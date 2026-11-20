@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Kimi K3 routed-expert geometry for bounded EXL3 calibration."""
+from typing import Optional
+
 from ..base import BaseQModel
 
 
@@ -36,14 +38,14 @@ class KimiLinearQModel(BaseQModel):
             "The ordinary GPTQModel looper cannot preserve AttnRes continuation."
         )
 
-    def pre_quantize(self, module):
+    def pre_quantize(self, module, module_path: Optional[str] = None):
         # Also fail closed when callers instantiate ModuleLooper directly.
         if getattr(module, "use_attn_residuals", False):
             raise NotImplementedError(
                 "Kimi K3 AttnRes layers require explicit prefix_sum and "
                 "block_residual continuation through the bounded runner."
             )
-        return super().pre_quantize(module)
+        return super().pre_quantize(module, module_path=module_path)
 
 
 class KimiK3QModel(KimiLinearQModel):

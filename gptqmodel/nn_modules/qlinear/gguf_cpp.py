@@ -21,6 +21,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization.config import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.ggml import GGML_VERSION_SYMBOL, ggml_version_at_least
 from ...utils.kernel import get_kernel_config
 from ...utils.logger import setup_logger
 from ._compile_support import COMPILE_LEVEL
@@ -436,11 +437,13 @@ _GGML_CUDA_MATMUL_UNSUPPORTED = _GGML_CPU_MATMUL_UNSUPPORTED | frozenset({"TQ1_0
 _MAX_GGML_CUDA_PLANS = 8
 
 # Upstream enum ggml_type values for constants llama-cpp-python does not export
-# (kept in sync with ggml/include/ggml.h; Q8_1=9, TQ1_0=34, TQ2_0=35).
+# (kept in sync with ggml/include/ggml.h; Q8_1=9, TQ1_0=34, TQ2_0=35,
+# F8_E4M3=43).
 _GGML_TYPE_ID_FALLBACK = {
     "Q8_1": 9,
     "TQ1_0": 34,
     "TQ2_0": 35,
+    "F8_E4M3": 43,
 }
 
 
@@ -477,6 +480,7 @@ class _GGMLBridge:
             "IQ2_XXS", "IQ2_XS", "IQ3_XXS", "IQ1_S", "IQ4_NL", "IQ3_S",
             "IQ2_S", "IQ4_XS", "I8", "I16", "I32", "I64", "F64", "IQ1_M",
             "BF16", "TQ1_0", "TQ2_0", "MXFP4", "NVFP4", "Q1_0", "Q2_0",
+            "F8_E4M3",
         ):
             value = getattr(llama_cpp_lib, f"GGML_TYPE_{name}", None)
             if value is None:
@@ -505,6 +509,14 @@ class _GGMLBridge:
         fn.restype = restype
 
     def _bind_functions(self) -> None:
+        # ggml_version() reports the vendored ggml release (for example
+        # "1.0.0"). It is present in every ggml release, but stay optional so
+        # an unusual build cannot break the whole bridge.
+        version_fn = getattr(self._ggml_base, GGML_VERSION_SYMBOL, None)
+        if version_fn is not None:
+            version_fn.argtypes = []
+            version_fn.restype = ctypes.c_char_p
+        self._ggml_version_fn = version_fn
         self._bind(self._ggml_base, "ggml_init", [_GGMLInitParams], ctypes.c_void_p)
         self._bind(self._ggml_base, "ggml_free", [ctypes.c_void_p], None)
         self._bind(
@@ -726,6 +738,22 @@ class _GGMLBridge:
             int(output.size),
         )
         return output
+
+    @property
+    def ggml_version(self) -> Optional[str]:
+        """Return the vendored ggml release, or ``None`` when unreported."""
+
+        if self._ggml_version_fn is None:
+            return None
+        raw = self._ggml_version_fn()
+        if not raw:
+            return None
+        return raw.decode("utf-8", "replace")
+
+    def supports_ggml_1_0(self) -> bool:
+        """Whether the loaded ggml has the stable v1.0 public C API."""
+
+        return ggml_version_at_least(self.ggml_version)
 
     @staticmethod
     def _cpu_threads() -> int:
@@ -1517,8 +1545,15 @@ def _finish_ggml_output(
 
 
 class GGUFCppKernel(GGUFTorchLinear):
-    # `llama-cpp-python` is not installed on this host, so the ggml CPU bridge
-    # cannot build; the CPU-only forward also rejects CUDA input. Static: EAGER.
+    # ``EAGER``: this forward never becomes a torch graph. It branches on
+    # host-side capability (``_use_ggml_cpu_matmul``), wraps the ggml call in
+    # ``try/except`` and records failures in ``_gguf_cpu_autotune_cache`` (a
+    # Python state write dynamo cannot trace), and the matmul itself is a
+    # ``ctypes`` call into ggml's ``ggml_mul_mat`` with no ``torch.ops`` entry
+    # and no fake/meta implementation. The ggml bridge is also built lazily
+    # under a lock on first use. There is no torch op for torch.compile to
+    # lower and no host-sync-free eager path to capture, so
+    # ``SUPPORTS_GRAPH_CAPTURE=False`` for the same reason.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
     SUPPORTS_GRAPH_CAPTURE = False
 
@@ -1698,7 +1733,12 @@ class GGUFCppKernel(GGUFTorchLinear):
                 "Load GGUF models on CPU or use BACKEND.GGUF_CPP_CUDA or BACKEND.GGUF_TORCH for CUDA inference."
             )
 
-        if self._use_ggml_cpu_matmul(x_flat):
+        # The native ggml matmul has no autograd support and returns a detached
+        # tensor, so a grad-mode forward silently dropped the gradient (#5392).
+        # Take the exact torch path for that call only; inference forwards keep
+        # the native kernel.
+        needs_grad = torch.is_grad_enabled() and x_flat.requires_grad
+        if not needs_grad and self._use_ggml_cpu_matmul(x_flat):
             try:
                 output = _finish_ggml_output(self, x_flat, self._forward_ggml_cpu(x_flat))
             except Exception:

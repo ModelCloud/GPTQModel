@@ -11,10 +11,19 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 
-from models.model_test import ModelTest  # noqa: E402
+import pytest  # noqa: E402
+from models.model_test import ModelTest, is_flash_attn_2_available  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
+
+
+# FlashAttention-2 is an optional CUDA-only package. Skip the test instead of
+# failing the suite when it is not installed or no CUDA device is visible.
+pytestmark = pytest.mark.skipif(
+    not is_flash_attn_2_available(),
+    reason="FlashAttention-2 requires the optional flash_attn package and a CUDA device",
+)
 
 
 class Test(ModelTest):

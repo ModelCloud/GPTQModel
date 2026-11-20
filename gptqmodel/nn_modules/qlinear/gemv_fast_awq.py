@@ -22,6 +22,7 @@ from ...utils.gemv import calculate_zeros_width
 from ...utils.model_dequant import _dequantize_awq_gemv_fast
 from ...utils.packing_math import scale_to_storage_dtype, scaled_zero_offset
 from ._compile_support import COMPILE_LEVEL
+from ._numerics import fp32_epilogue_context
 
 
 def pack_intweight(unpacked_qweight, interleave, kstride):
@@ -275,7 +276,6 @@ class AwqGEMVFastLinear(AWQuantLinear):
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
-        scale_zeros = zeros.float() * scales.float()
 
         pack_num = 32 // self.bits
         qscales = torch.zeros(
@@ -288,6 +288,11 @@ class AwqGEMVFastLinear(AWQuantLinear):
         )
         # Reject an unrepresentable FP16 scale before replacing module state.
         qscales[:, : scales.shape[1]] = scale_to_storage_dtype(scales, qscales.dtype)
+        stored_scales = qscales[:, : scales.shape[1]]
+        # The checkpoint decodes with the stored FP16 scale, so build the
+        # affine offset from that same grid. Mixing the FP32 source scale into
+        # the offset shifts the zero point whenever the cast rounds (#5605).
+        scale_zeros = zeros.float() * stored_scales.float()
         # GEMV_FAST/LLM_AWQ store FP16 offsets in the checkpoint. Reject an
         # unrepresentable offset before replacing any packed module state.
         offsets = scaled_zero_offset(qscales[:, : scales.shape[1]], zeros)
@@ -307,7 +312,7 @@ class AwqGEMVFastLinear(AWQuantLinear):
         group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
             (weight.float() + scale_zeros.index_select(1, group_index))
-            / qscales.index_select(1, group_index).float()
+            / stored_scales.index_select(1, group_index).float()
         ).clamp_(0, (1 << self.bits) - 1).to(torch.int32)
         self.register_buffer("qweight", pack_intweight(
             intweight.contiguous(), interleave=4, kstride=64
@@ -366,24 +371,30 @@ class LLMAwqLinear(AwqGEMVFastLinear):
 
 
 class AwqGEMVFastTorchLinear(AwqGEMVFastLinear):
-    """Portable CPU reader for the packed ``FORMAT.GEMV_FAST`` layout (issue #4736).
+    """Portable reader for the packed ``FORMAT.GEMV_FAST`` layout (#4736, #5109).
 
     The native GEMV_FAST extension is CUDA-only, so a quantize run that finishes
-    on CPU had no in-session kernel for a GEMV_FAST checkpoint and
-    ``quantize()`` raised after the whole calibration. This kernel reads the
-    exact same interleaved INT16 ``qweight`` and FP16 ``scales``/offset buffers
-    and dequantizes them to a dense FP32 tile per forward, which keeps the
-    checkpoint format unchanged and makes the in-session model runnable.
+    on CPU -- or on ROCm, where hipcc cannot build that extension -- had no
+    kernel for a GEMV_FAST checkpoint: ``quantize()`` raised after the whole
+    calibration and the documented format/platform combination was unusable.
+    This kernel reads the exact same interleaved INT16 ``qweight`` and FP16
+    ``scales``/offset buffers and dequantizes them to a dense FP32 tile per
+    forward, which keeps the checkpoint format unchanged and makes the
+    in-session model runnable.
 
     It is a documented fallback, not an AUTO replacement: the priority-0
     ``SUPPORTS_FORMATS`` entry keeps the accelerator AUTO order untouched, and
-    ``select_quant_linear`` only reaches it for a CPU-only target through
-    ``PORTABLE_CPU_FALLBACK``.
+    ``select_quant_linear`` only reaches it for a target whose device family
+    has no AUTO kernel through ``PORTABLE_FALLBACK``.
+
+    The per-forward dense tile is a bounded temporary. It is never cached on
+    the module, so the packed INT16 checkpoint storage stays the only
+    persistent weight representation.
     """
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    # 0 => supported for this layout, never auto-selected on an accelerator.
+    # 0 => supported for this layout, never auto-selected by AUTO.
     SUPPORTS_FORMATS = {FORMAT.GEMV_FAST: 0}
     SUPPORTS_BITS = [4]
     # Same packed layout contract as the native GEMV_FAST kernel, so a
@@ -396,20 +407,25 @@ class AwqGEMVFastTorchLinear(AwqGEMVFastLinear):
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [128]
-    SUPPORTS_DEVICES = [DEVICE.CPU]
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int16]
     SUPPORTS_ADAPTERS = [Lora]
     SUPPORTS_DTYPES = [torch.float16]
     QUANT_TYPE = "awq_gemv_fast_torch"
-    # Consumed by select_quant_linear() when AUTO has no CPU kernel for the layout.
-    PORTABLE_CPU_FALLBACK = True
+    # Consumed by select_quant_linear() when AUTO has no kernel for the layout
+    # on the target device family.
+    PORTABLE_FALLBACK = True
 
-    # Measured on CPU, torch 2.15.0+cpu: torch.compile(fullgraph=True) traces
-    # the forward with backend="eager" and "aot_eager", bit-identical to eager.
-    # Inductor was not measured (no host C++ compiler). CPU-only, so no CUDA
-    # graph capture applies.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.AOT_EAGER
+    # Measured with tests/kernels/compile_probe.py on torch 2.16 CPU and HIP
+    # builds: eager=True, graph_breaks=0, and dynamo/aot_eager/inductor all
+    # pass with output matching eager. Eager CUDA-graph capture is not claimed;
+    # the per-forward dequantize allocates its scatter indices on every call.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "portable GEMV_FAST fallback; no measured static-cache win (#4984)"
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     def __init__(self, *args, **kwargs):
@@ -424,12 +440,20 @@ class AwqGEMVFastTorchLinear(AwqGEMVFastLinear):
         inputs = x.reshape(-1, x.shape[-1])
         input_dtype = inputs.dtype
 
+        # The portable reader used to run only on CPU, so the packed buffers
+        # always matched the input. A partially placed or CPU-offloaded
+        # accelerator module can still hold them on CPU, and dequantizing there
+        # would move a dense weight over the bus. Move the packed words locally
+        # instead of rewriting the module state from `forward`: the buffers
+        # stay the checkpoint's, and the move stays inside this call.
+        qweight, zeros, scales = self._packed_for(inputs.device)
+
         # Bounded temporary dequantization: the dense tile lives only for this
         # matmul and is never cached on the module.
         weight = _dequantize_awq_gemv_fast(
-            self.qweight,
-            self._runtime_zeros(),
-            self.scales,
+            qweight,
+            zeros,
+            scales,
             bits=self.bits,
             group_size=self.group_size,
         )
@@ -437,20 +461,38 @@ class AwqGEMVFastTorchLinear(AwqGEMVFastLinear):
             weight = weight.to(device=inputs.device)
 
         # FP32 accumulation with a single rounding at the end, matching the
-        # accelerator GEMV_FAST kernels' accumulator width.
-        output = torch.matmul(inputs.to(torch.float32), weight.t())
-        if self.bias is not None:
-            output = output + self.bias.to(device=output.device, dtype=torch.float32)
-        output = output.to(dtype=input_dtype)
+        # accelerator GEMV_FAST kernels' accumulator width. An ambient autocast
+        # would narrow this explicit FP32 matmul and round the product before
+        # the bias cancels it (#5613), so the epilogue runs outside it and the
+        # caller's context is restored afterwards.
+        with fp32_epilogue_context(inputs.device.type):
+            output = torch.matmul(inputs.to(torch.float32), weight.t())
+            if self.bias is not None:
+                output = output + self.bias.to(device=output.device, dtype=torch.float32)
+            output = output.to(dtype=input_dtype)
 
         if self.adapter:
             output = self.adapter.apply(x=inputs, out=output)
 
         return output.reshape(out_shape)
 
+    def _packed_for(self, device: torch.device):
+        """Return ``(qweight, zeros, scales)`` on ``device`` for one forward.
+
+        Device only, and on the packed buffers: the checkpoint's stored dtype is
+        never narrowed (unlike the native kernel's ``_ensure_runtime_buffers``),
+        and no dense weight is derived here. The module state is not rewritten,
+        so a compiled or captured forward sees no mutation on this path.
+        """
+
+        def _on(tensor: torch.Tensor) -> torch.Tensor:
+            return tensor if tensor.device == device else tensor.to(device=device)
+
+        return _on(self.qweight), _on(self._runtime_zeros()), _on(self.scales)
+
 
 class LLMAwqTorchLinear(AwqGEMVFastTorchLinear, LLMAwqLinear):
-    """Portable CPU reader for ``FORMAT.LLM_AWQ`` (GEMV_FAST layout, ``scaled_zeros``).
+    """Portable reader for ``FORMAT.LLM_AWQ`` (GEMV_FAST layout, ``scaled_zeros``).
 
     It stays an ``LLMAwqLinear`` so layout-keyed consumers (MLX transfer) keep
     treating it as an LLM_AWQ module; the Torch ``forward`` comes first in MRO.
@@ -468,17 +510,21 @@ class LLMAwqTorchLinear(AwqGEMVFastTorchLinear, LLMAwqLinear):
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [128]
-    SUPPORTS_DEVICES = [DEVICE.CPU]
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int16]
     SUPPORTS_ADAPTERS = [Lora]
     SUPPORTS_DTYPES = [torch.float16]
     # Must keep the `awq_` prefix: pack dispatch keys AWQ packers on it.
     QUANT_TYPE = "awq_llm_awq_torch"
-    PORTABLE_CPU_FALLBACK = True
+    PORTABLE_FALLBACK = True
 
     # Same forward and measurement as AwqGEMVFastTorchLinear.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.AOT_EAGER
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "portable GEMV_FAST fallback; no measured static-cache win (#4984)"
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     zeros_name = "scaled_zeros"

@@ -1,11 +1,18 @@
 # MLX runtime generation and conversion flow
 
 This page describes how GPT-QModel drives an MLX model through the standard
-`BaseQModel.generate()` API and how
-`gptqmodel.utils.mlx.convert_gptq_to_mlx_weights()` turns a GPTQ/AWQ
-checkpoint into MLX-LM weights and config. It records the flow
-introduced for issue #4076 so the input normalization, the exact packed
-transfer, and the `dynamic` fallback stay reviewable without reading the diff.
+`BaseQModel.generate()` API and how the MLX backend turns a GPTQ/AWQ checkpoint
+into MLX-LM weights and config. It records the flow introduced for issue #4076
+so the input normalization, the exact packed transfer, and the `dynamic`
+fallback stay reviewable without reading the diff.
+
+There is **no public conversion entry point**. The former
+`gptqmodel.utils.mlx.convert_gptq_to_mlx_weights()` function was removed together with
+`GPTQModel.export()`, with no shim and no compatibility alias: converting
+weights for another runtime is a step of that runtime's backend, not a public
+API. MLX support is reached through
+`GPTQModel.load(..., backend=BACKEND.MLX)`, which runs the conversion
+internally (`gptqmodel.utils.mlx._convert_gptq_to_mlx_weights`).
 
 The MLX runtime is the only part that needs Apple Silicon and Metal. Converting
 a checkpoint is pure numpy: `repack_gptq` / `repack_awq` decode the stored
@@ -70,7 +77,7 @@ Option mapping:
 
 ## Conversion path
 
-`convert_gptq_to_mlx_weights` first tries `_packed_mlx_weights`, the exact
+`_convert_gptq_to_mlx_weights` first tries `_packed_mlx_weights`, the exact
 transfer: every supported packed source layer is decoded with the numpy repack
 and rebuilt as an MLX quantized module. Only when that transfer is unavailable
 does conversion fall back to `quantize_model`, and that fallback now receives
@@ -78,11 +85,11 @@ does conversion fall back to `quantize_model`, and that fallback now receives
 
 ```mermaid
 flowchart TD
-    A["convert_gptq_to_mlx_weights(..., stock_compatible=True)"] --> C{"dynamic override valid?"}
+    A["_convert_gptq_to_mlx_weights(..., stock_compatible=True)"] --> C{"dynamic override valid?"}
     R["GPTQModel.load(backend='mlx')"] --> C
     C -- "bits unsupported" --> D["ValueError"]
     C -- ok --> E["_packed_mlx_weights(model, config, lm_head_name)"]
-    E --> F{"custom-runtime layer?<br/>group 16, paro, qqq, fp8, gguf, bnb, exl3, macaq, nf12"}
+    E --> F{"custom-runtime layer?<br/>group 16, paro, qqq, gguf, bnb, exl3, macaq, nf12"}
     F -- "yes, stock_compatible=True" --> G["return None"]
     F -- "no" --> H["repack exact words into direct<br/>weight / scales / biases names"]
     F -- "yes, runtime load" --> I["custom MLX runtime class"]
@@ -106,7 +113,7 @@ bit width.
 
 ### Stock-compatible conversion (#4091 item 10)
 
-Before this fix, the conversion path called `convert_gptq_to_mlx_weights` with the
+Before this fix, the conversion path called `_convert_gptq_to_mlx_weights` with the
 same packed transfer as the runtime loader. On Linux, #4083 made that transfer
 available, so every GPTQ/AWQ `TorchLinear` was wrapped in `MlxGPTQLinear` /
 `MlxAWQLinear` and written with `*.linear.*` key names plus a
@@ -118,10 +125,10 @@ ValueError: Received 576 parameters not in model:
 model.layers.0.mlp.down_proj.linear.biases ...
 ```
 
-`convert_gptq_to_mlx_weights(..., stock_compatible=True)` keeps the conversion
+`_convert_gptq_to_mlx_weights(..., stock_compatible=True)` keeps the conversion
 on the stock layout. The exact packed transfer still runs for layers that map
 onto a stock `nn.QuantizedLinear` (direct `weight` / `scales` / `biases`
-names), and layers that need the custom runtime (group 16, Paro, QQQ, FP8,
+names), and layers that need the custom runtime (group 16, Paro, QQQ,
 GGUF, bitsandbytes, EXL3) go through the stock `quantize_model` fallback.
 Formats with no requantization path fail with the existing `ValueError` naming
 the format instead of writing an unreadable layout. The in-process
@@ -131,7 +138,7 @@ custom kernels are unchanged.
 | Situation | Before #4091 | After #4091 |
 | --- | --- | --- |
 | Linux conversion of a GPTQ/AWQ checkpoint | `*.linear.*` keys + custom-runtime flag; stock `mlx_lm.load` rejects | direct keys; stock `nn.QuantizedLinear`; `mlx_lm.load` succeeds |
-| Export of a group-16 / Paro / QQQ / FP8 / GGUF / bitsandbytes / EXL3 / MACaQ / NF12 checkpoint | custom-runtime layout | requantization when supported, otherwise `ValueError` naming the format |
+| Export of a group-16 / Paro / QQQ / GGUF / bitsandbytes / EXL3 / MACaQ / NF12 checkpoint | custom-runtime layout | requantization when supported, otherwise `ValueError` naming the format |
 | Runtime `GPTQModel.load(backend="mlx")` | exact packed transfer + custom runtime | unchanged |
 
 ### Before/after mechanism
@@ -272,14 +279,19 @@ compute-bound, so the decode-plus-matmul path takes over.
 ## Not in scope
 
 The custom MLX runtime classes (`MlxGPTQLinear`, `MlxGroup16Linear`,
-`MlxParoLinear`, `MlxQQQLinear`, `MlxFP8Linear`, `MlxGGUFLinear`) are still
+`MlxParoLinear`, `MlxQQQLinear`, `MlxGGUFLinear`) are still
 used by the in-process `GPTQModel.load(backend="mlx")` path, as are
 `MacaqMlxQuantLinear` and `NF12MlxQuantLinear`. Conversion for a stock
-`mlx_lm` checkpoint no longer depends on them:
-`convert_gptq_to_mlx_weights(..., stock_compatible=True)` emits the stock
+`mlx_lm` checkpoint no longer depends on them: the backend's
+`stock_compatible=True` conversion (`_convert_gptq_to_mlx_weights`) emits the stock
 `mlx_lm` layout described above. Checkpoints written by earlier versions with
 `*.linear.*` keys and the `_gptqmodel_custom_mlx_runtime` flag still require
 the GPT-QModel MLX loader.
+
+FP8 is not part of the MLX runtime: the invented Metal FP8 kernels and their
+loader were removed. `_build_mlx_model_from_checkpoint` rejects `FORMAT.FP8`
+before conversion, so production MXFP8/NVFP8 checkpoints load through the
+Torch backend.
 
 ## RoPE configuration (transformers 5)
 

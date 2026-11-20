@@ -13,6 +13,8 @@ from functools import lru_cache
 import torch
 
 from ....ext import exllamav3_ext as ext
+from ....q4nx import Q4NX_MULTIPLIER, decode_q4nx_states, unpack_q4nx_states
+from ....trellis import HALF_RATE_MASK, trellis_rate, validate_trellis_k
 from ....util.hadamard import get_hadamard_dt
 from ....util.memory import free_mem
 from ....util.progress import ProgressBar
@@ -128,23 +130,22 @@ def tile_core_permute_i(tiles: torch.Tensor, tiles_n: int, size_n: int) -> torch
 
 
 _DEFAULT_TILE_BATCH = 256
+_Q4NX_WIDE_TILE_BATCH = 512
+_Q4NX_NARROW_TILE_BATCH = 1024
 
 
-def _tile_batch_size() -> int:
+def _tile_batch_size(limit: int = _DEFAULT_TILE_BATCH) -> int:
     """Tile slots per quantization launch.
 
-    The scratch buffer below is ``batch x 256 x (65536 >> K)`` int16, i.e. 2 GiB
-    at the default batch of 256, allocated once per quantization stream. There
-    is one quantization stream per device, so a run holds one scratch pair per
-    device. ``KernelConfig.exl3_tile_batch`` lowers the slot count for
-    memory-constrained hosts; tiles are quantized independently, so a smaller
-    batch only means more launches.
+    Legacy Viterbi histories use up to 2 GiB of per-stream scratch at 256
+    slots. Q4NX's launch-local history is much smaller. An explicit
+    ``KernelConfig.exl3_tile_batch`` can lower either codebook's limit.
     """
 
     from .....utils.kernel import get_kernel_config
 
     batch = get_kernel_config().exl3_tile_batch
-    return max(1, min(_DEFAULT_TILE_BATCH, batch))
+    return limit if batch is None else max(1, min(limit, batch))
 
 
 def _allocate_temp_buffers(device, K: int, batch: int):
@@ -181,7 +182,7 @@ def clear_tile_workspace() -> None:
         _workspace_buffers.clear()
 
 
-def _stream_temp_buffers(device, K: int, stream):
+def _stream_temp_buffers(device, K: int, stream, batch: int):
     """Return the writable tile scratch owned by *stream*.
 
     A launch indexes the scratch by tile slot, so launches that may run at the
@@ -193,8 +194,7 @@ def _stream_temp_buffers(device, K: int, stream):
     scratch pair alive per device, which is what bounds the allocator cache.
     """
 
-    batch = _tile_batch_size()
-    key = (torch.device(device), int(K), stream, batch)
+    key = (torch.device(device), K, stream, batch)
     with _workspace_registry_lock:
         buffers = _workspace_buffers.get(key)
         if buffers is None:
@@ -203,7 +203,7 @@ def _stream_temp_buffers(device, K: int, stream):
         return buffers
 
 
-def _quantize_tiles_with_workspace(tiles, output, indices, K, mcg, mul1):
+def _quantize_tiles_with_workspace(tiles, output, indices, K, mcg, mul1, *, q4nx=False, scale_search=False):
     """Quantize every tile, splitting the launch to fit the scratch buffer.
 
     Tiles are independent (each carries its own trellis and writes all 256 of
@@ -211,17 +211,38 @@ def _quantize_tiles_with_workspace(tiles, output, indices, K, mcg, mul1):
     launch over the whole set.
     """
 
-    stream = torch.cuda.current_stream(tiles.device)
-    temp_costs, temp_edges = _stream_temp_buffers(tiles.device, K, stream)
+    validate_trellis_k(K, mcg, mul1, q4nx=q4nx)
+    if q4nx:
+        if not tiles.is_cuda or torch.version.hip is not None:
+            raise ValueError("EXL3 q4nx quantization requires NVIDIA CUDA.")
+        # Each tile stores 64 steps of int32 history. Bound the launch at
+        # 16 MiB with 128 states or 4 MiB with 16 states (search and W3.5).
+        limit = _Q4NX_NARROW_TILE_BATCH if scale_search or K == 3.5 else _Q4NX_WIDE_TILE_BATCH
+        batch = _tile_batch_size(limit)
+        step_bits = int(4 * K)
+        for start in range(0, tiles.shape[0], batch):
+            stop = start + batch
+            ext.quantize_tiles_q4nx(tiles[start:stop], output[start:stop], indices[start:stop], step_bits, scale_search)
+        return
+
     batch = _tile_batch_size()
+    depth = int(K)
+    stream = torch.cuda.current_stream(tiles.device)
+    if K != depth:
+        # Match the upstream cap for the larger fractional Viterbi histories.
+        # The native fractional op schedules tiles in waves of this size.
+        temp_costs, temp_edges = _stream_temp_buffers(tiles.device, depth, stream, min(batch, 128))
+        ext.quantize_tiles_frac(tiles, output, indices, temp_costs, temp_edges, depth, HALF_RATE_MASK)
+        return
+    temp_costs, temp_edges = _stream_temp_buffers(tiles.device, depth, stream, batch)
     rows = tiles.shape[0]
     if rows <= batch:
-        ext.quantize_tiles(tiles, output, indices, temp_costs, temp_edges, K, mcg, mul1)
+        ext.quantize_tiles(tiles, output, indices, temp_costs, temp_edges, depth, mcg, mul1)
         return
     for start in range(0, rows, batch):
         stop = min(start + batch, rows)
         ext.quantize_tiles(tiles[start:stop], output[start:stop], indices[start:stop],
-                           temp_costs, temp_edges, K, mcg, mul1)
+                           temp_costs, temp_edges, depth, mcg, mul1)
 
 
 def quantize_tiles(tiles, quant_args: dict):
@@ -239,7 +260,10 @@ def quantize_tiles(tiles, quant_args: dict):
     # a few hundred extra launches per weight matrix.
     quantized_tiles = torch.empty_like(tiles)
     quantized_idx = torch.empty_like(tiles, dtype = torch.short)
-    _quantize_tiles_with_workspace(tiles, quantized_tiles, quantized_idx, K, mcg, mul1)
+    _quantize_tiles_with_workspace(
+        tiles, quantized_tiles, quantized_idx, K, mcg, mul1,
+        q4nx="q4nx" in quant_args, scale_search=quant_args.get("q4nx_scale_search", False),
+    )
     return quantized_tiles, quantized_idx
 
 
@@ -351,7 +375,10 @@ def quantize_tiles_multigpu(tiles, quant_args: dict):
                 K = quant_args["K"]
                 mcg = "mcg" in quant_args
                 mul1 = "mul1" in quant_args
-                _quantize_tiles_with_workspace(dev_tiles, dev_q_tiles, dev_q_idx, K, mcg, mul1)
+                _quantize_tiles_with_workspace(
+                    dev_tiles, dev_q_tiles, dev_q_idx, K, mcg, mul1,
+                    q4nx="q4nx" in quant_args, scale_search=quant_args.get("q4nx_scale_search", False),
+                )
 
                 # Async copy back to pinned memory
                 pin_split_q_tiles[i].copy_(dev_q_tiles, non_blocking = True)
@@ -963,19 +990,32 @@ def finalize_capture_H(
 
 def pack_trellis(encoded: torch.Tensor, quant_args: dict) -> torch.Tensor:
     K = quant_args["K"]
+    q4nx = "q4nx" in quant_args
+    validate_trellis_k(K, "mcg" in quant_args, "mul1" in quant_args, q4nx=q4nx)
     shape = encoded.shape
     assert len(shape) == 3 and shape[2] == 256
     assert encoded.dtype == torch.int16
-    packed_shape = (shape[0], shape[1], 256 * K // 16)
+    packed_shape = (shape[0], shape[1], int(16 * K))
     # ``pack_trellis_kernel`` writes the whole tile: thread ``t < packed_size / 2``
     # stores one ``uint32`` each, which covers all ``packed_size`` entries, so the
     # zero fill only costs a memset of the packed tensor.
     packed = torch.empty(packed_shape, dtype = torch.int16, device = encoded.device)
-    ext.pack_trellis(packed, encoded.contiguous(), K)
-    # unpacked = torch.zeros_like(encoded)
-    # ext.unpack_trellis(unpacked, packed, K)
-    # assert torch.equal(unpacked, encoded)
+    encoded = encoded.contiguous()
+    if q4nx:
+        ext.pack_trellis_q4nx(packed, encoded, int(4 * K))
+    elif K == int(K):
+        ext.pack_trellis(packed, encoded, int(K))
+    else:
+        ext.pack_trellis_frac(packed, encoded, int(K), HALF_RATE_MASK)
     return packed
+
+
+def reconstruct_q4nx_inner(packed: torch.Tensor) -> torch.Tensor:
+    """Materialize the normalized, rotated weights for EXL3 replay."""
+    tiles_k, tiles_n, _ = packed.shape
+    values = decode_q4nx_states(unpack_q4nx_states(packed))
+    tiles = values[..., tensor_core_perm_i(packed.device)]
+    return tiles.reshape(tiles_k, tiles_n, 16, 16).permute(0, 2, 1, 3).reshape(tiles_k * 16, tiles_n * 16)
 
 
 def reconstruct_exl3_tensors(
@@ -994,35 +1034,27 @@ def reconstruct_exl3_tensors(
     svh = tensors["svh"]
     if (
         trellis.ndim != 3
+        or trellis.dtype != torch.int16
         or suh.ndim != 1
         or svh.ndim != 1
         or suh.numel() != trellis.shape[0] * 16
         or svh.numel() != trellis.shape[1] * 16
-        or trellis.shape[-1] % 16
     ):
         raise ValueError("EXL3 reconstruction received inconsistent tensor geometry")
-    K = int(trellis.shape[-1] // 16)
-    if K < 1 or K > 8:
-        raise ValueError(f"EXL3 reconstruction received invalid K={K}")
+    q4nx = "q4nx" in tensors
+    K = trellis_rate(trellis.shape[-1], "mcg" in tensors, "mul1" in tensors, q4nx=q4nx)
 
     target = torch.device(device)
     packed = trellis.to(device=target, non_blocking=True).contiguous()
-    reconstructed = torch.empty(
-        (suh.numel(), svh.numel()),
-        dtype=torch.float16,
-        device=target,
-    )
-    ext.reconstruct(
-        reconstructed,
-        packed,
-        K,
-        "mcg" in tensors,
-        "mul1" in tensors,
-    )
+    if q4nx:
+        reconstructed = reconstruct_q4nx_inner(packed)
+    else:
+        reconstructed = torch.empty((suh.numel(), svh.numel()), dtype=torch.float16, device=target)
+        ext.reconstruct(reconstructed, packed, K, "mcg" in tensors, "mul1" in tensors)
     reconstructed = preapply_had_l(reconstructed, had_k)
-    reconstructed *= suh.to(device=target, dtype=torch.float16).unsqueeze(1)
+    reconstructed *= suh.to(device=target, dtype=reconstructed.dtype).unsqueeze(1)
     reconstructed = preapply_had_r(reconstructed, had_n)
-    reconstructed *= svh.to(device=target, dtype=torch.float16).unsqueeze(0)
+    reconstructed *= svh.to(device=target, dtype=reconstructed.dtype).unsqueeze(0)
     return reconstructed.to(dtype=dtype)
 
 
@@ -1076,6 +1108,10 @@ def g_scale_gss(
     # representative) and search for the global scale within given range that minimizes the direct quantization
     # error
     tiles = _sample_gss_tiles(weight_r, width)
+    if "q4nx" in quant_args:
+        # Scale search only ranks candidates. Use a narrower beam and leave the
+        # caller's final-encoding settings intact.
+        quant_args = {**quant_args, "q4nx_scale_search": True}
 
     devices = quant_args["devices"]
     main_stream = get_quant_stream(devices[0])
@@ -1448,6 +1484,7 @@ def quantize_exl3(
 
     if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
         raise ValueError("EXL3 quantization requires a 2-D weight tensor")
+    validate_trellis_k(quant_args["K"], "mcg" in quant_args, "mul1" in quant_args, q4nx="q4nx" in quant_args)
     validate_exl3_quantization_geometry(
         int(weight.shape[0]),
         int(weight.shape[1]),
@@ -1712,6 +1749,8 @@ def _quantize_exl3_body(
             out_tensors.update({
                 "mul1": torch.tensor(codebook_mul1_mult, dtype = torch.uint32).view(torch.int)
             })
+        if "q4nx" in quant_args:
+            out_tensors["q4nx"] = torch.tensor(Q4NX_MULTIPLIER - (1 << 32), dtype=torch.int32, device="cpu")
 
         quant_args.update({
             "apply_out_scales": apply_out_scales,

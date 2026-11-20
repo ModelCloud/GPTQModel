@@ -5,14 +5,17 @@
 
 import torch
 from defuser import convert_model
+from torch import nn
 from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeConfig, Qwen2MoeForCausalLM
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextConfig, Qwen3NextForCausalLM
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeConfig
 from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeForConditionalGeneration
 
+from gptqmodel.models.definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from gptqmodel.nn_modules.converter import MODULE_CONVERTER_MAP
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.utils.model import thinker_text_model
 
 
 def _make_tiny_moe_config(config_cls):
@@ -126,13 +129,34 @@ def test_qwen3_omni_uses_defuser_for_fused_experts():
 
     model = Qwen3OmniMoeForConditionalGeneration(_make_tiny_qwen3_omni_config())
     convert_model(model, cleanup_original=False, max_layers=1)
-    layer = model.thinker.model.layers[0]
+    # transformers 5.22 nests the thinker decoder under `language_model`;
+    # `thinker_text_model` resolves either layout.
+    layer = thinker_text_model(model).layers[0]
 
     _assert_converted_experts(
         layer,
         hidden_size=model.config.get_text_config().hidden_size,
         dtype=next(layer.mlp.experts[0].gate_proj.parameters()).dtype,
     )
+
+
+def test_qwen3_omni_pre_lm_head_norm_resolves_before_model_load():
+    # The class declaration must resolve in the installed layout before
+    # `after_model_load` rewrites it from the runtime decoder prefix.
+    model = Qwen3OmniMoeForConditionalGeneration(_make_tiny_qwen3_omni_config())
+    instance = object.__new__(Qwen3OmniMoeGPTQ)
+    nn.Module.__init__(instance)
+    instance.model = model
+
+    resolved = instance._resolved_pre_lm_head_norm_candidates()
+
+    assert resolved
+    assert resolved[0][1] in (
+        "thinker.model.language_model.norm",
+        "thinker.model.norm",
+    )
+    assert resolved[0][0] is thinker_text_model(model).norm
+
 
 def test_awq_single_bit_validation_allows_skip_only_dynamic_rules():
     ok, err = AwqTorchLinear.validate(

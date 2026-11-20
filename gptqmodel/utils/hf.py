@@ -387,18 +387,21 @@ def suspend_hf_weight_init():
 _KEEP_IN_FP32_ATTRS = ("_keep_in_fp32_modules", "_keep_in_fp32_modules_strict")
 
 
-def _iter_keep_in_fp32_declarations(model):
+def _iter_keep_in_fp32_declarations(model, attrs=_KEEP_IN_FP32_ATTRS):
     """Yield the keep-in-fp32 patterns a model declares on itself or a child.
 
     ``PreTrainedModel.post_init`` already unions child declarations onto the
     top-level model, but walking submodules keeps the guard correct for models
     built without that step.
+
+    ``attrs`` narrows the walk to one declaration class. ``_strict`` entries
+    stay fp32 for every half dtype; the non-strict ones only for fp16.
     """
 
     seen = set()
     modules = getattr(model, "modules", None)
     for module in (modules() if callable(modules) else (model,)):
-        for attr in _KEEP_IN_FP32_ATTRS:
+        for attr in attrs:
             declared = getattr(module, attr, None)
             if not declared:
                 continue
@@ -410,7 +413,7 @@ def _iter_keep_in_fp32_declarations(model):
                     yield name
 
 
-def _compile_keep_in_fp32_matcher(model):
+def _compile_keep_in_fp32_matcher(model, attrs=_KEEP_IN_FP32_ATTRS):
     """Compile the model's fp32-pinned parameter patterns, transformers-style.
 
     transformers 5.22 matches every ``_keep_in_fp32_modules`` and
@@ -423,7 +426,7 @@ def _compile_keep_in_fp32_matcher(model):
 
     patterns = [
         re.compile(name.replace("*", ".*"))
-        for name in _iter_keep_in_fp32_declarations(model)
+        for name in _iter_keep_in_fp32_declarations(model, attrs=attrs)
     ]
     if not patterns:
         return None
@@ -432,6 +435,45 @@ def _compile_keep_in_fp32_matcher(model):
         return any(pattern.search(name) is not None for pattern in patterns)
 
     return matches
+
+
+CONSTRUCTION_DTYPES_ATTR = "_gptqmodel_construction_parameter_dtypes"
+
+
+def _record_construction_dtypes(model) -> None:
+    """Remember the dtype each parameter had when the model was constructed.
+
+    ``PreTrainedModel.post_init`` runs after the constructor and before
+    ``from_pretrained`` loads the checkpoint. Recording the dtypes there lets
+    ``assert_loaded_model_state`` distinguish a parameter the model's own code
+    allocated in fp32 (Hymba's ``mamba.A_log``) from one a broken load left in
+    the wrong dtype (issue #4888). Only dtypes are retained, never tensors.
+
+    Parameters matched by ``_keep_in_fp32_modules`` at construction are
+    excluded: the current declaration already governs them, so clearing the
+    declaration must make them reportable again (#4170).
+    """
+
+    named_parameters = getattr(model, "named_parameters", None)
+    if not callable(named_parameters):
+        return
+    try:
+        keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
+        dtypes = {
+            name: parameter.dtype
+            for name, parameter in named_parameters()
+            if parameter.is_floating_point()
+            and not (keep_in_fp32 is not None and keep_in_fp32(name))
+        }
+    except Exception:  # pragma: no cover - defensive: exotic parameter proxies
+        return
+    if not dtypes or all(dtype is torch.float32 for dtype in dtypes.values()):
+        # Constructed entirely in fp32: transformers' dtype context was not
+        # active, so the record says nothing about intent and must not be used
+        # to exempt anything. Keeping the strict check here is what stops a
+        # broken cast from being masked.
+        return
+    object.__setattr__(model, CONSTRUCTION_DTYPES_ATTR, dtypes)
 
 
 def assert_loaded_model_state(
@@ -466,12 +508,27 @@ def assert_loaded_model_state(
     dtype transformers' ``_get_dtype_plan`` pins them to. A declared module left
     in any other dtype is still reported. Pinned parameters are still checked
     for materialization, and undeclared mixed dtypes still fail (issue #4170).
+
+    A model's own constructor may also allocate a parameter in fp32 from an
+    explicit fp32 tensor (Hymba's ``mamba.A_log``), and transformers loads the
+    half-precision checkpoint value into it without changing its dtype. The
+    dtype each parameter had at construction is recorded by the patched
+    ``post_init``; a parameter that is *still* fp32 after the load is treated
+    as intentional. A parameter the load changed away from its construction
+    dtype is still reported, so a broken cast is never masked (issue #4888).
     """
 
     problems = []
 
     if default_dtype_before is not None:
-        default_dtype_after = torch.get_default_dtype()
+        # A construction window in another thread temporarily sets the process
+        # default dtype. Reading it here would report a change this load did not
+        # make (#5421). The writer excludes every construction window, so wait
+        # for them and compare the settled value.
+        from .torch import model_global_state_lock
+
+        with model_global_state_lock():
+            default_dtype_after = torch.get_default_dtype()
         if default_dtype_after != default_dtype_before:
             problems.append(
                 "torch.get_default_dtype() changed from "
@@ -483,6 +540,7 @@ def assert_loaded_model_state(
         require_materialized or require_uniform_dtype or expected_dtype is not None
     ):
         keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
+        construction_dtypes = getattr(model, CONSTRUCTION_DTYPES_ATTR, None)
         dtypes = Counter()
         meta = []
         for name, parameter in named_parameters():
@@ -496,6 +554,16 @@ def assert_loaded_model_state(
                 and keep_in_fp32 is not None
                 and keep_in_fp32(name)
             ):
+                continue
+            if (
+                parameter.dtype is torch.float32
+                and construction_dtypes is not None
+                and construction_dtypes.get(name) is torch.float32
+            ):
+                # The constructor allocated this parameter in fp32 and the load
+                # did not change it (Hymba's `mamba.A_log`, #4888). A parameter
+                # constructed in a half dtype and then left/cast to fp32 is
+                # still reported below.
                 continue
             dtypes[parameter.dtype] += 1
 
@@ -545,6 +613,11 @@ CONFIG_SELECTION_KWARGS = (
     "revision",
     "cache_dir",
     "local_files_only",
+    # A private or gated repository needs the same credential for the config
+    # read as the weights download. Leaving `token` out made model-type
+    # detection fail on a repository that `snapshot_download` could open
+    # (#5007).
+    "token",
     "use_auth_token",
     "force_download",
     "resume_download",
@@ -1132,6 +1205,114 @@ def _normalize_legacy_tied_weights_keys(model: PreTrainedModel) -> None:
             submodule._tied_weights_keys = {}
 
 
+def _is_rope_init_bridge(init_fn: Any) -> bool:
+    """Return whether ``init_fn`` delegates back to ``ROPE_INIT_FUNCTIONS``.
+
+    GPT-QModel installs such bridges on legacy ``trust_remote_code`` rotary
+    classes (e.g. Ouro) so transformers 5.x can find an initializer for them.
+    The bridge resolves the global ``"default"`` entry when it is called, so
+    the precedence wrapper must not hide that entry from it (#5259).
+    """
+
+    if getattr(init_fn, "_gptqmodel_rope_bridge", False):
+        return True
+
+    code = getattr(init_fn, "__code__", None)
+    if code is None:
+        return False
+
+    referenced = set(code.co_names) | set(code.co_freevars)
+    if "ROPE_INIT_FUNCTIONS" not in referenced:
+        return False
+    return "default" in {const for const in code.co_consts if isinstance(const, str)}
+
+
+def _rope_init_lookup_globals(init_fn: Any) -> Optional[dict[str, Any]]:
+    """Return the namespace ``init_fn`` resolves its module globals from."""
+
+    try:
+        unwrapped = inspect.unwrap(init_fn)
+    except Exception:
+        unwrapped = init_fn
+    namespace = getattr(unwrapped, "__globals__", None)
+    return namespace if isinstance(namespace, dict) else None
+
+
+def _install_rope_init_precedence_compat(rope_utils: Any) -> None:
+    """Keep a model's own default RoPE initializer ahead of the remote shim.
+
+    Legacy ``trust_remote_code`` modules index
+    ``ROPE_INIT_FUNCTIONS["default"]`` directly, so the compat entry installed
+    above has to stay in the global table. transformers 5.x builds its
+    ``_init_weights`` lookup as
+    ``{"default": module.compute_default_rope_parameters, **ROPE_INIT_FUNCTIONS}``,
+    so that global entry used to replace every native family's own
+    initializer: ``import gptqmodel`` changed ERNIE-4.5-VL's pre-rotated h/w
+    RoPE layout and its logits (#5226). Wrap ``_init_weights`` so a
+    module-owned initializer wins for that module, while modules that rely on
+    the shim still get it.
+
+    The table itself is never mutated: hiding ``"default"`` from the lookup
+    would break GPT-QModel's own bridges (Ouro's bridge delegates straight to
+    ``ROPE_INIT_FUNCTIONS["default"]``, #5259) and any other thread that
+    constructs a legacy remote rotary module during initialization. Instead
+    the wrapper shadows the table in ``_init_weights``' own namespace for the
+    duration of the call, leaving the process-global table intact.
+    """
+
+    try:
+        from transformers.modeling_utils import PreTrainedModel
+    except Exception:
+        log.debug("RoPE init precedence compat skipped: PreTrainedModel unavailable", exc_info=True)
+        return
+
+    original = PreTrainedModel._init_weights
+    if getattr(original, "_gptqmodel_rope_precedence", False):
+        return
+
+    def _init_weights_with_rope_precedence(self, module):
+        if (
+            getattr(module, "rope_type", None) == "default"
+            and hasattr(module, "original_inv_freq")
+            and "RotaryEmbedding" in module.__class__.__name__
+        ):
+            own = getattr(module, "compute_default_rope_parameters", None)
+            table = getattr(rope_utils, "ROPE_INIT_FUNCTIONS", None)
+            if own is not None and isinstance(table, dict) and "default" in table:
+                if getattr(own, "_gptqmodel_rope_bridge", False):
+                    # The marked bridge returns exactly the shim's result, so
+                    # letting the shim win is equivalent and leaves the table
+                    # untouched (#5259).
+                    return original(self, module)
+                namespace = _rope_init_lookup_globals(original)
+                shadow = None
+                if namespace is not None and namespace.get("ROPE_INIT_FUNCTIONS") is table:
+                    shadow = {key: value for key, value in table.items() if key != "default"}
+                if shadow is not None:
+                    with _MONKEY_PATCH_LOCK:
+                        namespace["ROPE_INIT_FUNCTIONS"] = shadow
+                        try:
+                            return original(self, module)
+                        finally:
+                            namespace["ROPE_INIT_FUNCTIONS"] = table
+                # Fallback for transformers builds that do not expose the
+                # lookup table as a module global: drop the entry for the
+                # duration. A detected bridge keeps resolving the shim instead
+                # of raising the KeyError this wrapper exists to avoid.
+                if not _is_rope_init_bridge(own):
+                    with _MONKEY_PATCH_LOCK:
+                        installed = table.pop("default")
+                        try:
+                            return original(self, module)
+                        finally:
+                            table["default"] = installed
+        return original(self, module)
+
+    _init_weights_with_rope_precedence._gptqmodel_rope_precedence = True
+    with _MONKEY_PATCH_LOCK:
+        PreTrainedModel._init_weights = _init_weights_with_rope_precedence
+
+
 # Bridge a few transformers 5.x API changes so older trust_remote_code model
 # files still import and initialize without editing the cached remote source.
 def _patch_transformers_remote_code_compat() -> None:
@@ -1253,6 +1434,11 @@ def _patch_transformers_remote_code_compat() -> None:
 
             rope_utils.ROPE_INIT_FUNCTIONS["default"] = _compute_default_rope_parameters_compat
 
+        if rope_utils is not None:
+            # Keep the shim available for legacy remote code without letting it
+            # replace a native family's own initializer (#5226).
+            _install_rope_init_precedence_compat(rope_utils)
+
         if cache_utils is not None and not hasattr(cache_utils, "SlidingWindowCache") and hasattr(cache_utils, "StaticCache"):
             # transformers 5.x folds sliding-window behavior into StaticCache
             # layers, but older remote code still imports the legacy symbol.
@@ -1346,6 +1532,42 @@ def _patch_transformers_remote_code_compat() -> None:
                 return previous_seq_length
 
             cache_base_cls.get_usable_length = get_usable_length
+
+        if cache_base_cls is not None and not getattr(
+            cache_base_cls.__dict__.get("__len__"), "_gptqmodel_legacy_layer_storage", False
+        ):
+            # transformers 5 moved cache length bookkeeping onto a `layers`
+            # list. Some remote caches subclass `Cache` while keeping the
+            # transformers-4 `key_cache`/`value_cache` lists (Hymba's
+            # `HybridMambaAttentionDynamicCache`), so `len(cache)` (through
+            # `bool(cache)`) and `get_max_length()` raised
+            # `AttributeError: ... has no attribute 'layers'`.
+            original_cache_len = cache_base_cls.__len__
+            original_cache_max_length = getattr(cache_base_cls, "get_max_length", None)
+
+            def __len__(self) -> int:
+                if getattr(self, "layers", None) is None:
+                    key_cache = getattr(self, "key_cache", None)
+                    if isinstance(key_cache, (list, tuple)):
+                        return len(key_cache)
+                    return 0
+                return original_cache_len(self)
+
+            __len__._gptqmodel_legacy_layer_storage = True
+            cache_base_cls.__len__ = __len__
+
+            if callable(original_cache_max_length) and not getattr(
+                original_cache_max_length, "_gptqmodel_legacy_layer_storage", False
+            ):
+                def get_max_length(self, layer_idx: Optional[int] = None):
+                    if getattr(self, "layers", None) is None:
+                        # A pre-5.x cache grows without a declared limit;
+                        # transformers 4 reported that as `None`.
+                        return None
+                    return original_cache_max_length(self, layer_idx)
+
+                get_max_length._gptqmodel_legacy_layer_storage = True
+                cache_base_cls.get_max_length = get_max_length
 
         dynamic_cache_cls = getattr(cache_utils, "DynamicCache", None) if cache_utils is not None else None
         if dynamic_cache_cls is not None and not hasattr(dynamic_cache_cls, "to_legacy_cache"):
@@ -1612,6 +1834,16 @@ def _patch_transformers_remote_code_compat() -> None:
 
             PreTrainedModel.__getattr__ = __getattr__
             PreTrainedModel._gptqmodel_missing_all_tied_weights_patch = True
+
+        if not getattr(PreTrainedModel, "_gptqmodel_construction_dtype_patch", False):
+            original_post_init = PreTrainedModel.post_init
+
+            def post_init(self):
+                original_post_init(self)
+                _record_construction_dtypes(self)
+
+            PreTrainedModel.post_init = post_init
+            PreTrainedModel._gptqmodel_construction_dtype_patch = True
 
 
 def _is_deepseek_vl_v2_model_path(model_id_or_path: Optional[str]) -> bool:
@@ -2074,6 +2306,16 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
         if getattr(config, 'attn_implementation_new', None) == "flex":
             from transformers.utils import is_flash_attn_2_available
             config.attn_implementation_new = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
+        if getattr(config, "attn_implementation_new", None) in (
+            "sdpa",
+            "flash_attention_2",
+        ) and getattr(config, "_attn_implementation", None) == "flex":
+            # `HymbaConfig` declares the mixer selection under its own
+            # `attn_implementation_new` field and `HymbaModel.__init__` copies
+            # it to `_attn_implementation`; transformers 5 validates
+            # `_attn_implementation` in `PreTrainedModel.__init__` *before*
+            # that copy runs and rejects the legacy `flex` value outright.
+            config._attn_implementation = config.attn_implementation_new
 
     if model_type_lower == "dream" or model_type == "brumby":
         import transformers.modeling_rope_utils as rope_utils
@@ -2218,6 +2460,32 @@ def _cache_sequence_length(cache: Any) -> int:
         return 0
 
 
+def apply_legacy_remote_code_fixups(model: Any) -> tuple[int, bool]:
+    """Run the post-load repairs legacy remote-code families need.
+
+    transformers 5 materializes checkpoint-absent non-persistent buffers with
+    ``torch.empty_like`` and re-derives a native rotary module's ``inv_freq``
+    only in the default ``_init_weights``; a remote-code class that overrides
+    ``_init_weights`` (EXAONE-3.0, DeciLM, ...) keeps uninitialized memory
+    (#4093 item 10). transformers 5 also changed the ``generate()`` cache
+    contract those classes implement (#5154).
+
+    Both repairs are no-ops when a model does not need them. They live in one
+    helper because the native loader and the Transformers bridge have to apply
+    the same set: the bridge skipped them and produced garbage RoPE
+    frequencies on a checkpoint that ``GPTQModel.load`` read correctly (#5311).
+
+    Returns ``(restored_rotary_buffers, installed_generation_adapter)``.
+    """
+
+    # Imported lazily: ``structure`` imports model helpers that pull this module.
+    from .structure import restore_init_owned_rotary_buffers
+
+    restored = restore_init_owned_rotary_buffers(model)
+    installed = install_legacy_generation_compat(model)
+    return restored, installed
+
+
 def install_legacy_generation_compat(model: Any) -> bool:
     """Restore the transformers-4 KV-cache contract for remote-code decoders.
 
@@ -2270,6 +2538,22 @@ def install_legacy_generation_compat(model: Any) -> bool:
     accepts_cache_position = "cache_position" in parameters or any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
+    accepts_attention_mask = any(
+        parameter.name == "attention_mask"
+        and parameter.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+        for parameter in parameters.values()
+    )
+    # transformers 4 never synthesized `position_ids` inside `generate()`; a
+    # remote implementation that does not declare the argument builds its own
+    # from `attention_mask` or the cache length. transformers 5 injects ids
+    # sized to the text sequence, which such code rejects (Hymba expects the id
+    # span to include its memory tokens on prefill).
+    accepts_position_ids = "position_ids" in parameters
 
     @wraps(original)
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, *args, **kwargs):
@@ -2286,6 +2570,28 @@ def install_legacy_generation_compat(model: Any) -> bool:
         num_new_tokens = None if modern_sequence_length else kwargs.pop(
             "next_sequence_length", None
         )
+
+        if not modern_sequence_length and accepts_attention_mask and kwargs.get("attention_mask") is None:
+            # transformers 5 drops an all-ones mask before calling the callee
+            # (no padding); transformers 4 always supplied it, and legacy
+            # remote implementations read it unconditionally (Hymba
+            # concatenates its memory-token mask onto `attention_mask.device`).
+            # An all-ones mask is exactly the transformers-4 value for an
+            # unpadded prompt, and it spans the sequence this step processes.
+            kwargs["attention_mask"] = torch.ones(
+                (int(input_ids.shape[0]), int(input_ids.shape[-1])),
+                dtype=torch.long,
+                device=input_ids.device,
+            )
+
+        if not modern_sequence_length and not accepts_position_ids:
+            # transformers 4 never synthesized ids; a legacy implementation
+            # that does not declare the argument builds its own from the mask
+            # or the cache length. transformers 5 injects ids sized to the text
+            # sequence, which that code rejects on prefill (Hymba's id span
+            # must include its memory tokens).
+            kwargs.pop("position_ids", None)
+
         if (
             accepts_cache_position
             and not modern_sequence_length
@@ -3113,6 +3419,74 @@ def sanitize_generation_config_file(path: str) -> bool:
         json.dump(data, fp, indent=2)
     return True
 
+
+def _shell_fp32_pin_attrs(dtype: Optional[torch.dtype]) -> tuple[str, ...]:
+    """Declarations the shell must honor for a ``dtype`` build.
+
+    ``_keep_in_fp32_modules_strict`` is the only declaration transformers pins
+    for both fp16 and bf16. The non-strict ``_keep_in_fp32_modules`` list is
+    fp16-only, and several families use it as a "skip from FP8 conversion"
+    marker rather than a dtype contract (DeepseekV4 lists bf16 compressor
+    projections there). Widening those in the shell would change the fp16
+    quantize layout, so the shell keeps its previous fp16 behaviour; a
+    half build pins the strict declaration only.
+    """
+
+    if dtype in (torch.float16, torch.bfloat16):
+        return ("_keep_in_fp32_modules_strict",)
+    return ()
+
+
+def pin_keep_in_fp32_shell_tensors(model, *, dtype: Optional[torch.dtype]) -> int:
+    """Keep the tensors transformers pins to fp32 at fp32 in a meta shell.
+
+    ``from_config(dtype=...)`` runs the constructor under the requested dtype,
+    so a module that registers a parameter or buffer without an explicit dtype
+    (``DeepseekV3TopkRouter.e_score_correction_bias``) gets that half dtype.
+    ``LazyTurtle`` materializes each leaf from the shell slot's dtype, so the
+    narrowed slot rounds the checkpoint value on the way in and the saved
+    checkpoint then stores the half dtype -- which also stops the #5157 reload
+    restore from firing (issue #5203). Pinning the shell slots to fp32 here
+    makes ``offload_to_disk`` agree with a direct half-precision load, where
+    transformers already keeps these tensors fp32.
+
+    Only dtype is changed: meta storage stays meta, and parameter objects are
+    kept so tied weights remain tied.
+    """
+
+    attrs = _shell_fp32_pin_attrs(dtype)
+    if not attrs:
+        return 0
+    matcher = _compile_keep_in_fp32_matcher(model, attrs=attrs)
+    if matcher is None:
+        return 0
+
+    pinned = 0
+    for module_name, module in model.named_modules():
+        prefix = f"{module_name}." if module_name else ""
+        for parameter_name, parameter in module._parameters.items():
+            if (
+                parameter is None
+                or not parameter.is_floating_point()
+                or parameter.dtype is torch.float32
+                or not matcher(f"{prefix}{parameter_name}")
+            ):
+                continue
+            parameter.data = parameter.data.float()
+            pinned += 1
+        for buffer_name, buffer in module._buffers.items():
+            if (
+                buffer is None
+                or not buffer.is_floating_point()
+                or buffer.dtype is torch.float32
+                or not matcher(f"{prefix}{buffer_name}")
+            ):
+                continue
+            module._buffers[buffer_name] = buffer.float()
+            pinned += 1
+    return pinned
+
+
 # load hf model with empty tensors on meta device (zero tensor memory usage)
 def build_shell_model(
     loader,
@@ -3141,6 +3515,10 @@ def build_shell_model(
     try:
         with init_empty_weights(include_buffers=True):
             try:
+                # ``from_config`` opens transformers' ``local_torch_dtype``
+                # window, which holds the model-global-state writer itself
+                # (#5304). Compiled forwards never trace through it (#5209,
+                # #5268).
                 shell = loader.from_config(
                     config,
                     trust_remote_code=trust_remote_code,
@@ -3187,6 +3565,23 @@ def build_shell_model(
                     raise
     finally:
         pb.close()
+
+    shell_dtype = init_kwargs.get("dtype", init_kwargs.get("torch_dtype"))
+    if isinstance(shell_dtype, str):
+        shell_dtype = getattr(torch, shell_dtype.strip().removeprefix("torch."), None)
+    if not isinstance(shell_dtype, torch.dtype):
+        shell_dtype = get_hf_config_dtype(config)
+    pinned = (
+        pin_keep_in_fp32_shell_tensors(shell, dtype=shell_dtype)
+        if isinstance(shell, torch.nn.Module)
+        else 0
+    )
+    if pinned:
+        log.debug(
+            "Model: pinned %s keep-in-fp32 shell tensor(s) to fp32 (build dtype %s)",
+            pinned,
+            shell_dtype,
+        )
 
     if trust_remote_code and isinstance(shell, PreTrainedModel):
         _normalize_legacy_tied_weights_keys(shell)

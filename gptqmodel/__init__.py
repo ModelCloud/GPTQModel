@@ -190,6 +190,23 @@ except Exception:
     log.warning("TritonPatch.apply() failed; triton autotuner threading fix is NOT active", exc_info=True)
 
 
+def _patch_transformers_model_construction_global_state():
+    """Hold the model-global-state writer for each construction window.
+
+    transformers opens a process-global ``torch.set_default_dtype`` window for
+    each construction (#5304) and, in the same init-context group, disables
+    ``PreTrainedModel.tie_weights`` class-wide and swaps registered classes
+    (#5421). Only the window was exclusive, so a foreign construction in
+    another thread could untie a GPT-QModel shell. Every construction now holds
+    the writer for the window; a compiled forward still does not wait for a
+    dense load's weight I/O, dtype casts and device placement.
+    """
+
+    from .utils.torch import install_model_global_state_dtype_guard
+
+    install_model_global_state_dtype_guard()
+
+
 def _patch_transformers_gptq_device_map_compat():
     """Preserve concrete single-device GPTQ maps for Optimum's later packing step."""
     try:
@@ -273,7 +290,11 @@ def _patch_transformers_refusing_quantizers():
         log.debug("GPT-QModel refusing quantizers inactive: transformers quantizer API changed", exc_info=True)
         return
 
-    from ._quant_methods import REFUSED_HF_QUANT_METHODS
+    from ._quant_methods import (
+        FP8_QUANT_METHOD,
+        REFUSED_HF_QUANT_METHODS,
+        is_legacy_inverse_fp8_config,
+    )
     from .utils.hf_refusing_quantizer import (
         GPTQModelRefusingHfQuantizer,
         GPTQModelRefusingQuantizationConfig,
@@ -289,16 +310,26 @@ def _patch_transformers_refusing_quantizers():
                 method, GPTQModelRefusingHfQuantizer
             )
 
-        # transformers special-cases `quant_method == "bitsandbytes"` in
-        # `AutoHfQuantizer.from_config`: it demands an instance of its own
-        # `BitsAndBytesConfig` and only then appends the `_4bit`/`_8bit`
-        # suffix. That branch runs before the mapping lookup, so the refusing
-        # quantizer registered above is never constructed and GPT-QModel's
-        # layout raises a generic TypeError instead of the actionable error
-        # (#4664). Refuse only GPT-QModel's layout: transformers' own
-        # `BitsAndBytesConfig` carries the same plain `quant_method`, so
-        # refusing every occurrence broke all genuine HF bnb loads (QLoRA, any
-        # Hub bnb checkpoint) in a process that imported GPT-QModel (#4731).
+        # Two layouts need a check before transformers converts the dict into
+        # its own config object:
+        #
+        # * `bitsandbytes`: `AutoHfQuantizer.from_config` special-cases the
+        #   name, demands an instance of transformers' own
+        #   `BitsAndBytesConfig`, and only then appends the `_4bit`/`_8bit`
+        #   suffix. That branch runs before the mapping lookup, so the refusing
+        #   quantizer registered above is never constructed and GPT-QModel's
+        #   layout raises a generic TypeError instead of the actionable error
+        #   (#4664). Refuse only GPT-QModel's layout: transformers' own
+        #   `BitsAndBytesConfig` carries the same plain `quant_method`, so
+        #   refusing every occurrence broke all genuine HF bnb loads (QLoRA, any
+        #   Hub bnb checkpoint) in a process that imported GPT-QModel (#4731).
+        #
+        # * `fp8` + `weight_scale_semantics: "inverse"`: transformers registers
+        #   `fp8` for its own `FineGrainedFP8`, which multiplies
+        #   `weight_scale_inv`; GPT-QModel's released FP8 checkpoints divide.
+        #   `FineGrainedFP8Config` drops the unknown marker during conversion,
+        #   so inspect the raw dict before delegating. Production `fp8`
+        #   checkpoints declare `multiplier` and keep loading (#5272).
         original_from_config = hf_quant_auto.AutoHfQuantizer.__dict__["from_config"]
         if not getattr(original_from_config, "_gptqmodel_refusal_guard", False):
 
@@ -306,10 +337,49 @@ def _patch_transformers_refusing_quantizers():
             def _refusing_from_config(cls, quantization_config, **kwargs):
                 if _is_gptqmodel_bitsandbytes_layout(quantization_config):
                     raise ValueError(refusal_message("bitsandbytes"))
+                if is_legacy_inverse_fp8_config(quantization_config):
+                    raise ValueError(
+                        refusal_message(
+                            FP8_QUANT_METHOD,
+                            label="FP8",
+                            detail="weight_scale_semantics: 'inverse'",
+                        )
+                    )
                 return original_from_config.__func__(cls, quantization_config, **kwargs)
 
             _refusing_from_config._gptqmodel_refusal_guard = True
             hf_quant_auto.AutoHfQuantizer.from_config = _refusing_from_config
+
+        # A checkpoint's `quantization_config` is a dict until
+        # `merge_quantization_configs()` converts it into transformers' own
+        # config class. `FineGrainedFP8Config` drops the unknown
+        # `weight_scale_semantics` marker, so the inverse-scale check has to
+        # run before that conversion; `from_config()` alone cannot see it.
+        original_merge = hf_quant_auto.AutoHfQuantizer.__dict__[
+            "merge_quantization_configs"
+        ]
+        if not getattr(original_merge, "_gptqmodel_refusal_guard", False):
+
+            @classmethod
+            def _refusing_merge(
+                cls, quantization_config, quantization_config_from_args
+            ):
+                if is_legacy_inverse_fp8_config(quantization_config):
+                    raise ValueError(
+                        refusal_message(
+                            FP8_QUANT_METHOD,
+                            label="FP8",
+                            detail="weight_scale_semantics: 'inverse'",
+                        )
+                    )
+                return original_merge.__func__(
+                    cls, quantization_config, quantization_config_from_args
+                )
+
+            _refusing_merge._gptqmodel_refusal_guard = True
+            hf_quant_auto.AutoHfQuantizer.merge_quantization_configs = (
+                _refusing_merge
+            )
 
 
 def _is_gptqmodel_bitsandbytes_layout(quantization_config) -> bool:
@@ -536,7 +606,10 @@ def _patch_optimum_gptqmodel_load_bridge():
 
         @wraps(original_convert_model)
         def _convert_model_with_gptqmodel_bridge(self, model, **kwargs):
-            from .utils.hf_load import hf_gptqmodel_prepare_model_for_load
+            from .utils.hf_load import (
+                hf_gptqmodel_prepare_model_for_load,
+                hf_gptqmodel_reselect_context,
+            )
 
             context = hf_gptqmodel_prepare_model_for_load(
                 model,
@@ -552,7 +625,19 @@ def _patch_optimum_gptqmodel_load_bridge():
                 backend=_hf_quantizer_backend(self),
                 dtype=kwargs.get("dtype"),
             )
+            self._gptqmodel_model = model
             if context is None:
+                # Third-party AutoGPTQ checkpoints keep Optimum's own
+                # replacement; publish the minimal context so the resolved
+                # map can still re-select an offload-safe kernel (#5262).
+                fallback = hf_gptqmodel_reselect_context(
+                    model,
+                    checkpoint_files=kwargs.get("checkpoint_files"),
+                    backend=_hf_quantizer_backend(self),
+                    dtype=kwargs.get("dtype"),
+                )
+                if fallback is not None:
+                    model._gptqmodel_hf_reselect_context = fallback
                 return original_convert_model(self, model, **kwargs)
             model._gptqmodel_hf_load_context = context
             return model
@@ -617,6 +702,33 @@ def _ensure_optimum_gptqmodel_load_bridge():
     return False
 
 
+def _reselect_kernels_for_resolved_device_map(quantizer, device_map) -> None:
+    """Re-pick kernels once Transformers resolves a keyword ``device_map``.
+
+    ``preprocess_model`` runs before ``_get_device_map`` turns ``"auto"`` plus
+    ``max_memory`` into a placement, so the bridge cannot see a CPU/disk spill
+    and AUTO keeps a CUDA-only Marlin kernel. ``_get_device_map`` calls
+    ``validate_environment`` again with the *resolved* dict, which is the first
+    point both the model and its final placement are known (#5194).
+    """
+
+    if not isinstance(device_map, dict):
+        return
+    model = getattr(quantizer, "_gptqmodel_model", None)
+    if model is None:
+        return
+    context = getattr(model, "_gptqmodel_hf_load_context", None)
+    if context is None:
+        # Third-party checkpoints do not get the native context, but still need
+        # the resolved-map reselection (#5262).
+        context = getattr(model, "_gptqmodel_hf_reselect_context", None)
+    if context is None:
+        return
+    from .utils.hf_load import hf_gptqmodel_reselect_offloaded_kernels
+
+    hf_gptqmodel_reselect_offloaded_kernels(model, context, device_map)
+
+
 def _patch_transformers_gptq_quantizer_bridge():
     """Retry the Optimum GPTQ bridge from Transformers' GPTQ quantizer.
 
@@ -644,10 +756,16 @@ def _patch_transformers_gptq_quantizer_bridge():
             return
         original_after = GptqHfQuantizer._process_model_after_weight_loading
 
+        original_validate = getattr(GptqHfQuantizer, "validate_environment", None)
+
         @wraps(original_before)
         def _before_with_gptqmodel_bridge(self, model, **kwargs):
             _ensure_optimum_gptqmodel_load_bridge()
-            return original_before(self, model, **kwargs)
+            result = original_before(self, model, **kwargs)
+            # Keep the model reachable from `validate_environment`, which
+            # Transformers calls with the resolved placement but without it.
+            self._gptqmodel_model = model
+            return result
 
         @wraps(original_after)
         def _after_with_gptqmodel_bridge(self, model, **kwargs):
@@ -658,6 +776,20 @@ def _patch_transformers_gptq_quantizer_bridge():
         _after_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         GptqHfQuantizer._process_model_before_weight_loading = _before_with_gptqmodel_bridge
         GptqHfQuantizer._process_model_after_weight_loading = _after_with_gptqmodel_bridge
+        if original_validate is not None and not getattr(
+            original_validate, "_gptqmodel_load_bridge", False
+        ):
+
+            @wraps(original_validate)
+            def _validate_with_gptqmodel_bridge(self, *args, **kwargs):
+                result = original_validate(self, *args, **kwargs)
+                _reselect_kernels_for_resolved_device_map(
+                    self, kwargs.get("device_map")
+                )
+                return result
+
+            _validate_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+            GptqHfQuantizer.validate_environment = _validate_with_gptqmodel_bridge
 
 
 def _patch_transformers_awq_gptqmodel_load_bridge():
@@ -710,10 +842,14 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
             _AWQ_BRIDGE_INSTALLED = True
             return True
         original_post_init = AwqQuantizer._process_model_after_weight_loading
+        original_validate = getattr(AwqQuantizer, "validate_environment", None)
 
         @wraps(original_prepare)
         def _prepare_with_gptqmodel_bridge(self, model, **kwargs):
-            from .utils.hf_load import hf_gptqmodel_prepare_model_for_load
+            from .utils.hf_load import (
+                hf_gptqmodel_prepare_model_for_load,
+                hf_gptqmodel_reselect_context,
+            )
 
             context = hf_gptqmodel_prepare_model_for_load(
                 model,
@@ -727,7 +863,22 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
                 backend=_hf_quantizer_backend(self),
                 dtype=kwargs.get("dtype"),
             )
+            # `validate_environment` gets the resolved placement but no model.
+            self._gptqmodel_model = model
             if context is None:
+                # A third-party checkpoint keeps Transformers' own module
+                # replacement, but the map resolved from `max_memory` still has
+                # to re-select an offload-safe kernel (#5262). Keep this
+                # separate from `_gptqmodel_hf_load_context` so the fallback
+                # load also keeps its own post-init path.
+                fallback = hf_gptqmodel_reselect_context(
+                    model,
+                    checkpoint_files=kwargs.get("checkpoint_files"),
+                    backend=_hf_quantizer_backend(self),
+                    dtype=kwargs.get("dtype"),
+                )
+                if fallback is not None:
+                    model._gptqmodel_hf_reselect_context = fallback
                 return original_prepare(self, model, **kwargs)
             model._gptqmodel_hf_load_context = context
             return model
@@ -735,6 +886,8 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
         @wraps(original_post_init)
         def _post_init_with_gptqmodel_bridge(self, model, **kwargs):
             from .utils.hf_load import (
+                hf_gptqmodel_finish_awq_load_without_rebuild,
+                hf_gptqmodel_native_awq_config,
                 hf_gptqmodel_post_init_for_load,
                 hf_gptqmodel_repair_awq_load,
             )
@@ -754,13 +907,77 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
                     dtype=kwargs.get("dtype"),
                 )
             if context is None:
-                return original_post_init(self, model, **kwargs)
+                # Nothing needed rebuilding: Transformers built every module
+                # from the serialized config (a native checkpoint without
+                # ``dynamic``), or the checkpoint is not ours. The context-free
+                # native post-init still has to run - the legacy remote-code
+                # repairs are not Transformers' job, and skipping them leaves
+                # the RoPE buffers uninitialized (#5433, same symptom as
+                # #5311 for AWQ checkpoints). This is also the path a
+                # third-party checkpoint takes through the prepare fallback.
+                qcfg = hf_gptqmodel_native_awq_config(
+                    model,
+                    checkpoint_files=kwargs.get("checkpoint_files"),
+                )
+                hf_gptqmodel_finish_awq_load_without_rebuild(
+                    model,
+                    qcfg=qcfg,
+                )
+                if qcfg is None:
+                    # A third-party checkpoint only took the remote-code
+                    # repairs above, so Transformers still owes it the native
+                    # post-init and its own hook is the only place that runs it.
+                    return original_post_init(self, model, **kwargs)
+                # ``qcfg is not None``: the native post-init already ran, with
+                # the serialized config. ``original_post_init`` is
+                # ``hf_gptqmodel_post_init`` -> ``gptqmodel_post_init``, so
+                # calling it here repacks an already-repacked ``qweight`` and
+                # raises ``AWQ qweight shape must be ...`` on CUDA/Marlin
+                # (#5511).
+                #
+                # The one side effect of that hook we do still owe is the
+                # Optimum bridge retry (``hf_gptqmodel_post_init`` installs it
+                # before delegating, #4749); it is idempotent and cheap.
+                _ensure_optimum_gptqmodel_load_bridge()
+                return None
             return hf_gptqmodel_post_init_for_load(model, context)
 
+        # Transformers 5.23 records a checkpoint tensor whose shape differs from
+        # the meta module as a mismatched key unless the quantizer reports that
+        # the param needs quantization. A pre-quantized AWQ checkpoint does not,
+        # so a ``dynamic`` checkpoint's per-module ``qzeros``/``scales`` were
+        # rejected in ``_finalize_model_loading`` before the post-weight repair
+        # could run (#5322).
+        original_param_needs_quantization = AwqQuantizer.param_needs_quantization
+
+        @wraps(original_param_needs_quantization)
+        def _param_needs_quantization_with_gptqmodel_bridge(self, model, param_name, **kwargs):
+            from .utils.hf_load import hf_gptqmodel_awq_tolerated_mismatch
+
+            if hf_gptqmodel_awq_tolerated_mismatch(model, param_name):
+                return True
+            return original_param_needs_quantization(self, model, param_name, **kwargs)
+
+        _param_needs_quantization_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         _prepare_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         _post_init_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         AwqQuantizer._process_model_before_weight_loading = _prepare_with_gptqmodel_bridge
         AwqQuantizer._process_model_after_weight_loading = _post_init_with_gptqmodel_bridge
+        AwqQuantizer.param_needs_quantization = _param_needs_quantization_with_gptqmodel_bridge
+        if original_validate is not None and not getattr(
+            original_validate, "_gptqmodel_load_bridge", False
+        ):
+
+            @wraps(original_validate)
+            def _validate_with_gptqmodel_bridge(self, *args, **kwargs):
+                result = original_validate(self, *args, **kwargs)
+                _reselect_kernels_for_resolved_device_map(
+                    self, kwargs.get("device_map")
+                )
+                return result
+
+            _validate_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+            AwqQuantizer.validate_environment = _validate_with_gptqmodel_bridge
         _AWQ_BRIDGE_INSTALLED = True
         return True
 
@@ -794,9 +1011,78 @@ def _ensure_transformers_awq_gptqmodel_load_bridge():
         # importing it again cannot succeed.
         return False
 
+    _capture_awq_quantizer_from_frames()
     if _patch_transformers_awq_gptqmodel_load_bridge():
         return True
     _AWQ_BRIDGE_UNAVAILABLE = True
+    return False
+
+
+def _capture_awq_quantizer_from_frames() -> bool:
+    """Publish the in-flight AWQ load's model before the bridge is installed.
+
+    ``transformers.integrations.awq.replace_with_awq_linear`` imports
+    ``gptqmodel`` from inside ``AwqQuantizer._process_model_before_weight_loading``,
+    so the bridge installed by that import only wraps *later* calls: the load
+    that triggered the import never reaches ``_prepare_with_gptqmodel_bridge``,
+    and ``self._gptqmodel_model`` stays unset. ``validate_environment`` still
+    runs afterwards with the placement resolved from ``max_memory``, but
+    ``_reselect_kernels_for_resolved_device_map`` needs the model to rebuild a
+    CUDA-only Marlin module for a CPU/disk-offloaded layer (#5395).
+
+    The quantizer and model are still live locals of the prepare call that is
+    on this thread's stack. Walk a bounded number of frames for exactly that
+    pair and publish the same state the wrapper would have published, so the
+    existing resolved-map reselection covers the current load too. This is a
+    compatibility shim for Transformers' AWQ import order; it is a no-op for
+    every other caller (package init, post-weight hook, later loads).
+    """
+
+    import torch.nn as nn
+
+    try:
+        from transformers.quantizers.quantizer_awq import AwqQuantizer
+    except ImportError:
+        return False
+
+    frame = sys._getframe(1)
+    for _ in range(32):
+        if frame is None:
+            return False
+        local_vars = frame.f_locals
+        quantizer = local_vars.get("self")
+        model = local_vars.get("model")
+        if isinstance(quantizer, AwqQuantizer) and isinstance(model, nn.Module):
+            from .utils.hf_load import (
+                hf_gptqmodel_reselect_context,
+                is_native_gptqmodel_checkpoint,
+            )
+
+            kwargs = local_vars.get("kwargs")
+            if not isinstance(kwargs, dict):
+                kwargs = {}
+            if getattr(quantizer, "_gptqmodel_model", None) is None:
+                quantizer._gptqmodel_model = model
+            # A native checkpoint gets its own repair from the post-weight hook,
+            # which rebuilds from the serialized per-module config. Publishing a
+            # context built from the *global* config here would replace the
+            # modules with the wrong geometry before that repair runs.
+            if (
+                getattr(model, "_gptqmodel_hf_reselect_context", None) is None
+                and not is_native_gptqmodel_checkpoint(
+                    model, kwargs.get("checkpoint_files")
+                )
+            ):
+                context = hf_gptqmodel_reselect_context(
+                    model,
+                    checkpoint_files=kwargs.get("checkpoint_files"),
+                    backend=_hf_quantizer_backend(quantizer),
+                    dtype=kwargs.get("dtype"),
+                )
+                if context is not None:
+                    model._gptqmodel_hf_reselect_context = context
+            return True
+        frame = frame.f_back
     return False
 
 
@@ -1012,6 +1298,7 @@ class _LazyDeviceThreadPoolProxy:
 DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
 _patch_transformers_gptq_device_map_compat()
+_patch_transformers_model_construction_global_state()
 _patch_transformers_gptqmodel_gguf_quantizer_compat()
 _patch_transformers_refusing_quantizers()
 _patch_transformers_save_pretrained_runtime_layout_guard()
@@ -1042,6 +1329,7 @@ from .backend import (  # noqa: F401
     AwqTritonConfig,
     BackendConfig,
     BitsAndBytesConfig,
+    EXL3CUDAConfig,
     GGUFCPPConfig,
     GGUFCUDAConfig,
     GGUFTorchConfig,

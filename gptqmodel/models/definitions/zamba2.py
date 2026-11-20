@@ -3,6 +3,7 @@
 
 from ...utils.logger import setup_logger
 from ...utils.model import move_to
+from ...utils.torch import dynamo_is_compiling
 from ..base import BaseQModel
 
 
@@ -81,8 +82,6 @@ class Zamba2QModel(BaseQModel):
         return tuple(name for name in cls._fast_path_kernels if getattr(modeling_zamba2, name, None) is None)
 
     def monkey_patch(self):
-        from transformers.models.zamba2 import modeling_zamba2
-
         from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
         missing_kernels = self._missing_fast_path_kernels()
@@ -93,10 +92,8 @@ class Zamba2QModel(BaseQModel):
                 f"{', '.join(missing_kernels)}. The mixer will use the Torch/upstream fallback path."
             )
 
-        is_torchdynamo_compiling = getattr(modeling_zamba2, "is_torchdynamo_compiling", None)
-
         def _is_compiling() -> bool:
-            return bool(is_torchdynamo_compiling()) if is_torchdynamo_compiling is not None else False
+            return dynamo_is_compiling()
 
         def _has_dense_cuda_weight(module) -> bool:
             if isinstance(module, BaseQuantLinear):

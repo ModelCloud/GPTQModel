@@ -65,7 +65,7 @@ tiny local safetensors fixtures. Tests in
 `tests/module_tree/test_bloom_awq_relationships.py` verify that disabling scaling
 does not hide any linear or norm weight owner.
 
-Run both test files explicitly alongside the AWQ CPU unit suite. This change
-does not modify CI workflows.
+Run both test files explicitly alongside the
+[on-demand AWQ CPU unit suite](awq-scaling-groups.md#on-demand-cpu-test-suites).
 
 Introduced with [Bloom replay safety](https://github.com/ModelCloud/GPTQModel/pull/4145).

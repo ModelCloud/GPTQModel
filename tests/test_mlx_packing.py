@@ -667,7 +667,7 @@ def _convert_tiny_qwen2(path, dynamic, desc_act=False, stock_compatible=False):
     from gptqmodel import GPTQModel
     from gptqmodel.quantization.config import RTNConfig
     from gptqmodel.utils.backend import BACKEND
-    from gptqmodel.utils.mlx import convert_gptq_to_mlx_weights
+    from gptqmodel.utils.mlx import _convert_gptq_to_mlx_weights
 
     _tiny_qwen2_dir(path)
     qcfg = RTNConfig(bits=4, group_size=128, sym=False, desc_act=desc_act, dynamic=dynamic)
@@ -680,7 +680,7 @@ def _convert_tiny_qwen2(path, dynamic, desc_act=False, stock_compatible=False):
     # Pin the portable Torch GPTQ backend so conversion sees the same layout as
     # the in-process checkpoint.
     source = GPTQModel.load(str(quantized), device="cpu", backend=BACKEND.GPTQ_TORCH)
-    return source, convert_gptq_to_mlx_weights(
+    return source, _convert_gptq_to_mlx_weights(
         str(quantized), source, qcfg.to_dict(), source.lm_head,
         stock_compatible=stock_compatible,
     )

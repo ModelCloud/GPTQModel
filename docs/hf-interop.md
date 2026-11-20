@@ -151,6 +151,156 @@ flowchart TD
 | Native AWQ `dynamic` checkpoint, no `gptqmodel` import | Global group size; CPU wrong logits, CUDA qzeros error | Post hook rebuilds every module from the manifest; matches `GPTQModel.load` |
 | Second AWQ load in the same process | Same as the first | Prepare hook runs before any layer is replaced |
 
+### AWQ late import and CPU/disk-offload kernel selection
+
+Introduced by PR #5543.
+
+`validate_environment` is where Transformers first hands the quantizer the
+placement resolved from `device_map="auto"` and `max_memory`. The bridge wraps
+it so `hf_gptqmodel_reselect_offloaded_kernels` can rebuild an
+`AwqMarlinLinear` that ended up on a CPU or disk layer with an offload-safe
+kernel. That rebuild runs before any checkpoint tensor is assigned, while the
+affected modules are still meta placeholders.
+
+For the load that imports `gptqmodel` from inside `replace_with_awq_linear`,
+the wrapper was installed too late to run the prepare step, so
+`self._gptqmodel_model` stayed unset. `validate_environment` ran with the
+resolved map but had no model to re-select against, AUTO kept
+`AwqMarlinLinear` on the offloaded layer, and `post_init` raised
+`AWQ Marlin requires CUDA tensors` (CPU spill) or the disk-backed `post_init`
+refusal (#5395).
+
+```mermaid
+flowchart TD
+    A["replace_with_awq_linear imports gptqmodel"] --> B["bridge installs for later calls only"]
+    B --> C["validate_environment has no _gptqmodel_model"]
+    C --> D["_reselect_kernels_for_resolved_device_map returns early"]
+    D --> E["AwqMarlinLinear stays on the CPU/disk layer"]
+    E --> F["post_init raises"]
+    style E fill:#f8d7da,stroke:#b02a37
+    style F fill:#f8d7da,stroke:#b02a37
+```
+
+`_capture_awq_quantizer_from_frames` runs while the bridge is being installed
+and walks this thread's stack for the live `AwqQuantizer` and model of the
+prepare call that triggered the import. It records the same
+`_gptqmodel_hf_reselect_context` the prepare wrapper records for a third-party
+checkpoint, so the existing `validate_environment` path can rebuild the
+offloaded modules before weight assignment. Native checkpoints keep their
+post-weight repair instead, because a context built from the global config
+would replace their serialized per-module geometry.
+
+```mermaid
+flowchart TD
+    A["plain AutoModelForCausalLM.from_pretrained"] --> B["AwqQuantizer._process_model_before_weight_loading"]
+    B --> C["replace_with_awq_linear"]
+    C --> D["import gptqmodel (first import, mid-load)"]
+    D --> E["_ensure_transformers_awq_gptqmodel_load_bridge"]
+    E --> F["_capture_awq_quantizer_from_frames"]
+    F --> G{"AwqQuantizer and model on this stack?"}
+    G -->|"no: package init or later entry point"| H["install the bridge hooks"]
+    G -->|"yes: the load that triggered the import"| I["record _gptqmodel_model and publish the third-party reselect context"]
+    I --> H
+    H --> J["Transformers builds modules from the global config"]
+    J --> K["_get_device_map resolves auto plus max_memory"]
+    K --> L["patched AwqQuantizer.validate_environment"]
+    L --> M{"offloaded layer with a CUDA-only kernel?"}
+    M -->|"yes"| N["hf_gptqmodel_reselect_offloaded_kernels rebuilds the meta modules"]
+    M -->|"no"| O["keep the AUTO kernel"]
+    N --> P["Transformers assigns checkpoint tensors"]
+    O --> P
+    style N fill:#d9f2d9,stroke:#2e7d32
+```
+
+| Situation | Before this change | After |
+| --- | --- | --- |
+| First third-party AWQ load, `device_map="auto"`, CPU spill, no `import gptqmodel` | `validate_environment` has no model; `AwqMarlinLinear` stays on the CPU layer and `post_init` raises | The prepare frame publishes the reselect context; the CPU layer is rebuilt with an offload-safe kernel before weights |
+| Same load with a disk spill | Same, then the disk-backed `post_init` refusal | Same offload-safe rebuild; the layer stays meta and Accelerate's hook replays it |
+| First load, `device_map="auto"`, no spill | Marlin | Marlin; the reselect helper finds no offloaded layer |
+| First load, explicit dict with CPU entries | Offload-safe kernel chosen from the dict | Unchanged |
+| Native AWQ checkpoint, no `import gptqmodel` | Post-weight repair from the serialized manifest | Unchanged; the capture deliberately does not publish a global-config context |
+| Second AWQ load in the same process | Prepare hook records the model | Unchanged |
+
+### Transformers 5.23 mismatch gate
+
+Transformers 5.23 tightened `core_model_loading.set_param_for_module`. A
+checkpoint tensor whose shape differs from the module built on meta used to be
+accepted whenever any `hf_quantizer` was active; now it is recorded as a
+mismatched key unless the quantizer reports `param_needs_quantization`:
+
+```text
+- if ref is not None and param_value.shape != expected_shape and hf_quantizer is None:
++ if (ref is not None and param_value.shape != expected_shape
++     and (hf_quantizer is None or not hf_quantizer.param_needs_quantization(model, target_name))):
+```
+
+A pre-quantized AWQ checkpoint has nothing to quantize, so `AwqQuantizer`
+inherits the base `param_needs_quantization` (always `False`). A `dynamic`
+checkpoint's per-module `qzeros`/`scales` are wider than the modules
+Transformers built from the global `group_size`, so they were recorded as
+MISMATCH and `_finalize_model_loading` raised
+`You set ignore_mismatched_sizes to False ...` *before* `postprocess_model`
+could run the repair hook (#5322). The documented plain-`from_pretrained` flow
+(`docs/peft.md`) therefore failed for every `dynamic` AWQ checkpoint.
+
+```mermaid
+flowchart TD
+    A["plain AutoModelForCausalLM.from_pretrained"] --> B["AwqQuantizer builds modules from the global config"]
+    B --> C["core_model_loading.set_param_for_module"]
+    C --> D{"shape differs and param_needs_quantization false?"}
+    D -->|"before 5.23: quantizer active"| E["assign tensor, continue"]
+    D -->|"5.23: not quantizing"| F["mismatched_keys"]
+    F --> G["_finalize_model_loading raises"]
+    G --> H["post-weight repair never runs"]
+    C --> I["patched param_needs_quantization"]
+    I --> J{"native GPT-QModel AWQ, packed buffer,<br/>and module geometry differs from its serialized config?"}
+    J -->|"yes: the repair will rebuild this module"| E
+    J -->|"no"| D
+    style G fill:#f8d7da,stroke:#b02a37
+    style E fill:#d9f2d9,stroke:#2e7d32
+```
+
+`_patch_transformers_awq_gptqmodel_load_bridge` wraps
+`AwqQuantizer.param_needs_quantization` with
+`hf_gptqmodel_awq_tolerated_mismatch` (`gptqmodel/utils/hf_load.py:314`). The
+guard accepts a mismatch only when the live quantize config is a GPT-QModel
+AWQ checkpoint (an explicit `gptqmodel` quantizer entry, `meta.uri`, or a
+`dynamic` map), the mismatched tensor is one of
+`qweight`/`qzeros`/`scales`/`g_idx`/`bias` on a `BaseQuantLinear`, **and**
+that module's built `bits`/`group_size`/`desc_act`/`sym` disagree with its
+resolved serialized per-module config. The last condition is the same one
+`_awq_modules_ignore_serialized_config` (`gptqmodel/utils/hf_load.py:922`) uses to decide whether
+`hf_gptqmodel_repair_awq_load` will rebuild the module, so a claimed tensor is
+always one the repair replaces. A serialized `group_size` of `-1` is compared
+as the module's `in_features`, which is the effective per-channel group size
+the kernel stores (`_awq_effective_group_size`, `gptqmodel/utils/hf_load.py:303`),
+so per-channel checkpoints are not mistaken for a geometry override.
+
+Everything else keeps Transformers' behavior: dense parameters still raise, an
+explicit third-party quantizer entry wins over the `dynamic` heuristic,
+non-AWQ methods are untouched, and a native checkpoint without a per-module
+geometry override keeps the mismatch. The earlier guard claimed every packed
+buffer of any native AWQ checkpoint, which disabled the last shape check for
+checkpoints the repair never rebuilds: a corrupted `qzeros`/`scales` loaded
+silently with the checkpoint shape instead of raising (#5345). The accepted
+tensors are then moved into the modules rebuilt from the manifest by
+`hf_gptqmodel_repair_awq_load`, so the load still matches `GPTQModel.load`.
+
+| Decision | Before this change | After |
+| --- | --- | --- |
+| Which packed buffers bypass the 5.23 shape check | Every packed buffer on a `BaseQuantLinear` in a native AWQ checkpoint | Only buffers whose module geometry differs from the serialized per-module config |
+| What happens to a corrupted native buffer without an override | Accepted silently; no MISMATCH, no repair, no error | MISMATCH recorded; `_finalize_model_loading` raises |
+
+| Situation | Before this change | After |
+| --- | --- | --- |
+| Native `dynamic` AWQ checkpoint whose override changes geometry, plain load, transformers 5.23 | Packed buffers accepted; modules rebuilt from the manifest | Unchanged |
+| Native AWQ checkpoint without a geometry override, wrong-shape packed buffer | Loaded silently with the checkpoint shape (#5345) | RuntimeError; the mismatch is reported |
+| Native AWQ checkpoint without a geometry override, valid shapes | Loads | Unchanged |
+| Same checkpoint, transformers <= 5.22 | Loads (any active quantizer skipped the check) | Unchanged |
+| Native `dynamic` AWQ checkpoint, dense tensor shape differs | RuntimeError | RuntimeError (still reported) |
+| Third-party AWQ checkpoint | Transformers' own mismatch behavior | Unchanged |
+| GPTQ checkpoint | Optimum path | Unchanged |
+
 The save path reports the same hazards loudly through `hf_compat_warnings`
 (`gptqmodel/models/writer.py`). A checkpoint that stores per-expert
 `experts.<n>.*.qweight` tensors emits a warning naming the missing /
@@ -252,7 +402,11 @@ unknown name, `supports_quant_method` only warns
 `from_pretrained` then random-initializes every linear layer. GPT-QModel
 publishes several layouts transformers does not implement (`bitsandbytes`,
 `exl3`, `qqq`, `paro`, `macaq`, `nf12`, `tt-blockfloat`) plus the
-deliberate `gptqmodel_gguf` alias.
+deliberate `gptqmodel_gguf` alias. FP8 is load-only: production checkpoints
+keep their own `quant_method: "fp8"`, which transformers implements. The
+legacy `gptqmodel_fp8` name is refused, and so is `fp8` when the config
+declares `weight_scale_semantics: "inverse"`, because `FineGrainedFP8` would
+multiply GPT-QModel's inverse scale.
 
 `gptqmodel/__init__.py` registers a refusing quantizer for each name from the
 single table `REFUSED_HF_QUANT_METHODS` in `gptqmodel/_quant_methods.py`, using
@@ -266,17 +420,32 @@ flowchart TD
     C --> E["AUTO_QUANTIZER_MAPPING.setdefault<br/>GPTQModelRefusingHfQuantizer"]
     A --> F["_patch_transformers_gptqmodel_gguf_quantizer_compat"]
     F --> F2["GGUF_EXPORT_QUANT_METHOD registered"]
-    G["AutoModelForCausalLM.from_pretrained"] --> H["AutoHfQuantizer.from_config"]
-    H --> I{"quant_method registered?"}
+    S["save: _serialize_export_quant_method"] --> S5["quant_method: method value"]
+    S5 --> G
+    G["AutoModelForCausalLM.from_pretrained"] --> H["AutoHfQuantizer.merge_quantization_configs"]
+    H --> H2{"fp8 + inverse scale?"}
+    H2 -- yes --> K2["raise ValueError<br/>use GPTQModel.load"]
+    H2 -- no --> H3["AutoHfQuantizer.from_config"]
+    H3 --> I{"quant_method registered?"}
     I -- no --> J["warn and skip quantization<br/>random Linear weights"]
     I -- yes --> K["GPTQModelRefusingHfQuantizer.__init__<br/>raise ValueError"]
     style J fill:#f8d7da,stroke:#b02a37
     style K fill:#d9f2d9,stroke:#2e7d32
+    style K2 fill:#d9f2d9,stroke:#2e7d32
 ```
 
 `setdefault` keeps any quantizer transformers already owns (`gptq`, `awq`,
 `fp8`, and its own `vptq`), so this table only covers names transformers does
-not implement. In particular transformers 5 registers `bitsandbytes_4bit` and
+not implement. The `fp8` name is the one exception: transformers owns it, but
+GPT-QModel refuses a config that also declares
+`weight_scale_semantics: "inverse"` before transformers converts the dict,
+because `FineGrainedFP8Config` would otherwise drop that marker and multiply
+the inverse scale. GPT-QModel no longer writes FP8 checkpoints: FP8 is
+load-only, and the checkpoints it loads are production FP8 (`FineGrainedFP8`,
+DeepSeek/Qwen block scales, NVIDIA ModelOpt, MXFP8, NVFP8) that publish the
+standard `fp8` name with a multiplier. `_serialize_export_quant_method`
+therefore only has to special-case GGUF.
+In particular transformers 5 registers `bitsandbytes_4bit` and
 `bitsandbytes_8bit`, not the plain `bitsandbytes` that GPT-QModel writes, so
 that name is refused like the other GPT-QModel-only layouts. The registration runs on package import, so
 a process that never imports `gptqmodel` still only sees transformers'
@@ -291,6 +460,74 @@ per-format table also appears in [the MACaQ page](macaq.md#transformers-interop)
 | `quant_method` transformers already implements | its own quantizer | unchanged (`setdefault`) |
 | save of a GPT-QModel-only layout | silent | `hf_compat_warnings` entry naming the method |
 
+## 6. Keyword `device_map` and `max_memory`
+
+Transformers calls a quantizer's `preprocess_model` *before* it resolves
+`device_map="auto"` from `max_memory`, and it never forwards `max_memory` to
+the quantizer. The bridge therefore receives an unresolved accelerate keyword,
+not a placement.
+
+### Before: the keyword expanded to every visible GPU
+
+`hf_select_quant_linear{,_v2}` and `hf_gptqmodel_prepare_model_for_load` sent
+the keyword to `hf_normalize_device_device_map`, which expanded it with
+`expand_selector_device_family` and validated the result. On a host whose GPUs
+span compute-capability groups, the load was refused before `max_memory` was
+considered, even when the budget named one card. `GPTQModel.load` was already
+fixed for that (#4632/#4747) because it resolves the budget itself.
+
+```mermaid
+flowchart TD
+    A["from_pretrained device_map=auto max_memory N card"] --> B["preprocess_model device_map=auto"]
+    B --> C["hf_normalize_device_device_map expands every visible GPU"]
+    C --> D{"capabilities differ?"}
+    D -->|"yes"| E["ValueError: mixed compute capabilities"]
+    D -->|"no"| F["kernel valid on every GPU"]
+    E --> G["max_memory never applied"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class E,G failure;
+```
+
+### After: defer placement, validate what was resolved
+
+The bridge now normalizes an accelerate keyword to the accelerator *family*
+(`defer_keyword_placement`) instead of a concrete ordinal. A family selector
+makes kernel selection validate the candidate against every visible device, so
+whichever card the budget names is served; a homogeneous host keeps the
+historical concrete expansion, so kernel choice there is unchanged. Once
+Transformers has applied `max_memory` and Accelerate has dispatched the model,
+`model.hf_device_map` is the real placement and
+`validate_device_map_capability_groups` keeps the refusal for a map that truly
+spans generations, with a remedy that can work on this path.
+
+```mermaid
+flowchart TD
+    A["from_pretrained device_map=auto max_memory N card"] --> B["preprocess_model device_map=auto"]
+    B --> C{"host spans capability groups?"}
+    C -->|"no"| D["expand to every visible GPU as before"]
+    C -->|"yes"| E["keep accelerator family"]
+    D --> F["kernel valid on every expanded GPU"]
+    E --> G["kernel valid on every visible GPU"]
+    F --> H["Transformers resolves max_memory"]
+    G --> H
+    H --> I["Accelerate dispatches and sets hf_device_map"]
+    I --> J["validate_device_map_capability_groups"]
+    J -->|"one capability group"| K["load succeeds"]
+    J -->|"mixed groups"| L["ValueError: explicit map or CUDA_VISIBLE_DEVICES"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    classDef ok fill:#d9f2d9,stroke:#2e7d32;
+    class L failure;
+    class K ok;
+```
+
+| Situation | Before | After |
+| --- | --- | --- |
+| `device_map="auto", max_memory={1: ...}` on a mixed host | `ValueError: cuda:0=..., cuda:1=...` | Loads on the budgeted card |
+| `device_map="auto", max_memory={... , "cpu": ...}` on a mixed host | Same `ValueError` | Loads; CPU-offload kernel contract still applies (#5022) |
+| `max_memory` naming both capability groups | `ValueError` before weights load | `ValueError` after dispatch, naming an explicit map |
+| Homogeneous host, any keyword | One kernel for all visible GPUs | Unchanged |
+| Explicit `device_map={"": "cuda:0", "model.layers.1": "cuda:1"}` | `ValueError` | Unchanged, still refused up front |
+
 ## Failure contract
 
 | Condition | Before | After |
@@ -300,6 +537,8 @@ per-format table also appears in [the MACaQ page](macaq.md#transformers-interop)
 | AWQ module with non-divisible `in_features` | `ValueError` after calibration | Retuned group size before calibration |
 | Native save of a source with `auto_map` | Dangling `auto_map`, `OSError` on load | `auto_map` removed; config loads natively |
 | GPT-QModel-only `quant_method` in plain HF | warning + random weights | refusing quantizer raises when `gptqmodel` is imported |
+| Keyword `max_memory` budget on a mixed-capability host | `ValueError` before the budget applies | Loads when the budget names one capability group; a resolved mixed map is still refused |
+| Native `dynamic` AWQ checkpoint on transformers 5.23 | `RuntimeError` size mismatch; repair never runs | Packed buffers accepted for native AWQ only; modules rebuilt from the manifest |
 
 ## Tests
 
@@ -314,3 +553,6 @@ per-format table also appears in [the MACaQ page](macaq.md#transformers-interop)
 | `tests/test_checkpoint_interop_4053.py::test_hf_from_pretrained_refuses_every_gptqmodel_only_method` | Every table entry raises instead of loading random weights |
 | `tests/test_checkpoint_compat.py::test_every_gptqmodel_only_method_registers_a_refusing_quantizer` | The package-init guard covers the whole table |
 | `tests/test_checkpoint_compat.py::test_hf_compat_warning_for_every_gptqmodel_only_method` | Save-time warnings name every table entry |
+| `tests/test_hf_bridge_mixed_capability_5084.py` | A keyword map is not validated before `max_memory`; the resolved map is |
+| `tests/test_hf_awq_dynamic_mismatch_5322.py` | The 5.23 mismatch guard accepts only native AWQ packed buffers; dense and third-party shapes still raise |
+| `tests/test_hf_awq_bridge_import_order_4795.py` | Plain-transformers `dynamic` AWQ load matches `GPTQModel.load` (5.22 and 5.23) |

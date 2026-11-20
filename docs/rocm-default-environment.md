@@ -9,16 +9,23 @@ call and both defer to a value the caller already set:
 
 | Variable | ROCm default | Why |
 |---|---|---|
-| `PYTORCH_ALLOC_CONF` / `PYTORCH_CUDA_ALLOC_CONF` | `max_split_size_mb:256,garbage_collection_threshold:0.7` | `expandable_segments:True` plus `torch.cuda.empty_cache()` corrupts ordinary Torch results on ROCm 10.1 / gfx1201 |
+| `PYTORCH_ALLOC_CONF` / `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:False` | `expandable_segments:True` plus `torch.cuda.empty_cache()` corrupts ordinary Torch results on ROCm 10.1 / gfx1201 |
 | `ROCBLAS_USE_HIPBLASLT` | `0` | rocBLAS forwards GEMMs to hipBLASLt, which selects a different kernel per process for the same shape; identical quantization runs then save different checkpoints |
 
 CUDA installs `expandable_segments:True` only, and never has
 `ROCBLAS_USE_HIPBLASLT` set by GPT-QModel. `max_split_size_mb` is deliberately
-left unset on CUDA: pinning it to 256 MiB stops the allocator from splitting and
-reusing 256 MiB blocks, so GPTQ's per-layer churn grows reserved VRAM while
-active memory stays flat (#4389). `garbage_collection_threshold` is omitted too:
+left unset on both backends: pinning it to 256 MiB stops the allocator from
+splitting and reusing 256 MiB blocks, so a layer's churn grows reserved VRAM
+while active memory stays flat (#4389 on CUDA, #5072 on ROCm, where one
+14336x4096 MACaQ layer peaked at 5258 MiB reserved for 4224 MiB allocated and
+4466 MiB after the cap was dropped, with identical tensors).
+`garbage_collection_threshold` is omitted too:
 without a memory fraction it only fires above a fraction of the whole device,
 which a quantization run never reaches.
+
+The ROCm default now pins exactly one thing, `expandable_segments:False`.
+Everything else is Torch's own default, so a future Torch allocator change
+reaches ROCm users unless it also needs this exclusion.
 
 ## The import-time flow
 
@@ -32,7 +39,7 @@ flowchart TD
     E -- "yes" --> G["preserve the caller value"]
     E -- "no" --> H["install DEFAULT_ALLOC_CONF with expandable_segments"]
     F -- "yes" --> G
-    F -- "no" --> I["install ROCM_DEFAULT_ALLOC_CONF without expandable_segments"]
+    F -- "no" --> I["install ROCM_DEFAULT_ALLOC_CONF = expandable_segments:False"]
     H --> J["_rocm_env.apply_default_rocm_blas_env"]
     I --> J
     G --> J
@@ -60,10 +67,9 @@ rocBLAS has no fast fp16/bf16 kernels, so that also routed AWQ's and RTN's
 fp16/bf16 GEMMs through rocBLAS: 8-14x slower than hipBLASLt, with no
 determinism gain for methods that never build a Hessian.
 
-The pin is scoped to methods that accumulate a Hessian or input Gram from the
-calibration activations (`_needs_deterministic_hessian` in
-`gptqmodel/models/base.py:158`, keyed off `_HESSIAN_PROCESSOR_STEPS` at
-`gptqmodel/models/base.py:148`):
+The pin is scoped to the processors in `_DETERMINISTIC_BLAS_PROCESSOR_STEPS`
+(`gptqmodel/models/base.py::_DETERMINISTIC_BLAS_PROCESSOR_STEPS`), checked by
+`_needs_deterministic_hessian` (`gptqmodel/models/base.py::_needs_deterministic_hessian`):
 
 | Method | Accumulates | Where |
 |---|---|---|
@@ -72,13 +78,15 @@ calibration activations (`_needs_deterministic_hessian` in
 | VPTQ | `X^T X` | `quantization/vptq.py:283` |
 | MACaQ | `X^T X` | `quantization/macaq.py:668` |
 | EXL3 | reuses GPTQ's capture | `looper/exllamav3_processor.py:192` |
-| FP8 GSQ | fp32 input Gram | `quantization/gsq_calibration.py:56` |
 | EoRA | fp32 input Gram + `eigh` | `eora/eora.py:44` |
+| Paro | none; rotation optimization GEMMs | `looper/paro_processor.py` |
 
-AWQ, Paro and weight-only (RTN) accumulate none of these and keep
-hipBLASLt. EoRA is included even though it is a secondary processor: an
-AWQ + EoRA plan would otherwise keep the adapter Gram on hipBLASLt, and the
-saved adapter differed in 39/42 LoRA tensors between identical runs (#4614).
+AWQ and weight-only (RTN) accumulate none of these and keep hipBLASLt. Paro is
+pinned rocBLAS despite building no Hessian: hipBLASLt selected a different GEMM
+kernel per process, so identically seeded runs saved different checkpoints
+(#4460). EoRA is included even though it is a secondary processor: an AWQ +
+EoRA plan would otherwise keep the adapter Gram on hipBLASLt, and the saved
+adapter differed in 39/42 LoRA tensors between identical runs (#4614).
 
 #4105 scoped the pin to `ProcessorStep.GPTQ in run_plan.processors`, which was
 too narrow: QQQ also builds a Hessian, so it accumulated on hipBLASLt and lost
@@ -92,8 +100,8 @@ only for the fp32 `X^T X` GEMM: those forward GEMMs produce the activations that
 are accumulated into the Hessian. Pinning only `compute_hessian_xtx` regressed
 Qwen2.5-0.5B-Instruct to **332/795** differing tensors across processes (the
 #4075 no-pin baseline), because the captured inputs themselves differed. The
-per-call contexts in `compute_hessian_xtx` (`gptqmodel/quantization/gptq.py:1207,1244,1260`)
-and `hessian_inverse` (`gptqmodel/quantization/gptq.py:2108`) remain as
+per-call contexts in `compute_hessian_xtx` (`gptqmodel/quantization/gptq.py:1277,1314,1330`)
+and `hessian_inverse` (`gptqmodel/quantization/gptq.py::hessian_inverse`) remain as
 defense-in-depth for direct Hessian calls; the outer method-scoped context is
 what keeps the forward reproducible.
 
@@ -114,7 +122,7 @@ same-target runs share the refcount and different-target runs serialize.
 ```mermaid
 flowchart TD
     A["GPTQModel.quantize"] --> B{"_needs_deterministic_hessian"}
-    B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, FP8 GSQ, Paro, EoRA" --> C["want rocBLAS"]
+    B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, Paro, EoRA" --> C["want rocBLAS"]
     B -- "no: AWQ, RTN" --> D["want hipBLASLt"]
     C --> E{"another run holds the other backend?"}
     D --> E
@@ -135,7 +143,7 @@ flowchart TD
 | Override scope | unconditional around the whole calibrated run (`gptqmodel/models/base.py:2128`) | only when `_needs_deterministic_hessian(run_plan)` (`gptqmodel/models/base.py:158`) |
 | AWQ / RTN | forced rocBLAS for the whole run | pinned hipBLASLt for the whole run |
 | Paro | forced rocBLAS for the whole run | pinned rocBLAS (no Hessian, but hipBLASLt kernel choice made seeded runs differ) |
-| QQQ / VPTQ / MACaQ / EXL3 / FP8 GSQ | forced rocBLAS | pinned rocBLAS (they build a Hessian) |
+| QQQ / VPTQ / MACaQ / EXL3 | forced rocBLAS | pinned rocBLAS (they build a Hessian) |
 | EoRA | forced rocBLAS | pinned rocBLAS (fp32 input Gram + `eigh`; #4614) |
 | GPTQ calibration forward and replay | forced rocBLAS | pinned rocBLAS (their activations feed the Hessian) |
 | Hessian `X^T X` and inversion | rocBLAS | rocBLAS, plus a nested per-call context |

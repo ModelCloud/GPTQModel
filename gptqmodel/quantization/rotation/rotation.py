@@ -24,6 +24,31 @@ from .hadamard_utils import (
 log = setup_logger()
 
 
+def resolve_head_dim(config) -> typing.Optional[int]:
+    """Return the attention head width, honoring an explicit ``config.head_dim``.
+
+    Transformers Llama (and its siblings) allow ``head_dim`` to differ from
+    ``hidden_size // num_attention_heads``. Rotation must use the declared
+    width, otherwise the V/O transforms reshape with the wrong chunk size.
+    """
+
+    head_dim = getattr(config, "head_dim", None)
+    if isinstance(head_dim, int) and head_dim > 0:
+        return head_dim
+
+    hidden_size = getattr(config, "hidden_size", None)
+    num_heads = getattr(config, "num_attention_heads", None)
+    if (
+        isinstance(hidden_size, int)
+        and hidden_size > 0
+        and isinstance(num_heads, int)
+        and num_heads > 0
+        and hidden_size % num_heads == 0
+    ):
+        return hidden_size // num_heads
+    return None
+
+
 def validate_rotation_dimensions(config, rotation: str) -> None:
     """Fail before any weight is modified when a rotated width has no exact Hadamard factor.
 
@@ -45,6 +70,16 @@ def validate_rotation_dimensions(config, rotation: str) -> None:
                 "of one of 172, 156, 140, 108, 60, 52, 36, 28, 40, 20, 12). "
                 "No weights were modified."
             )
+
+    # The V/O transforms apply one exact Hadamard per attention head, which
+    # needs a power-of-two width (``apply_exact_had_to_linear`` asserts it).
+    head_dim = resolve_head_dim(config)
+    if head_dim is not None and not (head_dim & (head_dim - 1) == 0):
+        raise ValueError(
+            f"rotation `{rotation}` is not supported for this model: "
+            f"`head_dim`={head_dim} is not a power of two, so the per-head "
+            "Hadamard transform cannot be applied. No weights were modified."
+        )
 
 
 def fuse_ln_linear(
@@ -287,8 +322,12 @@ def rotate_model(model: PreTrainedModel, rotate_mode: str, device: torch.device,
     )
     config = model.config
     num_heads = config.num_attention_heads
-    model_dim = config.hidden_size
-    head_dim = model_dim // num_heads
+    head_dim = resolve_head_dim(config)
+    if head_dim is None:
+        raise ValueError(
+            "rotation requires `head_dim` or a divisible "
+            "`hidden_size` / `num_attention_heads` pair"
+        )
 
     rotate_embeddings(model, Q, device, embedding_name=embedding_name)
     rotate_head(model, Q, device, lm_head_name)

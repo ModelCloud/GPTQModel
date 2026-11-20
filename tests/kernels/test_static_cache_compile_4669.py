@@ -27,13 +27,14 @@ from transformers.models.llama.modeling_llama import LlamaConfig, LlamaForCausal
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.quantization.config import CalibrationConfig, GPTQConfig
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 pytestmark = [
     pytest.mark.slow,
     pytest.mark.skipif(
-        not torch.cuda.is_available(),
-        reason="transformers only auto-compiles a static cache on an accelerator",
+        not requires_nvidia_cuda(),
+        reason="transformers only auto-compiles a static cache on a CUDA accelerator",
     ),
 ]
 

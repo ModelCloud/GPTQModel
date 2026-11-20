@@ -43,11 +43,6 @@ from gptqmodel.utils.exl3_error_ledger import (
 )
 
 
-_processor_wiring_pending = pytest.mark.skip(
-    reason="EXL3Processor zero-route wiring lands in a later stack layer"
-)
-
-
 def _metrics(scale: float) -> dict:
     return {
         "schema": "gptqmodel.exl3-trellis-error",
@@ -579,7 +574,6 @@ def test_mixed_recovery_binds_empirical_rows_and_identity_residual() -> None:
         )
 
 
-@_processor_wiring_pending
 @pytest.mark.parametrize(
     ("block_namespace", "logical_layer", "module_prefix"),
     [
@@ -684,7 +678,6 @@ def test_exl3_census_tops_up_undercovered_learned_router_namespaces(
         )
 
 
-@_processor_wiring_pending
 def test_exl3_census_excludes_deterministic_hash_router_from_topup():
     processor = object.__new__(EXL3Processor)
     processor.qcfg = SimpleNamespace(

@@ -30,7 +30,16 @@ class NamedModule(torch.nn.Module):
 
         self._parent_lock = get_parent_lock(full_name)
         self.module = module  # wrapped module
-        self.module_dtype = next(module.parameters()).dtype
+        first_parameter = next(iter(module.parameters()), None)
+        if first_parameter is None:
+            # A bare ``next(module.parameters())`` raised ``StopIteration`` and
+            # surfaced as an unexplained ``quantize()`` abort; name the module
+            # and its type instead (#5270).
+            raise ValueError(
+                f"NamedModule `{full_name}` wraps {type(module).__name__}, "
+                "which has no parameters to quantize."
+            )
+        self.module_dtype = first_parameter.dtype
         self.name = name  # module name
         self.full_name = full_name  # full dotted path inside model
         self.layer_index = layer_index  # layer index for repeated blocks

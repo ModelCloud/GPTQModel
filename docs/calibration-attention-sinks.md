@@ -3,7 +3,7 @@
 `quantize(CalibrationConfig(dataset=..., exclude_attention_sinks=True))`
 removes the BOS attention-sink tokens from every calibration statistic: Hessians (GPTQ,
 GPTAQ/FOEM `H` and `dXXT`, QQQ, MACaQ, the EXL3 capture), AWQ activation
-features (token-row sample, `x_mean`, scale-search loss), calibrated FP8 GSQ,
+features (token-row sample, `x_mean`, scale-search loss),
 and the token totals used for averaging and the zero-sample fallback threshold.
 The tokens still run through every forward, so later tokens keep attending to
 them. The default is `False`, and with it every method writes the same

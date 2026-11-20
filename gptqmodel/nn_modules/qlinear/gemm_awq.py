@@ -154,7 +154,20 @@ class AwqGemmFn(torch.autograd.Function):
                 **({"kernel": kernel} if kernel is not None else {}),
             )
 
+        if out.shape == out_shape:
+            # The GEMM allocated this tensor, so return it as-is: a no-op
+            # `reshape` would still hand autograd a view created inside this
+            # Function, and an in-place update on it is forbidden (#4974).
+            return out
+        # A batched result needs the leading dimensions back. The reshape is a
+        # view created inside this Function, so materialize it only when the
+        # output is autograd-tracked: an untracked result (inference mode or a
+        # forward with no grad-requiring input) accepts an in-place update on
+        # the view, and copying it would add a full-output kernel to every
+        # batched forward (#5086).
         out = out.reshape(out_shape)
+        if any(ctx.needs_input_grad):
+            out = out.clone()
         return out
 
     @staticmethod
@@ -235,14 +248,22 @@ class AwqGEMMLinear(AWQuantLinear):
             return True, None
 
     @classmethod
-    def _validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        ok, err = super()._validate(**args)
-        if not ok:
-            return ok, err
+    def _validate_group_size_shape(
+        cls,
+        *,
+        in_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+        group_size: Optional[int] = None,
+    ) -> Tuple[bool, Optional[Exception]]:
+        """Return whether this kernel packs ``out_features`` for ``group_size``.
 
-        group_size = args.get("group_size")
-        in_features = args.get("in_features")
-        out_features = args.get("out_features")
+        Split out of ``_validate`` so kernel selection can apply the same rule
+        without probing runtime availability: a per-channel (``-1``) module
+        packs only when ``out_features`` is a multiple of ``in_features``, so a
+        GQA ``k_proj``/``v_proj``/``down_proj`` cannot use the CUDA GEMM kernel
+        (#5391).
+        """
+
         effective_group_size = (
             in_features if group_size == -1 and in_features is not None else group_size
         )
@@ -260,6 +281,18 @@ class AwqGEMMLinear(AWQuantLinear):
                 f"got out_features={out_features}, group_size={effective_group_size}"
             )
         return True, None
+
+    @classmethod
+    def _validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        ok, err = super()._validate(**args)
+        if not ok:
+            return ok, err
+
+        return cls._validate_group_size_shape(
+            in_features=args.get("in_features"),
+            out_features=args.get("out_features"),
+            group_size=args.get("group_size"),
+        )
 
     def __init__(
         self,
@@ -390,12 +423,15 @@ class AwqGEMMLinear(AWQuantLinear):
         assert scales is not None and zeros is not None
         scales = scales.t().contiguous()
         zeros = zeros.t().contiguous()
-        scale_zeros = zeros.float() * scales.float()
 
         scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
         # Validate the storage cast before replacing any module state: a scale
         # that overflows or underflows here would silently corrupt every code.
         stored_scales = scale_to_storage_dtype(scales, scale_dtype).clone()
+        # The checkpoint decodes with the stored scale, so build the affine
+        # offset from that same grid. Mixing the wider source scale into the
+        # offset shifts the zero point whenever the storage cast rounds (#5605).
+        scale_zeros = zeros.float() * stored_scales.float()
         if linear.bias is not None:
             # The bias is not a quantization operand. Keep the source precision:
             # the forward epilogue adds it in FP32, so narrowing it to the scale

@@ -182,3 +182,102 @@ def test_plain_lora_still_loads(tmp_path):
     torch.testing.assert_close(
         adapter.lora_B, torch.full((2, 3), 2.0, dtype=torch.float16)
     )
+
+
+@pytest.mark.parametrize("peft_type", ["IA3", "LOHA", "LOKR", "OFT", "ADALORA"])
+def test_explicitly_unsupported_peft_type_is_rejected(tmp_path, peft_type):
+    """A declared non-LoRA PEFT type must not be rewritten to LORA (#5425)."""
+
+    _write_adapter(
+        tmp_path,
+        {"r": 2, "lora_alpha": 2, "target_modules": ["m"], "peft_type": peft_type},
+    )
+
+    with pytest.raises(ValueError, match="peft_type"):
+        LoraConfig.from_pretrained(path=str(tmp_path), filename=ADAPTER_CONFIG)
+
+    # The public load path reports the same error instead of attaching nothing.
+    adapter = Lora(rank=2, path=str(tmp_path))
+    with pytest.raises(ValueError, match="peft_type"):
+        adapter.post_init("m", torch.device("cpu"))
+
+
+@pytest.mark.parametrize(
+    ("tensor", "feature"),
+    [
+        ("base_model.model.m.ia3_l", "IA3"),
+        ("base_model.model.m.hada_w1_a", "LoHa"),
+        ("base_model.model.m.lokr_w1", "LoKr"),
+        ("base_model.model.m.oft_blocks", "OFT"),
+        ("base_model.model.m.vera_lambda_d", "VeRA"),
+        ("base_model.model.m.lora_E", "AdaLoRA"),
+    ],
+)
+def test_non_lora_adapter_tensor_is_rejected_without_a_declared_type(tmp_path, tensor, feature):
+    """A legacy config without `peft_type` cannot smuggle another layout in."""
+
+    _write_adapter(
+        tmp_path,
+        {"r": 2, "lora_alpha": 2, "target_modules": ["m"]},
+        {tensor: torch.ones(3, 4, dtype=torch.float16)},
+    )
+
+    adapter = Lora(rank=2, path=str(tmp_path))
+    with pytest.raises(ValueError, match=feature):
+        adapter.post_init("m", torch.device("cpu"))
+
+
+def test_legacy_config_without_peft_type_still_loads(tmp_path):
+    _write_adapter(tmp_path, {"r": 2, "lora_alpha": 2, "target_modules": ["m"]})
+
+    adapter = Lora(rank=2, path=str(tmp_path))
+    adapter.post_init("m", torch.device("cpu"))
+
+    assert adapter.lora_A.shape == (4, 2)
+    assert adapter.lora_B.shape == (2, 3)
+
+
+def _embedding_lora_weights():
+    """What PEFT writes for ``target_modules=["embed_tokens"]`` (#5508)."""
+
+    return {
+        "base_model.model.model.embed_tokens.lora_embedding_A": torch.ones(
+            2, 4, dtype=torch.float16
+        ),
+        "base_model.model.model.embed_tokens.lora_embedding_B": torch.ones(
+            3, 2, dtype=torch.float16
+        ),
+    }
+
+
+def test_embedding_lora_tensors_are_rejected(tmp_path):
+    """An embedding-only LoRA used to attach nothing and run the bare model (#5508)."""
+
+    _write_adapter(
+        tmp_path,
+        {"r": 2, "lora_alpha": 2, "target_modules": ["embed_tokens"]},
+        _embedding_lora_weights(),
+    )
+
+    adapter = Lora(rank=2, path=str(tmp_path))
+    with pytest.raises(ValueError, match="embedding layer is not supported"):
+        adapter.post_init("model.embed_tokens", torch.device("cpu"))
+
+
+def test_mixed_embedding_and_linear_lora_is_rejected(tmp_path):
+    """A mixed adapter must not load the linear half and drop the embedding half."""
+
+    weights = {
+        **_embedding_lora_weights(),
+        "base_model.model.m.lora_A.weight": torch.ones(2, 4, dtype=torch.float16),
+        "base_model.model.m.lora_B.weight": torch.ones(3, 2, dtype=torch.float16),
+    }
+    _write_adapter(
+        tmp_path,
+        {"r": 2, "lora_alpha": 2, "target_modules": ["embed_tokens", "m"]},
+        weights,
+    )
+
+    adapter = Lora(rank=2, path=str(tmp_path))
+    with pytest.raises(ValueError, match="embedding layer is not supported"):
+        adapter.post_init("m", torch.device("cpu"))

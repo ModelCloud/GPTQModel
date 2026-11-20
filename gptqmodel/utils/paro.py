@@ -20,6 +20,7 @@ from typing import Optional, Tuple
 
 import torch
 
+from ..utils.torch import dynamo_is_compiling
 from .cpp import (
     TorchOpsJitExtension,
     default_jit_cflags,
@@ -195,13 +196,14 @@ def apply_paro_rotation_reference(
     hidden = x2d.shape[-1]
     group_size = _normalize_group_size(group_size, hidden)
 
-    # A bf16 rotation cannot absorb a rounding after every Givens stage: the
+    # A 16-bit rotation cannot absorb a rounding after every Givens stage: the
     # krot stages each round the activation and cos/sin, which is about three
-    # times the error of rounding the fp32 result once. Accumulate in fp32 for
-    # bf16 and round once at the end; fp16 keeps the historical per-stage
-    # arithmetic (its 11-bit significand is already fine).
+    # times the error of rounding the fp32 result once. FP16 has the narrower
+    # exponent range of the two, so a partial sum such as 84853 overflows to
+    # inf even when the final value is representable (#5634). Accumulate in
+    # fp32 for both 16-bit dtypes and round once at the end.
     input_dtype = x2d.dtype
-    accumulate_fp32 = input_dtype == torch.bfloat16
+    accumulate_fp32 = input_dtype in (torch.bfloat16, torch.float16)
     work_dtype = torch.float32 if accumulate_fp32 else input_dtype
 
     if scales is not None:
@@ -261,10 +263,10 @@ def apply_paro_rotation_vectorized(
     num_groups = hidden // group_size
     half_group = group_size // 2
 
-    # Same single-rounding contract as the reference path: bf16 accumulates in
-    # fp32 and is narrowed once below, while fp16 keeps its per-stage rounding.
+    # Same single-rounding contract as the reference path: both 16-bit dtypes
+    # accumulate in fp32 and are narrowed once below (#5634).
     input_dtype = x2d.dtype
-    accumulate_fp32 = input_dtype == torch.bfloat16
+    accumulate_fp32 = input_dtype in (torch.bfloat16, torch.float16)
     work_dtype = torch.float32 if accumulate_fp32 else input_dtype
 
     if scales is not None:
@@ -288,7 +290,12 @@ def apply_paro_rotation_vectorized(
             & (local_i < group_size)
             & (local_j < group_size)
         )
-        if not bool(valid.any()):
+        if not dynamo_is_compiling() and not bool(valid.any()):
+            # A fully padded rotation row is a no-op below: every slot keeps its
+            # value, so skipping it is only an eager speedup. Reading the mask on
+            # the host is a data-dependent branch dynamo cannot trace, and the
+            # padding layouts are fixed by the checkpoint, so the traced graph
+            # runs the row and stays graph-safe (#5115).
             continue
 
         # Gather padding slots from a harmless index, then restore their
@@ -721,8 +728,17 @@ def _rotation_autotune_cache_path(device_index: int) -> Path:
 
 
 def _ensure_rotation_autotune_cache_loaded(device_index: int) -> None:
-    """Seed the in-process launch cache from disk once per device."""
+    """Seed the in-process launch cache from disk once per device.
+
+    The device flag is checked before the lock so a warmed process pays no
+    ``threading.Lock`` entry on the steady-state rotation path. That matters
+    for ``torch.compile``: dynamo cannot trace a lock context manager, so the
+    previous unconditional ``with`` graph-broke every non-identity Paro layer
+    even after an eager warmup had already loaded the cache (#5225).
+    """
     if not _rotation_autotune_cache_enabled():
+        return
+    if device_index in _ROTATION_AUTOTUNE_DISK_LOADED:
         return
     with _ROTATION_AUTOTUNE_DISK_LOCK:
         if device_index in _ROTATION_AUTOTUNE_DISK_LOADED:
@@ -865,6 +881,15 @@ def _resolve_rotation_launch(
         requested_row_pad=requested_row_pad,
     )
     device_index = int(cache_key[0])
+    if dynamo_is_compiling():
+        # Tracing must stay free of Python locks, on-disk reads and CUDA-only
+        # ops. A warm eager forward has already resolved this shape into the
+        # process-local map; otherwise fall back to the native legacy default,
+        # which the fused op resolves from device properties inside the graph.
+        cached = _ROTATION_LAUNCH_CONFIG_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        return -1, -1
     # Seed from the previous process before measuring anything: a full cold
     # lifecycle autotunes ~18 shapes at ~130ms each.
     _ensure_rotation_autotune_cache_loaded(device_index)
@@ -992,6 +1017,21 @@ def prewarm_paro_rotation_extension(
     return _load_rotation_extension()
 
 
+def _rotation_extension_ready_for_call() -> bool:
+    """Whether the fused rotation may run without loading it inside a trace.
+
+    ``_load_rotation_extension`` consults the shared JIT loader, which takes a
+    build lock and (on a cold cache) compiles the extension. Dynamo cannot
+    trace either, so while compiling a not-yet-loaded extension falls back to
+    the reference rotation instead of graph-breaking. A normal eager warmup or
+    ``optimize()`` loads it first, and the traced forward then uses the fused
+    op.
+    """
+    if dynamo_is_compiling() and not _ROTATION_EXTENSION_READY:
+        return False
+    return _load_rotation_extension()
+
+
 def apply_paro_rotation(
     x: torch.Tensor,
     pairs: torch.Tensor,
@@ -1000,7 +1040,7 @@ def apply_paro_rotation(
     group_size: int = 128,
 ) -> torch.Tensor:
     """Apply the fused rotation when available, else fall back to the reference path."""
-    if _rotation_kernel_ready(x, pairs, theta, scales, group_size) and _load_rotation_extension():
+    if _rotation_kernel_ready(x, pairs, theta, scales, group_size) and _rotation_extension_ready_for_call():
         return _apply_fused_rotation(x, pairs, theta, scales, int(group_size))
     return apply_paro_rotation_reference(x, pairs, theta, scales=scales, group_size=group_size)
 
@@ -1179,7 +1219,7 @@ def apply_paro_rotation_autograd(
     group_size: int = 128,
 ) -> torch.Tensor:
     """Apply the fused rotation with custom backward support when available."""
-    if _rotation_kernel_ready(x, pairs, theta, scales, group_size) and _load_rotation_extension():
+    if _rotation_kernel_ready(x, pairs, theta, scales, group_size) and _rotation_extension_ready_for_call():
         return _ParoRotateTensorFunc.apply(x, pairs, theta, scales, int(group_size))
     return apply_paro_rotation_reference(x, pairs, theta, scales=scales, group_size=group_size)
 

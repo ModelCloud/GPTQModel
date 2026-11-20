@@ -1,0 +1,57 @@
+name: CI runtime validation
+
+on:
+  pull_request:
+    paths:
+      - '.github/**'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - 'tests/test_ci_*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_GIL: '0'
+
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14.10t'
+      - name: Test CI runtime contracts
+        run: |
+          python .github/scripts/ci_assert_free_threaded.py --python-only
+          python -m pip install pytest pyyaml
+          python -m pytest --noconftest tests/test_ci_release_runtime.py tests/test_ci_free_threaded_lane.py -q -rs -k 'not test_gate_passes_with_gil0'
+
+  validate-sdist:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:13.2.1-devel-ubuntu24.04@sha256:0e1f7b8e96fa9ec5e36d4709a38c62df7b5665977446081811c12b8234d874bf
+    steps:
+      - name: Install CI tools
+        shell: bash
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git ninja-build
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up CI runtime
+        uses: ./.github/actions/setup-ci-runtime
+        with:
+          python-version: '3.14.10t'
+          source-build: 'true'
+      - name: Build and validate sdist
+        uses: ./.github/actions/release-source-common
+        with:
+          confirmation-mode: sleep
+          test-install: 'true'

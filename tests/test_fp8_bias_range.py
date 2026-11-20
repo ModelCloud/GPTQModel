@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+from tests.fp8_test_utils import install_fp8_payload, pack_fp8_module
 
 
 def test_fp8_packing_preserves_fp32_bias_range():
@@ -27,7 +28,8 @@ def test_fp8_packing_preserves_fp32_bias_range():
         register_buffers=False,
         format="float8_e4m3fn",
     )
-    module.pack_calibrated(
+    install_fp8_payload(
+        module,
         linear,
         torch.zeros((1, 4), dtype=torch.float8_e4m3fn),
         torch.ones((1,), dtype=torch.float32),
@@ -55,7 +57,7 @@ def test_fp8_bias_free_fallback_keeps_decoded_weight_range():
         register_buffers=False,
         format="float8_e4m3fn",
     )
-    module.pack_original(linear, None, None)
+    pack_fp8_module(module, linear)
 
     x = torch.tensor([[1.0, -1.0]], dtype=torch.float16)
     decoded = module.weight.float() / module.weight_scale_inv.float().view(-1, 1)
@@ -92,7 +94,7 @@ def test_fp8_cpu_bias_cancels_before_output_rounding(
         register_buffers=False,
         format="float8_e4m3fn",
     )
-    module.pack_original(linear, scales=None, zeros=None)
+    pack_fp8_module(module, linear)
     x = torch.full((2, 1), input_value, dtype=dtype)
 
     # Decode the stored payload independently in FP32; include the bias before
@@ -150,7 +152,7 @@ def test_fp8_gpu_native_gemm_keeps_bias_wide(dtype, input_value):
         in_features=1, out_features=1, bias=True,
         register_buffers=False, format="float8_e4m3fn",
     )
-    module.pack_original(linear, scales=None, zeros=None)
+    pack_fp8_module(module, linear)
     module = module.to("cuda")
     x = torch.full((2, 1), input_value, device="cuda", dtype=dtype)
     decoded = module.weight.float() / module.weight_scale_inv.float()[:, None]
@@ -192,7 +194,7 @@ def test_fp8_gpu_scaled_mm_adds_fp32_bias_before_rounding(dtype, input_value):
         weight_scale_method="tensor",
         activation_quant_method="per_token",
     )
-    module.pack_original(linear, scales=None, zeros=None)
+    pack_fp8_module(module, linear)
     module = module.to("cuda")
     x = torch.zeros((1, 16), device="cuda", dtype=dtype)
     x[0, 0] = input_value
@@ -228,7 +230,7 @@ def _bias_free_fp8_module(weight: torch.Tensor) -> TorchFP8Linear:
         register_buffers=False,
         format="float8_e4m3fn",
     )
-    module.pack_original(linear, None, None)
+    pack_fp8_module(module, linear)
     return module
 
 
@@ -240,14 +242,20 @@ def test_fp8_decoded_weight_bound_tracks_reload():
     big = torch.nn.Linear(2, 1, bias=False, dtype=torch.float32)
     with torch.no_grad():
         big.weight.fill_(65536.0)
-    module.pack_original(big, None, None)
+    pack_fp8_module(module, big)
     assert not module._weights_fit_activation_dtype(torch.float16)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm runtime required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_fp8_bias_free_cuda_in_range_weights_keep_native_path(monkeypatch, dtype):
-    """In-range decoded weights must not force an FP32 dense GEMM on CUDA."""
+    """In-range decoded weights must take the code-cast + FP32-epilogue GEMM.
+
+    Before #5146 this asserted that ``dequantize_weight`` was called with the
+    activation dtype. The leaner path does not materialise a decoded weight at
+    all: it casts the exact FP8 codes and applies the row scale to the FP32
+    product, so no FP32 dense weight or transpose copy is made.
+    """
     if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
         pytest.skip("BF16 arithmetic unavailable on this device")
     generator = torch.Generator().manual_seed(0)
@@ -255,22 +263,31 @@ def test_fp8_bias_free_cuda_in_range_weights_keep_native_path(monkeypatch, dtype
     module = module.to("cuda")
     x = torch.randn(8, 64, device="cuda", dtype=dtype)
 
-    seen = []
+    dequantized = []
     dequantize = module.dequantize_weight
 
     def tracked(*args, **kwargs):
-        seen.append(kwargs.get("dtype"))
+        dequantized.append(kwargs.get("dtype"))
         return dequantize(*args, **kwargs)
 
+    lean_calls = []
+    lean = module._forward_lean_scaled_matmul
+
+    def counted_lean(value, bias=None):
+        lean_calls.append(value.dtype)
+        return lean(value, bias=bias)
+
     monkeypatch.setattr(module, "dequantize_weight", tracked)
+    monkeypatch.setattr(module, "_forward_lean_scaled_matmul", counted_lean)
     with torch.inference_mode():
         output = module(x)
 
-    assert seen == [dtype]
+    assert lean_calls == [dtype]
+    assert dequantized == []
     assert output.dtype == dtype
     assert torch.isfinite(output).all()
-    decoded = module.weight.float() / module.weight_scale_inv.float().view(-1, 1)
-    oracle = (x.float() @ decoded.T).to(dtype)
+    decoded = module.weight.double() / module.weight_scale_inv.double().view(-1, 1)
+    oracle = (x.double() @ decoded.T).to(dtype)
     torch.testing.assert_close(output, oracle, rtol=2e-3, atol=2e-3)
 
 

@@ -50,6 +50,7 @@ from ..looper.named_module import NamedModule
 from ..utils.arch import rocm_arch
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
+from ..utils.quant_metrics import relative_error_from_energies
 from ..utils.rocm import IS_ROCM
 
 
@@ -57,6 +58,12 @@ log = setup_logger()
 
 MXFP4_BLOCK = 32
 _HESSIAN_DTYPE = torch.float32
+
+# E8M0 has no zero and no subnormals: byte 0 is the smallest positive scale,
+# 2**-127, byte 254 is 2**127, and byte 255 is the format's NaN.  The smallest
+# nonzero MXFP4 value is therefore 0.5 * 2**-127 = 2**-128, not 1e-12.
+E8M0_MIN_EXPONENT = -127
+E8M0_MAX_EXPONENT = 127
 
 # Signed E2M1 grid: 15 distinct levels (0 is shared by both signs), matching
 # the OCP MXFP4 element set.  Index 7 is the zero level.
@@ -218,9 +225,27 @@ def mxfp4_rtn_signed_index(
         )
     groups = in_features // block_size
     grouped = weight.float().view(out_features, groups, block_size)
-    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+    amax = grouped.abs().amax(dim=-1, keepdim=True)
+    # An exact-zero block keeps the historical zero-preserving floor so its
+    # packed scale byte does not move.  A nonzero peak must not take that
+    # floor: `floor(log2(amax)) - 2` is a valid E8M0 exponent down to the
+    # format's smallest scale 2**-127, and the old `clamp(min=1e-12)` flushed
+    # blocks like a constant 2**-50 that are exactly representable as
+    # 4 * 2**-52 (#5627).
+    amax = torch.where(amax == 0, torch.full_like(amax, 1e-12), amax)
     log2_scale = torch.floor(torch.log2(amax)) - 2.0 + float(exp_offset)
-    scale = torch.exp2(log2_scale)
+    # Clamp the finite exponent to E8M0's actual range *before* the codes are
+    # computed.  Inf/NaN are left alone so the packer can still emit 0xFF.
+    log2_scale = torch.where(
+        torch.isfinite(log2_scale),
+        log2_scale.clamp(float(E8M0_MIN_EXPONENT), float(E8M0_MAX_EXPONENT)),
+        log2_scale,
+    )
+    # `2 ** exponent` is bit-exact over the whole E8M0 range; `exp2` rounds
+    # 2**-127 one ulp low on CUDA (the same reason `decode_e8m0_scale` uses
+    # `torch.pow`).  A one-ulp-low scale would change the codes of a block at
+    # the bottom of the range.
+    scale = torch.pow(2.0, log2_scale)
 
     abs_scaled = (grouped / scale).abs()
     code = _e2m1_code_from_scaled(abs_scaled, tie_high=tie_high)
@@ -322,6 +347,28 @@ def pack_mxfp4_from_signed_index(
     return packed.contiguous(), scales
 
 
+def decode_mxfp4_scales(
+    scales: torch.Tensor, out_features: int, groups: int
+) -> torch.Tensor:
+    """Decode E8M0 scale bytes to FP32 powers of two.
+
+    ``scales`` may be an ``E8M0`` tensor or its ``uint8`` view and may carry
+    kernel padding; only the first ``out_features`` rows and ``groups`` columns
+    are read. E8M0 ``0xFF`` is the format's NaN, not ``2**128``:
+    :func:`pack_mxfp4_from_signed_index` writes it for a block that held a
+    NaN/Inf value.
+    """
+
+    scale_bytes = scales.view(torch.uint8)[:out_features, :groups].to(torch.float32)
+    # `2 ** exponent` rather than `exp2`: `exp2(0 - 127)` rounds 2**-127 one ulp
+    # low on CUDA, which would decode a representable block incorrectly.
+    return torch.where(
+        scale_bytes == 255.0,
+        torch.full_like(scale_bytes, float("nan")),
+        torch.pow(2.0, scale_bytes - 127.0),
+    )
+
+
 @torch.no_grad()
 def dequantize_mxfp4(
     packed: torch.Tensor,
@@ -342,14 +389,7 @@ def dequantize_mxfp4(
     groups = in_features // MXFP4_BLOCK
     if packed.shape[1] * 2 < in_features:
         raise ValueError("MACaQ: `packed` holds fewer than `in_features` values.")
-    scale_bytes = scales.view(torch.uint8)[:out_features, :groups].to(torch.float32)
-    # E8M0 0xFF is the format's NaN, not 2**128; `pack_mxfp4_from_signed_index`
-    # writes it for a block that held a NaN/Inf value.
-    scale = torch.where(
-        scale_bytes == 255.0,
-        torch.full_like(scale_bytes, float("nan")),
-        torch.exp2(scale_bytes - 127.0),
-    )
+    scale = decode_mxfp4_scales(scales, out_features, groups)
     lo = (packed & 0x0F).to(torch.int64)
     hi = ((packed >> 4) & 0x0F).to(torch.int64)
     code = torch.stack([lo, hi], dim=-1).reshape(out_features, packed.shape[1] * 2)[:, :in_features]
@@ -919,4 +959,8 @@ class Macaq:
         metric = hessian.to(torch.float64)
         error = (delta @ metric * delta).sum()
         denominator = (weight.to(torch.float64) @ metric * weight.to(torch.float64)).sum()
-        return float((error / denominator.clamp_min(1e-12)).item())
+        # Divide by the reference energy itself: an absolute floor turned
+        # total signal loss on a small reference into a near-zero error (#5635).
+        return relative_error_from_energies(
+            float(error.item()), float(denominator.item())
+        )

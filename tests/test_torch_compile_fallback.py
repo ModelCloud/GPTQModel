@@ -232,6 +232,32 @@ def test_dynamo_guard_assertion_falls_back_to_eager(monkeypatch):
     assert calls == [3, 4]
 
 
+def test_key_error_from_dynamo_frame_falls_back_to_eager(monkeypatch):
+    """A dynamo-internal ``KeyError`` must not abort a plain forward (#5127).
+
+    Under ``PYTHON_GIL=0``, a compile that races another thread's
+    ``torch.set_default_dtype`` can raise ``KeyError`` from
+    ``torch/_dynamo/utils.py:get_guard_fail_reason``. It originates in dynamo,
+    so it is a compiler failure and the eager path must serve the call.
+    """
+
+    calls = []
+
+    def eager(value):
+        calls.append(value)
+        return value * 11
+
+    error = _error_from_dynamo_frame(KeyError, 5190054990720)
+    _dynamo_compile(monkeypatch, error)
+    compiled = torch_utils.torch_compile(eager)
+
+    assert compiled(3) == 33
+    assert calls == [3]
+    # Sticky fallback: the broken compiler is not retried.
+    assert compiled(4) == 44
+    assert calls == [3, 4]
+
+
 def test_user_assertion_is_not_misread_as_a_compiler_failure():
     calls = []
 

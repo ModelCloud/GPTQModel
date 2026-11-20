@@ -13,6 +13,7 @@ before adding the bias returns inf; a correct one returns the FP16-rounded
 import pytest
 import torch
 import torch.nn as nn
+from compile_state_utils import under_compile
 
 from gptqmodel.looper.linear_mode import LinearMode
 from gptqmodel.nn_modules.qlinear._numerics import matmul_fp32_reduce
@@ -445,3 +446,207 @@ def test_awq_exllamav2_lora_keeps_activation_and_weight_dtypes():
     assert out.dtype == torch.float16
     assert module.adapter.lora_A.dtype == torch.float16
     assert module.adapter.lora_B.dtype == torch.float16
+
+
+# Issue #5367: a finite decoded weight can overflow the checkpoint's FP16 scale
+# dtype inside the AWQ fallback decoder. The true weight is 15 * 8192 = 122880;
+# decoding it in FP16 makes it `inf`, and the zero inputs in the same row then
+# produce `0 * inf == NaN`. The expected output, 0.25 * 122880 = 30720, is
+# representable in FP16.
+_AWQ_OVERFLOW_SCALE = 8192.0
+_AWQ_OVERFLOW_WEIGHT = 15.0 * _AWQ_OVERFLOW_SCALE
+_AWQ_OVERFLOW_EXPECTED = 0.25 * _AWQ_OVERFLOW_WEIGHT
+
+
+def _awq_overflow_fixture(cls, out_features=16):
+    module = cls(
+        bits=4,
+        group_size=32,
+        in_features=32,
+        out_features=out_features,
+        sym=False,
+        desc_act=False,
+        register_buffers=True,
+        checkpoint_format=FORMAT.GEMM,
+    ).eval()
+    with torch.no_grad():
+        module.qweight.fill_(-1)
+        module.qzeros.zero_()
+        module.scales.fill_(_AWQ_OVERFLOW_SCALE)
+    module.clear_weight_cache()
+    return module
+
+
+def _awq_overflow_input(dtype):
+    x = torch.zeros(1, 32, dtype=dtype)
+    x[0, 0] = 0.25
+    return x.requires_grad_()
+
+
+def _cpu_awq_class(cls_name):
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
+    from gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
+    from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
+
+    return {
+        "TorchFusedAwqLinear": TorchFusedAwqLinear,
+        "TorchAtenAwqLinear": TorchAtenAwqLinear,
+        "TorchCpuAvx512AwqLinear": TorchCpuAvx512AwqLinear,
+    }[cls_name]
+
+
+_AWQ_OVERFLOW_ACTIVATION_DTYPES = {
+    "TorchFusedAwqLinear": (torch.float32, torch.float16),
+    "TorchAtenAwqLinear": (torch.float32, torch.float16),
+    "TorchCpuAvx512AwqLinear": (torch.bfloat16,),
+}
+
+
+@pytest.mark.parametrize("cls_name", list(_AWQ_OVERFLOW_ACTIVATION_DTYPES))
+def test_cpu_awq_fallback_decodes_overflowing_fp16_scale(cls_name):
+    """The dense fallback must decode in a dtype that holds the real weight."""
+
+    out_features = 32 if cls_name == "TorchCpuAvx512AwqLinear" else 16
+    module = _awq_overflow_fixture(_cpu_awq_class(cls_name), out_features=out_features)
+
+    for dtype in _AWQ_OVERFLOW_ACTIVATION_DTYPES[cls_name]:
+        x = _awq_overflow_input(dtype)
+        out = module(x)
+        assert out.dtype is dtype
+        assert torch.isfinite(out).all()
+        torch.testing.assert_close(
+            out,
+            torch.full_like(out, _AWQ_OVERFLOW_EXPECTED),
+            rtol=0,
+            atol=0,
+        )
+        if dtype is not torch.float16:
+            out[0, 0].backward()
+            assert x.grad is not None
+            torch.testing.assert_close(
+                x.grad[0, 0],
+                torch.tensor(_AWQ_OVERFLOW_WEIGHT, dtype=dtype),
+                rtol=0,
+                atol=0,
+            )
+
+    # The reconstructed weight is call-local; nothing retains a dense copy.
+    retained = (
+        list(vars(module).values())
+        + list(module.buffers())
+        + list(module.parameters())
+    )
+    assert not any(
+        isinstance(value, torch.Tensor) and value.shape == (32, out_features)
+        for value in retained
+    )
+
+
+@pytest.mark.parametrize("cls_name", list(_AWQ_OVERFLOW_ACTIVATION_DTYPES))
+def test_cpu_awq_fallback_compiled_decode_matches_eager(cls_name):
+    """A traced fallback must read the same precomputed range answer."""
+
+    out_features = 32 if cls_name == "TorchCpuAvx512AwqLinear" else 16
+    module = _awq_overflow_fixture(_cpu_awq_class(cls_name), out_features=out_features)
+    assert module._decode_dtype_for_activation(torch.float16) is torch.float32
+
+    with under_compile():
+        assert module._decode_dtype_for_activation(torch.float16) is torch.float32
+
+
+# Issue #5577: the #5495 fix covered only the checkpoint-layout AWQ decode.
+# The live int4pack runtime decode and the GPTQ dense fallback still decoded in
+# the FP16 scale dtype, so the same layer returned `NaN` after a no-grad
+# warm-up (or on every GPTQ grad forward).
+_GPTQ_OVERFLOW_CLASSES = {
+    "TorchFusedLinear": "gptqmodel.nn_modules.qlinear.torch_fused",
+    "TorchAtenLinear": "gptqmodel.nn_modules.qlinear.torch_aten_kernel",
+}
+
+
+def _gptq_overflow_class(cls_name):
+    import importlib
+
+    return getattr(importlib.import_module(_GPTQ_OVERFLOW_CLASSES[cls_name]), cls_name)
+
+
+def _gptq_overflow_fixture(cls):
+    source = nn.Linear(32, 32, bias=False)
+    with torch.no_grad():
+        source.weight.fill_(_AWQ_OVERFLOW_WEIGHT)
+    module = cls(
+        bits=4,
+        group_size=32,
+        sym=False,
+        desc_act=False,
+        in_features=32,
+        out_features=32,
+        bias=False,
+        format=FORMAT.GPTQ_V2,
+        register_buffers=True,
+    )
+    module.pack_block(
+        source,
+        torch.full((32, 1), _AWQ_OVERFLOW_SCALE),
+        torch.zeros((32, 1)),
+        torch.arange(32, dtype=torch.int32) // 32,
+        workers=1,
+    )
+    if hasattr(module, "_init_wf_unsqueeze_buffers"):
+        module._init_wf_unsqueeze_buffers()
+    return module.eval()
+
+
+@pytest.mark.parametrize("cls_name", ["TorchFusedAwqLinear", "TorchAtenAwqLinear"])
+def test_cpu_awq_fallback_after_warmup_decodes_overflowing_fp16_scale(cls_name):
+    """A no-grad warm-up must not make the next FP16 grad decode `NaN`."""
+
+    module = _awq_overflow_fixture(_cpu_awq_class(cls_name))
+    warm = torch.zeros(1, 32, dtype=torch.float16)
+    warm[0, 0] = 0.25
+    with torch.no_grad():
+        module(warm)
+
+    x = _awq_overflow_input(torch.float16)
+    out = module(x)
+    assert out.requires_grad
+    assert torch.isfinite(out).all()
+    torch.testing.assert_close(
+        out,
+        torch.full_like(out, _AWQ_OVERFLOW_EXPECTED),
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("cls_name", list(_GPTQ_OVERFLOW_CLASSES))
+@pytest.mark.parametrize("warm", [False, True])
+def test_cpu_gptq_fallback_decodes_overflowing_fp16_scale(cls_name, warm):
+    """The GPTQ dense and runtime decodes must hold the real FP16 weight."""
+
+    module = _gptq_overflow_fixture(_gptq_overflow_class(cls_name))
+    if warm:
+        with torch.no_grad():
+            module(torch.zeros(1, 32, dtype=torch.float16))
+
+    for dtype in (torch.float32, torch.float16):
+        x = _awq_overflow_input(dtype)
+        out = module(x)
+        assert out.requires_grad
+        assert out.dtype is dtype
+        assert torch.isfinite(out).all()
+        torch.testing.assert_close(
+            out,
+            torch.full_like(out, _AWQ_OVERFLOW_EXPECTED),
+            rtol=0,
+            atol=0,
+        )
+        if dtype is not torch.float16:
+            out[0, 0].backward()
+            assert x.grad is not None
+            torch.testing.assert_close(
+                x.grad[0, 0],
+                torch.tensor(_AWQ_OVERFLOW_WEIGHT, dtype=dtype),
+                rtol=0,
+                atol=0,
+            )

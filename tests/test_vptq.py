@@ -20,7 +20,9 @@ oracle is a pure-Python bit writer and the reconstruction oracle walks the
 codebooks with explicit element indexing.
 """
 
+import gc
 import math
+import sys
 import threading
 from pathlib import Path
 
@@ -294,8 +296,12 @@ def oracle_weighted_kmeans(data, num_centroids, weights, *, iters, tol, seed):
         counts = torch.zeros(
             num_centroids, dtype=data.dtype, device=data.device
         ).index_add_(0, assignment, weights)
-        updated = sums / counts.clamp_min(_ORACLE_EPS).unsqueeze(1)
+        # Independent reference for the weighted mean: divide by the bucket's
+        # real total weight, never an epsilon floor, and keep `inf`/`nan` out
+        # of the empty buckets, which retain their previous centroid.
         empty = counts <= 0
+        divisor = torch.where(empty, torch.ones_like(counts), counts)
+        updated = sums / divisor.unsqueeze(1)
         if bool(empty.any()):
             updated[empty] = centroids[empty]
         centroids = updated
@@ -1008,6 +1014,77 @@ def test_vptq_pack_rejects_index_streams_wider_than_a_word():
         unpack_vptq_indices(packed, 33, 2)
 
 
+def _peak_rss_kib(field: str) -> int:
+    with open("/proc/self/status", encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith(field + ":"):
+                return int(line.split()[1])
+    raise KeyError(field)
+
+
+def _reset_peak_rss() -> bool:
+    # Writing 5 to clear_refs resets VmHWM to the current RSS (Linux >= 4.0).
+    try:
+        with open("/proc/self/clear_refs", "w", encoding="ascii") as handle:
+            handle.write("5")
+    except OSError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs /proc/self peak-RSS reset")
+def test_vptq_pack_streams_words_without_per_bit_expansion():
+    """Packing must not materialize one int64 per index bit (#5034).
+
+    Expanding every index into `total_bits` int64 lanes allocates
+    `2 * 8 * total_bits` bytes per index (256 B at the default 12+4 bits), and
+    VPTQ finalizers run concurrently on the CPU worker pool, so a 8B
+    `down_proj` crossed 5 GiB host RSS. The word-at-a-time packer needs a
+    couple of int64 words per index instead; this bounds the peak so the
+    regression cannot come back silently.
+    """
+
+    index_bits, res_bits = 12, 4
+    total_bits = index_bits + res_bits
+    # 4.2M indices: the shape of a 8B `down_proj` index set at vector_len 8,
+    # scaled down so the test stays cheap once the fix is in place.
+    rows, num_elements = 4096, 1024
+    generator = torch.Generator().manual_seed(5034)
+    indices = torch.randint(
+        0, 1 << index_bits, (rows, num_elements), generator=generator, dtype=torch.int64
+    )
+    res_indices = torch.randint(
+        0, 1 << res_bits, (rows, num_elements), generator=generator, dtype=torch.int64
+    )
+
+    gc.collect()
+    if not _reset_peak_rss():
+        pytest.skip("/proc/self/clear_refs is not writable")
+    before = _peak_rss_kib("VmRSS")
+    packed = pack_vptq_indices(
+        indices, index_bits, res_indices=res_indices, res_bits=res_bits
+    )
+    extra = (_peak_rss_kib("VmHWM") - before) * 1024
+
+    output_bytes = packed.numel() * packed.element_size()
+    # The per-bit expansion needed ~1.1 GiB here (2 * 8 * total_bits per index);
+    # the streaming packer measures ~76 MiB, dominated by its int64 accumulator.
+    # 384 MiB keeps ~5x headroom over the streaming path and still fails the
+    # expansion by 3x.
+    assert extra < 384 * 2**20, (
+        f"pack_vptq_indices raised peak RSS by {extra / 2**20:.1f} MiB for a "
+        f"{output_bytes / 2**20:.1f} MiB output over {rows * num_elements} "
+        f"indices at {total_bits} bits"
+    )
+
+    # The memory bound is only meaningful if the words are still correct.
+    unpacked, unpacked_res = unpack_vptq_indices(
+        packed, index_bits, num_elements, res_bits=res_bits
+    )
+    assert torch.equal(unpacked, indices)
+    assert torch.equal(unpacked_res, res_indices)
+
+
 def test_vptq_group_layout():
     """Group resolution mirrors the reference layout, including padding."""
 
@@ -1470,10 +1547,10 @@ def test_vptq_forward_dequantizes_per_call_without_dense_cache(monkeypatch):
     calls = 0
     dequantize = module.dequantize
 
-    def counted_dequantize():
+    def counted_dequantize(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return dequantize()
+        return dequantize(*args, **kwargs)
 
     monkeypatch.setattr(module, "dequantize", counted_dequantize)
 
@@ -1800,6 +1877,114 @@ def test_vptq_hessian_usability_rejects_zero_and_nonfinite():
     assert not VPTQ._hessian_is_usable(inf_hessian)
 
 
+def test_vptq_weighted_kmeans_tiny_weights_keep_their_mean():
+    """A non-empty bucket must divide by its real total weight, not `_EPS`.
+
+    Scaling every sample weight by the same positive constant cannot change
+    the minimizer. Clamping the divisor to `_EPS` broke that: one sample per
+    bucket with weight `1e-14` became `1e-14 * x / 1e-12 = 0.01 * x` instead
+    of `x`.
+    """
+
+    data = torch.tensor([[1.0], [3.0]])
+    # seed 17 draws `permutation == [1, 0]`, so centroid 0 starts at `3.0`
+    # and keeps the sample `3.0`, while centroid 1 keeps `1.0`.
+    expected = [3.0, 1.0]
+
+    for scale in (1.0, 1e-9, 1e-14, 1e-20):
+        centroids, assignment = _weighted_kmeans(
+            data,
+            2,
+            torch.full((2,), scale),
+            iters=1,
+            tol=0.0,
+            seed=17,
+        )
+        assert assignment.tolist() == [1, 0]
+        assert centroids.flatten().tolist() == expected, f"weight scale {scale}"
+
+    # The same invariance must hold for buckets that mix several vectors.
+    generator = torch.Generator().manual_seed(7)
+    data = torch.randn(64, 4, generator=generator) * 10.0
+    weights = torch.rand(64, generator=generator) + 0.5
+    reference, reference_assignment = _weighted_kmeans(
+        data, 8, weights, iters=6, tol=0.0, seed=3
+    )
+    for scale in (1e-8, 1e-14, 1e-20):
+        scaled, scaled_assignment = _weighted_kmeans(
+            data, 8, weights * scale, iters=6, tol=0.0, seed=3
+        )
+        assert torch.equal(scaled_assignment, reference_assignment)
+        torch.testing.assert_close(scaled, reference, rtol=1e-5, atol=1e-5)
+
+
+def test_vptq_weighted_kmeans_keeps_empty_buckets_and_handles_subnormals():
+    """Zero-weight buckets keep their centroid; subnormal weights stay finite."""
+
+    data = torch.tensor([[1.0], [3.0]])
+
+    # All weights zero: every bucket is empty and must retain its initialized
+    # centroid instead of producing a NaN or collapsing to zero.
+    initialized, _ = _weighted_kmeans(data, 2, None, iters=1, tol=0.0, seed=17)
+    centroids, _ = _weighted_kmeans(
+        data, 2, torch.zeros(2), iters=4, tol=0.0, seed=17
+    )
+    assert torch.equal(centroids, initialized)
+    assert torch.isfinite(centroids).all()
+
+    # A subnormal total weight would underflow `w * x` before the division
+    # could cancel the scale; the bucket must still report its own samples.
+    subnormal = [3.0, 1.0]
+    for scale in (1e-40, 1e-44):
+        centroids, _ = _weighted_kmeans(
+            data, 2, torch.full((2,), scale), iters=1, tol=0.0, seed=17
+        )
+        assert torch.isfinite(centroids).all()
+        assert centroids.flatten().tolist() == subnormal, f"weight scale {scale}"
+
+
+def test_vptq_tiny_hessian_group_keeps_exact_vectors():
+    """The full quantizer must not shrink a group whose Hessian is tiny.
+
+    The global Hessian mean is normalized to one, so a group with a tiny but
+    positive diagonal keeps tiny k-means weights even though the layer as a
+    whole looks ordinary. With one vector per centroid the codebook must
+    reproduce the weight exactly and the loss must stay zero.
+    """
+
+    weight = torch.tensor([[1.0, 3.0, 5.0, 7.0]]).repeat(4, 1)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 2],
+        num_res_centroids=[-1, -1],
+        group_size=2,
+        kmeans_mode="hessian",
+        enable_norm=False,
+        enable_perm=False,
+        kmeans_iters=1,
+        kmeans_tol=1e-9,
+        kmeans_seed=17,
+        block_size=4,
+        percdamp=0.01,
+    )
+
+    for diagonal in ([1.0, 1.0, 1.0, 1.0], [1e-14, 1e-14, 1.0, 1.0]):
+        hessian = torch.diag(torch.tensor(diagonal, dtype=torch.float64))
+        result, loss = build_quantizer(weight, qcfg).quantize_weight(weight, hessian)
+        assert result.stats["fallback"] is False
+        torch.testing.assert_close(result.quantized_weight, weight, rtol=1e-6, atol=1e-6)
+        assert loss == 0.0, f"diagonal {diagonal}"
+
+        # The tiny group's codebook must hold the samples themselves.
+        assert result.centroids[1] is not None
+        torch.testing.assert_close(
+            result.centroids[1].sort(dim=0).values,
+            torch.tensor([[1.0, 1.0, 1.0, 1.0], [3.0, 3.0, 3.0, 3.0]]),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+
 def test_vptq_weighted_kmeans_defers_inertia_read_until_after_update():
     """The convergence read must not block the independent centroid update."""
 
@@ -1829,6 +2014,154 @@ def test_vptq_weighted_kmeans_defers_inertia_read_until_after_update():
     # the deterministic reduction no longer uses ``index_add_``.
     centroid_update = ops.index("aten.index_put_.default")
     assert inertia_read > centroid_update
+
+
+def _legacy_weighted_kmeans(data, num_centroids, weights, *, iters, tol, seed):
+    """The pre-fix Lloyd update: a separate segment sum for sums and counts.
+
+    Kept as the reference for the shared-plan refactor. It reuses the same
+    public :func:`_deterministic_segment_sum` primitive but builds the stable
+    sort and ``bincount`` for every reduction, so any change in the reduction
+    order or bucket arithmetic shows up as a bitwise difference.
+    """
+
+    num_rows = data.shape[0]
+    generator = torch.Generator(device=data.device)
+    generator.manual_seed(int(seed))
+    permutation = torch.randperm(num_rows, generator=generator, device=data.device)
+    if num_centroids <= num_rows:
+        init_index = permutation[:num_centroids]
+    else:
+        repeats = (num_centroids + num_rows - 1) // num_rows
+        init_index = permutation.repeat(repeats)[:num_centroids]
+    centroids = data[init_index].clone()
+
+    if weights is None:
+        weights = torch.ones(num_rows, dtype=data.dtype, device=data.device)
+    else:
+        weights = weights.to(dtype=data.dtype, device=data.device)
+
+    previous_inertia = None
+    for _ in range(max(1, int(iters))):
+        assignment, residual = _chunked_assign(data, centroids)
+        inertia = (residual.double() * weights.double()).sum()
+
+        counts = vptq_module._deterministic_segment_sum(num_centroids, assignment, weights)
+        empty = counts <= 0
+        divisor = torch.where(empty, torch.ones_like(counts), counts)
+        tiny = ~empty & (counts < torch.finfo(counts.dtype).tiny)
+        if bool(tiny.any()):
+            factor = torch.where(
+                tiny,
+                divisor.reciprocal().clamp(max=torch.finfo(counts.dtype).max),
+                torch.ones_like(counts),
+            )
+            weighted = data * (weights * factor[assignment]).unsqueeze(1)
+            divisor = divisor * factor
+        else:
+            weighted = data * weights.unsqueeze(1)
+        sums = vptq_module._deterministic_segment_sum(num_centroids, assignment, weighted)
+        updated = sums / divisor.unsqueeze(1)
+        centroids = torch.where(empty.unsqueeze(1), centroids, updated)
+
+        inertia = float(inertia.item())
+        if previous_inertia is not None:
+            denominator = max(abs(previous_inertia), vptq_module._EPS)
+            if abs(previous_inertia - inertia) <= tol * denominator:
+                break
+        previous_inertia = inertia
+
+    return centroids, assignment
+
+
+def test_vptq_weighted_kmeans_builds_one_segment_plan_per_iteration():
+    """Both Lloyd reductions must share one stable sort and one ``bincount``.
+
+    ``sums`` and ``counts`` reduce the same assignment, so the second reduction
+    used to re-sort the index and recount the buckets for nothing. The op
+    counts pin the sharing, and the bitwise comparison pins that the shared plan
+    did not change the reduction order.
+    """
+
+    ops = []
+
+    class Recorder(torch.utils._python_dispatch.TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            ops.append(str(func))
+            return func(*args, **(kwargs or {}))
+
+    generator = torch.Generator().manual_seed(0)
+    data = torch.randn(4096, 4, generator=generator)
+    weights = torch.rand(4096, generator=generator)
+    iters = 2
+
+    with Recorder():
+        centroids, assignment = _weighted_kmeans(
+            data, 32, weights, iters=iters, tol=0.0, seed=0
+        )
+
+    # ``argsort(stable=True)`` lowers to ``aten.sort.stable`` on some Torch
+    # builds, so both spellings count as the single stable sort.
+    sorts = sum(
+        op.startswith("aten.argsort") or op == "aten.sort.stable" for op in ops
+    )
+    counts = ops.count("aten.bincount.default")
+    reductions = ops.count("aten.segment_reduce.default")
+    assert sorts == iters, f"{sorts} sorts for {iters} iterations: {ops}"
+    assert counts == iters, f"{counts} bincounts for {iters} iterations: {ops}"
+    assert reductions == 2 * iters
+
+    reference_centroids, reference_assignment = _legacy_weighted_kmeans(
+        data, 32, weights, iters=iters, tol=0.0, seed=0
+    )
+    assert torch.equal(centroids, reference_centroids)
+    assert torch.equal(assignment, reference_assignment)
+
+
+@pytest.mark.parametrize("num_centroids", [16, 32, 64, 257])
+@pytest.mark.parametrize("with_weights", [False, True])
+def test_vptq_weighted_kmeans_matches_legacy_reduction_bitwise(num_centroids, with_weights):
+    """Shared-plan k-means must be bitwise identical to the two-reduction path."""
+
+    generator = torch.Generator().manual_seed(7)
+    data = torch.randn(2048, 4, generator=generator)
+    weights = torch.rand(2048, generator=generator) if with_weights else None
+
+    centroids, assignment = _weighted_kmeans(
+        data, num_centroids, weights, iters=6, tol=1e-9, seed=3
+    )
+    legacy_centroids, legacy_assignment = _legacy_weighted_kmeans(
+        data, num_centroids, weights, iters=6, tol=1e-9, seed=3
+    )
+
+    assert centroids.shape == (num_centroids, 4)
+    assert torch.equal(centroids, legacy_centroids)
+    assert torch.equal(assignment, legacy_assignment)
+
+
+def test_vptq_segment_plan_reuses_one_sort_for_both_reductions():
+    """The plan primitive must reproduce both standalone reductions exactly."""
+
+    generator = torch.Generator().manual_seed(11)
+    index = torch.randint(0, 97, (3000,), generator=generator)
+    vectors = torch.randn(3000, 4, generator=generator)
+    weights = torch.rand(3000, generator=generator)
+
+    plan = vptq_module._segment_plan(97, index)
+    assert torch.equal(
+        vptq_module._segment_sum_with_plan(plan, vectors),
+        vptq_module._deterministic_segment_sum(97, index, vectors),
+    )
+    assert torch.equal(
+        vptq_module._segment_sum_with_plan(plan, weights),
+        vptq_module._deterministic_segment_sum(97, index, weights),
+    )
+
+    empty_plan = vptq_module._segment_plan(5, torch.empty(0, dtype=torch.long))
+    assert torch.equal(
+        vptq_module._segment_sum_with_plan(empty_plan, torch.empty(0, 4)),
+        torch.zeros(5, 4),
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA/HIP device")
@@ -3429,3 +3762,64 @@ def test_norm_dim0_error_feedback_uses_channel_scaled_hessian(monkeypatch):
         * channel_scale.unsqueeze(1)
     )
     assert torch.allclose(captured[0], expected, rtol=1e-5, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# free-threaded compilation
+# ---------------------------------------------------------------------------
+def _compile_probe_config():
+    return VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 4],
+        num_res_centroids=[-1, -1],
+        kmeans_iters=2,
+        enable_norm=False,
+        enable_perm=False,
+        group_num=4,
+    )
+
+
+def test_vptq_per_layer_compile_is_skipped_when_the_gil_is_disabled(monkeypatch):
+    """#5228: one code object traced per layer is not safe under free-threading.
+
+    A per-module wrapper of ``VPTQLinear.dequantize`` makes dynamo trace and
+    guard the same code object once per layer; a compiled call on one layer can
+    then read the cache entry another thread is tracing and return silently
+    wrong tensors. The eager method must stay reachable and ``optimize()`` must
+    still report success.
+    """
+
+    calls = []
+
+    def fake_compile(fn, **kwargs):
+        calls.append(fn)
+        return fn
+
+    monkeypatch.setattr(vptq_torch_module, "has_gil_disabled", lambda: True)
+    monkeypatch.setattr(vptq_torch_module, "torch_compile", fake_compile)
+
+    module = build_module(_compile_probe_config(), 64, 8, dtype=torch.float32)
+    module.optimize()
+
+    assert module.optimized is True
+    assert calls == []
+    assert module.dequantize.__func__ is VPTQLinear.dequantize
+
+
+def test_vptq_per_layer_compile_runs_when_the_gil_is_enabled(monkeypatch):
+    """The skip is scoped to free-threaded processes; a GIL build still compiles."""
+
+    calls = []
+
+    def fake_compile(fn, **kwargs):
+        calls.append(fn)
+        return fn
+
+    monkeypatch.setattr(vptq_torch_module, "has_gil_disabled", lambda: False)
+    monkeypatch.setattr(vptq_torch_module, "torch_compile", fake_compile)
+
+    module = build_module(_compile_probe_config(), 64, 8, dtype=torch.float32)
+    module.optimize()
+
+    assert module.optimized is True
+    assert len(calls) == 1

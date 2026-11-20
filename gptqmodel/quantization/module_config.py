@@ -100,6 +100,22 @@ class ModuleConstructorConfig:
         return kwargs
 
 
+def _normalize_paro_krot(value: Any) -> int:
+    """Return a positive `krot`, the way `ParoConfig.__post_init__` validates it."""
+
+    if isinstance(value, bool):
+        raise ValueError(f"Paro: `krot` must be a positive integer, got {value!r}.")
+    try:
+        krot = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"Paro: `krot` must be a positive integer, got {value!r}.") from None
+    if isinstance(value, float) and value != krot:
+        raise ValueError(f"Paro: `krot` must be a positive integer, got {value!r}.")
+    if krot <= 0:
+        raise ValueError(f"Paro: `krot` must be a positive integer, got {value!r}.")
+    return krot
+
+
 def resolve_module_constructor_config(
     *,
     bits,
@@ -223,6 +239,14 @@ def resolve_module_constructor_config(
             else:
                 raw_format = base_format
             _, _, tmp_bits = _normalize_gguf_config(raw_bits, raw_format)
+        elif format == FORMAT.PARO:
+            # `krot` sizes the Givens rotation buffers: `pairs` is
+            # (krot, in_features) and `theta` is (krot, in_features // 2). The
+            # processor copies the optimizer's buffers into the packed layer,
+            # so a per-module value that never reached the constructor was
+            # silently broadcast across every stage (#5659).
+            if "krot" in overrides:
+                options["krot"] = _normalize_paro_krot(overrides["krot"])
         elif format in (FORMAT.MXFP4_MACAQ, FORMAT.MXFP4):
             for key in ("had_block", "activation_precision", "pre_mode", "pre_alpha", "rotation"):
                 if key in overrides:

@@ -24,6 +24,7 @@ import torch
 import torch.nn as nn
 from tokenicer import Tokenicer
 from transformers import (
+    AutoConfig,
     AutoModelForCausalLM,
     AutoProcessor,
     PreTrainedModel,
@@ -37,6 +38,8 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear._compile_support import supports_compiled_generation
+from ..nn_modules.qlinear._fused_train_state import ensure_cpu_inference_layout
 from ..nn_modules.qlinear.fp4 import TorchFP4Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
@@ -86,16 +89,28 @@ from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import (
     BACKEND,
     awq_gemm_pack_backend,
+    awq_gemv_fast_pack_backend,
     awq_gemv_pack_backend,
     backend_for_activation,
     normalize_backend,
 )
 from ..utils.backend_config import Backend, resolve_quantize_backend
-from ..utils.calibration import prepare_calibration_dataset
+from ..utils.calibration import (
+    AUTO_BATCH_SIZE,
+    _chat_calibration_row_tokens,
+    _columnar_mapping_examples,
+    _frame_columns,
+    _hf_dataset_rows,
+    _is_columnar_mapping,
+    _message_template,
+    _messages_char_count,
+    auto_batch_size,
+    prepare_calibration_dataset,
+)
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
-from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
+from ..utils.hf import apply_legacy_remote_code_fixups, autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.kv_cache import KVCacheEstimate, estimate_kv_cache
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
@@ -108,6 +123,7 @@ from ..utils.model import (
     get_module,
     get_module_by_name_prefix,
     get_module_name,
+    has_cpu_offload_hooks,
     move_module_to_cpu_pinned,
     move_to,
     warn_fused_unit_dynamic_conflicts,
@@ -115,19 +131,28 @@ from ..utils.model import (
 from ..utils.model_dequant import infer_block_shape
 from ..utils.p2p import safe_module_to
 from ..utils.quant_metadata import UnsupportedMetadata, describe_unsupported_metadata, find_unsupported_metadata
+from ..utils.resource_budget import DeviceBudget, ResourceBudget, device_memory_bytes
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
     _get_parent_and_leaf_by_path,
     _get_qualified_name,
+    _resolve_qualified_name,
     alias_direct_meta_from_turtle_for_submodule,
     alias_from_turtle_for_submodule,
-    restore_init_owned_rotary_buffers,
 )
-from ..utils.tied_weights import lm_head_is_tied, word_embeddings_tied
+from ..utils.tied_weights import (
+    lm_head_is_tied,
+    lm_head_quantization_is_tied,
+    word_embeddings_tied,
+)
 from ..utils.torch import (
     TORCH_HAS_COMPILE,
     as_torch_device,
+    dynamo_is_compiling,
+    dynamo_traced_frames,
+    model_execution_device_scope,
+    release_compile_trace_garbage,
     release_pinned_host_cache,
     torch_compile,
     torch_empty_cache,
@@ -141,7 +166,7 @@ from ._const import (
     normalize_device,
 )
 from .fusable import FusableConfig, require_fusable_config
-from .loader import ModelLoader, _setup_rotation_online_had
+from .loader import ModelLoader, _setup_rotation_online_had, model_load_lock
 from .module_plan import ModulePlan
 from .quantization_run_plan import ProcessorStep, QuantizationRunPlan, processor_class
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -164,7 +189,7 @@ if TYPE_CHECKING:
 # Processor steps whose quantization GEMMs must run on rocBLAS to be
 # reproducible across processes (issues #4075, #4092, #4123, #4460).
 #
-# GPTQ, QQQ, VPTQ, MACaQ, calibrated FP8 GSQ and EoRA accumulate an input
+# GPTQ, QQQ, VPTQ, MACaQ and EoRA accumulate an input
 # Hessian/Gram from the calibration activations; EXL3 reuses GPTQ's capture.
 # EoRA runs after the primary, so an AWQ + EoRA plan would otherwise keep its
 # adapter Gram on hipBLASLt and produce a different adapter per process (#4614).
@@ -180,7 +205,6 @@ _DETERMINISTIC_BLAS_PROCESSOR_STEPS = frozenset({
     ProcessorStep.MACAQ,
     ProcessorStep.PARO,
     ProcessorStep.EXL3,
-    ProcessorStep.FP8_GSQ,
     ProcessorStep.EORA,
 })
 
@@ -392,6 +416,117 @@ def _log_quantize_summary(
 
 
 
+def _parameter_devices(inner: object) -> Dict[int, int]:
+    """(measured) Weight bytes per device index, meta tensors skipped.
+
+    Parameters and buffers whose storage does not live on a CUDA device are
+    reported under ``-1`` so a CPU or meta-only model still has a measured
+    weight total.
+    """
+
+    per_device: Dict[int, int] = {}
+    try:
+        tensors = list(inner.parameters()) + list(inner.buffers())
+    except Exception:  # pragma: no cover - exotic module trees
+        return per_device
+    for tensor in tensors:
+        if getattr(tensor, "is_meta", False):
+            continue
+        device = getattr(tensor, "device", None)
+        index = device.index if getattr(device, "type", None) == "cuda" and device.index is not None else -1
+        per_device[index] = per_device.get(index, 0) + tensor.numel() * tensor.element_size()
+    return per_device
+
+
+def _device_budgets(per_device: Dict[int, int]) -> Tuple[DeviceBudget, ...]:
+    """(measured) One DeviceBudget per device that holds weights."""
+
+    budgets = []
+    for index, weights in sorted(per_device.items()):
+        free, total = (None, None) if index < 0 else device_memory_bytes(index)
+        budgets.append(DeviceBudget(index=index, free_bytes=free, total_bytes=total, weights_bytes=weights))
+    return tuple(budgets)
+
+
+def _layer_device_indices(wrapper: object, inner: object,
+                          layer_count: int) -> Optional[Tuple[int, ...]]:
+    """(measured) Device index of each decoder layer, or None when unresolvable.
+
+    The layer paths live on the quantization wrapper (`BaseQModel`), while the
+    modules themselves live on the HF model it wraps - the split that made an
+    earlier revision return None for every real model.
+    """
+
+    extract = getattr(wrapper, "extract_layers_node", None)
+    if not callable(extract):
+        return None
+    try:
+        paths = list(extract())
+    except Exception:  # pragma: no cover - exotic definitions
+        return None
+    if not paths:
+        return None
+
+    # A definition may name the same decoder stack more than once: VL wrappers
+    # expose both ``model.language_model.layers`` and ``language_model.layers``,
+    # which resolve to one ModuleList. Accept every resolvable path only when
+    # they name the same modules; distinct stacks (HRM's L/H modules) stay
+    # unresolved instead of being guessed.
+    stacks = []
+    for path in paths:
+        for candidate in (inner, getattr(inner, "model", None)):
+            if candidate is None or not hasattr(candidate, "get_submodule"):
+                continue
+            try:
+                stacks.append(candidate.get_submodule(path))
+                break
+            except Exception:
+                continue
+    if not stacks:
+        return None
+    layers = stacks[0]
+    for other in stacks[1:]:
+        try:
+            same = len(other) == len(layers) and all(a is b for a, b in zip(layers, other))
+        except TypeError:  # a path that names a module rather than a stack
+            same = False
+        if not same:
+            return None
+
+    indices = []
+    for layer in layers:
+        tensors = list(layer.parameters()) + list(layer.buffers())
+        device = None
+        for tensor in tensors:
+            if getattr(tensor, "is_meta", False):
+                continue
+            device = getattr(tensor, "device", None)
+            break
+        index = device.index if getattr(device, "type", None) == "cuda" and device.index is not None else -1
+        indices.append(index)
+    if len(indices) != layer_count:
+        return None
+    return tuple(indices)
+
+
+def _budget_for(inner: object, *, wrapper: object = None, reserve: float = 0.1,
+                dtype: Optional[torch.dtype] = None) -> ResourceBudget:
+    """Resource budget for a decoder module: measured per-device numbers + estimates."""
+
+    per_device = _parameter_devices(inner)
+    estimate = _kv_cache_estimate_for(inner, dtype=dtype)
+    layer_devices = None
+    if estimate is not None:
+        layer_devices = _layer_device_indices(wrapper if wrapper is not None else inner,
+                                              inner, len(estimate.layers))
+    return ResourceBudget(
+        devices=_device_budgets(per_device),
+        kv_cache=estimate,
+        layer_devices=layer_devices,
+        reserve_fraction=reserve,
+    )
+
+
 def _kv_cache_estimate_for(inner: object, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
     """KV-cache estimate for a decoder module, dtype taken from its weights."""
 
@@ -399,6 +534,152 @@ def _kv_cache_estimate_for(inner: object, *, dtype: Optional[torch.dtype] = None
         getattr(inner, "config", None),
         dtype=dtype or _module_weight_dtype(inner),
     )
+
+
+def _calibration_rows(calibration) -> List[Any]:
+    """The rows the quantizer will see, normalized like the looper does.
+
+    ``batch_size="auto"`` used to read the raw ``calibration.dataset``, so the
+    estimate depended on the container: a ``DataFrame`` iterated its column
+    labels, a columnar mapping counted its columns as rows, a ``[1, S]`` tensor
+    row reported ``shape[-2] == 1`` and a bare tensor row raised from
+    ``Tensor.values()`` (#5505). Normalizing through the helpers
+    ``prepare_calibration_dataset`` already uses keeps the estimate on the rows
+    that are actually calibrated.
+    """
+
+    dataset = calibration.dataset
+    columns = _frame_columns(dataset)
+    if columns is not None:
+        return _columnar_mapping_examples(columns)
+    if isinstance(dataset, Mapping):
+        if _is_columnar_mapping(dataset):
+            return _columnar_mapping_examples(dataset)
+        return [dataset]
+    hf_rows = _hf_dataset_rows(dataset)
+    if hf_rows is not None:
+        return hf_rows
+    try:
+        return list(dataset)
+    except TypeError:
+        return [dataset]
+
+
+def _sequence_length(value: Any) -> int:
+    """Length of the last sequence dimension of a token-id container, else 0."""
+
+    if torch.is_tensor(value):
+        return int(value.shape[-1]) if value.dim() else 0
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return 0
+        head = value[0]
+        if isinstance(head, (list, tuple)) or torch.is_tensor(head):
+            return _sequence_length(value[-1])
+        return len(value)
+    return 0
+
+
+def _count_calibration_tokens(qmodel, text: Any) -> int:
+    """Tokenizer length of one text row, 0 when it cannot be measured."""
+
+    tokenizer = getattr(qmodel, "tokenizer", None)
+    if tokenizer is None or not isinstance(text, str):
+        return 0
+    try:
+        return len(tokenizer(text)["input_ids"])
+    except Exception:  # pragma: no cover - exotic tokenizers
+        return 0
+
+
+def _calibration_row_count(calibration) -> int:
+    """Rows the calibration set will produce, or a conservative estimate."""
+
+    try:
+        return max(1, len(_calibration_rows(calibration)))
+    except Exception:
+        return 1
+
+
+def _calibration_tokens_per_row(qmodel, calibration) -> int:
+    """Longest calibration row in tokens: declared concat size or measured."""
+
+    if calibration.concat_size:
+        return int(calibration.concat_size)
+
+    try:
+        rows = _calibration_rows(calibration)
+    except Exception:
+        return 512
+
+    # A `messages` row only yields tokens after the chat template runs, so the
+    # estimator could not measure it and kept the 512 default (#5568). Render
+    # the longest few through the same path preparation uses.
+    chat_template = _message_template(getattr(qmodel, "tokenizer", None))[0] is not None
+
+    longest = 0
+    texts: List[str] = []
+    chat_rows: List[Any] = []
+    for row in rows:
+        ids = row.get("input_ids") if isinstance(row, Mapping) else row
+        length = _sequence_length(ids) if ids is not None else 0
+        if length:
+            longest = max(longest, length)
+            continue
+        messages = row.get("messages") if isinstance(row, Mapping) else None
+        if messages is not None and chat_template:
+            chat_rows.append(row)
+            continue
+        text = row if isinstance(row, str) else (
+            row.get("text") if isinstance(row, Mapping) else None
+        )
+        if isinstance(text, str):
+            texts.append(text)
+    if chat_rows:
+        chat_rows.sort(key=_messages_char_count, reverse=True)
+        longest = max(
+            longest,
+            max((_chat_calibration_row_tokens(qmodel, row) for row in chat_rows[:4]), default=0),
+        )
+    if texts:
+        # Tokenizing every row would repeat the whole calibration pass. The
+        # longest few by character count bound the padded row far better than
+        # the first four rows, which is all the old estimate ever looked at.
+        texts.sort(key=len, reverse=True)
+        longest = max(
+            longest,
+            max((_count_calibration_tokens(qmodel, text) for text in texts[:4]), default=0),
+        )
+    return longest or 512
+
+
+def _materialized_calibration_config(calibration):
+    """Return a calibration config whose one-shot inputs are materialised once.
+
+    ``batch_size="auto"`` sizes the run by reading the calibration rows before
+    ``prepare_calibration_dataset`` runs, and ``quantize()`` may size the native
+    and EoRA passes separately. A generator (or ``iter(list)``/``map``) is
+    exhausted by the first read, so the later preparation saw no rows and
+    failed with "Quantize: calibration dataset is empty" (#5567). Materialise
+    the inputs up front so every read and every processor sees the same rows;
+    sized containers and ``datasets.IterableDataset`` are returned unchanged.
+    """
+
+    from dataclasses import replace
+
+    from ..looper.loop_processor import _reusable_calibration_dataset
+
+    dataset = _reusable_calibration_dataset(calibration.dataset)
+    adapter_dataset = _reusable_calibration_dataset(calibration.adapter_dataset)
+    if dataset is calibration.dataset and adapter_dataset is calibration.adapter_dataset:
+        return calibration
+
+    bound = replace(calibration, dataset=dataset, adapter_dataset=adapter_dataset)
+    if calibration.prepare_dataset is not None:
+        # ``replace()`` drops the non-init field, and a bound config must keep
+        # the preparer that its owner installed.
+        object.__setattr__(bound, "prepare_dataset", calibration.prepare_dataset)
+    return bound
 
 
 def _module_weight_dtype(module: object) -> Optional[torch.dtype]:
@@ -413,6 +694,26 @@ def _module_weight_dtype(module: object) -> Optional[torch.dtype]:
     return None
 
 
+def _cast_floating_inputs(example: Dict[str, Any], dtype: Optional[torch.dtype]) -> Dict[str, Any]:
+    """Cast floating rows to ``dtype``; integers keep their dtype.
+
+    Only used for definitions that declare ``calibration_inputs = "tensor_kwargs"``,
+    where the rows are the user's own tensors rather than token ids.
+    """
+
+    if dtype is None:
+        return example
+    for key, value in example.items():
+        if isinstance(value, list):
+            example[key] = [
+                item.to(dtype) if torch.is_tensor(item) and item.is_floating_point() else item
+                for item in value
+            ]
+        elif torch.is_tensor(value) and value.is_floating_point() and value.dtype != dtype:
+            example[key] = value.to(dtype)
+    return example
+
+
 class _CompiledModelForward:
     """Call a compiled unbound ``forward`` without pinning the model (#4937).
 
@@ -425,12 +726,15 @@ class _CompiledModelForward:
     ``dequantize_weight`` (#4871).
     """
 
-    __slots__ = ("_compiled", "_unbound", "_module_ref")
+    __slots__ = ("_compiled", "_unbound", "_module_ref", "_traced_frames")
 
     def __init__(self, compiled, unbound, module):
         self._compiled = compiled
         self._unbound = unbound
         self._module_ref = weakref.ref(module)
+        # Frames dynamo had already traced when this proxy was installed. Only a
+        # call that adds frames produces new trace garbage (#5020).
+        self._traced_frames = dynamo_traced_frames()
 
     def __call__(self, *args, **kwargs):
         module = self._module_ref()
@@ -438,7 +742,47 @@ class _CompiledModelForward:
             raise RuntimeError(
                 "compiled model `forward` called after its model was released"
             )
-        return self._compiled(module, *args, **kwargs)
+        try:
+            # Inductor's lazy pattern init uses the *current* device when a
+            # graph-break frame has no device-bearing input, which claimed
+            # cuda:0 for a model compiled on cuda:1 (#5101). Enter the model's
+            # execution device for the compiled call; the caller's device is
+            # restored on exit, including on error.
+            with model_execution_device_scope(module, args, kwargs):
+                return self._compiled(module, *args, **kwargs)
+        finally:
+            self._release_trace_garbage()
+
+    def _release_trace_garbage(self) -> None:
+        """Collect dynamo's trace cycles once per newly traced frame.
+
+        The proxy itself holds no strong reference to the model, but dynamo
+        leaves the trace's ``VariableTracker`` objects in reference cycles that
+        do, and reference counting cannot reclaim them. Collecting here, while
+        the caller still owns the model, leaves the model reachable only from
+        that owner, so dropping it frees its VRAM immediately instead of
+        waiting for a user-issued cyclic ``gc.collect()`` (#5020). A call that
+        reused the compiled cache adds no frames and needs no collection.
+        """
+
+        if dynamo_is_compiling():
+            # An outer ``torch.compile`` (transformers' static-cache generate)
+            # is tracing this call. ``gc.collect`` is untraceable, so running it
+            # here is a graph break per model call (#5224), and collecting while
+            # dynamo still holds the trace's trackers is the wrong time. Leave
+            # the count unchanged so the next eager call releases the garbage.
+            return
+        # Read the counter only after the trace check: dynamo traces this
+        # method when an outer compile calls through the proxy, and a traced
+        # read of ``counters["frames"]`` installs a guard on dynamo's global
+        # frame counter. Every later compile bumps that counter, so the guard
+        # failed on the next call and every static-cache ``generate()``
+        # re-traced forever (#5266).
+        traced = dynamo_traced_frames()
+        if traced == self._traced_frames:
+            return
+        self._traced_frames = traced
+        release_compile_trace_garbage()
 
     @property
     def _torchdynamo_orig_callable(self):
@@ -822,6 +1166,18 @@ def _module_tree_for_class(cls):
     return active[1] if active is not None and active[0] is cls else cls.module_tree
 
 
+def _module_owns_direct_meta_tensors(module: nn.Module) -> bool:
+    """Whether ``module`` itself (not a child) owns a tensor still on ``meta``."""
+
+    for tensor in list(module.parameters(recurse=False)) + list(module.buffers(recurse=False)):
+        if getattr(tensor, "is_meta", False):
+            return True
+        device = getattr(tensor, "device", None)
+        if device is not None and getattr(device, "type", None) == "meta":
+            return True
+    return False
+
+
 # Replay metadata key: the per-layer-type `attention_mask` / `position_embeddings`
 # captured from the first decoder layer's forward. `capture_first_layer_input_kwargs`
 # stores it in the cached batch kwargs and `prepare_layer_replay_kwargs` consumes it,
@@ -1188,19 +1544,21 @@ class BaseQModel(nn.Module):
         # the default `_init_weights`. Restore constructor-owned rotary buffers
         # here so every load path (native eval, quantization, quantized reload)
         # sees real RoPE frequencies instead of uninitialized memory.
-        restored_rotary_buffers = restore_init_owned_rotary_buffers(self.model)
+        # transformers 5 also always hands `generate()`'s cache to the remote
+        # `prepare_inputs_for_generation`, even before the first prefill, and
+        # replaced the tuple/attribute cache interface those implementations
+        # were written against. Both repairs are shared with the Transformers
+        # bridge through one helper so neither path can miss one (#5311).
+        restored_rotary_buffers, legacy_generation_compat = apply_legacy_remote_code_fixups(
+            self.model
+        )
         if restored_rotary_buffers:
             log.debug(
                 "Model: restored %d init-owned rotary buffer(s) for `%s`.",
                 restored_rotary_buffers,
                 type(self.model).__name__,
             )
-        # transformers 5 always hands `generate()`'s cache to the remote
-        # `prepare_inputs_for_generation`, even before the first prefill, and
-        # replaced the tuple/attribute cache interface those implementations
-        # were written against. Install the shared legacy adapter here so every
-        # load path (native eval, quantization, quantized reload) gets it.
-        if install_legacy_generation_compat(self.model):
+        if legacy_generation_compat:
             log.debug(
                 "Model: installed legacy generate() adapter for `%s`.",
                 type(self.model).__name__,
@@ -1285,12 +1643,26 @@ class BaseQModel(nn.Module):
             self.fuse()
 
     @classmethod
+    def _model_module_tree(cls, model, quantize_config, detector=None):
+        """Return the declared tree variant that matches this model's config.
+
+        Model definitions override this to pick a layout variant (for example
+        Falcon's two-norm parallel decoder). ``module_tree`` stays the default
+        declaration other code reads; the selected tree still goes through
+        ``module_tree_overrides`` in ``_resolve_effective_module_tree``.
+        """
+
+        return cls.module_tree
+
+    @classmethod
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
         """Resolve a model tree before a loader needs to plan against it."""
         quant_method = getattr(quantize_config, "method", None) if quantize_config else None
         effective_tree = copy.deepcopy(getattr(model, "gptqmodel_effective_module_tree", None))
         if effective_tree is None:
-            effective_tree = copy.deepcopy(cls.module_tree)
+            effective_tree = copy.deepcopy(
+                cls._model_module_tree(model, quantize_config, detector=detector)
+            )
         if quant_method is not None:
             override = (getattr(cls, "module_tree_overrides", None) or {}).get(quant_method)
             if override is not None and effective_tree is not None:
@@ -2253,24 +2625,104 @@ class BaseQModel(nn.Module):
 
         warn_fused_unit_dynamic_conflicts(module_names, self.quantize_config)
 
-    def kv_cache_estimate(self, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
-        """Per-token KV-cache cost of this model, or None when the config hides it.
+    def budget(self, *, reserve: float = 0.1, dtype: Optional[torch.dtype] = None) -> ResourceBudget:
+        """What this model costs on the current device.
 
-        Weight quantization does not change the cache, so this is the number a
-        user needs after loading to decide how much context fits next to the
-        weights. The dtype defaults to the dtype of the model's own weights: a
-        cache is as large as the activations that fill it, and
-        ``config.torch_dtype`` is usually unset.
+        Measured numbers (weight storage, a device-memory snapshot) sit next to
+        the estimated KV-cache footprint, and every accessor on the result says
+        which kind it is. ``reserve`` is the share of free device memory held
+        back from the KV budget.
         """
 
-        return _kv_cache_estimate_for(getattr(self, "model", None), dtype=dtype)
+        return _budget_for(getattr(self, "model", None), wrapper=self, reserve=reserve, dtype=dtype)
 
-    def log_kv_cache_estimate(self) -> None:
-        """Log the KV-cache cost once, when the config supports the estimate."""
+    def kv_cache_estimate(self, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
+        """The estimated KV-cache slice of :meth:`budget` (kept as a shortcut)."""
 
-        estimate = _kv_cache_estimate_for(getattr(self, "model", None))
-        if estimate is not None:
-            log.info(estimate.format())
+        return _budget_for(getattr(self, "model", None), wrapper=self, dtype=dtype).kv_cache
+
+    def log_budget(self) -> None:
+        """Log the resource budget once, marked measured vs estimated."""
+
+        for line in _budget_for(getattr(self, "model", None), wrapper=self).describe():
+            log.info(line)
+
+    def _calibration_batch_size(self, calibration) -> int:
+        """Resolve ``CalibrationConfig(batch_size="auto")`` for any entry point.
+
+        ``quantize()`` used to be the only caller that resolved the sentinel, so
+        ``requantize(norm=...)`` and ``adapter.generate()`` handed the raw
+        ``"auto"`` string to ``prepare_dataset`` and crashed in
+        ``range(0, len(dataset), "auto")`` with a ``TypeError`` that never named
+        ``batch_size`` (#5504).
+        """
+
+        batch_size = calibration.batch_size
+        if batch_size == AUTO_BATCH_SIZE:
+            batch_size = self._auto_calibration_batch_size(calibration)
+        return batch_size
+
+    def _auto_calibration_batch_size(self, calibration) -> int:
+        """Pick a calibration batch that fits, or 1 when the device is unmeasurable."""
+
+        config = getattr(getattr(self, "model", None), "config", None)
+        # Composite configs (VLM / omni / Qwen3.5) keep the decoder dims on
+        # `text_config` and leave the top-level fields unset. Reading them as 0
+        # shrank the per-row estimate by `hidden * layers` and silently
+        # disabled the memory guard (#5568).
+        text_config = config
+        get_text_config = getattr(config, "get_text_config", None)
+        if callable(get_text_config):
+            try:
+                text_config = get_text_config() or config
+            except Exception:  # pragma: no cover - exotic configs
+                text_config = config
+        hidden_size = int(getattr(text_config, "hidden_size", 0) or 0)
+        num_layers = int(getattr(text_config, "num_hidden_layers", 0) or 0)
+        if hidden_size <= 0 or num_layers <= 0:
+            log.warn(
+                "Calibrate: batch_size=auto -> 1 (the model config exposes no hidden_size/num_hidden_layers)"
+            )
+            return 1
+
+        dtype_bytes = 2
+        inner = getattr(self, "model", None)
+        try:
+            for parameter in inner.parameters():
+                if parameter.is_floating_point():
+                    dtype_bytes = parameter.element_size()
+                    break
+        except Exception:  # pragma: no cover - exotic module trees
+            dtype_bytes = 2
+
+        free_bytes = None
+        device = getattr(getattr(self, "quantize_config", None), "device", None)
+        device_type = getattr(device, "type", None) or str(device).split(":")[0].lower()
+        if device_type == "cuda":
+            try:
+                index = getattr(device, "index", None)
+                free_bytes, _total = (
+                    torch.cuda.mem_get_info() if index is None else torch.cuda.mem_get_info(index)
+                )
+            except Exception:  # pragma: no cover - driver edge cases
+                free_bytes = None
+
+        rows = _calibration_row_count(calibration)
+        tokens = _calibration_tokens_per_row(self, calibration)
+        batch = auto_batch_size(
+            rows=rows,
+            tokens_per_row=tokens,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dtype_bytes=dtype_bytes,
+            free_bytes=free_bytes,
+        )
+        where = "device unmeasurable" if free_bytes is None else f"free {free_bytes / 1024 ** 3:.1f} GiB"
+        log.info(
+            "Calibrate: batch_size=auto -> %d (rows=%d, tokens/row=%d, %s)",
+            batch, rows, tokens, where,
+        )
+        return batch
 
     @with_quantization_device_telemetry
     def quantize(
@@ -2305,6 +2757,13 @@ class BaseQModel(nn.Module):
             raise ValueError(
                 "quantize() binds the model's dataset preparer; pass an unbound CalibrationConfig."
             )
+        if self.quantize_config.is_load_only():
+            raise ValueError(
+                "FP8 is load-only: GPT-QModel no longer quantizes or exports FP8 "
+                "checkpoints. Load a production FP8 checkpoint (transformers "
+                "`FineGrainedFP8`, DeepSeek/Qwen block scales, NVIDIA ModelOpt, "
+                "MXFP8, or NVFP8), or quantize with GPTQ/AWQ/RTN."
+            )
         for pattern, override in (getattr(self.quantize_config, "dynamic", None) or {}).items():
             if isinstance(override, Mapping) and "exclude_attention_sinks" in override:
                 # The sink rows are a property of the calibration batch, not of
@@ -2316,6 +2775,43 @@ class BaseQModel(nn.Module):
         vram_devices = _quantize_vram_devices(self.quantize_config)
         _reset_peak_vram_stats(vram_devices)
 
+        embed_quant_config = self._normalize_embed_quant_config(
+            embed_quant_config=embed_quant_config,
+            embed_quant_mode=embed_quant_mode,
+        )
+        if embed_quant_config is not None and not self.quantized:
+            embed_mode = embed_quant_config.embed_quant_mode
+            if (
+                embed_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH)
+                and lm_head_quantization_is_tied(self)
+            ):
+                # A fresh quantize of the output endpoint replaces the tied
+                # `lm_head` with a packed module. The run used to finish every
+                # layer and only then fail to re-tie the head, leaving
+                # `quantized=True` on an unusable model (#5111). Refuse before
+                # any calibration work, matching the `lm_head=True` contract.
+                # Requantize of a loaded checkpoint stays allowed: its
+                # endpoints are already independent packed modules.
+                raise NotImplementedError(
+                    "quantize() cannot quantize the output embedding of a freshly "
+                    "loaded model with tied input/output embeddings: `lm_head` "
+                    "shares its weight with `embed_tokens`. Untie the model weights "
+                    "before quantization, or load a quantized checkpoint and use "
+                    "`requantize(embed_quant_mode=...)`."
+                )
+            if embed_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
+                # The capture forward has to execute the input embedding before
+                # the pseudo-layer is packed. A fresh run starts from a lazy
+                # shell, and materializing the endpoint for capture produced a
+                # packed FP16 endpoint in front of a dense BF16 decoder, so the
+                # in-session model could not forward (#5111). This flow is
+                # requantize-only; refuse before any calibration work.
+                raise NotImplementedError(
+                    "quantize() on an unquantized model cannot quantize the input "
+                    "embedding (QuantizeEmbed.INPUT/BOTH). Load a quantized "
+                    "checkpoint and use `requantize(embed_quant_mode=...)`."
+                )
+
         if fuse is not None and type(fuse) is not bool:
             raise TypeError("Fusion enabled must be bool")
         fusion_requested = fuse if fuse is not None else getattr(self, "_auto_fusion", False)
@@ -2325,10 +2821,6 @@ class BaseQModel(nn.Module):
             self._auto_fusion = fuse
             if not fuse:
                 self.fuse(False)
-        embed_quant_config = self._normalize_embed_quant_config(
-            embed_quant_config=embed_quant_config,
-            embed_quant_mode=embed_quant_mode,
-        )
 
         if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
@@ -2402,7 +2894,8 @@ class BaseQModel(nn.Module):
             if self.quantize_config.method != METHOD.AWQ:
                 raise ValueError(f"Staged GSQ is unsupported for {self.quantize_config.method}")
 
-        batch_size = calibration.batch_size
+        calibration = _materialized_calibration_config(calibration)
+        batch_size = self._calibration_batch_size(calibration)
         if not self.support_batch_quantize:
             log.warn("Quantize: batch_size overridden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
@@ -2467,12 +2960,13 @@ class BaseQModel(nn.Module):
                         device_type=quant_device_type, is_rocm=IS_ROCM
                     )
                 elif format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
-                    # The native GEMV_FAST extension is CUDA-only; a CPU-only
-                    # host packs with the portable Torch reader (issue #4736).
-                    preferred_backend = (
-                        BACKEND.AWQ_TORCH
-                        if quant_device_type == "cpu"
-                        else BACKEND.AWQ_GEMV_FAST
+                    # The native GEMV_FAST extension is CUDA-only. A host
+                    # without it -- CPU only (#4736) or ROCm, where hipcc
+                    # rejects the extension (#5109) -- packs the identical
+                    # interleaved layout with the portable Torch reader and
+                    # keeps it as the in-session kernel.
+                    preferred_backend = awq_gemv_fast_pack_backend(
+                        device_type=quant_device_type, is_rocm=IS_ROCM
                     )
                 else:
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
@@ -2506,8 +3000,6 @@ class BaseQModel(nn.Module):
                 preferred_backend = BACKEND.EXL3_EXLLAMA_V3
             elif self.quantize_config.method == METHOD.GGUF:
                 preferred_backend = BACKEND.AUTO
-            elif self.quantize_config.method == METHOD.FP8:
-                preferred_backend = BACKEND.FP8_TORCH
             elif self.quantize_config.method == METHOD.BITSANDBYTES:
                 preferred_backend = BACKEND.BITSANDBYTES
             else:
@@ -2524,6 +3016,12 @@ class BaseQModel(nn.Module):
 
             if not torch.cuda.is_available():
                 raise ValueError("EXL3 quantization requires CUDA/HIP.")
+
+            if IS_ROCM and (
+                self.quantize_config.codebook == "q4nx"
+                or any(rule.get("codebook") == "q4nx" for rule in (self.quantize_config.dynamic or {}).values())
+            ):
+                raise ValueError("EXL3 q4nx quantization requires NVIDIA CUDA.")
 
             quant_device = self.quantize_config.device
             if isinstance(quant_device, DEVICE):
@@ -2709,7 +3207,7 @@ class BaseQModel(nn.Module):
 
         # On ROCm the deterministic rocBLAS selection is scoped to methods
         # whose quantization GEMMs must be reproducible (GPTQ, QQQ, VPTQ,
-        # MACaQ, EXL3, calibrated FP8 GSQ, and Paro). For the Hessian
+        # MACaQ, EXL3, and Paro). For the Hessian
         # builders, the calibration forward and replay produce the activations
         # accumulated into the Hessian, so those GEMMs must be reproducible
         # too: pinning only the fp32 X^T X GEMM regressed Qwen2.5-0.5B to
@@ -2818,7 +3316,7 @@ class BaseQModel(nn.Module):
         # copies are gone once the loop returns, but PyTorch keeps the pinned
         # blocks cached (non-swappable ``RssShmem``) for the process lifetime.
         release_pinned_host_cache()
-        self.log_kv_cache_estimate()
+        self.log_budget()
         return result
 
     @staticmethod
@@ -2834,7 +3332,10 @@ class BaseQModel(nn.Module):
         if embed_quant_config is not None:
             if not isinstance(embed_quant_config, QuantizeEmbedConfig):
                 raise TypeError("`embed_quant_config` must be a `QuantizeEmbedConfig` or `QuantizeEmbed` instance.")
-            return embed_quant_config
+            # Re-validate: the caller may have mutated the instance after
+            # construction. A bad mode/`embed_only` must fail here, before the
+            # layer replay starts, not silently quantize nothing (#5124).
+            return embed_quant_config.validate()
         if embed_quant_mode is not None:
             if not isinstance(embed_quant_mode, QuantizeEmbed):
                 raise TypeError("`embed_quant_mode` must be a `QuantizeEmbed` instance.")
@@ -2857,6 +3358,7 @@ class BaseQModel(nn.Module):
                 "requantize(calibration=...) must be a CalibrationConfig, got "
                 f"{type(calibration).__name__}; pass `CalibrationConfig(dataset=...)`."
             )
+        calibration = _materialized_calibration_config(calibration)
         if not self.quantized:
             raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
         embed_quant_config = self._normalize_embed_quant_config(embed_quant_config, embed_quant_mode)
@@ -2865,26 +3367,35 @@ class BaseQModel(nn.Module):
         if embed_quant_config is None and norm is None:
             raise ValueError("`requantize()` requires `embed_quant_config`, `embed_quant_mode` or `norm`.")
 
-        if norm is not None:
-            from ..quantization.norm_tuning import validate_tuning_model
-
-            # Fail before embedding packing, dataset preparation or teacher loading.
-            # Loaded GPTQ-v1 checkpoints are fine: their runtime zeros are already v2.
-            if embed_quant_config is not None and resolve_quant_format(
+        # Fail before embedding packing, dataset preparation or teacher loading.
+        # Loaded GPTQ-v1 checkpoints are fine: their runtime zeros are already v2.
+        if (
+            norm is not None
+            and embed_quant_config is not None
+            and resolve_quant_format(
                 self.quantize_config.format, self.quantize_config.method
-            ) == FORMAT.GPTQ:
-                raise ValueError(
-                    "Norm tuning cannot be combined with GPTQ-v1 embedding requantization. "
-                    "Requantize embeddings separately, save the model, then reload with "
-                    "`backend=BACKEND.TORCH` and call `requantize(norm=...)`."
-                )
-            validate_tuning_model(self.model)
+            ) == FORMAT.GPTQ
+        ):
+            raise ValueError(
+                "Norm tuning cannot be combined with GPTQ-v1 embedding requantization. "
+                "Requantize embeddings separately, save the model, then reload with "
+                "`backend=BACKEND.TORCH` and call `requantize(norm=...)`."
+            )
 
         if self.load_quantized_model and self.turtle_model is None:
             # Resolve persistence before embedding packing or norm updates can
             # mutate the loaded model. Revalidate on each requantize() call.
             self._module_replacement_source = _QuantizedCheckpointSource(
                 str(self.model_local_path), checkpoint_file_name=getattr(self, "checkpoint_file_name", None)
+            )
+
+        norm_names = None
+        if norm is not None:
+            # The whole norm pre-flight: every rejection has to land before the
+            # embeddings are replaced, or the in-session model keeps a quantized
+            # embedding that no later requantize() accepts (#5118).
+            norm_names = self._validate_requantize_norm(
+                calibration=calibration, norm=norm, tokenizer=tokenizer
             )
 
         result = {}
@@ -2902,18 +3413,28 @@ class BaseQModel(nn.Module):
                 calibration=calibration,
                 norm=norm,
                 tokenizer=tokenizer,
+                names=norm_names,
             )
         return result
 
-    def _requantize_norm(
+    def _validate_requantize_norm(
         self,
         *,
         calibration: CalibrationConfig,
         norm: NormConfig,
         tokenizer: Optional[PreTrainedTokenizerBase],
-    ) -> Dict[str, Any]:
-        """Tune tagged norm parameters against an unquantized teacher; packed tensors stay untouched."""
-        from ..quantization.norm_tuning import tune_norm_params, validate_tuning_model
+    ) -> List[str]:
+        """Reject every invalid norm request before the model is mutated (#5118).
+
+        ``requantize(embed_quant_mode=..., norm=...)`` packs the embeddings
+        first. A rejected norm half (calibration flags, no matching norm
+        modules, a bad tokenizer, a mistyped teacher id) used to arrive after
+        that, leaving the input embedding replaced by a quantized module that
+        no later ``requantize()`` accepts. Resolve the teacher here too: a
+        path/id typo must fail before the embedding is touched.
+        """
+
+        from ..quantization.norm_tuning import validate_tuning_model
 
         validate_tuning_model(self.model)
         if calibration.dataset is None:
@@ -2933,11 +3454,38 @@ class BaseQModel(nn.Module):
                 "module_tree; norm tuning is unavailable."
             )
 
+        if tokenizer is not None and not isinstance(tokenizer, PreTrainedTokenizerBase):
+            raise ValueError(
+                f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`."
+            )
+
+        teacher = norm.teacher
+        if not isinstance(teacher, nn.Module):
+            # Resolve the config only: the weights are loaded by
+            # `_requantize_norm` after the embeddings, but a bad path/id has to
+            # fail here.
+            AutoConfig.from_pretrained(
+                teacher, trust_remote_code=getattr(self, "trust_remote_code", False)
+            )
+        return names
+
+    def _requantize_norm(
+        self,
+        *,
+        calibration: CalibrationConfig,
+        norm: NormConfig,
+        tokenizer: Optional[PreTrainedTokenizerBase],
+        names: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Tune tagged norm parameters against an unquantized teacher; packed tensors stay untouched."""
+        from ..quantization.norm_tuning import tune_norm_params
+
+        if names is None:
+            names = self._validate_requantize_norm(
+                calibration=calibration, norm=norm, tokenizer=tokenizer
+            )
+
         if tokenizer is not None:
-            if not isinstance(tokenizer, PreTrainedTokenizerBase):
-                raise ValueError(
-                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`."
-                )
             self.tokenizer = Tokenicer.load(
                 tokenizer,
                 trust_remote_code=self.trust_remote_code,
@@ -2948,7 +3496,7 @@ class BaseQModel(nn.Module):
             calibration_dataset=calibration.dataset,
             calibration_dataset_concat_size=calibration.concat_size,
             calibration_dataset_sort=calibration.sort,
-            batch_size=calibration.batch_size,
+            batch_size=self._calibration_batch_size(calibration),
             calibration_data_min_length=calibration.min_length,
             calibration_concat_separator=calibration.concat_separator,
         )
@@ -2957,12 +3505,20 @@ class BaseQModel(nn.Module):
         owns_teacher = not isinstance(teacher, nn.Module)
         if owns_teacher:
             device = get_device(self.get_input_embeddings())
-            teacher = AutoModelForCausalLM.from_pretrained(
-                teacher,
-                dtype=self.model.dtype,
-                device_map={"": device},
-                trust_remote_code=self.trust_remote_code,
-            )
+            # The teacher is a GPT-QModel-owned transformers construction, so it
+            # takes the same load lock as every other build: another thread
+            # must not be inside its own ``post_init`` while this one
+            # constructs, or the class-wide no-tie patch leaves the shell
+            # untied (#5421). The construction window still holds the
+            # global-state writer by itself (#5304), so the teacher's weight
+            # I/O stays concurrent with optimized forwards.
+            with model_load_lock():
+                teacher = AutoModelForCausalLM.from_pretrained(
+                    teacher,
+                    dtype=self.model.dtype,
+                    device_map={"": device},
+                    trust_remote_code=self.trust_remote_code,
+                )
         try:
             stats = tune_norm_params(self.model, teacher, batches, names, norm)
         finally:
@@ -2975,6 +3531,83 @@ class BaseQModel(nn.Module):
         if self.load_quantized_model:
             self._model_free_weight_only_replacements_only = True
         return stats
+
+    @staticmethod
+    def _embedding_endpoint_state(module) -> Tuple[Optional[torch.device], Optional[torch.dtype]]:
+        """The device and floating dtype a replaced embedding endpoint occupied."""
+
+        weight = getattr(module, "weight", None)
+        dtype = None
+        if isinstance(weight, torch.Tensor) and weight.is_floating_point():
+            dtype = weight.dtype
+        return get_device(module), dtype
+
+    def _snapshot_module_placement(self) -> Dict[str, torch.device]:
+        """Record the device of every leaf module that owns tensors."""
+
+        placement: Dict[str, torch.device] = {}
+        model = getattr(self, "model", None)
+        if model is None:
+            return placement
+        for name, module in model.named_modules():
+            if not name:
+                continue
+            owns_tensors = any(
+                True for _ in module.parameters(recurse=False)
+            ) or any(True for _ in module.buffers(recurse=False))
+            if not owns_tensors:
+                continue
+            placement[name] = get_device(module)
+        return placement
+
+    def _rehome_requantized_endpoints(
+        self,
+        endpoint_state: Dict[str, Tuple],
+        placement: Optional[Dict[str, torch.device]] = None,
+    ) -> None:
+        """Place requantized endpoints back on the device and dtype they replaced.
+
+        The looper packs on CPU and a quantized embedding's scales keep the
+        checkpoint dtype, so without this the in-session model cannot run a
+        forward and a BF16 checkpoint reloads with FP16 embeddings (#5116).
+        Layers the loop returned to CPU are also moved back to where they were.
+        """
+
+        if not endpoint_state and not placement:
+            return
+        live_model = getattr(self, "model", None)
+        if live_model is None:
+            return
+
+        model_dtype = getattr(live_model, "dtype", None)
+        if not isinstance(model_dtype, torch.dtype) or not model_dtype.is_floating_point:
+            model_dtype = None
+
+        # Restore the pre-run placement of the modules the loop offloaded. The
+        # endpoints are handled below with their dtype, so skip them here.
+        for name, device in (placement or {}).items():
+            if name in endpoint_state:
+                continue
+            if device is None or device.type == "meta":
+                continue
+            module = get_module(live_model, key=name)
+            if module is None:
+                continue
+            if get_device(module) != device:
+                safe_module_to(module, device)
+
+        for name, (device, dtype) in endpoint_state.items():
+            module = get_module(live_model, key=name)
+            if module is None:
+                continue
+            setter = getattr(module, "set_embedding_output_dtype", None)
+            target_dtype = dtype if dtype is not None else model_dtype
+            if callable(setter) and target_dtype is not None:
+                setter(target_dtype)
+            if device is None or device.type == "meta":
+                continue
+            if get_device(module) != device:
+                safe_module_to(module, device)
 
     def _requantize_embeddings(
         self,
@@ -2997,6 +3630,33 @@ class BaseQModel(nn.Module):
                 endpoint_device = CPU
             quantize_config.device = normalize_device(endpoint_device)
 
+        # A requantized endpoint is rebuilt on CPU during packing, and its
+        # scales keep the checkpoint dtype (FP16 for GPTQ). Record what each
+        # replaced endpoint occupied so it can be placed back afterwards; the
+        # first in-session forward otherwise fails on a device mismatch, and a
+        # BF16 model receives FP16 embeddings (#5116).
+        mode = embed_quant_config.embed_quant_mode
+        # The loop returns every processed layer to CPU (`post_quantize`), which
+        # is right for a fresh quantize but leaves a requantized *loaded* model
+        # unrunnable on the device it came from. Record the placement of the
+        # whole model so it can be restored after the run.
+        placement = self._snapshot_module_placement()
+        endpoint_state = {}
+        live_model = getattr(self, "model", None)
+        if live_model is not None:
+            if mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
+                input_name = self.get_input_embeddings_name()
+                if input_name:
+                    input_module = get_module(live_model, key=input_name)
+                    if input_module is not None:
+                        endpoint_state[input_name] = self._embedding_endpoint_state(input_module)
+            if mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH):
+                output_name = self.get_output_embeddings_name() or getattr(self, "lm_head", None)
+                if output_name:
+                    output_module = get_module(live_model, key=output_name)
+                    if output_module is not None:
+                        endpoint_state[output_name] = self._embedding_endpoint_state(output_module)
+
         result = self.quantize(
             calibration=calibration,
             tokenizer=tokenizer,
@@ -3005,12 +3665,13 @@ class BaseQModel(nn.Module):
             embed_quant_config=embed_quant_config,
         )
 
+        self._rehome_requantized_endpoints(endpoint_state, placement)
+
         # A loaded quantized model may contain inference-repacked or fused
         # modules that cannot safely be serialized as a complete checkpoint.
         # Preserve the source checkpoint and let the module-replacement writer
         # replace only the shards owned by the requested endpoints.
         prefixes = set(getattr(self, "_module_replacement_prefixes", set()))
-        mode = embed_quant_config.embed_quant_mode
         if mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
             input_name = self.get_input_embeddings_name()
             if input_name:
@@ -3090,15 +3751,16 @@ class BaseQModel(nn.Module):
     ):
         from ..looper.loop_processor import (
             _reusable_calibration_dataset,
+            prepare_calibration_dataset_once,
             release_failed_run_processors,
         )
         from ..looper.module_looper import ModuleLooper
 
-        # The native and EoRA steps each prepare their calibration input, so a
-        # one-shot iterator must be materialised once here or the second
-        # processor sees an exhausted dataset (issue #4307). A rotation run
-        # already prepared (and validated) its input before the model was
-        # mutated, so reuse those batches instead (#4935).
+        # A one-shot iterator must be materialised once here or a later
+        # traversal sees an exhausted dataset (issue #4307); the batches
+        # themselves are prepared once below and shared by every processor
+        # (#4869). A rotation run already prepared (and validated) its input
+        # before the model was mutated, so reuse those batches instead (#4935).
         if prepared_dataset is not None:
             dataset = prepared_dataset
         else:
@@ -3139,6 +3801,27 @@ class BaseQModel(nn.Module):
             adapter_dataset=None,
             batch_size=run_plan.batch_size,
         )
+        # Prepare the calibration batches once for the whole run: GPTAQ/FOEM
+        # pair the native and quantized captures by batch index, so two
+        # independent preparations of `sort="shuffle"` would pair unrelated
+        # sequences (#4869). Every calibrated processor replays this list, and
+        # a rotation run keeps the batches it already prepared (#4935).
+        if prepared_dataset is None:
+            prepared_dataset = prepare_calibration_dataset_once(calibration_config)
+        if (
+            prepared_adapter_dataset is None
+            and adapter_dataset is not None
+            and ProcessorStep.EORA in run_plan.processors
+        ):
+            prepared_adapter_dataset = prepare_calibration_dataset_once(
+                calibration_config.bind(self.prepare_dataset, dataset=adapter_dataset)
+            )
+        calibration_config = calibration.bind(
+            _already_prepared_calibration_dataset,
+            dataset=prepared_dataset,
+            adapter_dataset=None,
+            batch_size=run_plan.batch_size,
+        )
         args = {
             "tokenizer": self.tokenizer,
             "qcfg": self.quantize_config,
@@ -3175,12 +3858,16 @@ class BaseQModel(nn.Module):
                         )
                     )
                 elif step is ProcessorStep.EORA:
-                    # EoRA prepares its samples with the same policy; its rows are
-                    # not quantizer statistics, so the attention-sink row policy
-                    # does not apply to them.
+                    # EoRA replays the same prepared batches (or its own prepared
+                    # adapter samples). Its rows are not quantizer statistics, so
+                    # the attention-sink row policy does not apply to them.
                     eora_calibration = calibration_config.bind(
-                        prepare_dataset,
-                        dataset=adapter_dataset if adapter_dataset is not None else dataset,
+                        _already_prepared_calibration_dataset,
+                        dataset=(
+                            prepared_adapter_dataset
+                            if prepared_adapter_dataset is not None
+                            else prepared_dataset
+                        ),
                         exclude_attention_sinks=False,
                     )
                     processors.append(factory(
@@ -3191,9 +3878,6 @@ class BaseQModel(nn.Module):
                 elif step is ProcessorStep.EXL3:
                     exl3_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
                     processors.append(factory(**exl3_args, lm_head_name=self.lm_head))
-                elif step is ProcessorStep.FP8_GSQ:
-                    fp8_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
-                    processors.append(factory(**fp8_args))
                 elif step is ProcessorStep.QQQ:
                     processors.append(factory(**args, backend=run_plan.loop_backend))
                 elif step is ProcessorStep.MACAQ:
@@ -3339,6 +4023,8 @@ class BaseQModel(nn.Module):
         if self.quantized:
             raise EnvironmentError("eora_generate() is called a model that is already quantized")
 
+        calibration = _materialized_calibration_config(calibration)
+
         # Use the provided tokenizer if one is passed to quantize()
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
@@ -3379,7 +4065,10 @@ class BaseQModel(nn.Module):
             self.quantize_config.auto_dtype_cast = AutoDtypeCast.OFF
 
         # init processor with EoRA processor
-        calibration_config = calibration.bind(self.prepare_dataset)
+        calibration_config = calibration.bind(
+            self.prepare_dataset,
+            batch_size=self._calibration_batch_size(calibration),
+        )
         processors = []
         try:
             if getattr(self.quantize_config, "preprocessors", None):
@@ -3454,6 +4143,13 @@ class BaseQModel(nn.Module):
                     value = value.unsqueeze(0)
 
                 example[key] = move_to(value, device=data_device)
+
+        if getattr(self, "calibration_inputs", None) == "tensor_kwargs":
+            # These rows are the user's own tensors; a bf16 model fed fp32 rows
+            # fails inside the first matmul, far from the mistake.
+            example = _cast_floating_inputs(
+                example, _module_weight_dtype(getattr(self, "model", None))
+            )
 
         return self.finalize_input_capture_example(example)
 
@@ -3587,7 +4283,12 @@ class BaseQModel(nn.Module):
         slower than eager (#4669). Kernels declare the answer with
         ``BaseQuantLinear.SUPPORTS_COMPILE``, which defaults to False and
         requires both a ``fullgraph=True`` trace with no graph breaks and a
-        measured win on the hardware it claims (#4739).
+        measured win on the hardware it claims (#4739). A kernel that declares
+        a compile-capable ``SUPPORTS_COMPILE_LEVEL`` (``>= INDUCTOR``) yet
+        keeps the policy off has to record the measured loss in
+        ``SUPPORTS_COMPILE_EAGER_REASON``; otherwise the two declarations drift
+        apart and a trace-clean kernel stays 2-9x slower than it could be
+        (#4984).
 
         A model with no quantized linear (dense) has nothing that breaks the
         graph, so it keeps whatever compile policy the caller chose.
@@ -3611,7 +4312,7 @@ class BaseQModel(nn.Module):
         )
         if not modules:
             return True
-        return all(getattr(module, "SUPPORTS_COMPILE", False) for module in modules.values())
+        return all(supports_compiled_generation(module) for module in modules.values())
 
     def _generation_compile_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """Return the generation kwargs to pass, with the compile policy applied.
@@ -3657,12 +4358,21 @@ class BaseQModel(nn.Module):
         # construction. Inference tensors cannot receive a version counter, so
         # ``torch.inference_mode`` fails before model math on the TT PJRT path.
         # no_grad keeps autograd disabled without changing tensor semantics.
+        #
+        # The same constraint applies to an Accelerate CPU-offload hook: its
+        # per-forward ``Module._apply`` materializes parameters and buffers, and
+        # under ``torch.inference_mode`` those become inference tensors without
+        # a version counter. Dynamo reads version counters when it traces the
+        # forward that ``optimize()`` compiled, so the first compiled
+        # ``generate()`` crashed with "Inference tensors do not track version
+        # counter" (#5099). ``no_grad`` disables autograd without changing the
+        # moved tensors' semantics, so the offloaded layer keeps its counter.
+        # Models without an offload hook keep inference_mode.
         model_device = getattr(self.model, "device", torch.device("cpu"))
-        generate_context = (
-            torch.no_grad()
-            if getattr(model_device, "type", None) == "xla"
-            else torch.inference_mode()
-        )
+        if getattr(model_device, "type", None) == "xla" or has_cpu_offload_hooks(self.model):
+            generate_context = torch.no_grad()
+        else:
+            generate_context = torch.inference_mode()
         with generate_context:
             # fix hf generate not applying correct pad token
             pad_token_id = kwargs.get("pad_token_id", None)
@@ -3859,6 +4569,7 @@ class BaseQModel(nn.Module):
                     target_model=self.model,
                     target_submodule=module,
                     recurse=False,
+                    module_path=module_name,
                 )
             if not checkpoint_tensors:
                 checkpoint_tensors = dict(module.state_dict(keep_vars=True))
@@ -3881,7 +4592,9 @@ class BaseQModel(nn.Module):
                 target_dtype=decoder_cfg.target_dtype,
                 module_name=module_name,
             )
-            self._replace_live_submodule(module, decoded_module)
+            self._replace_live_submodule(
+                module, decoded_module, module_path=module_name
+            )
             decoded_count += 1
 
         return decoded_count
@@ -3910,6 +4623,7 @@ class BaseQModel(nn.Module):
                     target_model=self.model,
                     target_submodule=module,
                     recurse=False,
+                    module_path=module_name,
                 )
             if not checkpoint_tensors:
                 checkpoint_tensors = dict(module.state_dict(keep_vars=True))
@@ -3954,7 +4668,9 @@ class BaseQModel(nn.Module):
                     quant_source=decoded_module,
                     device=target_device,
                 )
-            self._replace_live_submodule(module, forward_module)
+            self._replace_live_submodule(
+                module, forward_module, module_path=module_name
+            )
             decoded_count += 1
 
         return decoded_count
@@ -3978,6 +4694,7 @@ class BaseQModel(nn.Module):
                     target_model=self.model,
                     target_submodule=module,
                     recurse=False,
+                    module_path=module_name,
                 )
             if not checkpoint_tensors:
                 checkpoint_tensors = dict(module.state_dict(keep_vars=True))
@@ -4043,6 +4760,11 @@ class BaseQModel(nn.Module):
         ``generate`` calls the original module's own ``forward`` (#4669). The
         first ``generate()`` after this call pays the compile cost, and a
         graph-breaking kernel runs slower compiled than eager.
+
+        Compiled calls do not pin the model: dynamo's per-frame trace cycles are
+        collected as soon as a call traces a new frame, so dropping the model
+        frees its weights and VRAM immediately instead of waiting for a
+        user-issued ``gc.collect()`` (#4937, #5020).
         """
 
         if not self.quantized:
@@ -4063,6 +4785,31 @@ class BaseQModel(nn.Module):
             self.model,
             layers=[BaseQuantLinear, ExllamaV3TorchLinear],
         )
+        # The CPU int4pack kernels only build their runtime layout in an eager
+        # forward, so compiling before the first forward traced the dense
+        # fallback and kept dequantizing every weight on every token (#5515).
+        # Install the layout for every eval-mode CPU module first; a kernel
+        # that cannot use the fused layout is left to its own forward.
+        model_dtype = getattr(self.model, "dtype", None)
+        if not isinstance(model_dtype, torch.dtype):
+            # ``nn.Module`` has no ``dtype``; a quantized model still carries
+            # the model dtype on its unquantized parameters (norms, embeddings).
+            model_dtype = next((param.dtype for param in self.model.parameters()), None)
+        if isinstance(model_dtype, torch.dtype):
+            for module in modules.values():
+                if (
+                    getattr(module, "linear_mode", "unsupported") is not None
+                    and not callable(
+                        getattr(module, "_prepare_cpu_inference_layout", None)
+                    )
+                ):
+                    continue
+                try:
+                    ensure_cpu_inference_layout(module, model_dtype)
+                except Exception:
+                    log.debug(
+                        "CPU int4pack warm-up skipped for `%s`", type(module).__name__, exc_info=True
+                    )
         for name in modules.keys():
             modules[name].optimize(fullgraph=False, backend=backend, mode=mode)
 
@@ -4094,10 +4841,15 @@ class BaseQModel(nn.Module):
             # call so the class method is used again (no instance attribute,
             # no cycle).
             model.__dict__.pop("forward", None)
+            self.compiled = False
         else:
             model.forward = _CompiledModelForward(
                 compiled_forward, unbound_forward, model
             )
+            # Inductor compiles on the first call, so "compiled" means the
+            # instance attribute is the compiled proxy, which is what the
+            # `compiled` flag has always documented.
+            self.compiled = True
         self.model = model
 
         #trigger kernel compilation hooks
@@ -4135,6 +4887,19 @@ class BaseQModel(nn.Module):
         pass
 
     def after_model_load(self, model, load_quantized_model):
+        return model
+
+    @classmethod
+    def after_make_quant(cls, model):
+        """Reattach runtime modules that the quantized shell did not replace.
+
+        A quantized load replaces only the leaves declared by ``module_tree``.
+        Definitions whose runtime model shares those leaves with another branch
+        (for example a weight-tied encoder/decoder stack) restore the aliases
+        here: the checkpoint load and its unmaterialized-parameter guard run
+        before ``after_model_load`` (#5514).
+        """
+
         return model
 
     def release_device(self) -> bool:
@@ -4752,21 +5517,33 @@ class BaseQModel(nn.Module):
                 devices = list(filtered)
         return as_torch_device(devices[0] if devices else base_device)
 
-    def pre_quantize(self, module: nn.Module) -> nn.Module:
+    def pre_quantize(
+        self,
+        module: nn.Module,
+        module_path: Optional[str] = None,
+    ) -> nn.Module:
         if get_device(module) == META or _module_has_meta_tensors(module):
             device = self._pre_quantize_device()
-            if self._materialize_floatx_layer_shell(module, device):
+            if self._materialize_floatx_layer_shell(
+                module, device, module_path=module_path
+            ):
                 return module
             return self.shell_module_materialize(
                 target_submodule=module,
                 device=device,
+                module_path=module_path,
             )
         elif get_device(module) == CPU and self.quantize_config.device != CPU:
             return move_to(module, device=self._pre_quantize_device())
         else:
             return module
 
-    def _materialize_floatx_layer_shell(self, module: nn.Module, device: torch.device) -> bool:
+    def _materialize_floatx_layer_shell(
+        self,
+        module: nn.Module,
+        device: torch.device,
+        module_path: Optional[str] = None,
+    ) -> bool:
         """Materialize one lazy layer without copying packed floatx storage into dense shells.
 
         Layer staging happens before its quantizable children have ``NamedModule``
@@ -4784,20 +5561,33 @@ class BaseQModel(nn.Module):
         device = as_torch_device(device)
 
         decoded_any = False
+        # Resolve the layer path once, then derive every child path from its
+        # ``named_modules()`` walk.  Looking each child up in the whole model
+        # made floatx shell materialization grow with layer depth.
+        layer_path = _resolve_qualified_name(self.model, module, module_path)
+        module_paths: Dict[int, str] = {}
+        for relative_name, candidate in module.named_modules():
+            full_name = (
+                f"{layer_path}.{relative_name}" if relative_name else layer_path
+            )
+            module_paths.setdefault(id(candidate), full_name)
         # Traverse leaves first, because replacement invalidates the old
         # submodule's qualified path in the live model tree.
         for submodule in reversed(list(module.modules())):
             if submodule is module or not hasattr(submodule, "weight"):
                 continue
+            module_name = module_paths.get(id(submodule))
+            if module_name is None:
+                module_name = _get_qualified_name(self.model, submodule)
             checkpoint_tensors = self.turtle_model.checkpoint_tensors_for_submodule(
                 target_model=self.model,
                 target_submodule=submodule,
                 recurse=False,
+                module_path=module_name,
             )
             weight = checkpoint_tensors.get("weight")
             if not isinstance(weight, torch.Tensor):
                 continue
-            module_name = _get_qualified_name(self.model, submodule)
             if self._decoder_weight_format(
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
@@ -4810,7 +5600,10 @@ class BaseQModel(nn.Module):
                 target_dtype=decoder_cfg.target_dtype,
                 module_name=module_name,
             )
-            self._replace_live_submodule(submodule, decoded)
+            self._replace_live_submodule(
+                submodule, decoded, module_path=module_name
+            )
+            module_paths[id(decoded)] = module_name
             decoded_any = True
 
         if not decoded_any:
@@ -4819,7 +5612,11 @@ class BaseQModel(nn.Module):
         # Materialize normal direct tensors (norm weights, etc.) after every
         # packed leaf has been replaced by a shape-compatible dense shell.
         for submodule in module.modules():
-            self.shell_direct_meta_materialize(target_submodule=submodule, device=device)
+            self.shell_direct_meta_materialize(
+                target_submodule=submodule,
+                device=device,
+                module_path=module_paths.get(id(submodule)),
+            )
         move_to(module, device=device)
         return True
 
@@ -4892,10 +5689,17 @@ class BaseQModel(nn.Module):
         self,
         current_submodule: nn.Module,
         replacement: nn.Module,
+        module_path: Optional[str] = None,
     ) -> nn.Module:
-        """Replace one live model submodule in place and return the replacement."""
+        """Replace one live model submodule in place and return the replacement.
 
-        module_path = _get_qualified_name(self.model, current_submodule)
+        ``module_path`` lets callers that already hold the dotted name skip the
+        full-tree scan in ``_get_qualified_name``.
+        """
+
+        module_path = _resolve_qualified_name(
+            self.model, current_submodule, module_path
+        )
         parent, leaf = _get_parent_and_leaf_by_path(self.model, module_path)
         setattr(parent, leaf, replacement)
         return replacement
@@ -4947,7 +5751,9 @@ class BaseQModel(nn.Module):
         replacement = cast_source_module(module, spec)
         named_module.state["auto_dtype_cast_source_spec"] = spec
         named_module.state["auto_dtype_cast_was_applied"] = True
-        replacement = self._replace_live_submodule(module, replacement)
+        replacement = self._replace_live_submodule(
+            module, replacement, module_path=named_module.full_name
+        )
         source_bias = getattr(module, "bias", None)
         source_bytes = module.weight.numel() * module.weight.element_size()
         if isinstance(source_bias, torch.Tensor):
@@ -5409,6 +6215,34 @@ class BaseQModel(nn.Module):
             f"and scale shape={tuple(scale.shape)}."
         )
 
+    def _fp8_compact_block_size(
+        self,
+        *,
+        weight: torch.Tensor,
+        scale: Optional[torch.Tensor],
+    ) -> Optional[tuple[int, int]]:
+        """Return the checkpoint block size when ``scale`` is its compact grid.
+
+        Some FP8 checkpoints use ceil blocking, so the scale grid is
+        ``ceil(N / br) x ceil(K / bc)``. That compact grid is exactly the
+        per-block layout ``TorchFP8Linear`` stores, so the loader must keep it
+        instead of expanding it to ``N x K`` (an FP32 tensor four times the
+        size of the FP8 weight) for the module's lifetime (#5593).
+        """
+
+        if not isinstance(scale, torch.Tensor) or scale.ndim != 2 or weight.ndim != 2:
+            return None
+        block_size = self._decoder_block_size()
+        if block_size is None:
+            return None
+        block_rows, block_cols = block_size
+        rows, cols = weight.shape
+        compact = (
+            (rows + block_rows - 1) // block_rows,
+            (cols + block_cols - 1) // block_cols,
+        )
+        return block_size if tuple(scale.shape) == compact else None
+
     def _build_fp8_forward_module(
         self,
         *,
@@ -5429,22 +6263,34 @@ class BaseQModel(nn.Module):
         if not isinstance(weight, torch.Tensor):
             return None
 
-        scale_inv = self._decoder_scale_tensor(
-            scale_tensor=checkpoint_tensors.get("weight_scale_inv"),
-            result_shape=tuple(weight.shape),
-        )
-        if isinstance(scale_inv, torch.Tensor):
+        raw_scale_inv = checkpoint_tensors.get("weight_scale_inv")
+        # A compact ceil-blocked grid is already the wrapper's per-block layout;
+        # expanding it to N x K would keep an FP32 scale four times the size of
+        # the FP8 weight for the module's lifetime (#5593).
+        compact_block_size = self._fp8_compact_block_size(weight=weight, scale=raw_scale_inv)
+        if isinstance(raw_scale_inv, torch.Tensor):
             scale_semantics = self._decoder_fp8_scale_semantics()
+            if compact_block_size is not None:
+                scale_inv = raw_scale_inv
+            else:
+                scale_inv = self._decoder_scale_tensor(
+                    scale_tensor=raw_scale_inv,
+                    result_shape=tuple(weight.shape),
+                )
         else:
             # ModelOpt-style FP8 checkpoints store direct scales instead of inverse scales;
             # normalize them here so TorchFP8Linear can use one consistent metadata form.
             direct_scale = checkpoint_tensors.get("weight_scale")
             if not isinstance(direct_scale, torch.Tensor):
                 direct_scale = checkpoint_tensors.get("scale")
-            scale = self._decoder_scale_tensor(
-                scale_tensor=direct_scale,
-                result_shape=tuple(weight.shape),
-            )
+            compact_block_size = self._fp8_compact_block_size(weight=weight, scale=direct_scale)
+            if compact_block_size is not None:
+                scale = direct_scale
+            else:
+                scale = self._decoder_scale_tensor(
+                    scale_tensor=direct_scale,
+                    result_shape=tuple(weight.shape),
+                )
             if not isinstance(scale, torch.Tensor):
                 return None
             scale = scale.to(torch.float32)
@@ -5461,11 +6307,16 @@ class BaseQModel(nn.Module):
         format_name = str(weight.dtype).split(".")[-1]
         try:
             # Infer the wrapper layout from the normalized inverse-scale tensor so native
-            # FP8 execution works for either checkpoint convention.
-            weight_scale_method, weight_block_size = self._infer_fp8_forward_layout(
-                weight=weight,
-                scale_inv=scale_inv,
-            )
+            # FP8 execution works for either checkpoint convention. A compact
+            # ceil-blocked grid keeps the checkpoint block size, which its shape
+            # alone cannot express.
+            if compact_block_size is not None:
+                weight_scale_method, weight_block_size = "block", compact_block_size
+            else:
+                weight_scale_method, weight_block_size = self._infer_fp8_forward_layout(
+                    weight=weight,
+                    scale_inv=scale_inv,
+                )
             forward_module = TorchFP8Linear(
                 bits=8,
                 group_size=-1,
@@ -5626,6 +6477,7 @@ class BaseQModel(nn.Module):
             target_model=self.model,
             target_submodule=target_submodule,
             recurse=False,
+            module_path=named_module.full_name,
         )
         weight = checkpoint_tensors.get("weight")
         if not isinstance(weight, torch.Tensor):
@@ -5662,7 +6514,11 @@ class BaseQModel(nn.Module):
                 target_dtype=target_dtype,
             )
             if fp8_module is not None:
-                replacement = self._replace_live_submodule(target_submodule, fp8_module)
+                replacement = self._replace_live_submodule(
+                    target_submodule,
+                    fp8_module,
+                    module_path=named_module.full_name,
+                )
                 forward_mode = "native"
                 reason = "validated_native_fp8"
             else:
@@ -5675,7 +6531,11 @@ class BaseQModel(nn.Module):
                 target_dtype=target_dtype,
             )
             if fp4_module is not None:
-                replacement = self._replace_live_submodule(target_submodule, fp4_module)
+                replacement = self._replace_live_submodule(
+                    target_submodule,
+                    fp4_module,
+                    module_path=named_module.full_name,
+                )
                 forward_mode = "native"
                 reason = "validated_native_nvfp4"
             else:
@@ -5696,7 +6556,11 @@ class BaseQModel(nn.Module):
                 quant_source=quant_source,
                 device=device,
             )
-            replacement = self._replace_live_submodule(target_submodule, decoded_forward)
+            replacement = self._replace_live_submodule(
+                target_submodule,
+                decoded_forward,
+                module_path=named_module.full_name,
+            )
 
         if forward_mode == "native":
             log.info(
@@ -5809,6 +6673,17 @@ class BaseQModel(nn.Module):
                 if stripped in input_feat:
                     return stripped
             return strip_non_quantize_flags(names[0]) if names else None
+
+        def _feature_numel(name):
+            """Number of captured activation elements for ``name`` (0 if absent).
+
+            A declared MoE root is seeded as a capture task even on a layer that
+            never runs an expert (ERNIE-4.5-MoE's dense prefix), so the key
+            exists with an empty tensor. Treat "key present" and "captured
+            something" as different questions (#4903).
+            """
+            feature = input_feat.get(name) if name else None
+            return int(feature.numel()) if feature is not None else 0
 
         def _try_update_last_module(candidate_name: str) -> bool:
             nonlocal last_module, last_module_name, last_module_root
@@ -6230,9 +7105,15 @@ class BaseQModel(nn.Module):
                     moe_gate_up_root = (
                         _block_moe_root(block) if has_gate_up_roles and is_moe_family else None
                     )
-                    if moe_gate_up_root is not None and moe_gate_up_root in input_feat:
+                    # A seeded-but-uncaptured root is not a usable search input:
+                    # the dense prefix of a hybrid MoE (`mlp:moe` with a dense
+                    # `mlp` block) seeds `mlp` but never runs the root hook, and
+                    # preferring that empty tensor dropped the dense layer's
+                    # norm -> gate/up group (#4903). Fall through to the block's
+                    # own captured feature in that case; a routed-expert block
+                    # keeps the fail-closed path below.
+                    if moe_gate_up_root is not None and _feature_numel(moe_gate_up_root) > 0:
                         feature_name = moe_gate_up_root
-                        inp = input_feat[moe_gate_up_root]
                     # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
                     elif is_moe_gate_up_block and module2inspect is not None:
                         if last_module_root not in input_feat:
@@ -6242,10 +7123,9 @@ class BaseQModel(nn.Module):
                                 len(block),
                             )
                         feature_name = last_module_root if last_module_root in input_feat else _select_feature_name(block)
-                        inp = input_feat.get(last_module_root, input_feat.get(_select_feature_name(block)))
                     else:
                         feature_name = _select_feature_name(block)
-                        inp = input_feat.get(feature_name)
+                    inp = input_feat.get(feature_name)
 
                     if inp is None:
                         pending_nonquant.clear()
@@ -6256,13 +7136,24 @@ class BaseQModel(nn.Module):
                         # never ran. A zero-width "source" also makes every
                         # consumer look width-foreign below, which used to drop
                         # the routed-expert gate/up group without a trace
-                        # (#4697). Warn before skipping it.
+                        # (#4697). Warn before skipping it, and warn for a
+                        # non-expert gate/up block too: the dense prefix of a
+                        # hybrid MoE used to lose its own group the same silent
+                        # way (#4903).
                         if is_moe_gate_up_block:
                             log.warning(
                                 "awq_get_modules_for_scaling: declared MoE root `%s` captured no "
                                 "activations; skipping the routed-expert gate/up scaling group "
                                 "and leaving those projections on plain quantization",
                                 last_module_root,
+                            )
+                        elif has_gate_up_roles:
+                            log.warning(
+                                "awq_get_modules_for_scaling: feature `%s` captured no activations; "
+                                "skipping the gate/up scaling group for `%s` and leaving those "
+                                "projections on plain quantization",
+                                feature_name,
+                                block[0] if block else "<empty block>",
                             )
                         pending_nonquant.clear()
                         skip_block = True
@@ -6599,6 +7490,8 @@ class BaseQModel(nn.Module):
             module_path: Optional[str] = None,
     ) -> torch.nn.Module:
         device = as_torch_device(device)
+        if module_path is None and named_module is not None:
+            module_path = named_module.full_name
         with self._turtle_lock:
             if role == "forward" and named_module is not None and named_module.state.get("auto_dtype_cast_source_spec") is not None:
                 return target_submodule
@@ -6625,6 +7518,7 @@ class BaseQModel(nn.Module):
                             target_model=self.model,
                             target_submodule=quant_source_template,
                             recurse=False,
+                            module_path=module_path,
                         )
                     quant_source = self._build_decoder_quant_source_module(
                         quant_source_template,
@@ -6642,7 +7536,11 @@ class BaseQModel(nn.Module):
                         source_format=(decoder_plan.get("runtime_plan") or {}).get("source_format", "auto"),
                     )
 
-                module = self._replace_live_submodule(target_submodule, quant_source)
+                module = self._replace_live_submodule(
+                    target_submodule,
+                    quant_source,
+                    module_path=module_path,
+                )
                 if source_spec is not None:
                     from ..utils.auto_dtype_cast import release_packed_source_storage
 
@@ -6663,6 +7561,7 @@ class BaseQModel(nn.Module):
                     target_model=self.model,
                     target_submodule=target_submodule,
                     recurse=False,
+                    module_path=module_path,
                 )
                 weight = checkpoint_tensors.get("weight")
                 if isinstance(weight, torch.Tensor):
@@ -6710,6 +7609,7 @@ class BaseQModel(nn.Module):
             self,
             target_submodule: torch.nn.Module,
             device: Optional[torch.device] = None,
+            module_path: Optional[str] = None,
     ):
         if device is not None:
             device = as_torch_device(device)
@@ -6721,6 +7621,7 @@ class BaseQModel(nn.Module):
                 turtle_model=self.turtle_model,
                 target_submodule=target_submodule,
                 device=device,
+                module_path=module_path,
             )
 
     ## overrides nn.module.train()
@@ -6994,16 +7895,55 @@ class BaseQModel(nn.Module):
         return blocks
 
     @classmethod
+    def _module_tree_prefix_paths(cls) -> List[tuple[str, ...]]:
+        """Return every module-tree prefix path before the layer container."""
+
+        all_prefix_paths: List[tuple[str, ...]] = []
+        for tree in cls._iter_module_tree_variants(_module_tree_for_class(cls)):
+            try:
+                sharp_idx = tree.index("#")
+            except ValueError:
+                raise ValueError("module_tree must contain '#' to separate hierarchy")
+
+            assert sharp_idx > 0, "failed to get_base_modules"
+            for path in cls._expand_module_tree_prefixes(tree):
+                prefix = tuple(path.split("."))
+                if prefix not in all_prefix_paths:
+                    all_prefix_paths.append(prefix)
+        return all_prefix_paths
+
+    @classmethod
     def get_modules_with_direct_meta_tensors(cls, model: nn.Module):
         """
         Return module paths whose direct params/buffers are materialized outside
         normal layer/base-module traversal.
         """
         out = []
+        seen = set()
         module_names = cls.modules_with_direct_meta_tensors or cls.direct_meta_modules or []
         for module_name in module_names:
             module = get_module(model, module_name)
-            if isinstance(module, nn.Module):
+            if isinstance(module, nn.Module) and module_name not in seen:
+                seen.add(module_name)
+                out.append(module_name)
+
+        # A decoder root (or another module-tree prefix node) can own a bare
+        # parameter/buffer that is not a child module, e.g. Hymba's
+        # `model.memory_tokens`. Nothing in the base-module or layer traversal
+        # materializes it, so a lazy shell leaves it on `meta` and the capture
+        # forward fails. Detect those owners generically instead of requiring
+        # every affected definition to declare them (#4888).
+        for parts in cls._module_tree_prefix_paths():
+            for depth in range(1, len(parts) + 1):
+                module_name = ".".join(parts[:depth])
+                if module_name in seen:
+                    continue
+                module = get_module(model, module_name)
+                if not isinstance(module, nn.Module):
+                    continue
+                if not _module_owns_direct_meta_tensors(module):
+                    continue
+                seen.add(module_name)
                 out.append(module_name)
         return out
 
@@ -7016,19 +7956,7 @@ class BaseQModel(nn.Module):
         """
         Return list of base modules directly under the root path but not the layer container.
         """
-        all_prefix_paths = []
-        for tree in cls._iter_module_tree_variants(_module_tree_for_class(cls)):
-            try:
-                sharp_idx = tree.index("#")
-            except ValueError:
-                raise ValueError("module_tree must contain '#' to separate hierarchy")
-
-            assert sharp_idx > 0, "failed to get_base_modules"
-            for path in cls._expand_module_tree_prefixes(tree):
-                prefix = tuple(path.split("."))
-                if prefix not in all_prefix_paths:
-                    all_prefix_paths.append(prefix)
-
+        all_prefix_paths = cls._module_tree_prefix_paths()
         if not all_prefix_paths:
             return []
 

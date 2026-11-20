@@ -9,12 +9,11 @@ description: Add and validate module-plan unit tests and fusion eligibility when
 
 ## At a glance
 
-- **What:** every model type and alias has a registry plan case, a model-specific module-plan test, and a fusion-eligibility entry.
-- **Why:** `module_tree` is the oracle for which checkpoint weights exist and how each is quantized. A wrong tree silently skips, misgroups, or drops weights.
-- **When:** adding to `MODEL_MAP`, changing a definition's paths, tags, variants, or method overrides, or changing a module-plan consumer.
-- **Where:** `gptqmodel/models/definitions/`, `gptqmodel/models/module_plan.py`, `tests/module_tree/` (fixtures `registered_module_plans.json`, `fusable_models.json`).
-- **How:** build the real model class tiny on CPU or meta, resolve every checkpoint-owned weight through the plan, and run the always-on registry contract.
-- **Also:** every new model or definition change needs `gptqmodel-awq-model-onboarding`.
+Treat the model's `module_tree` as the inventory of checkpoint-owned weights.
+Pin the registry, real model and fusion eligibility for every type and alias.
+For new models and definition changes, also qualify AWQ under the
+[AWQ onboarding skill](../gptqmodel-awq-model-onboarding/SKILL.md); a correct
+inventory does not prove scale sources, consumers or search objectives.
 
 ## Registry and model-specific tests
 
@@ -23,10 +22,6 @@ Every new `MODEL_MAP` entry, including an alias, must add an explicit case to
 module-plan unit test under `tests/module_tree/`. Changes to a definition's
 paths, tags, variants, or method overrides must update its tests in the same PR.
 The always-run registry contract fails for an unlisted model or method case.
-
-A correct weight inventory is necessary but does not qualify AWQ: scale
-sources, consumers, and search objectives are proven separately under
-`gptqmodel-awq-model-onboarding`.
 
 Use `tests/module_tree/test_registered_module_plans.py` for the fast compiler
 and consumer contract. Its inventory pins decoder prefixes and ordered blocks

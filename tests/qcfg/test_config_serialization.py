@@ -48,27 +48,37 @@ CONFIG_CLASSES = (
 )
 
 
+#: Methods whose quantizer reads the MSE shrink grid. Every other config
+#: refuses a non-default ``mse`` at construction (#5583), so the sweep
+#: exercises the dict-to-dataclass normalization with the default value there.
+MSE_APPLIED = (GPTQConfig, QQQConfig, RTNConfig)
+
+
 @pytest.mark.parametrize("config_cls", CONFIG_CLASSES, ids=lambda cls: cls.__name__)
 def test_every_concrete_config_normalizes_serialized_fields(config_cls):
+    mse = 2.4 if config_cls in MSE_APPLIED else {"norm": 0.0}
     config = config_cls(
         auto_dtype_cast="off",
         telemetry={"device": True},
-        mse=2.4,
+        mse=mse,
     )
 
     assert config.auto_dtype_cast is AutoDtypeCast.OFF
     assert isinstance(config.telemetry, TelemetryConfig)
     assert config.telemetry.device is True
     assert isinstance(config.mse, MSEConfig)
-    assert config.mse.norm == 2.4
+    assert config.mse.norm == (2.4 if config_cls in MSE_APPLIED else 0.0)
 
 
 def test_exl3_config_round_trips_serialized_fields():
+    # EXL3 refuses a non-default `mse` at construction (#5583); this still
+    # pins that a dict payload is normalized into the dataclass, which the
+    # #4052 bypass broke.
     config = EXL3Config(
         bits=3,
         auto_dtype_cast="off",
         telemetry=TelemetryConfig(device=True),
-        mse=2.4,
+        mse={"norm": 0.0},
     )
 
     payload = config.to_dict()

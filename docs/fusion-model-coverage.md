@@ -224,6 +224,7 @@ layout alone does not authorize it.
 | `deepseek_v3` | `DeepSeekV3QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `deepseek_v32` | `DeepSeekV32QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `deepseek_v4` | `DeepSeekV4QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `deepseek_v41` | `DeepSeekV41FlashQModel` | The published FP8 and FP4 weights use dedicated projection modules. |
 | `deepseek_vl_v2` | `DeepSeekVLV2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `dream` | `DreamQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `ernie4_5_moe_vl` | `Ernie4_5_VLMoeQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |

@@ -56,8 +56,8 @@ def classify() -> list[dict]:
                 sliding_layers=estimate.sliding_layers,
                 linear_layers=estimate.linear_layers,
                 mtp_layers=estimate.mtp_layers,
-                bytes_per_token=estimate.bytes_per_token,
-                exact=estimate.exact,
+                kv_bytes_per_token=estimate.kv_bytes_per_token,
+                exact=estimate.is_exact,
                 unclassified=list(estimate.unclassified),
             )
         rows.append(row)
@@ -88,7 +88,7 @@ def main() -> int:
             print(
                 f"{row['model_type']:28s} {row['status']:9s} {row['layout']:7s} "
                 f"{row['growing_layers']:6d} {row['sliding_layers']:7d} "
-                f"{row['bytes_per_token'] / 1024:10.1f}"
+                f"{row['kv_bytes_per_token'] / 1024:10.1f}"
             )
         print()
         print("layouts:", dict(sorted(layout_counts.items())))

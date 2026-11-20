@@ -1220,7 +1220,9 @@ def test_lazy_forward_materializes_direct_state_but_not_projection_weights():
     calls = []
 
     class DummyQModel:
-        def shell_direct_meta_materialize(self, *, target_submodule, device):
+        def shell_direct_meta_materialize(
+            self, *, target_submodule, device, module_path=None
+        ):
             calls.append((target_submodule, device))
             target_submodule.scale = torch.nn.Parameter(torch.ones(2, device=device))
 
@@ -1606,7 +1608,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):
@@ -1831,7 +1833,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):
@@ -2110,7 +2112,7 @@ def test_run_layer_stage_publishes_exactly_the_planned_steps(monkeypatch):
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):
@@ -2408,7 +2410,7 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):
@@ -3116,7 +3118,7 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):
@@ -3185,7 +3187,12 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
             return None
 
         def _prepare_layer_direct_state_for_forward(
-            self, module, fallback_device, *, projection_modules=None
+            self,
+            module,
+            fallback_device,
+            *,
+            projection_modules=None,
+            module_path=None,
         ):
             self.direct_state_layers.append(
                 (module, fallback_device, projection_modules)
@@ -3469,7 +3476,7 @@ def test_run_layer_stage_catches_up_packed_layer_with_original_forward_topology(
         def should_quantize_layer(self, *_args):
             return True
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def post_quantize(self, module):
@@ -3667,7 +3674,7 @@ def test_run_layer_stage_skips_boundary_commit_when_finalize_fails(monkeypatch):
             self.quantization_layer_boundary_checkpoint = boundary
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):

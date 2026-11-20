@@ -40,7 +40,6 @@ from ..quantization.config import (
     METHOD,
     BitsAndBytesConfig,
     CalibrationConfig,
-    FP8Config,
     GGUFConfig,
     NF12Config,
     RTNConfig,
@@ -51,7 +50,7 @@ from ..quantization.rtn import RTN
 from ..utils.backend import BACKEND
 from ..utils.importer import select_quant_linear
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, pack_module
+from ..utils.model import create_quant_module, install_quant_module, pack_module
 from ..utils.module_locks import parent_module_lock
 
 
@@ -81,10 +80,10 @@ class WeightOnlyProcessor(LoopProcessor):
     def __init__(
         self,
         tokenizer,
-        qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+        qcfg: RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
         forward: Optional[ForwardConfig] = None,
     ):
-        """Initializes a weight-only processor for RTN, GGUF, FP8, or BitsAndBytes."""
+        """Initializes a weight-only processor for RTN, GGUF, BitsAndBytes, or NF12."""
 
         super().__init__(
             tokenizer=tokenizer,
@@ -101,11 +100,11 @@ class WeightOnlyProcessor(LoopProcessor):
 
     @staticmethod
     def _uses_direct_pack(
-        qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+        qcfg: RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
     ) -> bool:
         """Returns whether the method packs directly from the original dense weights."""
 
-        return qcfg.method in {METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES, METHOD.NF12}
+        return qcfg.method in {METHOD.GGUF, METHOD.BITSANDBYTES, METHOD.NF12}
 
     def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
         """Backfills the logged loss field after late dequant-error measurement."""
@@ -121,7 +120,7 @@ class WeightOnlyProcessor(LoopProcessor):
         module: NamedModule,
         *,
         device: Optional[torch.device] = None,
-    ) -> Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config]:
+    ) -> Optional[RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config]:
         """Clones per-module config, quantizes weights, and logs the result."""
 
         resolved_cfg = get_resolved_module_config(module) or self.qcfg.resolve_module_config(module.full_name)
@@ -175,6 +174,14 @@ class WeightOnlyProcessor(LoopProcessor):
         self.log_new_row(stat)
 
         if not self._uses_direct_pack(qcfg_clone):
+            # The packers recover integer codes from `linear.weight`. When the
+            # replay copy is too narrow to hold them (8-bit asymmetric BF16),
+            # keep the exact FP32 reconstruction for packing (#5721).
+            pack_wq = getattr(task, "pack_weight", None)
+            if pack_wq is not None:
+                del task.pack_weight
+                module.stream_state_payload_to_cpu({"pack_wq": pack_wq})
+                del pack_wq
             module.weight.data = wq
         return qcfg_clone
 
@@ -217,7 +224,7 @@ class WeightOnlyProcessor(LoopProcessor):
         model: BaseQModel,
         *,
         qcfg: Optional[
-            RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config
+            RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config
         ] = None,
         **kwargs,
     ):
@@ -236,11 +243,19 @@ class WeightOnlyProcessor(LoopProcessor):
             assert q_g_idx.device == CPU
 
         layers = {module.full_name: model.model.get_submodule(module.full_name)}
+        # Exact FP32 reconstruction kept by the quantizer when the replay copy
+        # cannot round-trip the packing codes (#5721).
+        pack_wq = module.state.pop("pack_wq", None)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
         original_layer = layers.get(module.full_name)
         timer = getattr(model, "quant_region_timer", None)
 
+        # Build and pack the kernel off-model and publish it only once packing
+        # has returned. Installing the empty kernel first left a projection
+        # without its packed buffers in the tree when a Ctrl-C or an exception
+        # landed in `pack_module`, and every later forward then raised
+        # `AttributeError` (issue #5089).
         create_start = time.perf_counter() if timer is not None else None
         linear_cls = model.qlinear_kernel
         last_error = None
@@ -248,7 +263,7 @@ class WeightOnlyProcessor(LoopProcessor):
             try:
                 with log_time_block("create_quant_module", logger=log, module_name=module_label):
                     with parent_module_lock(parent_key):
-                        create_quant_module(
+                        qmodule = create_quant_module(
                             name=module.full_name,
                             linear_cls=candidate,
                             bits=active_qcfg.runtime_bits,
@@ -265,6 +280,7 @@ class WeightOnlyProcessor(LoopProcessor):
                             register_buffers=False,
                             init_kwargs=active_qcfg.quant_linear_init_kwargs(),
                             resolved_module_config=get_resolved_module_config(module),
+                            install=False,
                         )
             except NotImplementedError as error:
                 # A validated kernel can still refuse the module's concrete
@@ -279,8 +295,10 @@ class WeightOnlyProcessor(LoopProcessor):
             raise ValueError(f"No compatible quant linear was found for module `{module.full_name}`.")
         if timer is not None and create_start is not None:
             timer.record("submodule_finalize_create", time.perf_counter() - create_start, source=module_label)
+        if qmodule is None:
+            # The resolved config excluded this module from quantization.
+            return
 
-        qmodule = model.model.get_submodule(module.full_name)
         qmodules = (
             {module.full_name: qmodule}
             if isinstance(qmodule, (linear_cls, TorchQuantEmbeddings))
@@ -292,39 +310,13 @@ class WeightOnlyProcessor(LoopProcessor):
             with log_time_block("module.pack_original", logger=log, module_name=module_label):
                 with parent_module_lock(parent_key):
                     qmodule = qmodules[module.full_name]
-                    calibrated_fp8 = module.state.pop("gsq_fp8_result", None)
-                    if calibrated_fp8 is not None:
-                        if active_qcfg.method != METHOD.FP8:
-                            raise ValueError("Calibrated FP8 payload requires an FP8 module")
-                        qmodule.pack_calibrated(original_layer, calibrated_fp8["weight"], calibrated_fp8["scale_inv"])
-                    else:
-                        qmodule.pack_original(
-                            linear=original_layer,
-                            scales=None,
-                            zeros=None,
-                            g_idx=None,
-                            smooth=active_qcfg.smooth,
-                        )
-                    if active_qcfg.method == METHOD.FP8 and calibrated_fp8 is None:
-                        from ..quantization.gsq_fp8 import refine_fp8_weight
-                        from ..quantization.gsq_scalar import gsq_enabled_for
-
-                        if gsq_enabled_for(active_qcfg.gsq, module.full_name):
-                            teacher = qmodule._weight_to_matrix(original_layer).detach().to(
-                                device=qmodule.weight.device, dtype=torch.float32)
-                            refined = refine_fp8_weight(
-                                qmodule.weight, qmodule.weight_scale_inv, target=teacher,
-                                config=active_qcfg.gsq, method=qmodule.weight_scale_method,
-                                block_size=qmodule.weight_block_size)
-                            if (refined["weight"].shape != qmodule.weight.shape
-                                    or refined["weight"].dtype != qmodule.weight.dtype
-                                    or refined["scale_inv"].shape != qmodule.weight_scale_inv.shape):
-                                raise ValueError("FP8 GSQ export does not match the packed storage geometry")
-                            with torch.no_grad():
-                                qmodule.weight.copy_(refined["weight"])
-                                qmodule.weight_scale_inv.copy_(refined["scale_inv"])
-                            module.state["gsq_diagnostics"] = {
-                                key: refined[key] for key in ("before", "after", "history")}
+                    qmodule.pack_original(
+                        linear=original_layer,
+                        scales=None,
+                        zeros=None,
+                        g_idx=None,
+                        smooth=active_qcfg.smooth,
+                    )
             if timer is not None and pack_start is not None:
                 timer.record(
                     "submodule_finalize_pack",
@@ -332,24 +324,29 @@ class WeightOnlyProcessor(LoopProcessor):
                     source=f"{module_label} [module.pack_original]",
                 )
 
-            reference_weight = module.state.pop("fp8_reference_weight", None)
-            if reference_weight is None:
-                reference_weight = qmodule._weight_to_matrix(original_layer).detach()
+            reference_weight = qmodule._weight_to_matrix(original_layer).detach()
             dequant_weight = qmodule.dequantize_weight()
-            # BNB and NF12 expose native [out, in] weights; FP8/GGUF expose
+            # BNB and NF12 expose native [out, in] weights; GGUF exposes
             # [in, out].
-            if active_qcfg.method in (METHOD.FP8, METHOD.GGUF):
+            if active_qcfg.method == METHOD.GGUF:
                 dequant_weight = dequant_weight.T
             mean_abs_err = _mean_abs_error(reference_weight, dequant_weight)
             self._update_logged_loss(module, f"{active_qcfg.method.value}: {mean_abs_err:.7f}")
             module.state.pop("tp_pad_info", None)
             module.state.pop("quant_source_module", None)
+            with parent_module_lock(parent_key):
+                install_quant_module(model.model, module.full_name, qmodule)
+            # Drop the float weight only after the tree no longer references it.
             module.unregister_parameter("weight")
             return
 
         pack_start = time.perf_counter() if timer is not None else None
         with log_time_block("pack", logger=log, module_name=module_label):
             with parent_module_lock(parent_key):
+                if pack_wq is not None:
+                    # Pack from the exact reconstruction, not the narrowed
+                    # replay copy, so the stored codes match the quantizer's.
+                    layers[module.full_name].weight.data = pack_wq
                 packer_label = pack_module(
                     name=module.full_name,
                     qModules=qmodules,
@@ -372,6 +369,9 @@ class WeightOnlyProcessor(LoopProcessor):
         del q_scales, q_zeros, q_g_idx
         module.state.pop("tp_pad_info", None)
         module.state.pop("quant_source_module", None)
+        with parent_module_lock(parent_key):
+            install_quant_module(model.model, module.full_name, qmodule)
+        # Drop the float weight only after the tree no longer references it.
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
@@ -385,8 +385,6 @@ class WeightOnlyProcessor(LoopProcessor):
 
         if self.qcfg.method == METHOD.GGUF:
             return "weight_only_gguf"
-        if self.qcfg.method == METHOD.FP8:
-            return "weight_only_fp8"
         if self.qcfg.method == METHOD.BITSANDBYTES:
             return "weight_only_bitsandbytes"
         if self.qcfg.method == METHOD.NF12:

@@ -37,6 +37,7 @@ from ..quantization.config import (
 from .backend import BACKEND, backend_for_activation, normalize_backend
 from .hf import get_hf_config_dtype
 from .logger import setup_logger
+from .torch import defuser_conversion_scope
 
 
 log = setup_logger()
@@ -46,6 +47,9 @@ __all__ = [
     "hf_gptqmodel_post_init_for_load",
     "hf_gptqmodel_prepare_model_for_load",
     "hf_gptqmodel_repair_awq_load",
+    "hf_gptqmodel_reselect_context",
+    "hf_gptqmodel_reselect_offloaded_kernels",
+    "hf_gptqmodel_awq_tolerated_mismatch",
     "is_native_gptqmodel_checkpoint",
 ]
 
@@ -58,7 +62,14 @@ class HFGPTQModelLoadContext:
     """State shared between the pre- and post-weight-load hooks."""
 
     quantize_config: QuantizeConfig
-    quant_linear: Type[BaseQuantLinear]
+    # Only the native path installs modules, so the minimal context built for
+    # third-party checkpoints (see `hf_gptqmodel_reselect_context`) has none.
+    quant_linear: Optional[Type[BaseQuantLinear]] = None
+    # Needed to rebuild modules once Transformers resolves `device_map="auto"`
+    # from `max_memory`; see `hf_gptqmodel_reselect_offloaded_kernels` (#5194).
+    backend: Optional[BACKEND] = None
+    dtype: Optional[torch.dtype] = None
+    lm_head_name: Optional[str] = None
 
 
 def _checkpoint_files(checkpoint_files) -> List[str]:
@@ -161,6 +172,261 @@ def _is_native_gptqmodel_config(qcfg: QuantizeConfig) -> bool:
         "gptqmodel" in uri
         or bool(qcfg.dynamic)
         or resolve_quant_format(qcfg.format, qcfg.method) == FORMAT.GPTQ_V2
+    )
+
+
+def _hf_quantization_config_dict(model: nn.Module) -> Optional[Dict[str, Any]]:
+    """Return the HF ``quantization_config`` as a plain dict, if present."""
+
+    raw = getattr(getattr(model, "config", None), "quantization_config", None)
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return dict(raw)
+    to_dict = getattr(raw, "to_dict", None)
+    if not callable(to_dict):
+        return None
+    try:
+        payload = to_dict()
+    except Exception:
+        return None
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def _hf_quantization_config_is_native_awq(model: nn.Module) -> bool:
+    """Whether the live HF quantize config describes a native GPT-QModel AWQ checkpoint.
+
+    Reads the same provenance the load bridge uses (``quantize_config.json``
+    through Transformers' ``quantization_config``): an explicit
+    ``gptqmodel`` quantizer entry, GPT-QModel's ``meta.uri``, or non-empty
+    ``dynamic`` per-module overrides. ``dynamic`` is what makes Transformers'
+    global-config module build disagree with the checkpoint tensors.
+    """
+
+    raw = _hf_quantization_config_dict(model)
+    if not raw:
+        return False
+    # ``quantization_config`` round-trips through Transformers' typed config,
+    # whose ``quant_method`` is an enum when the live object is inspected.
+    method = raw.get("quant_method") or ""
+    method = str(getattr(method, "value", method)).strip().lower()
+    if method != "awq":
+        return False
+
+    meta = raw.get("meta")
+    quantizers = meta.get("quantizer") if isinstance(meta, dict) else None
+    if isinstance(quantizers, str):
+        quantizers = [quantizers]
+    if isinstance(quantizers, (list, tuple)):
+        normalized = [str(entry).lower().replace("-", "") for entry in quantizers if entry]
+        if any(entry.startswith("optimum") for entry in normalized):
+            return False
+        if any(entry.startswith("gptqmodel") for entry in normalized):
+            return True
+        if normalized:
+            # An explicit third-party provenance wins: do not reinterpret its
+            # `dynamic` field as GPT-QModel's per-module override syntax.
+            return False
+
+    uri = str((meta or {}).get("uri") or "").lower().replace("-", "") if isinstance(meta, dict) else ""
+    return "gptqmodel" in uri or bool(raw.get("dynamic"))
+
+
+# Buffers a packed AWQ kernel owns. Only these can legitimately disagree with a
+# module built from the global config; a dense tensor whose shape differs is a
+# genuine checkpoint error and must stay reported.
+_AWQ_PACKED_BUFFERS = ("qweight", "qzeros", "scales", "g_idx", "bias")
+
+_AWQ_QCFG_CACHE_ATTR = "_gptqmodel_awq_tolerated_qcfg"
+_AWQ_QCFG_UNSET = object()
+
+
+def _awq_load_quantize_config(model: nn.Module) -> Optional[QuantizeConfig]:
+    """Resolve the checkpoint manifest the AWQ repair will rebuild from.
+
+    Reads the same source as ``hf_gptqmodel_repair_awq_load`` so the tolerance
+    decision and the repair agree. Cached per model because Transformers calls
+    the mismatch hook once for every packed tensor whose shape differs.
+    """
+
+    cached = getattr(model, _AWQ_QCFG_CACHE_ATTR, _AWQ_QCFG_UNSET)
+    if cached is not _AWQ_QCFG_UNSET:
+        return cached
+
+    context = getattr(model, "_gptqmodel_hf_load_context", None)
+    qcfg = getattr(context, "quantize_config", None)
+    if qcfg is None:
+        checkpoint_path = find_checkpoint_dir(model)
+        if checkpoint_path is not None:
+            try:
+                qcfg = QuantizeConfig.from_pretrained(checkpoint_path)
+            except (KeyError, OSError, TypeError, ValueError):
+                qcfg = None
+    if qcfg is None:
+        raw = _hf_quantization_config_dict(model)
+        if raw:
+            try:
+                qcfg = QuantizeConfig.from_quant_config(dict(raw))
+            except (KeyError, TypeError, ValueError):
+                qcfg = None
+    try:
+        setattr(model, _AWQ_QCFG_CACHE_ATTR, qcfg)
+    except (AttributeError, TypeError):
+        pass
+    return qcfg
+
+
+def _awq_module_matches_serialized_config(
+    module: BaseQuantLinear,
+    qcfg: QuantizeConfig,
+    name: str,
+    format_code: FORMAT,
+) -> bool:
+    """Whether a built module already has its serialized per-module geometry."""
+
+    resolved = _resolved_module_config(qcfg, name, format_code)
+    if resolved is None:
+        return True
+    if int(module.bits) != int(resolved.bits):
+        return False
+    if _awq_effective_group_size(module, module.group_size) != _awq_effective_group_size(
+        module, resolved.group_size
+    ):
+        return False
+    if hasattr(module, "desc_act") and bool(module.desc_act) != bool(resolved.desc_act):
+        return False
+    if hasattr(module, "sym") and bool(module.sym) != bool(resolved.sym):
+        return False
+    return True
+
+
+def _awq_effective_group_size(module: BaseQuantLinear, group_size) -> int:
+    """Return the group size a kernel actually uses (``-1`` means per-channel)."""
+
+    value = int(group_size)
+    if value == -1:
+        in_features = getattr(module, "in_features", None)
+        if in_features is not None:
+            return int(in_features)
+    return value
+
+
+def hf_gptqmodel_awq_tolerated_mismatch(model: nn.Module, param_name: Optional[str] = None) -> bool:
+    """Whether Transformers must not reject a native AWQ checkpoint's shape mismatch.
+
+    Transformers 5.23 changed ``set_param_for_module`` so a checkpoint tensor
+    whose shape differs from the meta module is recorded as a mismatched key
+    unless ``hf_quantizer.param_needs_quantization`` is true:
+
+    ``hf_quantizer is None or not hf_quantizer.param_needs_quantization(...)``
+
+    Before 5.23 any active quantizer skipped that check. ``AwqQuantizer``
+    inherits the base ``param_needs_quantization`` (always ``False``) because
+    a pre-quantized checkpoint has nothing to quantize, so on 5.23 a native
+    ``dynamic`` checkpoint's per-module ``qzeros``/``scales`` are reported as
+    MISMATCH and ``_finalize_model_loading`` raises before the post-weight
+    repair hook can rebuild the modules (#5322).
+
+    ``replace_with_awq_linear`` imports ``gptqmodel`` mid-load, so the modules
+    were built from the *global* config and the checkpoint tensors are the
+    authority: accept them, then ``hf_gptqmodel_repair_awq_load`` rebuilds each
+    module from the serialized per-module config and moves them across.
+
+    Only a module whose built geometry genuinely disagrees with its serialized
+    per-module config may be accepted here: that is exactly the case the repair
+    rebuilds. For a native checkpoint without such an override the built module
+    already has the serialized geometry, so a differing tensor is a corrupted
+    checkpoint and Transformers must keep reporting it (#5345). The hook is only
+    consulted for GPT-QModel AWQ checkpoints, so third-party AWQ loads keep
+    their existing mismatch behavior.
+    """
+
+    if not _hf_quantization_config_is_native_awq(model):
+        return False
+    if param_name is None:
+        return True
+
+    module_path, _, buffer_name = param_name.rpartition(".")
+    if buffer_name not in _AWQ_PACKED_BUFFERS:
+        return False
+    try:
+        module = model.get_submodule(module_path)
+    except AttributeError:
+        return False
+    if not isinstance(module, BaseQuantLinear):
+        return False
+
+    qcfg = _awq_load_quantize_config(model)
+    if qcfg is None:
+        # Without the serialized manifest the mismatch cannot be attributed to
+        # a per-module geometry difference, so keep Transformers' rejection.
+        return False
+    format_code = resolve_quant_format(qcfg.format, qcfg.method)
+    return not _awq_module_matches_serialized_config(module, qcfg, module_path, format_code)
+
+
+def hf_gptqmodel_reselect_context(
+    model: nn.Module,
+    checkpoint_files=None,
+    backend: Optional[Union[str, BACKEND]] = None,
+    dtype: Optional[torch.dtype] = None,
+) -> Optional[HFGPTQModelLoadContext]:
+    """Build the minimal context needed to re-select offload-safe kernels.
+
+    ``hf_gptqmodel_prepare_model_for_load`` returns ``None`` for third-party
+    AutoAWQ/AutoGPTQ checkpoints, so Transformers/Optimum replace the modules
+    with their own path. Those modules are still built before ``max_memory`` is
+    applied and therefore keep a CUDA-only Marlin kernel; the resolved map is
+    only visible from ``validate_environment`` (#5262).
+
+    This context contains exactly the state
+    :func:`hf_gptqmodel_reselect_offloaded_kernels` reads. It is published under
+    a separate model attribute so the fallback load keeps its own post-init
+    path instead of switching to the native one.
+    """
+
+    raw_config = _hf_quantization_config_dict(model)
+    qcfg: Optional[QuantizeConfig] = None
+    if raw_config is not None:
+        try:
+            qcfg = QuantizeConfig.from_quant_config(raw_config)
+        except (KeyError, TypeError, ValueError):
+            qcfg = None
+    if qcfg is None:
+        checkpoint_path = find_checkpoint_dir(model, checkpoint_files)
+        if checkpoint_path is None:
+            return None
+        try:
+            qcfg = QuantizeConfig.from_pretrained(checkpoint_path)
+        except (KeyError, OSError, TypeError, ValueError):
+            return None
+
+    # The reselection candidates come from GPTQModel's own kernel registry, so
+    # only the two methods the HF bridges cover can be re-routed here.
+    if qcfg.method not in (METHOD.AWQ, METHOD.GPTQ):
+        return None
+
+    try:
+        resolved_backend = _resolve_backend_for_checkpoint(qcfg, backend)
+    except (NotImplementedError, TypeError, ValueError):
+        # An impossible caller choice still belongs to the caller's own load
+        # path; do not turn it into a bridge failure.
+        return None
+
+    if not isinstance(dtype, torch.dtype):
+        config_dtype = get_hf_config_dtype(model.config)
+        dtype = config_dtype if isinstance(config_dtype, torch.dtype) else None
+
+    from ..models.auto import MODEL_MAP_CASEFOLD
+    from ..models.base import BaseQModel
+
+    model_type = str(getattr(model.config, "model_type", "")).lower()
+    model_definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+    return HFGPTQModelLoadContext(
+        quantize_config=qcfg,
+        backend=resolved_backend,
+        dtype=dtype,
+        lm_head_name=getattr(model_definition, "lm_head", None),
     )
 
 
@@ -295,7 +561,7 @@ def hf_gptqmodel_prepare_model_for_load(
 
     from ..models.auto import MODEL_MAP_CASEFOLD
     from ..models.base import BaseQModel
-    from .importer import hf_normalize_device_device_map
+    from .importer import auto_cpu_offload, hf_normalize_device_device_map
     from .model import (
         _module_has_meta_tensors,
         _prepare_variable_quant_buffers,
@@ -332,11 +598,15 @@ def hf_gptqmodel_prepare_model_for_load(
                 defuser.convert_model(module, cleanup_original=True)
 
     # Expand MoE experts on meta to avoid materializing dense expert weights.
+    # Defuser's cache flush synchronizes the current device when it gets no
+    # device list; scope it to this model's tensors so the conversion does not
+    # claim cuda:0 for a checkpoint placed on cuda:1 (#5105).
     if _module_has_meta_tensors(model):
-        with torch.device("meta"):
+        with torch.device("meta"), defuser_conversion_scope(model):
             convert_fused_modules()
     else:
-        convert_fused_modules()
+        with defuser_conversion_scope(model):
+            convert_fused_modules()
 
     modules = find_modules(model)
     missing_modules = sorted(set(quantized_module_names).difference(modules))
@@ -349,6 +619,10 @@ def hf_gptqmodel_prepare_model_for_load(
         )
     quantized_modules = {name: modules[name] for name in quantized_module_names}
 
+    # Transformers calls this before it applies ``max_memory``, so an accelerate
+    # keyword map has no resolved placement yet. Keep the accelerator family so
+    # the selected kernel is valid on every visible device instead of rejecting
+    # a single-card budget for GPUs it never touches (#5084).
     target_device: DEVICE = hf_normalize_device_device_map(None, device_map)
     qcfg.device = target_device
     if not isinstance(dtype, torch.dtype):
@@ -366,6 +640,11 @@ def hf_gptqmodel_prepare_model_for_load(
         lm_head_name=model_definition.lm_head,
         device=target_device,
         dtype=dtype,
+        # A map with CPU entries runs `post_init` on the CPU-resident layers, so
+        # AUTO must not select a kernel that needs CUDA there (#5022). Only
+        # AUTO consults this: an explicit backend can repack from an in-memory
+        # offload weights map.
+        cpu_offload=auto_cpu_offload(backend, device_map),
     )
     if packed_suffix == ".nf12_packed":
         # The escape row count depends on the encoded weights, so resize the
@@ -376,7 +655,171 @@ def hf_gptqmodel_prepare_model_for_load(
         "Transformers/Optimum: prepared `%s` native GPTQModel modules from the checkpoint manifest.",
         len(quantized_module_names),
     )
-    return HFGPTQModelLoadContext(quantize_config=qcfg, quant_linear=quant_linear)
+    return HFGPTQModelLoadContext(
+        quantize_config=qcfg,
+        quant_linear=quant_linear,
+        backend=backend,
+        dtype=dtype,
+        lm_head_name=model_definition.lm_head,
+    )
+
+
+def _resolved_placement(device_map: Dict[str, Any], module_name: str):
+    """Return the placement a resolved `hf_device_map` gives `module_name`.
+
+    Accelerate maps whole modules, so a quantized projection inherits the
+    entry of its nearest named ancestor.
+    """
+
+    name = module_name
+    while True:
+        if name in device_map:
+            return device_map[name]
+        if not name:
+            return None
+        name = name.rpartition(".")[0]
+
+
+def _device_map_has_execution_device(device_map: Dict[str, Any]) -> bool:
+    """Whether a resolved map gives offloaded layers a GPU to run on.
+
+    Accelerate's `AlignDevicesHook` moves a CPU/disk-mapped layer to the
+    execution device only for `forward`. With every entry on CPU/disk there is
+    no such device and Transformers dispatches the model on CPU (#5579).
+    """
+
+    for value in device_map.values():
+        if isinstance(value, int):
+            return True
+        try:
+            device = torch.device(value)
+        except (RuntimeError, ValueError, TypeError):
+            # `"disk"` is not a device; it has no execution device either.
+            continue
+        if device.type != "cpu":
+            return True
+    return False
+
+
+def _kernel_supports_cpu(kernel) -> bool:
+    """Whether `kernel` declares that it executes on a CPU-resident layer."""
+
+    devices = getattr(kernel, "SUPPORTS_DEVICES", None) or ()
+    return DEVICE.ALL in devices or DEVICE.CPU in devices
+
+
+def hf_gptqmodel_reselect_offloaded_kernels(
+    model: nn.Module,
+    context: Optional[HFGPTQModelLoadContext],
+    device_map,
+) -> bool:
+    """Rebuild kernels that cannot initialize on a CPU/disk-offloaded layer.
+
+    Transformers hands the bridge the *unresolved* `device_map` keyword
+    (`"auto"`, `"balanced"`, ...) during `preprocess_model` and only computes the
+    real placement from `max_memory` afterwards, so `auto_cpu_offload` cannot see
+    the spill and AUTO keeps `MarlinLinear` / `AwqMarlinLinear`. Those kernels
+    need resident CUDA tensors in `post_init`, so the load crashed once
+    Accelerate placed a layer on CPU or disk (#5194).
+
+    `SUPPORTS_CPU_OFFLOAD` means "safe when Accelerate offloads the layer to a
+    GPU execution device", not "safe to execute on CPU". When the resolved map
+    has no GPU entry (a CPU-only `max_memory`, or a budget too small for any
+    layer), nothing moves the layer and a CUDA-only Triton kernel fails at the
+    first forward with a CPU pointer (#5579). Such kernels are rebuilt here too
+    unless they declare CPU support.
+
+    This runs after the placement is known but before any checkpoint tensor is
+    assigned: the affected modules are still meta placeholders, so they are
+    rebuilt in place with an offload-safe kernel and no weights are copied.
+    Returns whether any module was rebuilt.
+    """
+
+    if not isinstance(device_map, dict) or not device_map:
+        return False
+    if context is None:
+        return False
+    # An explicit backend is the caller's choice, exactly as in
+    # `auto_cpu_offload`: only AUTO may be re-routed here.
+    if context.backend not in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
+        return False
+
+    from .importer import (
+        hf_normalize_device_device_map,
+        is_offload_placement,
+        select_quant_linear,
+    )
+    from .kernel import snapshot_kernel_config
+    from .model import create_quant_layer, find_modules
+
+    modules = find_modules(model, layers=[BaseQuantLinear])
+    has_execution_device = _device_map_has_execution_device(device_map)
+    offloaded = {}
+    for name, module in modules.items():
+        if not is_offload_placement(_resolved_placement(device_map, name)):
+            continue
+        kernel = type(module)
+        if getattr(kernel, "SUPPORTS_CPU_OFFLOAD", False):
+            # The declaration covers the Accelerate path only; with no GPU in
+            # the map the layer is executed by a CPU kernel or not at all.
+            if has_execution_device or _kernel_supports_cpu(kernel):
+                continue
+        offloaded[name] = module
+    if not offloaded:
+        return False
+
+    qcfg = context.quantize_config
+    format_code = resolve_quant_format(qcfg.format, qcfg.method)
+    backend = context.backend
+    device = hf_normalize_device_device_map(None, device_map)
+    init_kwargs = qcfg.quant_linear_init_kwargs()
+    init_kwargs["kernel"] = snapshot_kernel_config(qcfg)
+
+    candidates = select_quant_linear(
+        bits=qcfg.runtime_bits,
+        group_size=qcfg.group_size,
+        desc_act=qcfg.desc_act,
+        sym=qcfg.sym,
+        backend=backend,
+        format=format_code,
+        quant_method=qcfg.export_quant_method(),
+        pack=False,
+        dynamic=qcfg.dynamic,
+        pack_dtype=qcfg.pack_dtype,
+        device=device,
+        dtype=context.dtype,
+        multi_select=True,
+        cpu_offload=True,
+    )
+    if not isinstance(candidates, (list, tuple)):
+        candidates = [candidates]
+
+    names = sorted(offloaded)
+    log.info(
+        "Transformers/Optimum: rebuilding `%s` CPU/disk-offloaded module(s) with an "
+        "offload-safe kernel: %s",
+        len(names),
+        ", ".join(names[:4]) + (", ..." if len(names) > 4 else ""),
+    )
+    create_quant_layer(
+        linear_candidates=list(candidates),
+        bits=qcfg.runtime_bits,
+        desc_act=qcfg.desc_act,
+        dynamic=qcfg.dynamic,
+        group_size=qcfg.group_size,
+        quant_result=dict.fromkeys(names, True),
+        module=model,
+        sym=qcfg.sym,
+        device=device,
+        lm_head_name=context.lm_head_name,
+        pack_dtype=qcfg.pack_dtype,
+        backend=backend,
+        adapter=qcfg.adapter,
+        format=format_code,
+        init_kwargs=init_kwargs,
+        dtype=context.dtype,
+    )
+    return True
 
 
 def hf_gptqmodel_post_init_for_load(
@@ -433,10 +876,27 @@ def hf_gptqmodel_post_init_for_load(
     # silently wrong outputs, so mirror the normal loader's post-init step.
     _setup_rotation_online_had(model, resolve_model_rotation(qcfg))
 
+    # Legacy remote-code families need the same two repairs the native loader
+    # applies: transformers 5 leaves checkpoint-absent rotary buffers
+    # uninitialized when the class overrides ``_init_weights`` (EXAONE-3.0,
+    # DeciLM, ...), and changed the ``generate()`` cache contract those classes
+    # implement. Without them a checkpoint that ``GPTQModel.load`` reads
+    # correctly produces garbage RoPE frequencies through transformers (#5311).
+    from .hf import apply_legacy_remote_code_fixups
+
+    apply_legacy_remote_code_fixups(model)
+
     # Paged Flash Attention is not CUDA-graph capture safe; the normal loader
     # opts paged models out of graph capture so ``generate_batch`` /
     # ``init_continuous_batching`` work without a caller-side monkey patch.
     _set_paged_attention_safe_cuda_graphs(model)
+
+    # The placement resolved from ``max_memory`` is known now. Keep the
+    # single-compute-capability refusal for a map that really spans generations
+    # while allowing a budget that names one card (#5084).
+    from .importer import validate_device_map_capability_groups
+
+    validate_device_map_capability_groups(getattr(model, "hf_device_map", None))
     return model
 
 
@@ -520,18 +980,86 @@ def _awq_modules_ignore_serialized_config(model: nn.Module, qcfg: QuantizeConfig
         module = modules.get(name)
         if not isinstance(module, BaseQuantLinear):
             continue
-        resolved = _resolved_module_config(qcfg, name, format_code)
-        if resolved is None:
-            continue
-        if int(module.bits) != int(resolved.bits):
-            return True
-        if int(module.group_size) != int(resolved.group_size):
-            return True
-        if hasattr(module, "desc_act") and bool(module.desc_act) != bool(resolved.desc_act):
-            return True
-        if hasattr(module, "sym") and bool(module.sym) != bool(resolved.sym):
+        if not _awq_module_matches_serialized_config(module, qcfg, name, format_code):
             return True
     return False
+
+
+def _native_awq_config_from_dir(checkpoint_path: str) -> Optional[QuantizeConfig]:
+    """The serialized config when ``checkpoint_path`` is a native AWQ checkpoint."""
+
+    try:
+        qcfg = QuantizeConfig.from_pretrained(checkpoint_path)
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+    if qcfg.method != METHOD.AWQ or not _is_native_gptqmodel_config(qcfg):
+        return None
+    return qcfg
+
+
+def hf_gptqmodel_native_awq_config(
+    model: nn.Module,
+    *,
+    checkpoint_files=None,
+) -> Optional[QuantizeConfig]:
+    """The serialized config when this is a native GPT-QModel AWQ checkpoint.
+
+    ``None`` means the checkpoint is not ours (a third-party AWQ checkpoint, or
+    a non-AWQ load) and the caller must leave Transformers' own path alone.
+    Kept separate from :func:`hf_gptqmodel_repair_awq_load` because a native
+    checkpoint whose modules Transformers already built correctly still needs
+    the native post-init steps (#5433).
+    """
+
+    checkpoint_path = _resolve_checkpoint_dir(model, checkpoint_files)
+    if checkpoint_path is None:
+        return None
+    return _native_awq_config_from_dir(checkpoint_path)
+
+
+def hf_gptqmodel_finish_awq_load_without_rebuild(
+    model: nn.Module,
+    *,
+    qcfg: Optional[QuantizeConfig] = None,
+) -> None:
+    """Run the native post-init steps that do not need a rebuilt module set.
+
+    Transformers' AWQ loader builds every module from the serialized
+    ``bits``/``group_size`` when the checkpoint has no ``dynamic`` overrides, so
+    :func:`hf_gptqmodel_repair_awq_load` has nothing to rebuild and returns
+    ``None``. The bridge used to treat that as "not our load" and fall through
+    to ``original_post_init``, which skipped the steps below: the RoPE buffers
+    transformers 5 materializes with ``torch.empty_like`` stayed uninitialized
+    and ``generate()`` lost its transformers-4 adapter (#5433, same symptom as
+    #5311 for AWQ checkpoints of legacy remote-code families).
+
+    ``qcfg`` is the serialized config for a native GPT-QModel checkpoint; it is
+    ``None`` for a third-party checkpoint, which only needs the shared
+    remote-code repairs (its modules are not ours to re-configure).
+    """
+
+    from ..models.loader import _set_paged_attention_safe_cuda_graphs, _setup_rotation_online_had
+    from .hf import apply_legacy_remote_code_fixups
+    from .importer import validate_device_map_capability_groups
+    from .model import gptqmodel_post_init
+
+    if qcfg is not None:
+        model.quantize_config = qcfg
+        gptqmodel_post_init(model, use_act_order=qcfg.desc_act, quantize_config=qcfg)
+        # Rotated checkpoints fuse an orthogonal Q and an exact Hadamard H into
+        # the weights; the H has to be re-applied to activations at inference.
+        _setup_rotation_online_had(model, resolve_model_rotation(qcfg))
+        # Paged Flash Attention is not CUDA-graph capture safe; the normal
+        # loader opts paged models out so `generate_batch` works unpatched.
+        _set_paged_attention_safe_cuda_graphs(model)
+        validate_device_map_capability_groups(getattr(model, "hf_device_map", None))
+
+    # Legacy remote-code families need the same two repairs the native loader
+    # applies: transformers 5 leaves checkpoint-absent rotary buffers
+    # uninitialized when the class overrides ``_init_weights`` (EXAONE-3.0,
+    # DeciLM, ...), and changed the ``generate()`` cache contract those classes
+    # implement.
+    apply_legacy_remote_code_fixups(model)
 
 
 def hf_gptqmodel_repair_awq_load(
@@ -556,18 +1084,16 @@ def hf_gptqmodel_repair_awq_load(
     config and kernel class, moves the loaded tensors into it, and returns the
     context for the native post-init. Returns ``None`` when the checkpoint is
     not a GPT-QModel-native AWQ checkpoint or when the modules Transformers
-    built already match the serialized config, so those loads keep their
-    existing path.
+    built already match the serialized config. In the latter case the caller
+    still owes the model the context-free native post-init; see
+    :func:`hf_gptqmodel_finish_awq_load_without_rebuild` (#5433).
     """
 
     checkpoint_path = _resolve_checkpoint_dir(model, checkpoint_files)
     if checkpoint_path is None:
         return None
-    try:
-        qcfg = QuantizeConfig.from_pretrained(checkpoint_path)
-    except (KeyError, OSError, TypeError, ValueError):
-        return None
-    if qcfg.method != METHOD.AWQ or not _is_native_gptqmodel_config(qcfg):
+    qcfg = _native_awq_config_from_dir(checkpoint_path)
+    if qcfg is None:
         return None
 
     quantized_module_names = _awq_checkpoint_module_names(checkpoint_path, checkpoint_files)

@@ -12,6 +12,7 @@ from .utils.backend_config import (
     AwqTritonConfig,
     BackendConfig,
     BitsAndBytesConfig,
+    EXL3CUDAConfig,
     GGUFCPPConfig,
     GGUFCUDAConfig,
     GGUFTorchConfig,
@@ -28,5 +29,5 @@ from .utils.backend_config import (
 __all__ = [
     "BACKEND", "BackendConfig", "MarlinConfig", "TorchConfig", "AwqTorchConfig", "AwqGemmConfig",
     "AwqTritonConfig", "SwordfishConfig", "GGUFTorchConfig", "GGUFCPPConfig", "GGUFCUDAConfig",
-    "ParoCUDAConfig", "ParoTritonConfig", "BitsAndBytesConfig", "TTBlockFloatConfig", "RuntimeConfig",
+    "ParoCUDAConfig", "ParoTritonConfig", "BitsAndBytesConfig", "TTBlockFloatConfig", "EXL3CUDAConfig", "RuntimeConfig",
 ]

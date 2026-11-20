@@ -25,6 +25,7 @@ from ..looper.loop_processor import (
     active_padding_mask,
     bind_resolved_module_config,
     get_resolved_module_config,
+    install_moe_padding_zero_hook,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -65,10 +66,11 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from ..quantization.gptq import SharedHessianFactorCache
+from ..utils.attn_mask import align_single_head_capture
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, pack_module
+from ..utils.model import create_quant_module, install_quant_module, pack_module
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import HAS_NPU
 
@@ -190,6 +192,17 @@ def clone_gptq_config_for_module(
 
     return qcfg_clone
 
+def _capture_payload(value: Any) -> Any:
+    """Detach one captured tensor for a quantizer; pass ``None`` through.
+
+    The capture hook hands ``add_batch`` the module input and, only for a task
+    that asks for it, the forward output. ``None`` means "this task does not
+    read an output" and must reach ``add_batch`` unchanged (#5724).
+    """
+
+    return value.data if torch.is_tensor(value) else value
+
+
 class GPTQProcessor(LoopProcessor):
     """Captures activations and quantizes modules with GPTQ or GPTAQ/FOEM."""
 
@@ -295,6 +308,8 @@ class GPTQProcessor(LoopProcessor):
         # Activation ranges must cover every token inference will see, the
         # BOS sinks included, so only padding is removed here.
         keep_mask = active_padding_mask(self)
+        if not isinstance(module, torch.nn.Conv2d):
+            inp = align_single_head_capture(inp, keep_mask)
         if (
             torch.is_tensor(keep_mask) and inp.ndim >= 3 and keep_mask.ndim == 2
             and keep_mask.shape == inp.shape[:2]
@@ -393,7 +408,12 @@ class GPTQProcessor(LoopProcessor):
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
             tmp.fallback = qcfg_clone.fallback
-            tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
+
+        # Percentage fallback thresholds resolve against the calibration token
+        # count for every selector. GPTAQ and FOEM inherited the GPTQ default
+        # ``None`` here, so ``"50%"`` was resolved against a base of one and a
+        # sparsely routed expert never fell back (#5755).
+        tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         tmp.quantizer.configure(
             perchannel=True,
@@ -604,6 +624,15 @@ class GPTQProcessor(LoopProcessor):
             """Records one activation batch for GPTQ Hessian/statistics accumulation."""
 
             g = self.tasks[name]  # noqa: F821
+            # GPTQ, GPTAQ and FOEM accumulate only `X^T X` from the module
+            # input; none of them reads the forward output, so slicing,
+            # gathering and copying `out` once per sample was work thrown away:
+            # a `kept_tokens x out_features` copy per sample per hooked module,
+            # plus a `nonzero` sync for every boolean index on CUDA (#5724).
+            # A task that needs the output opts in with `needs_module_output`.
+            needs_out = bool(getattr(g, "needs_module_output", False))
+            if not needs_out:
+                out = None
             batch_idx = self.current_batch_index()
             inp_tensor = inp[0]
             if capture_nvfp4:
@@ -612,6 +641,15 @@ class GPTQProcessor(LoopProcessor):
                     del inp, out
                     return
             keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+            # MLA attention feeds `kv_b_proj` a single-head 4-D latent, whose
+            # `shape[:2]` never matches the `[B, S]` mask; drop the unit head
+            # axis so the padding/sink branches below apply to it too (#5389).
+            # A 4-D Conv2d capture keeps its layout: its channel axis is not a
+            # head axis and the unfold branch below owns it.
+            if not isinstance(getattr(g, "module", None), torch.nn.Conv2d):
+                inp_tensor = align_single_head_capture(inp_tensor, keep_mask)
+                if torch.is_tensor(out):
+                    out = align_single_head_capture(out, keep_mask)
 
             if (
                 isinstance(getattr(g, "module", None), torch.nn.Embedding)
@@ -627,7 +665,9 @@ class GPTQProcessor(LoopProcessor):
                     selected_out = out[keep_on_input].contiguous()
                 else:
                     selected_out = out
-                g.add_batch(selected_ids.data, selected_out.data, batch_index=batch_idx)  # noqa: F821
+                g.add_batch(
+                    selected_ids.data, _capture_payload(selected_out), batch_index=batch_idx
+                )  # noqa: F821
             elif (
                 torch.is_tensor(inp_tensor)
                 and torch.is_tensor(keep_mask)
@@ -658,7 +698,7 @@ class GPTQProcessor(LoopProcessor):
                         ].contiguous()
                     else:
                         sample_out = out
-                    g.add_batch(sample_inp.data, sample_out.data, batch_index=batch_idx)  # noqa: F821
+                    g.add_batch(sample_inp.data, _capture_payload(sample_out), batch_index=batch_idx)  # noqa: F821
             elif (
                 torch.is_tensor(inp_tensor)
                 and torch.is_tensor(keep_mask)
@@ -700,7 +740,7 @@ class GPTQProcessor(LoopProcessor):
                         sample_out = out
                     g.add_batch(
                         sample_inp.data,
-                        sample_out.data if torch.is_tensor(sample_out) else sample_out,
+                        _capture_payload(sample_out),
                         batch_index=batch_idx,
                     )  # noqa: F821
             elif (
@@ -735,13 +775,13 @@ class GPTQProcessor(LoopProcessor):
                         kept_out = out
                     g.add_batch(
                         kept_inp.data,
-                        kept_out.data if torch.is_tensor(kept_out) else kept_out,
+                        _capture_payload(kept_out),
                         batch_index=batch_idx,
                     )  # noqa: F821
                 else:
-                    g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
+                    g.add_batch(inp_tensor.data, _capture_payload(out), batch_index=batch_idx)  # noqa: F821
             else:
-                g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
+                g.add_batch(inp_tensor.data, _capture_payload(out), batch_index=batch_idx)  # noqa: F821
             del inp, out
         return tmp
 
@@ -755,35 +795,10 @@ class GPTQProcessor(LoopProcessor):
         every expert Hessian while leaving real rows untouched.
         """
 
+        del moe_block_name
         if not getattr(self, "preserve_batch_keep_mask", False):
             return False
-
-        def zero_masked_rows(_module, args, kwargs):
-            # Zero padding only: a BOS sink is a real token whose MoE
-            # output the following positions attend to.
-            keep_mask = active_padding_mask(self)
-            if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
-                return None
-
-            hidden_states = kwargs.get("hidden_states") if kwargs else None
-            from_kwargs = hidden_states is not None
-            if hidden_states is None:
-                if not args or not torch.is_tensor(args[0]):
-                    return None
-                hidden_states = args[0]
-            if hidden_states.dim() != 3 or tuple(hidden_states.shape[:2]) != tuple(keep_mask.shape):
-                return None
-
-            row_mask = keep_mask.to(device=hidden_states.device, dtype=hidden_states.dtype).unsqueeze(-1)
-            masked = hidden_states * row_mask
-            if from_kwargs:
-                kwargs = dict(kwargs)
-                kwargs["hidden_states"] = masked
-                return args, kwargs
-            return (masked,) + tuple(args[1:]), kwargs
-
-        handles.append(moe_block.register_forward_pre_hook(zero_masked_rows, with_kwargs=True))
-        return True
+        return install_moe_padding_zero_hook(self, moe_block, handles)
 
     def process(
         self,
@@ -838,11 +853,21 @@ class GPTQProcessor(LoopProcessor):
                     f"does not match target device {expected_device}."
                 )
 
-            g_h = getattr(g, "H", None)
-            if g_h is not None:
-                assert torch.device(g_h.device) == expected_device, (
-                    f"GPTQ Hessian tensor for '{module.full_name}' lives on {g_h.device}, expected {expected_device}."
+            # Read the Hessian's device through the task instead of binding it
+            # to a local: GPTAQ/FOEM hand their `[C, C]` accumulator to the
+            # quantizer and rebind it to a permuted copy, so a local reference
+            # kept the original unpermuted fp32 Hessian alive across
+            # `g.quantize()` and its peak (#5026).
+            if getattr(g, "H", None) is not None:
+                assert torch.device(g.H.device) == expected_device, (
+                    f"GPTQ Hessian tensor for '{module.full_name}' lives on {g.H.device}, expected {expected_device}."
                 )
+                # No local may be bound here. GPTAQ/FOEM release the task
+                # Hessian themselves and then rebind `H` to the permutation,
+                # so a surviving reference keeps the original unpermuted
+                # [C, C] fp32 copy alive across the whole quantize -- including
+                # the peak, where `H`, `dXXT` and the inverse are all live
+                # (#5026). 784 MiB for an 8B down_proj.
 
             if expected_device.type == "cuda" and torch.cuda.is_available():
                 current_cuda_device = torch.device("cuda", torch.cuda.current_device())
@@ -857,7 +882,25 @@ class GPTQProcessor(LoopProcessor):
                     f"while processing '{module.full_name}'."
                 )
 
-        wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        try:
+            wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        except BaseException:
+            # `free()` below is the success-path teardown. A failing quantize
+            # must still drop the `[C, C]` accumulator, or the task pins it
+            # until the processor is torn down. Only the Hessian state is
+            # released: the module and quantizer are left intact for the
+            # failed-run cleanup (#5026).
+            release = getattr(g, "release_hessian_state", None)
+            if release is not None:
+                try:
+                    release()
+                except Exception:  # pragma: no cover - teardown must not mask
+                    log.warning(
+                        "GPTQProcessor: releasing the Hessian for '%s' failed after a "
+                        "quantize error; the original exception is re-raised.",
+                        module.full_name,
+                    )
+            raise
         gsq_diagnostics = getattr(g, "gsq_diagnostics", None)
         if gsq_diagnostics is not None:
             module.state["gsq_diagnostics"] = gsq_diagnostics
@@ -995,6 +1038,15 @@ class GPTQProcessor(LoopProcessor):
                         "wq": snapshot_eora_reconstructed_weight(wq),
                     })
 
+        # The packers recover integer codes from `linear.weight`. When the
+        # replay copy is too narrow to hold them (8-bit asymmetric BF16),
+        # keep the exact FP32 reconstruction for packing (#5721).
+        pack_wq = getattr(g, "pack_weight", None)
+        if pack_wq is not None:
+            del g.pack_weight
+            module.stream_state_payload_to_cpu({"pack_wq": pack_wq})
+            del pack_wq
+
         # single largest deallocation of vram happens here
         module.weight.data = wq
         if self.qcfg.activation_mode == "w4afp8":
@@ -1073,12 +1125,20 @@ class GPTQProcessor(LoopProcessor):
         assert q_g_idx.device == CPU
 
         layers = {module.full_name: model.model.get_submodule(module.full_name)}
+        # Exact FP32 reconstruction kept by the quantizer when the replay copy
+        # cannot round-trip the packing codes (#5721).
+        pack_wq = module.state.pop("pack_wq", None)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
 
         # replace module with quantized module
         timer = getattr(model, "quant_region_timer", None)
 
+        # Build and pack the kernel off-model and publish it only once packing
+        # has returned. Installing the empty kernel first left a projection
+        # without `qweight`/`qzeros`/`scales` in the tree when a Ctrl-C or an
+        # exception landed in `pack_module`, and every later forward then
+        # raised `AttributeError` (issue #5089).
         create_start = time.perf_counter() if timer is not None else None
         with log_time_block(
             "create_quant_module",
@@ -1086,7 +1146,7 @@ class GPTQProcessor(LoopProcessor):
             module_name=module_label,
         ):
             with parent_module_lock(parent_key):
-                create_quant_module(
+                qmodule = create_quant_module(
                     name=module.full_name,
                     linear_cls=model.qlinear_kernel,
                     bits=self.qcfg.runtime_bits,
@@ -1102,6 +1162,7 @@ class GPTQProcessor(LoopProcessor):
                     format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
                     register_buffers=False,
                     resolved_module_config=get_resolved_module_config(module),
+                    install=False,
                 )
         if timer is not None and create_start is not None:
             timer.record(
@@ -1110,8 +1171,11 @@ class GPTQProcessor(LoopProcessor):
                 source=module_label,
             )
 
+        if qmodule is None:
+            # The resolved config excluded this module from quantization.
+            return
+
         # pack module
-        qmodule = model.model.get_submodule(module.full_name)
         if self.qcfg.activation_mode == "w4a_nvfp4":
             qmodule.activation_global_scale.fill_(module.state.pop("activation_global_scale"))
         qModules = (
@@ -1126,6 +1190,10 @@ class GPTQProcessor(LoopProcessor):
             module_name=module_label,
         ):
             with parent_module_lock(parent_key):
+                if pack_wq is not None:
+                    # Pack from the exact reconstruction, not the narrowed
+                    # replay copy, so the stored codes match the quantizer's.
+                    layers[module.full_name].weight.data = pack_wq
                 packer_label = pack_module(
                     name=module.full_name,
                     qModules=qModules,
@@ -1144,6 +1212,12 @@ class GPTQProcessor(LoopProcessor):
                 time.perf_counter() - pack_start,
                 source=f"{module_label} [{packer_label or 'module.pack_original'}]",
             )
+
+        # The kernel is complete; publish it with one assignment under the same
+        # parent lock the creation and packing used.
+        if qmodule is not None:
+            with parent_module_lock(parent_key):
+                install_quant_module(model.model, module.full_name, qmodule)
 
         # TODO: store module quant results in module, not global processor result
         self.result_pop(module.full_name)

@@ -62,9 +62,29 @@ def _restore_attention_mask_capture(model):
             delattr(language_model, name)
 
 
+def _encoder_decoder_tied(model) -> bool:
+    """Whether the checkpoint ties the encoder and decoder text stacks.
+
+    ``DiffusionGemmaConfig.tie_word_embeddings=False`` is supported and stores
+    two independent copies of the text parameters. The tie map itself is a
+    class-level constant, so only the config says whether it applies; the
+    finalizer must not alias untied parameters just because names and shapes
+    match (#5411).
+    """
+
+    config = getattr(model, "config", None)
+    for candidate in (config, getattr(config, "text_config", None)):
+        value = getattr(candidate, "tie_word_embeddings", None)
+        if isinstance(value, bool):
+            return value
+    return True
+
+
 def _sync_decoder_quantized_modules(model, encoder_layer: nn.Module | None = None) -> int:
     """Share quantized encoder projections with the weight-tied diffusion decoder."""
 
+    if not _encoder_decoder_tied(model):
+        return 0
     core = model.model
     encoder_layers = core.encoder.language_model.layers
     decoder_layers = core.decoder.layers
@@ -94,6 +114,8 @@ def _sync_decoder_quantized_modules(model, encoder_layer: nn.Module | None = Non
 def _sync_decoder_tied_parameters(model) -> int:
     """Restore dense encoder/decoder parameter aliases after checkpoint loading."""
 
+    if not _encoder_decoder_tied(model):
+        return 0
     core = model.model
     synced = 0
     for encoder_layer, decoder_layer in zip(core.encoder.language_model.layers, core.decoder.layers):
@@ -122,6 +144,15 @@ def _refresh_tied_weight_metadata(model, include_layer_ties: bool = False) -> No
     """Refresh tie metadata after defusion/quantization changes module aliases."""
 
     core = model.model
+    if not _encoder_decoder_tied(model):
+        # An untied checkpoint keeps both stacks. Recording the class-level map
+        # would make `save_pretrained` drop the decoder copies it considers
+        # aliases, so publish an empty map for this model (#5411).
+        core._tied_weights_keys = {}
+        core.all_tied_weights_keys = core.get_expanded_tied_weights_keys(all_submodels=False)
+        model.all_tied_weights_keys = model.get_expanded_tied_weights_keys(all_submodels=True)
+        return
+
     tied_weights = getattr(core, "_tied_weights_keys", None) or {}
     layer_markers = ("encoder.language_model.layers", "decoder.layers")
     # Defusion changes the module tree after the original tie map was built.
@@ -239,6 +270,19 @@ class DiffusionGemmaQModel(BaseQModel):
         # quantization, once encoder and decoder modules actually share storage.
         _refresh_tied_weight_metadata(model)
 
+    @classmethod
+    def after_make_quant(cls, model):
+        # A saved checkpoint stores the encoder owner only: `make_quant`
+        # replaces the encoder leaves with `QuantLinear` and leaves the tied
+        # decoder dense with `torch.empty` storage. Reattach those leaves and
+        # the remaining dense aliases here, before the loader's checkpoint
+        # guard runs; `after_model_load` is too late because the guard raises
+        # first (#5514). The untied case stays refused by
+        # `pre_quantize_generate_hook_start` and is a no-op here (#5411).
+        _sync_decoder_quantized_modules(model)
+        _sync_decoder_tied_parameters(model)
+        return model
+
     def after_model_load(self, model, load_quantized_model=False):
         model = super().after_model_load(model, load_quantized_model=load_quantized_model)
         if load_quantized_model:
@@ -267,6 +311,20 @@ class DiffusionGemmaQModel(BaseQModel):
         return module
 
     def pre_quantize_generate_hook_start(self):
+        # Only the encoder stack is quantized, and the decoder is filled in by
+        # sharing those modules. An untied checkpoint would therefore end up
+        # with a quantized encoder and a dense decoder, so refuse it here -
+        # before any layer weight is replaced - instead of silently changing
+        # the decoder's trained values (#5411).
+        if not _encoder_decoder_tied(self.model):
+            raise NotImplementedError(
+                "DiffusionGemma quantization requires tied encoder/decoder text "
+                "weights, but this checkpoint declares "
+                "`tie_word_embeddings=False`. GPT-QModel quantizes the encoder "
+                "stack and shares it with the decoder, which would leave the "
+                "independent decoder weights dense. Load the checkpoint without "
+                "quantizing, or use a tied checkpoint."
+            )
         _patch_attention_mask_capture(self.model)
 
         # These modules sit outside the quantized layer list but participate in

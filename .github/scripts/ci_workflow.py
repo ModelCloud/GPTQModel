@@ -6,15 +6,22 @@ import shlex
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from ci_common import append_github_env
+
+
+# GitHub Actions expands at most 256 jobs from one matrix, and a reusable
+# workflow input payload may not exceed 65,535 characters. Keep every emitted
+# matrix at the documented expansion limit so each shard can be handed to the
+# reusable workflow as one input.
+DEFAULT_MAX_MATRIX_ENTRIES = 256
 
 
 def split_csv(raw: str | None) -> list[str]:
@@ -121,6 +128,27 @@ def normalize_test_name(name: str) -> str:
     return strip_py_suffix(name.removeprefix("tests/"))
 
 
+def python_lane(value: Any) -> tuple[int, int, bool] | None:
+    """``(major, minor, free_threaded)`` for a ``py`` value, or ``None``.
+
+    ``test.yaml`` spells a lane as an exact managed build (``3.14.10t``), but
+    only the major/minor and the free-threaded flag decide which wheels
+    install, so the patch version is ignored. Keep in sync with
+    ``ci_deps.python_lane``.
+    """
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    free_threaded = text.endswith("t")
+    if free_threaded:
+        text = text[:-1]
+    parts = text.split(".")
+    if len(parts) < 2 or not all(part.isdigit() for part in parts[:2]):
+        return None
+    return int(parts[0]), int(parts[1]), free_threaded
+
+
 def is_npu_test_name(name: str) -> bool:
     return "npu" in re.split(r"[/_.-]+", normalize_test_name(name))
 
@@ -215,12 +243,57 @@ def matches_test_regex(test_regex: Any, rel_path: str) -> bool:
     return any(test_regex.match(candidate) for candidate in candidates)
 
 
-def should_skip_test(config_data: dict[str, Any], rel_path: str) -> bool:
+def lane_gate_reason(config: dict[str, Any], python_version: str | None) -> str | None:
+    """Why this test needs a different lane than ``python_version``, or ``None``."""
+
+    lane = python_lane(python_version)
+    required = config.get("py")
+    required_lane = python_lane(required)
+    if lane is None or required_lane is None or required_lane == lane:
+        return None
+    return f"requires {required}, lane is {python_version}"
+
+
+def raw_test_entry(data: dict[str, Any], group: str, test_name: str) -> dict[str, Any]:
+    """Only the test's own ``test.yaml`` entry, without ``common``/group merging.
+
+    ``py`` is inherited from ``common`` for every test, so a lane comparison
+    has to see whether *this* test overrides it. Merging would make every test
+    look like it requires the common runtime and gate all of them off any other
+    lane.
+    """
+
+    test_path = PurePosixPath(test_name)
+    candidate_groups = [group]
+    if len(test_path.parts) > 1:
+        prefix = PurePosixPath(group)
+        for depth in range(1, len(test_path.parts)):
+            candidate_groups.append(str(prefix.joinpath(*test_path.parts[:depth])))
+
+    entry: dict[str, Any] = {}
+    for candidate_group in candidate_groups:
+        section = data.get(candidate_group) or {}
+        if not isinstance(section, dict):
+            continue
+        value = section.get(test_path.name)
+        if isinstance(value, dict):
+            entry.update(value)
+    return entry
+
+
+def should_skip_test(
+        config_data: dict[str, Any],
+        rel_path: str,
+        *,
+        python_version: str | None = None,
+) -> bool:
     try:
         config = parse_test_config_data_for_path(config_data, "tests", rel_path)
     except KeyError:
         return False
-    return bool(config.get("skip", False))
+    if bool(config.get("skip", False)):
+        return True
+    return lane_gate_reason(raw_test_entry(config_data, "tests", rel_path), python_version) is not None
 
 
 def list_tests(
@@ -228,7 +301,9 @@ def list_tests(
         test_names: str,
         test_regex: str,
         tests_root: str | Path,
-) -> tuple[list[str], list[str], list[str], list[str]]:
+        *,
+        python_version: str | None = None,
+) -> tuple[list[str], list[str], list[str], list[str], dict[str, str]]:
     tests_root = Path(tests_root)
     input_tests = [strip_py_suffix(name) for name in split_csv(test_names)]
     ignored_raw = ignored_test_files if isinstance(ignored_test_files, list) else split_csv(ignored_test_files)
@@ -236,13 +311,29 @@ def list_tests(
     config_data = load_yaml(Path(__file__).with_name("test.yaml"))
     compiled_test_regex = re.compile(test_regex)
 
-    all_tests = {
-        rel: path
-        for path in tests_root.rglob("test_*.py")
-        for rel in [str(path.relative_to(tests_root).with_suffix(""))]
-        if rel not in ignored_set and path.stem not in ignored_set
-        if not should_skip_test(config_data, rel)
-    }
+    # A test whose `py` names another runtime is not scheduled on this lane:
+    # its pinned wheels cannot install here (#5420). Report it so the planner
+    # log says which coverage the lane does not provide and why.
+    lane = python_version
+    if lane is None:
+        lane = (config_data.get("common") or {}).get("py")
+    all_tests: dict[str, Path] = {}
+    gated_tests: dict[str, str] = {}
+    for path in tests_root.rglob("test_*.py"):
+        rel = str(path.relative_to(tests_root).with_suffix(""))
+        if rel in ignored_set or path.stem in ignored_set:
+            continue
+        try:
+            config = parse_test_config_data_for_path(config_data, "tests", rel)
+        except KeyError:
+            config = {}
+        if bool(config.get("skip", False)):
+            continue
+        gate = lane_gate_reason(raw_test_entry(config_data, "tests", rel), lane)
+        if gate is not None:
+            gated_tests[rel] = gate
+            continue
+        all_tests[rel] = path
 
     model_tests = {
         rel
@@ -292,6 +383,7 @@ def list_tests(
         sorted(torch_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
         sorted(model_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
         sorted(mlx_tests, key=lambda rel: sort_key(rel, all_tests[rel])),
+        gated_tests,
     )
 
 
@@ -345,39 +437,92 @@ def build_test_matrices(
     }
 
 
+def split_matrix_entries(
+        entries: list[dict[str, str]],
+        max_entries: int = DEFAULT_MAX_MATRIX_ENTRIES,
+) -> list[list[dict[str, str]]]:
+    if max_entries < 1:
+        raise ValueError(f"max matrix entries must be positive: {max_entries}")
+    return [
+        entries[offset:offset + max_entries]
+        for offset in range(0, len(entries), max_entries)
+    ]
+
+
+def validate_matrix_shards(
+        group: str,
+        entries: list[dict[str, str]],
+        shards: list[list[dict[str, str]]],
+        max_entries: int = DEFAULT_MAX_MATRIX_ENTRIES,
+) -> None:
+    if max_entries < 1:
+        raise ValueError(f"max matrix entries must be positive: {max_entries}")
+    oversized = [len(shard) for shard in shards if len(shard) > max_entries]
+    if oversized:
+        raise ValueError(
+            f"{group} matrix shards exceed the {max_entries}-entry expansion limit: {oversized}"
+        )
+    flattened = [entry for shard in shards for entry in shard]
+    if flattened != entries:
+        raise ValueError(f"{group} matrix shards do not cover the planned entries in order")
+
+
 def build_test_plan(
         *,
         ignored_test_files: str | list[str],
         test_names: str,
         test_regex: str,
         tests_root: str | Path,
-) -> dict[str, list[dict[str, str]] | list[str]]:
-    cpu_tests, torch_tests, model_tests, mlx_tests = list_tests(
+        max_matrix_entries: int = DEFAULT_MAX_MATRIX_ENTRIES,
+        python_version: str | None = None,
+) -> dict[str, list[dict[str, str]] | list[list[dict[str, str]]] | list[str] | dict[str, str] | int]:
+    cpu_tests, torch_tests, model_tests, mlx_tests, gated_tests = list_tests(
         ignored_test_files=ignored_test_files,
         test_names=test_names,
         test_regex=test_regex,
         tests_root=tests_root,
+        python_version=python_version,
     )
     matrices = build_test_matrices(
         cpu_tests=cpu_tests,
         torch_tests=torch_tests,
         model_tests=model_tests,
     )
+    matrix_shards: dict[str, list[list[dict[str, str]]]] = {}
+    for group in ("cpu", "torch", "model"):
+        matrix = matrices[f"{group}_matrix"]
+        shards = split_matrix_entries(matrix, max_matrix_entries)
+        validate_matrix_shards(group, matrix, shards, max_matrix_entries)
+        matrix_shards[f"{group}_matrix_shards"] = shards
     return {
         "cpu_files": cpu_tests,
         "torch_files": torch_tests,
         "model_files": model_tests,
         "mlx_files": mlx_tests,
+        "gated_tests": gated_tests,
         **matrices,
+        **matrix_shards,
+        "max_matrix_entries": max_matrix_entries,
     }
 
 
-def resolve_test_runtime(test_name: str, tests_root: str | Path = "tests") -> TestRuntime:
+def resolve_test_runtime(
+        test_name: str,
+        tests_root: str | Path = "tests",
+        test_group: str = "",
+) -> TestRuntime:
     normalized = normalize_test_name(test_name)
     test_path = test_path_from_name(normalized, tests_root=tests_root)
     xpu_mode = "xpu" in normalized
     npu_mode = is_npu_test_name(normalized)
-    skip_gpu_allocation = xpu_mode or npu_mode or has_no_gpu_marker(test_path)
+    # A CPU matrix entry never holds a GPU lease, even when its file lacks the
+    # `# GPU=-1` marker used by the automatic planner.
+    skip_gpu_allocation = (
+        test_group == "cpu"
+        or xpu_mode
+        or npu_mode
+        or has_no_gpu_marker(test_path)
+    )
     return TestRuntime(
         test_name=normalized,
         test_path=str(test_path),
@@ -408,6 +553,8 @@ def cmd_list_tests(args: argparse.Namespace) -> int:
         test_names=args.test_names,
         test_regex=args.test_regex,
         tests_root=args.tests_root,
+        max_matrix_entries=args.max_matrix_entries,
+        python_version=args.python_version,
     )
     print(json.dumps(test_plan))
     return 0
@@ -440,13 +587,20 @@ def cmd_resolve_env(args: argparse.Namespace) -> int:
 
 
 def cmd_resolve_test_runtime(args: argparse.Namespace) -> int:
-    runtime = resolve_test_runtime(args.test_name, tests_root=args.tests_root)
+    runtime = resolve_test_runtime(
+        args.test_name,
+        tests_root=args.tests_root,
+        test_group=args.test_group,
+    )
     skip_gpu = str(runtime.skip_gpu_allocation).lower()
     xpu_mode = str(runtime.xpu_mode).lower()
 
     append_github_env("TEST_FILE", runtime.test_path)
     append_github_env("SKIP_GPU_ALLOCATION", skip_gpu)
     append_github_env("XPU_MODE", xpu_mode)
+    if runtime.skip_gpu_allocation:
+        # Keep the whole job CPU-only, not just the pytest subprocess.
+        append_github_env("CUDA_VISIBLE_DEVICES", "")
 
     if args.shell:
         print(f"TEST_FILE={shlex.quote(runtime.test_path)}")
@@ -474,6 +628,12 @@ def main() -> int:
     list_parser.add_argument("--test-names", default=os.getenv("TEST_NAMES", ""))
     list_parser.add_argument("--test-regex", default=os.getenv("TEST_REGEX", ".*"))
     list_parser.add_argument("--tests-root", default="tests")
+    list_parser.add_argument("--max-matrix-entries", type=int, default=DEFAULT_MAX_MATRIX_ENTRIES)
+    list_parser.add_argument(
+        "--python-version",
+        default=None,
+        help="lane runtime (e.g. 3.14.10t); tests that declare another `py` are gated off",
+    )
 
     resolve_parser = subparsers.add_parser("resolve-env")
     resolve_parser.add_argument("--yaml-file", default=Path(__file__).with_name("test.yaml"))
@@ -487,6 +647,7 @@ def main() -> int:
     runtime_parser = subparsers.add_parser("resolve-test-runtime")
     runtime_parser.add_argument("--test-name", required=True)
     runtime_parser.add_argument("--tests-root", default="tests")
+    runtime_parser.add_argument("--test-group", default="")
     runtime_parser.add_argument("--shell", action="store_true")
 
     versions_parser = subparsers.add_parser("loop-versions")

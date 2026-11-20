@@ -287,13 +287,46 @@ variables. Only the fields above select behaviour.
 
 | Field | Default | Effect |
 | --- | --- | --- |
-| `exl3_tile_batch` | `256` | EXL3 quantization scratch slots per launch |
+| `exl3_tile_batch` | `None` | Automatic EXL3 quantization slots per launch. A positive integer lowers the automatic limit. |
 | `exl3_host_rss_limit_bytes` | `0` | EXL3 capture host-memory ceiling (`0` disables) |
 | `exl3_cuda_allocation_limit_bytes` | `0` | EXL3 capture device-memory ceiling (`0` disables) |
 | `exl3_memory_telemetry_interval_batches` | `0` | Batches between capture memory checks |
 | `exl3_capture_batch_spool` | `None` | Durable batch-spool root |
 | `exl3_capture_batch_checkpoint_interval` | `1` | Committed batches between spool checkpoints |
 | `exl3_capture_frontier` | `None` | Durable capture-frontier root |
+
+Automatic launch limits are 256 tiles for ordinary EXL3 integer encoding
+and 128 for ordinary fractional encoding. Q4NX uses up to 512 tiles for
+W2.5 and W3.0 final encoding and 1024 for scale search and W3.5 final
+encoding. These Q4NX limits bound the per-launch path history to 16 MiB
+and 4 MiB respectively. Set `exl3_tile_batch` to a smaller value to lower
+temporary memory use.
+
+Q4NX encoding first selects the automatic launch limit from the stage and
+rate. Each CUDA block processes one complete tile. At W2.5 and W3.0, the
+low suffix bits assign each overlap class to a thread, which keeps its
+minimum candidate key in registers. At W3.5, the block shares a table of
+signed errors and searches all 16 overlap classes. The minimum key orders
+the FP32 path cost first and the state and predecessor slot second.
+
+```mermaid
+flowchart LR
+    A["_quantize_tiles_with_workspace"] --> B{"Scale search or W3.5?"}
+    B -->|yes| C["1,024 tile automatic limit"]
+    B -->|no| D["512 tile automatic limit"]
+    C --> E["_tile_batch_size applies exl3_tile_batch"]
+    D --> E
+    E --> F["quantize_tiles_q4nx"]
+    F -->|final encoding| G["pack_trellis_q4nx"]
+    F -->|scale search| H["Score trial scale"]
+```
+
+| Encoder stage | Original Q4NX | Current Q4NX |
+| --- | --- | --- |
+| W2.5 and W3.0 candidate minima | Shared atomic minima per overlap class | Register minima per owning thread |
+| W3.5 exhaustive search | Compute signed errors for every candidate | Share signed errors across candidates |
+| Final W2.5 and W3.0 launch limit | 256 tiles | 512 tiles |
+| Scale search and W3.5 launch limit | 256 tiles | 1,024 tiles |
 
 ### ROCm
 

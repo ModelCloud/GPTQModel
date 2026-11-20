@@ -193,6 +193,20 @@ def test_numpy_and_scalar_tensor_token_ids_are_pretokenized(cls, monkeypatch):
     assert batches[0]["input_ids"].tolist() == [list(range(12))]
 
 
+def _column_values(row):
+    """Normalize a pre-tokenized row's columns for comparison.
+
+    The splitter preserves the caller's container: a mapping of lists stays
+    lists, a columnar dataset column can arrive as a NumPy array, and a binary
+    mask can be an integer tensor (#5486). Compare the values instead.
+    """
+
+    return {
+        name: [int(value) for value in row[name]]
+        for name in ("input_ids", "attention_mask")
+    }
+
+
 def test_split_calibration_dataset_unpacks_columnar_mapping():
     rows, conversations = split_calibration_dataset(
         {
@@ -203,7 +217,10 @@ def test_split_calibration_dataset_unpacks_columnar_mapping():
     )
 
     assert conversations is None
-    assert rows == [
+    # ``#5486`` keeps the binary-mask convention while unpacking a columnar
+    # mapping, so the mask arrives as an integer tensor rather than a list.
+    # Compare the values (and the row order), not the container.
+    assert [_column_values(row) for row in rows] == [
         {"input_ids": [1, 2], "attention_mask": [1, 1]},
         {"input_ids": [3, 4], "attention_mask": [1, 1]},
     ]
@@ -251,11 +268,8 @@ def test_split_calibration_dataset_ignores_the_dataset_display_format(format, sl
 
     # ``pandas`` keeps the per-row token columns as NumPy arrays, which the
     # splitter passes through unchanged; compare the ids, not the container.
-    def _ids(row):
-        return {name: [int(value) for value in row[name]] for name in ("input_ids", "attention_mask")}
-
     assert conversations is None
-    assert [_ids(row) for row in rows] == [
+    assert [_column_values(row) for row in rows] == [
         {"input_ids": [1, 2], "attention_mask": [1, 1]},
         {"input_ids": [3, 4], "attention_mask": [1, 1]},
     ]

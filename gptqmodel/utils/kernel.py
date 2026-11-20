@@ -54,6 +54,8 @@ _BOOL_FIELDS = (
     "bitsandbytes_cpu_int8_dense",
     "bitsandbytes_triton",
     "disable_bitblas",
+    "exl3_fp16_gemv",
+    "exl3_fused_gemm",
     "gguf_native_quantized_loader",
     "gsq_disable_cuda_relaxation",
     "gsq_disable_hip_relaxation",
@@ -81,7 +83,7 @@ _MIN_INT_FIELDS = {
     "paro_triton_autotune_warmup": 0,
     "paro_triton_autotune_iters": 1,
     "paro_triton_decode_max_rows": 1,
-    "exl3_tile_batch": 1,
+    "exl3_int8_gemv": 0,
     "exl3_host_rss_limit_bytes": 0,
     "exl3_cuda_allocation_limit_bytes": 0,
     "exl3_memory_telemetry_interval_batches": 0,
@@ -93,6 +95,7 @@ _OPTIONAL_MIN_INT_FIELDS = {
     "gguf_cpp_threads": 1,
     "cpu_workers": 1,
     "cuda_workers": 1,
+    "exl3_tile_batch": 1,
     "max_packers": 1,
     "pool_intraop_threads": 0,
 }
@@ -247,7 +250,13 @@ class KernelConfig:
     gsq_disable_hip_relaxation: bool = False
 
     # EXL3 scratch, telemetry and capture. Replace ``GPTQMODEL_EXL3_*``.
-    exl3_tile_batch: int = 256
+    exl3_tile_batch: Optional[int] = None
+    # New CUDA variants change summation order. Existing integer checkpoints
+    # use their original GEMM by default. INT8 uses 0 (off), 1 (residual),
+    # or 2 (plain).
+    exl3_fp16_gemv: bool = False
+    exl3_fused_gemm: bool = False
+    exl3_int8_gemv: int = 0
     exl3_host_rss_limit_bytes: int = 0
     exl3_cuda_allocation_limit_bytes: int = 0
     exl3_memory_telemetry_interval_batches: int = 0
@@ -318,6 +327,9 @@ class KernelConfig:
                 )
             if value < minimum:
                 raise ValueError(f"KernelConfig.{name} must be >= {minimum}; got {value}")
+
+        if self.exl3_int8_gemv > 2:
+            raise ValueError("KernelConfig.exl3_int8_gemv must be 0 (off), 1 (residual), or 2 (plain)")
 
         for name, minimum in _OPTIONAL_MIN_INT_FIELDS.items():
             value = getattr(self, name)

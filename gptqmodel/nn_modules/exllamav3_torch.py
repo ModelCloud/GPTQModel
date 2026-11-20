@@ -14,12 +14,14 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+from ..exllamav3.q4nx import decode_q4nx_states, unpack_q4nx_states
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, trellis_rate
 from ..models._const import DEVICE
 from ..utils.cpu_features import cpu_bf16x3_scope, has_avx512_bf16, has_cpu_bf16x3_precision
 from ..utils.logger import setup_logger
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from .compiled_state import compiled_module_getstate
-from .exllamav3 import _EXL3_BUFFER_NAMES, _torch_dtype
+from .exllamav3 import _EXL3_BUFFER_NAMES, _EXL3_REQUIRED_BUFFERS, _torch_dtype
 
 
 log = setup_logger()
@@ -159,19 +161,34 @@ _EXL3_MUL1_INV = _half_scalar_from_bits(0x1EEE)
 _EXL3_MUL1_BIAS = _half_scalar_from_bits(0xC931)
 
 
+# These factories feed process-global ``lru_cache`` entries. A plain
+# ``torch.inference_mode()`` caller (``generate()``, an eval loop, server
+# warmup) would otherwise create an *inference* tensor and the cache would hand
+# that kind to every later caller. Matmul then raises "Inference tensors cannot
+# be saved for backward" for any grad-mode forward of any model in the process.
+# Build every constant with inference mode disabled (and no autograd tracking):
+# the values never need grad, and an ordinary tensor is valid in every mode.
+# A clone inside inference mode is still an inference tensor, so it cannot fix
+# this; the construction context itself has to be grad-safe.
 @lru_cache(maxsize=None)
+@torch.inference_mode(False)
+@torch.no_grad()
 def _tensor_core_perm(device_type: str, device_index: int | None) -> torch.Tensor:
     device = torch.device(device_type, device_index)
     return torch.tensor(_tensor_core_perm_values(), dtype=torch.long, device=device)
 
 
 @lru_cache(maxsize=None)
+@torch.inference_mode(False)
+@torch.no_grad()
 def _tensor_core_perm_i(device_type: str, device_index: int | None) -> torch.Tensor:
     device = torch.device(device_type, device_index)
     return torch.tensor(_inverse_perm_values(_tensor_core_perm_values()), dtype=torch.long, device=device)
 
 
 @lru_cache(maxsize=None)
+@torch.inference_mode(False)
+@torch.no_grad()
 def _hadamard_128(device_type: str, device_index: int | None) -> torch.Tensor:
     device = torch.device(device_type, device_index)
     had = torch.tensor([[1.0]], dtype=torch.float32, device=device)
@@ -188,6 +205,8 @@ def _hadamard_128(device_type: str, device_index: int | None) -> torch.Tensor:
 
 
 @lru_cache(maxsize=None)
+@torch.inference_mode(False)
+@torch.no_grad()
 def _codebook_lut(
     codebook: str,
     device_type: str,
@@ -257,6 +276,8 @@ def _hadamard_for(x: torch.Tensor) -> torch.Tensor:
 
 
 @lru_cache(maxsize=None)
+@torch.inference_mode(False)
+@torch.no_grad()
 def _hadamard_128_as(device_type: str, device_index: int | None, dtype: torch.dtype) -> torch.Tensor:
     return _hadamard_128(device_type, device_index).to(dtype=dtype)
 
@@ -277,6 +298,7 @@ def _apply_hadamard_right(x: torch.Tensor) -> torch.Tensor:
 
 class ExllamaV3TorchLinear(nn.Module):
     QUANT_TYPE = "exl3"
+    CHECKPOINT_REQUIRED_BUFFERS = _EXL3_REQUIRED_BUFFERS
     # Every floating EXL3 buffer (the fp16 `suh`/`svh` sign vectors and the
     # bias) loads at its checkpoint dtype; the Hadamard kernels require fp16.
     MODEL_DTYPE_BUFFERS = ()
@@ -344,17 +366,25 @@ class ExllamaV3TorchLinear(nn.Module):
         """EXL3 has no runtime cache to initialize."""
 
     def _codebook_name(self) -> str:
-        if getattr(self, "mcg", None) is not None:
-            return "mcg"
-        if getattr(self, "mul1", None) is not None:
-            return "mul1"
+        for name in EXL3_CODEBOOK_MARKERS:
+            if getattr(self, name, None) is not None:
+                return name
         return "3inst"
 
-    def _bits_per_weight(self) -> int:
+    def _bits_per_weight(self) -> int | float:
         trellis = getattr(self, "trellis", None)
         if trellis is None:
             raise RuntimeError(f"EXL3 module `{self.name}` is missing `trellis`.")
-        return int(trellis.shape[-1] // 16)
+        try:
+            return trellis_rate(
+                trellis.shape[-1],
+                getattr(self, "mcg", None) is not None,
+                getattr(self, "mul1", None) is not None,
+                q4nx=getattr(self, "q4nx", None) is not None,
+                max_integer_rate=16,
+            )
+        except ValueError as exc:
+            raise ValueError(f"EXL3 module `{self.name}` has invalid trellis geometry: {exc}") from exc
 
     def _runtime_weight_dtype(self) -> torch.dtype:
         trellis = getattr(self, "trellis", None)
@@ -365,14 +395,9 @@ class ExllamaV3TorchLinear(nn.Module):
     def _stored_features(self) -> tuple[int, int]:
         """Validate full Hadamard storage against the logical linear shape."""
         trellis = getattr(self, "trellis", None)
-        # Packing width is `bits` 16-bit words, so it is always a multiple of 16.
-        # The upper bound follows from the bit width, not a fixed 128: EXL3
-        # supports 2..16 bits (16 bits -> 256 words), and capping at 128/8 bits
-        # rejected every valid 10/12/16-bit checkpoint. ``_bits_per_weight()``
-        # derives the same value from this dimension.
-        if (trellis is None or trellis.ndim != 3 or trellis.dtype != torch.int16
-                or trellis.shape[-1] <= 0 or trellis.shape[-1] % 16 != 0):
+        if trellis is None or trellis.ndim != 3 or trellis.dtype != torch.int16:
             raise ValueError(f"EXL3 module `{self.name}` has invalid trellis geometry or dtype")
+        self._bits_per_weight()
         inputs, outputs = int(trellis.shape[0]) * 16, int(trellis.shape[1]) * 16
         padded_outputs = ((self.out_features + 127) // 128) * 128
         if (self.in_features <= 0 or self.out_features <= 0
@@ -408,10 +433,27 @@ class ExllamaV3TorchLinear(nn.Module):
                 f"for {trellis.shape[1]} tiles."
             )
 
+        packed = trellis[:, tile_n_start:tile_n_end]
+        if getattr(self, "q4nx", None) is not None:
+            return unpack_q4nx_states(packed)
+
         bits = self._bits_per_weight()
-        mask = (1 << bits) - 1
-        words = (trellis[:, tile_n_start:tile_n_end].to(torch.int32) & 0xFFFF).contiguous()
+        words = (packed.to(torch.int32) & 0xFFFF).contiguous()
         words = words.view(*words.shape[:-1], -1, 2).flip(-1).reshape(*words.shape)
+        if bits != int(bits):
+            # Each alternating pair consumes 2*floor(bits)+1 bits. Gather
+            # the 16-bit state ending at each position, wrapping at the tile
+            # boundary. As for integer tiles, the preceding flip puts each
+            # packed uint32 into bitstream-order uint16 words.
+            positions = torch.arange(1, 257, device=words.device, dtype=torch.long)
+            offsets = (positions * int(bits) + positions // 2 - 16) % (16 * words.shape[-1])
+            word_idx = offsets // 16
+            joined = _torch_left_shift(words[..., word_idx], 16)
+            joined = joined | words[..., (word_idx + 1) % words.shape[-1]]
+            return (_torch_right_shift(joined, 16 - offsets % 16) & 0xFFFF).to(torch.long)
+
+        bits = int(bits)
+        mask = (1 << bits) - 1
         words = words.view(*words.shape[:-1], 16, bits)
 
         # Unpack all 16 positions in one pass. Each position selects one of the
@@ -471,8 +513,12 @@ class ExllamaV3TorchLinear(nn.Module):
             raise RuntimeError(f"EXL3 module `{self.name}` has not been materialized from checkpoint tensors yet.")
 
         encoded = self._unpack_indices(tile_n_start, tile_n_end)
-        lut = _codebook_lut(self._codebook_name(), trellis.device.type, trellis.device.index)
-        decoded = lut[encoded]
+        codebook = self._codebook_name()
+        if codebook == "q4nx":
+            decoded = decode_q4nx_states(encoded)
+        else:
+            lut = _codebook_lut(codebook, trellis.device.type, trellis.device.index)
+            decoded = lut[encoded]
 
         perm_i = _tensor_core_perm_i(trellis.device.type, trellis.device.index)
         decoded = decoded[..., perm_i]
@@ -642,13 +688,10 @@ class ExllamaV3TorchLinear(nn.Module):
             "bits_per_weight": self._bits_per_weight(),
         }
 
-        mcg_multiplier = self._multiplier_value("mcg")
-        if mcg_multiplier is not None:
-            entry["mcg_multiplier"] = mcg_multiplier
-
-        mul1_multiplier = self._multiplier_value("mul1")
-        if mul1_multiplier is not None:
-            entry["mul1_multiplier"] = mul1_multiplier
+        for name in EXL3_CODEBOOK_MARKERS:
+            multiplier = self._multiplier_value(name)
+            if multiplier is not None:
+                entry[f"{name}_multiplier"] = multiplier
 
         return entry
 

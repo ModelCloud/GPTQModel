@@ -203,8 +203,7 @@ norm can exceed the text tokens by hundreds of times, so a few rows dominate the
 input Hessian and the quantizer stops optimizing for text tokens (issue #4393).
 `CalibrationConfig(exclude_attention_sinks=True)` drops every attended BOS token (the
 leading one and each document-boundary BOS of concatenated calibration) from
-every calibration method's statistics (GPTQ, GPTAQ, FOEM, QQQ, MACaQ, EXL3, AWQ,
-calibrated FP8 GSQ) while still running it through the forward:
+every calibration method's statistics (GPTQ, GPTAQ, FOEM, QQQ, MACaQ, EXL3, AWQ) while still running it through the forward:
 
 ```python
 model.quantize(CalibrationConfig(dataset=texts, exclude_attention_sinks=True))
@@ -239,10 +238,13 @@ writes the requested GEMV checkpoint (issue #4554).
 
 `FORMAT.GEMV_FAST` and `FORMAT.LLM_AWQ` follow the same rule: the native
 CUDA GEMV_FAST kernel packs on CUDA, and the portable Torch readers
-(`AwqGEMVFastTorchLinear`, `LLMAwqTorchLinear`, `BACKEND.AWQ_TORCH`) pack on a
-CPU-only host and serve as the in-session CPU kernel, so `quantize()` ->
-`save()` keeps the calibration and writes the requested interleaved checkpoint
-(issue #4736).
+(`AwqGEMVFastTorchLinear`, `LLMAwqTorchLinear`, `BACKEND.AWQ_TORCH`) pack on
+every host without that extension - a CPU-only host (#4736) and ROCm, where
+hipcc cannot build it (#5109) - and serve as the in-session kernel, so
+`quantize()` -> `save()` keeps the calibration and writes the requested
+interleaved checkpoint. On CUDA an AUTO load still selects the native kernel;
+on CPU and ROCm the same AUTO load resolves the portable reader, because these
+two layouts have no Triton kernel.
 
 ### RTN W4A16 without calibration
 
@@ -270,73 +272,33 @@ Use a compatible NVIDIA GPU and CUDA build for `BACKEND.QQQ`;
 `group_size=-1`. Activation ordering is unsupported. INT8 activation operands
 inside QQQ do not change the model's public FP16/BF16 input/output dtype.
 
-### FP8 weights
+### FP8 weights (load-only)
 
-```python
-from gptqmodel.quantization import FP8Config
+FP8 is a production checkpoint format, not a GPT-QModel quantization recipe.
+GPT-QModel no longer quantizes or exports FP8 weights: `FP8Config` exists to
+describe a checkpoint you load, and `GPTQModel.quantize()` refuses it with a
+`ValueError`. Load production FP8 checkpoints with `GPTQModel.load` (or
+`transformers` directly):
 
-qcfg = FP8Config(bits=8, format="float8_e4m3fn", weight_scale_method="row")
-backend = BACKEND.FP8_TORCH
-```
+- `transformers` `FineGrainedFP8` and DeepSeek/Qwen block scales, which store
+  `amax / 448` under `weight_scale_inv` and multiply it;
+- NVIDIA ModelOpt per-tensor scales;
+- MXFP8 and NVFP8 on hardware that supports them.
 
-Use `format="float8_e5m2"` for E5M2. This recipe quantizes weights without
-calibration; it does not enable the experimental GPTQ FP8 activation stream.
+A loaded checkpoint may use `float8_e4m3fn` or `float8_e5m2`. Legacy
+GPT-QModel checkpoints that store an inverse scale still load when they
+declare `weight_scale_semantics="inverse"`; that spelling is accepted on load
+and never written. The legacy `quant_method: "gptqmodel_fp8"` name is also
+accepted on load and normalized to `fp8`; it is never written again.
 
 `TorchFP8Linear` is **weight-only (W8A16)**: the packed FP8 weight tile is
 dequantized for the current matmul and activations keep their FP16/BF16 input
-dtype. The GPU `torch._scaled_mm` path is not used by this recipe. It is
-reachable only through the explicit
+dtype. The GPU `torch._scaled_mm` path is not used by default. It is reachable
+only through the explicit
 `TorchFP8Linear.set_activation_quant_method("per_token")` opt-in, which makes
 the layer **W8A8** with one activation scale per token. There is no per-tensor
 activation mode, because it would make a row's output depend on its batch
 neighbours. See [FP8 weight-only dispatch](fp8-weight-only-dispatch.md).
-
-#### FP8 source weight validation
-
-FP8 quantization requires finite dense source weights that remain finite when
-converted to FP32. `quantize_fp8_weight` rejects Inf, NaN, and values outside
-FP32's range by checking the already-computed absolute maxima before inverse
-scales. `TorchFP8Linear.pack_original` checks the source before an optional
-smoother and before MLX dispatch; the ordinary Torch path uses the direct
-quantizer's check. This contract was introduced in PR #3742.
-
-| Previous path | Current path |
-| --- | --- |
-| `quantize_fp8_weight` computed `amax` and inverse scales from the FP32 copy without validating the source (`gptqmodel/nn_modules/qlinear/fp8.py:131` at the previous revision). | `_require_finite_fp8_source` checks each method's computed absolute maxima before inverse scales. |
-| `TorchFP8Linear.pack_original` smoothed and selected the packer directly (`gptqmodel/nn_modules/qlinear/fp8.py:348` at the previous revision). | It validates before smoothing or MLX dispatch; the Torch path checks its maxima. |
-
-```mermaid
-flowchart TD
-    A["TorchFP8Linear.pack_original"] --> B["Convert source to CPU FP32"]
-    B --> C{"Smoother configured?"}
-    C -- Yes --> D["_require_finite_fp8_source before smoothing"]
-    D --> D2{"Finite?"}
-    D2 -- Yes --> E["Optional smoothing"]
-    D2 -- No --> X["ValueError before packed buffers change"]
-    C -- No --> E
-    E --> F{"MLX large-weight path selected?"}
-    F -- Yes --> V["_require_finite_fp8_source before MLX"]
-    V --> V2{"Finite?"}
-    V2 -- Yes --> G["quantize_fp8_weight_mlx validates and packs"]
-    V2 -- No --> X
-    F -- No --> H["quantize_fp8_weight"]
-    Q["Direct quantize_fp8_weight"] --> H
-    H --> I["Convert source to CPU FP32 and compute abs maxima"]
-    I --> K["_require_finite_fp8_source on maxima"]
-    K --> K2{"Finite?"}
-    K2 -- No --> X
-    K2 -- Yes --> L["Compute inverse scales and FP8 codes"]
-    G --> R["Return FP8 codes and inverse scales"]
-    L --> R
-    R --> N{"Called by pack_original?"}
-    N -- Yes --> J["Install packed weight and scale buffers"]
-    N -- No --> U["Return to direct caller"]
-    classDef failure fill:#fdd,stroke:#c00,color:#000
-    class X failure
-```
-
-The validation creates no persistent weight cache. Packed FP8 weights and
-inverse scales remain the only weight storage installed by the packer.
 
 ### GGUF block quantization
 
@@ -396,6 +358,9 @@ from gptqmodel.quantization import EXL3Config
 qcfg = EXL3Config(bits=4.0, codebook="mcg")
 backend = BACKEND.EXL3_EXLLAMA_V3
 ```
+
+Set `codebook="q4nx"` with `bits=2.5`, `3.0`, or `3.5` to use EXL3's Q4NX
+codebook on NVIDIA CUDA. [Q4NX checkpoint layout and per-projection recipe](exl3-native-decode.md#q4nx)
 
 `bits` is a target average bitrate, not a uniform integer field width.
 Quantization requires CUDA/HIP and the ExLlama V3 integration and its build

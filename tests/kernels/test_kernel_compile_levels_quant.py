@@ -13,8 +13,6 @@ host are skipped with the reason their declaration records.
 from __future__ import annotations
 
 import importlib.util
-import os
-import shutil
 import warnings
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -159,7 +157,12 @@ def _build_nf12():
 
 
 def _build_paro(cls):
-    in_features, out_features, group_size = 128, 64, 32
+    # ``group_size=128`` and a non-identity theta/scales are required to reach
+    # the fused rotation op: the identity shortcut returns the input unchanged,
+    # and the fused kernel only accepts group_size 128 with krot 1/8. A smaller
+    # group or an identity rotation silently measured the reference path and
+    # missed the #5225 graph breaks.
+    in_features, out_features, group_size = 256, 64, 128
     linear = _linear(in_features, out_features)
     module = cls(
         bits=4, group_size=group_size, sym=True, desc_act=False,
@@ -169,6 +172,8 @@ def _build_paro(cls):
     groups = in_features // group_size
     scales = torch.rand(out_features, groups, dtype=torch.float16) * 0.03 + 0.01
     module.pack(linear, scales, torch.full((out_features, groups), 8, dtype=torch.int32))
+    module.theta.fill_(0.2)
+    module.channel_scales.mul_(0.75)
     module.post_init()
     module = module.cuda().eval()
     return module, _input(module), True
@@ -255,9 +260,19 @@ def _unavailable(cls) -> Optional[str]:
 
 
 def _paro_unavailable() -> Optional[str]:
-    if os.environ.get("CUDA_HOME") is None and shutil.which("nvcc") is None:
-        return "ParoLinear needs the AWQ CUDA GEMM JIT extension; no CUDA toolkit on this host"
-    return None
+    # ParoLinear packs through the AWQ CUDA GEMM JIT extension. Gate on the
+    # same runtime check the AWQ kernel uses: it resolves the toolkit through
+    # ``torch.utils.cpp_extension.CUDA_HOME`` (which also finds
+    # ``/usr/local/cuda``), so requiring CUDA_HOME or nvcc on PATH skipped this
+    # test on hosts where the extension builds fine (#4981).
+    from gptqmodel.utils.awq import awq_runtime_available, awq_runtime_error
+
+    if awq_runtime_available():
+        return None
+    return (
+        "ParoLinear needs the AWQ CUDA GEMM JIT extension: "
+        f"{awq_runtime_error() or 'not available on this host'}"
+    )
 
 
 def _fp8_capture_supported() -> bool:

@@ -61,6 +61,7 @@ def test_field_list_is_stable():
         "has_tensor_memory",
     )
 
+@requires_cuda
 def test_explicit_device_zero_is_not_treated_as_unset(monkeypatch):
     """`0` is falsy, so an explicit index 0 must not fall back to the current device."""
     from gptqmodel.utils import marlin as marlin_mod
@@ -80,6 +81,7 @@ def test_explicit_device_zero_is_not_treated_as_unset(monkeypatch):
     assert calls == [0], f"device 0 was resolved to {calls}"
 
 
+@requires_cuda
 def test_index_less_cuda_means_the_current_device(monkeypatch):
     from gptqmodel.utils import marlin as marlin_mod
 
@@ -97,6 +99,7 @@ def test_index_less_cuda_means_the_current_device(monkeypatch):
     assert calls == [2]
 
 
+@requires_cuda
 def test_non_cuda_device_is_rejected(monkeypatch):
     from gptqmodel.utils import marlin as marlin_mod
 
@@ -105,6 +108,7 @@ def test_non_cuda_device_is_rejected(monkeypatch):
         marlin_mod.marlin_device_profile("cpu")
 
 
+@requires_cuda
 @pytest.mark.parametrize("device", ["cuda:256", "cuda:999", torch.device("cuda:1")])
 def test_explicit_device_index_is_validated_before_profile(monkeypatch, device):
     from gptqmodel.utils import marlin as marlin_mod

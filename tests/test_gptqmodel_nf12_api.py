@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 
 import gptqmodel_nf12 as nf12
-from tests.accelerator_gates import nf12_skip_reason
+from tests.accelerator_gates import nf12_skip_reason, requires_nvidia_cuda
 from tests.nf12_embedding_cases import (
     OBSERVED_LITE_PREFILL_CASES,
     assert_embedding_lookup_exact,
@@ -142,6 +142,9 @@ def test_repeat4_uses_single_copy_from_preloaded_legacy_namespace(monkeypatch):
                        single.unsqueeze(-2).repeat(1, 1, 4, 1).view(torch.int16))
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="the native NF12 loader is NVIDIA CUDA only"
+)
 def test_preloaded_partial_namespace_is_reused_without_a_second_load(monkeypatch):
     """A legacy namespace must not trigger a JIT/load attempt (#3886)."""
     from gptqmodel_nf12 import _library
@@ -165,6 +168,9 @@ def test_preloaded_partial_namespace_is_reused_without_a_second_load(monkeypatch
     assert _library.has_ops("embedding", "decode")
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="the native NF12 loader is NVIDIA CUDA only"
+)
 def test_require_reports_only_the_missing_operator(monkeypatch):
     from gptqmodel_nf12 import _library
 

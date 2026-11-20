@@ -20,6 +20,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.python import has_gil_disabled
 from ...utils.torch import torch_compile
 from ...utils.vptq import (
     unpack_vptq_indices,
@@ -30,7 +31,12 @@ from ...utils.vptq import (
 )
 from . import WeightOnlyQuantLinear
 from ._compile_support import COMPILE_LEVEL
-from ._numerics import bias_narrows_losslessly, linear_fp32_reduce, linear_needs_wide_bias
+from ._numerics import (
+    bias_narrows_losslessly,
+    codebook_rounding_dtype,
+    linear_fp32_reduce,
+    linear_needs_wide_bias,
+)
 
 
 log = setup_logger()
@@ -45,11 +51,38 @@ def _as_pair(value: Any, name: str) -> List[int]:
 class VPTQLinear(WeightOnlyQuantLinear):
     """Weight-only VPTQ linear layer with the portable Torch implementation."""
 
+    # Packed codebook indices plus the codebooks that decode them. The
+    # residual/outlier codebooks, their indices, the norm scales and the
+    # permutation exist only when the layer was configured with them, so the
+    # validator skips a suffix whose live tensor is absent.
+    CHECKPOINT_REQUIRED_BUFFERS = (
+        "indices",
+        "centroids.weight",
+        "res_centroids.weight",
+        "outlier_centroids.weight",
+        "outlier_indices",
+        "weight_scale",
+        "weight_bias",
+        "perm",
+    )
+
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
     # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
     # capture succeeds with output matching eager.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all pass. CUDA-graph capture is CUDA-only, so
+    # the portable CPU forward's ceiling is INDUCTOR.
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
     SUPPORTS_GRAPH_CAPTURE = True
+    # Static-cache `generate()` adds one model graph with zero breaks and
+    # decodes 3.5-5.0x faster than eager: Qwen2.5-0.5B-Instruct VPTQ, fp16,
+    # RTX 4090 (sm_89), torch 2.15.0+cu132, 4 left-padded prompts x 32 greedy
+    # tokens: 0.70 s -> 0.14 s (#5102). The layer-local `dequantize` compile
+    # exists on both paths, so the model graph is the delta. AUTO selects this
+    # kernel on ROCm (the CUDA kernel cannot run there), so the previous
+    # unmeasured opt-out cost every ROCm VPTQ checkpoint by default.
+    SUPPORTS_COMPILE = True
 
     SUPPORTS_BACKENDS = [BACKEND.VPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.VPTQ]
@@ -302,6 +335,21 @@ class VPTQLinear(WeightOnlyQuantLinear):
             log.info.once("Optimize: `VPTQLinear` torch.compile skipped on NPU.")
             return
 
+        if has_gil_disabled():
+            # `dequantize` is one code object shared by every VPTQ layer, so a
+            # per-module `torch.compile` wrapper makes dynamo trace and guard
+            # that code object once per layer. Under free-threading a compiled
+            # call on one layer can then read the cache entry another thread is
+            # still tracing and return silently wrong tensors (#5228); the
+            # model-level forward compile still serves the graph. Re-enable
+            # once dynamo's per-code-object cache is thread-safe.
+            self.optimized = True
+            log.info.once(
+                "Optimize: `VPTQLinear` per-layer torch.compile skipped on "
+                "free-threaded Python (GIL disabled)."
+            )
+            return
+
         if backend is None:
             backend = "inductor" if device_type != "mps" else "aot_eager"
         self.dequantize = torch_compile(
@@ -498,8 +546,16 @@ class VPTQLinear(WeightOnlyQuantLinear):
     # runtime
     # ------------------------------------------------------------------
     @torch.no_grad()
-    def dequantize(self) -> torch.Tensor:
-        """Reconstruct the dense weight matrix from codebooks and indices."""
+    def dequantize(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        """Reconstruct the dense weight matrix from codebooks and indices.
+
+        The codebook reduction runs in FP32. ``dtype`` is the dtype the caller
+        needs; when it is omitted the historical codebook storage dtype is
+        returned. Rounding to a narrower dtype is only safe when that dtype can
+        represent the result, so callers that need a wider range (for example
+        BF16 inference from an FP16 checkpoint) must pass it here instead of
+        narrowing and widening again (#5609).
+        """
 
         device = self.centroids.weight.device
         centroids = self.centroids.weight.view(self.group_num, self.num_centroids, self.vector_len)
@@ -580,7 +636,7 @@ class VPTQLinear(WeightOnlyQuantLinear):
 
         if qweight.device != device:
             qweight = qweight.to(device)
-        return qweight.to(self.centroids.weight.dtype)
+        return qweight.to(self.centroids.weight.dtype if dtype is None else dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = getattr(self, "bias", None)
@@ -590,7 +646,13 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 out = self.adapter.apply(x=x, out=out)
             return out
 
-        weight = self.dequantize().to(dtype=x.dtype, device=x.device)
+        # Round the FP32 codebook reduction once, to a dtype that can hold it.
+        # An FP16 checkpoint whose two finite codebooks sum above 65504 must
+        # not narrow to FP16 before a BF16 activation consumes it, while an
+        # FP32 activation keeps the historical codebook-dtype rounding (#5609).
+        weight = self.dequantize(
+            dtype=codebook_rounding_dtype(x.dtype, self.centroids.weight.dtype)
+        ).to(dtype=x.dtype, device=x.device)
         bias = self._promote_stored_bias(x, bias)
         out = linear_fp32_reduce(x, weight, bias)
         if self.adapter is not None:

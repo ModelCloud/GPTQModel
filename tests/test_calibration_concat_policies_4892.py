@@ -17,8 +17,12 @@ against the model's position budget up front.
 from types import SimpleNamespace
 
 import pytest
+import torch
 
-from gptqmodel.utils.calibration import prepare_calibration_dataset
+from gptqmodel.utils.calibration import (
+    _prepare_tensor_kwargs_dataset,
+    prepare_calibration_dataset,
+)
 
 
 class _Tokenizer:
@@ -29,6 +33,20 @@ class _Tokenizer:
 
     def decode(self, ids, skip_special_tokens=False):
         return " ".join(str(int(token)) for token in ids)
+
+
+class _CharTokenizer(_Tokenizer):
+    """Encode each character as its code point, as the #5357 fixture does."""
+
+    def __init__(self, *, padding_side="right"):
+        self.padding_side = padding_side
+
+    def __call__(self, text, **kwargs):
+        ids = torch.tensor([[ord(char) for char in text]])
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+
+    def decode(self, ids, skip_special_tokens=False):
+        return "".join(chr(int(token)) for token in ids)
 
 
 def _qmodel(*, max_positions=128):
@@ -163,3 +181,157 @@ def test_non_concat_path_keeps_the_per_row_policies():
 
     assert len(prepared) == 1
     assert _real_tokens(prepared) == 64
+
+
+def test_concat_size_errors_name_the_public_config_field():
+    """Every user-facing concat error names ``CalibrationConfig.concat_size``.
+
+    The removed ``calibration_dataset_concat_size`` quantize keyword raises
+    ``TypeError``, so a message that names it sends the user to a dead end
+    (#5121).
+    """
+
+    with pytest.raises(ValueError, match=r"CalibrationConfig\.concat_size=65 exceeds"):
+        prepare_calibration_dataset(
+            _qmodel(max_positions=64),
+            _rows(8),
+            calibration_dataset_concat_size=65,
+            calibration_data_min_length=0,
+        )
+
+    with pytest.raises(ValueError, match=r"`CalibrationConfig\.concat_size` is specified"):
+        prepare_calibration_dataset(
+            SimpleNamespace(
+                tokenizer=None,
+                support_batch_quantize=True,
+                model=SimpleNamespace(
+                    config=SimpleNamespace(max_position_embeddings=128),
+                ),
+            ),
+            _rows(8),
+            calibration_dataset_concat_size=8,
+            calibration_data_min_length=0,
+        )
+
+    with pytest.raises(ValueError, match=r"`CalibrationConfig\.concat_size` must be larger"):
+        prepare_calibration_dataset(
+            _qmodel(),
+            _rows(2),
+            calibration_dataset_concat_size=8,
+            calibration_data_min_length=10,
+        )
+
+    with pytest.raises(ValueError, match=r"`CalibrationConfig\.concat_size` is token-based"):
+        _prepare_tensor_kwargs_dataset(
+            [],
+            calibration_dataset_concat_size=8,
+            batch_size=1,
+            log=SimpleNamespace(warn=lambda *a, **k: None, info=lambda *a, **k: None),
+        )
+
+
+@pytest.mark.parametrize(
+    ("concat_size", "expected_ids", "expected_mask"),
+    [
+        (
+            4,
+            [[1, 2, 3, 0], [4, 5, 0, 0]],
+            [[1, 1, 1, 0], [1, 1, 0, 0]],
+        ),
+        (
+            5,
+            [[1, 2, 3, 0, 0], [4, 5, 0, 0, 0]],
+            [[1, 1, 1, 0, 0], [1, 1, 0, 0, 0]],
+        ),
+    ],
+)
+def test_concat_partial_windows_are_padded_and_drop_a_trailing_separator(
+    concat_size, expected_ids, expected_mask
+):
+    """#5357: an early flush must emit a full, zero-masked window.
+
+    The separator (``"##"`` -> two tokens) belongs between two documents in one
+    window. When the first document leaves no room for a separator plus one
+    token of the next document, the window must be padded instead of ending
+    short or carrying attended trailing separator tokens.
+    """
+
+    prepared = prepare_calibration_dataset(
+        SimpleNamespace(tokenizer=_CharTokenizer()),
+        [[1, 2, 3], [4, 5]],
+        calibration_dataset_concat_size=concat_size,
+        calibration_data_min_length=0,
+        calibration_concat_separator="##",
+    )
+
+    assert [row["input_ids"].tolist() for row in prepared] == [
+        [ids] for ids in expected_ids
+    ]
+    assert [row["attention_mask"].tolist() for row in prepared] == [
+        [mask] for mask in expected_mask
+    ]
+    assert {row["input_ids"].shape[-1] for row in prepared} == {concat_size}
+
+
+def test_concat_partial_window_pads_on_the_tokenizer_padding_side():
+    """The shared flush keeps honoring ``tokenizer.padding_side``."""
+
+    prepared = prepare_calibration_dataset(
+        SimpleNamespace(tokenizer=_CharTokenizer(padding_side="left")),
+        [[1, 2, 3], [4, 5]],
+        calibration_dataset_concat_size=4,
+        calibration_data_min_length=0,
+        calibration_concat_separator="##",
+    )
+
+    assert [row["input_ids"].tolist() for row in prepared] == [
+        [[0, 1, 2, 3]],
+        [[0, 0, 4, 5]],
+    ]
+    assert [row["attention_mask"].tolist() for row in prepared] == [
+        [[0, 1, 1, 1]],
+        [[0, 0, 1, 1]],
+    ]
+
+
+def test_concat_separator_still_joins_documents_when_a_token_follows():
+    """A separator is kept when it and at least one next-document token fit."""
+
+    prepared = prepare_calibration_dataset(
+        SimpleNamespace(tokenizer=_CharTokenizer()),
+        [[1, 2], [3, 4, 5]],
+        calibration_dataset_concat_size=5,
+        calibration_data_min_length=0,
+        calibration_concat_separator="##",
+    )
+
+    assert [row["input_ids"].tolist() for row in prepared] == [
+        [[1, 2, 35, 35, 3]],
+        [[4, 5, 0, 0, 0]],
+    ]
+    assert [row["attention_mask"].tolist() for row in prepared] == [
+        [[1, 1, 1, 1, 1]],
+        [[1, 1, 0, 0, 0]],
+    ]
+
+
+def test_concat_every_window_has_the_configured_width():
+    """Early flushes and the tail must all agree with the declared width.
+
+    Ragged windows made each batch a different shape depending on whether a
+    window was closed early, completed exactly, or ended as the tail. Here the
+    separator cannot fit after the first document, so the early flush is the
+    path that used to emit a short window.
+    """
+
+    prepared = prepare_calibration_dataset(
+        SimpleNamespace(tokenizer=_CharTokenizer()),
+        [[1, 2, 3, 4], [5, 6], [7, 8, 9, 10], [11]],
+        calibration_dataset_concat_size=5,
+        calibration_data_min_length=0,
+        calibration_concat_separator="##",
+    )
+
+    assert len(prepared) == 4
+    assert {row["input_ids"].shape[-1] for row in prepared} == {5}
+    assert {row["attention_mask"].shape[-1] for row in prepared} == {5}

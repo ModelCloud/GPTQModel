@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import threading
+import weakref
 from typing import Any, Callable, Optional, Tuple
 
 import torch
@@ -1742,6 +1743,14 @@ def _publish_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> 
     lets a consumer on a different stream wait for exactly that work.
     """
 
+    # Snapshot the tensors a consumer stream must keep alive.  The forward path
+    # must never iterate the cache dict itself: a peer thread may retire the
+    # handshake (a ``dict.pop``) while this thread is iterating it, which raises
+    # "dictionary changed size during iteration" (#4962).  The cache is not
+    # visible to other threads until this returns, so the snapshot is safe here.
+    cache["tensors"] = tuple(
+        value for value in cache.values() if isinstance(value, torch.Tensor)
+    )
     try:
         stream = torch.cuda.current_stream(device)
         event = torch.cuda.Event()
@@ -1829,10 +1838,10 @@ def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) ->
         return
     current.wait_event(event)
     # The cached tensors outlive every forward, but the allocator still has to
-    # know this stream reads them.
-    for value in cache.values():
-        if isinstance(value, torch.Tensor):
-            value.record_stream(current)
+    # know this stream reads them.  Iterate the publish-time snapshot, never the
+    # dict: a peer thread may retire the handshake concurrently (#4962).
+    for value in cache.get("tensors", ()):
+        value.record_stream(current)
 
 
 # One lock for every module's first-forward re-layout. The permute itself is a
@@ -1840,6 +1849,41 @@ def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) ->
 # cheap, and it makes "already permuted" a decision no two threads can race on
 # (#4879).
 _PACKED_WEIGHT_PERMUTE_LOCK = threading.Lock()
+
+# One cold-build lock per module. A published cache entry owns the
+# ``scale``/``min`` tensors that every consumer stream reads, so replacing it
+# while a consumer is still running drops the last reference and hands those
+# blocks back to the allocator under a pending kernel (#5008). Serializing the
+# cold build makes the entry a once-per-module decision, and it also removes
+# the N redundant builds of an N-thread cold burst.
+#
+# The lock lives in a weak map keyed by the module instead of on the module:
+# a ``threading.Lock`` attribute would make ``copy.deepcopy``/``torch.save`` of
+# a quantized model raise ``cannot pickle '_thread.lock' object``, while a
+# deep-copied replica (data-parallel forward) still gets its own lock here.
+_TRITON_CACHE_BUILD_LOCKS: "weakref.WeakKeyDictionary[torch.nn.Module, threading.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+_TRITON_CACHE_BUILD_LOCKS_GUARD = threading.Lock()
+# Fallback for a module that cannot be a weak key; never
+# ``_PACKED_WEIGHT_PERMUTE_LOCK``, which the build itself acquires.
+_TRITON_CACHE_BUILD_FALLBACK_LOCK = threading.Lock()
+
+
+def _triton_cache_build_lock(module: torch.nn.Module) -> threading.Lock:
+    """Return the cold-build lock that belongs to ``module``."""
+
+    try:
+        with _TRITON_CACHE_BUILD_LOCKS_GUARD:
+            lock = _TRITON_CACHE_BUILD_LOCKS.get(module)
+            if lock is None:
+                lock = threading.Lock()
+                _TRITON_CACHE_BUILD_LOCKS[module] = lock
+            return lock
+    except TypeError:
+        # Not weak-referenceable (a test double built without ``__init__``):
+        # fall back to one lock for the process rather than fail the forward.
+        return _TRITON_CACHE_BUILD_FALLBACK_LOCK
 
 
 class GGUFTritonKernel(GGUFTorchLinear):
@@ -1857,6 +1901,18 @@ class GGUFTritonKernel(GGUFTorchLinear):
     # bit width is not enough to identify one (Q4_0 and Q4_K are both 4-bit),
     # so AUTO selection must consult the resolved qtype.
     SUPPORTS_GGUF_QTYPES = frozenset({"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"})
+
+    #: GGUF tensor types whose fused Triton forward is safe under an explicit
+    #: ``torch.cuda.CUDAGraph`` capture (#5591). The fused kernels are pure
+    #: device work (``tl.load``/``tl.dot``) with no host copy, so every layout
+    #: the constructor accepts is capturable. The inherited
+    #: ``GGUFTorchLinear.GRAPH_CAPTURE_QTYPES`` is *not* this kernel's answer: it
+    #: lists Q4_0/Q8_0, which this constructor rejects, and omits the 1-bit
+    #: formats it does build, so the per-instance answer under-claimed them.
+    #: Measured on sm_120 (RTX 5090, torch 2.15.0+cu132, triton 3.9.0): capture,
+    #: replay and a changed-input replay are bitwise identical to eager for all
+    #: five layouts, including the Q6_K wide-scale path.
+    GRAPH_CAPTURE_QTYPES = frozenset({"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"})
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True
@@ -1943,7 +1999,10 @@ class GGUFTritonKernel(GGUFTorchLinear):
         return True, None
 
     def clear_weight_cache(self) -> None:
-        self._gguf_triton_cache.clear()
+        # Mutate the cache only under the build lock: a concurrent cold build
+        # would otherwise re-publish an entry into the dict this just cleared.
+        with _triton_cache_build_lock(self):
+            self._gguf_triton_cache.clear()
         return super().clear_weight_cache()
 
     def _packed_weight_is_permuted(self) -> bool:
@@ -2164,6 +2223,14 @@ class GGUFTritonKernel(GGUFTorchLinear):
         raise NotImplementedError(f"Unsupported GGUF Triton qtype: {self.gguf_tensor_qtype}")
 
     def _get_triton_cache(self, device: torch.device, wide_dot: bool = False) -> dict[str, Any]:
+        """Return this module's published metadata cache, building it once.
+
+        The hit path is the steady state: a dict read, a key compare and a
+        retired handshake (#4956). A miss (cold build, or an invalidation that
+        changed ``qweight_key``) is serialized per module so a concurrent burst
+        cannot replace the entry a peer is already reading (#5008).
+        """
+
         key = self._triton_cache_key(device, wide_dot)
         qweight_key = tensor_cache_key(self.qweight)
         cached = self._gguf_triton_cache.get(key)
@@ -2171,13 +2238,29 @@ class GGUFTritonKernel(GGUFTorchLinear):
             _wait_for_triton_cache_ready(cached, device)
             return cached
 
-        cached = self._build_triton_cache(device, wide_dot)
-        # The first build re-lays out ``qweight`` (#4811), so key the cache by
-        # the tensor that is actually resident now or every forward rebuilds it.
-        cached["qweight_key"] = tensor_cache_key(self.qweight)
-        _publish_triton_cache_ready(cached, device)
-        self._gguf_triton_cache[key] = cached
-        return cached
+        # Cold build, or a genuine invalidation: a weight write, a reload or a
+        # device/dtype move changed ``qweight_key``. Serialize it per module so
+        # two threads can never both build: the second store used to replace the
+        # entry a peer had already picked up, dropping the last reference to that
+        # entry's ``scale``/``min`` while a consumer stream was still reading
+        # them -- NaN/garbage from the first concurrent forward (#5008).
+        with _triton_cache_build_lock(self):
+            # Double-check under the lock: a peer may have published while this
+            # thread waited, and the first build re-lays out ``qweight`` (#4811),
+            # which changes the key it was resolved against above.
+            qweight_key = tensor_cache_key(self.qweight)
+            cached = self._gguf_triton_cache.get(key)
+            if cached is not None and cached.get("qweight_key") == qweight_key:
+                _wait_for_triton_cache_ready(cached, device)
+                return cached
+
+            cached = self._build_triton_cache(device, wide_dot)
+            # The first build re-lays out ``qweight`` (#4811), so key the cache by
+            # the tensor that is actually resident now or every forward rebuilds it.
+            cached["qweight_key"] = tensor_cache_key(self.qweight)
+            _publish_triton_cache_ready(cached, device)
+            self._gguf_triton_cache[key] = cached
+            return cached
 
     def _forward_triton(
         self, x_flat: torch.Tensor, output_dtype: torch.dtype | None = None,

@@ -304,6 +304,28 @@ def awq_gemv_pack_backend(*, device_type: str = "cuda", is_rocm: bool) -> BACKEN
     return BACKEND.AWQ_GEMV_TRITON if is_rocm else BACKEND.AWQ_GEMV
 
 
+def awq_gemv_fast_pack_backend(*, device_type: str = "cuda", is_rocm: bool) -> BACKEND:
+    """Return the AWQ GEMV_FAST / LLM_AWQ backend used to pack the weights.
+
+    The native GEMV_FAST extension (``gemv_fast_forward_decode`` /
+    ``gemm_fast_forward_prefill``) is CUDA-only: hipcc rejects its sources, so
+    ROCm has never had a backend for these two layouts (issue #5109). The
+    portable Torch readers (``AwqGEMVFastTorchLinear``/``LLMAwqTorchLinear``)
+    read and write the identical interleaved INT16 layout, so a host without
+    the extension packs with ``BACKEND.AWQ_TORCH`` instead of refusing before
+    calibration. That mirrors what #4753 did for a CPU-only host.
+
+    Args:
+        device_type: Runtime type of the quantization device (``"cuda"``,
+            ``"rocm"``, ``"cpu"``, ...).
+        is_rocm: Whether the CUDA namespace is backed by the HIP runtime.
+    """
+
+    if device_type == "cpu" or is_rocm:
+        return BACKEND.AWQ_TORCH
+    return BACKEND.AWQ_GEMV_FAST
+
+
 def backend_for_activation(activation_mode: Optional[str], backend: Optional[BACKEND]) -> Optional[BACKEND]:
     """Bind a saved W4A policy to its matching kernel, including AUTO loads."""
     if activation_mode is None:

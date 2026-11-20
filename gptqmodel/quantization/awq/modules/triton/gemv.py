@@ -139,8 +139,11 @@ def _awq_gemv_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    pid_n = tl.program_id(0)
-    pid_m = tl.program_id(1)
+    # Rows live on grid axis 0: axes 1 and 2 cap at 65535 blocks, so a
+    # 64K-token prefill on axis 1 silently dropped (ROCm) or rejected (CUDA)
+    # every row past 65535 (#5192).
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
     pack_factor: tl.constexpr = 8
     words_k = K // pack_factor
     num_words: tl.constexpr = BLOCK_K // pack_factor
@@ -173,14 +176,21 @@ def _awq_gemv_kernel(
         zero = (zero_word >> ((group % pack_factor) * 4)) & 0xF
 
         rows = base_k + tl.arange(0, BLOCK_K)
+        # 64-bit row arithmetic: `pid_m * K` overflows int32 once a prefill
+        # spans more than 2^31 elements (#5192).
+        row_offset = pid_m.to(tl.int64) * K
         activation = tl.load(
-            x_ptr + pid_m * K + rows, mask=rows < K, other=0.0,
+            x_ptr + row_offset + rows, mask=rows < K, other=0.0,
         ).to(tl.float32)
 
         weights = (codes.to(tl.float32) - zero.to(tl.float32)[:, None]) * scale.to(tl.float32)[:, None]
         accumulator += tl.sum(weights * activation[None, :], axis=1)
 
-    tl.store(out_ptr + pid_m * N + cols, accumulator.to(out_ptr.type.element_ty), mask=col_mask)
+    tl.store(
+        out_ptr + pid_m.to(tl.int64) * N + cols,
+        accumulator.to(out_ptr.type.element_ty),
+        mask=col_mask,
+    )
 
 
 def awq_gemv_triton(
@@ -234,7 +244,7 @@ def awq_gemv_triton(
     out_dtype = input.dtype if output_dtype is None else output_dtype
     output = torch.empty((M, N), device=input.device, dtype=out_dtype)
     with torch.cuda.device(input.device):
-        _awq_gemv_kernel[(triton.cdiv(N, block_n), M)](
+        _awq_gemv_kernel[(M, triton.cdiv(N, block_n))](
             input,
             qweight,
             scales,

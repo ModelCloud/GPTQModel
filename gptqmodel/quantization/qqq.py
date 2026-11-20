@@ -25,10 +25,19 @@ from ..utils.device import get_device
 from ..utils.kernel import resolve_kernel_config
 from ..utils.p2p import safe_move_to
 from .conv_padding import conv_padding_pairs, pad_mode
-from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
+from .fallback_smooth import (
+    affine_range_with_zero,
+    element_saliency_weights,
+    hessian_column_weights,
+    mse_optimal_quant,
+    smooth_applies,
+    smooth_block,
+    symmetric_range_from_bounds,
+)
 from .gptq import (
     _is_memory_allocation_failure,
     _move_static_groups,
+    _propagate_block_error,
     _uniform_column_group,
     get_number_of_rows_and_cols,
 )
@@ -224,16 +233,24 @@ class Quantizer(nn.Module):
                 ).unsqueeze(1)
                 xmin1 = p * xmin.unsqueeze(0)
                 xmax1 = p * xmax.unsqueeze(0)
-                scale1 = (
-                    (xmax1 - xmin1) / self.maxq
-                    if not groupwise
-                    else xmax1 / self.maxq
-                )
-                zero1 = (
-                    torch.round(-xmin1 / scale1)
-                    if not self.sym
-                    else self.zero.unsqueeze(0).expand(steps, x.shape[0])
-                )
+                if self._maxq_value < 0:
+                    # Ternary levels are stored directly in scale/zero and
+                    # ``maxq == -1`` is a sentinel, so the affine grid would be
+                    # negative. Shrink the extrema themselves and keep the
+                    # unshrunk endpoints as the incumbent (#5601).
+                    scale1 = xmax1
+                    zero1 = xmin1
+                else:
+                    scale1 = (
+                        (xmax1 - xmin1) / self.maxq
+                        if not groupwise
+                        else xmax1 / self.maxq
+                    )
+                    zero1 = (
+                        torch.round(-xmin1 / scale1)
+                        if not self.sym
+                        else self.zero.unsqueeze(0).expand(steps, x.shape[0])
+                    )
                 self.scale, self.zero = _mse_shrink_grid(
                     x,
                     scale1,
@@ -396,12 +413,19 @@ class QQQ:
 
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
-    def _fallback_quantize(self, strategy: FallbackStrategy):
+    def _fallback_quantize(
+        self,
+        strategy: FallbackStrategy,
+        hessian_diag: Optional[torch.Tensor] = None,
+    ):
         maxq = 2 ** self.qcfg.bits - 1
         sigma = 3.0
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
         start_time = time.time()
         smooth_method = getattr(self.fallback, "smooth", None)
+        search_mse = isinstance(smooth_method, SmoothMSE) and smooth_applies(
+            smooth_method, group_size
+        )
         mse_steps = 32
         mse_maxshrink = 0.8
         if isinstance(smooth_method, SmoothMSE):
@@ -422,6 +446,19 @@ class QQQ:
                 device=W.device,
             )
             W = torch.cat((W, pad), dim=1)
+        # The Hessian diagonal carries the captured input-channel energy; use
+        # it so SmoothMSE does not clip weights that feed outlier activations.
+        # Without a Hessian, fall back to the weight-magnitude proxy rather
+        # than the uniform mean that rewards clipping a row's largest weight.
+        col_weights = None
+        if search_mse:
+            col_weights = hessian_column_weights(
+                getattr(self, "H", None), self.columns, device=W.device
+            )
+            if col_weights is None:
+                col_weights = hessian_column_weights(
+                    hessian_diag, self.columns, device=W.device
+                )
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
@@ -437,9 +474,10 @@ class QQQ:
 
             if self.qcfg.sym:
                 # Every symmetric kernel assumes zero = 2 ** (bits - 1);
-                # Marlin does not even read the stored qzeros. Fit the common
-                # symmetric range so all strategies store that fixed zero.
-                lo, hi = symmetric_range(block_mod)
+                # Marlin does not even read the stored qzeros. Zero-center the
+                # interval the strategy selected so STDCLIP/MEAN/MEDIAN keep
+                # their clipping decision instead of remeasuring the block.
+                lo, hi = symmetric_range_from_bounds(lo, hi)
             else:
                 lo, hi = affine_range_with_zero(lo, hi)
             scale = torch.clamp((hi - lo) / maxq, min=1e-8)
@@ -454,13 +492,15 @@ class QQQ:
             end = min(start + group_size, self.columns)
             block = W[:, start:end]
 
-            if isinstance(smooth_method, SmoothMSE):
+            if search_mse:
+                weights = element_saliency_weights(block) if col_weights is None else col_weights[start:end]
                 dequant, scale, zero = mse_optimal_quant(
                     block,
                     self.qcfg,
                     maxq,
                     steps=mse_steps,
                     maxshrink=mse_maxshrink,
+                    weights=weights,
                 )
             else:
                 block_mod, scale_factor = smooth_block(
@@ -550,7 +590,10 @@ class QQQ:
             # weight, not the original one: GPTQ error propagation can push
             # max|Q| above max|W|, and a scale fitted to W then saturates the
             # packed codes (and no longer reproduces the in-memory `wq`).
-            quantizer_extra.find_params(Q.clone(), weight=True)
+            # ``Q`` is back in the source ``Conv1D`` [in, out] orientation;
+            # the per-channel scale belongs to the output axis.
+            extra_weight = Q.t() if isinstance(self.layer, transformers.Conv1D) else Q
+            quantizer_extra.find_params(extra_weight.clone(), weight=True)
             scale_extra = quantizer_extra.scale
 
         duration = time.time() - start_time
@@ -569,7 +612,7 @@ class QQQ:
         if isinstance(self.layer, nn.Linear) or isinstance(
                 self.layer, transformers.Conv1D
         ):
-            if len(inp.shape) == 3:
+            if len(inp.shape) > 2:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
         if isinstance(self.layer, nn.Conv1d):
@@ -854,13 +897,22 @@ class QQQ:
                 extra,
                 self.expected_nsamples,
             )
-            # The fallback is data-independent: release the Hessian instead of
-            # carrying a near-singular matrix into the block loop.
+            # The fallback grid is data-independent, but SmoothMSE still
+            # weights its search by the captured input-channel energy. Keep
+            # only the diagonal (``columns`` floats) before releasing the
+            # near-singular matrix (#5300).
+            hessian_diag = (
+                self.H.diagonal().detach().clone()
+                if isinstance(getattr(self.fallback, "smooth", None), SmoothMSE)
+                else None
+            )
             self.H = None
             self._materialized_samples = 0
             self._device_hessian_partials.clear()
             self._device_sample_counts.clear()
-            return self._fallback_quantize(resolved_strategy)
+            return self._fallback_quantize(
+                resolved_strategy, hessian_diag=hessian_diag
+            )
 
         percdamp = self.qcfg.damp_percent
         groupsize = self.qcfg.group_size
@@ -884,15 +936,19 @@ class QQQ:
 
         tick = time.time()
 
-        if not self.quantizer.ready():
-            self.quantizer.find_params(W, weight=True)
-
         H = self.H
         del self.H
         # The quantizer consumes and mutates this Hessian; it is no longer the
         # materialized calibration state, so later batches start a fresh merge.
         self._materialized_samples = 0
         _neutralize_dead_columns(H, W)
+
+        # Fit the whole-row grid after dead-column masking: a channel absent
+        # from every calibration sample carries no signal, so its weight must
+        # not set the per-channel scale that every live column is quantized
+        # with (#5611).
+        if not self.quantizer.ready():
+            self.quantizer.find_params(W, weight=True)
 
         g_idx = []
         scale = []
@@ -1175,7 +1231,7 @@ class QQQ:
 
                 Losses1.div_(2)
 
-                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                _propagate_block_error(W[:, i2:], Err1, Hinv[i1:i2, i2:])
 
                 if DEBUG:
                     self.layer.weight.data[:, :i2] = Q[:, :i2]
@@ -1267,7 +1323,10 @@ class QQQ:
             # from the pre-quantization `W`. Error propagation can raise
             # max|Q| above max|W|; a W-fitted scale then clamps packed codes
             # and the export no longer equals the in-memory `wq`.
-            quantizer_extra.find_params(Q.clone(), weight=True)
+            # ``Q`` is back in the source ``Conv1D`` [in, out] orientation;
+            # the per-channel scale belongs to the output axis.
+            extra_weight = Q.t() if isinstance(self.layer, transformers.Conv1D) else Q
+            quantizer_extra.find_params(extra_weight.clone(), weight=True)
             scale_extra = quantizer_extra.scale
 
         duration = time.time() - start

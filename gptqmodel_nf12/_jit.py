@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import logging
@@ -18,6 +17,12 @@ import threading
 from pathlib import Path
 
 import torch
+
+
+try:  # POSIX
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no fcntl
+    fcntl = None
 
 
 _LIBRARIES = ("libnf12.so", "libnf12_torch.so")
@@ -33,6 +38,22 @@ class _MissingBuildTools(RuntimeError):
 
 _lock = threading.Lock()
 _directory: Path | None = None
+
+
+def _lock_file(handle) -> None:
+    """Take an exclusive inter-process lock on an open build lock file.
+
+    ``fcntl`` does not exist on Windows, where this module still has to import
+    so the portable NF12 path and its capability probe keep working (#5382).
+    Windows locks a byte range instead; either lock is released when the
+    caller's handle is closed.
+    """
+    if fcntl is not None:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        return
+    import msvcrt  # noqa: PLC0415 - Windows-only fallback
+
+    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
 
 
 def _source_root() -> Path:
@@ -113,6 +134,10 @@ def source_build_available() -> bool:
     that is guaranteed to fail; :func:`_build` remains the authority and still
     reports the concrete missing tool when a build is attempted.
     """
+    if sys.platform == "win32":
+        # The builder emits ELF shared objects that the loader opens by that
+        # name, so there is no supported native NF12 build on Windows (#5382).
+        return False
     try:
         archs = _architectures()
     except (ImportError, RuntimeError):
@@ -186,7 +211,7 @@ def library_directory() -> Path:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         # Keep the lock file: unlinking it lets waiters lock a different inode.
         with (directory / "build.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            _lock_file(lock)
             if not _ready(directory):
                 (directory / "complete").unlink(missing_ok=True)
                 _build(source, directory, archs)

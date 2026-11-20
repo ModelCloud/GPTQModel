@@ -21,10 +21,17 @@ from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
 from gptqmodel.quantization.config import (
     AWQConfig,
     BitsAndBytesConfig,
+    FallbackStrategy,
+    GGUFConfig,
     GPTQConfig,
     MacaqConfig,
     ParoConfig,
     QQQConfig,
+    QuantizeConfig,
+    RTNConfig,
+    SmootherConfig,
+    SmoothMAD,
+    SmoothPercentile,
     VPTQConfig,
 )
 
@@ -200,3 +207,149 @@ def test_bitsandbytes_dynamic_rejects_string_for_alias_bool():
             bits=4,
             dynamic={r".*down_proj": {"bnb_compress_statistics": "False"}},
         )
+
+
+# --- nested smoother/fallback payload keys (#5122) -------------------------
+#
+# A smoother or fallback dict was parsed with ``.get(...)`` only. A misspelled
+# key was accepted and had no effect, and a smoother dict without ``type``
+# returned ``None`` -- silently turning smoothing off. The tests below assert
+# rejection; the control cases prove the documented spellings still compile.
+
+
+@pytest.mark.parametrize(
+    ("payload", "bad_key", "hint"),
+    [
+        ({"type": "mad", "kk": 1.0}, "kk", "k"),
+        ({"smooth": {"type": "percentile", "percentil": 95}}, "percentil", "percentile"),
+        ({"smoth": {"type": "mad"}}, "smoth", "smooth"),
+    ],
+)
+def test_misspelled_smoother_payload_keys_are_rejected(payload, bad_key, hint):
+    with pytest.raises((TypeError, ValueError)) as excinfo:
+        GPTQConfig(smoother=payload)
+
+    message = str(excinfo.value)
+    assert f"`{bad_key}`" in message, message
+    assert f"did you mean `{hint}`?" in message, message
+
+
+@pytest.mark.parametrize("payload", [{"typ": "mad", "k": 1.0}, {}])
+def test_smoother_dict_without_type_is_rejected_not_silently_disabled(payload):
+    """A dict payload must never normalize to ``SmootherConfig(smooth=None)``."""
+
+    with pytest.raises((TypeError, ValueError)):
+        GPTQConfig(smoother=payload)
+
+
+def test_nested_smoother_dicts_validate_in_every_owner():
+    with pytest.raises((TypeError, ValueError)):
+        SmootherConfig(smooth={"type": "mad", "kk": 1.0})
+    with pytest.raises((TypeError, ValueError)):
+        RTNConfig(bits=4, smooth={"type": "mad", "kk": 1.0})
+    with pytest.raises((TypeError, ValueError)):
+        GGUFConfig(bits=4, smoother={"type": "mad", "kk": 1.0})
+
+
+@pytest.mark.parametrize(
+    ("payload", "bad_key", "hint"),
+    [
+        ({"strategy": "rtn", "threshhold": "5%"}, "threshhold", "threshold"),
+        ({"stratgy": "median"}, "stratgy", "strategy"),
+    ],
+)
+def test_misspelled_fallback_keys_are_rejected(payload, bad_key, hint):
+    for build in (
+        lambda: GPTQConfig(fallback=payload),
+        lambda: QuantizeConfig.from_quant_config(
+            {"bits": 4, "group_size": 128, "fallback": payload}
+        ),
+    ):
+        with pytest.raises((TypeError, ValueError)) as excinfo:
+            build()
+
+        message = str(excinfo.value)
+        assert f"`{bad_key}`" in message, message
+        assert f"did you mean `{hint}`?" in message, message
+
+
+def test_smoother_dict_defaults_match_the_dataclasses():
+    """``smoother="mad"`` must not use a second, drifting ``k`` literal.
+
+    The weight-only RTN config owns `smoother`: the calibrated GPTQ configs
+    refuse it because their solve never applies it (#5302).
+    """
+
+    from_dict = RTNConfig(bits=4, smoother="mad").smoother.smooth
+    from_type = RTNConfig(bits=4, smoother={"type": "mad"}).smoother.smooth
+    direct = SmoothMAD()
+
+    assert isinstance(from_dict, SmoothMAD)
+    assert from_dict.k == pytest.approx(direct.k)
+    assert from_type.k == pytest.approx(direct.k)
+
+
+def test_valid_smoother_and_fallback_dicts_still_compile():
+    assert RTNConfig(bits=4, smoother={"type": "mad", "k": 1.0}).smoother.smooth.k == pytest.approx(1.0)
+
+    wrapped = RTNConfig(
+        bits=4, smoother={"smooth": {"type": "percentile", "percentile": 95}}
+    ).smoother.smooth
+    assert isinstance(wrapped, SmoothPercentile)
+    assert wrapped.percentile == pytest.approx(95.0)
+
+    thresholded = RTNConfig(
+        bits=4, smoother={"type": "mad", "group_size_threshold": 64}
+    ).smoother.smooth
+    assert thresholded.group_size_threshold == 64
+
+    fallback = GPTQConfig(fallback={"strategy": "rtn", "threshold": "5%"}).fallback
+    assert fallback.strategy is FallbackStrategy.RTN
+    assert fallback.threshold == "5%"
+
+    # The documented legacy aliases must keep working.
+    for legacy, expected in (
+        ({"clip_method": "mad"}, SmoothMAD),
+        ({"smooth_method": "mad"}, SmoothMAD),
+        ({"smooth_mad_k": 2.5}, SmoothMAD),
+        ({"smooth_percentile": 95}, SmoothPercentile),
+        ({"smooth": {"type": "percentile", "percentile": 90}}, SmoothPercentile),
+    ):
+        resolved = GPTQConfig(fallback={"strategy": "rtn", **legacy}).fallback.smooth
+        assert isinstance(resolved, expected), legacy
+
+
+def test_rtn_smoother_round_trip_still_works():
+    """RTN applies only its top-level smoother; `fallback.smooth` is refused (#5401)."""
+
+    config = RTNConfig(
+        bits=4,
+        group_size=128,
+        smoother={"type": "mad", "k": 2.5},
+        fallback={"strategy": "rtn", "threshold": "5%"},
+    )
+    restored = QuantizeConfig.from_quant_config(config.to_dict())
+
+    assert isinstance(restored.smoother.smooth, SmoothMAD)
+    assert restored.smoother.smooth.k == pytest.approx(2.5)
+    assert restored.fallback.smooth is None
+
+
+@pytest.mark.parametrize("config_cls", [GPTQConfig, QQQConfig], ids=["gptq", "qqq"])
+def test_calibrated_still_round_trips_the_fallback_smoother_it_applies(config_cls):
+    """`fallback.smooth` is applied by the calibrated fallback path (#5302 control)."""
+
+    config = config_cls(
+        bits=4,
+        group_size=128,
+        fallback={
+            "strategy": "rtn",
+            "threshold": "5%",
+            "smooth": {"type": "percentile", "percentile": 95},
+        },
+    )
+    restored = QuantizeConfig.from_quant_config(config.to_dict())
+
+    assert restored.smoother is None
+    assert isinstance(restored.fallback.smooth, SmoothPercentile)
+    assert restored.fallback.smooth.percentile == pytest.approx(95.0)

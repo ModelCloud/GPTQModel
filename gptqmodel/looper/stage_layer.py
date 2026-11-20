@@ -35,6 +35,7 @@ from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from ..quantization.config import GcMode, QuantizeEmbed
 from ..utils.device import get_device, get_device_new
 from ..utils.device_telemetry import capture_device_telemetry
+from ..utils.host_memory import malloc_trim as trim_host_heap
 from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
 from ..utils.looper_helpers import (
     find_last_quantized_layer_index,
@@ -211,6 +212,20 @@ def _should_empty_cache_after_sync_finalize(
     if not getattr(looper.gptq_model.quantize_config, "offload_to_disk", False):
         return False
     return any(isinstance(process, ParoProcessor) for process, *_ in finalize_tasks)
+
+
+def _trim_host_heap_after_layer() -> None:
+    """Return freed host pages to the OS at a layer boundary.
+
+    AWQ's token-row feature packing and CPU pack path allocate many short-lived
+    host buffers per layer. glibc keeps the freed pages in its arenas, so a
+    large MoE AWQ run retains several GiB even after the packed model is gone
+    (issue #4990). Trimming once per layer keeps the heap flat. The helper is a
+    silent no-op where glibc ``malloc_trim`` is unavailable, so it cannot break
+    quantization on musl/macOS/Windows.
+    """
+
+    trim_host_heap()
 
 
 def _processor_needs_pristine_group_clone(processor) -> bool:
@@ -724,7 +739,9 @@ def run_layer_stage(
         # track the current object before that call as well as after it.
         looper._track_inflight_layer(module, inflight_home)
 
-        module = looper.gptq_model.pre_quantize(module)
+        module = looper.gptq_model.pre_quantize(
+            module, module_path=layer_name or None
+        )
         looper._track_inflight_layer(module, inflight_home)
 
         embedding_module_name = None
@@ -842,6 +859,7 @@ def run_layer_stage(
                 module,
                 cur_layer_device,
                 projection_modules=full,
+                module_path=layer_descriptor,
             )
             # Recovery must use the same forward topology as the original
             # capture.  In particular, DeepSeek's router can make different
@@ -1252,6 +1270,7 @@ def run_layer_stage(
                     module,
                     cur_layer_device,
                     projection_modules=full,
+                    module_path=layer_descriptor,
                 )
                 for relative_name, native_module in full.items():
                     if isinstance(native_module, NamedModule):
@@ -1455,6 +1474,7 @@ def run_layer_stage(
                                             offload_to_disk(
                                                 model=looper.gptq_model.model,
                                                 module=target_module,
+                                                module_name=module_full_name,
                                                 disk_path=offload_path,
                                                 # The on-disk bundle is the only record a
                                                 # resumed run can restore from, so never
@@ -1597,6 +1617,10 @@ def run_layer_stage(
                             submodule_finalized=True,
                             raise_in_place=False,
                         )
+                        # Finalization (packing + disk offload) has released the
+                        # layer's host temporaries; return them to the OS before
+                        # the next layer allocates its own (#4990).
+                        _trim_host_heap_after_layer()
                     return True
 
                 if finalize_futures_snapshot:
@@ -1653,6 +1677,9 @@ def run_layer_stage(
                         submodule_finalized=True,
                         raise_in_place=True,
                     )
+                    # No finalize tasks, but the layer's own capture/quantize
+                    # temporaries were freed; trim at the same boundary.
+                    _trim_host_heap_after_layer()
                     if durable_progress_logs:
                         log.info(
                             "StageLayer: layer=%s complete (no finalize tasks)",

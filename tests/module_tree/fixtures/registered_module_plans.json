@@ -26,6 +26,7 @@
     "deepseek_v3": "DeepSeekV3QModel",
     "deepseek_v32": "DeepSeekV32QModel",
     "deepseek_v4": "DeepSeekV4QModel",
+    "deepseek_v41": "DeepSeekV41FlashQModel",
     "deepseek_vl": "DeepSeekVLQModel",
     "deepseek_vl_v2": "DeepSeekVLV2QModel",
     "diffusion_gemma": "DiffusionGemmaQModel",
@@ -507,6 +508,24 @@
         ["mlp.experts.{expert_index}.down_proj"],
         ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
         ["mlp.shared_experts.down_proj"]
+      ]
+    },
+    "DeepSeekV41FlashQModel/gptq": {
+      "layers": ["layers"],
+      "blocks": [
+        ["engram:!"],
+        ["engram.embed:!", "engram.wkv:!"],
+        ["attn_hc:!"],
+        ["attn_norm:!"],
+        ["attn:!"],
+        ["attn.wq_a", "attn.q_norm:!", "attn.wq_b", "attn.wkv", "attn.kv_norm:!", "attn.wo_a", "attn.wo_b"],
+        ["attn.compressor.wkv", "attn.compressor.wgate", "attn.compressor.norm:!"],
+        ["attn.indexer.wq_b", "attn.indexer.weights_proj", "attn.indexer.wk", "attn.indexer.k_norm:!"],
+        ["ffn_hc:!"],
+        ["ffn_norm:!"],
+        ["ffn.gate:!"],
+        ["ffn.experts.{expert_index}.w1", "ffn.experts.{expert_index}.w3", "ffn.experts.{expert_index}.w2"],
+        ["ffn.shared_experts.w1", "ffn.shared_experts.w3", "ffn.shared_experts.w2"]
       ]
     },
     "DeepSeekV4QModel/gptq": {
@@ -1273,9 +1292,9 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["mamba.in_proj"],
+        ["mamba.in_proj", "mamba.conv1d:!", "mamba.x_proj.0:!", "mamba.dt_proj.0:!"],
         ["mamba.out_proj"],
-        ["post_attention_layernorm:!"],
+        ["pre_moe_layernorm:!"],
         ["moe.experts.0.gate_proj", "moe.experts.0.up_proj"],
         ["moe.experts.0.down_proj"]
       ]
@@ -1514,7 +1533,8 @@
         ["post_operator_norm:!"],
         ["conv.in_proj"],
         ["conv.out_proj"],
-        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj", "self_attn.gate_proj:!"],
+        ["conv.conv:!"],
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj", "self_attn.g_proj:!"],
         ["self_attn.o_proj"],
         ["ffn_norm:!"],
         ["post_ffn_norm:!"],
@@ -1529,7 +1549,8 @@
         ["post_operator_norm:!"],
         ["conv.in_proj"],
         ["conv.out_proj"],
-        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj", "self_attn.gate_proj:!"],
+        ["conv.conv:!"],
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj", "self_attn.g_proj:!"],
         ["self_attn.o_proj"],
         ["ffn_norm:!"],
         ["post_ffn_norm:!"],
@@ -1544,7 +1565,8 @@
         ["post_operator_norm:!"],
         ["conv.in_proj"],
         ["conv.out_proj"],
-        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj", "self_attn.gate_proj:!"],
+        ["conv.conv:!"],
+        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj", "self_attn.g_proj:!"],
         ["self_attn.o_proj"],
         ["ffn_norm:!"],
         ["post_ffn_norm:!"],

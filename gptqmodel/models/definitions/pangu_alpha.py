@@ -5,7 +5,7 @@
 
 import torch
 
-from ...utils.model import move_to
+from ...utils.model import has_cpu_offload_hooks, move_to
 from ..base import BaseQModel
 
 
@@ -92,13 +92,9 @@ class PanguAlphaQModel(BaseQModel):
 
         if layer_input:
             hidden_states = layer_input[0]
-            norm = transformer.ln_f
-            try:
-                norm_device = next(norm.parameters()).device
-            except StopIteration:
-                norm_device = hidden_states.device
-            if norm_device != hidden_states.device:
-                norm = move_to(norm, device=hidden_states.device)
+            norm = self._materialize_replay_module(
+                transformer.ln_f, device=hidden_states.device
+            )
             layer_input[0] = norm(hidden_states)
             hidden_states = layer_input[0]
         else:
@@ -118,7 +114,41 @@ class PanguAlphaQModel(BaseQModel):
                 seq_len, device=hidden_states.device, dtype=torch.long
             ).unsqueeze(0).expand(batch, -1)
 
-        additional_inputs["custom_query"] = transformer.wqe(
-            position_ids.to(target_device)
-        )
+        replay_device = target_device
+        if replay_device is None:
+            replay_device = (
+                hidden_states.device
+                if torch.is_tensor(hidden_states)
+                else position_ids.device
+            )
+        # ``wqe`` is not part of the quantized layer tree: lazy loading leaves it
+        # on meta and disk offload leaves a meta placeholder behind an
+        # Accelerate hook. Place it next to the replayed query before the
+        # embedding lookup so the index and weight devices agree.
+        wqe = self._materialize_replay_module(transformer.wqe, device=replay_device)
+        additional_inputs["custom_query"] = wqe(position_ids.to(replay_device))
         return additional_inputs
+
+    def _materialize_replay_module(self, module, device):
+        """Put a non-layer replay module on ``device`` from its loaded source.
+
+        ``ln_f`` and ``wqe`` live outside the decoder-layer module tree, so the
+        quantizer never materializes them. With lazy loading they stay meta
+        shells; with ``offload_to_disk`` they are meta placeholders behind an
+        Accelerate hook (possibly wrapped in ``SequentialHook``). ``move_to``
+        alone cannot handle either: it refuses a meta module whose hook it does
+        not recognize, and a lazy shell has no hook to restore from. Use the
+        same helpers the looper uses, then relocate the materialized module.
+        """
+        from ...utils.offload import is_meta_module, undo_offload_to_disk
+
+        if is_meta_module(module):
+            if has_cpu_offload_hooks(module):
+                module = undo_offload_to_disk(module, device=device)
+            else:
+                materialize = getattr(self, "shell_module_materialize", None)
+                if getattr(self, "turtle_model", None) is not None and callable(
+                    materialize
+                ):
+                    module = materialize(module, device=device)
+        return move_to(module, device=device)

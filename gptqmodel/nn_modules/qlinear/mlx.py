@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 # AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
-# FP8 encoding layouts: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
 # Marlin format: IST-DASLab contributors, MIT, https://github.com/IST-DASLab/marlin
 # BitBLAS format: Microsoft Research contributors, Apache-2.0, https://github.com/microsoft/BitBLAS
 # Format references: Paro (z-lab), QQQ (vLLM, Apache-2.0), GGUF (ggml-org),
@@ -32,7 +31,6 @@ from ...utils.mlx_packing import (
 from . import AWQuantLinear, BaseQuantLinear, GPTQQuantLinear
 from ._compile_support import COMPILE_LEVEL
 from .bitsandbytes import BitsAndBytesLinear
-from .fp8 import TorchFP8Linear
 from .gemv_awq import AwqGEMVLinear
 from .gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from .gguf import GGUFTorchLinear
@@ -794,6 +792,10 @@ class QQQMlxQuantLinear(_MlxLinearContract, QQQTorchLinear):
     # MLX arrays; mx.compile owns the graph
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
     SUPPORTS_GRAPH_CAPTURE = False
+    # The torch parent opts into the #4669 policy (#5102), but MLX runs
+    # mx.compile, not torch.compile: this holder was never traced or timed, so
+    # it must not inherit that opt-in.
+    SUPPORTS_COMPILE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.QQQ]
@@ -962,106 +964,16 @@ class _MlxDenseContract(_MlxLinearContract):
         return ok
 
 
-class FP8MlxQuantLinear(_MlxDenseContract, TorchFP8Linear):
-    """FP8 holder for native MXFP8 and general packed Metal inference."""
-
-    # MLX arrays; mx.compile owns the graph
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
-    SUPPORTS_GRAPH_CAPTURE = False
-    # The Torch FP8 declaration covers the CUDA dequant/`_scaled_mm` forward.
-    # This holder dispatches to native Metal MXFP8 kernels on MPS, which were
-    # never traced or timed, so it does not inherit the Torch opt-in (#4739).
-    SUPPORTS_COMPILE = False
-
-    SUPPORTS_BACKENDS = [BACKEND.MLX]
-    SUPPORTS_METHODS = [METHOD.FP8]
-    SUPPORTS_FORMATS = {FORMAT.FP8: 0}
-    SUPPORTS_BITS = [8]
-    SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = False
-    SUPPORTS_AUTO_PADDING = False
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_DEVICES = [DEVICE.MPS]
-    SUPPORTS_PLATFORM = [PLATFORM.DARWIN]
-    SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32, torch.int64]
-    SUPPORTS_ADAPTERS = []
-    SUPPORTS_DTYPES = [torch.float16]
-    REQUIRES_FORMAT_V2 = False
-    # The Torch FP8 declaration covers the CUDA dequant/``_scaled_mm`` forward.
-    # This holder dispatches to native Metal MXFP8 kernels on MPS, which were
-    # never traced or timed, so it keeps the conservative default (#4739).
-    SUPPORTS_COMPILE = False
-
-    SOURCE_LINEAR = TorchFP8Linear
-
-    @classmethod
-    def source_compatible(cls, module):
-        return (super().source_compatible(module)
-                and module.weight_scale_semantics == "inverse"
-                and tuple(module.weight.shape) == (module.out_features, module.in_features))
-
-    @classmethod
-    def dense_weight(cls, module):
-        return module.dequantize_weight(device="cpu", dtype=torch.float16).T.contiguous()
-
-    @classmethod
-    def native_compatible(cls, module):
-        return (cls.source_compatible(module)
-                and module.fp8_format == "float8_e4m3fn"
-                and module.weight_scale_method in {"row", "tensor"}
-                and module.in_features % 32 == 0
-                and torch.isfinite(module.weight_scale_inv).all().item()
-                and (module.weight_scale_inv > 0).all().item()
-                and torch.isfinite(1.0 / module.weight_scale_inv).all().item()
-                and not ((module.weight.detach().view(torch.uint8) & 0x7f) == 0x7f).any().item())
-
-    @classmethod
-    def mlx_params(cls, module):
-        if not cls.native_compatible(module):
-            raise ValueError("FP8 layer cannot use exact native MXFP8 inference")
-        return {"group_size": 32, "bits": 8, "mode": "mxfp8"}
-
-    @classmethod
-    def pack_source(cls, module):
-        import numpy as np
-
-        if not cls.native_compatible(module):
-            raise ValueError("FP8 layer cannot use exact native MXFP8 inference")
-        # MLX MXFP8 stores E4M3 bytes in ascending K order, four per uint32.
-        codes = module.weight.detach().contiguous().view(torch.uint8).cpu().numpy()
-        packed = np.ascontiguousarray(codes).view(np.uint32).reshape(module.out_features, -1)
-        scales = np.full((module.out_features, module.in_features // 32), 127, dtype=np.uint8)
-        output_scale = (1.0 / module.weight_scale_inv.detach().float()).cpu().numpy()
-        return packed, scales, output_scale, cls.mlx_params(module)
-
-    @classmethod
-    def packed_payload(cls, module):
-        """Return exact checkpoint bytes, scales, and a format decode table."""
-        import numpy as np
-
-        if not cls.source_compatible(module):
-            raise ValueError("FP8 layer cannot be transferred to MLX")
-        codes = module.weight.detach().contiguous().view(torch.uint8).cpu().numpy()
-        codebook = torch.arange(256, dtype=torch.uint8).view(module.fp8_dtype).float().numpy()
-        return {
-            "weight": np.ascontiguousarray(codes),
-            "scales": module.weight_scale_inv.detach().to("cpu", torch.float32).numpy(),
-            "codebook": codebook,
-            "bias": None if module.bias is None else module.bias.detach().to("cpu", torch.float32).numpy(),
-            "in_features": module.in_features,
-            "out_features": module.out_features,
-            "scale_method": module.weight_scale_method,
-            "block_size": module.weight_block_size,
-        }
-
-
 class BitsAndBytesMlxQuantLinear(_MlxDenseContract, BitsAndBytesLinear):
     """BNB checkpoint holder transferred to packed MLX Metal matmul."""
 
     # MLX arrays; mx.compile owns the graph
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
     SUPPORTS_GRAPH_CAPTURE = False
+    # The Torch BnB declaration covers the CUDA 4/8-bit dequant+matmul forward.
+    # This holder runs native Metal matmuls, which were never traced or timed,
+    # so it does not inherit the Torch opt-in (#4984).
+    SUPPORTS_COMPILE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.BITSANDBYTES]
@@ -1136,6 +1048,10 @@ class MacaqMlxQuantLinear(_MlxDenseContract, MacaqLinear):
     # MLX arrays; mx.compile owns the graph
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
     SUPPORTS_GRAPH_CAPTURE = False
+    # The Torch MACaQ declaration covers the MXFP4 dequant/Hadamard forward.
+    # This holder runs native Metal matmuls, which were never traced or timed,
+    # so it does not inherit the Torch opt-in (#4984).
+    SUPPORTS_COMPILE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.MACAQ]

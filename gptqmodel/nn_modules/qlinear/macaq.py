@@ -32,12 +32,25 @@ from ...utils.macaq_triton import (
     mxfp4_w4a16_linear,
     triton_mxfp4_available,
 )
+from ...utils.torch import dynamo_is_compiling
 from . import WeightOnlyQuantLinear
 from ._compile_support import COMPILE_LEVEL
 from ._numerics import linear_fp32_reduce
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
+
+
+# Extreme decoded MXFP4 magnitudes: every decoded weight is one of
+# `E2M1_MAGNITUDES` times a power-of-two E8M0 scale.
+_E2M1_MIN_NONZERO = float(macaq_core.E2M1_MAGNITUDES[macaq_core.E2M1_MAGNITUDES > 0].min())
+_E2M1_MAX = float(macaq_core.E2M1_MAGNITUDES.max())
+
+# The activation dtypes the Torch fallback decodes a weight for. The answers
+# are computed eagerly so a compiled graph reads them as Python constants
+# (#5631), the same contract as the AWQ decode-range cache.
+_DECODE_RANGE_DTYPES = (torch.float16, torch.bfloat16)
 
 
 def _triton_failure_is_transient(exc: BaseException) -> bool:
@@ -63,11 +76,21 @@ class MacaqLinear(WeightOnlyQuantLinear):
     and released immediately.
     """
 
+    # Packed E2M1 weights and E8M0 scales are always stored; the activation
+    # transforms (`BH`, fitted `pre_scale`) are registered only for the
+    # configured rotation/pre-scale mode, so an absent one is skipped.
+    CHECKPOINT_REQUIRED_BUFFERS = ("W_packed", "W_scales", "BH", "pre_scale")
+
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: every compile level passes,
     # but explicit capture fails because `dequantize_mxfp4` copies the CPU
     # `E2M1_MAGNITUDES` table to the device on each call.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
     SUPPORTS_GRAPH_CAPTURE = False
+    # The policy flag is about dynamo, not the eager capture: a static-cache
+    # `generate()` traces this forward to one graph with zero breaks and the
+    # compiled decode is up to 9x faster than the eager torch path (0.73 s vs
+    # 6.67 s, #4984), so the auto-compile must stay on for `MACAQ_TORCH`.
+    SUPPORTS_COMPILE = True
 
     SUPPORTS_BACKENDS = [BACKEND.MACAQ_TORCH]
     SUPPORTS_METHODS = [METHOD.MACAQ]
@@ -88,7 +111,16 @@ class MacaqLinear(WeightOnlyQuantLinear):
     QUANT_TYPE = "macaq"
     # The Hadamard block and the smoothing pre-scale are built in
     # `compute_dtype` and multiply the activations at the activation dtype.
-    MODEL_DTYPE_BUFFERS = ("bias", "BH", "pre_scale")
+    # The bias is not: it is added after the FP32 reduction, so a checkpoint
+    # FP32 bias must survive a BF16 load instead of being rounded (#5632).
+    MODEL_DTYPE_BUFFERS = ("BH", "pre_scale")
+
+    # Decode-range answers derived from the packed scales. The class defaults
+    # keep a module usable before the first refresh; `clear_weight_cache()`
+    # recomputes them on every load, move and state-dict copy (#5631).
+    _packed_range_key = None
+    _packed_range_fits = True
+    _packed_range_fits_by_dtype = None
 
     def __init__(
         self,
@@ -234,6 +266,7 @@ class MacaqLinear(WeightOnlyQuantLinear):
 
     def post_init(self):
         self._validate_loaded_state()
+        self._refresh_packed_range_fits()
         super().post_init()
 
     @property
@@ -288,7 +321,108 @@ class MacaqLinear(WeightOnlyQuantLinear):
         if self.BH is not None:
             self.BH.data.copy_(result.BH.to(device=device, dtype=self.compute_dtype))
         if bias is not None and self.bias is not None:
-            self.bias.data.copy_(bias.to(device=device, dtype=self.compute_dtype))
+            # Keep the source dtype: an FP32 bias such as -257 is -256 in
+            # BF16, and the rounded value no longer cancels the product
+            # (#5632). `linear_fp32_reduce` adds a wider bias in FP32 and
+            # rounds only the final output. A dtype change replaces the
+            # buffer outside inference mode, like `_allocate_buffers`.
+            stored = bias.detach().to(device=device)
+            if stored.dtype == self.bias.dtype:
+                self.bias.data.copy_(stored)
+            else:
+                with torch.inference_mode(False):
+                    self.bias = stored.clone()
+        # The packed storage is final for this checkpoint; decide once whether
+        # a half activation dtype can hold it (#5631).
+        self._refresh_packed_range_fits()
+
+    # ------------------------------------------------------------------
+    # packed decode range
+    # ------------------------------------------------------------------
+    def _compute_packed_range_fits(self, dtype: torch.dtype) -> bool:
+        """Whether every decoded MXFP4 weight is finite and nonzero in ``dtype``.
+
+        The checkpoint stores one E8M0 scale per 32-value block, so a decoded
+        weight is at most ``6 * scale`` and its smallest nonzero magnitude is
+        ``0.5 * scale``. Above the dtype's largest finite value the decode
+        yields ``inf``; below its smallest subnormal it yields ``0``. Either
+        corruption happens inside the decode, before the FP32 reduction can
+        help, so the caller must decode wide instead (#5631). The bound is
+        conservative: it reads the scales, not the packed codes, so a block
+        whose codes stay small may pick the wide decode for nothing.
+        """
+
+        if dtype not in _DECODE_RANGE_DTYPES:
+            return True
+        scales = getattr(self, "W_scales", None)
+        if scales is None or scales.numel() == 0 or scales.device.type == "meta":
+            return True
+        scale = macaq_core.decode_mxfp4_scales(
+            scales, self.out_features, self.in_features // self.block_size
+        ).abs()
+        converted = scale.to(dtype)
+        representable = (
+            converted.isfinite()
+            & (converted * _E2M1_MAX).isfinite()
+            & ~((scale > 0) & ((converted * _E2M1_MIN_NONZERO) == 0))
+        )
+        # An E8M0 0xFF block decodes to NaN in every dtype; widening cannot
+        # recover it, so it must not select the wide path.
+        return bool((representable | torch.isnan(scale)).all())
+
+    def _refresh_packed_range_fits(self) -> None:
+        """Precompute the per-dtype answers a compiled forward reads.
+
+        A host reduction is neither traceable nor legal during CUDA-graph
+        capture, so the compiled path reads a plain Python constant (dynamo
+        guards on it, and a change recompiles). This runs wherever the packed
+        storage can change: ``post_init()``, ``load_quant_result()``, and a
+        device/dtype move or state-dict load (both via ``_apply`` ->
+        ``clear_weight_cache()``).
+        """
+
+        self._packed_range_key = None
+        self._packed_range_fits_by_dtype = {
+            dtype: self._compute_packed_range_fits(dtype) for dtype in _DECODE_RANGE_DTYPES
+        }
+
+    def clear_weight_cache(self) -> None:
+        """Drop the derived decode-range answers after a load, move or mutation."""
+
+        self._packed_range_key = None
+        self._packed_range_fits = True
+        if hasattr(self, "W_scales"):
+            self._refresh_packed_range_fits()
+
+    def _packed_range_fits_dtype(self, dtype: torch.dtype) -> bool:
+        """Whether the packed weight decodes into ``dtype`` without range loss."""
+
+        if dtype not in _DECODE_RANGE_DTYPES:
+            return True
+        scales = getattr(self, "W_scales", None)
+        if scales is None or scales.device.type == "meta":
+            return True
+        if dynamo_is_compiling() or (
+            scales.device.type == "cuda" and torch.cuda.is_current_stream_capturing()
+        ):
+            precomputed = self._packed_range_fits_by_dtype
+            if precomputed is None:
+                # A caller that skipped `post_init`: the wide decode is always
+                # correct, so do not guess from a host read here.
+                return False
+            return precomputed[dtype]
+        key = (tensor_cache_key(scales), dtype)
+        if key == self._packed_range_key:
+            return self._packed_range_fits
+        fits = self._compute_packed_range_fits(dtype)
+        self._packed_range_key = key
+        self._packed_range_fits = fits
+        # Keep the compiled-region answer in step with an eager recompute (a
+        # caller that mutates the scales in place and runs an eager forward
+        # before compiling).
+        if self._packed_range_fits_by_dtype is not None:
+            self._packed_range_fits_by_dtype[dtype] = fits
+        return fits
 
     # ------------------------------------------------------------------
     # forward
@@ -319,7 +453,13 @@ class MacaqLinear(WeightOnlyQuantLinear):
 
     def _forward_torch(self, x_flat: torch.Tensor) -> torch.Tensor:
         dtype = self._forward_dtype(x_flat)
-        weight = self.dequantize(dtype=dtype)
+        # A finite MXFP4 weight that the activation dtype cannot hold decodes
+        # to `inf`, and its zero lanes then turn the dot into `0 * inf = NaN`
+        # (#5631). Keep the decode and the reduction in FP32 there and round
+        # only the final output (`forward` rounds to `x.dtype`); the narrow
+        # path stays untouched when the packed range fits.
+        wide = not self._packed_range_fits_dtype(dtype)
+        weight = self.dequantize(dtype=torch.float32 if wide else dtype)
         pre_scale, bh = self.pre_scale, self.BH
         if self.activation_precision == "w4a4":
             xb = macaq_core.macaq_quantize_activations(
@@ -331,8 +471,13 @@ class MacaqLinear(WeightOnlyQuantLinear):
                 xb = xb * pre_scale.to(dtype)
             if bh is not None:
                 xb = macaq_core.rotate_blocks(xb, bh)
-        bias = None if self.bias is None else self.bias.to(dtype)
-        return linear_fp32_reduce(xb, weight, bias)
+        if wide:
+            # The activation transform above stays at the activation dtype;
+            # only the dot's operands widen.
+            xb = xb.to(torch.float32)
+        # Pass the stored bias unchanged; `linear_fp32_reduce` keeps a wider
+        # bias out of the low-precision operands and adds it in FP32 (#5632).
+        return linear_fp32_reduce(xb, weight, self.bias)
 
     def _forward_triton(self, x_flat: torch.Tensor) -> torch.Tensor:
         # Like `_forward_torch`, the Triton path must not trust the build-time
@@ -408,6 +553,10 @@ class MacaqTritonLinear(MacaqLinear):
     # `torch.cuda.device_count()` (non-Tensor return): EAGER only.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
     SUPPORTS_GRAPH_CAPTURE = True
+    # The torch path's #4984 opt-in covers `MacaqLinear`'s straight-line
+    # MXFP4 dequant; this Triton decode breaks the dynamo graph on
+    # `torch.cuda.device_count()`, so it must not inherit the opt-in.
+    SUPPORTS_COMPILE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MACAQ_TRITON]
     SUPPORTS_METHODS = [METHOD.MACAQ]

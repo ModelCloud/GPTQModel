@@ -57,9 +57,21 @@ from ..models.writer import (
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
-from ..nn_modules.hooked_linear import HookedLinear
+from ..nn_modules.hooked_linear import (
+    HookedLinear,
+    restore_linear_from_hooked,
+    unwrap_hooked_linears,
+)
 from ..nn_modules.qlinear.paro import ParoLinear
-from ..quantization.config import FORMAT, METHOD, CalibrationConfig, QuantizeConfig, resolve_quant_format
+from ..quantization.config import (
+    FORMAT,
+    METHOD,
+    BaseQuantizeConfig,
+    CalibrationConfig,
+    QuantizeConfig,
+    clone_config_for_module,
+    resolve_quant_format,
+)
 from ..quantization.paro.optimization import (
     _activate_stage_params,
     _backward_scalar_loss,
@@ -72,16 +84,19 @@ from ..quantization.paro.optimization import (
     _quantizer_sym_for_impl,
     _resolve_best_state_snapshot_dtype,
     _result_from_model,
+    _sample_activation_rows,
     build_paro_optimizer,
     build_random_rotation_buffers,
     build_random_rotation_buffers_reference,
+    identity_paro_result,
     optimize_paro_linear,
 )
-from ..utils.fallback import normalize_fallback
+from ..utils.fallback import normalize_fallback, resolve_threshold, should_use_fallback
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import (
     create_quant_module,
     get_module_by_name_prefix,
+    install_quant_module,
     move_to,
     nested_move_to,
     pack_module,
@@ -281,6 +296,10 @@ class ParoProcessor(LoopProcessor):
         self._clean_group_layer_inputs: Optional[List[List[torch.Tensor]]] = None
         self._runtime_prewarmed = False
         self.fallback = qcfg.fallback
+        # One deep-copied config per module, carrying every `dynamic`
+        # override. Built lazily because a processor may be constructed
+        # before the model's module names are known.
+        self._module_qcfg_cache: Dict[str, QuantizeConfig] = {}
 
     def continuation_state_dict(self):
         state = super().continuation_state_dict()
@@ -355,6 +374,33 @@ class ParoProcessor(LoopProcessor):
         else:
             feature = feature.detach()
 
+        # Count the rows that actually routed here before the per-batch sampling
+        # below. ``Fallback.threshold`` asks how much of the calibration corpus
+        # reached the module, and the sampling bound must not fake low coverage.
+        raw_rows = 0 if feature.numel() == 0 else feature.reshape(-1, feature.shape[-1]).shape[0]
+
+        qcfg = getattr(self, "qcfg", None)
+        train_rows = getattr(qcfg, "opt_train_samples", 512) if qcfg is not None else 512
+        val_rows = getattr(qcfg, "opt_validation_samples", 128) if qcfg is not None else 128
+        target_rows = max(1, int(train_rows) + int(val_rows))
+
+        cache = getattr(self, "inputs_cache", None)
+        layer_inputs = getattr(cache, "layer_inputs", None)
+        batch_count = len(layer_inputs) if layer_inputs else 0
+        if batch_count <= 0:
+            calibration = getattr(self, "calibration", None)
+            rows = getattr(calibration, "rows", None)
+            if rows:
+                batch_count = len(rows)
+
+        if batch_count > 0:
+            per_batch_quota = max(1, 2 * (target_rows + batch_count - 1) // batch_count)
+        else:
+            per_batch_quota = target_rows
+
+        if feature.numel() > 0 and feature.reshape(-1, feature.shape[-1]).shape[0] > per_batch_quota:
+            feature = _sample_activation_rows(feature, max_rows=per_batch_quota).unsqueeze(0)
+
         with self.lock:
             entry = self.tasks.get(module_name)
             if entry is None:
@@ -363,6 +409,7 @@ class ParoProcessor(LoopProcessor):
             batch_index = self.current_batch_index()
             entry.setdefault("input_batch_indices", []).append(batch_index)
             entry.setdefault("inputs", []).append(feature)
+            entry["raw_tokens"] = int(entry.get("raw_tokens", 0)) + raw_rows
 
     def _ensure_task_bucket(self, module_name: str, layer_index: int) -> None:
         """Reset repeated relative module names when quantization advances to a new layer."""
@@ -380,6 +427,7 @@ class ParoProcessor(LoopProcessor):
         """Materialize concatenated calibration features for all modules in a layer."""
         features: Dict[str, torch.Tensor] = {}
         for name in list(state.modules):
+            target_rows = self._target_sample_rows(self._module_qcfg(state.modules[name]))
             entry = self.tasks.get(name) or {}
             tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
             indices = entry.get("input_batch_indices", [])
@@ -388,12 +436,25 @@ class ParoProcessor(LoopProcessor):
             if not tensors:
                 features[name] = torch.empty(0)
                 continue
-            try:
-                features[name] = torch.cat(tensors, dim=0)
-                entry["inputs"] = [features[name]]
-                entry.pop("input_batch_indices", None)
-            except RuntimeError:
-                features[name] = tensors[0]
+            # Join on the row axis, not the batch axis: routed MoE experts (and
+            # any corpus with one short row) capture a different number of rows
+            # per batch, and `torch.cat(tensors, dim=0)` then raised. The old
+            # fallback silently kept `tensors[0]`, so the optimizer trained on
+            # the first calibration batch only (#5198).
+            rows = [
+                tensor.reshape(-1, tensor.shape[-1])
+                for tensor in tensors
+                if tensor.numel() > 0
+            ]
+            features[name] = (
+                torch.cat(rows, dim=0).unsqueeze(0) if rows else torch.empty(0)
+            )
+
+            if features[name].numel() > 0 and features[name].reshape(-1, features[name].shape[-1]).shape[0] > target_rows:
+                features[name] = _sample_activation_rows(features[name], max_rows=target_rows).unsqueeze(0)
+
+            entry["inputs"] = [features[name]]
+            entry.pop("input_batch_indices", None)
         return features
 
     def _module_quant_params(self, module_name: str, *, resolved_cfg=None) -> tuple[int, int, bool]:
@@ -403,6 +464,107 @@ class ParoProcessor(LoopProcessor):
         group_size = int(resolved_cfg.get("group_size", self.qcfg.group_size))
         sym = bool(resolved_cfg.get("sym", self.qcfg.sym))
         return bits, group_size, sym
+
+    def _module_qcfg(self, module: NamedModule):
+        """Return the per-module config clone for one module (#5573).
+
+        `dynamic` accepts every field of every known quantize config and is
+        written to `quantize_config.json`, but the processor only read a
+        hard-coded subset from `self.qcfg`. The clone applies the whole rule
+        and re-runs the config's own `__post_init__`, exactly like MACaQ.
+        """
+
+        qcfg = getattr(self, "qcfg", None)
+        if not isinstance(qcfg, BaseQuantizeConfig):
+            # Synthetic processor fixtures use a light-weight namespace.
+            return qcfg
+        full_name = getattr(module, "full_name", None) or getattr(module, "name", "")
+        cache = getattr(self, "_module_qcfg_cache", None)
+        if cache is None:
+            cache = {}
+            self._module_qcfg_cache = cache
+        clone = cache.get(full_name)
+        if clone is None:
+            clone = clone_config_for_module(
+                qcfg,
+                full_name,
+                resolved_cfg=get_resolved_module_config(module),
+            )
+            cache[full_name] = clone
+        return clone if clone is not None else qcfg
+
+    @staticmethod
+    def _target_sample_rows(qcfg) -> int:
+        """Rows of calibration data one module's optimizer may consume."""
+        train_rows = getattr(qcfg, "opt_train_samples", 512) if qcfg is not None else 512
+        val_rows = getattr(qcfg, "opt_validation_samples", 128) if qcfg is not None else 128
+        return max(1, int(train_rows) + int(val_rows))
+
+    def _captured_rows(self, module_name: str) -> int:
+        """Rows of calibration data that routed to one module before sampling."""
+        entry = (getattr(self, "tasks", None) or {}).get(module_name) or {}
+        return int(entry.get("raw_tokens", 0) or 0)
+
+    def _module_fallback_enabled(self, module_name: str, state) -> bool:
+        """Whether any fallback applies to one module, module rule first."""
+        module = state.modules.get(module_name)
+        if module is not None:
+            fallback = getattr(self._module_qcfg(module), "fallback", None)
+            if fallback is not None:
+                return bool(fallback)
+        return bool(getattr(self, "fallback", None))
+
+    def _module_fallback_requested(self, module: NamedModule) -> bool:
+        """Whether a module received less than ``Fallback.threshold`` of the corpus.
+
+        The threshold comes from the module's resolved config: a per-module
+        `fallback` rule was cloned and then ignored in favour of the
+        processor-level value (#5659).
+        """
+        module_name = getattr(module, "name", module)
+        entry = (getattr(self, "tasks", None) or {}).get(module_name) or {}
+        if "raw_tokens" not in entry:
+            # No capture accounting for this module (direct unit call or a
+            # processor built without a capture pass): we cannot claim low
+            # coverage, so keep the historical optimizer path.
+            return False
+        expected = getattr(self, "total_calibration_tokens", None)
+        qcfg = self._module_qcfg(module)
+        fallback = getattr(qcfg, "fallback", None)
+        if fallback is None and not isinstance(qcfg, BaseQuantizeConfig):
+            fallback = getattr(self, "fallback", None)
+        return should_use_fallback(fallback, float(entry["raw_tokens"] or 0), expected)
+
+    def _identity_fallback_result(self, module: NamedModule):
+        """Build the identity-rotation RTN result Paro uses for starved modules."""
+        qcfg = self._module_qcfg(module)
+        bits, group_size, sym = self._module_quant_params(
+            module.full_name, resolved_cfg=get_resolved_module_config(module)
+        )
+        return identity_paro_result(
+            weight=self._module_weight_matrix(module),
+            bias=module.bias.data if getattr(module, "bias", None) is not None else None,
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            krot=int(qcfg.krot),
+            quantizer_impl=qcfg.opt_quantizer_impl,
+        )
+
+    def _log_fallback(self, module: NamedModule) -> None:
+        """Report one threshold-triggered fallback with the GPTQ wording."""
+        expected = getattr(self, "total_calibration_tokens", None)
+        fallback = getattr(self._module_qcfg(module), "fallback", None)
+        if fallback is None:
+            fallback = getattr(self, "fallback", None)
+        threshold_raw, is_percent = resolve_threshold(fallback, expected)
+        threshold_text = str(getattr(fallback, "threshold", None))
+        threshold_info = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
+        log.warn(
+            f"Paro: Module `{module.full_name}` -> Using `rtn` fallback quantization "
+            f"(observed {self._captured_rows(module.name)} samples, threshold={threshold_text}"
+            f"{threshold_info}, max_total={expected})."
+        )
 
     @staticmethod
     def _module_weight_matrix(module: NamedModule) -> torch.Tensor:
@@ -486,27 +648,37 @@ class ParoProcessor(LoopProcessor):
             paro_mlx_optimization_available,
         )
 
+        qcfg = self._module_qcfg(module)
         bits, group_size, sym = self._module_quant_params(
             module.full_name, resolved_cfg=get_resolved_module_config(module),
         )
         weight = self._module_weight_matrix(module)
         bias = module.bias.data if getattr(module, "bias", None) is not None else None
         original_weight = weight.detach().clone()
+        if self._module_fallback_requested(module):
+            self._log_fallback(module)
+            result = self._identity_fallback_result(module)
+            self._apply_optimization_result(module, result, original_weight)
+            return result.train_loss, result.val_loss
         if inputs.numel() == 0:
             inputs = torch.empty((0, weight.shape[1]), dtype=weight.dtype, device=weight.device)
-        module_seed = self._module_seed(module.layer_index, module.full_name)
+        module_seed = self._module_seed(module.layer_index, module.full_name, qcfg)
+        # The stage LRs are scaled for ``opt_batch_size`` in every scope, so the
+        # default ``opt_scope="module"`` must not pass the raw config values
+        # (#5306 regression, #5517).
+        rotation_lr, weight_lr, quantizer_lr = self._stage_learning_rates(qcfg)
 
         use_mlx = (
             inputs.numel() > 0
             and weight.device.type in {"cpu", "mps"}
             and paro_mlx_optimization_available()
             and self._opt_scope_mode() == "module"
-            and self.qcfg.opt_stage_impl == "fast"
-            and not self._gradient_checkpointing_enabled()
+            and qcfg.opt_stage_impl == "fast"
+            and not self._gradient_checkpointing_enabled(qcfg)
         )
         if use_mlx:
             normalized_group_size = _normalize_group_size(group_size, weight.shape[1])
-            normalized_pair_impl = _normalize_opt_impl(self.qcfg.opt_pair_impl, field="pair_impl")
+            normalized_pair_impl = _normalize_opt_impl(qcfg.opt_pair_impl, field="pair_impl")
             pair_builder = (
                 build_random_rotation_buffers_reference
                 if normalized_pair_impl == "reference"
@@ -515,8 +687,8 @@ class ParoProcessor(LoopProcessor):
             pairs, theta_mask = pair_builder(
                 in_features=weight.shape[1],
                 group_size=normalized_group_size,
-                krot=self.qcfg.krot,
-                pair_ratio=self.qcfg.opt_pair_ratio,
+                krot=qcfg.krot,
+                pair_ratio=qcfg.opt_pair_ratio,
                 seed=module_seed,
                 device=weight.device,
             )
@@ -528,26 +700,26 @@ class ParoProcessor(LoopProcessor):
                 theta_mask=theta_mask,
                 bits=bits,
                 group_size=normalized_group_size,
-                symmetric=_quantizer_sym_for_impl(sym, self.qcfg.opt_quantizer_impl),
-                train_rows=self.qcfg.opt_train_samples,
-                val_rows=self.qcfg.opt_validation_samples,
-                batch_size=self.qcfg.opt_batch_size,
-                rotation_epochs=self.qcfg.opt_rotation_epochs,
-                finetune_epochs=self.qcfg.opt_finetune_epochs,
-                rotation_lr=self.qcfg.opt_rotation_lr,
-                weight_lr=self.qcfg.opt_weight_lr,
-                quantizer_lr=self.qcfg.opt_quantizer_lr,
-                optimizer_name=getattr(self.qcfg, "opt_optimizer", "adamw"),
-                optimizer_weight_decay=float(getattr(self.qcfg, "opt_weight_decay", 0.01)),
-                optimizer_betas=tuple(getattr(self.qcfg, "opt_betas", (0.9, 0.95))),
-                optimizer_eps=float(getattr(self.qcfg, "opt_eps", 1e-10)),
-                optimizer_amsgrad=bool(getattr(self.qcfg, "opt_amsgrad", False)),
-                sgd_momentum=float(getattr(self.qcfg, "opt_sgd_momentum", 0.0)),
-                sgd_dampening=float(getattr(self.qcfg, "opt_sgd_dampening", 0.0)),
-                sgd_nesterov=bool(getattr(self.qcfg, "opt_sgd_nesterov", False)),
-                best_state_dtype=getattr(self.qcfg, "opt_best_state_dtype", "fp32"),
-                scale_clamp_min=self.qcfg.opt_channel_scale_clamp_min,
-                scale_clamp_max=self.qcfg.opt_channel_scale_clamp_max,
+                symmetric=_quantizer_sym_for_impl(sym, qcfg.opt_quantizer_impl),
+                train_rows=qcfg.opt_train_samples,
+                val_rows=qcfg.opt_validation_samples,
+                batch_size=qcfg.opt_batch_size,
+                rotation_epochs=qcfg.opt_rotation_epochs,
+                finetune_epochs=qcfg.opt_finetune_epochs,
+                rotation_lr=rotation_lr,
+                weight_lr=weight_lr,
+                quantizer_lr=quantizer_lr,
+                optimizer_name=getattr(qcfg, "opt_optimizer", "adamw"),
+                optimizer_weight_decay=float(getattr(qcfg, "opt_weight_decay", 0.01)),
+                optimizer_betas=tuple(getattr(qcfg, "opt_betas", (0.9, 0.95))),
+                optimizer_eps=float(getattr(qcfg, "opt_eps", 1e-10)),
+                optimizer_amsgrad=bool(getattr(qcfg, "opt_amsgrad", False)),
+                sgd_momentum=float(getattr(qcfg, "opt_sgd_momentum", 0.0)),
+                sgd_dampening=float(getattr(qcfg, "opt_sgd_dampening", 0.0)),
+                sgd_nesterov=bool(getattr(qcfg, "opt_sgd_nesterov", False)),
+                best_state_dtype=getattr(qcfg, "opt_best_state_dtype", "fp32"),
+                scale_clamp_min=qcfg.opt_channel_scale_clamp_min,
+                scale_clamp_max=qcfg.opt_channel_scale_clamp_max,
             )
             self._apply_optimization_result(module, result, original_weight)
             return result.train_loss, result.val_loss
@@ -560,40 +732,40 @@ class ParoProcessor(LoopProcessor):
                 bits=bits,
                 group_size=group_size,
                 sym=sym,
-                krot=self.qcfg.krot,
-                pair_ratio=self.qcfg.opt_pair_ratio,
-                train_rows=self.qcfg.opt_train_samples,
-                val_rows=self.qcfg.opt_validation_samples,
-                batch_size=self.qcfg.opt_batch_size,
-                rotation_epochs=self.qcfg.opt_rotation_epochs,
-                finetune_epochs=self.qcfg.opt_finetune_epochs,
-                rotation_lr=self.qcfg.opt_rotation_lr,
-                weight_lr=self.qcfg.opt_weight_lr,
-                quantizer_lr=self.qcfg.opt_quantizer_lr,
+                krot=qcfg.krot,
+                pair_ratio=qcfg.opt_pair_ratio,
+                train_rows=qcfg.opt_train_samples,
+                val_rows=qcfg.opt_validation_samples,
+                batch_size=qcfg.opt_batch_size,
+                rotation_epochs=qcfg.opt_rotation_epochs,
+                finetune_epochs=qcfg.opt_finetune_epochs,
+                rotation_lr=rotation_lr,
+                weight_lr=weight_lr,
+                quantizer_lr=quantizer_lr,
                 seed=module_seed,
-                optimizer_name=getattr(self.qcfg, "opt_optimizer", "adamw"),
-                optimizer_weight_decay=float(getattr(self.qcfg, "opt_weight_decay", 0.01)),
-                optimizer_betas=tuple(getattr(self.qcfg, "opt_betas", (0.9, 0.95))),
-                optimizer_eps=float(getattr(self.qcfg, "opt_eps", 1e-10)),
-                optimizer_amsgrad=bool(getattr(self.qcfg, "opt_amsgrad", False)),
-                sgd_momentum=float(getattr(self.qcfg, "opt_sgd_momentum", 0.0)),
-                sgd_dampening=float(getattr(self.qcfg, "opt_sgd_dampening", 0.0)),
-                sgd_nesterov=bool(getattr(self.qcfg, "opt_sgd_nesterov", False)),
-                fused_rotation=self.qcfg.opt_fused_rotation,
-                gradient_checkpointing=bool(getattr(self.qcfg, "opt_gradient_checkpointing", False)),
-                stage_cudagraph=self._module_scope_stage_cudagraph_enabled(),
-                use_amp=getattr(self.qcfg, "opt_amp", None),
-                best_state_dtype=getattr(self.qcfg, "opt_best_state_dtype", "fp32"),
-                stage_impl=self.qcfg.opt_stage_impl,
-                pair_impl=self.qcfg.opt_pair_impl,
-                quantizer_impl=self.qcfg.opt_quantizer_impl,
-                scale_clamp_min=self.qcfg.opt_channel_scale_clamp_min,
-                scale_clamp_max=self.qcfg.opt_channel_scale_clamp_max,
+                optimizer_name=getattr(qcfg, "opt_optimizer", "adamw"),
+                optimizer_weight_decay=float(getattr(qcfg, "opt_weight_decay", 0.01)),
+                optimizer_betas=tuple(getattr(qcfg, "opt_betas", (0.9, 0.95))),
+                optimizer_eps=float(getattr(qcfg, "opt_eps", 1e-10)),
+                optimizer_amsgrad=bool(getattr(qcfg, "opt_amsgrad", False)),
+                sgd_momentum=float(getattr(qcfg, "opt_sgd_momentum", 0.0)),
+                sgd_dampening=float(getattr(qcfg, "opt_sgd_dampening", 0.0)),
+                sgd_nesterov=bool(getattr(qcfg, "opt_sgd_nesterov", False)),
+                fused_rotation=qcfg.opt_fused_rotation,
+                gradient_checkpointing=bool(getattr(qcfg, "opt_gradient_checkpointing", False)),
+                stage_cudagraph=self._module_scope_stage_cudagraph_enabled(qcfg),
+                use_amp=getattr(qcfg, "opt_amp", None),
+                best_state_dtype=getattr(qcfg, "opt_best_state_dtype", "fp32"),
+                stage_impl=qcfg.opt_stage_impl,
+                pair_impl=qcfg.opt_pair_impl,
+                quantizer_impl=qcfg.opt_quantizer_impl,
+                scale_clamp_min=qcfg.opt_channel_scale_clamp_min,
+                scale_clamp_max=qcfg.opt_channel_scale_clamp_max,
             )
 
         from ..quantization.gsq_scalar import gsq_enabled_for
 
-        if gsq_enabled_for(self.qcfg.gsq, module.full_name):
+        if gsq_enabled_for(qcfg.gsq, module.full_name):
             from dataclasses import replace
 
             from ..quantization.gsq_paro import refine_paro_export
@@ -603,7 +775,7 @@ class ParoProcessor(LoopProcessor):
             features = inputs.reshape(-1, weight.shape[1]).to(weight.device)
             fitted = refine_paro_export(
                 result, teacher=original_weight, inputs=features,
-                group_size=group_size, config=self.qcfg.gsq,
+                group_size=group_size, config=qcfg.gsq,
                 storage_dtype=weight.dtype if weight.dtype in (torch.float16, torch.bfloat16) else torch.float16)
             result = replace(result, pack_weight=fitted["pack_weight"],
                              pseudo_weight=fitted["pseudo_weight"],
@@ -635,10 +807,11 @@ class ParoProcessor(LoopProcessor):
             return full_name
         return self._module_archetype(full_name)
 
-    def _module_seed(self, layer_index: int, full_name: str) -> int:
+    def _module_seed(self, layer_index: int, full_name: str, qcfg=None) -> int:
         """Derive a deterministic per-module seed from base seed, layer index, and module name."""
+        qcfg = qcfg if qcfg is not None else self.qcfg
         module_name = self._module_seed_key(full_name)
-        seed_material = f"{int(self.qcfg.opt_seed)}:{int(layer_index)}:{module_name}".encode("utf-8")
+        seed_material = f"{int(qcfg.opt_seed)}:{int(layer_index)}:{module_name}".encode("utf-8")
         digest = hashlib.blake2b(seed_material, digest_size=8).digest()
         return int.from_bytes(digest, byteorder="big", signed=False)
 
@@ -646,9 +819,10 @@ class ParoProcessor(LoopProcessor):
         """Normalize the configured Paro optimization scope."""
         return str(getattr(self.qcfg, "opt_scope", "module")).strip().lower()
 
-    def _gradient_checkpointing_enabled(self) -> bool:
+    def _gradient_checkpointing_enabled(self, qcfg=None) -> bool:
         """Resolve grouped-stage checkpointing from config, defaulting to layer scope only."""
-        configured = getattr(self.qcfg, "opt_gradient_checkpointing", None)
+        qcfg = qcfg if qcfg is not None else self.qcfg
+        configured = getattr(qcfg, "opt_gradient_checkpointing", None)
         if configured is None:
             return self._opt_scope_mode() == "layer"
         return bool(configured)
@@ -676,7 +850,7 @@ class ParoProcessor(LoopProcessor):
         qcfg = getattr(self, "qcfg", None)
         return bool(getattr(qcfg, "opt_train_on_noisy_inputs", False)) and self.uses_grouped_optimization()
 
-    def _module_scope_stage_cudagraph_enabled(self) -> bool:
+    def _module_scope_stage_cudagraph_enabled(self, qcfg=None) -> bool:
         """Disable per-linear stage CUDA graphs in the full quantization loop.
 
         Module scope calls the Paro optimizer once per linear across the
@@ -686,7 +860,30 @@ class ParoProcessor(LoopProcessor):
         """
         if self._opt_scope_mode() == "module":
             return False
-        return bool(getattr(self.qcfg, "opt_stage_cudagraph", False))
+        qcfg = qcfg if qcfg is not None else self.qcfg
+        return bool(getattr(qcfg, "opt_stage_cudagraph", False))
+
+    def _stage_learning_rates(self, qcfg=None) -> tuple[float, float, float]:
+        """Return the three stage LRs scaled for the optimizer batch size.
+
+        ``opt_batch_size`` sets how many rows one optimizer step covers, so the
+        number of steps per epoch is ``rows / opt_batch_size``. At a fixed LR a
+        larger batch therefore moves the parameters less per epoch: #5279
+        raised the default from 64 to 128 and cost Llama-3.2-1B about 1% PPL
+        (#5306). Scale linearly from the 64-row reference, so a step covers
+        twice the rows and moves twice as far and the per-epoch update is
+        unchanged. Batches at or below the reference keep the LR they always
+        had.
+        """
+
+        qcfg = qcfg if qcfg is not None else self.qcfg
+        batch_size = float(getattr(qcfg, "opt_batch_size", 64) or 64)
+        scale = max(1.0, batch_size / 64.0)
+        return (
+            float(qcfg.opt_rotation_lr) * scale,
+            float(qcfg.opt_weight_lr) * scale,
+            float(qcfg.opt_quantizer_lr) * scale,
+        )
 
     def _optimizer_param_group_kwargs(self) -> Dict[str, object]:
         """Return shared optimizer hyperparameters for Paro stage param groups."""
@@ -726,23 +923,24 @@ class ParoProcessor(LoopProcessor):
 
     def _build_group_optim_linear(self, module: NamedModule) -> _ParoOptimLinear:
         """Materialize one Paro optimizer wrapper from the current live module state."""
+        qcfg = self._module_qcfg(module)
         bits, group_size, sym = self._module_quant_params(
             module.full_name, resolved_cfg=get_resolved_module_config(module),
         )
         weight = self._module_weight_matrix(module)
         bias = module.bias.data if getattr(module, "bias", None) is not None else None
         normalized_group_size = _normalize_group_size(group_size, weight.shape[1])
-        normalized_pair_impl = _normalize_opt_impl(self.qcfg.opt_pair_impl, field="pair_impl")
-        quantizer_sym = _quantizer_sym_for_impl(sym, self.qcfg.opt_quantizer_impl)
-        _normalize_quantizer_impl(self.qcfg.opt_quantizer_impl)
-        module_seed = self._module_seed(module.layer_index, module.full_name)
+        normalized_pair_impl = _normalize_opt_impl(qcfg.opt_pair_impl, field="pair_impl")
+        quantizer_sym = _quantizer_sym_for_impl(sym, qcfg.opt_quantizer_impl)
+        _normalize_quantizer_impl(qcfg.opt_quantizer_impl)
+        module_seed = self._module_seed(module.layer_index, module.full_name, qcfg)
 
         if normalized_pair_impl == "reference":
             pairs, theta_mask = build_random_rotation_buffers_reference(
                 in_features=weight.shape[1],
                 group_size=normalized_group_size,
-                krot=self.qcfg.krot,
-                pair_ratio=self.qcfg.opt_pair_ratio,
+                krot=qcfg.krot,
+                pair_ratio=qcfg.opt_pair_ratio,
                 seed=module_seed,
                 device=weight.device,
             )
@@ -750,8 +948,8 @@ class ParoProcessor(LoopProcessor):
             pairs, theta_mask = build_random_rotation_buffers(
                 in_features=weight.shape[1],
                 group_size=normalized_group_size,
-                krot=self.qcfg.krot,
-                pair_ratio=self.qcfg.opt_pair_ratio,
+                krot=qcfg.krot,
+                pair_ratio=qcfg.opt_pair_ratio,
                 seed=module_seed,
                 device=weight.device,
             )
@@ -764,36 +962,23 @@ class ParoProcessor(LoopProcessor):
             quantizer_sym=quantizer_sym,
             pairs=pairs,
             theta_mask=theta_mask,
-            scale_clamp_min=self.qcfg.opt_channel_scale_clamp_min,
-            scale_clamp_max=self.qcfg.opt_channel_scale_clamp_max,
+            scale_clamp_min=qcfg.opt_channel_scale_clamp_min,
+            scale_clamp_max=qcfg.opt_channel_scale_clamp_max,
             # Layer-scope live optimization must stay on the portable PyTorch
             # rotation path. The fused autograd kernel can fail to load on some
             # fleet GPUs and the error may surface asynchronously well after the
             # original rotation call.
-            fused_rotation=False if self._opt_scope_mode() == "layer" else self.qcfg.opt_fused_rotation,
+            fused_rotation=False if self._opt_scope_mode() == "layer" else qcfg.opt_fused_rotation,
         ).to(device=weight.device, dtype=torch.float32)
 
     @staticmethod
     def _restore_linear_from_hooked(module: HookedLinear) -> torch.nn.Linear:
         """Drop HookedLinear's inference-only forward while preserving the shared parameter storage."""
-        restored = torch.nn.Linear.__new__(torch.nn.Linear)
-        torch.nn.Module.__init__(restored)
-        restored.in_features = module.in_features
-        restored.out_features = module.out_features
-        restored.weight = module.weight
-        restored.bias = module.bias
-        return restored
+        return restore_linear_from_hooked(module)
 
     def _strip_hooked_linear_wrappers(self, module: torch.nn.Module) -> int:
         """Layer-scope training must not run through HookedLinear, which always forwards in inference mode."""
-        replaced = 0
-        for child_name, child in list(module.named_children()):
-            if isinstance(child, HookedLinear):
-                setattr(module, child_name, self._restore_linear_from_hooked(child))
-                replaced += 1
-                continue
-            replaced += self._strip_hooked_linear_wrappers(child)
-        return replaced
+        return unwrap_hooked_linears(module)
 
     @staticmethod
     def _sync_named_modules_to_live_layer(
@@ -2305,6 +2490,7 @@ class ParoProcessor(LoopProcessor):
         optim_modules: dict[str, _ParoOptimLinear] = {}
         original_modules: dict[str, torch.nn.Module] = {}
         optimizer_group_kwargs = self._optimizer_param_group_kwargs()
+        rotation_lr, weight_lr, quantizer_lr = self._stage_learning_rates()
         try:
             for param in layer.parameters():
                 param.requires_grad_(False)
@@ -2323,10 +2509,10 @@ class ParoProcessor(LoopProcessor):
                 replay_batches_train=replay_batches_train,
                 replay_batches_val=replay_batches_val,
                 param_groups=[
-                    {"params": [optim_module.channel_scales_opt], "lr": self.qcfg.opt_rotation_lr, **optimizer_group_kwargs}
+                    {"params": [optim_module.channel_scales_opt], "lr": rotation_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ] + [
-                    {"params": [optim_module.theta], "lr": self.qcfg.opt_rotation_lr, **optimizer_group_kwargs}
+                    {"params": [optim_module.theta], "lr": rotation_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ],
                 epochs=int(self.qcfg.opt_rotation_epochs),
@@ -2342,10 +2528,10 @@ class ParoProcessor(LoopProcessor):
                 replay_batches_train=replay_batches_train,
                 replay_batches_val=replay_batches_val,
                 param_groups=[
-                    {"params": [optim_module.weight], "lr": self.qcfg.opt_weight_lr, **optimizer_group_kwargs}
+                    {"params": [optim_module.weight], "lr": weight_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ] + [
-                    {"params": optim_module.quantizer.optim_params(), "lr": self.qcfg.opt_quantizer_lr, **optimizer_group_kwargs}
+                    {"params": optim_module.quantizer.optim_params(), "lr": quantizer_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                     if optim_module.quantizer is not None
                 ],
@@ -2435,6 +2621,7 @@ class ParoProcessor(LoopProcessor):
                 attention_masks_val,
             ) = self._group_dataset_for_device(state, next(layer_clone.parameters()).device)
             optimizer_group_kwargs = self._optimizer_param_group_kwargs()
+            rotation_lr, weight_lr, quantizer_lr = self._stage_learning_rates()
 
             self._run_group_stage(
                 layer_clone,
@@ -2450,10 +2637,10 @@ class ParoProcessor(LoopProcessor):
                 position_ids_val=position_ids_val,
                 attention_masks_val=attention_masks_val,
                 param_groups=[
-                    {"params": [optim_module.channel_scales_opt], "lr": self.qcfg.opt_rotation_lr, **optimizer_group_kwargs}
+                    {"params": [optim_module.channel_scales_opt], "lr": rotation_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ] + [
-                    {"params": [optim_module.theta], "lr": self.qcfg.opt_rotation_lr, **optimizer_group_kwargs}
+                    {"params": [optim_module.theta], "lr": rotation_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ],
                 epochs=int(self.qcfg.opt_rotation_epochs),
@@ -2476,10 +2663,10 @@ class ParoProcessor(LoopProcessor):
                 position_ids_val=position_ids_val,
                 attention_masks_val=attention_masks_val,
                 param_groups=[
-                    {"params": [optim_module.weight], "lr": self.qcfg.opt_weight_lr, **optimizer_group_kwargs}
+                    {"params": [optim_module.weight], "lr": weight_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ] + [
-                    {"params": optim_module.quantizer.optim_params(), "lr": self.qcfg.opt_quantizer_lr, **optimizer_group_kwargs}
+                    {"params": optim_module.quantizer.optim_params(), "lr": quantizer_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                     if optim_module.quantizer is not None
                 ],
@@ -2561,7 +2748,7 @@ class ParoProcessor(LoopProcessor):
 
         input_feat = self._layer_input_features(state)
         for module_name, tensor in input_feat.items():
-            if tensor.numel() == 0 and not self.fallback:
+            if tensor.numel() == 0 and not self._module_fallback_enabled(module_name, state):
                 raise RuntimeError(
                     f"ParoProcessor error: missing activation features for `{module_name}` with fallback disabled."
                 )
@@ -2583,13 +2770,26 @@ class ParoProcessor(LoopProcessor):
                     f"Resolved groups for layer {layer_index}: {[label for label, _modules in optimization_groups]}"
                 )
 
-            for _group_label, group_modules in optimization_groups:
-                start = time.perf_counter()
-                group_results, group_val_loss = self._optimize_group(state, group_modules)
-                duration = time.perf_counter() - start
-                duration_per_module = duration / max(1, len(group_modules))
+            starved = {
+                name for name, named_module in state.modules.items()
+                if self._module_fallback_requested(named_module)
+            }
+            for name in sorted(starved):
+                self._log_fallback(state.modules[name])
 
-                for named_module in group_modules:
+            for _group_label, group_modules in optimization_groups:
+                optimizable = [module for module in group_modules if module.name not in starved]
+                starved_modules = [module for module in group_modules if module.name in starved]
+
+                if optimizable:
+                    start = time.perf_counter()
+                    group_results, group_val_loss = self._optimize_group(state, optimizable)
+                    duration = time.perf_counter() - start
+                    duration_per_module = duration / max(1, len(optimizable))
+                else:
+                    group_results, group_val_loss, duration_per_module = {}, 0.0, 0.0
+
+                for named_module in optimizable:
                     original_weight = self._module_weight_matrix(named_module).detach().clone()
                     result = group_results[named_module.name]
                     self._apply_optimization_result(named_module, result, original_weight)
@@ -2600,8 +2800,20 @@ class ParoProcessor(LoopProcessor):
                         feat = torch.empty(0)
                     self._log_quant_result(named_module, feat, group_val_loss, duration_per_module)
 
+                for named_module in starved_modules:
+                    original_weight = self._module_weight_matrix(named_module).detach().clone()
+                    result = self._identity_fallback_result(named_module)
+                    self._apply_optimization_result(named_module, result, original_weight)
+                    if mode == "layer":
+                        move_to(named_module.module, device=CPU)
+                    feat = input_feat.get(named_module.name)
+                    if feat is None:
+                        feat = torch.empty(0)
+                    self._log_quant_result(named_module, feat, result.val_loss, 0.0)
+
                 if mode == "compute_block" and getattr(self.qcfg, "offload_to_disk", False):
-                    flush_device = self._module_weight_matrix(group_modules[0]).device if group_modules else None
+                    flush_group = optimizable or starved_modules
+                    flush_device = self._module_weight_matrix(flush_group[0]).device if flush_group else None
                     torch_empty_cache(device=flush_device, gc=False, sync=True)
 
         state.quantized = True
@@ -2764,6 +2976,7 @@ class ParoProcessor(LoopProcessor):
 
         module.weight.data = move_to(pack_weight, device=CPU)
         resolved_cfg = get_resolved_module_config(module)
+        module_qcfg = self._module_qcfg(module)
         quant_linear_cls = self._resolve_qlinear_kernel(module.full_name, resolved_cfg=resolved_cfg)
         layers = {module.full_name: model.model.get_submodule(module.full_name)}
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
@@ -2774,7 +2987,7 @@ class ParoProcessor(LoopProcessor):
             module_name=module_label,
         ):
             with parent_module_lock(module.full_name):
-                create_quant_module(
+                qmodule = create_quant_module(
                     name=module.full_name,
                     linear_cls=quant_linear_cls,
                     bits=self.qcfg.runtime_bits,
@@ -2789,11 +3002,24 @@ class ParoProcessor(LoopProcessor):
                     pack_dtype=self.qcfg.pack_dtype,
                     format=self.format,
                     register_buffers=False,
-                    init_kwargs=self.qcfg.quant_linear_init_kwargs(),
+                    # The optimizer built this module's buffers from the
+                    # per-module config, so the packed layer must be
+                    # constructed from the same one: a top-level `krot`/
+                    # `kernel` silently resized or rerouted the copy (#5659).
+                    init_kwargs=(
+                        module_qcfg.quant_linear_init_kwargs()
+                        if isinstance(module_qcfg, BaseQuantizeConfig)
+                        else self.qcfg.quant_linear_init_kwargs()
+                    ),
                     resolved_module_config=resolved_cfg,
+                    install=False,
                 )
 
-        qmodule = model.model.get_submodule(module.full_name)
+        if qmodule is None:
+            raise RuntimeError(
+                f"ParoProcessor: module `{module.full_name}` resolved to an excluded "
+                "quant config but still reached packing."
+            )
         qmodules = (
             {module.full_name: qmodule}
             if isinstance(qmodule, quant_linear_cls)
@@ -2818,21 +3044,39 @@ class ParoProcessor(LoopProcessor):
                 layers=layers,
                 quant_linear_cls=quant_linear_cls,
                 lock=self.lock,
-                quantize_config=self.qcfg,
+                quantize_config=self._module_qcfg(module),
             )
 
-        qmodule = qmodules[module.full_name]
         if not isinstance(qmodule, ParoLinear):
             raise TypeError(
                 f"Expected `{module.full_name}` to be packed as ParoLinear, got `{type(qmodule).__name__}`."
             )
 
+        # A `krot` mismatch used to be a silent broadcast (top=8, dyn=1) or a
+        # raw RuntimeError (top=8, dyn=16) deep inside `copy_`. Name the real
+        # cause instead of relying on a shape-compatible copy (#5659).
+        for label, packed, produced in (
+            ("pairs", qmodule.pairs, pairs),
+            ("theta", qmodule.theta, theta),
+        ):
+            if tuple(packed.shape) != tuple(produced.shape):
+                raise RuntimeError(
+                    f"ParoProcessor: `{module.full_name}` was packed with {label} shape "
+                    f"{tuple(packed.shape)} but the optimizer produced {tuple(produced.shape)}. "
+                    f"Resolved `krot`={getattr(module_qcfg, 'krot', None)!r} against the "
+                    f"packed layer's `krot`={getattr(qmodule, 'krot', None)!r}."
+                )
         qmodule.pairs.copy_(pairs.to(device=qmodule.pairs.device, dtype=qmodule.pairs.dtype))
         qmodule.theta.copy_(theta.to(device=qmodule.theta.device, dtype=qmodule.theta.dtype))
         qmodule.channel_scales.copy_(
             channel_scales.to(device=qmodule.channel_scales.device, dtype=qmodule.channel_scales.dtype)
         )
         qmodule.post_init()
+        # Publish the fully packed and post-initialized module with one
+        # assignment; installing it before packing left an unusable projection
+        # behind when packing was interrupted (issue #5089).
+        with parent_module_lock(module.full_name):
+            install_quant_module(model.model, module.full_name, qmodule)
 
     def finalize(self, model: BaseQModel, **kwargs):
         """Mark the model as Paro-quantized before shared finalization work."""

@@ -1,0 +1,154 @@
+# GPU=-1
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
+"""A model quantized with EoRA must remain savable (#5354).
+
+The adapter writer used to delete ``model.lora_results`` after the first
+export. The second ``save()`` then wrote a new base checkpoint and only failed
+inside the adapter writer, leaving the destination without an adapter.
+"""
+
+import json
+import os
+from types import SimpleNamespace
+
+import pytest
+import torch
+from safetensors.torch import load_file
+from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
+from gptqmodel.adapter.adapter import Lora
+from gptqmodel.models.writer import ModelWriter
+
+
+@pytest.fixture(scope="module")
+def tiny_llama_dir(tmp_path_factory) -> str:
+    torch.manual_seed(0)
+    config = LlamaConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=96,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=128,
+    )
+    path = tmp_path_factory.mktemp("tiny_llama_5354")
+    LlamaForCausalLM(config).save_pretrained(path)
+
+    specials = ["<s>", "</s>", "<unk>", "<pad>"]
+    tok = Tokenizer(models.WordLevel(unk_token="<unk>"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    tok.add_special_tokens(specials)
+    tok.train_from_iterator(
+        ["the quick brown fox jumps over the lazy dog"] * 20,
+        trainer=trainers.WordLevelTrainer(special_tokens=specials, vocab_size=128),
+    )
+    PreTrainedTokenizerFast(tokenizer_object=tok, pad_token="<pad>").save_pretrained(path)
+    return str(path)
+
+
+def _calibration_texts():
+    return [f"The quick brown fox number {i} jumps over the lazy dog." for i in range(8)]
+
+
+def _adapter_weights(adapter_dir) -> dict:
+    return load_file(os.path.join(adapter_dir, "adapter_model.safetensors"))
+
+
+def _adapter_base(directory) -> str:
+    with open(os.path.join(directory, "adapter_config.json"), encoding="utf-8") as handle:
+        return json.load(handle)["base_model_name_or_path"]
+
+
+def _load_and_forward(save_dir, adapter_dir):
+    adapter = Lora(rank=4, path=str(adapter_dir))
+    loaded = GPTQModel.load(
+        model_id_or_path=str(save_dir),
+        adapter=adapter,
+        backend=BACKEND.GPTQ_TORCH,
+        device="cpu",
+    )
+    input_ids = torch.tensor([[2, 5, 11, 17]], dtype=torch.long)
+    with torch.inference_mode():
+        return loaded(input_ids=input_ids).logits
+
+
+def test_eora_writer_exports_the_same_adapter_twice(tmp_path):
+    class _Writer:
+        pass
+
+    ModelWriter(_Writer)
+    writer = _Writer()
+    writer.quantize_config = SimpleNamespace(adapter=Lora(rank=2), dynamic=None)
+    writer.lora_results = {
+        "model.layers.0.self_attn.q_proj": Lora(
+            rank=2,
+            lora_A=torch.arange(8, dtype=torch.float16).reshape(2, 4),
+            lora_B=torch.arange(6, dtype=torch.float16).reshape(3, 2),
+        )
+    }
+
+    first_adapter = tmp_path / "adapter-1"
+    second_adapter = tmp_path / "adapter-2"
+    writer.eora_save(
+        save_dir=str(first_adapter), model_save_dir=str(tmp_path / "base-1")
+    )
+    writer.eora_save(
+        save_dir=str(second_adapter), model_save_dir=str(tmp_path / "base-2")
+    )
+
+    first_weights = _adapter_weights(first_adapter)
+    second_weights = _adapter_weights(second_adapter)
+    assert first_weights.keys() == second_weights.keys()
+    for key in first_weights:
+        torch.testing.assert_close(second_weights[key], first_weights[key], rtol=0, atol=0)
+    assert _adapter_base(first_adapter) == str(tmp_path / "base-1")
+    assert _adapter_base(second_adapter) == str(tmp_path / "base-2")
+
+
+def test_eora_quantized_model_saves_twice_with_complete_adapters(tiny_llama_dir, tmp_path):
+    model = GPTQModel.load(
+        tiny_llama_dir,
+        QuantizeConfig(bits=4, group_size=32, desc_act=False, device="cpu"),
+        backend=BACKEND.GPTQ_TORCH,
+    )
+
+    model.quantize(
+        CalibrationConfig(dataset=_calibration_texts(), batch_size=2),
+        adapter=Lora(rank=4, path=str(tmp_path / "adapter-0")),
+    )
+
+    first_base = tmp_path / "export-1"
+    first_adapter = tmp_path / "adapter-1"
+    model.save(str(first_base), eora_path=str(first_adapter))
+
+    assert (first_base / "model.safetensors").is_file()
+    assert (first_adapter / "adapter_config.json").is_file()
+    first_weights = _adapter_weights(first_adapter)
+    assert first_weights
+
+    second_base = tmp_path / "export-2"
+    second_adapter = tmp_path / "adapter-2"
+    model.save(str(second_base), eora_path=str(second_adapter))
+
+    assert (second_base / "model.safetensors").is_file()
+    assert (second_adapter / "adapter_config.json").is_file()
+    second_weights = _adapter_weights(second_adapter)
+
+    # Both destinations carry the adapter generated by the one quantization
+    # run, and each config points at its own base checkpoint.
+    assert first_weights.keys() == second_weights.keys()
+    for key in first_weights:
+        torch.testing.assert_close(second_weights[key], first_weights[key], rtol=0, atol=0)
+    assert _adapter_base(first_adapter) == str(first_base)
+    assert _adapter_base(second_adapter) == str(second_base)
+
+    # Reloading is the consumer that matters: both exports must produce the
+    # same quantized-plus-adapter result.
+    first_logits = _load_and_forward(first_base, first_adapter)
+    second_logits = _load_and_forward(second_base, second_adapter)
+    torch.testing.assert_close(second_logits, first_logits, rtol=0, atol=0)

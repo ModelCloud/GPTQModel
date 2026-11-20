@@ -74,7 +74,14 @@ def _constructor_kwargs(qcfg, *, bias: bool) -> dict:
 
 
 def _cpu_fallback_sources(qcfg) -> list[type[BaseQuantLinear]]:
-    """Packing kernels for ``qcfg`` that cannot run on CPU."""
+    """Packing kernels for ``qcfg`` that cannot run on CPU.
+
+    Restricted to CUDA sources: ``rehome_quantized_kernel`` moves the kernel a
+    CUDA calibration run selected. Enumerating the live registry without that
+    filter also picked up other accelerators (``QQQMlxQuantLinear`` on MPS) once
+    an unrelated test had imported their module, which made the assertion
+    depend on test order (#5325).
+    """
 
     method = qcfg.export_quant_method()
     fmt = resolve_quant_format(qcfg.format, method)
@@ -84,6 +91,7 @@ def _cpu_fallback_sources(qcfg) -> list[type[BaseQuantLinear]]:
         if method in (cls.SUPPORTS_METHODS or ())
         and fmt in (cls.SUPPORTS_FORMATS or {})
         and _supports_pack_api(cls)
+        and DEVICE.CUDA in (cls.SUPPORTS_DEVICES or ())
         and DEVICE.CPU not in (cls.SUPPORTS_DEVICES or ())
         and DEVICE.ALL not in (cls.SUPPORTS_DEVICES or ())
     ]
@@ -134,6 +142,14 @@ def test_rehome_switches_every_cpu_fallback_pair_with_complete_state(monkeypatch
     reference = target(**kwargs, register_buffers=True)
     _populate(reference, bias=bias)
     reference.post_init()
+    # ``QQQTorchLinear`` moves the checkpoint layout into
+    # ``_torch_dropped_checkpoint`` on its first forward, so snapshot the
+    # post-init buffers before that (otherwise the module under test is built
+    # from ``None`` payload buffers and its numbers depend on import order).
+    checkpoint_buffers = {
+        name: (tensor.clone() if tensor is not None else None)
+        for name, tensor in reference._buffers.items()
+    }
     activation = torch.randn(3, IN_FEATURES, generator=torch.Generator().manual_seed(7)).to(torch.float16)
     with torch.inference_mode():
         expected = reference(activation)
@@ -150,7 +166,7 @@ def test_rehome_switches_every_cpu_fallback_pair_with_complete_state(monkeypatch
             # that rejects this layout (AllSpark is 8-bit only) or lacks its
             # package (BitBLAS) can never be the module the switch receives.
             continue
-        for name, tensor in reference._buffers.items():
+        for name, tensor in checkpoint_buffers.items():
             if tensor is not None:
                 module._buffers[name] = tensor.clone()
 

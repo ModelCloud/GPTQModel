@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -93,6 +94,360 @@ def test_host_g_idx_stage_is_accounted_in_bytes():
     host = _source("gptqmodel_ext/marlin/gptq_marlin.cu")
     g_idx = _assigned_expression(host, r"int sh_g_idx_size = ([^;]*);")
     assert "stages * tb_k * 4" in g_idx, g_idx
+
+
+# ---------------------------------------------------------------------------
+# Derived shared-memory accounting
+#
+# The two checks above compare source *strings*. That catches the exact #4657
+# drift, but it does not recompute the extent the kernel actually declares, so
+# it cannot tell whether a host budget covers the whole layout (B/reduce union,
+# FP32 bias, g_idx, zero points, scales, A) for the configs ``is_valid_config``
+# accepts. The checks below translate the real declarations in
+# ``marlin_template.h`` / ``gptq_marlin.cu`` into Python, evaluate them over the
+# real thread-config matrix, and assert
+# ``host dynamic shared memory >= kernel requirement``.
+# ---------------------------------------------------------------------------
+
+
+def _split_top_level(expr: str, sep: str) -> int | None:
+    depth = 0
+    for i, ch in enumerate(expr):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == sep and depth == 0:
+            return i
+    return None
+
+
+def _replace_ternary(expr: str) -> str:
+    """Rewrite C++ ``cond ? a : b`` (including nesting) as a Python conditional."""
+
+    expr = expr.strip()
+    # Translate parenthesised sub-expressions first, so any ``?`` left at depth
+    # zero belongs to this level.
+    out = []
+    i = 0
+    while i < len(expr):
+        if expr[i] == "(":
+            depth = 1
+            j = i + 1
+            while j < len(expr) and depth:
+                if expr[j] == "(":
+                    depth += 1
+                elif expr[j] == ")":
+                    depth -= 1
+                j += 1
+            out.append("(" + _replace_ternary(expr[i + 1 : j - 1]) + ")")
+            i = j
+        else:
+            out.append(expr[i])
+            i += 1
+    expr = "".join(out)
+
+    question = _split_top_level(expr, "?")
+    if question is None:
+        return expr
+    colon = _split_top_level(expr[question + 1 :], ":")
+    assert colon is not None, expr
+    colon += question + 1
+    cond = _replace_ternary(expr[:question])
+    then = _replace_ternary(expr[question + 1 : colon])
+    other = _replace_ternary(expr[colon + 1 :])
+    return f"({then} if {cond} else {other})"
+
+
+@lru_cache(maxsize=None)
+def _translate_c(expr: str) -> str:
+    """Translate the small C++ subset used by the two layout models to Python."""
+
+    expr = " ".join(expr.split())
+    expr = expr.replace("sizeof(int)", "4")
+    expr = expr.replace("vllm::kFE2M1f", "False")
+    expr = expr.replace("&&", " and ").replace("||", " or ")
+    expr = re.sub(r"!(?!=)", " not ", expr)
+    expr = _replace_ternary(expr)
+    # Every operand is a non-negative int, so C++ truncating division is ``//``.
+    return expr.replace("/", "//")
+
+
+def _eval_c(expr: str, **env):
+    return eval(_translate_c(expr), {"__builtins__": {}}, {"max": max, "min": min, **env})
+
+
+@lru_cache(maxsize=None)
+def _decl(source: str, name: str) -> str:
+    match = re.search(
+        r"(?:constexpr\s+)?int\s+" + re.escape(name) + r"\s*=\s*(.+?);",
+        source,
+        flags=re.DOTALL,
+    )
+    assert match is not None, f"{name} is not declared in the source"
+    return match.group(1)
+
+
+def _thread_configs(source: str) -> list[tuple[int, int, int]]:
+    configs = []
+    for block in re.finditer(
+        r"thread_config_t\s+\w+\[\]\s*=\s*\{(.*?)\};", source, flags=re.DOTALL
+    ):
+        for match in re.finditer(r"\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\}", block.group(1)):
+            config = tuple(int(part) for part in match.groups())
+            if config not in configs:
+                configs.append(config)
+    assert configs, "no thread configs found"
+    return configs
+
+
+def _div_ceil(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def _kernel_shmem_bytes(
+    kernel: str, th_k: int, th_n: int, tmb: int, num_bits: int, group_size: int,
+    has_act_order: bool, is_k_full: bool, has_zp: bool, is_zp_float: bool,
+    stages: int, m_block_size_8: bool,
+) -> tuple[int, dict[str, int]]:
+    """Recompute the int4 regions ``marlin_template.h`` declares, in bytes."""
+
+    env = {
+        "thread_k_blocks": th_k // 16,
+        "thread_n_blocks": th_n // 16,
+        "thread_m_blocks": tmb,
+        "pack_factor": 32 // num_bits,
+        "stages": stages,
+        "has_act_order": has_act_order,
+        "has_zp": has_zp,
+        "is_zp_float": is_zp_float,
+        "m_block_size_8": m_block_size_8,
+        "w_type": "kU4",
+        # The modelled kernels use 16-bit scales; 8-bit (FP4/MX) scales halve the scale stage.
+        "is_8bit_scale": False,
+        "group_blocks": 0
+        if has_act_order
+        else (-1 if group_size == -1 else (2 if group_size == 0 else group_size // 16)),
+        "tb_k": _eval_c(_decl(kernel, "tb_k"), **{"thread_k_blocks": th_k // 16}),
+    }
+    env["m_block_size"] = _eval_c(_decl(kernel, "m_block_size"), **env)
+    env["sh_red_size"] = _eval_c(_decl(kernel, "sh_red_size"), **env)
+    env["b_sh_stride"] = _eval_c(_decl(kernel, "b_sh_stride"), **env)
+    env["b_sh_stage"] = _eval_c(_decl(kernel, "b_sh_stage"), **env)
+    env["sh_b_size"] = _eval_c(_decl(kernel, "sh_b_size"), **env)
+    env["sh_size_b_red_max"] = _eval_c(_decl(kernel, "sh_size_b_red_max"), **env)
+    env["sh_bias_size"] = _eval_c(_decl(kernel, "sh_bias_size"), **env)
+    if re.search(r"int\s+sh_size_b_red_min\s*=", kernel):
+        # The pre-#4735 layout put the bias at the start of the union. Keep the
+        # port able to read that source so the sensitivity check reports a byte
+        # gap instead of a parse error.
+        env["sh_size_b_red_min"] = _eval_c(_decl(kernel, "sh_size_b_red_min"), **env)
+    env["sh_b_red_bias_size"] = _eval_c(_decl(kernel, "sh_b_red_bias_size"), **env)
+    env["g_idx_stage"] = _eval_c(_decl(kernel, "g_idx_stage"), **env)
+    env["s_sh_stride"] = _eval_c(_decl(kernel, "s_sh_stride"), **env)
+    env["s_tb_groups"] = _eval_c(_decl(kernel, "s_tb_groups"), **env)
+    env["s_sh_stage"] = _eval_c(_decl(kernel, "s_sh_stage"), **env)
+    env["act_s_max_num_groups"] = _eval_c(
+        _decl(kernel, "act_s_max_num_groups"), **env
+    )
+    env["sh_s_size"] = _eval_c(_decl(kernel, "sh_s_size"), **env)
+    env["zp_sh_stride"] = _eval_c(_decl(kernel, "zp_sh_stride"), **env)
+    env["zp_tb_groups"] = env["s_tb_groups"]
+    env["zp_sh_stage"] = _eval_c(_decl(kernel, "zp_sh_stage"), **env)
+    env["a_sh_stride"] = _eval_c(_decl(kernel, "a_sh_stride"), **env)
+    env["a_sh_stage"] = _eval_c(_decl(kernel, "a_sh_stage"), **env)
+
+    regions = {
+        # ``sh_b_red_bias_size`` is the g_idx offset: the extent reserved for
+        # the B/reduce union plus the bias stage. ``span`` is what the kernel
+        # actually declares; ``union`` + ``bias`` only equals it when the bias
+        # has its own region after the union (the #4735 layout).
+        "span": env["sh_b_red_bias_size"],
+        "union": env["sh_size_b_red_max"],
+        "bias": env["sh_bias_size"],
+        "g_idx": stages * env["g_idx_stage"],
+        "zp": stages * env["zp_sh_stage"],
+        "scales": env["sh_s_size"],
+        "a": stages * env["a_sh_stage"],
+    }
+    total_int4 = (
+        regions["span"]
+        + regions["g_idx"]
+        + regions["zp"]
+        + regions["scales"]
+        + regions["a"]
+    )
+    return total_int4 * 16, {name: value * 16 for name, value in regions.items()}
+
+
+def _host_scales_bytes(
+    host: str, th_k: int, th_n: int, group_size: int, has_act_order: bool,
+    is_k_full: bool, stages: int,
+) -> int:
+    """Port of ``get_scales_cache_size`` (cross-checked against its source)."""
+
+    flat = " ".join(host.split())
+    assert "tb_groups = div_ceil(tb_k, 32)" in flat
+    assert "load_groups = tb_groups * stages * 2" in flat
+    assert "load_groups = max(load_groups, 32)" in flat
+    assert "return load_groups * tb_n * 2" in flat
+    assert "int tb_scales = tb_groups * tb_n * 2" in flat
+    assert "return tb_scales * stages" in flat
+
+    tb_groups = (
+        1
+        if group_size == -1
+        else (_div_ceil(th_k, 32) if group_size == 0 else _div_ceil(th_k, group_size))
+    )
+    if has_act_order and not is_k_full:
+        return max(tb_groups * stages * 2, 32) * th_n * 2
+    return tb_groups * th_n * 2 * stages
+
+
+def _host_shmem_bytes(
+    host: str, th_k: int, th_n: int, tmb: int, num_bits: int, group_size: int,
+    has_act_order: bool, is_k_full: bool, has_zp: bool, is_zp_float: bool,
+    stages: int, *, bias_bytes: int | None = None,
+) -> tuple[int, dict[str, int]]:
+    """Recompute ``get_kernel_cache_size()`` in bytes."""
+
+    env = {
+        "tb_m": tmb * 16,
+        "tb_k": th_k,
+        "tb_n": th_n,
+        "pack_factor": 32 // num_bits,
+        "stages": stages,
+        "has_act_order": has_act_order,
+        "is_k_full": is_k_full,
+        "has_zp": has_zp,
+        "is_zp_float": is_zp_float,
+    }
+    env["sh_a_size"] = _eval_c(_decl(host, "sh_a_size"), **env)
+    env["sh_b_size"] = _eval_c(_decl(host, "sh_b_size"), **env)
+    env["sh_red_size"] = _eval_c(_decl(host, "sh_red_size"), **env)
+    env["sh_bias_size"] = _eval_c(_decl(host, "sh_bias_size"), **env)
+    if bias_bytes is not None:
+        env["sh_bias_size"] = bias_bytes
+    env["tmp_size"] = _eval_c(_decl(host, "tmp_size"), **env)
+    env["sh_s_size"] = _host_scales_bytes(
+        host, th_k, th_n, group_size, has_act_order, is_k_full, stages
+    )
+    env["sh_g_idx_size"] = _eval_c(_decl(host, "sh_g_idx_size"), **env)
+    env["sh_zp_size"] = 0
+    if has_zp:
+        if is_zp_float:
+            assert "sh_zp_size = sh_s_size;" in host
+            env["sh_zp_size"] = env["sh_s_size"]
+        elif num_bits == 4:
+            assert "sh_zp_size = sh_s_size / 4;" in host
+            env["sh_zp_size"] = env["sh_s_size"] // 4
+        elif num_bits == 8:
+            assert "sh_zp_size = sh_s_size / 2;" in host
+            env["sh_zp_size"] = env["sh_s_size"] // 2
+    total = _eval_c(_decl(host, "total_size"), **env)
+    return total, {
+        "union": env["sh_b_size"] if env["sh_b_size"] > env["sh_red_size"] else env["sh_red_size"],
+        "bias": env["sh_bias_size"],
+        "g_idx": env["sh_g_idx_size"],
+        "zp": env["sh_zp_size"],
+        "scales": env["sh_s_size"],
+        "a": env["sh_a_size"],
+    }
+
+
+def _accepted_configs(kernel: str):
+    """Every (thread config, M tile, bits, group, act/zp) the host can accept."""
+
+    for th_k, th_n, _threads in _thread_configs(kernel):
+        for tmb in (1, 2, 3, 4):
+            for num_bits in (4, 8):
+                for group_size in (128, 64, 32, -1):
+                    for has_act_order in (False, True):
+                        for has_zp in (False, True):
+                            for is_zp_float in ((False, True) if has_zp else (False,)):
+                                yield (
+                                    th_k, th_n, tmb, num_bits, group_size,
+                                    has_act_order, has_zp, is_zp_float,
+                                )
+
+
+def test_host_shared_memory_budget_covers_the_kernel_layout():
+    """For every accepted config the host must reserve at least what the kernel uses."""
+
+    host = _source("gptqmodel_ext/marlin/gptq_marlin.cu")
+    kernel = _source("gptqmodel_ext/marlin/marlin_template.h")
+    stages = int(_decl(_source("gptqmodel_ext/marlin/marlin.cuh"), "pipe_stages"))
+
+    # The FP32 stage is int4 in the kernel and bytes in the host model.
+    kernel_bias = _eval_c(
+        _decl(kernel, "sh_bias_size"), thread_n_blocks=256 // 16
+    ) * 16
+    host_bias = _eval_c(_decl(host, "sh_bias_size"), tb_n=256)
+    assert host_bias == kernel_bias == 1024
+
+    checked = 0
+    for th_k, th_n, tmb, num_bits, group_size, has_act_order, has_zp, is_zp_float in _accepted_configs(host):
+        for m_block_size_8 in (False, True):
+            kernel_bytes, kregions = _kernel_shmem_bytes(
+                kernel, th_k, th_n, tmb, num_bits, group_size, has_act_order,
+                False, has_zp, is_zp_float, stages, m_block_size_8,
+            )
+            host_bytes, hregions = _host_shmem_bytes(
+                host, th_k, th_n, tmb, num_bits, group_size, has_act_order,
+                False, has_zp, is_zp_float, stages,
+            )
+            assert host_bytes >= kernel_bytes, (
+                "host dynamic shared memory is smaller than the kernel layout: "
+                f"thread_k={th_k} thread_n={th_n} thread_m_blocks={tmb} "
+                f"bits={num_bits} group={group_size} act={has_act_order} "
+                f"zp={has_zp}/{is_zp_float} m8={m_block_size_8}: "
+                f"host={host_bytes} kernel={kernel_bytes} "
+                f"host_regions={hregions} kernel_regions={kregions}"
+            )
+            # The regions #4657 changed must match exactly, not merely fit.
+            assert hregions["bias"] == kregions["bias"], (hregions, kregions)
+            assert hregions["g_idx"] == kregions["g_idx"], (hregions, kregions)
+            assert hregions["union"] == kregions["union"], (hregions, kregions)
+            # The FP32 bias must not be carved out of the B/reduce union: the
+            # declared span is the union followed by the bias, nothing shared.
+            assert kregions["span"] == kregions["union"] + kregions["bias"], (
+                "the bias stage overlaps the B/reduce union",
+                kregions,
+            )
+            checked += 1
+
+    assert checked > 0
+
+
+def test_the_pre_4657_bias_budget_would_under_count():
+    """Sensitivity: the old ``tb_n * 2`` bias term must fail the same check.
+
+    Without this, a future edit could make both models agree on the wrong
+    number and the invariant test above would silently pass.
+    """
+
+    host = _source("gptqmodel_ext/marlin/gptq_marlin.cu")
+    kernel = _source("gptqmodel_ext/marlin/marlin_template.h")
+    stages = int(_decl(_source("gptqmodel_ext/marlin/marlin.cuh"), "pipe_stages"))
+
+    short = []
+    for th_k, th_n, tmb, num_bits, group_size, has_act_order, has_zp, is_zp_float in _accepted_configs(host):
+        kernel_bytes, _ = _kernel_shmem_bytes(
+            kernel, th_k, th_n, tmb, num_bits, group_size, has_act_order,
+            False, has_zp, is_zp_float, stages, False,
+        )
+        old_bytes, _ = _host_shmem_bytes(
+            host, th_k, th_n, tmb, num_bits, group_size, has_act_order, False,
+            has_zp, is_zp_float, stages, bias_bytes=th_n * 2,
+        )
+        if old_bytes < kernel_bytes:
+            short.append((th_k, th_n, tmb, num_bits, group_size, has_act_order,
+                          has_zp, is_zp_float, kernel_bytes - old_bytes))
+
+    assert short, "the old 16-bit bias term unexpectedly covers the FP32 layout"
+    # tn=256 is the config that shows the widest gap: the 512-byte bias
+    # under-count, exactly as reported for #4735.
+    assert max(entry[-1] for entry in short) >= 512
 
 
 def _skip_reason(dtype: torch.dtype) -> str | None:

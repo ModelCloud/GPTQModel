@@ -402,3 +402,189 @@ def test_eora_export_rank_pattern_reproduces_first_match_dynamic(tmp_path):
         adapter = Lora(rank=base_rank, path=str(tmp_path))
         adapter.post_init(name, CPU)
         assert adapter.rank == rank, name
+
+
+def _write_overflow_adapter(directory, *, source_b, alpha, rank, store=torch.float16):
+    """A rank-``rank`` adapter with the given stored ``lora_B`` scale."""
+
+    module_key = "model.layers.0.self_attn.q_proj"
+    _write_adapter(
+        directory,
+        config={
+            "r": rank,
+            "lora_alpha": alpha,
+            "use_rslora": False,
+            "target_modules": ["q_proj"],
+        },
+        weights={
+            f"base_model.model.{module_key}.lora_A.weight": torch.ones(
+                (rank, 1), dtype=store
+            ),
+            f"base_model.model.{module_key}.lora_B.weight": torch.tensor(
+                [[source_b]], dtype=store
+            ),
+        },
+    )
+    return module_key
+
+
+def test_fp16_scale_fold_does_not_overflow_the_adapter_output(tmp_path):
+    """A fold that overflows FP16 keeps the raw B and scales the product (#5426).
+
+    PEFT multiplies ``alpha / rank`` after both projections, so
+    ``((x @ A.T) @ B.T) * 4`` with ``B = 32768`` and ``x = 0.125`` is a finite
+    16384. Folding the scale into the FP16 storage first turned B into ``inf``
+    and the whole adapter output with it.
+    """
+
+    module_key = _write_overflow_adapter(tmp_path, source_b=32768.0, alpha=4, rank=1)
+    adapter = Lora(rank=1, path=str(tmp_path))
+    adapter.post_init(module_key, CPU)
+
+    assert torch.isfinite(adapter.lora_B).all(), "the load must not fold into inf"
+    assert adapter.lora_B.item() == 32768.0
+
+    x = torch.tensor([[0.125]], dtype=torch.float16)
+    base = torch.zeros((1, 1), dtype=torch.float16)
+    result = adapter.apply(x, base)
+
+    oracle = ((x.double() @ torch.ones((1, 1), dtype=torch.float64)) @ torch.tensor(
+        [[32768.0]], dtype=torch.float64
+    )) * 4.0
+    assert result.item() == 16384.0
+    torch.testing.assert_close(result.double(), oracle, rtol=0, atol=0)
+
+
+def test_fp16_scale_fold_still_applies_when_it_fits(tmp_path):
+    """An in-range fold keeps the fast path and the same effective scale (#5426)."""
+
+    module_key = _write_overflow_adapter(tmp_path, source_b=2.0, alpha=4, rank=1)
+    adapter = Lora(rank=1, path=str(tmp_path))
+    adapter.post_init(module_key, CPU)
+
+    assert adapter.lora_B.item() == 8.0, "an in-range scale is still folded once"
+
+    x = torch.tensor([[0.125]], dtype=torch.float16)
+    base = torch.zeros((1, 1), dtype=torch.float16)
+    result = adapter.apply(x, base)
+    assert result.item() == 1.0
+
+
+def _single_rank_a(rank):
+    """A stored ``lora_A`` (rank, 1) with only rank 0 active."""
+
+    weight = torch.zeros((rank, 1), dtype=torch.float16)
+    weight[0, 0] = 1.0
+    return weight
+
+
+def test_fp16_scale_fold_does_not_flush_a_small_b_to_zero(tmp_path):
+    """A fold that flushes a nonzero B element to zero keeps the raw B (#5426)."""
+
+    module_key = "model.layers.0.self_attn.q_proj"
+    _write_adapter(
+        tmp_path,
+        config={
+            "r": 64,
+            "lora_alpha": 1,
+            "use_rslora": False,
+            "target_modules": ["q_proj"],
+        },
+        weights={
+            # One active rank so the product is a single `B` element.
+            f"base_model.model.{module_key}.lora_A.weight": _single_rank_a(64),
+            f"base_model.model.{module_key}.lora_B.weight": torch.full(
+                (1, 64), 1.0e-6, dtype=torch.float16
+            ),
+        },
+    )
+    adapter = Lora(rank=64, path=str(tmp_path))
+    adapter.post_init(module_key, CPU)
+
+    stored_b = torch.full((1, 64), 1.0e-6, dtype=torch.float16).flatten()[0].item()
+    assert (adapter.lora_B == stored_b).all(), "the fold would flush B to zero"
+    assert adapter.lora_scale == pytest.approx(1 / 64)
+
+    # FP32 activations keep the small product representable; the folded B in
+    # FP16 would have been zero before the multiply.
+    x = torch.ones((1, 1), dtype=torch.float32)
+    base = torch.zeros((1, 1), dtype=torch.float32)
+    result = adapter.apply(x, base)
+    torch.testing.assert_close(
+        result,
+        torch.full((1, 1), stored_b / 64, dtype=torch.float32),
+        rtol=1e-6,
+        atol=1e-12,
+    )
+
+
+@pytest.mark.parametrize("store", [torch.float16, torch.float32, torch.bfloat16])
+def test_scale_fold_is_decided_in_the_compute_dtype(tmp_path, store):
+    """An FP32/BF16 adapter on an FP16 model must not fold into inf (#5501).
+
+    ``_fold_scale_into_b`` used to check only the adapter's storage dtype, but
+    ``apply()`` casts both projections to the activation dtype on the first
+    forward. A trained adapter is stored in FP32 (or BF16) while the model may
+    run in FP16, so the fold passed in storage and overflowed on the cast.
+    """
+
+    module_key = _write_overflow_adapter(
+        tmp_path, source_b=32768.0, alpha=4, rank=1, store=store
+    )
+    adapter = Lora(rank=1, path=str(tmp_path))
+    adapter.post_init(module_key, CPU)
+
+    assert adapter._lora_scale_folded is False, "the cast to FP16 would overflow"
+    assert torch.isfinite(adapter.lora_B).all()
+    assert adapter.lora_B.item() == 32768.0
+
+    x = torch.tensor([[0.125]], dtype=torch.float16)
+    base = torch.zeros((1, 1), dtype=torch.float16)
+    result = adapter.apply(x, base)
+
+    assert result.item() == 16384.0, "PEFT multiplies the product, not the stored B"
+    assert torch.isfinite(result).all()
+
+
+@pytest.mark.parametrize("store", [torch.float32, torch.bfloat16])
+def test_wide_storage_fold_still_folds_when_it_survives_the_compute_dtype(tmp_path, store):
+    """A wide-storage adapter keeps the fast path when the cast stays finite (#5501)."""
+
+    module_key = _write_overflow_adapter(
+        tmp_path, source_b=2.0, alpha=4, rank=1, store=store
+    )
+    adapter = Lora(rank=1, path=str(tmp_path))
+    adapter.post_init(module_key, CPU)
+
+    assert adapter._lora_scale_folded is True
+    assert adapter.lora_B.item() == 8.0
+
+    x = torch.tensor([[0.125]], dtype=torch.float16)
+    base = torch.zeros((1, 1), dtype=torch.float16)
+    result = adapter.apply(x, base)
+    assert result.item() == 1.0
+
+
+def test_wide_storage_fold_is_rejected_when_the_compute_dtype_flushes_it(tmp_path):
+    """A fold that flushes to zero in FP16 keeps the raw B even from FP32 storage (#5501)."""
+
+    module_key = _write_overflow_adapter(
+        tmp_path, source_b=1.0e-6, alpha=1 / 64, rank=1, store=torch.float32
+    )
+    adapter = Lora(rank=1, path=str(tmp_path))
+    adapter.post_init(module_key, CPU)
+
+    assert adapter._lora_scale_folded is False
+    stored_b = adapter.lora_B.item()
+    assert stored_b == pytest.approx(1.0e-6, rel=1e-6)
+
+    # FP32 activations keep the small product representable.
+    x = torch.ones((1, 1), dtype=torch.float32)
+    base = torch.zeros((1, 1), dtype=torch.float32)
+    result = adapter.apply(x, base)
+    torch.testing.assert_close(
+        result,
+        torch.full((1, 1), stored_b * (1 / 64), dtype=torch.float32),
+        rtol=1e-6,
+        atol=1e-12,
+    )

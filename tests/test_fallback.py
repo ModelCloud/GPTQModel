@@ -44,9 +44,17 @@ def test_dict_fallback_keeps_the_dataclass_threshold_default():
     for config_cls in (GPTQConfig, AWQConfig):
         plain = config_cls(bits=4, group_size=128)
         assert plain.fallback.threshold == default
-        for override in ({"strategy": "rtn"}, {"smooth": "mad"}):
+        for override in ({"strategy": "rtn"},):
             config = config_cls(bits=4, group_size=128, fallback=override)
             assert config.fallback.threshold == default, (config_cls.__name__, override)
+
+    # Only GPTQ/QQQ apply a fallback smoother; AWQ's fallback never did, and
+    # its `fallback.smooth` is refused (#5302).
+    for override in ({"strategy": "rtn"}, {"smooth": "mad"}):
+        config = GPTQConfig(bits=4, group_size=128, fallback=override)
+        assert config.fallback.threshold == default, override
+    with pytest.raises(ValueError, match="fallback.smooth"):
+        AWQConfig(bits=4, group_size=128, fallback={"smooth": "mad"})
 
     # An explicit threshold still wins.
     explicit = GPTQConfig(bits=4, group_size=128, fallback={"threshold": "2.0%"})
@@ -721,7 +729,7 @@ def _assert_percentile_smoother_matches_reference(device: str) -> None:
     log_mu = math.log1p(8.0)
     log_vals = torch.log1p(block.abs() * 8.0) / log_mu
     log_threshold = torch.quantile(log_vals, 0.99, dim=1, keepdim=True)
-    log_linear_threshold = (torch.exp(log_threshold * log_mu) - 1.0) / 8.0
+    log_linear_threshold = torch.expm1(log_threshold * log_mu) / 8.0
     log_ref = torch.clamp(block, -log_linear_threshold, log_linear_threshold)
     torch.testing.assert_close(log_out, log_ref, atol=1e-5, rtol=1e-5)
 

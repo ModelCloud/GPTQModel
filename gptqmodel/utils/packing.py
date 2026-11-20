@@ -100,12 +100,19 @@ def _auto_pack_impl(module: BaseQuantLinear, linear: Optional[nn.Module] = None)
     """Resolve ``pack_impl="auto"`` to the fastest available packer.
 
     Accelerator packing is preferred whenever a CUDA/ROCm device is present and
-    the module implements it.  Embedding layers keep the CPU block packer because
-    ``pack_gpu`` does not emit their packed layout.
+    the module implements it.  Embeddings keep the original packer: both the GPU
+    and block packers lay the packed words out along the input axis, while an
+    embedding is packed along its vocabulary axis (#5381).
     """
+    if isinstance(linear, nn.Embedding):
+        return "original"
+    # Both accelerated packers emit 32-bit storage words only, so narrow words
+    # (int8/int16 continuous layouts) must stay on the original packer instead
+    # of raising from the packer after a speculative device copy (#5806).
+    if int(getattr(module, "pack_dtype_bits", 32)) != 32:
+        return "original"
     if (
-        not isinstance(linear, nn.Embedding)
-        and torch.cuda.is_available()
+        torch.cuda.is_available()
         and hasattr(module, "pack_gpu")
     ):
         return "gpu"

@@ -540,9 +540,10 @@ def test_rowmajor_fallback_warns_exactly_once_across_failures(monkeypatch):
 
 
 def test_source_build_available_reports_missing_tools(monkeypatch):
-    import gptqmodel_nf12
+    # Import the submodule the test exercises: `gptqmodel_nf12` loads `_jit`
+    # lazily, so the package attribute is absent on a fresh import (#5618).
+    from gptqmodel_nf12 import _jit
 
-    _jit = gptqmodel_nf12._jit
     monkeypatch.setattr(_jit, "_architectures", lambda: [89])
     monkeypatch.setattr(_jit.shutil, "which", lambda _name: None)
     assert not _jit.source_build_available()

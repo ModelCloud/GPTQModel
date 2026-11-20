@@ -13,6 +13,7 @@ import gptqmodel.looper.weight_only_looper as weight_only_looper_module
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.looper.weight_only_processor import WeightOnlyProcessor
+from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.quantization.config import QuantizeEmbed, QuantizeEmbedConfig, RTNConfig, VramStrategy
 from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
 
@@ -155,7 +156,7 @@ class _FakeQModel:
     def simple_layer_modules(self, **_kwargs):
         return [["linear"]]
 
-    def pre_quantize(self, module):
+    def pre_quantize(self, module, module_path=None):
         return module
 
     def post_quantize(self, module):
@@ -662,6 +663,18 @@ def test_weight_only_looper_respects_dense_and_moe_vram_strategy_devices(monkeyp
     fake_logger = _FakeLogger()
     processor = _FakeProcessor(qcfg)
     model = _FakeQModel(qcfg)
+    # Production wrappers expose the model definition's ModulePlan; without it
+    # expert families are indistinguishable from dense projections.
+    model.module_plan = lambda: ModulePlan.from_tree([
+        "model", "layers", "#",
+        {
+            "self_attn": ("q_proj:0",),
+            "mlp:moe": {
+                "experts": {"#": ("gate_proj:0", "up_proj:0")},
+                "shared_expert": ("down_proj:1",),
+            },
+        },
+    ])
     model.model.layers = nn.ModuleList([_ExpertLayer()])
     model.simple_layer_modules = lambda **_kwargs: [
         ["self_attn.q_proj"],

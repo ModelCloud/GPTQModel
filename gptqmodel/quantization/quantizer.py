@@ -5,6 +5,8 @@
 
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -67,6 +69,27 @@ def _replace_zero_scale(
     return safe_scale, safe_zero
 
 
+def narrowing_loses_codes(weight_dtype: torch.dtype, bits: int, sym: bool) -> bool:
+    """Whether narrowing a reconstruction to ``weight_dtype`` can move a code.
+
+    Packing does not receive the quantizer's integer codes: it recovers them
+    from ``Q = (q - zero) * scale`` with ``round(Q / scale) + zero``. Casting
+    ``Q`` to ``weight_dtype`` moves it by at most half an ULP, which is at
+    most ``max_code * 2**-mantissa_bits`` code steps for the largest code.
+    Once that exceeds half a step the recovered code can land on its
+    neighbour. BF16's 8-bit mantissa is too narrow for 8-bit asymmetric codes
+    (``max_code = 255``), while 8-bit symmetric (``128``) and every narrower
+    bit width still round-trip (#5721).
+    """
+
+    if not weight_dtype.is_floating_point or weight_dtype == torch.float32:
+        return False
+    # ``eps`` is ``2**-(mantissa_bits - 1)`` for every IEEE-like float.
+    mantissa_bits = 1 - int(round(math.log2(torch.finfo(weight_dtype).eps)))
+    max_code = (1 << bits) - 1 if not sym else (1 << (bits - 1))
+    return max_code > (1 << (mantissa_bits - 1))
+
+
 def _neutralize_dead_columns(
     hessian: torch.Tensor,
     weight: torch.Tensor,
@@ -75,19 +98,28 @@ def _neutralize_dead_columns(
     """Neutralize calibration-dead input channels in place.
 
     A channel with a zero Hessian diagonal carries no calibration signal. Its
-    diagonal entry is replaced with one so the Cholesky inverse stays
-    well-defined, and the matching weight (and optional auxiliary) columns are
-    zeroed. Returns the boolean dead-column mask so a caller can rebuild the
-    neutralized weight from its source without keeping a copy.
+    diagonal entry is replaced with the mean of the live diagonal entries so
+    the Cholesky inverse stays well-defined without changing the damping mean
+    the caller derives from ``mean(diag(H))`` (#5727). The matching weight
+    (and optional auxiliary) columns are zeroed. Returns the boolean
+    dead-column mask so a caller can rebuild the neutralized weight from its
+    source without keeping a copy.
 
-    Boolean-mask assignment (``H[dead, dead] = 1`` / ``W[:, dead] = 0``)
+    Boolean-mask assignment (``H[dead, dead] = <mean>`` / ``W[:, dead] = 0``)
     performs a ``nonzero`` scan and a device-to-host synchronization per
     module. The ``masked_fill_`` forms below are equivalent and stay on the
     device.
     """
 
-    dead = torch.diagonal(hessian) == 0
-    hessian.diagonal().masked_fill_(dead, 1.0)
+    diag = torch.diagonal(hessian)
+    dead = diag == 0
+    live = ~dead
+    live_count = live.sum()
+    live_mean = (diag * live).sum() / live_count.clamp_min(1)
+    # An all-dead module is routed to the RTN fallback before this point; keep
+    # a finite, positive placeholder for direct callers anyway.
+    placeholder = torch.where(live_count > 0, live_mean, torch.ones_like(live_mean))
+    diag.masked_fill_(dead, placeholder)
     weight.masked_fill_(dead.unsqueeze(0), 0.0)
     for tensor in column_tensors:
         tensor.masked_fill_(dead.unsqueeze(0), 0.0)
@@ -443,16 +475,26 @@ class Quantizer(nn.Module):
         ).unsqueeze(1)
         xmin1 = p * xmin.unsqueeze(0)
         xmax1 = p * xmax.unsqueeze(0)
-        scale1 = xmax1 / self.maxq if groupwise else (xmax1 - xmin1) / self.maxq
-        # Evaluate the same representable scales that will be packed. Flooring
-        # only the initial/final winner would select against a different grid,
-        # and asymmetric zero points must be computed from the bounded scale.
-        if scale_min is not None:
-            scale1 = _floor_scale_for_storage(scale1, scale_min)
-        if self.qcfg.sym:
-            zero1 = self.zero.unsqueeze(0).expand(steps, rows)
+        if self._maxq_value < 0:
+            # ``configure(trits=True)`` stores the two ternary levels in
+            # ``scale``/``zero`` and uses ``maxq == -1`` as a sentinel, not an
+            # affine divisor: the ``(xmax - xmin) / maxq`` grid would be
+            # negative and meaningless. The candidate endpoints are the shrunk
+            # extrema, and the unshrunk ``(xmax, xmin)`` stay the incumbent
+            # (#5601).
+            scale1 = xmax1
+            zero1 = xmin1
         else:
-            zero1 = torch.round(-xmin1 / scale1)
+            scale1 = xmax1 / self.maxq if groupwise else (xmax1 - xmin1) / self.maxq
+            # Evaluate the same representable scales that will be packed. Flooring
+            # only the initial/final winner would select against a different grid,
+            # and asymmetric zero points must be computed from the bounded scale.
+            if scale_min is not None:
+                scale1 = _floor_scale_for_storage(scale1, scale_min)
+            if self.qcfg.sym:
+                zero1 = self.zero.unsqueeze(0).expand(steps, rows)
+            else:
+                zero1 = torch.round(-xmin1 / scale1)
 
         # Step-major order -- (i=0,z0), (i=0,z1), (i=1,z0), ... -- preserves the
         # sequential candidate order, so the first-minimum ``argmin`` below

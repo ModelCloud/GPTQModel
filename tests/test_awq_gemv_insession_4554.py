@@ -33,6 +33,7 @@ from gptqmodel.nn_modules.qlinear.gemv_fast_awq import (
 )
 from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization.config import AWQConfig
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 HIDDEN_SIZE = 64
@@ -166,6 +167,10 @@ def test_awq_gemv_cpu_reader_matches_the_gemm_reader_numerics():
     torch.testing.assert_close(gemv_out, gemm_out, rtol=2e-2, atol=2e-2)
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(),
+    reason="the AWQ GEMV pack step needs the native CUDA AWQ extension",
+)
 def test_awq_gemv_quantize_save_and_reload_on_cpu(tmp_path):
     source = tmp_path / "source"
     _write_tiny_llama(source)
@@ -255,16 +260,74 @@ def _packed_gemv_fast(native_cls, in_features=256, out_features=128, group_size=
 
 
 @pytest.mark.parametrize("fmt, native_cls, torch_cls", GEMV_FAST_FAMILY)
-def test_awq_gemv_fast_cpu_insession_kernel_is_the_documented_fallback(fmt, native_cls, torch_cls):
+def test_awq_gemv_fast_portable_reader_is_the_documented_fallback(fmt, native_cls, torch_cls):
     qcfg = AWQConfig(bits=4, format=fmt, group_size=128, pack_dtype=torch.int16, offload_to_disk=False)
 
     selected = select_in_session_quant_linear(qcfg, torch.device("cpu"))
 
     assert selected is torch_cls
     assert DEVICE.CPU in selected.SUPPORTS_DEVICES
-    # Explicit-only: accelerator AUTO order must not change.
+    # Explicit-only: AUTO order must not change.
     assert selected.SUPPORTS_FORMATS == {fmt: 0}
     assert DEVICE.CPU not in native_cls.SUPPORTS_DEVICES
+
+
+@pytest.mark.parametrize("fmt, native_cls, torch_cls", GEMV_FAST_FAMILY)
+def test_awq_gemv_fast_portable_reader_serves_a_rocm_target(fmt, native_cls, torch_cls):
+    # #5109: the native class is CUDA-only and no Triton kernel reads this
+    # layout, so AUTO on ROCm used to raise "No valid quant linear" and the only
+    # named portable backend refused the device. The Torch reader declares ROCm
+    # and is reached through the per-family portable fallback.
+    qcfg = AWQConfig(bits=4, format=fmt, group_size=128, pack_dtype=torch.int16, offload_to_disk=False)
+
+    selected = select_in_session_quant_linear(qcfg, DEVICE.ROCM)
+
+    assert selected is torch_cls
+    assert DEVICE.ROCM in selected.SUPPORTS_DEVICES
+    assert selected.SUPPORTS_FORMATS == {fmt: 0}
+    assert DEVICE.ROCM not in native_cls.SUPPORTS_DEVICES
+
+
+@pytest.mark.parametrize("fmt, native_cls, torch_cls", GEMV_FAST_FAMILY)
+def test_awq_gemv_fast_portable_reader_keeps_packed_storage_across_forwards(fmt, native_cls, torch_cls):
+    # The reader is now reachable on an accelerator, where the packed buffers can
+    # still sit on CPU. A forward must move only the packed storage and must not
+    # retain a dense weight: no FP32 buffer may outlive the call.
+    module, linear, scales, zeros = _packed_gemv_fast(native_cls)
+    packed = {name: buf.clone() for name, buf in module.named_buffers()}
+    portable = torch_cls(
+        bits=4,
+        group_size=128,
+        sym=False,
+        desc_act=False,
+        in_features=linear.in_features,
+        out_features=linear.out_features,
+        bias=True,
+        pack_dtype=torch.int16,
+        register_buffers=True,
+    )
+    portable.load_state_dict(
+        {"qweight": packed["qweight"], "scales": packed["scales"], portable.zeros_name: packed[portable.zeros_name],
+         "bias": packed["bias"]},
+        strict=True,
+    )
+
+    inputs = torch.randn(2, 3, linear.in_features).half()
+    with torch.inference_mode():
+        out = portable(inputs)
+
+    torch.testing.assert_close(out, _gemv_fast_oracle(linear, scales, zeros, 128, inputs), rtol=1e-3, atol=1e-2)
+    assert out.dtype == inputs.dtype
+    # Repeated forwards keep the same packed storage: no dense cache, no
+    # re-packing, and no silent dtype narrowing of the stored buffers.
+    stored = dict(portable.named_buffers())
+    for name, buf in packed.items():
+        assert stored[name].dtype == buf.dtype, name
+        assert torch.equal(stored[name], buf), name
+    # A dense [out_features, in_features] weight would have this many elements;
+    # no buffer may reach it, regardless of dtype.
+    dense_elements = portable.in_features * portable.out_features
+    assert all(buf.numel() < dense_elements for buf in stored.values())
 
 
 @pytest.mark.parametrize("fmt, native_cls, torch_cls", GEMV_FAST_FAMILY)
@@ -300,6 +363,58 @@ def test_rehome_switches_native_gemv_fast_module_to_cpu_reader(fmt, native_cls, 
     )
     # No dense weight copy outlives the forward.
     assert all(buf.dtype != torch.float32 for buf in module.buffers())
+
+
+@pytest.mark.parametrize("fmt, native_cls, torch_cls", GEMV_FAST_FAMILY)
+def test_awq_gemv_fast_portable_reader_moves_packed_storage_per_call(fmt, native_cls, torch_cls):
+    # The reader is now selectable on an accelerator, where the quantize loop can
+    # leave the packed buffers on CPU. One forward must then use device-local
+    # packed words without rewriting the module's stored checkpoint buffers, and
+    # a repeat call must produce the same result.
+    if not torch.cuda.is_available():
+        pytest.skip("a runtime accelerator device is required for the cross-device path")
+    device = torch.device("cuda", 0)
+    # AUTO on a CUDA target keeps the native kernel (checked above); this test
+    # covers the portable reader's own accelerator forward.
+    module, linear, scales, zeros = _packed_gemv_fast(native_cls)
+    portable = torch_cls(
+        bits=4,
+        group_size=128,
+        sym=False,
+        desc_act=False,
+        in_features=linear.in_features,
+        out_features=linear.out_features,
+        bias=True,
+        pack_dtype=torch.int16,
+        register_buffers=True,
+    )
+    portable.load_state_dict(
+        {
+            "qweight": module.qweight,
+            "scales": module.scales,
+            portable.zeros_name: getattr(module, module.zeros_name),
+            "bias": module.bias,
+        },
+        strict=True,
+    )
+    packed = {name: buf.clone() for name, buf in portable.named_buffers()}
+
+    inputs = torch.randn(2, 3, linear.in_features, dtype=torch.float16, device=device)
+    with torch.inference_mode():
+        first = portable(inputs)
+        second = portable(inputs)
+
+    assert first.device == device
+    assert torch.equal(first, second)
+    torch.testing.assert_close(
+        first.cpu(), _gemv_fast_oracle(linear, scales, zeros, 128, inputs.cpu()), rtol=1e-3, atol=1e-2
+    )
+    # The checkpoint's packed buffers stay where the checkpoint put them, in
+    # their stored dtype: the move is per-call and never a module-state rewrite.
+    for name, buf in portable.named_buffers():
+        assert buf.device.type == "cpu", name
+        assert buf.dtype == packed[name].dtype, name
+        assert torch.equal(buf, packed[name]), name
 
 
 @pytest.mark.parametrize("fmt, native_cls, torch_cls", GEMV_FAST_FAMILY)

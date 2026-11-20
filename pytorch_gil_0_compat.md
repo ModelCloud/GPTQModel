@@ -500,17 +500,12 @@ fix.
 
 ## CI enforcement
 
-A `3.14t` job that does not set `PYTHON_GIL=0` can re-enable the GIL while
-importing `triton._C.libtriton` and then run fully serialized: every test that
-needs a free-threaded interpreter skips, and the build stays green. The default
-matrix in `.github/workflows/unit_tests.yml` keeps the GIL because some
-test-only libraries still need it; the dedicated `free-threaded` job passes
-`free_threaded: true` to `.github/workflows/unit_tests_reusable.yml`, which
-exports `PYTHON_GIL=0` for every later step and runs
-`.github/scripts/ci_assert_free_threaded.py` after the package is installed.
-That gate fails the job unless `sys._is_gil_enabled()` is still `False` after
-importing `torch`, `gptqmodel`, `triton`, and `gptqmodel.utils.p2p`, so a
-silently serialized lane is a red build instead of a skipped one.
+The CUDA release and unit-test jobs create an exact CPython `3.14.10t`
+environment and set `PYTHON_GIL=0` before build, installation, and testing.
+The [CI runtime](docs/ci-runtime.md) verifier checks the free-threaded build and
+the GIL state before imports and again after importing Torch, GPT-QModel, Triton,
+and the TorchAO NVFP4 helpers. The dedicated `free-threaded` job still exercises
+multi-device and thread-ownership paths.
 
 The lane runs bounded concurrency tests: `tests/test_threadx_cpu_locks.py`,
 `tests/test_threadx_shutdown.py`, `tests/test_looper_concurrency.py`, and

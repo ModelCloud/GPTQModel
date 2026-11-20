@@ -30,6 +30,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from gptqmodel.nn_modules.qlinear._numerics import linear_fp32_reduce
 from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear, MacaqTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD, MacaqConfig, QuantizeConfig
 from gptqmodel.quantization import macaq as macaq
@@ -722,9 +723,9 @@ def test_macaq_linear_torch_matches_reference():
         result.W_packed, result.W_scales, 128, dtype=torch.bfloat16
     )
     reference_input = macaq.macaq_quantize_activations(x, result.pre_scale, result.BH).to(torch.bfloat16)
-    expected = torch.nn.functional.linear(
-        reference_input, reference_weight, layer.bias.to(torch.bfloat16)
-    )
+    # The packed bias keeps its FP32 dtype (#5632), so the reference adds it
+    # after the FP32 reduction instead of narrowing it to BF16 first.
+    expected = linear_fp32_reduce(reference_input, reference_weight, layer.bias)
 
     assert output.dtype == torch.bfloat16
     assert torch.equal(output, expected)
@@ -802,7 +803,7 @@ def test_triton_dense_kernel_masks_k_tail(k):
     a_packed, a_scales = macaq_triton.quantize_mxfp4(activations.float())
 
     out = torch.empty(rows, cols, device=device, dtype=torch.float32)
-    macaq_triton._dense_w4a4_kernel[
+    macaq_triton._dense_mx_gemm_kernel[
         (triton.cdiv(rows, 64), triton.cdiv(cols, 128))
     ](
         a_packed, w_packed, a_scales, w_scales, out, w_scales,
@@ -896,9 +897,10 @@ def _reference_weight_mxfp4(weight, bh, offset=0):
     out_features, in_features = weight.shape
     rotated = _reference_rotate(weight.to(torch.float32), bh.float())
     grouped = rotated.reshape(out_features, in_features // 32, 32)
-    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-12)
+    amax = grouped.abs().amax(dim=-1, keepdim=True)
+    amax = torch.where(amax == 0, torch.full_like(amax, 1e-12), amax)
     exponent = (torch.floor(torch.log2(amax)) - 2.0 + offset).clamp(-127.0, 127.0)
-    scale = torch.exp2(exponent)
+    scale = torch.pow(2.0, exponent)
     normalized = (grouped / scale).abs()
     code = torch.zeros_like(grouped, dtype=torch.long)
     for threshold, level in _E2M1_THRESHOLDS:
@@ -950,9 +952,10 @@ def _reference_activation_mxfp4(values):
 
     rows, k = values.shape
     grouped = values.to(torch.float32).reshape(rows, k // 32, 32)
-    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-20)
+    amax = grouped.abs().amax(dim=-1, keepdim=True)
+    amax = torch.where(amax == 0, torch.full_like(amax, 1e-20), amax)
     exponent = (torch.floor(torch.log2(amax)) - 2.0).clamp(-127.0, 127.0)
-    scale = torch.exp2(exponent)
+    scale = torch.pow(2.0, exponent)
     normalized = (grouped / scale).abs()
     code = torch.zeros_like(grouped, dtype=torch.long)
     for threshold, level in _E2M1_THRESHOLDS:
@@ -1509,7 +1512,9 @@ def test_plain_mxfp4_layer_stores_only_mxfp4_tensors(activation_precision):
 
     if activation_precision == "w4a16":
         weight = macaq.dequantize_mxfp4(result.W_packed, result.W_scales, 128, dtype=torch.bfloat16)
-        expected = torch.nn.functional.linear(x, weight, bias.to(torch.bfloat16))
+        # The packed bias keeps its FP32 dtype (#5632), so the reference adds
+        # it after the FP32 reduction instead of narrowing it to BF16 first.
+        expected = linear_fp32_reduce(x, weight, bias)
         assert torch.equal(fast, expected)
 
 

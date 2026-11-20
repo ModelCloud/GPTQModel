@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 import torch
 
 from ...extension import op as extension_op
+from ...extension import register_fake
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
@@ -20,6 +21,12 @@ from .torch_aten_kernel import TorchAtenLinear
 
 
 log = setup_logger()
+
+
+def _fake_gemm_int4_qzero_group_scaled(input, weight, zeros, absmax, blocksize, bias=None):
+    """FakeTensor shape for the AVX512 int4 GEMM (see ``extension.register_fake``)."""
+
+    return input.new_empty((input.shape[0], weight.shape[0]))
 
 
 def pack_hf_int4(codes: torch.Tensor) -> torch.Tensor:
@@ -172,11 +179,18 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
 
     REQUIRES_FORMAT_V2 = True
 
-    # Measured on an x86-64 AVX512-BF16 host (torch 2.15): the extension
-    # builds and the fused BF16 forward runs, but it inherits
-    # TorchAtenLinear's RLock-guarded forward, which dynamo cannot enter:
-    # EAGER. CPU-only, so no CUDA-graph capture applies.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    # Measured on an x86-64 AVX512-BF16 host, torch 2.16.0.dev20261021+cpu:
+    # eager=True, graph_breaks=0, dynamo/aot_eager/inductor all reach it for the
+    # BF16 fused path itself: the AVX512 extension GEMM has a registered
+    # FakeTensor impl, and the RLock-guarded one-time transform inherited from
+    # TorchAtenLinear is skipped while tracing. CPU-only, so no CUDA-graph
+    # capture applies.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     QUANT_TYPE = "torch_cpu_avx512"
@@ -188,6 +202,13 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     # checkpoint ``qweight`` is rebuilt on save instead of kept resident. The
     # remaining snapshot entries are per-column metadata, not the packed weight.
     _FUSED_TRAIN_STATE_REBUILD = "avx512_gptq"
+
+    #: ``dequantize_weight`` already restores the checkpoint input order.
+    _runtime_dense_weight_is_checkpoint_order = True
+
+    def _runtime_dense_weight(self):
+        """Decode the live AVX512 layout without restoring the checkpoint layout."""
+        return self.dequantize_weight()
 
     gemm_int4_qzero_group_scaled_cpu_kernel = None
     pack_gptq_int4_kernel = None
@@ -209,6 +230,11 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         try:
             cls.gemm_int4_qzero_group_scaled_cpu_kernel = extension_op(
                 "int4_qzero_group_scaled_cpu", "gemm_int4_qzero_group_scaled_cpu_forward"
+            )
+            register_fake(
+                "int4_qzero_group_scaled_cpu",
+                "gemm_int4_qzero_group_scaled_cpu_forward",
+                _fake_gemm_int4_qzero_group_scaled,
             )
             cls.pack_gptq_int4_kernel = extension_op(
                 "int4_qzero_group_scaled_cpu", "pack_gptq_int4"

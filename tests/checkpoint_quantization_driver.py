@@ -40,7 +40,6 @@ def main():
             "gptq",
             "awq",
             "rtn",
-            "fp8",
             "gguf",
             "bitsandbytes",
             "qqq",
@@ -89,7 +88,6 @@ def main():
         AWQConfig,
         BitsAndBytesConfig,
         EXL3Config,
-        FP8Config,
         GGUFConfig,
         ParoConfig,
         QQQConfig,
@@ -99,7 +97,6 @@ def main():
     config_class = {
         "awq": AWQConfig,
         "rtn": RTNConfig,
-        "fp8": FP8Config,
         "gguf": GGUFConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "qqq": QQQConfig,
@@ -110,7 +107,6 @@ def main():
         "gptq": {"method": METHOD.GPTQ, "format": FORMAT.GPTQ, "bits": 4},
         "awq": {"method": METHOD.AWQ, "format": FORMAT.GEMM, "bits": 4},
         "rtn": {"bits": 4},
-        "fp8": {"bits": 8},
         "gguf": {"bits": "q4_0"},
         "bitsandbytes": {"bits": 4},
         "qqq": {"bits": 4},
@@ -146,7 +142,6 @@ def main():
     if args.format == "gemv_fast":
         method_settings.update(group_size=128, pack_dtype=torch.int16)
     backend = {
-        "fp8": BACKEND.FP8_TORCH,
         "gguf": BACKEND.GGUF_TORCH,
         "bitsandbytes": BACKEND.BITSANDBYTES,
         "qqq": BACKEND.QQQ,

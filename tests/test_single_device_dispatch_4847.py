@@ -124,6 +124,70 @@ def test_all_cpu_map_is_unchanged():
     assert model.hf_device_map == {"0": "cpu", "2": "cpu"}
 
 
+class _RotaryLike(torch.nn.Module):
+    """A shell module whose cache buffer is built on the CPU and never saved.
+
+    Remote-code rotary modules index ``cos_cached``/``sin_cached`` directly
+    instead of moving ``inv_freq`` to the input device, so the buffer has to
+    follow its layer (#5232).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer(
+            "inv_freq", torch.arange(4, dtype=torch.float32), persistent=False
+        )
+        self.linear = torch.nn.Linear(4, 4)
+
+
+def test_single_device_map_places_non_persistent_buffers():
+    # The checkpoint loader only fills tensors the checkpoint provides, so a
+    # non-persistent buffer stays where the shell built it. Skipping the hooks
+    # must not skip that placement as well.
+    model = torch.nn.Sequential(_RotaryLike())
+    model[0].linear.to("cuda:0")
+
+    simple_dispatch_model(model, {"0": "cuda:0"})
+
+    assert model[0].inv_freq.device.type == "cuda"
+    assert model[0].linear.weight.device.type == "cuda"
+
+
+def test_single_device_map_keeps_a_shared_buffer_shared():
+    shared = torch.arange(4, dtype=torch.float32)
+    first, second = _RotaryLike(), _RotaryLike()
+    first._buffers["inv_freq"] = shared
+    second._buffers["inv_freq"] = shared
+    first.linear.to("cuda:0")
+    second.linear.to("cuda:0")
+    model = torch.nn.Sequential(first, second)
+
+    simple_dispatch_model(model, {"0": "cuda:0", "1": "cuda:0"})
+
+    assert model[0].inv_freq.data_ptr() == model[1].inv_freq.data_ptr()
+
+
+def test_single_resident_shortcut_calls_buffer_placement(monkeypatch):
+    # CPU-only guard for the wiring: the shortcut must invoke the placement
+    # helper with the map's device instead of returning silently.
+    import gptqmodel.utils.model as model_utils
+
+    calls = []
+    monkeypatch.setattr(
+        model_utils, "_single_resident_device", lambda model, device_map: torch.device("cpu")
+    )
+    monkeypatch.setattr(
+        model_utils,
+        "_place_non_persistent_buffers",
+        lambda model, device: calls.append(device),
+    )
+
+    # A non-root entry so the ``single_root`` fast path is not the one taken.
+    model_utils.simple_dispatch_model(torch.nn.Linear(2, 2), {"0": "cuda:0"})
+
+    assert calls == [torch.device("cpu")]
+
+
 def test_single_resident_device_rejects_offload_and_spanning_maps():
     from gptqmodel.utils.model import _single_resident_device
 

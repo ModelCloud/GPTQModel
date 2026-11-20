@@ -539,7 +539,10 @@ def test_awq_layer_preserves_activation_dtype_and_rank(dtype):
         assert layer.linear_mode == "inference"
         assert layer._cpu_transformed is True
     else:
-        assert layer.linear_mode == "train"
+        # ``#5447`` removed the eval-mode training latch. FP16 has no fused
+        # layout here, so the call takes the dense fall-back without pinning a
+        # mode; only a training-mode forward latches ``"train"``.
+        assert layer.linear_mode is None
         assert layer._cpu_transformed is False
     torch.testing.assert_close(output, reference, atol=0.25, rtol=0.02)
 

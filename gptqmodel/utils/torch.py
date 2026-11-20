@@ -347,11 +347,13 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
     without ``fullgraph``: ``fullgraph=True`` is an explicit single-graph
     contract and must still fail closed.
 
-    The remaining fallback is deliberately narrow: only a ``RuntimeError``
-    raised inside PyTorch's compiler packages, or dynamo's guard-check
-    ``AssertionError`` (``Guard failed on the same frame it was created ...
-    GLOBAL_STATE changed``) which fires when another thread changes a
-    process-global setting, such as ``torch.set_default_dtype``, during a
+    The remaining fallback is deliberately narrow: a ``RuntimeError`` raised
+    inside PyTorch's compiler packages, a ``LookupError`` raised there (dynamo's
+    guard bookkeeping raises ``KeyError`` from ``get_guard_fail_reason`` when a
+    concurrent compile invalidates its state, issue #5127), or dynamo's
+    guard-check ``AssertionError`` (``Guard failed on the same frame it was
+    created ... GLOBAL_STATE changed``) which fires when another thread changes
+    a process-global setting, such as ``torch.set_default_dtype``, during a
     concurrent first compile (issue #4094). Everything else belongs to the
     traced user code; retrying eagerly would run that code twice and hide the
     original error. The innermost frame is what matters: user code raising the
@@ -381,9 +383,11 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
         for token in ("/torch/_dynamo/", "/torch/_inductor/", "/torch/_functorch/")
     ):
         return False
-    if isinstance(exc, RuntimeError):
+    if isinstance(exc, (RuntimeError, LookupError)):
         # Inductor compile workers raise RuntimeError outside the traced frame
-        # (for example ``Attempting to use a closed pool``).
+        # (for example ``Attempting to use a closed pool``), and dynamo's guard
+        # bookkeeping raises KeyError from ``get_guard_fail_reason`` when a
+        # concurrent compile changed the process-global state (#5127).
         return True
     return isinstance(exc, AssertionError) and "Guard failed on the same frame it was created" in str(exc)
 
@@ -425,22 +429,524 @@ def _warn_compile_fallback(label: str, exc: BaseException) -> None:
     )
 
 
+def _dynamo_config():
+    """Return ``torch._dynamo.config`` without importing dynamo, or ``None``.
+
+    Importing dynamo only to read one flag would force its side effects on a
+    process that never compiled anything. ``torch_compile`` imports it
+    (``configure_dynamo_cache(ensure_import=True)``) before a wrapper exists, so
+    it is already present whenever this runs in practice.
+    """
+    dynamo = sys.modules.get("torch._dynamo")
+    return getattr(dynamo, "config", None)
+
+
+_IS_DYNAMO = getattr(getattr(torch, "compiler", None), "is_dynamo_compiling", None)
+_IS_EXPORT = getattr(getattr(torch, "compiler", None), "is_exporting", None)
+
+
+def dynamo_is_compiling() -> bool:
+    """Return True when dynamo is already tracing this thread.
+
+    ``torch.compiler.is_compiling()`` is not per-thread: it reads a module-level
+    flag that the compile session sets for the whole process, so every eager
+    thread sees ``True`` while *any* thread compiles (#5427). The constant
+    ``is_dynamo_compiling()`` is ``False`` in eager code and folded to ``True``
+    inside the traced frame, so another thread's session cannot leak in. Export
+    is still process-scoped but single-threaded, so its flag is folded in.
+
+    ``torch.compile`` is lazy, so the wrapper ``torch_compile`` installs can be
+    entered from inside another ``torch.compile`` trace: transformers compiles
+    ``generate``'s forward, and ``VPTQLinear.optimize()`` installs one of these
+    wrappers on ``dequantize`` at post-init. ``suppress_errors`` is a ContextVar,
+    so writing it there is a ``ContextVar mutation not supported`` graph break in
+    the outer trace, which turns a cudagraph static-cache decode into
+    overwritten-output corruption (#5224). Nested calls therefore stay
+    read-only; the eager body is inlined into the outer graph instead.
+    """
+    if _IS_DYNAMO is not None:
+        return bool(_IS_DYNAMO()) or (_IS_EXPORT is not None and bool(_IS_EXPORT()))
+    compiler = getattr(torch, "compiler", None)
+    is_compiling = getattr(compiler, "is_compiling", None)
+    if is_compiling is None:
+        return False
+    try:
+        return bool(is_compiling())
+    except Exception:
+        return False
+
+
+def _call_with_dynamo_suppression(compiled: Callable, fullgraph: bool, args: tuple, kwargs: dict):
+    """Invoke ``compiled`` with dynamo allowed to fall back for the failing frame.
+
+    ``fullgraph=True`` is an explicit single-graph contract and stays
+    fail-closed, so suppression is not enabled for it. The previous flag value
+    is restored in a ``finally`` block: this is a per-call behaviour switch, not
+    a process setting, and a concurrent compile in another thread must not see
+    it (a GLOBAL_STATE guard failure from that race is issue #4094).
+
+    A nested compile is already inside an outer trace, where the ContextVar
+    write is untraceable; the caller normally short-circuits to the eager body
+    before reaching here, and this guard keeps the helper safe on its own.
+    """
+    if fullgraph or dynamo_is_compiling():
+        return compiled(*args, **kwargs)
+    config = _dynamo_config()
+    if config is None:
+        return compiled(*args, **kwargs)
+    previous = getattr(config, "suppress_errors", False)
+    config.suppress_errors = True
+    try:
+        return compiled(*args, **kwargs)
+    finally:
+        config.suppress_errors = previous
+
+
+class _ModelGlobalStateLock:
+    """Process-wide reader/writer lock for torch's global default dtype.
+
+    transformers' ``from_pretrained``/``from_config`` saves, sets and restores
+    ``torch.set_default_dtype``; dynamo's ``preserve_global_state`` does the
+    same around every trace, and its ``GLOBAL_STATE`` guard re-reads the dtype
+    on every compiled call. A compiled call that re-traces inside a load's bf16
+    window would restore bf16 after the load restored fp32 (or trip
+    ``assert_loaded_model_state``, #5127/#5209), so it may not overlap that
+    window.
+
+    Compiled calls only read the process state: they take :meth:`reader` and
+    run concurrently with each other. Model construction changes it: it takes
+    the writer (also via ``with``), which excludes every in-flight compiled
+    call but holds for the construction window only, not for the rest of a
+    load. The lock is re-entrant on both sides for the owning thread: a load
+    may execute compiled code while it owns the writer, and a compiled call may
+    nest into another compiled call.
+    """
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._readers = 0
+        self._writer = None
+        self._writer_depth = 0
+        self._waiting_writers = 0
+        self._local = threading.local()
+
+    def __enter__(self):
+        self.acquire_write()
+        return self
+
+    def __exit__(self, *_exc):
+        self.release_write()
+        return False
+
+    def reader(self):
+        """Return a context manager holding shared access for one compiled call."""
+
+        return _ModelGlobalStateReader(self)
+
+    def holds_reader(self) -> bool:
+        """Whether the calling thread currently holds the shared side."""
+
+        return bool(getattr(self._local, "read_depth", 0))
+
+    def holds_writer(self) -> bool:
+        """Whether the calling thread currently owns the exclusive side."""
+
+        return self._writer == threading.get_ident()
+
+    def _acquire_reader(self) -> bool:
+        """Take the shared side; return False when this thread owns the writer."""
+
+        ident = threading.get_ident()
+        if self._writer == ident:
+            # A load thread running compiled code is already exclusive; taking
+            # a reader here would deadlock against its own writer.
+            return False
+
+        depth = getattr(self._local, "read_depth", 0)
+        with self._condition:
+            if depth == 0:
+                # Writer preference: once a load is waiting, new calls queue
+                # behind it instead of starving it with a stream of readers.
+                while self._writer is not None or self._waiting_writers:
+                    self._condition.wait()
+            self._readers += 1
+        self._local.read_depth = depth + 1
+        return True
+
+    def _release_reader(self) -> None:
+        self._local.read_depth -= 1
+        with self._condition:
+            self._readers -= 1
+            if self._readers == 0:
+                self._condition.notify_all()
+
+    def acquire_write(self):
+        ident = threading.get_ident()
+        with self._condition:
+            if self._writer == ident:
+                self._writer_depth += 1
+                return
+            if getattr(self._local, "read_depth", 0):
+                # Upgrading a reader to a writer can deadlock against another
+                # reader; the compiled path never needs it, so fail loudly
+                # instead of hanging a load.
+                raise RuntimeError(
+                    "model global-state lock cannot upgrade a reader to a writer"
+                )
+            self._waiting_writers += 1
+            try:
+                while self._writer is not None or self._readers:
+                    self._condition.wait()
+            finally:
+                self._waiting_writers -= 1
+            self._writer = ident
+            self._writer_depth = 1
+
+    def release_write(self):
+        with self._condition:
+            self._writer_depth -= 1
+            if self._writer_depth == 0:
+                self._writer = None
+                self._condition.notify_all()
+
+
+class _ModelGlobalStateReader:
+    """One compiled call's shared hold on :class:`_ModelGlobalStateLock`.
+
+    A plain object instead of a generator-based context manager: the compiled
+    proxies enter this on every forward, so the per-call cost matters.
+    """
+
+    __slots__ = ("_lock", "_held")
+
+    def __init__(self, lock: _ModelGlobalStateLock):
+        self._lock = lock
+        self._held = False
+
+    def __enter__(self):
+        self._held = self._lock._acquire_reader()
+        return self
+
+    def __exit__(self, *_exc):
+        if self._held:
+            self._held = False
+            self._lock._release_reader()
+        return False
+
+
+_MODEL_GLOBAL_STATE_ACCESSOR = None
+
+
+def model_global_state_lock():
+    """Return the process-wide reader/writer lock for torch's global dtype.
+
+    Loads and the save-side shell rebuild take the writer around the
+    transformers construction call that saves, sets and restores
+    ``torch.set_default_dtype``. Compiled calls take :meth:`reader`, so they
+    overlap each other and the rest of a load, but never the dtype window.
+    Look the lock up through the loader accessor so tests and callers share
+    one object.
+    """
+    global _MODEL_GLOBAL_STATE_ACCESSOR
+
+    accessor = _MODEL_GLOBAL_STATE_ACCESSOR
+    if accessor is None:
+        # Resolve lazily: the loader imports this module at import time. The
+        # accessor is cached because a compiled call resolves this on every
+        # forward; the accessor itself still returns the loader's current lock
+        # object, so tests and callers that replace it keep working.
+        from ..models.loader import model_global_state_lock as accessor
+
+        _MODEL_GLOBAL_STATE_ACCESSOR = accessor
+
+    return accessor()
+
+
+@contextmanager
+def model_global_state_write_guard():
+    """Hold the global-state writer for one process-global torch switch.
+
+    ``torch.backends.*.fp32_precision``, the CPU BF16x3 matmul precision and
+    ``torch.set_num_threads`` are process-global, and dynamo's ``GLOBAL_STATE``
+    guard snapshots them when a trace starts and writes them back when it ends.
+    A switch that only takes its own lock can therefore be overwritten
+    mid-window by a trace in another thread (#5390). Compiled calls hold the
+    shared side for the whole call, including their traces, so the writer
+    excludes every in-flight trace.
+
+    A caller that is already inside a compiled call holds the reader and
+    cannot upgrade without deadlocking; the trace it is running already spans
+    the switch, so that caller skips the writer instead of raising. A switch
+    that runs while the package itself is still importing (a pool worker's
+    intra-op install) skips the writer too: the lock lives in the loader,
+    which cannot be imported from that thread without deadlocking.
+    """
+
+    lock = _global_state_lock_for_write()
+    if lock is None or lock.holds_reader():
+        yield
+        return
+    with lock:
+        yield
+
+
+def _global_state_lock_for_write():
+    """Return the lock to hold, or None when it cannot be resolved yet.
+
+    ``gptqmodel.models.loader`` imports this module, so a pool worker that
+    starts while the package is still importing must not resolve the accessor:
+    that import blocks on the importing thread, which may itself be waiting
+    for the worker. No compiled call can exist before the package is imported,
+    so a switch in that window runs without the writer.
+    """
+
+    accessor = _MODEL_GLOBAL_STATE_ACCESSOR
+    if accessor is not None:
+        return accessor()
+    module = sys.modules.get(f"{__name__.split('.')[0]}.models.loader")
+    accessor = getattr(module, "model_global_state_lock", None)
+    return accessor() if accessor is not None else None
+
+
+_LOCAL_TORCH_DTYPE_GUARDED = False
+_LOCAL_TORCH_DTYPE_GUARD_LOCK = threading.Lock()
+
+_INIT_CONTEXT_GUARDED = False
+_INIT_CONTEXT_GUARD_LOCK = threading.Lock()
+
+
+def install_model_global_state_dtype_guard() -> None:
+    """Hold the global-state writer for every transformers construction window.
+
+    transformers builds a model inside a group of process-global contexts
+    (``PreTrainedModel.get_init_context``): the ``local_torch_dtype`` window, a
+    class-wide ``PreTrainedModel.tie_weights`` no-op (``init.no_tie_weights``)
+    and the registered class swaps (``apply_patches``). Everything else in a
+    load -- weight I/O, dtype casts, device placement, packing and kernel
+    post-init -- leaves the process state alone and must not exclude compiled
+    forwards (#5304): a warm compiled step was blocked for the whole duration
+    of a concurrent dense ``GPTQModel.load``.
+
+    Only the dtype window was exclusive, so a foreign ``from_pretrained`` in
+    another thread could have tying disabled while a GPT-QModel shell ran
+    ``post_init``; the shell then stayed untied and the checkpoint load failed
+    on the missing ``lm_head.weight`` (#5421). The guards below close that:
+
+    * ``local_torch_dtype`` itself holds the writer, so the dtype window stays
+      exclusive even for a construction that does not use
+      ``get_init_context``.
+    * ``PreTrainedModel.get_init_context`` prepends the writer to the init
+      contexts. ``ContextManagers`` enters them in order and exits through an
+      ``ExitStack``, so the writer is acquired before every class-wide patch
+      and released after all of them: two constructions -- GPT-QModel's or a
+      caller's -- can never have one thread's patches active inside the other.
+      ``PreTrainedModel._from_config`` takes the writer for the
+      ``from_config`` construction, which opens ``apply_patches`` outside
+      ``get_init_context`` and may have no dtype window at all.
+    * ``init.no_tie_weights`` and ``apply_patches`` take the writer themselves,
+      so a direct use of either patch is exclusive too, and a tie that
+      GPT-QModel applies after a load cannot land inside another thread's
+      window.
+
+    Both patches are installed once per process. The writer is re-entrant, so
+    nested constructions and a load that runs compiled code while it owns the
+    writer keep working.
+    """
+
+    _install_local_torch_dtype_guard()
+    _install_init_context_guard()
+    _install_class_wide_patch_guards()
+
+
+def _install_local_torch_dtype_guard() -> None:
+    """Make transformers' ``local_torch_dtype`` window take the writer."""
+
+    global _LOCAL_TORCH_DTYPE_GUARDED
+
+    if _LOCAL_TORCH_DTYPE_GUARDED:
+        return
+    with _LOCAL_TORCH_DTYPE_GUARD_LOCK:
+        if _LOCAL_TORCH_DTYPE_GUARDED:
+            return
+        from transformers import modeling_utils
+
+        original = getattr(modeling_utils, "local_torch_dtype", None)
+        if original is None:
+            # transformers without the helper leaves nothing to guard; the
+            # load lock still serializes construction.
+            return
+        if getattr(original, "_gptqmodel_global_state_guarded", False):
+            _LOCAL_TORCH_DTYPE_GUARDED = True
+            return
+
+        def guarded_local_torch_dtype(dtype, model_class_name=None):
+            with model_global_state_lock():
+                with original(dtype, model_class_name=model_class_name):
+                    yield
+
+        guarded = contextmanager(guarded_local_torch_dtype)
+        guarded._gptqmodel_global_state_guarded = True
+        guarded._gptqmodel_original = original
+        modeling_utils.local_torch_dtype = guarded
+        _LOCAL_TORCH_DTYPE_GUARDED = True
+
+
+def _install_init_context_guard() -> None:
+    """Make every transformers model construction take the writer.
+
+    ``get_init_context`` returns the list of process-global contexts a
+    ``from_pretrained`` construction runs inside. Prepending the writer to that
+    list makes the whole group exclusive, which is what the class-wide
+    ``no_tie_weights`` / ``apply_patches`` monkeypatches need: a model built in
+    one thread must not see the other thread's temporary patches (#5421).
+
+    ``_from_config`` (the ``from_config`` construction path) opens
+    ``apply_patches`` without ``get_init_context`` and only opens a dtype
+    window when a dtype is given, so it takes the writer for its whole
+    construction. Both wrappers are pass-through and preserve the original
+    signatures.
+    """
+
+    global _INIT_CONTEXT_GUARDED
+
+    if _INIT_CONTEXT_GUARDED:
+        return
+    with _INIT_CONTEXT_GUARD_LOCK:
+        if _INIT_CONTEXT_GUARDED:
+            return
+        from transformers import modeling_utils
+
+        model_cls = modeling_utils.PreTrainedModel
+
+        original = getattr(model_cls.__dict__.get("get_init_context"), "__func__", None)
+        if original is not None and not getattr(original, "_gptqmodel_global_state_guarded", False):
+
+            @functools.wraps(original)
+            def guarded_get_init_context(cls, *args, **kwargs):
+                # First in the list, therefore entered before every context and
+                # left after all of them (``ContextManagers`` uses an
+                # ``ExitStack``).
+                return [model_global_state_lock(), *original(cls, *args, **kwargs)]
+
+            guarded_get_init_context._gptqmodel_global_state_guarded = True
+            guarded_get_init_context._gptqmodel_original = original
+            model_cls.get_init_context = classmethod(guarded_get_init_context)
+
+        original_from_config = getattr(model_cls.__dict__.get("_from_config"), "__func__", None)
+        if original_from_config is not None and not getattr(
+            original_from_config, "_gptqmodel_global_state_guarded", False
+        ):
+
+            @functools.wraps(original_from_config)
+            def guarded_from_config(cls, *args, **kwargs):
+                with model_global_state_lock():
+                    return original_from_config(cls, *args, **kwargs)
+
+            guarded_from_config._gptqmodel_global_state_guarded = True
+            guarded_from_config._gptqmodel_original = original_from_config
+            model_cls._from_config = classmethod(guarded_from_config)
+
+        _INIT_CONTEXT_GUARDED = True
+
+
+def model_global_state_dtype_guard_installed() -> bool:
+    """Whether transformers' default-dtype window takes the writer."""
+
+    return _LOCAL_TORCH_DTYPE_GUARDED
+
+
+def model_global_state_init_context_guard_installed() -> bool:
+    """Whether every transformers model construction takes the writer."""
+
+    return _INIT_CONTEXT_GUARDED
+
+
+def _install_class_wide_patch_guards() -> None:
+    """Hold the writer while a class-wide construction patch is installed.
+
+    ``init.no_tie_weights`` replaces ``PreTrainedModel.tie_weights`` for every
+    class and ``apply_patches`` swaps registered classes in every transformers
+    module. Both are process-global, so a tie or a construction in another
+    thread that runs inside the window sees the patch (#5421). Taking the
+    writer here makes any use of either patch -- through ``get_init_context``
+    or directly -- exclusive with a GPT-QModel construction or tie.
+    """
+
+    from transformers import initialization, modeling_utils
+
+    for module, name in (
+        (initialization, "no_tie_weights"),
+        (modeling_utils, "apply_patches"),
+    ):
+        original = getattr(module, name, None)
+        if original is None or getattr(original, "_gptqmodel_global_state_guarded", False):
+            continue
+
+        def guarded(original=original):
+            with model_global_state_lock():
+                with original():
+                    yield
+
+        wrapper = contextmanager(guarded)
+        wrapper._gptqmodel_global_state_guarded = True
+        wrapper._gptqmodel_original = original
+        setattr(module, name, wrapper)
+
+
 def _install_callable_compile_fallback(original: Callable, compiled: Callable, fullgraph: bool) -> Callable:
-    """Return a callable that retries ``original`` eagerly after a compile failure."""
+    """Return a callable that degrades to eager after a compile failure.
+
+    The failure is never retried by re-running ``original`` from the start. With
+    ``fullgraph=False`` dynamo executes the forward as compiled fragments plus
+    resume frames, so a compiler failure can arrive after earlier frames already
+    mutated state (the KV cache in ``generate()``, Mamba/SSM state, offload
+    hooks). Re-running there applies those side effects twice -- the first
+    ``generate()`` after ``optimize()`` appended every KV entry a second time and
+    died on the mask length (#5119).
+
+    ``torch._dynamo.config.suppress_errors`` makes dynamo skip only the failing
+    frame and run that frame eagerly, which executes nothing twice. The flag is
+    scoped to this call and restored afterwards; the skip dynamo installs is
+    sticky, so later calls stay eager without it. For ``fullgraph=True`` nothing
+    has executed yet when the compiler fails, so the eager retry is exact.
+    """
     label = _compile_label(original)
     state = {"fallback": False}
 
     def call(*args, **kwargs):
         if state["fallback"]:
             return original(*args, **kwargs)
-        try:
-            return compiled(*args, **kwargs)
-        except Exception as exc:
-            if not _is_compiler_failure(exc, fullgraph=fullgraph):
-                raise
-            state["fallback"] = True
-            _warn_compile_fallback(label, exc)
+        if dynamo_is_compiling():
+            # An outer torch.compile is already tracing this frame. Its trace
+            # owns error handling; mutate no dynamo config and inline the eager
+            # body instead of opening a redundant nested compile (#5224).
             return original(*args, **kwargs)
+
+        def run_compiled():
+            try:
+                return _call_with_dynamo_suppression(
+                    compiled, fullgraph, args, kwargs
+                )
+            except Exception as exc:
+                if not _is_compiler_failure(exc, fullgraph=fullgraph):
+                    raise
+                state["fallback"] = True
+                _warn_compile_fallback(label, exc)
+                return original(*args, **kwargs)
+
+        # Dynamo saves/restores the process-global default dtype around every
+        # trace and its GLOBAL_STATE guard re-reads it on every call. Any call
+        # can re-trace when a guard changes -- not just the first -- so a call
+        # may not overlap a load's dtype window; otherwise the window is
+        # captured by a re-trace and restored after the load restored fp32
+        # (#5127, #5209). The reader side is shared: compiled calls run
+        # concurrently with each other and with the rest of a load, and only
+        # wait while construction owns the writer. Nested calls from this
+        # thread are re-entrant.
+        with model_global_state_lock().reader():
+            if state["fallback"]:
+                return original(*args, **kwargs)
+            return run_compiled()
 
     functools.update_wrapper(call, original)
     # Keep the dynamo wrapper chain truthful: this proxy really does forward to
@@ -480,17 +986,72 @@ def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgrap
     def forward(*args, **kwargs):
         if state["fallback"]:
             return module(*args, **kwargs)
-        try:
-            return compiled_forward(*args, **kwargs)
-        except Exception as exc:
-            if not _is_compiler_failure(exc, fullgraph=fullgraph):
-                raise
-            state["fallback"] = True
-            _warn_compile_fallback(label, exc)
+        if dynamo_is_compiling():
+            # See `_install_callable_compile_fallback.call`: a nested module
+            # forward is inlined into the outer graph without a config write.
             return module(*args, **kwargs)
+
+        def run_compiled():
+            try:
+                return _call_with_dynamo_suppression(
+                    compiled_forward, fullgraph, args, kwargs
+                )
+            except Exception as exc:
+                if not _is_compiler_failure(exc, fullgraph=fullgraph):
+                    raise
+                state["fallback"] = True
+                _warn_compile_fallback(label, exc)
+                return module(*args, **kwargs)
+
+        # Every forward can re-trace and mutate the process-global default
+        # dtype (see the callable proxy above), so it may not overlap a load's
+        # dtype window. The reader side is shared, so forwards from different
+        # threads run concurrently and only wait for construction.
+        with model_global_state_lock().reader():
+            if state["fallback"]:
+                return module(*args, **kwargs)
+            return run_compiled()
 
     compiled.forward = forward
     return compiled
+
+
+def dynamo_traced_frames() -> int:
+    """Number of frames ``torch.compile`` has traced in this process.
+
+    Dynamo traces a frame lazily on its first call and traces another one for
+    every new shape or code path, so a change in this count means the compiled
+    call that just returned produced fresh trace state (#5020).
+    """
+
+    dynamo = sys.modules.get("torch._dynamo")
+    if dynamo is None:
+        return 0
+    counters = getattr(getattr(dynamo, "utils", None), "counters", None)
+    if counters is None:
+        return 0
+    try:
+        return int(counters["frames"]["total"])
+    except (KeyError, TypeError, ValueError):
+        return 0
+
+
+def release_compile_trace_garbage() -> int:
+    """Break the reference cycles that a compiled call leaves behind.
+
+    Every frame dynamo traces builds ``VariableTracker`` objects. A graph break
+    leaves an ``UnspecializedNNModuleVariable`` -> ``SideEffectsProxyDict`` ->
+    ``DunderDictVariable`` cycle that keeps the traced module reachable. The
+    cycle is unreachable garbage, but reference counting cannot reclaim it, so a
+    compiled model - with all of its weights and VRAM - survives the last user
+    reference until a full cyclic ``gc.collect()`` (#4937, #5020).
+
+    Only those cycles are collected. Dynamo's compiled-frame cache is left
+    intact, so the next call still takes the compiled path instead of
+    recompiling. Returns the number of unreachable objects reclaimed.
+    """
+
+    return GC.collect()
 
 
 def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="inductor", mode: str = None, fullgraph=False):
@@ -606,6 +1167,189 @@ def accelerator_context_claimed(device_type: str, index: Optional[int] = None) -
         return bool(is_initialized())
     except Exception:  # pragma: no cover - runtime edge cases
         return True
+
+
+_ACCELERATOR_DEVICE_TYPES = frozenset({"cuda", "xpu", "npu", "mps"})
+_DEFUSER_CONVERSION_LOCK = threading.RLock()
+
+
+def model_accelerator_devices(model) -> List[str]:
+    """Concrete accelerator ordinals that already hold model parameters or buffers.
+
+    Placement is read from the tensors rather than inferred from a selector: a
+    fused-expert model is converted while it still lives on CPU/meta, and a
+    model converted after placement keeps its real ordinals.
+    """
+
+    devices: List[str] = []
+    seen = set()
+    for source in (getattr(model, "parameters", None), getattr(model, "buffers", None)):
+        if not callable(source):
+            continue
+        for tensor in source():
+            device = getattr(tensor, "device", None)
+            if device is None or device.type not in _ACCELERATOR_DEVICE_TYPES:
+                continue
+            name = str(device)
+            if name in seen:
+                continue
+            seen.add(name)
+            devices.append(name)
+    return devices
+
+
+def _first_accelerator_tensor_device(value) -> Optional[torch.device]:
+    """The first accelerator tensor device in ``value`` (one nesting level)."""
+
+    if isinstance(value, torch.Tensor):
+        device = value.device
+        return device if device.type in _ACCELERATOR_DEVICE_TYPES else None
+    if isinstance(value, dict):
+        values = value.values()
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        return None
+    for item in values:
+        device = _first_accelerator_tensor_device(item)
+        if device is not None:
+            return device
+    return None
+
+
+def _module_accelerator_device(module) -> Optional[torch.device]:
+    """The first accelerator device held by ``module``'s parameters or buffers."""
+
+    for source in (getattr(module, "parameters", None), getattr(module, "buffers", None)):
+        if not callable(source):
+            continue
+        for tensor in source():
+            device = getattr(tensor, "device", None)
+            if device is not None and device.type in _ACCELERATOR_DEVICE_TYPES:
+                return device
+    return None
+
+
+def model_execution_device(model, *inputs) -> Optional[torch.device]:
+    """The accelerator device a model call executes on, or ``None`` for CPU.
+
+    A multi-device map is not pinned to one GPU: the first accelerator input
+    wins, then the input embedding, then the first accelerator parameter or
+    buffer. The inputs are the call's positional values (nested tuples, lists
+    and dicts are inspected one level deep), so a device map's first stage is
+    used for that stage's call.
+    """
+
+    for value in inputs:
+        device = _first_accelerator_tensor_device(value)
+        if device is not None:
+            return device
+
+    embedding = None
+    try:
+        get_input_embeddings = getattr(model, "get_input_embeddings", None)
+        if callable(get_input_embeddings):
+            embedding = get_input_embeddings()
+    except Exception:  # pragma: no cover - exotic module trees
+        embedding = None
+    for candidate in (embedding, model):
+        if candidate is None:
+            continue
+        device = _module_accelerator_device(candidate)
+        if device is not None:
+            return device
+    return None
+
+
+@contextmanager
+def model_execution_device_scope(model, *inputs):
+    """Enter the device a compiled model call executes on, then restore the caller's.
+
+    Inductor initializes its lazy graph patterns from the traced frame's input
+    device (``torch/_inductor/fx_passes/joint_graph.py::joint_graph_passes`` ->
+    ``lazy_init`` -> ``fuse_attention._sfdp_init``). A quantized-kernel graph
+    break can leave that frame without a device-bearing input, and
+    ``_get_sfdp_patterns`` then falls back to ``"cuda"`` -- the *current*
+    device. A compiled model loaded on ``cuda:1`` therefore claimed the primary
+    context of ``cuda:0`` when a later shape recompiled (#5101).
+
+    Entering the model's execution device for the compiled call makes those
+    device-less defaults resolve to the GPU that holds the model. Only the
+    current device changes; tensor placement is untouched. The previous current
+    device is restored on exit, including when the call raises. A CPU model, or
+    a model with no accelerator tensor, runs the call unchanged.
+    """
+
+    device = model_execution_device(model, *inputs)
+    if device is None or device.type not in _ACCELERATOR_DEVICE_TYPES:
+        yield
+        return
+
+    if device.type == "cuda":
+        # Also the ROCm spelling: HIP exposes the CUDA device namespace.
+        with torch.cuda.device(device):
+            yield
+        return
+
+    runtime = getattr(torch, device.type, None)
+    device_context = getattr(runtime, "device", None)
+    if callable(device_context):
+        with device_context(device):
+            yield
+        return
+    yield
+
+
+@contextmanager
+def defuser_conversion_scope(model):
+    """Bound Defuser's ``clear_memory()`` to the devices the model occupies.
+
+    Defuser's fused-expert conversion calls ``clear_memory()`` without a device
+    list, and that helper synchronizes the *current* CUDA device. Converting a
+    CPU/meta model therefore initializes the primary context of cuda:0 --
+    hundreds of MiB on a GPU the caller excluded with ``device=("cuda:1",)`` or
+    with a CPU-only load (#5105). The pinned Defuser API accepts no device
+    argument, so scope the module-level reference it calls for the duration of
+    the conversion:
+
+    * a model that already holds accelerator tensors synchronizes exactly those
+      ordinals, preserving the barrier its own data needs;
+    * a CPU/meta model passes a CPU-only list, so no accelerator is claimed.
+      ``torch.cuda.empty_cache()`` still runs and does not create a context.
+
+    Defuser also synchronizes XPU unconditionally; that remains outside this
+    scope because the pinned API exposes no per-device hook for it.
+    """
+
+    if not torch.cuda.is_available():
+        # Defuser's CUDA branch is skipped entirely without a CUDA runtime.
+        yield
+        return
+
+    device_list = model_accelerator_devices(model) or ["cpu"]
+
+    try:
+        from defuser.modeling import moe_experts_interface as defuser_moe
+    except Exception:  # pragma: no cover - optional dependency layout
+        yield
+        return
+
+    original = getattr(defuser_moe, "clear_memory", None)
+    if not callable(original):
+        yield
+        return
+
+    def _scoped_clear_memory(*args, **kwargs):
+        if len(args) < 2 and "device_list" not in kwargs:
+            kwargs["device_list"] = device_list
+        return original(*args, **kwargs)
+
+    with _DEFUSER_CONVERSION_LOCK:
+        defuser_moe.clear_memory = _scoped_clear_memory
+        try:
+            yield
+        finally:
+            defuser_moe.clear_memory = original
 
 
 def torch_sync(device: torch.device = None):
@@ -1119,6 +1863,23 @@ def tf32_high_precision_guard():
     IEEE math. The count under a lock keeps the override until the last caller
     exits and restores exactly the setting captured by the first caller
     (issue #4094).
+
+    A trace in another thread is the other overwriter: dynamo snapshots the
+    precision when a trace starts and writes it back when the trace ends, and
+    it does not take this guard's lock. The depth-0 transitions therefore also
+    take the model-global-state writer, which excludes in-flight compiled
+    calls and their traces, so no trace can straddle a switch (#5390). Only
+    the switches take the writer, not the whole quantization.
+
+    A *raw* ``torch.compile`` call is the residual case. Only the package's
+    ``torch_compile()`` wrapper holds the shared side, so a trace started by
+    a caller's own ``torch.compile`` runs outside it. A raw trace that started
+    before this guard writes the pre-guard precision back when it ends, while
+    the guard is still active: the writer cannot exclude a trace that never
+    takes the lock, and dynamo exposes no in-flight-trace signal to wait on.
+    Callers that quantize while another thread runs a raw compile must
+    coordinate: let that trace finish before ``quantize()``, or compile
+    through ``torch_compile()`` so the call holds the reader (#5612).
     """
 
     global _TF32_GUARD_DEPTH, _TF32_GUARD_PREVIOUS
@@ -1129,8 +1890,9 @@ def tf32_high_precision_guard():
 
     with _TF32_GUARD_LOCK:
         if _TF32_GUARD_DEPTH == 0:
-            _TF32_GUARD_PREVIOUS = _snapshot_tf32_state()
-            _set_tf32_state(False)
+            with model_global_state_write_guard():
+                _TF32_GUARD_PREVIOUS = _snapshot_tf32_state()
+                _set_tf32_state(False)
         _TF32_GUARD_DEPTH += 1
     try:
         yield
@@ -1141,7 +1903,8 @@ def tf32_high_precision_guard():
                 previous_state = _TF32_GUARD_PREVIOUS
                 _TF32_GUARD_PREVIOUS = None
                 if previous_state is not None:
-                    _restore_tf32_state(previous_state)
+                    with model_global_state_write_guard():
+                        _restore_tf32_state(previous_state)
 
 
 @contextmanager

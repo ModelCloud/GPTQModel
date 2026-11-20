@@ -337,12 +337,12 @@ and float32. Only a checkpoint that declares none of them falls back to
 bfloat16. An fp16 GPTQ checkpoint therefore dequantizes to `dtype=float16` with F16
 tensors instead of being rewritten as bf16 (#4455).
 
-### The `GPTQModel.export()` API was removed
+### The `GPTQModel.export()` and MLX conversion APIs were removed
 
 `GPTQModel.export(model_id_or_path, target_path, format)` no longer exists. It
 was a static convenience wrapper that guessed a runtime backend from
 `quantization_config` and then either called `dequantize_model()` (`format="hf"`)
-or `GPTQModel.load()` + `convert_gptq_to_mlx_weights(stock_compatible=True)`
+or `GPTQModel.load()` + the MLX backend's internal conversion
 (`format="mlx"`). Both destinations are checkpoint-level operations that own
 their own arguments, so the wrapper only duplicated dispatch and could select a
 decoder that does not understand the stored layout.
@@ -350,7 +350,7 @@ decoder that does not understand the stored layout.
 | Need | Replacement |
 | --- | --- |
 | Dense Transformers checkpoint | `gptqmodel.utils.model_dequant.dequantize_model(source, target, target_dtype=None, device=None, resume=False, trust_remote_code=False)` |
-| MLX-LM weights and config | `GPTQModel.load(source, backend=...)`, then `gptqmodel.utils.mlx.convert_gptq_to_mlx_weights(path, model, quant_config, lm_head, stock_compatible=True)`, then `mlx_lm.utils.save_model` / `save_config` |
+| MLX-LM weights and config | No public replacement. MLX inference is `GPTQModel.load(source, backend=BACKEND.MLX)`; the conversion is an internal step of that backend (`gptqmodel.utils.mlx._convert_gptq_to_mlx_weights`). Producing stock MLX-LM weights for `mlx_lm.utils.save_model` is not a supported public operation. |
 | Hugging Face repo id instead of a local path | `gptqmodel.utils.hub.snapshot_download(repo_id=...)` first |
 
 ```mermaid
@@ -361,7 +361,7 @@ flowchart TD
         C --> D["dequantize_model()"]
         B -- mlx --> E["guess backend from quant_method"]
         E --> F["GPTQModel.load()"]
-        F --> G["convert_gptq_to_mlx_weights<br/>stock_compatible=True"]
+        F --> G["convert_gptq_to_mlx_weights<br/>stock_compatible=True (removed)"]
         B -- other --> X["ValueError"]
     end
     style X fill:#f8d7da,stroke:#b02a37
@@ -373,9 +373,9 @@ flowchart TD
     Q -- "dense Transformers" --> R["snapshot_download for repo ids"]
     R --> T["dequantize_model(source, target)"]
     T --> U["dense safetensors + config<br/>without quantization_config"]
-    Q -- "MLX-LM" --> V["GPTQModel.load(source, backend=...)"]
-    V --> W["convert_gptq_to_mlx_weights<br/>stock_compatible=True"]
-    W --> Y["mlx_lm.utils.save_model / save_config"]
+    Q -- "MLX-LM" --> V["GPTQModel.load(source, backend=BACKEND.MLX)"]
+    V --> W["internal conversion<br/>(no public entry point)"]
+    W --> Y["MLX model, ready for generate()"]
     style U fill:#d9f2d9,stroke:#2e7d32
     style Y fill:#d9f2d9,stroke:#2e7d32
 ```
@@ -488,7 +488,7 @@ logits by `0.251` (v2 words into a v1-labelled target) and `0.130` (v1 words
 into a v2 target); both directions are now exact because the words describe
 their own layout.
 
-## 10. HF `quant_method` for RTN AWQ exports and packed GGUF
+## 10. HF `quant_method` for RTN AWQ exports, packed GGUF and FP8
 
 `BaseQuantizeConfig.to_dict()` publishes `export_quant_method()`, not the
 internal quantizer `method`. An RTN config with `format="gemm"` therefore
@@ -501,6 +501,26 @@ back to GPTQ.
 Packed GGUF is different: `transformers` owns the `gguf` name and routes it to
 `GgufHfQuantizer`, which expects a `.gguf` file. GPT-QModel publishes
 `gptqmodel_gguf` instead and registers a refusing quantizer for that name.
+FP8 is load-only. GPT-QModel no longer quantizes or exports FP8 weights and no
+longer publishes a `gptqmodel_fp8` alias, so `to_dict()` returns the plain
+`fp8` value and transformers' `FineGrainedFP8` remains the loader for the
+production layouts GPT-QModel consumes:
+
+- transformers `FineGrainedFP8` and DeepSeek/Qwen block scales, which store
+  `amax / 448` under `weight_scale_inv` and multiply it;
+- NVIDIA ModelOpt per-tensor scales;
+- MXFP8 and NVFP8 on hardware that supports them.
+
+Legacy GPT-QModel checkpoints that store an inverse scale still load when they
+declare `weight_scale_semantics="inverse"`; that spelling is accepted on load
+and never written. A checkpoint that still carries `quant_method: "fp8"`
+resolves to `METHOD.FP8`. The legacy `gptqmodel_fp8` name is also accepted on
+load and normalized to `METHOD.FP8`; it is never written again. Importing
+`gptqmodel` registers a refusing quantizer for `gptqmodel_fp8` and refuses
+the standard `fp8` name when the config declares `weight_scale_semantics:
+"inverse"`, because `FineGrainedFP8` would multiply the inverse scale. Both
+raise the same actionable "load with `GPTQModel.load`" error.
+
 Every other GPT-QModel-only layout (`exl3`, `qqq`, `paro`, `macaq`,
 `nf12`, `tt-blockfloat`) is registered from
 `REFUSED_HF_QUANT_METHODS` in `gptqmodel/_quant_methods.py`.
@@ -534,8 +554,9 @@ flowchart TD
 
 Already-published GGUF checkpoints keep `quant_method: "gguf"` (plus
 `method: "gguf"`) and still load through `GPTQModel.load`; `gguf` remains
-accepted by `_normalize_quant_method`. Only new checkpoints publish the
-non-colliding name. `hf_compat_warnings` also warns at save time that a packed
+accepted by `_normalize_quant_method`. An FP8 checkpoint that carries
+`quant_method: "fp8"` resolves to `METHOD.FP8`; the legacy `gptqmodel_fp8`
+spelling is accepted on load and normalized to `METHOD.FP8`. `hf_compat_warnings` warns at save time that a packed
 GGUF checkpoint is not loadable by plain Transformers, and emits the same
 save-time warning for every method in `REFUSED_HF_QUANT_METHODS`.
 
@@ -611,6 +632,113 @@ the module's own runtime layout and is copied as-is. A runtime layout that no
 longer matches the snapshot has no inverse, so export raises instead of writing
 `inf`.
 
+## 13. Checkpoint key layout: source renames are idempotent
+
+A GPT-QModel writer stores *runtime* names (`model.norm.weight`,
+`model.embed_tokens.weight`, `model.hc_head.*`, `lm_head.weight`). A
+Transformers `save_pretrained()` stores the *source* layout instead
+(`model.layers.N.attn.norm.weight`, `head.weight`,
+`model.layers.N.ffn.gate.bias`). `_checkpoint_key_converter`
+(`gptqmodel/models/loader.py:173`) bridges the two layouts for families that
+declare no explicit `checkpoint_key_for_load` / `checkpoint_key_for_save` by
+inverting the Transformers checkpoint conversion map and applying the declared
+renames. `to_runtime=True` maps checkpoint keys onto the shell for
+`load_checkpoint_in_model_then_tie_weights`
+(`gptqmodel/models/loader.py:3622`); `to_runtime=False` maps a runtime module
+name back to its checkpoint alias for `validate_checkpoint_qweights`
+(`gptqmodel/models/loader.py:3317`).
+
+Introduced by [PR #5162](https://github.com/ModelCloud/GPTQModel/pull/5162),
+which fixes #5131.
+
+### 13.1 Before: the source map ran on every key
+
+The converter returned the first matching rename for every key and assumed the
+map could not match a runtime name. That assumption fails for DeepSeek-V4,
+whose map carries `WeightRenaming("\\.norm\\." -> ".kv_norm.")` for the source
+key `layers.N.attn.norm.weight`: it also matches the runtime
+`model.norm.weight`, which then becomes `model.kv_norm.weight`. No runtime
+parameter carries that name, so the final norm was reported missing (#5131).
+
+```mermaid
+flowchart TD
+    A["checkpoint key<br/>model.norm.weight"] --> B{"explicit<br/>checkpoint_key_for_load?"}
+    B -- yes --> C["definition converter"]
+    B -- no --> D["inverted Transformers map<br/>for deepseek_v4"]
+    D --> E["first matching rename<br/>\\.norm\\. -> .kv_norm."]
+    E --> F["model.kv_norm.weight"]
+    F --> G["_unmaterialized_checkpoint_parameters<br/>utils/model.py:3165"]
+    G --> H{"every non-quantized<br/>parameter found?"}
+    H -- yes --> I["load into the shell"]
+    H -- "no (model.norm.weight)" --> J["RuntimeError: checkpoint does not<br/>provide 1 non-quantized parameter<br/>utils/model.py:3234"]
+    style J fill:#f8d7da,stroke:#b02a37
+    style F fill:#f8d7da,stroke:#b02a37
+```
+
+| Stage | Pre-fix behaviour | Evidence |
+| --- | --- | --- |
+| Converter build | inferred map, no knowledge of the shell's own names | `gptqmodel/models/loader.py:173` (pre-fix body returned `convert_hf_checkpoint_key` directly) |
+| Key application | first matching rename, applied to runtime keys too | `gptqmodel/utils/structure.py:2211` |
+| Missing-key check | converted the checkpoint key set the same way, then compared with `named_parameters` | `gptqmodel/utils/model.py:3186` |
+| Observable result | `model.norm.weight` -> `model.kv_norm.weight`, final norm reported missing | `gptqmodel/utils/model.py:3234` |
+| Pre-#4810 behaviour | the rename loaded nothing and the final norm kept its `1.0` init | issue #5131 A/B |
+
+### 13.2 After: the shell's own names are a fixed point
+
+`_runtime_checkpoint_names` (`gptqmodel/models/loader.py:153`) collects every
+parameter and buffer name of the shell. The converter keeps any key already in
+that set, and only adopts a rename chain when it lands on one. A source key that
+needs several declared renames (`layers.N.attn.norm.weight` needs `.attn.` ->
+`.self_attn.` and then `.norm.` -> `.kv_norm.`) is followed until it resolves or
+stops changing. Converting a checkpoint written by GPT-QModel is therefore the
+identity.
+
+```mermaid
+flowchart TD
+    A["checkpoint key"] --> B{"in the shell's parameter<br/>or buffer names?"}
+    B -- yes --> C["keep the key unchanged<br/>debug log if the map would rename it"]
+    B -- no --> D["apply one declared rename"]
+    D --> E{"changed and resolved<br/>on the shell?"}
+    E -- yes --> F["use the renamed key"]
+    E -- no --> G{"chain next rename<br/>bounded to 8 steps"}
+    G -- "lands on a shell name" --> F
+    G -- "stops changing" --> H["keep the single rename<br/>previous behaviour"]
+    style C fill:#d9f2d9,stroke:#2e7d32
+    style F fill:#d9f2d9,stroke:#2e7d32
+    style H fill:#fff4cc,stroke:#b8860b
+```
+
+### 13.3 Failure path
+
+The guard never makes a load succeed with the wrong tensor. If a checkpoint key
+is genuinely absent from the shell, it is still reported by
+`_unmaterialized_checkpoint_parameters` and the load raises; the guard only
+stops the converter from *creating* a name the shell does not own.
+
+```mermaid
+flowchart LR
+    A["runtime key<br/>model.norm.weight"] --> B{"shell owns it?"}
+    B -- yes --> C["keep it"]
+    B -- no --> D["source rename"]
+    C --> E{"checkpoint tensor present?"}
+    D --> E
+    E -- yes --> F["Accelerate loads it"]
+    E -- no --> G["fail closed:<br/>unmaterialized parameter error"]
+    style G fill:#f8d7da,stroke:#b02a37
+```
+
+Notes for extension:
+
+- The guard is load-direction only. `to_runtime=False` is asked for
+  checkpoint-side module aliases, where a module name is not a parameter name.
+- Families with a multi-step source layout (DeepSeek-V3/V4, GPT-NeoX) now resolve
+  through the chain; families whose map matches once keep the previous single
+  rename.
+- A new family whose source pattern also matches a runtime name needs no code:
+  the shell's names win. A family whose source layout cannot be reached by
+  chaining still needs an explicit `checkpoint_key_for_load` /
+  `checkpoint_key_for_save` pair.
+
 ## Failure contract
 
 ### Producer filters, format changes, and `save_pretrained` (items 1-3)
@@ -652,6 +780,15 @@ longer matches the snapshot has no inverse, so export raises instead of writing
 | Unknown/undetectable checkpoint format | `ValueError` from `detect_format` |
 | `dynamic` bits override | applied per module, not globally |
 
+### Checkpoint key layout (item 13)
+
+| Situation | Before | After |
+| --- | --- | --- |
+| GPT-QModel checkpoint reloads its own `model.norm.weight` (DeepSeek-V4) | renamed to `model.kv_norm.weight`; `RuntimeError` naming the missing parameter | key kept; tensor loads |
+| Same checkpoint, before #4810 | final norm stayed at its `1.0` init with no warning | tensor loads with the saved values |
+| Transformers source layout (`layers.N.attn.norm.weight`) | first rename only (`.attn.` -> `.self_attn.`) | chain reaches `self_attn.kv_norm.weight` |
+| Checkpoint genuinely missing a non-quantized tensor | `RuntimeError` | `RuntimeError` (unchanged) |
+
 ## Tests
 
 `tests/test_checkpoint_interop_4053.py` covers the synthetic AWQ exclusion
@@ -664,3 +801,13 @@ tests live beside their modules (`tests/test_q4_marlin.py`,
 Marlin `g_idx` regressions). `tests/qcfg/test_config_serialization.py` pins the
 RTN export method, and `tests/test_checkpoint_compat.py` pins the GGUF
 `quant_method` alias and save-time warning.
+
+Item 13 is pinned by
+`tests/test_deepseek_v4_support.py::test_rtn_round_trip_keeps_the_deepseek_v4_final_norm`
+(quantize, save, reload, final-norm values and logits),
+`tests/test_deepseek_v4_support.py::test_deepseek_v4_source_layout_keys_convert_to_runtime_names`
+(source-layout conversion and the runtime fixed point), and the
+`test_fallback_conversion_map_is_idempotent_on_runtime_names` parametrization in
+`tests/test_lazy_turtle_conversion_mapping.py` (DeepSeek-V4, Qwen3-MoE,
+GPT-NeoX). `test_deepseek_v4_source_map_would_rename_the_runtime_final_norm`
+keeps the #5131 trigger visible so the guard cannot silently become untested.

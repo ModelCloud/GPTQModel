@@ -26,11 +26,15 @@ from transformers import CompileConfig, GenerationConfig
 
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear, MacaqTritonLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.paro import ParoLinear
+from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
 
 
 pytestmark = [pytest.mark.cpu]
@@ -248,12 +252,63 @@ def test_kernel_declarations():
     # FP8 traces clean under `fullgraph=True` and its compiled static-cache
     # decode is 3x faster than eager here, so it must not stay opted out (#4739).
     assert TorchFP8Linear.SUPPORTS_COMPILE is True
+    # BnB traces to one graph with zero breaks and its compiled static-cache
+    # decode is 2.2-3.5x faster than eager on the reporter's hardware, and AUTO
+    # picks it for every BitsAndBytes checkpoint on CUDA (#4984).
+    assert BitsAndBytesLinear.SUPPORTS_COMPILE is True
+    # `MACAQ_TORCH` is the same story (9x faster compiled, one graph, zero
+    # breaks); the Triton sibling breaks the graph on `device_count()` and must
+    # not inherit the opt-in (#4984).
+    assert MacaqLinear.SUPPORTS_COMPILE is True
+    assert MacaqTritonLinear.SUPPORTS_COMPILE is False
+    # The portable QQQ/VPTQ forwards trace with zero breaks and their compiled
+    # static-cache decode is several times faster than eager (#5102). The
+    # FP16-only QQQ CUDA kernel and the fused VPTQ CUDA kernel stay out: their
+    # own decode loops recompile and lose.
+    assert QQQTorchLinear.SUPPORTS_COMPILE is True
+    assert QQQLinear.SUPPORTS_COMPILE is False
+    assert VPTQLinear.SUPPORTS_COMPILE is True
 
 
-def test_mlx_fp8_does_not_inherit_the_torch_fp8_opt_in():
-    """The MPS holder runs native Metal kernels that were never traced (#4739)."""
+def test_a_compile_capable_kernel_keeps_the_auto_compile():
+    """A real traceable kernel must not be forced eager by the policy (#4984).
 
-    from gptqmodel.nn_modules.qlinear.mlx import FP8MlxQuantLinear
+    `MacaqLinear` declares `SUPPORTS_COMPILE_LEVEL = CUDAGRAPH`; before #4984 it
+    inherited `SUPPORTS_COMPILE = False`, so `generate(cache_implementation=
+    "static")` silently added `disable_compile=True` and ran 9x slower.
+    """
 
-    assert issubclass(FP8MlxQuantLinear, TorchFP8Linear)
-    assert FP8MlxQuantLinear.SUPPORTS_COMPILE is False
+    harness = _Harness(MacaqLinear(bits=4, group_size=32, in_features=32, out_features=32))
+
+    assert harness._kernels_support_compile() is True
+    assert harness._generation_compile_kwargs({"cache_implementation": "static"}) == {
+        "cache_implementation": "static"
+    }
+
+
+def test_a_compile_capable_opt_out_must_record_its_reason():
+    """The level and the policy flag cannot drift apart silently (#4984)."""
+
+    from gptqmodel.nn_modules.qlinear._compile_support import (
+        COMPILE_LEVEL,
+        compile_policy_is_justified,
+    )
+
+    class _SilentOptOut(BaseQuantLinear):
+        """Declares a traceable level but keeps the policy off with no reason."""
+
+        SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+        SUPPORTS_GRAPH_CAPTURE = True
+
+        def __init__(self):
+            nn.Module.__init__(self)
+
+    class _DocumentedOptOut(_SilentOptOut):
+        SUPPORTS_COMPILE_EAGER_REASON = (
+            "measured 1.3-8x slower than eager under a static-cache generate"
+        )
+
+    assert compile_policy_is_justified(_SilentOptOut) is False
+    assert _Harness(_SilentOptOut())._kernels_support_compile() is False
+    assert compile_policy_is_justified(_DocumentedOptOut) is True
+    assert _Harness(_DocumentedOptOut())._kernels_support_compile() is False

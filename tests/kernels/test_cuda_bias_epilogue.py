@@ -19,6 +19,7 @@ from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.quantization import FORMAT
+from tests.fp8_test_utils import pack_fp8_module
 
 
 pytestmark = pytest.mark.skipif(
@@ -99,7 +100,7 @@ def _fp8(dtype, scaled):
     linear = torch.nn.Linear(k, n, bias=True)
     linear.weight.data.fill_(41.25)
     linear.bias.data.fill_(-8000)
-    module.pack_original(linear, scales=None, zeros=None)
+    pack_fp8_module(module, linear)
     module = module.eval().to(device="cuda")
     module._scaled_mm_hard_disabled = not scaled
     return module, 41.25, 52, -8000
@@ -114,6 +115,8 @@ def _gguf(dtype):
     linear = torch.nn.Linear(k, n, bias=True)
     linear.weight.data.fill_(38.5)
     linear.bias.data.fill_(-5000)
+    # GGUF has its own packer; the FP8 packer writes ``weight_scale_inv`` and
+    # an ``fp8_format`` the GGUF module never reads (#5325, round 26).
     module.pack_original(linear, scales=None, zeros=None)
     return module.eval().to(device="cuda", dtype=dtype), 38.5, 55, -5000
 

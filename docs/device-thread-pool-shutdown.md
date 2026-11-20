@@ -106,6 +106,11 @@ accepted before shutdown is guaranteed to run. The only ambiguity is ordering
 between a `submit` and a `shutdown` that race — the lock decides it, and either
 outcome is well defined.
 
+An accepted task can still be skipped by the caller: `future.cancel()` before a
+worker starts it releases the in-flight slot without running the task, so the
+drain above still completes. See
+[Device thread pool task cancellation](device-thread-pool-cancellation.md).
+
 ## Scope
 
 The change adds no PyTorch API and no environment-variable switch; it only

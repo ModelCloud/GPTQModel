@@ -37,6 +37,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from . import BaseQuantLinear
 from ._compile_support import COMPILE_LEVEL
+from ._numerics import autocast_active
 
 
 #: Values per shared exponent. The hardware format fixes this; a checkpoint
@@ -310,10 +311,23 @@ class _BlockfloatStorage(nn.Module):
 class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
     """Linear over Tenstorrent block-float weights."""
 
-    # Conservative: the native block-float CUDA kernel is a custom op without
-    # fake/meta support, and the dense fallback's dequantize reads code_shape
-    # with int() (host sync), so no level above eager and no CUDA-graph capture.
+    # `codes`/`exponents` are the payload; `code_shape` is geometry the
+    # constructor already derives, so it stays optional.
+    CHECKPOINT_REQUIRED_BUFFERS = ("codes", "exponents")
+
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=2,
+    # dynamo/aot_eager/inductor all reach it (the breaks are the
+    # `lru_cache`-wrapped quantize helpers on the cold path, which dynamo
+    # inlines). The native block-float CUDA kernel is a custom op without
+    # fake/meta support, so CUDA stays eager; the CPU dense decode is plain
+    # tensor math. No CUDA-graph capture: the dequantize path reads
+    # `code_shape` with `int()` (host sync).
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: the portable CPU "
+        "block-float decode has no measured static-cache win (#4984)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.TT_BLOCKFLOAT]
@@ -344,6 +358,7 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
         block: int = BLOCKFLOAT_BLOCK,
         pack_dtype: torch.dtype = torch.uint8,
         block_axis: str = "in",
+        bias_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
         if block != BLOCKFLOAT_BLOCK:
@@ -368,11 +383,19 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
         self.pack_dtype = pack_dtype
         self._init_storage(out_features, in_features, bits, block, block_axis)
         if bias:
-            # Bias is not quantized, so keep the precision of the model it came
-            # from. Narrowing to float16 here would overflow large finite
+            # Bias is not quantized, so keep the precision of the checkpoint it
+            # came from. The loader passes that dtype explicitly when the saved
+            # bias is wider than the weights (issue #5650); otherwise follow the
+            # model dtype. Narrowing to float16 here would overflow large finite
             # values and round ordinary ones even for a float32 checkpoint.
-            bias_dtype = dtype if isinstance(dtype, torch.dtype) else torch.float16
-            self.register_buffer("bias", torch.zeros(out_features, dtype=bias_dtype))
+            resolved_bias_dtype = (
+                bias_dtype
+                if isinstance(bias_dtype, torch.dtype)
+                else dtype if isinstance(dtype, torch.dtype) else torch.float16
+            )
+            self.register_buffer(
+                "bias", torch.zeros(out_features, dtype=resolved_bias_dtype)
+            )
         else:
             self.bias = None
 
@@ -437,11 +460,15 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
                 else out_dtype
             )
             weight = self.dequantize(dtype=compute_dtype)
-            out = F.linear(
-                x.to(compute_dtype),
-                weight,
-                None if bias is None else bias.to(compute_dtype),
-            )
+            bias = None if bias is None else bias.to(compute_dtype)
+            # Ambient autocast would narrow these explicitly wide operands back
+            # to the activation dtype before the bias cancels the product, so
+            # the reduction must run with autocast disabled and round once.
+            if autocast_active(x.device.type):
+                with torch.autocast(device_type=x.device.type, enabled=False):
+                    out = F.linear(x.to(compute_dtype), weight, bias)
+            else:
+                out = F.linear(x.to(compute_dtype), weight, bias)
             # Release the temporary before the activation leaves this scope.
             del weight
 
@@ -459,6 +486,8 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
     float16 table: 266.16 MiB against 501.00 MiB for Llama-3.2-1B, measured
     from the shard headers (250.50 MiB codes + 15.66 MiB exponents).
     """
+
+    CHECKPOINT_REQUIRED_BUFFERS = ("codes", "exponents")
 
     def __init__(
         self,
@@ -634,6 +663,7 @@ def swap_blockfloat_modules(
     block: int = BLOCKFLOAT_BLOCK,
     quantized_prefixes: Optional[list] = None,
     block_axis: str = "in",
+    bias_dtypes: Optional[dict] = None,
 ) -> dict:
     """Replace quantized modules on an already-built model with block-float ones.
 
@@ -641,9 +671,15 @@ def swap_blockfloat_modules(
     ``bits_per_layer``. Returns ``{prefix: [out_features, in_features]}`` for
     everything swapped. Used by the library loader and by the modeling file the
     checkpoint ships, so both produce the same object graph.
+
+    ``bias_dtypes`` maps a prefix to the dtype its checkpoint stores the bias
+    in. A checkpoint may keep a float32 bias alongside bfloat16 weights, and
+    sizing the fresh bias buffer at the weight dtype would narrow it during
+    ``load_state_dict`` (issue #5650). The activation dtype is unaffected.
     """
 
     bits_per_layer = dict(bits_per_layer or {})
+    bias_dtypes = dict(bias_dtypes or {})
     targets = list(quantized_prefixes or bits_per_layer)
 
     restored = {}
@@ -681,6 +717,7 @@ def swap_blockfloat_modules(
                 dtype=module.weight.dtype,
                 block=block,
                 block_axis=block_axis,
+                bias_dtype=bias_dtypes.get(prefix),
             )
         else:
             continue

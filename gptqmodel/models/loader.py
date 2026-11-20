@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 import torch
 import transformers
 
+from ..utils.hf import _compile_keep_in_fp32_matcher
 from ..utils.kernel import KernelConfig, configure_kernel
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.p2p import P2PConfig, configure_p2p
@@ -50,7 +51,7 @@ from ..adapter.adapter import Adapter, normalize_adapter
 from ..adapter.remote import configure_explicit_remote_adapter, resolve_checkpoint_adapter_path
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
-from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear, checkpoint_qzeros_layout
 from ..nn_modules.qlinear.allspark import AllSparkLinear
 from ..nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
@@ -93,6 +94,7 @@ from ..utils.hf import (
 from ..utils.importer import (
     _selector_devices,
     auto_select_device,
+    device_map_uses_cpu,
     expand_selector_device_family,
     get_kernel_for_backend,
     normalize_device_device_map,
@@ -119,7 +121,11 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
-from ..utils.torch import xla_device_count
+from ..utils.torch import (
+    _ModelGlobalStateLock,
+    defuser_conversion_scope,
+    xla_device_count,
+)
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
@@ -142,6 +148,57 @@ def __getattr__(name: str):
 log = setup_logger()
 
 
+def _model_keep_in_fp32_strict_names(model) -> Optional[List[str]]:
+    """Concrete runtime tensor names the model pins to fp32 for every half dtype.
+
+    transformers 5.x declares these on ``_keep_in_fp32_modules_strict`` and
+    keeps them fp32 for fp16 *and* bf16. Accelerate's loader only honors
+    ``keep_in_fp32_modules`` for fp16, so the quantized-load path restores
+    them explicitly (issue #5151). Buffers are included: the DeepSeek-V3 /
+    GLM-4.x routers store ``e_score_correction_bias`` as a buffer, and ERNIE
+    declares the ``gate.weight`` parameter.
+    """
+
+    matcher = _compile_keep_in_fp32_matcher(
+        model, attrs=("_keep_in_fp32_modules_strict",)
+    )
+    if matcher is None:
+        return None
+
+    names = [
+        name for name, _ in model.named_parameters() if matcher(name)
+    ]
+    names.extend(name for name, _ in model.named_buffers() if matcher(name))
+    return names or None
+
+
+# A source layout can need several declared renames before a key matches the
+# runtime shell (``deepseek_v4``: ``layers.N.attn.norm.weight`` needs
+# ``\.attn\.`` -> ``.self_attn.`` and then ``\.norm\.`` -> ``.kv_norm.``).
+# Bound the walk so two rules that rename each other cannot cycle.
+_MAX_CHECKPOINT_KEY_RENAMES = 8
+
+
+def _runtime_checkpoint_names(model) -> frozenset[str]:
+    """Names of every parameter and buffer the runtime shell can receive.
+
+    A GPT-QModel writer stores runtime names, so a checkpoint key in this set is
+    already in the layout Accelerate has to load. Tied weights keep both names
+    because ``remove_duplicate=False`` does not collapse them by storage.
+    Config-like stand-ins without modules return an empty set, which leaves the
+    raw Transformers conversion map in charge.
+    """
+
+    named_parameters = getattr(model, "named_parameters", None)
+    named_buffers = getattr(model, "named_buffers", None)
+    if not callable(named_parameters) or not callable(named_buffers):
+        return frozenset()
+
+    names = {name for name, _ in named_parameters(remove_duplicate=False)}
+    names.update(name for name, _ in named_buffers(remove_duplicate=False))
+    return frozenset(names)
+
+
 def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
     """Return the key converter the quantized loader should apply.
 
@@ -149,9 +206,18 @@ def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
     ``checkpoint_key_for_save``. Every other family falls back to its
     Transformers checkpoint conversion map, inferred from the live model, so a
     legacy-layout checkpoint (Transformers 4.x keys such as ``model.layers.*``
-    and ``visual.*``) is remapped to the runtime names. The map is idempotent
-    for checkpoints already written with runtime keys: their names do not match
-    the checkpoint-side patterns and pass through unchanged.
+    and ``visual.*``) is remapped to the runtime names.
+
+    That map describes a *source* layout only, and some families declare
+    patterns wide enough to also match runtime keys. ``deepseek_v4`` renames
+    ``\.norm\.`` -> ``.kv_norm.`` for the source key
+    ``layers.N.attn.norm.weight``, which also matches the runtime
+    ``model.norm.weight``; no runtime parameter is called
+    ``model.kv_norm.weight``, so the renamed final norm was reported missing
+    (#5131). The converter is therefore idempotent on the shell's own names: a
+    key that already names a runtime parameter or buffer is never renamed, and
+    a rename chain is only adopted when it lands on one. Converting a
+    checkpoint written by GPT-QModel is the identity.
     """
 
     explicit = getattr(
@@ -170,8 +236,44 @@ def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
     if mapping is None:
         return None
 
-    def convert(name: str) -> str:
+    # Runtime names only exist for the load direction. The save direction is
+    # asked for checkpoint-side names (for example quantized module aliases),
+    # where a module name is not a parameter name.
+    runtime_names = _runtime_checkpoint_names(model) if to_runtime else frozenset()
+
+    def rename_once(name: str) -> str:
         return LazyTurtle.convert_hf_checkpoint_key(name, mapping, to_runtime=to_runtime)
+
+    def convert(name: str) -> str:
+        renamed = rename_once(name)
+        if name in runtime_names:
+            # Idempotence check: the key already resolves on this shell, so a
+            # matching source-side pattern must not rename it again.
+            if renamed != name:
+                log.debug(
+                    "Loader: keeping runtime checkpoint key `%s`; the HF conversion map "
+                    "would rename it to `%s`, which is not a parameter of this model",
+                    name,
+                    renamed,
+                )
+            return name
+
+        if not to_runtime or renamed == name or renamed in runtime_names:
+            return renamed
+
+        # A source layout can need several renames before it matches the shell.
+        # Adopt the first chain result that resolves on this model; otherwise
+        # keep the single rename so families whose map matches once are
+        # unchanged.
+        current = renamed
+        for _ in range(_MAX_CHECKPOINT_KEY_RENAMES):
+            candidate = rename_once(current)
+            if candidate == current:
+                break
+            if candidate in runtime_names:
+                return candidate
+            current = candidate
+        return renamed
 
     return convert
 
@@ -682,18 +784,14 @@ def _normalize_max_memory(max_memory, device) -> List[tuple[str, int]]:
 
 
 def _device_map_uses_cpu(device_map) -> bool:
-    """Whether a placement map contains a CPU-resident entry."""
-    if not isinstance(device_map, dict):
-        return False
-    for value in device_map.values():
-        if value is None or isinstance(value, int):
-            continue
-        try:
-            if torch.device(value).type == "cpu":
-                return True
-        except (RuntimeError, ValueError):
-            continue
-    return False
+    """Whether a placement map contains a CPU-resident entry.
+
+    The HF bridge derives the same contract from the map Transformers hands it
+    (`utils.importer.device_map_uses_cpu`), so both loaders agree on which
+    kernels may serve an offloaded map (#5022).
+    """
+
+    return device_map_uses_cpu(device_map)
 
 
 def _assign_greedy_device_ids(
@@ -868,6 +966,34 @@ def _normalize_explicit_placement(device, device_map, max_memory):
             explicit_device_map = {"": explicit_device}
             requested_device_map = explicit_device_map
     return requested_device_map, explicit_device_map
+
+
+def _dense_placement_device_map(device, device_map, resolved_device):
+    """Return the placement map for the dense (non-quantized) Transformers load.
+
+    Transformers' ``"auto"`` policy fills the first visible accelerator, so an
+    explicit ``device="cpu"`` on a CUDA host silently loaded a CUDA model: the
+    requested device only selected the dtype and was then replaced by ``auto``
+    (#5373). An explicit ``device_map`` still wins; otherwise the requested
+    device becomes a full-model root mapping. A device pool is a layer-wise
+    request with no single root target, so it keeps the auto policy.
+    """
+
+    if device_map:
+        return device_map
+    if device is None or isinstance(resolved_device, tuple):
+        return "auto"
+    # ``_indexed_device_request`` keeps an accelerator ordinal that the family
+    # resolution below drops (``device=1`` resolves to the CUDA family).
+    target = _indexed_device_request(device)
+    if target is None:
+        if isinstance(resolved_device, DEVICE):
+            target = str(resolved_device.to_torch_device())
+        elif isinstance(resolved_device, torch.device):
+            target = str(resolved_device)
+        else:
+            return "auto"
+    return {"": target}
 
 
 def _max_memory_device_name_is_cpu(name: str) -> bool:
@@ -1096,36 +1222,42 @@ def _check_defuser_version() -> None:
 
 def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     _check_defuser_version()
-    converted = defuser.convert_model(model, cleanup_original=cleanup_original)
+    # Defuser's conversion flushes the accelerator cache through
+    # `clear_memory()`, which synchronizes the *current* device when no device
+    # list is supplied. Scope that call to the devices this model actually
+    # occupies so a CPU/meta conversion does not claim cuda:0 on the way to
+    # cuda:1 (#5105).
+    with defuser_conversion_scope(model):
+        converted = defuser.convert_model(model, cleanup_original=cleanup_original)
 
-    # Defuser gates `convert_model()` on its own model registry. Model types
-    # that GPT-QModel supports through the generic Transformers experts
-    # interface (native Kimi-Linear / MiMo-V2-Flash) have no registry entry,
-    # so run Defuser's generic replacement pass explicitly instead of leaving
-    # the fused 3-D expert parameters unquantized.
-    if not converted and getattr(cls, "defuser_generic_experts", False):
-        from defuser.modeling.update_module import update_module
+        # Defuser gates `convert_model()` on its own model registry. Model types
+        # that GPT-QModel supports through the generic Transformers experts
+        # interface (native Kimi-Linear / MiMo-V2-Flash) have no registry entry,
+        # so run Defuser's generic replacement pass explicitly instead of leaving
+        # the fused 3-D expert parameters unquantized.
+        if not converted and getattr(cls, "defuser_generic_experts", False):
+            from defuser.modeling.update_module import update_module
 
-        update_module(model, cleanup_original=cleanup_original)
-        converted = True
+            update_module(model, cleanup_original=cleanup_original)
+            converted = True
 
-    defuser_module_paths = getattr(cls, "defuser_module_paths", ())
-    if defuser_module_paths:
-        for module_path in defuser_module_paths:
-            module, _ = get_module_by_name_prefix(model, module_path)
-            if module is None:
-                log.warn("Loader: defuser module path `%s` was not found.", module_path)
-                continue
-            converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
+        defuser_module_paths = getattr(cls, "defuser_module_paths", ())
+        if defuser_module_paths:
+            for module_path in defuser_module_paths:
+                module, _ = get_module_by_name_prefix(model, module_path)
+                if module is None:
+                    log.warn("Loader: defuser module path `%s` was not found.", module_path)
+                    continue
+                converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
 
-    after_conversion = getattr(cls, "after_defuser_conversion", None)
-    # Model-specific finalizers may also normalize metadata that Defuser does
-    # not own. Run them after the conversion attempt even when the installed
-    # Defuser has no matching registration and reports no structural change.
-    if callable(after_conversion):
-        after_conversion(model)
+        after_conversion = getattr(cls, "after_defuser_conversion", None)
+        # Model-specific finalizers may also normalize metadata that Defuser does
+        # not own. Run them after the conversion attempt even when the installed
+        # Defuser has no matching registration and reports no structural change.
+        if callable(after_conversion):
+            after_conversion(model)
 
-    return converted
+        return converted
 
 
 # Fused expert projections that Defuser splits from one 3-D tensor into a
@@ -1451,6 +1583,17 @@ def compare_versions(installed_version, required_version, operator):
 # through this lock; ``quantize()`` on already-loaded models stays concurrent.
 _MODEL_LOAD_LOCK = threading.RLock()
 
+# Compiled calls only read the process-global torch state (dynamo's
+# ``GLOBAL_STATE`` guard reads the default dtype on every call), while
+# transformers' construction changes it. This reader/writer lock lets compiled
+# forwards run concurrently and holds the writer only for the
+# ``local_torch_dtype`` window that saves/sets/restores the dtype -- not for a
+# load's weight I/O, packing or kernel post-init (#5268, #5304). The window
+# itself takes the writer (``gptqmodel.utils.torch``), so no call site can widen
+# it. It is separate from ``_MODEL_LOAD_LOCK`` so load-vs-load serialization
+# does not serialize inference.
+_MODEL_GLOBAL_STATE_LOCK = _ModelGlobalStateLock()
+
 
 def model_load_lock():
     """Return the process-wide, re-entrant lock guarding model construction.
@@ -1465,11 +1608,49 @@ def model_load_lock():
     return _MODEL_LOAD_LOCK
 
 
+def model_global_state_lock():
+    """Return the process-wide reader/writer lock for torch's default dtype.
+
+    Compiled calls take the shared reader side (``.reader()``); transformers'
+    ``local_torch_dtype`` window -- the only code that saves, sets and restores
+    ``torch.set_default_dtype`` -- takes the exclusive writer side (``with``).
+    Look the lock up through this accessor so tests and callers share one
+    object.
+    """
+
+    return _MODEL_GLOBAL_STATE_LOCK
+
+
+def _default_dtype_outside_construction() -> torch.dtype:
+    """Read torch's default dtype while no construction window can be open.
+
+    transformers' ``local_torch_dtype`` window saves, sets and restores the
+    process default dtype in the constructing thread. A bare
+    ``torch.get_default_dtype()`` at load entry or exit can therefore observe
+    another thread's temporary dtype and report a change the load did not make
+    (#5421). The writer excludes every construction window, so the value read
+    here is the process's settled default dtype.
+    """
+
+    with model_global_state_lock():
+        return torch.get_default_dtype()
+
+
 def _serialized_model_load(method):
     """Serialize a model-construction entry point across threads."""
 
     @wraps(method)
     def wrapper(*args, **kwargs):
+        if model_global_state_lock().holds_reader():
+            # The calling thread is inside a compiled call, which holds the
+            # shared side of the global-state lock. A load needs the writer;
+            # waiting for it here could deadlock against another load that
+            # holds the model-load lock and is waiting for this reader. Fail
+            # loudly instead of hanging the process.
+            raise RuntimeError(
+                "a model load cannot start inside a compiled call: the compiled "
+                "call holds the shared model-global-state lock"
+            )
         with model_load_lock():
             return method(*args, **kwargs)
 
@@ -1574,6 +1755,23 @@ def _is_broken_transformers_dynamic_module_error(exc: Exception) -> bool:
 
 
 def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_path: str, **kwargs):
+    """Build a model through ``loader.from_pretrained``.
+
+    transformers runs model construction inside ``local_torch_dtype``, a
+    process-global default-dtype window, and dynamo's ``preserve_global_state``
+    restores that dtype around every trace. A compiled call re-tracing inside
+    the window can therefore restore bf16 after the load restored fp32, or trip
+    ``assert_loaded_model_state`` (#5127/#5209), so that window must exclude
+    compiled forwards.
+
+    The writer is taken by ``local_torch_dtype`` itself (#5304), not here: the
+    window is milliseconds of a load, while the surrounding call is the whole
+    dense load (weight I/O, dtype casts, device placement, packing and kernel
+    post-init). Taking it here stalled every optimized forward for the full
+    load duration. The window-level guard also covers each call site and the
+    quantize path automatically, so a new site cannot be added unguarded.
+    """
+
     try:
         return loader.from_pretrained(model_local_path, **kwargs)
     except Exception as exc:
@@ -1654,26 +1852,46 @@ def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remot
     )
 
 
-def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=None) -> None:
-    """Refuse the CUDA-only AWQ GEMV/GEMV_FAST/LLM_AWQ layouts on ROCm.
+def _reject_native_awq_gemv_on_rocm(
+    export_quant_method, format_code, backend=None, device=None
+) -> None:
+    """Refuse a GEMV load only when the target placement itself is ROCm.
 
-    Those three layouts are only readable by the native CUDA AWQ extension
-    (``gemv_forward``/``gemmv2_forward``/``gemv_fast_forward_decode``), which
-    hipcc cannot build: the sources include ``cuda_fp16.h`` and CUDA-only inline
-    asm, and the hipified warp-sync reduction rejects wave32.  Without this check
-    an AUTO load fails later with a bare "No valid quant linear", so point at the
-    layout and kernels that do run on ROCm.
+    ``FORMAT.GEMV`` is read by the native CUDA AWQ extension
+    (``gemv_forward``/``gemmv2_forward``), which hipcc cannot build: the
+    sources include ``cuda_fp16.h`` and CUDA-only inline asm, and the hipified
+    warp-sync reduction rejects wave32.  Without this check an AUTO load fails
+    later with a bare "No valid quant linear", so point at the layout and
+    kernels that do run on ROCm.
+
+    The gate keys on the *target* device family, not on the installed torch
+    build (#5219).  A ROCm wheel can still serve ``device="cpu"``, where
+    ``AwqGEMVTorchLinear`` reads the identical packed layout, so refusing every
+    load in a HIP process would break a supported placement for a reason that
+    has nothing to do with where the weights run.
+
+    ``FORMAT.GEMV_FAST`` / ``FORMAT.LLM_AWQ`` are not refused here: their
+    portable Torch readers declare ROCm and read the identical interleaved
+    layout, so AUTO resolves to them on ROCm (issue #5109).  An explicit
+    selection of the CUDA-only native kernel still fails through
+    ``select_quant_linear`` with the device-family message.
     """
 
     if not IS_ROCM:
         return
     if export_quant_method != METHOD.AWQ:
         return
-    if format_code not in (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+    if format_code != FORMAT.GEMV:
         return
     # The portable Triton GEMV reads the GEMV layout without the extension, so an
     # explicit selection of it is a supported ROCm placement.
     if backend == BACKEND.AWQ_GEMV_TRITON:
+        return
+    # ``device=None`` means the caller did not resolve a placement; keep the
+    # conservative refusal.  A resolved non-ROCm family (CPU, XPU, ...) falls
+    # through to ``select_quant_linear``, whose ``PORTABLE_FALLBACK`` pass picks
+    # a reader that declares that family.
+    if device is not None and selector_device_family(device) != DEVICE.ROCM:
         return
 
     from ..nn_modules.qlinear.gemv_awq import AWQ_GEMV_ROCM_UNSUPPORTED
@@ -2067,7 +2285,7 @@ def ModelLoader(cls):
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
         torch._dynamo.disable()
-        default_dtype_before = torch.get_default_dtype()
+        default_dtype_before = _default_dtype_outside_construction()
 
         pretrained_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             pretrained_model_id_or_path,
@@ -2089,6 +2307,14 @@ def ModelLoader(cls):
 
         tokenizer_trust_remote_code = model_init_kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs_without_internal)
+        # The wrapper owns the processor and auxiliary-file lookup. A nested
+        # checkpoint keeps all of them beside the config and weights, so pass
+        # the resolved directory instead of the repository root. Config,
+        # tokenizer and weight loading keep forwarding ``subfolder`` to
+        # Transformers; this value is only the wrapper's checkpoint root.
+        checkpoint_dir = resolve_checkpoint_subfolder(
+            model_local_path, model_init_kwargs_without_internal.get("subfolder")
+        )
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
 
         model_init_kwargs_without_internal["trust_remote_code"] = trust_remote_code
@@ -2228,7 +2454,9 @@ def ModelLoader(cls):
                 # come from these arguments rather than the previous load.
                 configure_kernel(kernel)
             hf_model_init_kwargs = dict(model_init_kwargs_without_internal)
-            hf_model_init_kwargs["device_map"] = device_map if device_map else "auto"
+            hf_model_init_kwargs["device_map"] = _dense_placement_device_map(
+                device, device_map, resolved_device
+            )
             set_dtype_compat(hf_model_init_kwargs, dtype)
             hf_model_init_kwargs.update(hf_gguf_load_kwargs)
             if (
@@ -2244,9 +2472,12 @@ def ModelLoader(cls):
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
             _call_before_model_load(
                 cls,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
                 load_quantized_model=False,
             )
+            # transformers' ``from_pretrained`` wraps model construction in
+            # ``local_torch_dtype`` (a process-global default-dtype window).
+            # The helper takes the global-state writer for that call.
             model = _hf_loader_from_pretrained_with_dynamic_module_retry(
                 cls.loader,
                 model_local_path,
@@ -2269,7 +2500,7 @@ def ModelLoader(cls):
                 quantize_config=quantize_config,
                 tokenizer=tokenizer,
                 trust_remote_code=trust_remote_code,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
             )
             _set_paged_attention_safe_cuda_graphs(instance.model)
 
@@ -2344,7 +2575,7 @@ def ModelLoader(cls):
 
             _call_before_model_load(
                 cls,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
                 load_quantized_model=False,
             )
             from ..utils.hf import build_shell_model
@@ -2472,7 +2703,7 @@ def ModelLoader(cls):
             quantize_config=quantize_config,
             tokenizer=tokenizer,
             trust_remote_code=trust_remote_code,
-            model_local_path=model_local_path,
+            model_local_path=checkpoint_dir,
         )
         _set_paged_attention_safe_cuda_graphs(instance.model)
 
@@ -2538,13 +2769,20 @@ def ModelLoader(cls):
         # pre-enablement below and the inference-time copies use it.
         configure_p2p(p2p)
         # Install the kernel policy before any quantized module is built.
-        configure_kernel(kernel)
+        kernel_policy = configure_kernel(kernel)
 
-        # post-quant is safe with GIL=0 and torch.compile/graphs
-
-        import torch._dynamo
-        torch._dynamo.reset()
-        default_dtype_before = torch.get_default_dtype()
+        # A load must not reset dynamo's caches: ``torch._dynamo.reset()``
+        # discards every compiled frame in the process, including the graphs of
+        # other models that are already ``optimize()``d and still serving, and
+        # running it while another thread executes one of those frames crashed
+        # dynamo's frame evaluation (#5209). The load's bf16 default-dtype
+        # window is instead serialized with every compiled call through
+        # ``model_load_lock()`` (``gptqmodel/utils/torch.py``), so a concurrent
+        # trace can neither capture nor restore it. Compiled frames that belong
+        # to a discarded model are dropped with it: ``release_compile_trace_garbage``
+        # reclaims the trace cycles that keep a dropped model alive (#5020), so a
+        # load does not need a process-wide reset for them.
+        default_dtype_before = _default_dtype_outside_construction()
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,
@@ -2645,24 +2883,31 @@ def ModelLoader(cls):
         # constructor raises. VLLM/SGLang are explicit passthrough engines and
         # consume their own runtime options.
         if backend not in (BACKEND.VLLM, BACKEND.SGLANG):
-            leftover = set(kwargs_without_internal)
+            accepted = _accepted_quantized_load_kwargs(cls, kwargs_without_internal.consumed)
+            # The Hub staging options (`token`, `max_workers`, `local_dir`,
+            # `endpoint`, ...) are forwarded un-popped to `snapshot_download`
+            # above, so they are consumed by the load even though they never
+            # reach `pop`. Comparing against the accepted set keeps the check
+            # and its message consistent: rejecting a keyword the message lists
+            # as accepted made `GPTQModel.load(repo, token=...)` always fail
+            # (#5007).
+            leftover = set(kwargs_without_internal) - accepted
             if leftover:
-                _raise_unexpected_quantized_load_kwargs(
-                    cls,
-                    leftover,
-                    _accepted_quantized_load_kwargs(cls, kwargs_without_internal.consumed),
-                )
+                _raise_unexpected_quantized_load_kwargs(cls, leftover, accepted)
 
         # A native block-float checkpoint carries none of the GPTQ keys this
         # loader binds (qweight/qzeros/scales/g_idx): it stores packed mantissa
         # codes plus one exponent per block of 16 values. Route it before any
         # GPTQ parsing, otherwise every decoder layer reads as missing. The
+        # probe and the build both use the resolved checkpoint directory, so
+        # `subfolder=` selects the same artifact as passing that directory
+        # directly instead of falling through to the GPTQ config parser. The
         # guards above still apply -- this path builds the model through
         # transformers like any other, so the same version and
         # trust_remote_code rules hold.
         from .tt_blockfloat_loader import is_tt_blockfloat_checkpoint
 
-        if is_tt_blockfloat_checkpoint(model_local_path):
+        if is_tt_blockfloat_checkpoint(checkpoint_dir):
             if requested_device_map is not None or (
                 requested_device is not None
                 and str(requested_device).split(":")[0].lower() != "cpu"
@@ -2678,7 +2923,7 @@ def ModelLoader(cls):
                 )
             return _load_tt_blockfloat_model(
                 cls,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
                 dtype=dtype,
                 trust_remote_code=trust_remote_code,
             )
@@ -2830,7 +3075,7 @@ def ModelLoader(cls):
             if backend == BACKEND.AUTO:
                 backend = BACKEND.BITSANDBYTES
 
-        _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend)
+        _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend, device)
 
         dtype = _coerce_quantized_awq_dtype(
             backend=backend,
@@ -2880,7 +3125,7 @@ def ModelLoader(cls):
                 )
 
                 model = load_model_by_vllm(
-                    model=model_local_path,
+                    model=checkpoint_dir,
                     trust_remote_code=trust_remote_code,
                     **kwargs_without_internal,
                 )
@@ -2901,7 +3146,7 @@ def ModelLoader(cls):
                     resolved_dtype=dtype,
                 )
                 model, hf_config = load_model_by_sglang(
-                    model=model_local_path,
+                    model=checkpoint_dir,
                     trust_remote_code=trust_remote_code,
                     config=config,
                     **sglang_kwargs,
@@ -2917,7 +3162,7 @@ def ModelLoader(cls):
                 qlinear_kernel=None,
                 load_quantized_model=True,
                 trust_remote_code=trust_remote_code,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
             )
             instance._runtime_generate = runtime_generate
             _set_paged_attention_safe_cuda_graphs(instance.model)
@@ -3003,7 +3248,7 @@ def ModelLoader(cls):
         with suspend_hf_weight_init():
             _call_before_model_load(
                 cls,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
                 load_quantized_model=True,
             )
 
@@ -3030,6 +3275,11 @@ def ModelLoader(cls):
             set_dtype_compat(args, dtype)
 
             try:
+                # ``from_config`` opens transformers' ``local_torch_dtype``
+                # window, and that window holds the model-global-state writer
+                # (#5304). Nothing else in this call is exclusive, so weight
+                # I/O, packing and kernel post-init stay concurrent with
+                # optimized forwards (#5209, #5268).
                 model = cls.loader.from_config(
                     config, trust_remote_code=trust_remote_code, **args
                 )
@@ -3131,7 +3381,7 @@ def ModelLoader(cls):
                 input_embed_name = get_module_name(model, input_embeddings) if input_embeddings is not None else None
                 output_embed_name = get_module_name(model, output_embeddings) if output_embeddings is not None else None
                 input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
-                    model_dir=model_local_path,
+                    model_dir=checkpoint_dir,
                     input_embed_name=input_embed_name,
                     output_embed_name=output_embed_name,
                 )
@@ -3221,6 +3471,7 @@ def ModelLoader(cls):
                     module_names=list(qcfg.tensor_storage.keys()),
                     tensor_storage=qcfg.tensor_storage,
                     module_cls=exl3_module_cls,
+                    kernel=kernel_policy,
                 )
                 preload_qlinear_kernel = exl3_module_cls
             else:
@@ -3235,6 +3486,16 @@ def ModelLoader(cls):
                     is_sharded=is_sharded,
                     cpu_offload=cpu_offload,
                 )
+
+        # The shell replaced only the modules named by `module_tree`. Let the
+        # definition reattach any runtime modules it shares with those leaves
+        # before the checkpoint is loaded: the unmaterialized-parameter guard
+        # inside `load_checkpoint_in_model_then_tie_weights` would otherwise
+        # reject the sibling branch before `after_model_load` can fix it
+        # (#5514).
+        after_make_quant = getattr(cls, "after_make_quant", None)
+        if callable(after_make_quant):
+            model = after_make_quant(model)
 
         validate_checkpoint_qweights(
             model,
@@ -3538,10 +3799,13 @@ def ModelLoader(cls):
             load_extra_kwargs["offload_buffers"] = offload_kwargs["offload_buffers"]
 
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
+        keep_in_fp32_strict_modules = _model_keep_in_fp32_strict_names(model)
+
         if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PARO]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
+                keep_in_fp32_strict_modules=keep_in_fp32_strict_modules,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
@@ -3647,6 +3911,7 @@ def ModelLoader(cls):
                 model,
                 dtype=dtype,
                 keep_in_fp32_modules=keep_in_fp32_modules or None,
+                keep_in_fp32_strict_modules=keep_in_fp32_strict_modules,
                 fp32_bf16_buffer_names=fp32_bf16_buffer_names,
                 packed_fp8_buffer_dtypes=packed_fp8_buffer_dtypes,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
@@ -3656,11 +3921,12 @@ def ModelLoader(cls):
                 **load_extra_kwargs,
             )
 
-            if format_code == FORMAT.GPTQ_V2:
-                # Native v2 checkpoints store logical zero points; the v1->v2
-                # conversion above only runs for v1 checkpoints. Mark the
-                # loaded modules so decoders and repack bookkeeping read the
-                # words as v2 instead of misreading every zero point one high.
+            if checkpoint_qzeros_layout(format_code) == 2:
+                # Native v2 and planar gptq_p checkpoints store logical zero
+                # points; the v1->v2 conversion above only runs for v1
+                # checkpoints. Mark the loaded modules so decoders and repack
+                # bookkeeping read the words as v2 instead of misreading every
+                # zero point one high.
                 for m in model.modules():
                     if isinstance(m, GPTQQuantLinear):
                         m.qzero_format(format=2)
@@ -3717,7 +3983,7 @@ def ModelLoader(cls):
                 from mlx_lm import load
                 from mlx_lm.utils import save_config, save_model
 
-                from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
+                from ..utils.mlx import _convert_gptq_to_mlx_weights, mlx_generate
             except ModuleNotFoundError as exception:
                 raise type(exception)(
                     "GPT-QModel load mlx model required dependencies are not installed.",
@@ -3725,7 +3991,7 @@ def ModelLoader(cls):
                 )
 
             with tempfile.TemporaryDirectory() as temp_dir:
-                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_local_path, model, qcfg.to_dict(), cls.lm_head)
+                mlx_weights, mlx_config = _convert_gptq_to_mlx_weights(model_local_path, model, qcfg.to_dict(), cls.lm_head)
                 if (mlx_config.pop("_gptqmodel_group16_runtime", False)
                         or mlx_config.pop("_gptqmodel_custom_mlx_runtime", False)):
                     model = mlx_weights
@@ -3753,7 +4019,7 @@ def ModelLoader(cls):
             qlinear_kernel=qlinear_kernel,
             load_quantized_model=True,
             trust_remote_code=trust_remote_code,
-            model_local_path=model_local_path,
+            model_local_path=checkpoint_dir,
             effective_module_tree=effective_module_tree,
         )
         if backend == BACKEND.MLX:

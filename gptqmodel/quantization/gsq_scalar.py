@@ -257,16 +257,19 @@ def refine_gptq_scalar(
             )
             refined_weights.append(result.weight)
             refined_scales.append(result.scales)
-            normalizer = energy if energy > torch.finfo(torch.float32).eps else 1.0
-            before_sum += result.before * normalizer
-            after_sum += result.after * normalizer
-            energy_sum += normalizer
+            before_sum += result.before
+            after_sum += result.after
+            energy_sum += energy
             for step, score in enumerate(result.history):
-                weighted_history[step] += score * normalizer
+                weighted_history[step] += score
+        # Apply the near-zero convention to the layer total, not to each
+        # chunk: a zero-energy row must not add a fictitious unit of teacher
+        # energy to whichever chunk happens to hold it (#5693).
+        normalizer = energy_sum if energy_sum > torch.finfo(torch.float32).eps else 1.0
         return ScalarGSQResult(
             torch.cat(refined_weights), torch.cat(refined_scales), zeros.detach().clone(),
-            g_idx.detach().clone(), before_sum / energy_sum, after_sum / energy_sum,
-            [score / energy_sum for score in weighted_history],
+            g_idx.detach().clone(), before_sum / normalizer, after_sum / normalizer,
+            [score / normalizer for score in weighted_history],
         )
 
 
@@ -339,29 +342,32 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
     zero = zeros.detach().float().clone()
     teacher_projected = teacher @ factor
     teacher_energy = teacher_projected.square().sum()
-    if not bool(torch.isfinite(teacher_energy)) or float(teacher_energy) <= torch.finfo(torch.float32).eps:
-        # A near-zero teacher is not a useful normalization. Score the
-        # unnormalized quadratic, which keeps the ordering and the sign.
-        teacher_energy = torch.ones_like(teacher_energy)
+    if not bool(torch.isfinite(teacher_energy)):
+        raise ValueError("non-finite GSQ teacher energy")
 
     def loss(matrix):
-        return ((matrix.float() - teacher) @ factor).square().sum() / teacher_energy
+        # Raw Gram quadratic. The caller normalizes the layer total once, so a
+        # zero-energy chunk cannot add a fictitious unit of teacher energy.
+        return ((matrix.float() - teacher) @ factor).square().sum()
 
     def row_loss(matrix):
-        # One raw projection score per output row. Summing these and dividing
-        # by the shared teacher energy reproduces ``loss`` exactly, so a
-        # per-row acceptance decision is the same objective the checkpoint is
-        # reported against.
+        # One raw projection score per output row. Summing these reproduces
+        # ``loss`` exactly, so a per-row acceptance decision is the same
+        # objective the checkpoint is reported against.
         error = matrix.float() - teacher
         return (error @ factor).square().sum(dim=1)
 
     def recover_codes(candidate_weight, candidate_scales):
-        # Match pack_original: the scale/zero product, addition and division
-        # use the producer tensor dtypes before the integer rounding step.
-        native_scale = candidate_scales.to(scales.dtype)[:, group]
-        native_zero = zeros[:, group]
-        offset = native_zero * native_scale
-        return ((candidate_weight + offset) / native_scale).round().clamp(0, 2**bits - 1).float()
+        # Share the packer's arithmetic instead of re-deriving it here.
+        # ``affine_codes`` widens the weight, scale and zero-point to FP32
+        # before the multiply, exactly like ``pack_original``; multiplying two
+        # FP16 operands first overflowed (zero-point 8 * scale 8192 -> inf) and
+        # turned an exactly representable zero into code 14 (#5697).
+        stored = candidate_scales.to(scale_dtype)
+        return affine_codes(
+            candidate_weight, stored, zeros, group, bits,
+            packing="gptq", scale_dtype=scale_dtype,
+        ).float()
 
     def decode(codes, candidate_scales):
         stored = candidate_scales.to(scale_dtype).float()
@@ -410,21 +416,30 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
             metric=factor,
             teacher=teacher,
             decode=lambda codes: decode(codes, current_scales),
-            row_loss=lambda codes: score_rows(codes, current_scales),
+            # ``hard_code_sweep`` passes a decoded *weight* to ``row_loss``, so
+            # hand it the weight-based scorer. Passing the codes-based
+            # ``score_rows`` decoded a weight as if it were codes, and the
+            # inflated ``best_rows`` made the sweep accept unconditionally.
+            row_loss=row_loss,
             bits=bits,
             offsets=offsets,
         )
-        current_codes = searched
-        code_rows = score_rows(current_codes, current_scales)
+        code_rows = score_rows(searched, current_scales)
         accepts = code_rows < best_rows * floor
-        best_codes = torch.where(accepts.unsqueeze(-1), current_codes, best_codes)
+        best_codes = torch.where(accepts.unsqueeze(-1), searched, best_codes)
         best_scales = torch.where(accepts.unsqueeze(-1), current_scales, best_scales)
         best_rows = torch.where(accepts, code_rows, best_rows)
-        history.append(float(best_rows.sum() / teacher_energy))
-        if not config.learn_scales or not bool(accepts.any()):
+        # Continue from each row's best accepted state so a rejected candidate
+        # never feeds its worse codes or scales into the next candidate family.
+        current_codes = best_codes
+        current_scales = best_scales
+        history.append(float(best_rows.sum()))
+        if not config.learn_scales:
             break
         # Candidate 2: refit the scale table under those codes. Scales move the
         # grid, so the next round re-searches the codes on the new table.
+        # Every row gets its own scale trial even when its codes were already
+        # optimal; whether a neighbour improved must not decide this row (#5692).
         scaled = _fit_group_scales(
             current_codes, zero, group, teacher, factor, decode,
             scale_dtype, current_scales,
@@ -433,11 +448,10 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
         accepts = scale_rows < best_rows * floor
         if not bool(accepts.any()):
             break
-        best_codes = torch.where(accepts.unsqueeze(-1), current_codes, best_codes)
         best_scales = torch.where(accepts.unsqueeze(-1), scaled, best_scales)
         best_rows = torch.where(accepts, scale_rows, best_rows)
-        current_scales = torch.where(accepts.unsqueeze(-1), scaled, current_scales)
-        history.append(float(best_rows.sum() / teacher_energy))
+        current_scales = best_scales
+        history.append(float(best_rows.sum()))
 
     # Final per-row acceptance against the initializer, so a row that got worse
     # somewhere in the loop keeps its GPTQ export.

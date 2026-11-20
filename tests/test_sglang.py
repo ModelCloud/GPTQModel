@@ -177,7 +177,9 @@ class TestLoadSglang:
             pytest.skip(SGLANG_INSTALL_HINT)
         if importlib.util.find_spec("flashinfer") is None:
             pytest.skip(
-                "flashinfer is required by SGLang integration; install gptqmodel['sglang']"
+                "flashinfer is required by SGLang integration; install flashinfer and "
+                "sglang[srt] in an environment whose Torch/Transformers pins match "
+                "SGLang (see docs/engine-extras.md)"
             )
         if not torch.cuda.is_available():
             pytest.skip(

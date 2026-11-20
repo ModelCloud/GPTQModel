@@ -111,6 +111,7 @@ from .definitions.raon1_mini import Raon1MiniQModel  # noqa: E402
 from .definitions.flint import FlintQModel  # noqa: E402
 from .definitions.ricursive import RicursiveQModel  # noqa: E402
 from .definitions.deepseek_v4 import DeepSeekV4QModel  # noqa: E402
+from .definitions.deepseek_v41_flash import DeepSeekV41FlashQModel  # noqa: E402
 from .definitions.deepseek_ocr2 import DeepSeekOCR2QModel  # noqa: E402
 from .definitions.deepseek_vl import DeepSeekVLQModel  # noqa: E402
 from .definitions.deepseek_vl_v2 import DeepSeekVLV2QModel  # noqa: E402
@@ -399,6 +400,7 @@ MODEL_MAP = {
     "flint": FlintQModel,
     "ricursive": RicursiveQModel,
     "deepseek_v4": DeepSeekV4QModel,
+    "deepseek_v41": DeepSeekV41FlashQModel,
     "deepseek_ocr2": DeepSeekOCR2QModel,
     "deepseek_vl": DeepSeekVLQModel,
     "deepseek_vl_v2": DeepSeekVLV2QModel,
@@ -645,6 +647,97 @@ def _get_config_load_kwargs(kwargs: dict) -> dict:
     return config_kwargs
 
 
+def _legacy_sidecar_names() -> tuple:
+    """The sidecar filenames a legacy checkpoint may carry."""
+
+    return (QUANT_CONFIG_FILENAME, "quant_config.json")
+
+
+def _cached_sidecar_exists(
+    repo_id: str,
+    filename: str,
+    *,
+    subfolder: str,
+    revision,
+) -> bool:
+    """Whether the local Hub cache holds one sidecar file for this selection."""
+
+    try:
+        from huggingface_hub import hf_hub_download
+
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            subfolder=subfolder or None,
+            revision=revision,
+            local_files_only=True,
+        )
+        return True
+    except Exception:  # pragma: no cover - missing cache entry / offline miss
+        return False
+
+
+def _has_legacy_quant_sidecar(
+    model_id_or_path,
+    config_kwargs: dict,
+    *,
+    treat_as_local_path: bool,
+) -> bool:
+    """Whether the *selected* checkpoint carries a legacy quantize sidecar.
+
+    The probe has to resolve the same ``subfolder``/``revision`` as the config
+    and the weights (#5379): a nested checkpoint keeps its sidecar beside its
+    config, and a pinned revision keeps it in that revision. An offline caller
+    must never list the remote repository, so offline probes consult only the
+    local cache.
+    """
+
+    subfolder = config_kwargs.get("subfolder") or ""
+    if treat_as_local_path:
+        root = join(model_id_or_path, subfolder) if subfolder else model_id_or_path
+        return any(os.path.exists(join(root, name)) for name in _legacy_sidecar_names())
+
+    revision = config_kwargs.get("revision")
+    from huggingface_hub import constants as hub_constants
+
+    if hub_constants.HF_HUB_OFFLINE:
+        return any(
+            _cached_sidecar_exists(
+                model_id_or_path, name, subfolder=subfolder, revision=revision
+            )
+            for name in _legacy_sidecar_names()
+        )
+    files = set(list_repo_files(repo_id=model_id_or_path, revision=revision))
+    return any(
+        (f"{subfolder}/{name}" if subfolder else name) in files
+        for name in _legacy_sidecar_names()
+    )
+
+
+def select_model_definition(model_type: str, config) -> type:
+    """Return the definition the loader uses for an already-resolved ``config``.
+
+    Mirrors `check_and_get_model_definition` without reading a checkpoint, so
+    tests (for example the meta-device MoE coverage sweep) resolve exactly the
+    definition a real load would pick.
+    """
+
+    model_type = (model_type or "").lower()
+
+    # Unsupported model types use BaseQModel and fail closed unless the caller
+    # supplies an explicit model definition/module tree.
+    definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+
+    # `kimi_linear` covers two incompatible layouts: the legacy AttnRes/K3
+    # checkpoint that needs the bounded K3 runner, and native Transformers
+    # `KimiLinearForCausalLM` (no AttnRes), which quantizes with the ordinary
+    # looper. Dispatch on config fields rather than on the registry key.
+    if model_type == "kimi_linear" and not is_kimi_k3_config(config):
+        return KimiLinearNativeQModel
+
+    return definition
+
+
 def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_load_kwargs):
     if "gguf_file" not in config_load_kwargs:
         model_dir = normalize_model_id_or_path_for_hf_gguf(
@@ -657,9 +750,7 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
     model_type = config.model_type.lower()
 
-    # Unsupported model types use BaseQModel and fail closed unless the caller
-    # supplies an explicit model definition/module tree.
-    definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+    definition = select_model_definition(model_type, config)
 
     # `model_type: llava` covers both the Hugging Face composite checkpoint and
     # the original liuhaotian checkpoint, which declares a plain causal-LM
@@ -673,13 +764,6 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
             "Hugging Face `LlavaForConditionalGeneration` checkpoint. Use the "
             "Hugging Face format instead, e.g. `llava-hf/llava-1.5-7b-hf`."
         )
-
-    # `kimi_linear` covers two incompatible layouts: the legacy AttnRes/K3
-    # checkpoint that needs the bounded K3 runner, and native Transformers
-    # `KimiLinearForCausalLM` (no AttnRes), which quantizes with the ordinary
-    # looper. Dispatch on config fields rather than on the registry key.
-    if model_type == "kimi_linear" and not is_kimi_k3_config(config):
-        return KimiLinearNativeQModel
 
     return definition
 
@@ -982,17 +1066,11 @@ class GPTQModel:
             is_gptqmodel_quantized = True
         else:
             # TODO FIX ME...not decoded to check if quant method is compatible or quantized by gptqmodel
-            for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
-                if treat_as_local_path:  # Local paths should never trigger remote Hub lookups
-                    if isdir(model_id_or_path) and os.path.exists(join(model_id_or_path, name)):
-                        is_gptqmodel_quantized = True
-                        break
-                else:  # Remote
-                    files = list_repo_files(repo_id=model_id_or_path)
-                    for f in files:
-                        if f == name:
-                            is_gptqmodel_quantized = True
-                            break
+            is_gptqmodel_quantized = _has_legacy_quant_sidecar(
+                model_id_or_path,
+                _get_config_load_kwargs(kwargs),
+                treat_as_local_path=treat_as_local_path,
+            )
 
         if is_gptqmodel_quantized:
             if quantize_config is not None:
@@ -1046,7 +1124,7 @@ class GPTQModel:
 
         # Weight quantization does not change the cache, so state what context
         # costs as soon as a model is loaded for inference.
-        m.log_kv_cache_estimate()
+        m.log_budget()
 
         return m
 

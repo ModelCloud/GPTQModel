@@ -8,10 +8,11 @@ import torch
 
 from gptqmodel.nn_modules import exllamav3 as exl3_bridge
 from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 requires_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not requires_nvidia_cuda(),
     reason="the native EXL3 dispatch needs a CUDA device",
 )
 
@@ -41,9 +42,9 @@ class _FakeNative:
             return torch.zeros(
                 (*x.shape[:-1], self.out_features), dtype=out_dtype, device=x.device
             )
-        # Mimic the native FP16 GEMM (FP16 inputs, FP16 output, bias included).
+        # Mimic the native FP16 GEMM and its optional bias epilogue.
         result = x @ self.weight
-        if self.bias is not None:
+        if params.get("include_bias", True) and self.bias is not None:
             result = result + self.bias
         return result.to(out_dtype)
 
@@ -124,6 +125,7 @@ def test_exllamav3_half_inputs_keep_native_dispatch(rows):
     assert calls == [(torch.float16, torch.float16, rows)]
 
 
+@requires_cuda
 @pytest.mark.parametrize("rows, branch", [(32, "bc"), (33, "hgemm")])
 def test_native_exl3_row_boundary_uses_expected_half_kernel(monkeypatch, rows, branch):
     from gptqmodel.exllamav3.modules.quant import exl3 as native_exl3
@@ -168,7 +170,9 @@ def test_bfloat16_normal_range_cast_is_exact():
 
     assert prepared is not None
     native_input, output_scale = prepared
-    assert output_scale is None
+    # `None` and an all-ones tensor are the same decision, "scale 1" (#4955).
+    if output_scale is not None:
+        assert torch.equal(output_scale, torch.ones_like(output_scale))
     assert native_input.dtype == torch.float16
     assert torch.equal(native_input.float(), x.float())
 

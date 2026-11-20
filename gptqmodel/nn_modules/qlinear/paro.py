@@ -19,21 +19,26 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
 from ...utils.backend import BACKEND
+from ...utils.cpu_features import has_avx512_bf16
 from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.paro import (
     apply_paro_rotation,
+    apply_paro_rotation_autograd,
     apply_paro_rotation_vectorized,
     build_identity_rotation_buffers,
     is_identity_rotation,
+    prewarm_paro_rotation_extension,
     validate_rotation_buffers,
 )
 from ...utils.rocm import IS_ROCM
+from ...utils.torch import dynamo_is_compiling
 from . import detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
+    checkpoint_layout_tensor,
     discard_fused_train_state,
     finalize_fused_train_state,
     restore_fused_train_state,
@@ -44,10 +49,16 @@ from .gemm_awq import (
     _awq_cuda_gemm_forward,
     _awq_cuda_gemm_forward_fp32_reduce,
 )
+from .torch_aten_kernel import _has_local_int4pack_cpu_ops
+from .torch_aten_kernel_awq import TorchAtenAwqLinear
 from .torch_awq import AwqTorchLinear
+from .torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
 
 
 log = setup_logger()
+
+# ``torch.compile`` must not trace the one-time CPU layout transform.
+_disable_compile = getattr(getattr(torch, "compiler", None), "disable", lambda fn: fn)
 
 # INT4 AWQ stores eight codes per int32, so `pack_awq` rejects a packed
 # dimension that is not a multiple of eight. Paro reuses that packer for
@@ -59,6 +70,77 @@ PARO_OUT_FEATURES_ALIGN = 8
 
 # Rotated activations benchmark faster with a shallower K split than generic AWQ.
 _PARO_AWQ_SPLIT_K = 4
+
+# The split-K AWQ GEMM and dequantize + cuBLAS cross over at a row count that
+# depends on the projection shape. The dense route pays a fixed dequantize
+# cost proportional to ``in_features * out_features`` (the dequantized weight
+# bytes), while the native route pays one FP32 split-K partial slab per row.
+# A global 640-row threshold (the #5164 fix for #5096) sent the 641-2000 row
+# band to cuBLAS where the native kernel is still faster (issue #5210); the
+# first shape-aware fit then clamped every small wide projection to a
+# 2048-row floor and regressed the 1024-2047 row band (issue #5260).
+#
+# Measured on SM 8.9 (RTX 4090, torch 2.15.0+cu132, FP16, group_size 128,
+# synthetic g128 layers), both routes interleaved in one process, min of
+# nine to forty-one blocks. The crossover is ~800 rows for 896x4864, ~870 for
+# 1536x8960, ~960 for 2048x8192, ~1340 for 4096x14336, ~1490 for 4096x4096,
+# ~1900 for 2048x2048, ~2300 for 14336x4096 and 4864x896, ~2000 for
+# 8192x2048 and ~3100 for 8960x1536. Small layers pay a fixed cuBLAS small-M
+# penalty while large layers pay more dequantize work, so the size response
+# is a V-shape in log size around the 4096x4096 anchor. The fit reproduces
+# the wide and square crossovers within ~10%; the narrow tall shapes are
+# conservative heuristics because cuBLAS switches kernels between adjacent
+# row counts. It keeps the 641-row native choice from #5210 for the 7-8B
+# shapes, and the 4096-row ceiling preserves #5096's wide-prefill escape.
+# See docs/paro.md#shape-aware-crossover.
+_PARO_AWQ_DENSE_FLOOR_ROWS = 768
+_PARO_AWQ_DENSE_MAX_ROWS = 4096
+_PARO_AWQ_DENSE_ROWS_AT_4096 = 1342
+_PARO_AWQ_DENSE_ASPECT_EXP = 0.304
+_PARO_AWQ_DENSE_SIZE_EXP = 0.357
+_PARO_AWQ_DENSE_SMALL_SIZE_EXP = 0.098
+_PARO_AWQ_DENSE_NARROW_OUT = 2048
+_PARO_AWQ_NARROW_OUT_EXP = 0.219
+_PARO_AWQ_DENSE_SIZE_ANCHOR = 4096 * 4096
+
+
+def paro_awq_dense_min_rows(in_features: int, out_features: int) -> int:
+    """Rows from which dequantize + cuBLAS beats the native split-K AWQ GEMM.
+
+    The measured crossover has three drivers: the aspect ratio, the layer size
+    ``in_features * out_features`` (the dequantized weight bytes), and the
+    output width. Small layers pay a fixed cuBLAS small-M penalty, so the size
+    term is a V-shape in log size around the 4096x4096 anchor: below it the
+    threshold grows as the layer shrinks, above it the threshold grows with
+    the dequantize work. A narrow output width makes the cuBLAS GEMM less
+    efficient and raises the threshold further.
+
+    It is a host-side integer decision, not a device probe, so the same shape
+    always selects the same path. The floor keeps the 641-row native choice
+    from #5210; the 4096-row ceiling preserves #5096's wide-prefill escape.
+    """
+
+    if in_features <= 0 or out_features <= 0:
+        return _PARO_AWQ_DENSE_FLOOR_ROWS
+    size = (in_features * out_features) / _PARO_AWQ_DENSE_SIZE_ANCHOR
+    size_exp = (
+        _PARO_AWQ_DENSE_SIZE_EXP
+        if size >= 1.0
+        else -_PARO_AWQ_DENSE_SMALL_SIZE_EXP
+    )
+    narrow = max(1.0, _PARO_AWQ_DENSE_NARROW_OUT / out_features)
+    rows = (
+        _PARO_AWQ_DENSE_ROWS_AT_4096
+        * (in_features / out_features) ** _PARO_AWQ_DENSE_ASPECT_EXP
+        * size**size_exp
+        * narrow**_PARO_AWQ_NARROW_OUT_EXP
+    )
+    return int(
+        min(
+            _PARO_AWQ_DENSE_MAX_ROWS,
+            max(_PARO_AWQ_DENSE_FLOOR_ROWS, round(rows)),
+        )
+    )
 
 
 def awq_gemm_shape_supported(*, bits: int, in_features: int, out_features: int, groups: int) -> bool:
@@ -94,11 +176,42 @@ def awq_gemm_bf16_supported(device: torch.device) -> bool:
 class ParoLinear(AwqTorchLinear):
     """Run Paro inference by rotating inputs and reusing AWQ packed GEMM."""
 
-    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
-    # ``torch.cuda.graph`` capture both run with matching output. The rotation
-    # buffers are validated in ``post_init``; dynamo stops at EAGER on
-    # ``tensor.is_inference()``.
+    # The inherited AWQ payload plus the per-layer rotation state. A checkpoint
+    # missing any of these loads a wrong rotation or a zero placeholder (the
+    # issue measured 1.16-3.99 logit diffs).
+    CHECKPOINT_REQUIRED_BUFFERS = (
+        "qweight",
+        "qzeros",
+        "scales",
+        "theta",
+        "pairs",
+        "channel_scales",
+    )
+
+    # Eager and an explicit ``torch.cuda.graph`` capture both run with matching
+    # output (measured on sm_80, torch 2.15.0.dev20260928+cu130); the rotation
+    # buffers are validated in ``post_init``.
+    #
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all pass for the AVX512-BF16 path (bias
+    # included) and for the bias-free ATen int4pack path. The
+    # ``_cpu_transform_lock`` transforms and ``_ensure_cpu_layout`` rewrites are
+    # skipped while tracing: the eager warmup builds the layout and the traced
+    # graph only reads it (#4885 keeps the lock in eager). The AVX512 extension
+    # op has a registered FakeTensor impl. A biased FP16/BF16 layer on the ATen
+    # path asks for the wide product and adds the bias afterwards; the #4068
+    # operand cast is a registered custom op (#5110), so that case traces too
+    # (#5332).
+    #
+    # CUDA keeps ``EAGER``: the native AWQ GEMM entry point was not re-measured
+    # on this CPU-only host, so it does not raise the base declaration.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = True
 
     SUPPORTS_BACKENDS = [BACKEND.PARO_CUDA]
@@ -220,6 +333,11 @@ class ParoLinear(AwqTorchLinear):
         self.scales_and_zeros = None
         self._register_rotation_buffers()
         self._rotation_identity = True
+        # The dense/split-K crossover is a property of the projection shape,
+        # so resolve it once instead of paying a float pow on every forward.
+        self._awq_dense_min_rows = paro_awq_dense_min_rows(
+            self.in_features, self.out_features
+        )
 
     def _register_rotation_buffers(self) -> None:
         """Allocate the per-layer buffers that encode runtime rotations."""
@@ -461,6 +579,15 @@ class ParoLinear(AwqTorchLinear):
 
     def post_init(self) -> None:
         super().post_init()
+        weight = getattr(self, "qweight", None)
+        if isinstance(weight, torch.Tensor) and weight.device.type == "cpu":
+            # Resolve the CPU kernels before any torch.compile trace: their
+            # validators load the JIT extensions through importlib, which dynamo
+            # cannot trace. This only warms the process-wide caches.
+            if self._paro_cpu_avx512 and has_avx512_bf16():
+                TorchCpuAvx512AwqLinear.cached_validate_once()
+            if _has_local_int4pack_cpu_ops():
+                TorchAtenAwqLinear.cached_validate_once()
         # Rotation pairs are checkpoint data used as shared-memory indices by
         # the fused CUDA kernel. Validate them once after the weights load.
         validate_rotation_buffers(
@@ -473,10 +600,48 @@ class ParoLinear(AwqTorchLinear):
             layer_name=f"Paro `{self.name}`",
         )
 
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+        """Load the fused rotation before ``torch.compile`` traces this layer.
+
+        ``optimize()`` usually runs right after a checkpoint load, before any
+        eager forward. Loading the JIT extension here keeps the compiled graph
+        on the fused rotation op instead of the slower reference fallback.
+        """
+        weight = getattr(self, "qweight", None)
+        prewarm_paro_rotation_extension(
+            fused_rotation=True,
+            group_size=self.group_size,
+            krot=self.krot,
+            device=weight.device if isinstance(weight, torch.Tensor) else None,
+        )
+        # ``BaseQModel.optimize`` warms every layer, but a direct per-layer
+        # ``optimize()`` call must install the CPU layout too: the traced CPU
+        # branches only read it (#5581).
+        scales = getattr(self, "scales", None)
+        if isinstance(scales, torch.Tensor):
+            self._prepare_cpu_inference_layout(scales.dtype)
+        super().optimize(backend=backend, mode=mode, fullgraph=fullgraph)
+
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         """Paro relies on AWQ validation and needs no extra one-time checks here."""
         return True, None
+
+    @classmethod
+    def auto_select_priority(cls, fmt, dtype=None):
+        """AUTO rank; demote the per-forward dense fallback on ROCm.
+
+        ``_cuda_awq_kernel_supported`` is false on every HIP build because the
+        AWQ GEMM extension is CUDA-only, so on ROCm this kernel always takes
+        ``_forward_dense`` and re-dequantizes the whole packed weight on each
+        call. ``ParoTritonLinear`` is the native ROCm path and must win AUTO
+        selection there; the declared rank is unchanged on CUDA (#4914).
+        """
+
+        priority = super().auto_select_priority(fmt, dtype)
+        if IS_ROCM:
+            return min(priority, 0)
+        return priority
 
     def extra_repr(self) -> str:
         """Expose Paro-specific fields in `repr(module)` for debugging."""
@@ -542,11 +707,45 @@ class ParoLinear(AwqTorchLinear):
             self._runtime_bias = bias
         return scales, bias
 
+    def _rotation_runtime_tensors(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Convert the rotation operands for this device/dtype, without caching."""
+
+        theta = self.theta.to(device=device, dtype=dtype).contiguous()
+        channel_scales = self.channel_scales.to(device=device, dtype=dtype).contiguous()
+        return theta, channel_scales
+
     def _ensure_rotation_runtime_dtype(
         self,
         device: torch.device,
         dtype: torch.dtype,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if dynamo_is_compiling():
+            # `tensor_cache_key` reads `is_inference()`/`_version`/`data_ptr()`,
+            # all hard dynamo graph breaks, and publishing the cache is a state
+            # write a traced graph must not perform. The eager warmup built the
+            # tensors for this device/dtype; a cold trace converts them without
+            # publishing, which stays traceable. Without this, every layer of a
+            # real (non-identity) Paro checkpoint broke the graph twice on CPU
+            # while the class declared `INDUCTOR` (#5115).
+            theta = self._runtime_theta
+            channel_scales = self._runtime_channel_scales
+            if (
+                theta is None
+                or channel_scales is None
+                or theta.device != device
+                or theta.dtype != dtype
+                or channel_scales.device != device
+                or channel_scales.dtype != dtype
+                or not theta.is_contiguous()
+                or not channel_scales.is_contiguous()
+            ):
+                return self._rotation_runtime_tensors(device, dtype)
+            return theta, channel_scales
+
         runtime_key = (
             tensor_cache_key(self.theta),
             tensor_cache_key(self.channel_scales),
@@ -560,21 +759,67 @@ class ParoLinear(AwqTorchLinear):
             or not self._runtime_theta.is_contiguous()
             or not self._runtime_channel_scales.is_contiguous()
         ):
-            self._runtime_theta = self.theta.to(device=device, dtype=dtype).contiguous()
-            self._runtime_channel_scales = self.channel_scales.to(device=device, dtype=dtype).contiguous()
+            # This cache outlives the call that fills it: the bf16 auto-cache
+            # serves every later forward, including grad-mode ones where the
+            # fused rotation's autograd wrapper saves these tensors for
+            # backward. Tensors created under `torch.inference_mode()` cannot
+            # be saved that way, so an eval/`generate()` warm-up must not
+            # poison the cache (#5317). `inference_mode(False)` restores the
+            # enclosing grad mode, so an ordinary build is unchanged.
+            with torch.inference_mode(False):
+                self._runtime_theta, self._runtime_channel_scales = (
+                    self._rotation_runtime_tensors(device, dtype)
+                )
             self._rotation_runtime_device = device
             self._rotation_runtime_dtype = dtype
             self._rotation_runtime_key = runtime_key
         return self._runtime_theta, self._runtime_channel_scales
 
+    def _rotation_parameters_need_grad(self) -> bool:
+        """Whether an enabled gradient path consumes the rotation operands.
+
+        An identity rotation is a no-op in value but not in its derivatives:
+        the identity angle still has a nonzero derivative and a unit scale has
+        a unit derivative (#5419). Dropping the rotation is only safe when no
+        enabled gradient needs ``theta`` or ``channel_scales``.
+        """
+
+        if not torch.is_grad_enabled():
+            return False
+        return bool(self.theta.requires_grad or self.channel_scales.requires_grad)
+
+    def _rotation_needs_autograd(self, x_flat: torch.Tensor) -> bool:
+        """Whether this rotation must stay inside the autograd graph.
+
+        The fused rotation op has no registered autograd kernel, so calling it
+        while a gradient is needed silently returns ``None`` for the input and
+        for every rotation parameter (issue #4958). The autograd wrapper runs
+        the same fused kernel in its forward and implements the backward.
+        """
+
+        if not torch.is_grad_enabled():
+            return False
+        return bool(x_flat.requires_grad or self._rotation_parameters_need_grad())
+
+    def _rotation_parameters_trainable(self) -> bool:
+        """Whether an optimizer can update the rotation operands in place."""
+
+        return bool(self.theta.requires_grad or self.channel_scales.requires_grad)
+
     def _rotate_inputs(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Apply the learned input transform before quantized matmul."""
-        if self._rotation_identity:
+        if self._rotation_identity and not self._rotation_parameters_trainable():
+            # The identity is exact, so the shortcut is bit-identical for the
+            # activations. Trainable operands must skip it even when grad is
+            # disabled: an optimizer step changes them without clearing the
+            # cached identity flag, and the no-grad forward has to observe the
+            # new values (#5636).
             return x_flat
+        needs_autograd = self._rotation_needs_autograd(x_flat)
         if (
-            x_flat.device.type == "cpu"
+            not needs_autograd
+            and x_flat.device.type == "cpu"
             and not self.training
-            and not x_flat.requires_grad
         ):
             theta, channel_scales = self._ensure_rotation_runtime_dtype(
                 x_flat.device,
@@ -594,6 +839,14 @@ class ParoLinear(AwqTorchLinear):
         channel_scales = self.channel_scales
         if use_cached_rotation_dtype:
             theta, channel_scales = self._ensure_rotation_runtime_dtype(x_flat.device, x_flat.dtype)
+        if needs_autograd:
+            return apply_paro_rotation_autograd(
+                x_flat,
+                self.pairs,
+                theta,
+                scales=channel_scales,
+                group_size=self.group_size,
+            )
         return apply_paro_rotation(
             x_flat,
             self.pairs,
@@ -602,11 +855,45 @@ class ParoLinear(AwqTorchLinear):
             group_size=self.group_size,
         )
 
+    @_disable_compile
+    def _checkpoint_operands_for_trace(self):
+        """Checkpoint ``qweight``/``qzeros`` for a traced dense call (#5581).
+
+        A traced graph must not restore the runtime layout (that rewrites the
+        registered buffers), so read the snapshot the transform captured.
+        """
+
+        with self._cpu_transform_lock:
+            return (
+                checkpoint_layout_tensor(self, "qweight"),
+                checkpoint_layout_tensor(self, "qzeros"),
+            )
+
     def _forward_dense(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Fallback reference path: dequantize AWQ weights and run dense matmul."""
         # The dense path dequantizes the checkpoint tensors, so a CPU kernel
         # layout must be returned first.
         if self._live_cpu_layout() is not None:
+            if dynamo_is_compiling():
+                # Restoring rewrites the registered buffers, which a traced
+                # graph must not do. Decode the checkpoint tensors the transform
+                # captured instead, so a traced grad call (which no fused path
+                # accepts) still returns the reference product (#5581).
+                qweight, qzeros = self._checkpoint_operands_for_trace()
+                if qweight is None or qzeros is None:
+                    raise RuntimeError(
+                        f"{type(self).__name__}: a CPU runtime layout is live and no "
+                        "traceable fused path was selected. Compile the layer before "
+                        "its first eager forward, or run this layer eagerly."
+                    )
+                compute_dtype = (
+                    torch.float32
+                    if x_flat.dtype in (torch.float16, torch.bfloat16)
+                    else x_flat.dtype
+                )
+                return self._dense_matmul_for_dtype(
+                    x_flat, compute_dtype, qweight=qweight, qzeros=qzeros
+                )
             self._restore_cpu_checkpoint_layout()
         # Keep the reconstructed grid, the reduction and the stored bias in
         # FP32, then round once.  Decoding to the activation dtype first makes
@@ -616,7 +903,20 @@ class ParoLinear(AwqTorchLinear):
             if x_flat.dtype in (torch.float16, torch.bfloat16)
             else x_flat.dtype
         )
-        weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
+        return self._dense_matmul_for_dtype(x_flat, compute_dtype)
+
+    def _dense_matmul_for_dtype(
+        self,
+        x_flat: torch.Tensor,
+        compute_dtype: torch.dtype,
+        *,
+        qweight: Optional[torch.Tensor] = None,
+        qzeros: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Dequantize at ``compute_dtype`` and run the wide dense product."""
+        weight = self._dequantize_weight_for_inference(
+            x_flat, dtype=compute_dtype, qweight=qweight, qzeros=qzeros
+        )
         return linear_wide_bias(
             x_flat,
             # AWQ reconstructs [in_features, out_features]; the wide epilogue
@@ -624,6 +924,21 @@ class ParoLinear(AwqTorchLinear):
             weight.t(),
             self._bias_for_compute(device=x_flat.device),
         )
+
+    def _forward_dense_batch(self, x_2d: torch.Tensor) -> torch.Tensor:
+        """Large-row dispatch: dequantize the packed grid, then cuBLAS.
+
+        The activation dtype is the kernel's compute dtype, so the
+        reconstructed weight stays narrow and only the reduction and the bias
+        are wide, exactly like ``AwqGEMMLinear`` above its own row threshold.
+        The weight exists only for this call and is not retained.
+        """
+        weight = self._dequantize_weight_for_inference(x_2d, dtype=x_2d.dtype)
+        bias = self._bias_for_compute(device=x_2d.device)
+        out = torch.mm(x_2d, weight, out_dtype=torch.float32)
+        if bias is not None:
+            out = out + bias.float()
+        return out.to(dtype=x_2d.dtype)
 
     def _cuda_awq_kernel_supported(self, compute_dtype: torch.dtype) -> bool:
         """Whether the native AWQ GEMM can accept this layer's packed shape.
@@ -666,6 +981,12 @@ class ParoLinear(AwqTorchLinear):
 
     def _forward_cuda_awq_kernel(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
         """Fast path that feeds rotated activations into the AWQ CUDA GEMM kernel."""
+        if torch.is_grad_enabled() and x_flat.requires_grad:
+            # The native AWQ GEMM op has no autograd kernel, so a gradient
+            # taken through it is silently dropped (issue #4958). The dense
+            # reference below is the differentiable path; inference keeps the
+            # native kernel.
+            return None
         compute_dtype = x_flat.dtype if x_flat.dtype in (torch.float16, torch.bfloat16) else torch.float16
         if not self._cuda_awq_kernel_supported(compute_dtype):
             return None
@@ -683,6 +1004,16 @@ class ParoLinear(AwqTorchLinear):
             cache=use_cached_runtime_dtype,
         )
         kernel_input_2d = kernel_input.reshape(-1, kernel_input.shape[-1])
+        rows = kernel_input_2d.shape[0]
+        if rows >= self._awq_dense_min_rows:
+            # The split-K GEMM allocates one FP32 partial slab per split, so a
+            # long prefill pays split_k x rows x out_features of transient
+            # memory before the reduction. Dequantize + cuBLAS keeps only the
+            # reconstructed weight beside the output and is faster from the
+            # shape-aware crossover. The 32-bit store class of #5096 in the
+            # native kernel is fixed independently in gptqmodel_ext/awq; the
+            # 4096-row ceiling keeps that escape for every shape.
+            return self._forward_dense_batch(kernel_input_2d)
         if self.bias is not None and self.fp32_accum:
             # The split-K partials are already FP32.  Ask for an FP32 result
             # and add the stored bias there, so a finite sum that overflows the
@@ -713,6 +1044,60 @@ class ParoLinear(AwqTorchLinear):
             out = out.to(dtype=x_flat.dtype)
         return out
 
+    def _cpu_aten_shape_supported(self) -> bool:
+        """Whether the layer fits ATen's native CPU int4pack GEMM."""
+        return (
+            self.bits == 4
+            and getattr(self, "requested_group_size", self.group_size) != -1
+            and self.group_size in (32, 64, 128, 256)
+        )
+
+    @_disable_compile
+    def _prepare_cpu_inference_layout(self, dtype: Optional[torch.dtype]) -> bool:
+        """Build the packed CPU operands before ``torch.compile`` traces.
+
+        The AVX512 and ATen branches only *read* the runtime layout while dynamo
+        traces; the one-time transform rewrites registered buffers and takes a
+        lock, so it only ever ran in an eager forward. A compile made before the
+        first eager forward therefore traced the dense dequantize path and kept
+        re-expanding every weight on every token (#5581).
+        """
+
+        if self.training:
+            return False
+        weight = getattr(self, "qweight", None)
+        if not isinstance(weight, torch.Tensor) or weight.device.type != "cpu":
+            return False
+        if self._live_cpu_layout() is not None:
+            return True
+        if dtype not in (torch.float16, torch.bfloat16):
+            return False
+
+        if (
+            dtype == torch.bfloat16
+            and self._paro_cpu_avx512
+            and has_avx512_bf16()
+            and self._cpu_avx512_shape_supported()
+        ):
+            with self._cpu_transform_lock:
+                if self._ensure_cpu_layout("avx512"):
+                    return True
+
+        if (
+            self._cpu_aten_shape_supported()
+            and _has_local_int4pack_cpu_ops()
+            and TorchAtenAwqLinear.cached_validate_once()[0]
+        ):
+            with self._cpu_transform_lock:
+                if not self._ensure_cpu_layout("aten", dtype):
+                    return False
+                from .torch_fused import _cpu_int4pack_mm
+
+                self._paro_int4pack_mm = _cpu_int4pack_mm
+                return True
+
+        return False
+
     def _forward_cpu_avx512(
         self,
         x_flat: torch.Tensor,
@@ -723,34 +1108,59 @@ class ParoLinear(AwqTorchLinear):
         if not enabled or not self._cpu_avx512_eligible(x_flat):
             return None
 
-        from .torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
-
-        ok, _ = TorchCpuAvx512AwqLinear.cached_validate_once()
         gemm = TorchCpuAvx512AwqLinear.gemm_int4_qzero_group_scaled_cpu_kernel
-        if not ok or gemm is None:
-            return None
+        if gemm is None:
+            if dynamo_is_compiling():
+                # Resolving the handle loads the JIT extension through
+                # importlib, which dynamo cannot trace (a `setattr` on the
+                # extension module is a hard graph break). The eager warmup
+                # already answered for this host: a missing handle means the
+                # AVX512 path is unavailable, so fall through to the ATen/dense
+                # paths instead of resolving it inside the graph (#5115).
+                return None
+            ok, _ = TorchCpuAvx512AwqLinear.cached_validate_once()
+            gemm = TorchCpuAvx512AwqLinear.gemm_int4_qzero_group_scaled_cpu_kernel
+            if not ok or gemm is None:
+                return None
 
         original_dtype = x_flat.dtype
         kernel_input = x_flat if x_flat.is_contiguous() else x_flat.contiguous()
-        # The transform rewrites registered buffers, so it must not interleave
-        # with `state_dict()`/`load_state_dict()`, which hold the same lock.
-        # Only the transform and the operand capture need that lock: the GEMM
-        # runs on these locals, so a concurrent save may rebind the module
-        # attributes without tearing this product (issue #4885).
-        with self._cpu_transform_lock:
-            if not self._ensure_cpu_layout("avx512"):
+        if dynamo_is_compiling():
+            # The transform rewrites registered buffers and takes the RLock
+            # dynamo cannot enter; a traced graph must not do either. The eager
+            # warmup built this layout, so only read it. Without a warmup, fall
+            # through to the ATen/dense paths.
+            if self._live_cpu_layout() != "avx512":
                 return None
             qweight = self.qweight
             qzeros = self.qzeros
-            # The kernel requires FP32 affine operands. Widen per call so the
-            # checkpoint dtype stays resident instead of a second FP32 copy
-            # (issue #4814).
             scales = self.scales.to(dtype=torch.float32).contiguous()
             bias = (
                 self.bias.to(dtype=torch.float32).contiguous()
                 if self.bias is not None
                 else None
             )
+        else:
+            # The transform rewrites registered buffers, so it must not
+            # interleave with `state_dict()`/`load_state_dict()`, which hold the
+            # same lock. Only the transform and the operand capture need that
+            # lock: the GEMM runs on these locals, so a concurrent save may
+            # rebind the module attributes without tearing this product
+            # (issue #4885).
+            with self._cpu_transform_lock:
+                if not self._ensure_cpu_layout("avx512"):
+                    return None
+                qweight = self.qweight
+                qzeros = self.qzeros
+                # The kernel requires FP32 affine operands. Widen per call so
+                # the checkpoint dtype stays resident instead of a second FP32
+                # copy (issue #4814).
+                scales = self.scales.to(dtype=torch.float32).contiguous()
+                bias = (
+                    self.bias.to(dtype=torch.float32).contiguous()
+                    if self.bias is not None
+                    else None
+                )
         output = gemm(
             kernel_input,
             qweight,
@@ -776,35 +1186,53 @@ class ParoLinear(AwqTorchLinear):
         ):
             return None
 
-        from .torch_aten_kernel import _has_local_int4pack_cpu_ops
-
-        if not _has_local_int4pack_cpu_ops():
-            return None
-
-        from .torch_aten_kernel_awq import TorchAtenAwqLinear
-
-        ok, _ = TorchAtenAwqLinear.cached_validate_once()
-        if not ok:
-            return None
-
-        from .torch_fused import _cpu_int4pack_mm
-
-        # The transform rewrites registered buffers, so it must not interleave
-        # with `state_dict()`/`load_state_dict()`, which hold the same lock.
-        # Capture the operands under it, then run the product on those locals:
-        # a concurrent save may rebind the module attributes without tearing
-        # this GEMM (issue #4885).
-        with self._cpu_transform_lock:
-            if not self._ensure_cpu_layout("aten", x_flat.dtype):
+        if dynamo_is_compiling():
+            # The transform rewrites registered buffers and takes the RLock
+            # dynamo cannot enter; a traced graph only reads the eager-built
+            # layout. A biased layer asks for the FP32 product and adds the
+            # bias afterwards, and the #4068 operand cast is a registered
+            # custom op since #5110, so it traces as well.
+            if (
+                self._live_cpu_layout() != "aten"
+                or self._cpu_runtime_dtype != x_flat.dtype
+            ):
+                return None
+            int4pack_mm = getattr(self, "_paro_int4pack_mm", None)
+            if int4pack_mm is None:
                 return None
             qweight = self.qweight
             scales_and_zeros = self.scales_and_zeros
             bias = self.bias
+        else:
+            # Resolve the entry point at call time: the eager path keeps the
+            # lazy lookup so a test or caller can substitute it, and the
+            # compile path reads the reference captured here.
+            from .torch_fused import _cpu_int4pack_mm as int4pack_mm
+
+            self._paro_int4pack_mm = int4pack_mm
+            if not _has_local_int4pack_cpu_ops():
+                return None
+
+            ok, _ = TorchAtenAwqLinear.cached_validate_once()
+            if not ok:
+                return None
+
+            # The transform rewrites registered buffers, so it must not
+            # interleave with `state_dict()`/`load_state_dict()`, which hold the
+            # same lock. Capture the operands under it, then run the product on
+            # those locals: a concurrent save may rebind the module attributes
+            # without tearing this GEMM (issue #4885).
+            with self._cpu_transform_lock:
+                if not self._ensure_cpu_layout("aten", x_flat.dtype):
+                    return None
+                qweight = self.qweight
+                scales_and_zeros = self.scales_and_zeros
+                bias = self.bias
         try:
             # The layer has no bias: the parent adds it after return. Ask
             # for the wide product so a finite sum is not rounded to
             # infinity before the outer bias epilogue (issue #4471).
-            out = _cpu_int4pack_mm(
+            out = int4pack_mm(
                 x_flat,
                 qweight,
                 self.group_size,
@@ -849,6 +1277,11 @@ class ParoLinear(AwqTorchLinear):
 
         out = self._forward_cuda_awq_kernel(rotated)
         if out is None:
+            if dynamo_is_compiling() and self._live_cpu_layout() is None:
+                # A cold trace must not bake in the dense fallback: install the
+                # layout here (a graph break) and retrace into the fused
+                # branch (#5581).
+                self._prepare_cpu_inference_layout(rotated.dtype)
             out = self._forward_cpu_avx512(
                 rotated,
                 enabled=self._paro_cpu_avx512 and rotated.dtype == torch.bfloat16,

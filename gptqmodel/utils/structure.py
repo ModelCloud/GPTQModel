@@ -548,6 +548,36 @@ def _get_qualified_name(root: torch.nn.Module, obj: torch.nn.Module) -> str:
             return name
     raise ValueError("Could not find the given module within the target model.")
 
+
+def _resolve_qualified_name(
+    root: torch.nn.Module,
+    obj: torch.nn.Module,
+    module_path: Optional[str] = None,
+) -> str:
+    """Return ``obj``'s dotted path, trusting a caller-provided path when valid.
+
+    ``_get_qualified_name`` walks the whole tree.  The quantization loop already
+    holds the dotted path (``NamedModule.full_name``) and calling the scan once
+    per module makes per-layer cost grow with model depth.  Resolve the supplied
+    path directly and keep the full scan only as a fallback for stale or
+    missing names.
+    """
+
+    if module_path:
+        try:
+            resolved = root.get_submodule(module_path)
+        except (AttributeError, IndexError, KeyError):
+            resolved = None
+        if resolved is obj:
+            return module_path
+        log.warning(
+            "Provided module path `%s` does not resolve to the target module; "
+            "falling back to a full named_modules() lookup.",
+            module_path,
+        )
+    return _get_qualified_name(root, obj)
+
+
 def _get_parent_and_leaf_by_path(root: torch.nn.Module, dotted: str):
     if "." in dotted:
         parent_path, leaf = dotted.rsplit(".", 1)
@@ -569,6 +599,41 @@ def _ensure_target_storage_on_device_(param: torch.nn.Parameter, device: torch.d
     # asymmetric ROCm link can segfault, so use the direction-aware helper.
     param.data = safe_move_to(param.data, device, copy=True)  # keeps Parameter identity
     return param
+
+
+def _publish_checkpoint_param_(
+    *,
+    target_submodule: torch.nn.Module,
+    rel_name: str,
+    target_param: torch.nn.Parameter,
+    source: torch.Tensor,
+    tensor_device: torch.device,
+    non_blocking: bool,
+) -> torch.nn.Parameter:
+    """Fill a materialized parameter before publishing it on the module.
+
+    A lazy shell owns meta parameters. Installing freshly allocated storage on
+    the module and copying the checkpoint values in a second step leaves
+    ``torch.empty`` memory behind when an interrupt lands between the two.
+    Run-exit recovery uses ``is_meta`` as its only "not loaded" test, so that
+    module is then treated as materialized and the in-session model forwards
+    with uninitialized weights (#5088).
+
+    Build and fill the replacement first; only then swap it onto the module.
+    An interrupt during the copy leaves the old meta parameter in place, which
+    the existing recovery already re-materializes.
+    """
+
+    replacement = _ensure_target_storage_on_device_(target_param, tensor_device)
+    if source.dtype != replacement.dtype:
+        source = source.to(dtype=replacement.dtype)
+    replacement.detach().copy_(
+        source, non_blocking=(non_blocking and source.is_pinned())
+    )
+    if replacement is not target_param:
+        t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+        setattr(t_parent, leaf, replacement)
+    return replacement
 
 
 class _SplitDimWithInterleave(int):
@@ -1131,6 +1196,23 @@ def _cleanup_all_conversions() -> None:
 atexit.register(_cleanup_all_conversions)
 
 
+def _tie_partners(tied: Optional[Dict[str, str]], name: str) -> tuple:
+    """Runtime names tied to ``name`` in either direction, as ``a.b`` pairs."""
+
+    if not isinstance(tied, dict) or "." not in name:
+        return ()
+    partners = []
+    source = tied.get(name)
+    if isinstance(source, str):
+        partners.append(source)
+    partners.extend(
+        target
+        for target, tied_source in tied.items()
+        if tied_source == name and isinstance(target, str)
+    )
+    return tuple(partner for partner in partners if "." in partner)
+
+
 class LazyTurtle:
     """Checkpoint-backed shell materializer for local dense checkpoints.
 
@@ -1197,6 +1279,14 @@ class LazyTurtle:
         alias_items = self._normalize_runtime_to_checkpoint_renamings(conversion_aliases)
         self._runtime_to_checkpoint_renamings = tuple(alias_items)
         self._runtime_to_checkpoint_converters = self._normalize_runtime_to_checkpoint_converters(conversion_aliases)
+        # These are needed while resolving the tie below: `_checkpoint_shard_path`
+        # takes `_lock` and reads `_active_source_root`. Initializing them after
+        # the snapshot call made the checkpoint comparison raise `AttributeError`,
+        # which the defensive wrapper swallowed as "unknown" -- so a distinct
+        # `lm_head` was never refuted (#4799, #4973).
+        self._lock = threading.RLock()
+        self._active_source_root: Optional[str] = None
+        self._active_source_provenance: Optional[Dict[str, Any]] = None
         # Resolve tying once from the decoder config and the checkpoint itself.
         # `materialize_submodule` re-applies this snapshot instead of calling
         # `tie_weights()`, which would recompute from the wrapper config and
@@ -1212,9 +1302,6 @@ class LazyTurtle:
         self._no_placement_params = tuple(
             pattern for pattern in (no_placement_params or ()) if isinstance(pattern, str) and pattern
         )
-        self._lock = threading.RLock()
-        self._active_source_root: Optional[str] = None
-        self._active_source_provenance: Optional[Dict[str, Any]] = None
 
     def close(self) -> None:
         """Release the converted checkpoint directory held by this turtle.
@@ -1505,8 +1592,9 @@ class LazyTurtle:
         show_progress: bool = True,
         skip_module_types: tuple[type, ...] = (),
     ) -> torch.nn.Module:
-        if module_path is None:
-            module_path = _get_qualified_name(target_model, target_submodule)
+        module_path = _resolve_qualified_name(
+            target_model, target_submodule, module_path
+        )
 
         # Build only the ancestor chain plus the descendant subtree for the target
         # module. _resolve_prefer_transposed_hint only needs these entries, so a full
@@ -1743,6 +1831,7 @@ class LazyTurtle:
         target_model: nn.Module,
         target_submodule: nn.Module,
         rel_name: str = "weight",
+        module_path: Optional[str] = None,
     ) -> bool:
         """Return whether the checkpoint owns `rel_name` for one shell submodule.
 
@@ -1753,7 +1842,9 @@ class LazyTurtle:
         exactly the case the shell cannot discover through parameter identity.
         """
 
-        path = _get_qualified_name(target_model, target_submodule)
+        path = _resolve_qualified_name(
+            target_model, target_submodule, module_path
+        )
         with self._lock:
             source_name, _expert_index, _split_index, _split_dim = (
                 self._resolve_checkpoint_tensor_source(path, rel_name)
@@ -1766,10 +1857,13 @@ class LazyTurtle:
         target_model: nn.Module,
         target_submodule: nn.Module,
         recurse: bool = False,
+        module_path: Optional[str] = None,
     ) -> Dict[str, torch.Tensor]:
         """Load checkpoint tensors for one shell submodule without mutating it."""
 
-        path = _get_qualified_name(target_model, target_submodule)
+        path = _resolve_qualified_name(
+            target_model, target_submodule, module_path
+        )
         with self._lock:
             tensors = self._load_checkpoint_tensors_for_module_path(
                 module_path=path,
@@ -1879,6 +1973,21 @@ class LazyTurtle:
 
             return tensors
 
+    def checkpoint_source_aliases(self, runtime_name: str) -> tuple[str, ...]:
+        """Return every source-checkpoint spelling of one runtime tensor name.
+
+        Exposes the same runtime -> checkpoint alias chain the materializers use
+        (declared renamings, the reversed Hugging Face conversion map,
+        base-model-prefix variants and one-to-one converter aliases) so a caller
+        can decide whether a source index entry belongs to the loaded model
+        without loading it (#5029).
+        """
+
+        if not isinstance(runtime_name, str) or not runtime_name:
+            return ()
+        with self._lock:
+            return tuple(self._all_runtime_to_checkpoint_candidates(runtime_name))
+
     def sync_all_meta(
         self,
         *,
@@ -1956,6 +2065,7 @@ class LazyTurtle:
         target_model: nn.Module,
         target_submodule: nn.Module,
         device: Optional[torch.device] = None,
+        module_path: Optional[str] = None,
     ):
         """Materialize only direct meta params/buffers for one shell submodule."""
 
@@ -1964,7 +2074,9 @@ class LazyTurtle:
             if device.type == "meta":
                 raise ValueError("materialize_direct_meta_tensors() does not support meta target devices.")
 
-        path = _get_qualified_name(target_model, target_submodule)
+        path = _resolve_qualified_name(
+            target_model, target_submodule, module_path
+        )
         with self._lock, torch.inference_mode():
             self._materialize_direct_meta_tensors(
                 shell_sub=target_submodule,
@@ -3583,7 +3695,25 @@ class LazyTurtle:
         # just `weight` / `bias`. Retry resolution with the full module path so leaf-only
         # materialization can still map back to fused expert checkpoint tensors.
         combined_name = self._join_tensor_name(module_path, rel_name)
-        return self._resolve_fused_checkpoint_tensor_source("", combined_name)
+        resolved = self._resolve_fused_checkpoint_tensor_source("", combined_name)
+        if resolved[0] is not None:
+            return resolved
+
+        # A tied checkpoint may store the shared tensor under only one member of
+        # the pair. Fall back to the partner of a declared tie, in either
+        # direction, so the member the checkpoint omits is materialized from the
+        # one it stores instead of staying on meta (#5399). The snapshot is
+        # still being resolved on the first pass, so `tied_weights_keys` is unset
+        # and this lookup is inert then.
+        tied = getattr(self, "tied_weights_keys", None)
+        for partner in _tie_partners(tied, combined_name):
+            partner_module, partner_rel = partner.rsplit(".", 1)
+            resolved = self._resolve_direct_checkpoint_tensor_source(
+                partner_module, partner_rel
+            )
+            if resolved[0] is not None:
+                return resolved
+        return resolved
 
     @staticmethod
     def _materialization_issue_message(
@@ -3880,15 +4010,14 @@ class LazyTurtle:
                                     source_shape=tuple(tensor.shape),
                                 )
                             )
-                        target_param_new = _ensure_target_storage_on_device_(target_param, tensor_device)
-                        if target_param_new is not target_param:
-                            t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
-                            setattr(t_parent, leaf, target_param_new)
-                            target_param = target_param_new
-                        source = tensor.detach()
-                        if source.dtype != target_param.dtype:
-                            source = source.to(dtype=target_param.dtype)
-                        target_param.detach().copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                        _publish_checkpoint_param_(
+                            target_submodule=target_submodule,
+                            rel_name=rel_name,
+                            target_param=target_param,
+                            source=tensor.detach(),
+                            tensor_device=tensor_device,
+                            non_blocking=non_blocking,
+                        )
                     else:
                         target_buffer = t_bufs.get(rel_name)
                         t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
@@ -3994,15 +4123,14 @@ class LazyTurtle:
                                         split_index=split_index,
                                         split_dim=split_dim,
                                     ))
-                                target_param_new = _ensure_target_storage_on_device_(target_param, tensor_device)
-                                if target_param_new is not target_param:
-                                    t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
-                                    setattr(t_parent, leaf, target_param_new)
-                                    target_param = target_param_new
-                                source = tensor.detach()
-                                if source.dtype != target_param.dtype:
-                                    source = source.to(dtype=target_param.dtype)
-                                target_param.detach().copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                                _publish_checkpoint_param_(
+                                    target_submodule=target_submodule,
+                                    rel_name=rel_name,
+                                    target_param=target_param,
+                                    source=tensor.detach(),
+                                    tensor_device=tensor_device,
+                                    non_blocking=non_blocking,
+                                )
                             else:
                                 target_buffer = t_bufs.get(rel_name)
                                 t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
@@ -4480,6 +4608,7 @@ def alias_direct_meta_from_turtle_for_submodule(
     target_submodule: torch.nn.Module,
     *,
     device: Optional[torch.device] = None,
+    module_path: Optional[str] = None,
 ):
     """Materialize only direct meta params/buffers for one shell submodule."""
 
@@ -4492,6 +4621,7 @@ def alias_direct_meta_from_turtle_for_submodule(
         target_model=target_model,
         target_submodule=target_submodule,
         device=device,
+        module_path=module_path,
     )
 
 def _is_meta_tensor(t: torch.Tensor) -> bool:

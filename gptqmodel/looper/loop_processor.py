@@ -38,7 +38,11 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization.config import CalibrationConfig, QuantizeConfig
-from ..utils.attn_mask import bos_token_positions, exclude_attention_sinks
+from ..utils.attn_mask import (
+    align_single_head_capture,
+    bos_token_positions,
+    exclude_attention_sinks,
+)
 from ..utils.calibration import calibration_input_row_count
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
@@ -95,6 +99,49 @@ def _sized_calibration_dataset(dataset):
     if _calibration_dataset_length(dataset) is None:
         return list(dataset)
     return dataset
+
+
+def prepare_calibration_dataset_once(calibration: CalibrationConfig):
+    """Return the prepared calibration batches of one run.
+
+    Every calibrated processor of a run must replay the same batch order:
+    GPTAQ/FOEM pair the native capture with the quantized capture by batch
+    index, so preparing the same ``sort="shuffle"`` dataset once per processor
+    would pair unrelated sequences (#4869). ``quantize()`` calls this once and
+    hands the result to every processor in the chain.
+    """
+
+    dataset = calibration.dataset
+    if dataset is None:
+        return None
+
+    prepare_dataset = calibration.prepare_dataset
+    if prepare_dataset is None:
+        raise ValueError(
+            "CalibrationConfig.prepare_dataset must be bound (CalibrationConfig.bind()) "
+            "when calibration data is supplied."
+        )
+
+    prepared = prepare_dataset(
+        calibration_dataset=dataset,
+        calibration_dataset_concat_size=calibration.concat_size,
+        calibration_dataset_sort=calibration.sort,
+        batch_size=calibration.batch_size,
+        calibration_data_min_length=calibration.min_length,
+        calibration_concat_separator=calibration.concat_separator,
+    )
+    # A model-specific ``prepare_dataset`` override may return a one-shot
+    # iterable; normalise it before the checks below and before the per-layer
+    # replay, which needs a reusable dataset.
+    prepared = _sized_calibration_dataset(prepared)
+    if len(prepared) == 0:
+        raise ValueError(
+            "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
+            "all samples (for example, every input_ids was shorter than "
+            "CalibrationConfig.min_length). Lower CalibrationConfig.min_length "
+            "or provide longer calibration samples."
+        )
+    return prepared
 
 
 def _reusable_calibration_dataset(dataset):
@@ -419,6 +466,49 @@ def active_padding_mask(processor):
     return getattr(tls, "padding_value", getattr(tls, "value", None))
 
 
+def install_moe_padding_zero_hook(processor, moe_block: Module, handles: List[Any]) -> bool:
+    """Zero calibration padding rows on a MoE block input.
+
+    Natively routed experts run through the model's own router, so their forward
+    hooks see ``[routed_rows, H]`` rows whose count is unrelated to the
+    calibration keep mask and the padding cannot be filtered there. Zeroing the
+    padded rows of the MoE input makes them reach every expert as an all-zero
+    row, which contributes exactly nothing to the per-expert statistics while
+    leaving real rows untouched (#5719).
+
+    The mask is read per batch, so one hook serves every replayed sample. A
+    caller that also wants attention sinks zeroed must not use this: a sink is a
+    real token whose output later positions attend to.
+    """
+
+    def zero_masked_rows(_module, args, kwargs):
+        """Scale the hidden states by the active padding mask."""
+
+        keep_mask = active_padding_mask(processor)
+        if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+            return None
+
+        hidden_states = kwargs.get("hidden_states") if kwargs else None
+        from_kwargs = hidden_states is not None
+        if hidden_states is None:
+            if not args or not torch.is_tensor(args[0]):
+                return None
+            hidden_states = args[0]
+        if hidden_states.dim() != 3 or tuple(hidden_states.shape[:2]) != tuple(keep_mask.shape):
+            return None
+
+        row_mask = keep_mask.to(device=hidden_states.device, dtype=hidden_states.dtype).unsqueeze(-1)
+        masked = hidden_states * row_mask
+        if from_kwargs:
+            kwargs = dict(kwargs)
+            kwargs["hidden_states"] = masked
+            return args, kwargs
+        return (masked,) + tuple(args[1:]), kwargs
+
+    handles.append(moe_block.register_forward_pre_hook(zero_masked_rows, with_kwargs=True))
+    return True
+
+
 def resolve_calibration_keep_mask(processor, keep_mask, *, batch_index, layer_input):
     """Return ``processor``'s calibration row mask for one replayed batch.
 
@@ -570,7 +660,8 @@ class LoopProcessor:
             # ``datasets.IterableDataset`` and plain generators are valid
             # calibration inputs but do not implement ``__len__``. Only run the
             # pre-prepare checks when the caller supplied a sized container;
-            # emptiness is verified again on the prepared result below.
+            # emptiness is verified again on the prepared result by
+            # ``prepare_calibration_dataset_once``.
             raw_calibration_size = _calibration_dataset_length(calibration_dataset)
             if raw_calibration_size == 0:
                 raise ValueError("Calibration dataset must not be empty.")
@@ -579,34 +670,11 @@ class LoopProcessor:
                 log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
                                f"Current: {raw_calibration_size}.")
 
-            if self.calibration.prepare_dataset is None:
-                raise ValueError(
-                    "CalibrationConfig.prepare_dataset must be bound (CalibrationConfig.bind()) "
-                    "when calibration data is supplied."
-                )
-
-            calibration_dataset = self.calibration.prepare_dataset(
-                calibration_dataset=calibration_dataset,
-                calibration_dataset_concat_size=self.calibration.concat_size,
-                calibration_dataset_sort=self.calibration.sort,
-                batch_size=self.calibration.batch_size,
-                calibration_data_min_length=self.calibration.min_length,
-                calibration_concat_separator=self.calibration.concat_separator,
-            )
-
-            # A model-specific ``prepare_dataset`` override may return a
-            # one-shot iterable; normalise it before the checks below and
-            # before the per-layer replay, which needs a reusable dataset.
-            calibration_dataset = _sized_calibration_dataset(calibration_dataset)
+            # ``quantize()`` prepares the batches once per run and hands the
+            # same list to every processor, so processors that pair their
+            # captures by batch index (GPTAQ/FOEM) see one order (#4869).
+            calibration_dataset = prepare_calibration_dataset_once(self.calibration)
             prepared_calibration_size = len(calibration_dataset)
-
-            if prepared_calibration_size == 0:
-                raise ValueError(
-                    "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
-                    "all samples (for example, every input_ids was shorter than "
-                    "CalibrationConfig.min_length). Lower CalibrationConfig.min_length "
-                    "or provide longer calibration samples."
-                )
 
             # The size is only knowable after preparation for unsized inputs.
             if raw_calibration_size is None and prepared_calibration_size < min_calibration_dataset_size:
@@ -802,15 +870,20 @@ class LoopProcessor:
         )
 
     def calibration_rows(self, inp: torch.Tensor) -> torch.Tensor:
-        """Drop the attention-sink rows from a module input the mask wrapper left whole.
+        """Select the calibration rows for a module input the mask wrapper left whole.
 
         ``ModuleLooper._masked_hook_wrapper`` already applies the calibration
         mask to ``[B, S, H]`` inputs. QQQ, MACaQ and the EXL3 capture also see
-        inputs it cannot place, such as the flattened ``[B*S, H]`` rows of an
-        all-expert MoE bypass, which they historically consumed whole
-        (padding included). Here they lose exactly the BOS sink rows, so the
-        option changes nothing else. Natively routed expert rows cannot be
-        mapped back to a sequence position and stay unfiltered.
+        inputs it cannot place: a flattened ``[B*S, H]`` full grid (an
+        all-expert MoE bypass or a shared expert) and natively routed
+        ``[routed_rows, H]`` rows.
+
+        A flattened full grid keeps the batch geometry, so it is filtered with
+        the same calibration mask as the ``[B, S, H]`` layout -- padding and
+        excluded sinks alike (#5385). A ``[B, S, H]`` input that still matches
+        the mask loses only the sink rows, because its padding was already
+        removed by the wrapper. Routed rows cannot be mapped back to a sequence
+        position and stay unfiltered.
         """
 
         if not torch.is_tensor(inp):
@@ -818,7 +891,17 @@ class LoopProcessor:
         tls = getattr(self, "_mask_tls", None)
         keep_mask = getattr(tls, "value", None)
         padding_mask = getattr(tls, "padding_value", keep_mask)
-        if keep_mask is padding_mask or not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+        if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+            return inp
+        inp = align_single_head_capture(inp, keep_mask)
+        # A flattened `[B*S, H]` full grid still carries the batch geometry, so
+        # filter it with the calibration mask exactly like `[B, S, H]`. It used
+        # to keep its padding rows: only sinks were removed, which made the
+        # same calibration batch accumulate 15 rows here and 12 through the
+        # grid layout (#5385).
+        if inp.dim() == 2 and inp.shape[0] == keep_mask.numel():
+            return inp[keep_mask.reshape(-1).to(device=inp.device, dtype=torch.bool)]
+        if keep_mask is padding_mask:
             # Option off or no sink in this batch: the calibration mask is the
             # padding mask itself.
             return inp
@@ -827,8 +910,6 @@ class LoopProcessor:
             rows = rows | ~padding_mask.to(device=rows.device, dtype=torch.bool)
         if inp.dim() >= 3 and tuple(inp.shape[:2]) == tuple(rows.shape):
             return inp[rows.to(device=inp.device)]
-        if inp.dim() == 2 and inp.shape[0] == rows.numel():
-            return inp[rows.reshape(-1).to(device=inp.device)]
         return inp
 
     @staticmethod
@@ -1665,6 +1746,23 @@ class LoopProcessor:
 
         pass
         #self.offload_to_disk(module=module)
+
+    def finalize_deferred_runtime_weights(self, model: BaseQModel) -> None:
+        """Publish deferred replay weights a cancelled run will not replay.
+
+        A processor may pack a projection and leave the owning module holding a
+        placement placeholder until the layer's next forward materializes the
+        dense replay weight. A stopped or failed run never reaches that
+        forward, so the in-session model keeps a parameter no forward can read.
+        Processors that defer replay state override this hook and materialize
+        it here, before the looper restores the in-flight layer and before the
+        remaining-meta verdict (#5083). The default has nothing to publish.
+
+        ``model`` is the wrapper the packed module is installed into, the same
+        object ``submodule_finalize`` receives.
+        """
+
+        del model
 
     def release_run_workspace(self) -> None:
         """Release process-wide scratch that outlives individual modules.

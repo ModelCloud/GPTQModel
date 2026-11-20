@@ -24,17 +24,20 @@ eager -> 0.047 s compiled (1 graph, 0 breaks) on sm_121.
 
 from __future__ import annotations
 
+import json
+import os
 import statistics
 import time
 
 import pytest
 import torch
+from safetensors.torch import save_file
 from torch import nn
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import CalibrationConfig, FP8Config
+from tests.fp8_test_utils import pack_fp8_module
 
 
 pytestmark = [
@@ -86,7 +89,7 @@ def _fp8_module() -> TorchFP8Linear:
         register_buffers=False,
         format="float8_e4m3fn",
     )
-    module.pack_original(linear, scales=None, zeros=None)
+    pack_fp8_module(module, linear)
     return module.half().to(DEVICE)
 
 
@@ -189,7 +192,45 @@ def test_awq_torch_is_trace_clean():
     torch.testing.assert_close(output, eager, rtol=0, atol=2e-2)
 
 
-def _build_fp8_model(root, out):
+_FP8_BLOCK = (128, 128)
+_FP8_LAYER_MODULES = (
+    "self_attn.q_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "self_attn.o_proj",
+    "mlp.gate_proj",
+    "mlp.up_proj",
+    "mlp.down_proj",
+)
+
+
+def _quantize_block_fp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Encode one matrix like transformers' ``FineGrainedFP8`` (128x128 blocks)."""
+
+    rows, cols = weight.shape
+    block_rows, block_cols = _FP8_BLOCK
+    assert rows % block_rows == 0 and cols % block_cols == 0, (rows, cols)
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    blocks = weight.detach().to(torch.float32).reshape(
+        rows // block_rows, block_rows, cols // block_cols, block_cols
+    )
+    abs_max = blocks.abs().amax(dim=(1, 3))
+    scale = torch.where(abs_max > 0, abs_max / fp8_max, torch.ones_like(abs_max))
+    quantized = (
+        torch.clamp(blocks / scale.unsqueeze(1).unsqueeze(3), min=-fp8_max, max=fp8_max)
+        .to(torch.float8_e4m3fn)
+        .reshape(rows, cols)
+    )
+    return quantized.contiguous(), scale.to(torch.float32).contiguous()
+
+
+def _build_fp8_model(root):
+    """Write a tiny block-FP8 Llama checkpoint and load it read-only.
+
+    FP8 is load-only (#5242), so the fixture writes a transformers-style
+    ``FineGrainedFP8`` checkpoint instead of calling ``GPTQModel.quantize``.
+    """
+
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
     from tokenizers.pre_tokenizers import Whitespace
@@ -210,28 +251,49 @@ def _build_fp8_model(root, out):
         pad_token="[PAD]",
     ).save_pretrained(root)
 
-    LlamaForCausalLM(
-        LlamaConfig(
-            vocab_size=256,
-            hidden_size=256,
-            intermediate_size=512,
-            num_hidden_layers=2,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            max_position_embeddings=2048,
-            pad_token_id=0,
-            bos_token_id=1,
-            eos_token_id=2,
-            tie_word_embeddings=False,
-        )
-    ).save_pretrained(root)
-
-    model = GPTQModel.load(str(root), quantize_config=FP8Config(device=DEVICE), backend=BACKEND.AUTO)
-    model.quantize(
-        CalibrationConfig(dataset=_TEXTS, batch_size=1, min_length=1), backend=BACKEND.AUTO
+    config = LlamaConfig(
+        vocab_size=256,
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=2048,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+        tie_word_embeddings=False,
     )
-    model.save(str(out))
-    return GPTQModel.load(str(out), backend=BACKEND.FP8_TORCH, device=DEVICE)
+    torch.manual_seed(0)
+    model = LlamaForCausalLM(config)
+    state = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
+    for layer_index, _layer in enumerate(model.model.layers):
+        for module_name in _FP8_LAYER_MODULES:
+            prefix = f"model.layers.{layer_index}.{module_name}"
+            qweight, scale_inv = _quantize_block_fp8(model.get_submodule(prefix).weight)
+            state[f"{prefix}.weight"] = qweight
+            state[f"{prefix}.weight_scale_inv"] = scale_inv
+    for name, tensor in list(state.items()):
+        if tensor.is_floating_point() and tensor.dtype == torch.float32:
+            state[name] = tensor.to(torch.bfloat16)
+
+    root.mkdir(parents=True, exist_ok=True)
+    save_file(state, os.path.join(root, "model.safetensors"))
+    payload = config.to_dict()
+    payload["dtype"] = "bfloat16"
+    payload["quantization_config"] = {
+        "activation_scheme": "dynamic",
+        "dequantize": False,
+        "expert_dtype": "fp8",
+        "modules_to_convert": None,
+        "modules_to_not_convert": None,
+        "quant_method": "fp8",
+        "scale_fmt": "float",
+        "weight_block_size": list(_FP8_BLOCK),
+    }
+    with open(os.path.join(root, "config.json"), "w") as handle:
+        json.dump(payload, handle, indent=2)
+    return GPTQModel.load(str(root), backend=BACKEND.FP8_TORCH, device=DEVICE)
 
 
 def _generate(model, inputs, **kwargs):
@@ -246,7 +308,7 @@ def _generate(model, inputs, **kwargs):
 def test_fp8_static_cache_keeps_the_compile_and_beats_eager(tmp_path):
     """An FP8 model must not lose the static-cache auto-compile (#4739)."""
 
-    model = _build_fp8_model(tmp_path / "fp8", tmp_path / "fp8-quantized")
+    model = _build_fp8_model(tmp_path / "fp8")
     assert type(model.model.model.layers[0].self_attn.q_proj).__name__ == "TorchFP8Linear"
     assert model._kernels_support_compile() is True
 

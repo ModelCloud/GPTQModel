@@ -72,10 +72,16 @@ gate/up scaling group (`AWQProcessor.register_moe_root_capture_hook`).
 
 ## Token-row budget
 
-`AWQProcessor._token_row_budget` derives the bound from the captures themselves:
+`AWQProcessor._token_row_budget` derives the bound from the captures themselves,
+and `AWQProcessor._cap_token_rows` then clamps it to the model's declared
+sequence limit:
 
 ```
-retained = min(total_rows, max(largest_batch_rows, non_empty_batch_count))
+retained = min(
+    total_rows,
+    max(largest_batch_rows, non_empty_batch_count),
+    resolve_position_limit(model.config),
+)
 ```
 
 For `batch_size=1` that is one longest-sample equivalent, so 512 rows for a
@@ -83,8 +89,97 @@ For `batch_size=1` that is one longest-sample equivalent, so 512 rows for a
 a 4096-document corpus keep the same per-module replay tensor. The extra row per
 batch guarantees every non-empty calibration batch contributes at least one row
 when the budget is at least the batch count; below that, evenly spaced batches
-contribute one row each. `_pack_token_rows` samples evenly inside each batch and
-is deterministic for a fixed capture order.
+contribute one row each. A single-row quota keeps the batch's first (BOS)
+position for one batch in eight and the batch centre for the rest: keeping every
+one at position 0 collapsed the sample onto the BOS/attention-sink activation
+(#5265), and keeping none loses the outlier channels those positions carry
+(#5310). `_pack_token_rows` samples evenly inside each batch and is
+deterministic for a fixed capture order.
+
+The position-limit clamp (#5085) is required because the packed rows are
+replayed as **one** sequence. Without it `batch_size > 1` asks for about
+`batch_size * seq_len` rows, and a corpus with more batches than the limit does
+the same. Attention implementations that read their causal structure from the
+`attention_mask` argument tolerate that, but `GPTNeoSelfAttention` slices a
+fixed `[max_position_embeddings, max_position_embeddings]` buffer:
+
+```python
+causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
+attn_weights = torch.where(causal_mask, attn_weights, mask_value)
+```
+
+An over-long replay clips that slice and `torch.where` raises
+`RuntimeError: The size of tensor a (2048) must match the size of tensor b
+(2200)`. OpenAI GPT's `[n_positions, n_positions]` buffer is the quieter
+variant: it clips the same way without raising, so rows past the limit would be
+scored against a truncated causal mask. `resolve_position_limit` in
+`gptqmodel/utils/model.py` reads the same keys calibration truncation already
+uses (`max_position_embeddings`, `max_sequence_length`, `max_seq_len`,
+`n_positions`, `seq_length`), so a row that calibration kept can always be
+replayed. A definition-declared `max_tokens` is clamped the same way.
+
+```mermaid
+flowchart TD
+    A["_layer_input_features"] --> B["policy max_tokens?"]
+    B -- yes --> C["int(max_tokens)"]
+    B -- no --> D["_token_row_budget<br/>max(largest_batch, batches)"]
+    C --> E["_cap_token_rows<br/>min(budget, position_limit)"]
+    D --> E
+    E --> F["_pack_token_rows<br/>[1, retained, hidden]"]
+    F --> G["_search_best_scale<br/>reference replay"]
+    G --> H{"Torch tensor geometry error?"}
+    H -- yes --> I["_AWQScaleGroupError<br/>configured fallback or raise"]
+    H -- no --> J["20-candidate grid<br/>apply_scale"]
+    style I fill:#ffe9b3,stroke:#b38600
+```
+
+`_cap_token_rows` caches `resolve_position_limit` once per processor, so the
+budget path costs no per-module config walk.
+
+### Routed-expert reservoir
+
+A routed expert sees a different number of rows per batch, so it never matches
+the precomputed plan and every capture goes to the uniform priority reservoir
+(`AWQProcessor._merge_reservoir_rows`). The reservoir is sized by
+`_reservoir_budget_cap` from the **layer-wide** budget, not from the expert's
+own captures: `max(largest_batch, batches)`, which is 906 rows for a
+128-document, 2500-character C4 calibration. Before #5175 each expert was sized
+from its own captures (about 185 rows in the same run), so a MoE run now runs
+the clip search on roughly 5x more rows per expert. That is the accuracy/latency
+trade-off of the bounded capture, and it dominates MoE AWQ quantize time
+(`_search_best_clip` 12.9 s -> 68.5 s in a contended run, #5284).
+
+A model that wants the smaller sample back can declare it per module through
+`awq_input_feature_aggregation`, which is already honoured by both the plan and
+the reservoir:
+
+```python
+@classmethod
+def awq_input_feature_aggregation(cls, module_name):
+    if module_name.startswith("mlp.experts."):
+        return {"mode": "token_rows", "max_tokens": 256}
+    return super().awq_input_feature_aggregation(module_name)
+```
+
+The value is clamped by the position limit like every other budget.
+
+Two per-capture costs are not part of that trade-off and are optimized away
+(#5284): the aggregation policy is memoized per `(class, module_name)` instead
+of rebuilding the model's `ModulePlan` on every capture, and a full reservoir
+short-circuits a capture whose rows all lose to the kept ones instead of
+concatenating and re-ranking the buffer.
+
+### Replay geometry failures
+
+The clamp covers the declared limit, but a module can bound its context below
+the config value, or a definition can declare a `max_tokens` of its own. A
+replay that still raises a Torch tensor-geometry failure
+(`must match the size of tensor`, `expanded size of the tensor`,
+`shapes cannot be multiplied`, `mat1 and mat2 shapes`) is reported as an
+`_AWQScaleGroupError` by `AWQProcessor._search_best_scale`. The configured
+fallback then quantizes the group plainly instead of aborting `quantize()`;
+`fallback=None` still propagates the error. Memory, kernel and numerical
+failures keep propagating unchanged.
 
 Host memory for the packed tensor is `retained * hidden * dtype_bytes` per
 module, and the raw per-batch captures are dropped by
@@ -181,6 +276,30 @@ needs:
   the same limitation the padded `batch_size>1` path already has.
 - Sibling projections (`q/k/v`, `gate/up`) share one captured input list, so
   the quadratic mask is built once per unique capture list per layer.
+- **Token-aligned kwargs travel with the same provenance** (#4880, #5015).
+  `AWQProcessor._pack_token_aligned_kwargs` selects `input_ids` (every entry of
+  `_AWQ_TOKEN_ALIGNED_KWARGS`) with the retained rows' provenance and returns it
+  as `[1, retained]`. The provenance `row_index` counts *kept* rows, not grid
+  positions: the capture hook strips padding and excluded attention sinks before
+  storing a feature, so `AWQProcessor._kept_row_grid_positions` maps each index
+  back through `_token_row_source_structure` (the same structure the mask and
+  position replay uses) before the id is read. Without that mapping a padded
+  `batch_size > 1` batch handed the router another document's id, and the row
+  count still matched, so the guard could not catch it. DeepSeek-V4 `hash_moe` layers route with
+  `gate.tid2eid[input_ids.reshape(-1)]`, so forwarding the current calibration
+  batch's ids instead handed the router a different number of index rows than
+  the replayed hidden states and raised `IndexError` in the first decoder layer.
+  If a token-aligned kwarg still does not describe the replayed rows,
+  `_prepare_module_forward` raises `_AWQScaleGroupError`, so the configured
+  plain-quantization fallback applies instead of aborting `quantize()`.
+- A forward declared with a `**kwargs` catch-all takes its real inputs from
+  that dict: Hymba's `HymbaBlock` reads `attention_mask`, `position_ids`,
+  `kv_last_layer` and `use_swa` out of it. `AWQProcessor._sanitize_kwargs`
+  therefore passes the captured kwargs through unchanged, and
+  `_prepare_module_forward` treats `position_ids` as accepted so a 2-D
+  activation is promoted to `[1, seq, hidden]` the way the block's
+  `pack(...)` requires (#4891). A name-based filter handed the block an empty
+  dict and the replay raised `KeyError: 'attention_mask'`.
 
 ### Bloom ALiBi
 
@@ -257,7 +376,7 @@ sequenceDiagram
     Hook->>Pack: kept rows per document
     Pack->>Kw: provenance source batch and row
     Kw->>Kw: source structure maps row to document and position
-    Kw->>Attn: mask in the captured form and position_ids for packed rows
+    Kw->>Attn: mask in the captured form, position_ids and token-aligned kwargs for packed rows
     Note over Attn: same-document causal only
 ```
 
@@ -367,3 +486,23 @@ with a different checkpoint (inference: the base `gemma-3-1b-pt`, which is not
 present locally). The Llama values differ from #4095 as well because `main`
 moved after that table was taken: #4089 changed replay chunk sizing. Qwen RTN
 reproduces #4063's 24.84 / 22.77 exactly, which anchors the harness.
+
+## Regression coverage
+
+| Test node | Guarantee |
+| --- | --- |
+| `tests/test_awq_gpt_neo_packed_replay_5085.py::test_position_limit_resolves_each_declared_key` | `resolve_position_limit` reads every calibration key and nested decoder config |
+| `tests/test_awq_gpt_neo_packed_replay_5085.py::test_token_row_budget_is_capped_at_the_position_limit` | the clamp binds, and an absent limit keeps the unclamped budget |
+| `tests/test_awq_gpt_neo_packed_replay_5085.py::test_awq_gpt_neo_batch_of_two_quantizes_within_the_limit` | native GPT-Neo, two 40-token rows against a 64-position limit: every packed replay stays within the limit and all 12 leaves pack |
+| `tests/test_awq_gpt_neo_packed_replay_5085.py::test_control_batch_of_one_keeps_every_row` | a single document under the limit still replays all 40 rows |
+| `tests/test_awq_gpt_neo_packed_replay_5085.py::test_replay_geometry_error_becomes_a_scale_group_error` | an over-long replay raises `_AWQScaleGroupError`; fallback quantizes every leaf, `fallback=None` propagates |
+| `tests/test_awq_capture_perf_5284.py::test_policy_is_resolved_once_per_module` | the aggregation policy is resolved once per `(class, module_name)`, not once per capture |
+| `tests/test_awq_capture_perf_5284.py::test_a_losing_capture_skips_the_merge` | a full reservoir does not re-rank the buffer for a capture that cannot displace a row |
+| `tests/test_awq_capture_perf_5284.py::test_merge_matches_the_previous_algorithm` | the short-circuit keeps exactly the rows the previous merge kept |
+| `tests/test_awq_token_row_position_5265.py::test_single_row_quota_keeps_a_bounded_sink_share` | one in eight single-row quotas keeps position 0, the rest keep the batch centre |
+| `tests/test_awq_token_row_position_5265.py::test_single_row_quotas_bound_the_sink_share` | the sink share of a single-row plan stays between 1% and 50% |
+
+The first three `test_awq_gpt_neo_packed_replay_5085.py` nodes fail on `main`
+before the #5085 fix; its geometry-error node asserts the fallback contract
+introduced with it. The `test_awq_capture_perf_5284.py` policy and short-circuit
+nodes fail before #5284, and its equivalence node pins the kept rows.

@@ -13,6 +13,7 @@ import copy
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -306,6 +307,11 @@ def test_jamba_replay_mask_is_causal_not_bidirectional():
 
 
 def test_tiny_jamba_gptq_quantization_smoke(tmp_path: Path, monkeypatch):
+    # GPTQModel.load() validates the definition's `mamba-ssm` requirement and
+    # raises PackageNotFoundError when its metadata is absent. Only this smoke
+    # run loads a model; the CPU contract tests above do not need the package.
+    pytest.importorskip("mamba_ssm")
+
     _use_torch_reference_kernels(monkeypatch)
 
     model_dir = tmp_path / "native"
@@ -355,9 +361,10 @@ def test_tiny_jamba_gptq_quantization_smoke(tmp_path: Path, monkeypatch):
     # The top-k router is checkpoint-owned but intentionally stays unquantized.
     assert not isinstance(modules["model.layers.1.feed_forward.router"], TorchLinear)
 
-    # Mamba mixer modules that consume dense weights stay dense.
+    # ``x_proj`` is a declared quantizable mixer projection (#4245); the mixer
+    # still consumes ``conv1d``/``dt_proj`` as dense weights, so those stay dense.
+    assert isinstance(modules["model.layers.0.mamba.x_proj"], TorchLinear)
     assert isinstance(modules["model.layers.0.mamba.dt_proj"], torch.nn.Linear)
-    assert isinstance(modules["model.layers.0.mamba.x_proj"], torch.nn.Linear)
     assert isinstance(modules["model.layers.0.mamba.conv1d"], torch.nn.Conv1d)
 
     input_ids = tokenizer("tiny jamba calibration sample one", return_tensors="pt")["input_ids"]

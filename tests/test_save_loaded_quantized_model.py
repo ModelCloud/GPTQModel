@@ -21,6 +21,7 @@ from transformers import AutoTokenizer  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, get_best_device  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.utils.importer import get_kernel_for_backend  # noqa: E402
+from tests.accelerator_gates import requires_nvidia_cuda  # noqa: E402
 
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
@@ -55,6 +56,8 @@ class TestSave(unittest.TestCase):
         ]
     )
     def test_save(self, backend: BACKEND):
+        if backend == BACKEND.TRITON and not requires_nvidia_cuda():
+            self.skipTest("TritonV2Linear is CUDA-only")
         if backend != BACKEND.AUTO:
             self._require_backend(backend)
 

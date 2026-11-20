@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
+
 import torch
 
 from ...utils.rocm import IS_ROCM
+from ...utils.torch import dynamo_is_compiling
 
 
 # cuBLAS accumulates float16/bfloat16 GEMMs in the operand dtype once the
@@ -38,6 +41,20 @@ def autocast_active(device_type: str) -> bool:
         return torch.is_autocast_enabled(device_type)
     except TypeError:  # torch < 2.4 takes no device argument (CUDA only)
         return torch.is_autocast_enabled()
+
+
+def fp32_epilogue_context(device_type: str):
+    """Keep an explicit FP32 epilogue out of an ambient autocast context.
+
+    A module that promises one wide reduction and a single output rounding
+    performs its matmul on explicit FP32 operands. Autocast still narrows an
+    eligible ``matmul``, so the product is rounded *before* a stored bias
+    cancels it (an exact 1 can become 0). Entering this context disables
+    autocast only for the epilogue; leaving it restores the caller's state.
+    """
+    if not autocast_active(device_type):
+        return contextlib.nullcontext()
+    return torch.autocast(device_type=device_type, enabled=False)
 
 
 def _can_fuse_hip_bias(
@@ -91,7 +108,7 @@ class _CudaWideMatmul(torch.autograd.Function):
         flat_x = x.reshape(-1, x.shape[-1])
         if bias is None:
             output = torch.mm(flat_x, weight, out_dtype=torch.float32)
-        elif torch.compiler.is_compiling():
+        elif dynamo_is_compiling():
             # Inductor cannot lower `addmm(..., out_dtype=...)` (torch 2.15
             # raises `tuned_addmm() takes 3 positional arguments but 4 were
             # given`), which breaks a compiled static-cache decode. Keep the
@@ -99,7 +116,11 @@ class _CudaWideMatmul(torch.autograd.Function):
             output = torch.mm(flat_x, weight, out_dtype=torch.float32) + bias.float()
         else:
             output = torch.addmm(bias.float(), flat_x, weight, out_dtype=torch.float32)
-        return output.to(x.dtype).reshape(x.shape[:-1] + (weight.shape[-1],))
+        # Return the 2-D product, never a view: a `Function` output that is a
+        # view cannot be modified in-place by the caller, which is what PEFT's
+        # AdaLoRA wrapper does (`result += output`). The caller reshapes
+        # outside the Function (#4974).
+        return output.to(x.dtype)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
@@ -115,6 +136,42 @@ class _CudaWideMatmul(torch.autograd.Function):
         if ctx.needs_input_grad[2]:
             grad_bias = grad.float().sum_to_size(ctx.bias_shape).to(ctx.bias_dtype)
         return grad_x, grad_weight, grad_bias
+
+
+def _reshape_reduced(output: torch.Tensor, shape: torch.Size) -> torch.Tensor:
+    """Reshape a reduced product without creating a view when it is unnecessary.
+
+    ``Tensor.reshape`` returns a view even when the requested shape equals the
+    current one. Inside an ``autograd.Function`` that makes the output a view,
+    and autograd then rejects any in-place op on it (#4974). Skipping the
+    no-op reshape keeps the plain eager path allocation-free.
+    """
+
+    return output if output.shape == shape else output.reshape(shape)
+
+
+def _reshape_reduced_owned(
+    output: torch.Tensor,
+    x: torch.Tensor,
+    bias: torch.Tensor | None,
+    shape: torch.Size,
+) -> torch.Tensor:
+    """``_reshape_reduced`` for epilogues that can run inside a custom Function.
+
+    A real reshape is still a view, so a batched result returned from
+    ``autograd.Function.forward`` would reject an in-place update by the caller
+    (#4974). Grad mode is disabled inside that forward while the Function's
+    output is tracked, so materialize the view there; eager inference and
+    ordinary training loops keep the allocation-free reshape.
+    """
+
+    if output.shape == shape:
+        return output
+    out = output.reshape(shape)
+    tracked = x.requires_grad or (bias is not None and bias.requires_grad)
+    if tracked and not torch.is_grad_enabled():
+        return out.clone()
+    return out
 
 
 def matmul_fp32_reduce(
@@ -134,9 +191,11 @@ def matmul_fp32_reduce(
         # round the product before a wide bias cancels it.
         return linear_wide_bias(x, weight.t(), bias)
     if _wants_fp32_reduce(x):
-        if _needs_wide_autograd(x, weight, bias):
-            return _CudaWideMatmul.apply(x, weight, bias)
         shape = x.shape[:-1] + (weight.shape[-1],)
+        if _needs_wide_autograd(x, weight, bias):
+            # The Function returns the 2-D product; reshaping here keeps its
+            # output free of views (#4974).
+            return _reshape_reduced(_CudaWideMatmul.apply(x, weight, bias), shape)
         if autocast_active(x.device.type):
             # Autocast narrows the GEMM operands, so a bias fused into the
             # epilogue is narrowed too (a BF16 bias can overflow as FP16).
@@ -149,7 +208,7 @@ def matmul_fp32_reduce(
         flat_x = x.reshape(-1, x.shape[-1])
         if bias is not None and (bias.dim() == 1 or bias.shape == shape):
             flat_bias = bias if bias.dim() == 1 else bias.reshape(-1, weight.shape[-1])
-            if torch.compiler.is_compiling():
+            if dynamo_is_compiling():
                 # Inductor (torch 2.15) cannot lower `addmm` with `out_dtype`.
                 # The eager `addmm` branch is left unchanged so its rounding
                 # stays bitwise identical to the pre-fix path; the compiled
@@ -164,12 +223,14 @@ def matmul_fp32_reduce(
             return (output + bias).to(x.dtype)
         else:
             output = torch.mm(flat_x, weight, out_dtype=torch.float32)
-        return output.to(x.dtype).reshape(shape)
+        return _reshape_reduced(output.to(x.dtype), shape)
     if _can_fuse_hip_bias(x, weight, bias):
         # Fuse the bias into the GEMM epilogue instead of rounding first.
         flat_x = x.reshape(-1, x.shape[-1])
         flat_bias = bias if bias.dim() == 1 else bias.reshape(-1, weight.shape[-1])
-        return torch.addmm(flat_bias, flat_x, weight).reshape(x.shape[:-1] + (weight.shape[-1],))
+        return _reshape_reduced(
+            torch.addmm(flat_bias, flat_x, weight), x.shape[:-1] + (weight.shape[-1],)
+        )
     output = torch.matmul(x, weight)
     return output + bias if bias is not None else output
 
@@ -232,7 +293,11 @@ def linear_wide_bias(
                 output = output.reshape(shape) + bias.float()
             else:
                 output = output + bias.float()
-        return output.to(x.dtype).reshape(shape)
+        # A wide bias can reach this epilogue from inside a custom
+        # ``autograd.Function`` (the Triton decoder and the GGUF fallback both
+        # call ``matmul_fp32_reduce``), where a returned reshape view cannot be
+        # modified in place afterwards (#4974).
+        return _reshape_reduced_owned(output.to(x.dtype), x, bias, shape)
 
     if not autocast_active(x.device.type):
         return reduce()
@@ -267,7 +332,7 @@ def bias_narrows_losslessly(bias: torch.Tensor, dtype: torch.dtype) -> bool:
     # Dynamo also cannot trace its data-dependent Python boolean. Choose the
     # safe wide epilogue in either mode. The graph still reads the live bias
     # tensor on every replay, including writes made through `.data`.
-    if torch.compiler.is_compiling():
+    if dynamo_is_compiling():
         return False
     if bias.device.type == "cuda" and torch.cuda.is_current_stream_capturing():
         return False
@@ -336,7 +401,9 @@ def _fused_addmm(
 ) -> torch.Tensor:
     shape = x.shape[:-1] + (weight.shape[0],)
     flat_bias = bias if bias.dim() == 1 else bias.reshape(-1, weight.shape[0])
-    return torch.addmm(flat_bias, x.reshape(-1, x.shape[-1]), weight.t()).reshape(shape)
+    return _reshape_reduced_owned(
+        torch.addmm(flat_bias, x.reshape(-1, x.shape[-1]), weight.t()), x, bias, shape
+    )
 
 
 def linear_fp32_reduce(x, weight, bias=None):
@@ -346,15 +413,82 @@ def linear_fp32_reduce(x, weight, bias=None):
         return linear_wide_bias(x, weight, bias)
     bias = promote_bias(x, bias)
     if _wants_fp32_reduce(x):
-        if _needs_wide_autograd(x, weight, bias):
-            return _CudaWideMatmul.apply(x, weight.t(), bias)
         shape = x.shape[:-1] + (weight.shape[0],)
+        if _needs_wide_autograd(x, weight, bias):
+            # The Function returns the 2-D product; reshape outside it so the
+            # output is never a view of a custom Function (#4974).
+            return _reshape_reduced(_CudaWideMatmul.apply(x, weight.t(), bias), shape)
         output = torch.mm(x.reshape(-1, x.shape[-1]), weight.t(), out_dtype=torch.float32)
         if bias is not None:
             output = output + bias.float()
-        return output.to(x.dtype).reshape(shape)
+        return _reshape_reduced(output.to(x.dtype), shape)
     if _fuse_bias_epilogue(x, weight, bias):
         # CPU/HIP may round or overflow the product before a separate bias
         # addition; keep both in a single epilogue.
         return _fused_addmm(x, weight, bias)
     return torch.nn.functional.linear(x, weight, bias)
+
+
+def codebook_rounding_dtype(
+    activation_dtype: torch.dtype, codebook_dtype: torch.dtype
+) -> torch.dtype:
+    """Dtype a wide codebook reconstruction should be rounded to for a matmul.
+
+    A decoder sums its codebooks in FP32 and rounds once. The historical target
+    was the codebook storage dtype, and that stays bitwise identical whenever
+    the activation dtype can hold every value the codebook dtype can (a
+    matching dtype, or an FP32/FP64 activation over an FP16 checkpoint).
+
+    When the activation dtype has a wider range but a coarser mantissa -- BF16
+    activations over an FP16 checkpoint -- rounding to the codebook dtype can
+    turn a finite sum into ``inf`` even though the activation dtype represents
+    it exactly. Round once to the activation dtype there instead (#5609).
+    """
+
+    if (
+        not activation_dtype.is_floating_point
+        or not codebook_dtype.is_floating_point
+        or activation_dtype == codebook_dtype
+    ):
+        return codebook_dtype
+    activation = torch.finfo(activation_dtype)
+    codebook = torch.finfo(codebook_dtype)
+    if activation.max >= codebook.max and activation.eps <= codebook.eps:
+        return codebook_dtype
+    if activation.max > codebook.max:
+        return activation_dtype
+    return codebook_dtype
+
+
+def scaled_accumulation(
+    accum: torch.Tensor, s1: torch.Tensor, s_channel: torch.Tensor
+) -> torch.Tensor:
+    """Apply two broadcast scales without letting an intermediate overflow.
+
+    ``accum`` is an INT8 reduction widened to FP32, so every nonzero element
+    is an integer of magnitude at least one.  The historical expression
+    ``(accum * s1) * s_channel`` is kept bitwise unchanged for every element
+    whose intermediate stays finite; only elements that overflowed are
+    recomputed with the other association.
+
+    The fallback is sufficient rather than merely different: when
+    ``(accum * s1) * s_channel`` is non-finite because a factor overflowed,
+    the reversed product ``(accum * s_channel) * s1`` has a first intermediate
+    of ``|accum * s1 * s_channel| / |s1|``, which is below the FP32 maximum
+    whenever the true product is.  If the reversed association overflows too,
+    then both ``|accum * s1|`` and ``|accum * s_channel|`` exceed the FP32
+    maximum, so the exact product exceeds ``max**2 / |accum|`` with
+    ``|accum| >= 1`` and is genuinely unrepresentable in FP32.  Returning the
+    ``inf`` of the fallback is then the correctly rounded result.
+
+    Reversing unconditionally would change rounding in the ordinary range
+    (and can overflow where the historical order cannot), so the choice is
+    made per element on the device: no host reduction and no graph break.
+    """
+    scaled = accum * s1
+    scaled = scaled * s_channel
+    # A non-finite result here can only come from a factor overflow: the INT8
+    # reduction is exact in FP32 and both scales are positive.
+    alternate = accum * s_channel
+    alternate = alternate * s1
+    return torch.where(torch.isfinite(scaled), scaled, alternate)

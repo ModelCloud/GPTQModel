@@ -31,7 +31,7 @@ from .device import get_device
 from .logger import setup_logger
 from .module_locks import parent_module_lock
 from .tensor import tensor_buffer
-from .tied_weights import retie_tied_weights, word_embeddings_tied
+from .tied_weights import retie_tied_weights, tied_weights_keys, word_embeddings_tied
 from .torch import CPU, META
 
 
@@ -55,8 +55,44 @@ def get_module_fullname(model: torch.nn.Module, module: torch.nn.Module) -> str:
         if mod is module:
             return name  # dotted path like "model.embed_tokens" or "model.layers.0.self_attn.q_proj"
 
-    name = module.full_name if module is NamedModule else ""
+    name = module.full_name if isinstance(module, NamedModule) else ""
     raise Exception(f"module not found in model: name = {name}, module = {module}")
+
+
+def _resolve_offload_module_name(
+    model: torch.nn.Module,
+    module: torch.nn.Module,
+    module_name: Optional[str],
+) -> str:
+    """Return ``module``'s dotted path without scanning the whole model.
+
+    Disk offload runs once per finalized quantized linear.  Recovering the name
+    with ``get_module_fullname`` walks ``named_modules()`` from the root, so the
+    scan cost grows with layer depth.  Prefer a name the caller already holds
+    (``NamedModule.full_name`` or the looper's module path) and keep the scan as
+    a fallback that also catches stale names.
+    """
+
+    target = module.module if isinstance(module, NamedModule) else module
+    candidate = module_name
+    if candidate is None and isinstance(module, NamedModule):
+        candidate = module.full_name
+    if candidate:
+        try:
+            resolved = get_submodule(model, candidate)
+        except (AttributeError, IndexError, KeyError):
+            resolved = None
+        if isinstance(resolved, NamedModule):
+            resolved = resolved.module
+        if resolved is target:
+            return candidate
+        log.warning(
+            "offload_to_disk: module name `%s` does not resolve to the target "
+            "module; falling back to a full named_modules() lookup.",
+            candidate,
+        )
+    return get_module_fullname(model=model, module=target)
+
 
 def set_submodule(root: torch.nn.Module, path: str, new_mod: torch.nn.Module) -> None:
     parts = path.split(".")
@@ -98,12 +134,23 @@ def bind_private_offload_root(model: nn.Module) -> Optional[str]:
     move this model's save-time bundle lookup. The directory is registered on
     the model so :func:`release_private_offload_root` can remove it after save,
     after a failed run, or when the model is garbage collected (issue #4368).
+
+    A checkpoint session records its attempt directory on the model as
+    run-owned state; this run's namespace then lives inside that attempt
+    instead of the caller's shared root (issue #5361).
     """
     config = getattr(model, "quantize_config", None)
     if config is None or not getattr(config, "offload_to_disk", False):
         return None
 
     base = getattr(model, "_private_offload_base_root", None)
+    if not base:
+        # A checkpoint attempt is run-owned state on the model rather than a
+        # rewrite of the caller's (possibly shared) QuantizeConfig. Its private
+        # namespace belongs inside that attempt directory (#5361).
+        attempt = getattr(model, "_checkpoint_offload_attempt_root", None)
+        if attempt:
+            base = os.path.abspath(os.path.expanduser(os.fspath(attempt)))
     if not base:
         configured = getattr(config, "offload_to_disk_path", None)
         if not configured:
@@ -444,18 +491,27 @@ def _retie_shared_embeddings(model: nn.Module) -> bool:
     was on meta cannot be loaded from it (issue #4597). The lazy shell also
     replaces parameters as it materializes, which breaks the tie the config
     declares. Re-tie before judging whether a module is still meta.
+
+    The load-time snapshot is authoritative: it already resolved tying from the
+    wrapper flag and the checkpoint, so a wrapper whose decoder text config
+    defaults to ``False`` still ties here (#4973), while a distinct checkpoint
+    head stays untied (#4799).
     """
 
     tie = getattr(model, "tie_weights", None)
     if not callable(tie):
         return False
+    snapshot = tied_weights_keys(model)
+    if snapshot is not None:
+        # An empty snapshot means the checkpoint really leaves the head untied.
+        if not snapshot:
+            return False
+        return retie_tied_weights(model)
+    # No snapshot (a model loaded outside the lazy path): keep the config gate.
     config = getattr(model, "config", None)
-    # A stamped snapshot already resolved this from the decoder config and the
-    # checkpoint, so a composite default cannot re-tie a distinct head (#4799).
     if not word_embeddings_tied(config):
         return False
-    retie_tied_weights(model)
-    return True
+    return retie_tied_weights(model)
 
 
 def materialize_remaining_meta_modules(qmodel, *, device: torch.device = CPU) -> List[str]:
@@ -492,7 +548,11 @@ def materialize_remaining_meta_modules(qmodel, *, device: torch.device = CPU) ->
             continue
         if callable(materialize):
             try:
-                materialize(target_submodule=module, device=device)
+                materialize(
+                    target_submodule=module,
+                    device=device,
+                    module_path=name,
+                )
                 replace_inference_parameters(module)
             except Exception as exc:  # pragma: no cover - defensive
                 log.warn("Offload: failed to materialize `%s` from the source checkpoint: %s", name, exc)
@@ -531,6 +591,24 @@ def _tensor_nbytes(tensor: torch.Tensor) -> int:
     except RuntimeError:
         itemsize = torch.empty((), dtype=tensor.dtype).element_size()
     return tensor.numel() * itemsize
+
+
+def _module_has_tensors(module: nn.Module) -> bool:
+    """True when ``module`` owns state at any depth.
+
+    ``offload_to_disk`` bundles ``module.state_dict()``, which is recursive, so
+    the "is there anything to offload" gate must be recursive too. Checking
+    ``recurse=False`` made container modules (``model.visual`` and friends)
+    look empty and silently skipped their offload (#5145).
+    """
+
+    for parameter in module.parameters(recurse=True):
+        if parameter.numel() > 0:
+            return True
+    for buffer in module.buffers(recurse=True):
+        if buffer.numel() > 0:
+            return True
+    return False
 
 
 def _write_offload_index(index: dict, offload_dir: str) -> None:
@@ -1172,12 +1250,16 @@ def offload_to_disk(
     disk_path: str = ".",
     force: bool = False,
     *,
+    module_name: Optional[str] = None,
     source_root: Optional[str] = None,
     source_checkpoint: Optional[str] = None,
 ):
     """Offload module state to disk. force=True also writes modules below the
     small-module threshold -- required when the on-disk bundle is the only
     durable record (e.g. quantized modules that a resumed run must restore).
+
+    ``module_name`` names the single module being offloaded so the caller's
+    known dotted path can skip a full ``named_modules()`` scan.
 
     ``source_root``/``source_checkpoint`` name the checkpoint the model was
     loaded from. When a module's tensors are still byte-identical to that
@@ -1189,6 +1271,7 @@ def offload_to_disk(
         model=model,
         disk_path=disk_path,
         force=force,
+        module_name=module_name,
         source_root=source_root,
         source_checkpoint=source_checkpoint,
     )
@@ -1200,6 +1283,7 @@ def _offload_to_disk_impl(
     disk_path: str = ".",
     force: bool = False,
     *,
+    module_name: Optional[str] = None,
     source_root: Optional[str] = None,
     source_checkpoint: Optional[str] = None,
 ):
@@ -1208,6 +1292,8 @@ def _offload_to_disk_impl(
 
     #with _lock:
     if isinstance(module, List):
+        if module_name is not None:
+            raise ValueError("offload_to_disk(module_name=...) requires a single module")
         for name in module:
             m = get_submodule(model, name)
             # unwrap named module
@@ -1215,7 +1301,9 @@ def _offload_to_disk_impl(
                 # print(f"offloading named module: {module.full_name}")
                 m = m.module
 
-            full_name = get_module_fullname(model=model, module=m)
+            # The caller supplied the dotted path, so the full-tree scan is
+            # pure overhead here.
+            full_name = name
             _offload_disk(
                 module=m,
                 name=full_name,
@@ -1225,12 +1313,17 @@ def _offload_to_disk_impl(
                 source_checkpoint=source_checkpoint,
             )
     else:
+        source_module = module
         # unwrap named module
         if isinstance(module, NamedModule):
             # print(f"offloading named module: {module.full_name}")
             module = module.module
 
-        full_name = get_module_fullname(model=model, module=module)
+        full_name = _resolve_offload_module_name(
+            model=model,
+            module=source_module,
+            module_name=module_name,
+        )
 
         _offload_disk(
             module=module,
@@ -1297,10 +1390,13 @@ def _offload_disk_locked(
 
     # print(f"device_map base_modules: {device_map}")
 
-    # skip modules that have no parameters and no buffers since they can't be offloaded
-    has_params  = any(p.numel() > 0 for p in module.parameters(recurse=False))
-    has_buffers = any(b.numel() > 0 for b in module.buffers(recurse=False))
-    if not has_params and not has_buffers:
+    # Skip only a module whose recursive state is empty. The old check used
+    # recurse=False, so a container that owns no direct tensors (a multimodal
+    # ``model.visual`` tower, whose weights all live in its children) was
+    # skipped as "empty" and silently stayed on the accelerator for the whole
+    # layer loop (#5145). ``state_dict()`` below is recursive, so this check
+    # now matches what actually gets bundled.
+    if not _module_has_tensors(module):
         return
 
     module_offload_dir = os.path.join(disk_path, name)

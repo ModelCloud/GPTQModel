@@ -26,9 +26,11 @@ class TestHymba(ModelTest):
     # Hymba currently tests that DESC_ACT=False to get better results.
     # If DESC_ACT=False, the output will be terrible.
     DESC_ACT = False
-    OFFLOAD_TO_DISK = False # FIXME the issue where hymba does not work with OFFLOAD_TO_DISK=True
     LOAD_BACKEND = BACKEND.AUTO
     USE_FLASH_ATTN = True
+    # ARC alone never calls generate(), so a broken transformers-5 cache
+    # contract stayed invisible (#5090).
+    ASSERT_INFERENCE = True
 
 
     def test_hymba(self):

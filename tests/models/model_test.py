@@ -133,7 +133,6 @@ from gptqmodel.quantization.config import (  # noqa: E402
     BitsAndBytesConfig,
     Fallback,
     FOEMConfig,
-    FP8Config,
     GGUFConfig,
     GPTAQConfig,
     HessianConfig,
@@ -1580,21 +1579,6 @@ class ModelTest(unittest.TestCase):
                     smoother=self.WEIGHT_ONLY.smooth,
                 )
 
-            if format_family == FORMAT.FP8 or self.WEIGHT_ONLY.method.value == "fp8":
-                return FP8Config(
-                    bits=self.BITS,
-                    format=self.FORMAT,
-                    adapter=self.EORA,
-                    pack_impl="cpu",
-                    dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
-                    dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
-                    moe_vram_strategy=self.MOE_VRAM_STRATEGY,
-                    moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
-                    dynamic=self.DYNAMIC,
-                    moe=self.MOE_CONFIG,
-                    smoother=self.WEIGHT_ONLY.smooth,
-                )
-
             return RTNConfig(
                 bits=self.BITS,
                 group_size=self.GROUP_SIZE,
@@ -1661,9 +1645,7 @@ class ModelTest(unittest.TestCase):
 
         log.info(f"args: {args}")
         torch_fused_backend = self._torch_fused_backend()
-        model = GPTQModel.load(
-            model_id_or_path,
-            quantize_config=quantize_config,
+        load_kwargs = dict(
             trust_remote_code=trust_remote_code,
             dtype=dtype,
             device_map=(
@@ -1673,6 +1655,20 @@ class ModelTest(unittest.TestCase):
             ),
             **args,
         )
+        try:
+            model = GPTQModel.load(
+                model_id_or_path,
+                quantize_config=quantize_config,
+                **load_kwargs,
+            )
+        except ValueError as exc:
+            # A pre-quantized checkpoint carries its own quantization settings
+            # and rejects a caller config by design. Load it without the config
+            # so the prequantized eval branch in ``quantize_and_evaluate`` is
+            # reachable for every ModelTest with a quantized NATIVE_MODEL_ID.
+            if "cannot be applied to a quantized checkpoint" not in str(exc):
+                raise
+            model = GPTQModel.load(model_id_or_path, **load_kwargs)
 
         self._layer_stop_callback = None
         if DEBUG_ON and self.STOP_AFTER_LAYER is not None:

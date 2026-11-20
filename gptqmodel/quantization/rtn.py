@@ -18,9 +18,14 @@ from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
 from .config import FORMAT, Fallback, FallbackStrategy, RTNConfig, SmoothMSE
-from .fallback_smooth import mse_optimal_quant, smooth_block
+from .fallback_smooth import (
+    element_saliency_weights,
+    mse_optimal_quant,
+    smooth_applies,
+    smooth_block,
+)
 from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
-from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, Quantizer
+from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, Quantizer, narrowing_loses_codes
 
 
 _MLX_RTN_MIN_ELEMENTS = 256 * 1024
@@ -182,6 +187,9 @@ class RTN:
             self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
         )
         smooth_method = self.qcfg.smooth
+        search_mse = isinstance(smooth_method, SmoothMSE) and smooth_applies(
+            smooth_method, effective_group_size
+        )
         mse_steps = 32
         mse_maxshrink = 0.8
         if isinstance(smooth_method, SmoothMSE):
@@ -207,7 +215,7 @@ class RTN:
                 end = min(start + effective_group_size, self.columns)
                 block = weights[:, start:end]
 
-                if isinstance(smooth_method, SmoothMSE):
+                if search_mse:
                     dequant, scale, zero = mse_optimal_quant(
                         block,
                         self.qcfg,
@@ -215,6 +223,10 @@ class RTN:
                         steps=mse_steps,
                         maxshrink=mse_maxshrink,
                         eps=SCALE_STORAGE_FLOOR,
+                        # Calibration-free saliency: a large weight dominates
+                        # its row's dot product, so do not let the search clip
+                        # it just because the bulk gets a smaller step.
+                        weights=element_saliency_weights(block),
                     )
                 else:
                     block_mod, scale_factor = smooth_block(
@@ -285,11 +297,15 @@ class RTN:
             quantized = quantized.t()
 
         if quantized.shape != self.module.weight.shape:
-            quantized = quantized.reshape(self.module.weight.shape).to(
-                self.module.weight.dtype
-            )
-        else:
-            quantized = quantized.to(self.module.weight.dtype)
+            quantized = quantized.reshape(self.module.weight.shape)
+
+        # The packers recover integer codes from ``linear.weight``; BF16 is
+        # too narrow for 8-bit asymmetric codes to round-trip. Keep the FP32
+        # reconstruction for packing and narrow only the replay copy (#5721).
+        if narrowing_loses_codes(self.module.weight.dtype, self.qcfg.bits, self.qcfg.sym):
+            self.pack_weight = quantized.detach()
+
+        quantized = quantized.to(self.module.weight.dtype)
 
         quantized = quantized.to(
             device=self.module.weight.data.device, non_blocking=False
