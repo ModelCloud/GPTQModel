@@ -308,6 +308,17 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         # this build cannot invert keeps it (#4783).
         finalize_fused_train_state(self)
 
+    def _runtime_dense_operands(self) -> tuple[torch.Tensor, bool]:
+        """Dense weight for a compiled grad forward.
+
+        ``torch_cpu_avx512`` swaps ``qweight``/``qzeros`` for the HF int4 tile
+        layout in ``transform_cpu``, not the ATen int4pack permutation, so the
+        shared int4pack decoder cannot read it (#5569). ``dequantize_weight``
+        inverts that tile layout and already restores the checkpoint channel
+        order, so the caller must not gather ``ret_idx``.
+        """
+        return self.dequantize_weight(), False
+
     def dequantize_weight(self, num_itr: int = 1):
         if not self._cpu_transformed:
             return super().dequantize_weight(num_itr=num_itr)

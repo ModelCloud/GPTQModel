@@ -339,6 +339,7 @@ class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
+        runtime_dense = False
         if torch.compiler.is_compiling():
             # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
             # hard graph break), and the one-time ``transform()`` rewrites the
@@ -346,6 +347,12 @@ class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
             # graph must not do. The transform runs on the first eager forward
             # and in ``optimize()``'s warmup, so the graph only reads the
             # resolved ``linear_mode``.
+            #
+            # A grad-requiring call cannot use the ``@torch.no_grad`` fused op
+            # and must not restore the checkpoint layout by mutating buffers
+            # inside the trace. Decode the live runtime operands instead
+            # (#5369, #5569).
+            runtime_dense = x_flat.device.type == "cpu" and fused_autograd_needs_dense(self, x_flat)
             linear_mode = self.linear_mode
         else:
             with self._cpu_transform_lock:
@@ -378,7 +385,16 @@ class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
                     self.linear_mode = "train"
             linear_mode = self.linear_mode
 
-        if linear_mode == "inference":
+        if runtime_dense:
+            weight = self.awq_weight_dequantize(device=x_flat.device, dtype=x_flat.dtype)
+            if self.bias is not None:
+                # ``transform_cpu()`` keeps the fused kernel's bias in FP32. Keep
+                # the product and the bias in FP32 so a cancelling bias is
+                # applied before the single output cast.
+                out = matmul_fp32_reduce(x_flat, weight, self.bias).reshape(out_shape)
+            else:
+                out = torch.matmul(x_flat, weight).reshape(out_shape)
+        elif linear_mode == "inference":
             if not self._fused_input_dtype(x_flat):
                 raise RuntimeError(
                     f"{self.__class__.__name__} was transformed for bfloat16 "

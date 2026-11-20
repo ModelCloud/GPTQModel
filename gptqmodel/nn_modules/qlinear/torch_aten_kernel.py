@@ -554,9 +554,10 @@ class TorchAtenLinear(PackableQuantLinear):
             linear_mode == "inference" and self._fused_op_handles_bias
         )
         if runtime_dense:
-            weights = runtime_int4pack_dense_weight(self).to(x.dtype)
+            weights, gather = self._runtime_dense_operands()
+            weights = weights.to(x.dtype)
             dense_x = x
-            if not self._ret_idx_is_identity():
+            if gather and not self._ret_idx_is_identity():
                 dense_x = x[:, self._build_ret_idx().to(x.device)].contiguous()
             elif not dense_x.is_contiguous():
                 dense_x = dense_x.contiguous()
@@ -585,6 +586,17 @@ class TorchAtenLinear(PackableQuantLinear):
             out = self.adapter.apply(x=x, out=out)
 
         return out
+
+    def _runtime_dense_operands(self) -> tuple[torch.Tensor, bool]:
+        """Dense weight for a compiled grad forward.
+
+        Returns ``(weight, gather)``. ``weight`` is the dense ``[in, out]``
+        operand and ``gather`` says whether the caller must reorder the
+        activations with ``ret_idx`` to match it. The default decodes the live
+        ATen int4pack runtime layout, which keeps runtime input order; a
+        subclass whose runtime layout is not int4pack overrides both.
+        """
+        return runtime_int4pack_dense_weight(self), True
 
     @torch.no_grad
     def _fused_op_forward(self, x):
