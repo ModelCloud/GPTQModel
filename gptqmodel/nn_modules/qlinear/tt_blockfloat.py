@@ -37,6 +37,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from . import BaseQuantLinear
 from ._compile_support import COMPILE_LEVEL
+from ._numerics import autocast_active
 
 
 #: Values per shared exponent. The hardware format fixes this; a checkpoint
@@ -357,6 +358,7 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
         block: int = BLOCKFLOAT_BLOCK,
         pack_dtype: torch.dtype = torch.uint8,
         block_axis: str = "in",
+        bias_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
         if block != BLOCKFLOAT_BLOCK:
@@ -381,11 +383,19 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
         self.pack_dtype = pack_dtype
         self._init_storage(out_features, in_features, bits, block, block_axis)
         if bias:
-            # Bias is not quantized, so keep the precision of the model it came
-            # from. Narrowing to float16 here would overflow large finite
+            # Bias is not quantized, so keep the precision of the checkpoint it
+            # came from. The loader passes that dtype explicitly when the saved
+            # bias is wider than the weights (issue #5650); otherwise follow the
+            # model dtype. Narrowing to float16 here would overflow large finite
             # values and round ordinary ones even for a float32 checkpoint.
-            bias_dtype = dtype if isinstance(dtype, torch.dtype) else torch.float16
-            self.register_buffer("bias", torch.zeros(out_features, dtype=bias_dtype))
+            resolved_bias_dtype = (
+                bias_dtype
+                if isinstance(bias_dtype, torch.dtype)
+                else dtype if isinstance(dtype, torch.dtype) else torch.float16
+            )
+            self.register_buffer(
+                "bias", torch.zeros(out_features, dtype=resolved_bias_dtype)
+            )
         else:
             self.bias = None
 
@@ -450,11 +460,15 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
                 else out_dtype
             )
             weight = self.dequantize(dtype=compute_dtype)
-            out = F.linear(
-                x.to(compute_dtype),
-                weight,
-                None if bias is None else bias.to(compute_dtype),
-            )
+            bias = None if bias is None else bias.to(compute_dtype)
+            # Ambient autocast would narrow these explicitly wide operands back
+            # to the activation dtype before the bias cancels the product, so
+            # the reduction must run with autocast disabled and round once.
+            if autocast_active(x.device.type):
+                with torch.autocast(device_type=x.device.type, enabled=False):
+                    out = F.linear(x.to(compute_dtype), weight, bias)
+            else:
+                out = F.linear(x.to(compute_dtype), weight, bias)
             # Release the temporary before the activation leaves this scope.
             del weight
 
@@ -649,6 +663,7 @@ def swap_blockfloat_modules(
     block: int = BLOCKFLOAT_BLOCK,
     quantized_prefixes: Optional[list] = None,
     block_axis: str = "in",
+    bias_dtypes: Optional[dict] = None,
 ) -> dict:
     """Replace quantized modules on an already-built model with block-float ones.
 
@@ -656,9 +671,15 @@ def swap_blockfloat_modules(
     ``bits_per_layer``. Returns ``{prefix: [out_features, in_features]}`` for
     everything swapped. Used by the library loader and by the modeling file the
     checkpoint ships, so both produce the same object graph.
+
+    ``bias_dtypes`` maps a prefix to the dtype its checkpoint stores the bias
+    in. A checkpoint may keep a float32 bias alongside bfloat16 weights, and
+    sizing the fresh bias buffer at the weight dtype would narrow it during
+    ``load_state_dict`` (issue #5650). The activation dtype is unaffected.
     """
 
     bits_per_layer = dict(bits_per_layer or {})
+    bias_dtypes = dict(bias_dtypes or {})
     targets = list(quantized_prefixes or bits_per_layer)
 
     restored = {}
@@ -696,6 +717,7 @@ def swap_blockfloat_modules(
                 dtype=module.weight.dtype,
                 block=block,
                 block_axis=block_axis,
+                bias_dtype=bias_dtypes.get(prefix),
             )
         else:
             continue

@@ -2356,6 +2356,17 @@ def build_blockfloat_model(
             f"{checkpoint_dir}: quantization_config.block_axis must be 'in' or "
             f"'out', got {block_axis!r}"
         )
+    # A checkpoint may store a quantized module's bias in a wider dtype than its
+    # weights -- a float32 bias next to bfloat16 weights is valid, and the save
+    # path preserves it. Size each fresh bias buffer from the payload before
+    # ``load_state_dict`` copies into it; otherwise the copy narrows the value
+    # (e.g. -257 -> -256) and the projection changes (issue #5650). Only the
+    # bias is affected: the activation dtype stays the model's own.
+    bias_dtypes = {}
+    for prefix in widths:
+        saved_bias = state.get(f"{prefix}.bias")
+        if isinstance(saved_bias, torch.Tensor) and saved_bias.is_floating_point():
+            bias_dtypes[prefix] = saved_bias.dtype
     restored = swap_blockfloat_modules(
         model,
         bits_per_layer=widths,
@@ -2364,6 +2375,7 @@ def build_blockfloat_model(
         block=int(quantization_config.get("block", BLOCKFLOAT_BLOCK)),
         quantized_prefixes=sorted(widths),
         block_axis=block_axis,
+        bias_dtypes=bias_dtypes,
     )
 
     missing, unexpected = model.load_state_dict(state, strict=False)

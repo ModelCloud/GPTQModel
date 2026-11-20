@@ -786,15 +786,14 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         return deq.to(target_dtype).transpose(0, 1).contiguous()
 
     def _dequantize_cpu(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
-        # ``dequantize_fp8``'s ``scale`` argument always multiplies. Convert the
-        # stored inverse-scale tensor into the arithmetic this module declares
-        # so the CPU fallback is exactly ``_dequantize_native``.
-        stored_scale = self.weight_scale_inv.to(device="cpu", dtype=torch.float32)
-        if self.weight_scale_semantics == "inverse":
-            stored_scale = torch.reciprocal(stored_scale)
+        # Pass the stored scale through with its declared semantics so an
+        # inverse scale is divided out directly. Recreating its reciprocal
+        # first overflows FP32 for a finite scale below 2**-128 and turns an
+        # exact decode into ``inf``/``NaN`` (#5654).
         weight = dequantize_fp8(
             self.weight.to(device="cpu"),
-            scale=stored_scale,
+            scale_inv=self.weight_scale_inv.to(device="cpu", dtype=torch.float32),
+            scale_semantics=self.weight_scale_semantics,
             axis=None if self.weight_scale_method == "block" else (0 if self.weight_scale_method == "row" else 0),
             target_dtype=target_dtype,
         )
