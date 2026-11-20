@@ -1100,7 +1100,7 @@ std::tuple<at::Tensor, at::Tensor> rotate_pair(at::Tensor x, at::Tensor x2, at::
                                                int64_t requested_row_pad = -1) {
   TORCH_CHECK(x.is_cuda() && x2.is_cuda(), "Paro rotate_pair requires CUDA tensors.");
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
-  TORCH_CHECK(x.sizes() == x2.sizes(), "Paro rotate_pair expects operands with equal shapes.");
+  TORCH_CHECK(x.sizes().equals(x2.sizes()), "Paro rotate_pair expects operands with equal shapes.");
   TORCH_CHECK(x.scalar_type() == x2.scalar_type(),
               "Paro rotate_pair expects operands with equal dtypes.");
   const at::Tensor no_scales;
@@ -1120,7 +1120,7 @@ rotate_pair_grad(at::Tensor x, at::Tensor g, at::Tensor idx, at::Tensor theta,
                  int64_t requested_row_pad = -1) {
   TORCH_CHECK(x.is_cuda() && g.is_cuda(), "Paro rotate_pair_grad requires CUDA tensors.");
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
-  TORCH_CHECK(x.sizes() == g.sizes(),
+  TORCH_CHECK(x.sizes().equals(g.sizes()),
               "Paro rotate_pair_grad expects operands with equal shapes.");
   TORCH_CHECK(x.scalar_type() == g.scalar_type(),
               "Paro rotate_pair_grad expects operands with equal dtypes.");

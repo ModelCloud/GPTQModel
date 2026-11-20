@@ -32,7 +32,7 @@ torch::Tensor gemm_int4_qzero_group_scaled_cpu_forward(
     TORCH_CHECK(input.size(1) == weight.size(1) * 2, "input/weight feature dimensions differ");
     TORCH_CHECK(input.size(1) % blocksize == 0, "in_features must be divisible by blocksize");
     TORCH_CHECK(
-        zeros.sizes() == absmax.sizes(),
+        zeros.sizes().equals(absmax.sizes()),
         "zeros and absmax must have the same shape");
     TORCH_CHECK(
         zeros.size(0) == input.size(1) / blocksize,

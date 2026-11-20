@@ -20,7 +20,7 @@ torch::Tensor rco_dp(torch::Tensor gained, torch::Tensor steps, int64_t budget) 
               "gained must be float64 CPU");
   TORCH_CHECK(steps.device().is_cpu() && steps.scalar_type() == torch::kInt64,
               "steps must be int64 CPU");
-  TORCH_CHECK(gained.dim() == 2 && steps.sizes() == gained.sizes(),
+  TORCH_CHECK(gained.dim() == 2 && steps.sizes().equals(gained.sizes()),
               "gained and steps must be matching [layers, options]");
 
   const int64_t n_layers = gained.size(0);

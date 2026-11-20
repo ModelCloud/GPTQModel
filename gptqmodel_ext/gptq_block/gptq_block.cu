@@ -73,17 +73,17 @@ void block_update_cuda(
                 "column_group must be CUDA int32 on the work device");
     TORCH_CHECK(work.dim() == 2 && work.size(1) == kWidth && work.stride(1) == 1,
                 "work must have 128 contiguous columns");
-    TORCH_CHECK(hinv.sizes() == at::IntArrayRef({kWidth, kWidth}),
+    TORCH_CHECK(hinv.sizes().equals(at::IntArrayRef({kWidth, kWidth})),
                 "hinv must be 128 by 128");
     const auto rows = work.size(0);
     TORCH_CHECK(scale.dim() == 2 && scale.size(0) > 0 && scale.size(1) == rows && scale.stride(1) == 1,
                 "scale must have shape [groups, rows] with contiguous rows");
-    TORCH_CHECK(zero.sizes() == scale.sizes(), "zero must match scale");
+    TORCH_CHECK(zero.sizes().equals(scale.sizes()), "zero must match scale");
     TORCH_CHECK(zero.stride(1) == 1, "zero must have contiguous rows");
     TORCH_CHECK(column_group.dim() == 1 && column_group.size(0) == kWidth,
                 "column_group must have 128 entries");
     for (const auto& tensor : {quantized, errors, losses}) {
-        TORCH_CHECK(tensor.sizes() == work.sizes() && tensor.stride(1) == 1,
+        TORCH_CHECK(tensor.sizes().equals(work.sizes()) && tensor.stride(1) == 1,
                     "outputs must match work and have contiguous columns");
     }
 

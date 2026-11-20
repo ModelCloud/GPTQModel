@@ -294,3 +294,24 @@ def test_stable_abi_error_check_falls_back_before_torch_2_15():
         "#define STABLE_TORCH_ERROR_CODE_CHECK TORCH_ERROR_CODE_CHECK\n"
         "#endif"
     ) in header
+
+
+def test_stable_abi_sources_avoid_array_ref_equality():
+    """Shape checks must not rely on ``HeaderOnlyArrayRef::operator==``.
+
+    torch added the hidden-friend ``operator==``/``operator!=`` for
+    ``HeaderOnlyArrayRef`` after 2.11, so ``a.sizes() == b.sizes()`` fails to
+    compile on the 2.10 ABI floor.  ``equals()`` exists on both, so the kernels
+    compare shapes with it and this test keeps new ``==`` uses out.
+    """
+
+    root = Path(__file__).resolve().parents[1] / "gptqmodel_ext"
+    offenders = []
+    for path in sorted(root.rglob("*")):
+        if path.suffix not in {".h", ".hpp", ".cpp", ".cu", ".cuh"}:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if "sizes() ==" in line or "sizes() !=" in line:
+                offenders.append(f"{path.relative_to(root)}:{lineno}")
+    assert not offenders, "use .equals() instead of operator==: " + ", ".join(offenders)

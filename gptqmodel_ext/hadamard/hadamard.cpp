@@ -10,7 +10,7 @@
 
 #include "fast_hadamard_transform.h"
 
-#define CHECK_SHAPE(x, ...) TORCH_CHECK(x.sizes() == torch::IntArrayRef({__VA_ARGS__}), #x " must have shape (" #__VA_ARGS__ ")")
+#define CHECK_SHAPE(x, ...) TORCH_CHECK(x.sizes().equals(torch::IntArrayRef({__VA_ARGS__})), #x " must have shape (" #__VA_ARGS__ ")")
 
 #define DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)                    \
     if (ITYPE == at::ScalarType::Half) {                                            \

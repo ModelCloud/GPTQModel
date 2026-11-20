@@ -212,7 +212,7 @@ MoeCoopParams exl3_moe_coop_prepare
     TORCH_CHECK(u_trellis.dim() == 1 && u_trellis.numel() <= 32767,
                 "exl3_moe_coop: pointer tables must hold at most 32767 experts");
     auto check_table = [&](const at::Tensor& t) {
-        TORCH_CHECK(t.scalar_type() == at::kLong && t.is_contiguous() && t.sizes() == u_trellis.sizes(),
+        TORCH_CHECK(t.scalar_type() == at::kLong && t.is_contiguous() && t.sizes().equals(u_trellis.sizes()),
                     "exl3_moe_coop: pointer tables must be contiguous int64 arrays of equal length");
     };
     for (const at::Tensor* t : { &g_trellis, &g_suh, &g_svh, &u_trellis, &u_suh, &u_svh, &d_trellis, &d_suh, &d_svh })
@@ -398,7 +398,7 @@ void exl3_moe_coop
     for (const auto* t : { &g_bias, &u_bias, &d_bias, &sh_out, &sh_gate_w })
         TORCH_CHECK(!*t || t->value().device() == x.device(), "exl3_moe_coop: optional tensors must be on the input device");
     TORCH_CHECK(sel.is_contiguous() && rw.is_contiguous(), "exl3_moe_coop: sel/rw must be contiguous");
-    TORCH_CHECK(sel.sizes() == rw.sizes() && sel.dim() == 2 && sel.size(0) == x.size(0), "exl3_moe_coop: sel/rw must be (bsz, topk)");
+    TORCH_CHECK(sel.sizes().equals(rw.sizes()) && sel.dim() == 2 && sel.size(0) == x.size(0), "exl3_moe_coop: sel/rw must be (bsz, topk)");
     if (sh_out)
     {
         TORCH_CHECK_DTYPE(sh_out.value(), kFloat);
