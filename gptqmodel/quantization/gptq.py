@@ -643,6 +643,290 @@ def _move_static_groups(groups, device: torch.device):
     )
 
 
+def recover_damped_hessian_factor(
+    H: torch.Tensor,
+    *,
+    damp_percent: float,
+    damp_auto_increment: float,
+    name: str = "",
+    npu_block_size: Optional[int] = None,
+) -> Tuple[Optional[torch.Tensor], float]:
+    """Damp ``H``'s diagonal and return its inverse-Cholesky factor.
+
+    Shared by every quantizer that solves a layer Hessian: the configured
+    ``damp_percent`` is probed first on the untouched diagonal, then the
+    additive ``damp_auto_increment`` grid, then a diagonal floor. The
+    diagonal is restored between attempts, so the selected candidate is
+    reproducible from the original matrix. ``damp_auto_increment == 0`` is
+    the explicit no-recovery control: one attempt, then ``None``.
+
+    Returns ``(factor, used_damp)``; ``(None, 1.0)`` when no candidate works.
+    ``H`` is mutated in place, ending on the last diagonal floor tried.
+    """
+
+    # Capture a writable view of the Hessian diagonal so we can restore it between attempts.
+    diag_view = H.diagonal()
+    orig_diag = diag_view.clone()
+    max_floor_attempts = 6
+    last_error = None
+    damp_candidates = None
+    damp_grid_skipped = False
+    floor_base = None
+
+    def try_damp(current_diag: torch.Tensor, mean: torch.Tensor, damp: float):
+        """Return a Cholesky result for one grid value, restoring ``H``."""
+
+        nonlocal last_error
+        diag_view.add_(damp * mean)
+        try:
+            if H.device.type == "npu":
+                return npu_inverse_cholesky_factor(
+                    H,
+                    block_size=npu_block_size,
+                )
+
+            # ``cholesky_ex`` reports a non positive-definite input through
+            # ``info`` instead of raising, so failed probes stay cheap.
+            H2, info = torch.linalg.cholesky_ex(H, check_errors=False)
+            info_value = int(info.item())
+            if info_value != 0:
+                last_error = f"torch.linalg.cholesky_ex info={info_value}"
+                del H2
+                return None
+            return H2
+        except torch._C._LinAlgError as exc:
+            last_error = exc
+            return None
+        finally:
+            diag_view.copy_(current_diag)
+
+    def inverse_factor(cholesky_result: torch.Tensor) -> torch.Tensor:
+        """Finish only the selected successful candidate."""
+
+        if H.device.type == "npu":
+            return cholesky_result
+        if H.device.type in ("cpu", "cuda"):
+            # cholesky_inverse permits the factor as its output.
+            # Reuse that buffer while keeping H intact for damp retries.
+            torch.cholesky_inverse(cholesky_result, out=cholesky_result)
+            return torch.linalg.cholesky(cholesky_result, upper=True)
+        return torch.linalg.cholesky(
+            torch.cholesky_inverse(cholesky_result),
+            upper=True,
+        )
+
+    def try_factor(current_diag: torch.Tensor, mean: torch.Tensor, damp: float):
+        """Return the finished inverse factor for one grid value, or ``None``.
+
+        The cheap probe only proves the Cholesky factor exists. The legacy
+        linear walk also required the inverse step to succeed, which can
+        fail for Hessians with an extreme dynamic range even when the
+        factorization itself reports success, so both steps must agree.
+        """
+
+        nonlocal last_error
+        cholesky_result = try_damp(current_diag, mean, damp)
+        if cholesky_result is None:
+            return None
+        try:
+            return inverse_factor(cholesky_result)
+        except torch._C._LinAlgError as exc:
+            last_error = exc
+            return None
+
+    def legacy_damp_candidates() -> Optional[list[float]]:
+        """Materialize the old additive grid without changing float rounding.
+
+        Returns ``None`` when the increment needs more candidates than the
+        work budget allows, so a misconfigured increment cannot allocate an
+        unbounded list before the first probe.
+        """
+
+        # Repeated addition (not one multiply-add) keeps the selected damp
+        # bit-identical to the former linear walk.
+        values = [float(damp_percent)]
+        increment = float(damp_auto_increment)
+        if increment == 0.0:
+            return values
+        while True:
+            next_damp = values[-1] + increment
+            # The progress guard also makes malformed/non-finite increments
+            # terminate instead of spinning forever.
+            if not (values[-1] < next_damp < 1.0):
+                return values
+            if len(values) >= _DAMP_GRID_WORK_BUDGET:
+                return None
+            values.append(next_damp)
+
+    def finish_damped_candidate(first_success: int, first_cholesky: torch.Tensor):
+        """Finish the first grid value whose Cholesky factor also inverts.
+
+        Bisection only checks the cheap factorization probe. If the selected
+        factor still fails the inverse step, keep walking the legacy grid so
+        the chosen ``damp`` stays identical to the former linear scan.
+        """
+
+        nonlocal last_error
+        index = first_success
+        cholesky_result = first_cholesky
+        while index < len(damp_candidates):
+            if cholesky_result is None:
+                cholesky_result = try_damp(current_diag, mean, damp_candidates[index])
+            if cholesky_result is None:
+                index += 1
+                continue
+            try:
+                return inverse_factor(cholesky_result), damp_candidates[index]
+            except torch._C._LinAlgError as exc:
+                last_error = exc
+                cholesky_result = None
+            index += 1
+        return None
+
+    def log_failure_diagnostics() -> float:
+        """Run full-matrix diagnostics only after the healthy path failed.
+
+        Healthy layers therefore never pay for these matrix-wide scans.
+        """
+
+        finite = bool(torch.isfinite(H).all().item())
+        if not finite:
+            log.error(
+                f"Quantization: Module `{name}` -> Hessian contains non-finite values."
+            )
+        elif not torch.equal(H, H.mT):
+            log.warn(
+                f"Quantization: Module `{name}` -> Hessian is not exactly symmetric; "
+                "recovery will not modify or symmetrize it."
+            )
+
+        base_abs_max = torch.max(orig_diag.abs()).item()
+        if not math.isfinite(base_abs_max) or base_abs_max == 0.0:
+            log.warn(
+                f"Quantization: Module `{name}` -> Hessian diagonal is degenerate; "
+                "using the minimum diagonal-floor scale."
+            )
+            return 1.0
+        return base_abs_max
+
+    attempt = 0
+    while attempt <= max_floor_attempts:
+        if attempt == 0:
+            current_diag = orig_diag
+        else:
+            assert floor_base is not None
+            floor_increment = floor_base * math.pow(10.0, attempt - 1)
+            current_diag = torch.clamp(orig_diag + floor_increment, min=floor_increment)
+            if attempt == 1:
+                log.warn(
+                    f"Quantization: Module `{name}` -> Applying Hessian diagonal floor (+{floor_increment:.2e}) to recover positive definiteness.")
+            else:
+                log.warn(
+                    f"Quantization: Module `{name}` -> Increasing Hessian diagonal floor to +{floor_increment:.2e}.")
+
+        diag_view.copy_(current_diag)
+        mean = torch.mean(current_diag)
+        initial_damp = float(damp_percent)
+        # Probe the configured damp first, on the untouched diagonal.
+        initial_factor = try_factor(current_diag, mean, initial_damp)
+        if initial_factor is not None:
+            return initial_factor, initial_damp
+
+        if attempt == 0:
+            # Defer matrix-wide scans and their host decisions until the
+            # first Cholesky failure. The healthy path stays untouched.
+            floor_base = log_failure_diagnostics() * 1e-6
+
+        if float(damp_auto_increment) == 0.0:
+            log.warn(
+                f"Quantization: Module `{name}` -> Hessian Cholesky failed with "
+                f"`damp_percent={initial_damp:.5f}` and no auto increment configured."
+            )
+        else:
+            increment = float(damp_auto_increment)
+            log.warn(
+                f"Quantization: Module `{name}` -> Starting compatible damp recovery at "
+                f"`damp_percent={initial_damp:.5f}`, increment step "
+                f"`{float(damp_auto_increment):.5f}`."
+            )
+
+            # Recovery normally succeeds on the very next candidate, so
+            # probe it before materializing the additive grid (#5790).
+            next_damp = initial_damp + increment
+            if initial_damp < next_damp < 1.0:
+                next_factor = try_factor(current_diag, mean, next_damp)
+                if next_factor is not None:
+                    log.warn(
+                        f"Quantization: Module `{name}` -> Damp recovery succeeded at "
+                        f"`damp_percent={next_damp:.5f}` (started at {initial_damp:.5f})."
+                    )
+                    return next_factor, next_damp
+
+            if damp_candidates is None and not damp_grid_skipped:
+                damp_candidates = legacy_damp_candidates()
+                if damp_candidates is None:
+                    # The grid depends only on the configured damp and
+                    # increment, so decide once instead of re-walking and
+                    # re-logging for every diagonal-floor attempt.
+                    damp_grid_skipped = True
+                    minimum_increment = (1.0 - initial_damp) / (
+                        _DAMP_GRID_WORK_BUDGET - 1
+                    )
+                    log.error(
+                        f"Quantization: Module `{name}` -> Skipping damp recovery: "
+                        f"`damp_auto_increment={increment:g}` needs more than "
+                        f"{_DAMP_GRID_WORK_BUDGET} candidates before reaching 1.0. "
+                        f"Use an increment of at least {minimum_increment:.3e} or a larger "
+                        f"`damp_percent`."
+                    )
+
+            if damp_grid_skipped:
+                attempt += 1
+                continue
+
+            if len(damp_candidates) > 1:
+                # Cholesky success is monotone on this grid when the
+                # diagonal mean is positive. Test the endpoint first,
+                # then find the first successful legacy candidate.
+                high = len(damp_candidates) - 1
+                high_cholesky = try_damp(current_diag, mean, damp_candidates[high])
+                if high_cholesky is not None:
+                    low = 0  # The initial candidate already failed.
+                    while high - low > 1:
+                        middle = (low + high) // 2
+                        middle_cholesky = try_damp(current_diag, mean, damp_candidates[middle])
+                        if middle_cholesky is None:
+                            low = middle
+                        else:
+                            high = middle
+                            high_cholesky = middle_cholesky
+
+                    selected = finish_damped_candidate(high, high_cholesky)
+                    if selected is not None:
+                        factor, used_damp = selected
+                        log.warn(
+                            f"Quantization: Module `{name}` -> Damp recovery succeeded at "
+                            f"`damp_percent={used_damp:.5f}` (started at {initial_damp:.5f})."
+                        )
+                        return factor, used_damp
+
+            log.warn(
+                f"Quantization: Module `{name}` -> Damp recovery failed after reaching "
+                f"`damp_percent={damp_candidates[-1]:.5f}`."
+            )
+
+        attempt += 1
+
+    log.error(
+        f"Quantization: Module `{name}` -> Hessian remained non positive-definite after diagonal floor attempts. "
+        f"Last `damp_percent` tried = "
+        f"{(damp_candidates[-1] if damp_candidates else float(damp_percent)):.5f}."
+    )
+    if last_error is not None:
+        log.debug(f"Hessian failure detail: {last_error}")
+    return None, 1.0
+
+
 class GPTQ:
     #: Whether the capture hook must hand this task the module's forward output.
     #: GPTQ (and its GPTAQ/FOEM subclasses) accumulate only ``X^T X`` from the
@@ -2595,267 +2879,18 @@ class GPTQ:
             if _log_hessian_verbose():
                 log.info(f"GPTQ: hessian_inverse begin {self.name} shape={tuple(H.shape)}")
             try:
-                # Capture a writable view of the Hessian diagonal so we can restore it between attempts.
-                diag_view = H.diagonal()
-                orig_diag = diag_view.clone()
-                max_floor_attempts = 6
-                last_error = None
-                damp_candidates = None
-                damp_grid_skipped = False
-                floor_base = None
-
-                def try_damp(current_diag: torch.Tensor, mean: torch.Tensor, damp: float):
-                    """Return a Cholesky result for one grid value, restoring ``H``."""
-
-                    nonlocal last_error
-                    diag_view.add_(damp * mean)
-                    try:
-                        if H.device.type == "npu":
-                            return npu_inverse_cholesky_factor(
-                                H,
-                                block_size=resolve_kernel_config(self.qcfg).npu_cholesky_block_size,
-                            )
-
-                        # ``cholesky_ex`` reports a non positive-definite input through
-                        # ``info`` instead of raising, so failed probes stay cheap.
-                        H2, info = torch.linalg.cholesky_ex(H, check_errors=False)
-                        info_value = int(info.item())
-                        if info_value != 0:
-                            last_error = f"torch.linalg.cholesky_ex info={info_value}"
-                            del H2
-                            return None
-                        return H2
-                    except torch._C._LinAlgError as exc:
-                        last_error = exc
-                        return None
-                    finally:
-                        diag_view.copy_(current_diag)
-
-                def inverse_factor(cholesky_result: torch.Tensor) -> torch.Tensor:
-                    """Finish only the selected successful candidate."""
-
-                    if H.device.type == "npu":
-                        return cholesky_result
-                    if H.device.type in ("cpu", "cuda"):
-                        # cholesky_inverse permits the factor as its output.
-                        # Reuse that buffer while keeping H intact for damp retries.
-                        torch.cholesky_inverse(cholesky_result, out=cholesky_result)
-                        return torch.linalg.cholesky(cholesky_result, upper=True)
-                    return torch.linalg.cholesky(
-                        torch.cholesky_inverse(cholesky_result),
-                        upper=True,
-                    )
-
-                def try_factor(current_diag: torch.Tensor, mean: torch.Tensor, damp: float):
-                    """Return the finished inverse factor for one grid value, or ``None``.
-
-                    The cheap probe only proves the Cholesky factor exists. The legacy
-                    linear walk also required the inverse step to succeed, which can
-                    fail for Hessians with an extreme dynamic range even when the
-                    factorization itself reports success, so both steps must agree.
-                    """
-
-                    nonlocal last_error
-                    cholesky_result = try_damp(current_diag, mean, damp)
-                    if cholesky_result is None:
-                        return None
-                    try:
-                        return inverse_factor(cholesky_result)
-                    except torch._C._LinAlgError as exc:
-                        last_error = exc
-                        return None
-
-                def legacy_damp_candidates() -> Optional[list[float]]:
-                    """Materialize the old additive grid without changing float rounding.
-
-                    Returns ``None`` when the increment needs more candidates than the
-                    work budget allows, so a misconfigured increment cannot allocate an
-                    unbounded list before the first probe.
-                    """
-
-                    # Repeated addition (not one multiply-add) keeps the selected damp
-                    # bit-identical to the former linear walk.
-                    values = [float(self.qcfg.damp_percent)]
-                    increment = float(self.qcfg.damp_auto_increment)
-                    if increment == 0.0:
-                        return values
-                    while True:
-                        next_damp = values[-1] + increment
-                        # The progress guard also makes malformed/non-finite increments
-                        # terminate instead of spinning forever.
-                        if not (values[-1] < next_damp < 1.0):
-                            return values
-                        if len(values) >= _DAMP_GRID_WORK_BUDGET:
-                            return None
-                        values.append(next_damp)
-
-                def finish_damped_candidate(first_success: int, first_cholesky: torch.Tensor):
-                    """Finish the first grid value whose Cholesky factor also inverts.
-
-                    Bisection only checks the cheap factorization probe. If the selected
-                    factor still fails the inverse step, keep walking the legacy grid so
-                    the chosen ``damp`` stays identical to the former linear scan.
-                    """
-
-                    nonlocal last_error
-                    index = first_success
-                    cholesky_result = first_cholesky
-                    while index < len(damp_candidates):
-                        if cholesky_result is None:
-                            cholesky_result = try_damp(current_diag, mean, damp_candidates[index])
-                        if cholesky_result is None:
-                            index += 1
-                            continue
-                        try:
-                            return inverse_factor(cholesky_result), damp_candidates[index]
-                        except torch._C._LinAlgError as exc:
-                            last_error = exc
-                            cholesky_result = None
-                        index += 1
-                    return None
-
-                def log_failure_diagnostics() -> float:
-                    """Run full-matrix diagnostics only after the healthy path failed.
-
-                    Healthy layers therefore never pay for these matrix-wide scans.
-                    """
-
-                    finite = bool(torch.isfinite(H).all().item())
-                    if not finite:
-                        log.error(
-                            f"Quantization: Module `{self.name}` -> Hessian contains non-finite values."
-                        )
-                    elif not torch.equal(H, H.mT):
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Hessian is not exactly symmetric; "
-                            "recovery will not modify or symmetrize it."
-                        )
-
-                    base_abs_max = torch.max(orig_diag.abs()).item()
-                    if not math.isfinite(base_abs_max) or base_abs_max == 0.0:
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Hessian diagonal is degenerate; "
-                            "using the minimum diagonal-floor scale."
-                        )
-                        return 1.0
-                    return base_abs_max
-
-                attempt = 0
-                while attempt <= max_floor_attempts:
-                    if attempt == 0:
-                        current_diag = orig_diag
-                    else:
-                        assert floor_base is not None
-                        floor_increment = floor_base * math.pow(10.0, attempt - 1)
-                        current_diag = torch.clamp(orig_diag + floor_increment, min=floor_increment)
-                        if attempt == 1:
-                            log.warn(
-                                f"Quantization: Module `{self.name}` -> Applying Hessian diagonal floor (+{floor_increment:.2e}) to recover positive definiteness.")
-                        else:
-                            log.warn(
-                                f"Quantization: Module `{self.name}` -> Increasing Hessian diagonal floor to +{floor_increment:.2e}.")
-
-                    diag_view.copy_(current_diag)
-                    mean = torch.mean(current_diag)
-                    initial_damp = float(self.qcfg.damp_percent)
-                    # Probe the configured damp first, on the untouched diagonal.
-                    initial_factor = try_factor(current_diag, mean, initial_damp)
-                    if initial_factor is not None:
-                        return initial_factor, initial_damp
-
-                    if attempt == 0:
-                        # Defer matrix-wide scans and their host decisions until the
-                        # first Cholesky failure. The healthy path stays untouched.
-                        floor_base = log_failure_diagnostics() * 1e-6
-
-                    if self.qcfg.damp_auto_increment == 0:
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with "
-                            f"`damp_percent={initial_damp:.5f}` and no auto increment configured."
-                        )
-                    else:
-                        increment = float(self.qcfg.damp_auto_increment)
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Starting compatible damp recovery at "
-                            f"`damp_percent={initial_damp:.5f}`, increment step "
-                            f"`{self.qcfg.damp_auto_increment:.5f}`."
-                        )
-
-                        # Recovery normally succeeds on the very next candidate, so
-                        # probe it before materializing the additive grid (#5790).
-                        next_damp = initial_damp + increment
-                        if initial_damp < next_damp < 1.0:
-                            next_factor = try_factor(current_diag, mean, next_damp)
-                            if next_factor is not None:
-                                log.warn(
-                                    f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
-                                    f"`damp_percent={next_damp:.5f}` (started at {initial_damp:.5f})."
-                                )
-                                return next_factor, next_damp
-
-                        if damp_candidates is None and not damp_grid_skipped:
-                            damp_candidates = legacy_damp_candidates()
-                            if damp_candidates is None:
-                                # The grid depends only on the configured damp and
-                                # increment, so decide once instead of re-walking and
-                                # re-logging for every diagonal-floor attempt.
-                                damp_grid_skipped = True
-                                minimum_increment = (1.0 - initial_damp) / (
-                                    _DAMP_GRID_WORK_BUDGET - 1
-                                )
-                                log.error(
-                                    f"Quantization: Module `{self.name}` -> Skipping damp recovery: "
-                                    f"`damp_auto_increment={increment:g}` needs more than "
-                                    f"{_DAMP_GRID_WORK_BUDGET} candidates before reaching 1.0. "
-                                    f"Use an increment of at least {minimum_increment:.3e} or a larger "
-                                    f"`damp_percent`."
-                                )
-
-                        if damp_grid_skipped:
-                            attempt += 1
-                            continue
-
-                        if len(damp_candidates) > 1:
-                            # Cholesky success is monotone on this grid when the
-                            # diagonal mean is positive. Test the endpoint first,
-                            # then find the first successful legacy candidate.
-                            high = len(damp_candidates) - 1
-                            high_cholesky = try_damp(current_diag, mean, damp_candidates[high])
-                            if high_cholesky is not None:
-                                low = 0  # The initial candidate already failed.
-                                while high - low > 1:
-                                    middle = (low + high) // 2
-                                    middle_cholesky = try_damp(current_diag, mean, damp_candidates[middle])
-                                    if middle_cholesky is None:
-                                        low = middle
-                                    else:
-                                        high = middle
-                                        high_cholesky = middle_cholesky
-
-                                selected = finish_damped_candidate(high, high_cholesky)
-                                if selected is not None:
-                                    factor, used_damp = selected
-                                    log.warn(
-                                        f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
-                                        f"`damp_percent={used_damp:.5f}` (started at {initial_damp:.5f})."
-                                    )
-                                    return factor, used_damp
-
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Damp recovery failed after reaching "
-                            f"`damp_percent={damp_candidates[-1]:.5f}`."
-                        )
-
-                    attempt += 1
-
-                log.error(
-                    f"Quantization: Module `{self.name}` -> Hessian remained non positive-definite after diagonal floor attempts. "
-                    f"Last `damp_percent` tried = "
-                    f"{(damp_candidates[-1] if damp_candidates else self.qcfg.damp_percent):.5f}."
+                npu_block_size = (
+                    resolve_kernel_config(self.qcfg).npu_cholesky_block_size
+                    if H.device.type == "npu"
+                    else None
                 )
-                if last_error is not None:
-                    log.debug(f"Hessian failure detail: {last_error}")
-                return None, 1.0
+                return recover_damped_hessian_factor(
+                    H,
+                    damp_percent=float(self.qcfg.damp_percent),
+                    damp_auto_increment=float(self.qcfg.damp_auto_increment),
+                    name=self.name,
+                    npu_block_size=npu_block_size,
+                )
             finally:
                 if _log_hessian_verbose():
                     log.info(f"GPTQ: hessian_inverse end {self.name}")
