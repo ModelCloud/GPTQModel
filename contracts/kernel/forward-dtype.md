@@ -81,15 +81,39 @@ supported. Choose the dtype at load time, or cast before the first forward.
   The justification must not be "a later call might use another dtype".
 - **Different modules, different dtypes.** Two separately loaded models, or
   two module instances, may use different dtypes.
-- **Quantization replaces modules; it does not mutate them.** Quantizing
-  produces weights in a new target form from the source weights. It does this
-  by swapping the source module (for example an `nn.Linear`) for a new kernel
-  module. The new module has never run a forward, so it starts with no lock,
-  and its first forward fixes its dtype. Calibration forwards on source
-  modules are outside this contract. If a quantization path (`requantize`,
-  conversion, post-quant replay) needs different weights or dtypes on a
-  kernel module that has already run a forward, it must build a replacement
-  module. It must not cast or rewrite the existing one.
+
+## Quantization stage
+
+Quantization works on two kinds of module, and the contract treats them
+differently.
+
+**Source modules** are the `nn.Linear` (or Conv1D, embedding) being quantized,
+wrapped by the looper (`NamedModule` / `HookedLinear`). The quantizer owns
+them for the whole stage:
+
+- **Weight values may change between forwards.** GPTQ calibrates on `W`,
+  rewrites the weight to its reconstruction `Wq` (`module.weight.data = wq`
+  in `gptq_processor.py`), then replays the layer through the same module so
+  later layers calibrate on quantized outputs. QQQ, VPTQ, MACaQ and Paro work
+  the same way. This is the job of quantization, not a violation.
+- **Dtypes still do not change.** The activation dtype stays the same across
+  capture and replay. The replay weight `Wq` is written in the source
+  weight's dtype and shape, so replay inputs and outputs keep that dtype.
+  When the integer codes cannot be recovered exactly from a replay weight in
+  that dtype, the exact wide copy goes into module state (for example
+  `pack_wq`, #5721). It must not widen or narrow the replay weight.
+- Source modules are never served as runtime kernels. When the stage ends,
+  each one is replaced by a newly packed kernel module.
+
+**Kernel modules** (`BaseQuantLinear`) follow the whole contract, including
+during quantization:
+
+- Packing builds a new module. It has never run a forward, so it starts with
+  no lock, and its first forward fixes its dtype.
+- `requantize`, conversion, and any post-quant replay that runs through
+  kernel modules must not cast or rewrite a kernel module that has already
+  run a forward. If such a path needs different weights or dtypes, it builds
+  a replacement module.
 
 ## Enforcement
 

@@ -61,10 +61,26 @@ def test_lock_survives_deepcopy():
 
 
 def test_compiled_dtype_switch_raises():
-    compiled = torch.compile(_Echo(), backend="eager", fullgraph=True)
+    module = _Echo()
+    module(torch.zeros(2, dtype=torch.float16))  # eager call records the lock
+    compiled = torch.compile(module, backend="eager", fullgraph=True)
     compiled(torch.zeros(2, dtype=torch.float16))
     with pytest.raises(Exception, match="forward-dtype.md"):
         compiled(torch.zeros(2, dtype=torch.bfloat16))
+
+
+def test_compiled_forward_does_not_recompile_for_the_lock():
+    torch._dynamo.reset()
+    frames = []
+
+    def backend(graph_module, example_inputs):
+        frames.append(graph_module)
+        return graph_module.forward
+
+    compiled = torch.compile(_Echo(), backend=backend, fullgraph=True)
+    for _ in range(3):
+        compiled(torch.zeros(2, dtype=torch.float16))
+    assert len(frames) == 1
 
 
 class _Weighted(_Echo):

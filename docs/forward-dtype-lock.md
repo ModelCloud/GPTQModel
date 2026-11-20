@@ -32,7 +32,7 @@ flowchart TD
     U -- "no: before first forward" --> P["kernel _apply runs (cast allowed)"]
     U -- "yes" --> D{"any parameter/buffer dtype would change?"}
     D -- "no: device move or same dtype" --> P
-    D -- "yes" --> X2["RuntimeError: weight dtypes are frozen<br/>module left untouched"]
+    D -- "yes" --> X2["RuntimeError: weight dtypes are frozen<br/>no tensor dtype changes"]
 
     FU["_FusionGroup.execute"] --> K2["_check_forward_dtype on each source module"] --> PF["packed fused forward"]
 
@@ -46,7 +46,9 @@ flowchart TD
   dtypes.
 - The `_apply` guard runs before the kernel's own `_apply` does anything. It
   passes `fn` an empty tensor of each dtype and device the module holds, so
-  nothing is modified before the check.
+  no tensor changes dtype before the check. A kernel whose `_apply`
+  first restores a dropped checkpoint layout may do that (same decoded
+  weights) before a nested check rejects the cast.
 - On a whole-model cast, modules that come earlier in the traversal may
   already have been cast when a locked module raises. After this error, the
   model is invalid.

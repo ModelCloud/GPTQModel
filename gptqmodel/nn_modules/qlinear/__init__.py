@@ -460,7 +460,11 @@ def _check_forward_dtype(module: "BaseQuantLinear", args, kwargs) -> None:
         return
     locked = getattr(module, "_forward_dtype_lock", None)
     if locked is None:
-        module._forward_dtype_lock = x.dtype
+        # Never record from inside a dynamo trace: the write would make the
+        # compiled graph guard on ``lock is None`` and force a recompile on
+        # the next call. Eager calls record; traces only check an existing lock.
+        if not dynamo_is_compiling():
+            module._forward_dtype_lock = x.dtype
     elif x.dtype != locked:
         raise RuntimeError(
             f"{module.__class__.__name__}({module.name}): forward received {x.dtype} "
@@ -487,14 +491,19 @@ def _check_apply_keeps_dtypes(module: "BaseQuantLinear", fn) -> None:
 
     After the first forward, weight and buffer dtypes are frozen
     (contracts/kernel/forward-dtype.md). ``fn`` is probed on an empty tensor
-    of each dtype/device so the check runs before anything is modified.
+    of each dtype/device so the check runs before any tensor changes dtype.
     """
     locked = getattr(module, "_forward_dtype_lock", None)
     if locked is None:
         return
     probed = {}
-    for kind, tensors in (("parameter", module._parameters), ("buffer", module._buffers)):
-        for name, tensor in tensors.items():
+    # Check the whole subtree up front so a rejected cast leaves every child
+    # untouched, not only this module's own tensors.
+    for kind, tensors in (
+        ("parameter", module.named_parameters(remove_duplicate=False)),
+        ("buffer", module.named_buffers(remove_duplicate=False)),
+    ):
+        for name, tensor in tensors:
             if not isinstance(tensor, t.Tensor):
                 continue
             key = (tensor.dtype, tensor.device)
@@ -504,7 +513,7 @@ def _check_apply_keeps_dtypes(module: "BaseQuantLinear", fn) -> None:
             if probed[key] != tensor.dtype:
                 raise RuntimeError(
                     f"{module.__class__.__name__}({module.name}): cannot change {kind} `{name}` "
-                    f"from {tensor.dtype} to {probed[key]} after the module ran a forward in {locked}. "
+                    f"from {tensor.dtype} to {probed[key]} after the module's first forward (input dtype {locked}). "
                     f"Weight dtypes are frozen after the first forward; see {FORWARD_DTYPE_CONTRACT}."
                 )
 
@@ -655,6 +664,8 @@ class BaseQuantLinear(nn.Module):
                  validate_kwargs: Optional[Dict[str, Any]] = None,
                  **kwargs):
         super().__init__()
+        # Forward dtype contract: set by the first eager forward.
+        self._forward_dtype_lock = None
         if name is None:
             name = f"{self.__class__.__module__}.{self.__class__.__qualname__}"
         self.name = name # full path module name in model weights

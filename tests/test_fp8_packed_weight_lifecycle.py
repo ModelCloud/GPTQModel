@@ -217,9 +217,11 @@ def test_fp8_dtype_move_retains_packed_bytes_and_metadata(monkeypatch, dtype, fm
     payload = _payload(fmt)
     model = _Model(fmt=fmt)
     _install(model, payload)
-    model.to(dtype=dtype)
+    model.to(dtype=dtype)  # before the first forward: allowed
     _assert_oracle_and_no_cache(model, payload, dtype, monkeypatch)
-    model.float()
+    # After a forward, weight dtypes are frozen (contracts/kernel/forward-dtype.md).
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        model.float()
     _assert_packed(model.proj, payload)
     restored = _Model(fmt=fmt)
     restored.load_state_dict(model.state_dict())

@@ -52,12 +52,14 @@ def _model(dtype: torch.dtype):
 
 @pytest.mark.parametrize("cast", ["float", "half"])
 def test_whole_model_cast_keeps_embedding_in_step(cast):
+    """A whole-model cast before the first forward carries the embedding along."""
+    torch.manual_seed(5394)
     embedding, model = _model(torch.bfloat16)
+    torch.manual_seed(5394)
+    reference, reference_model = _model(torch.bfloat16)
     ids = torch.tensor([[0, 1, 31]])
-
-    before = model(ids)
-    before_embedding = embedding(ids)
-    assert before.dtype == torch.bfloat16
+    before = reference_model(ids)
+    before_embedding = reference(ids)
 
     getattr(model, cast)()
     target = torch.float32 if cast == "float" else torch.float16
@@ -73,6 +75,16 @@ def test_whole_model_cast_keeps_embedding_in_step(cast):
     # bit for bit; the projection only differs by its accumulation precision.
     assert torch.equal(embedding(ids), before_embedding.to(target))
     assert torch.allclose(after.float(), before.float(), atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("cast", ["float", "half"])
+def test_whole_model_cast_after_forward_raises(cast):
+    """Weight dtypes are frozen after the first forward (contracts/kernel/forward-dtype.md)."""
+    embedding, model = _model(torch.bfloat16)
+    model(torch.tensor([[0, 1, 31]]))
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        getattr(model, cast)()
+    assert embedding.embedding_output_dtype() == torch.bfloat16
 
 
 def test_output_dtype_anchor_is_not_persisted():
