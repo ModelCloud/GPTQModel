@@ -236,8 +236,10 @@ flowchart TD
 The original integer Torch operator and default Python call remain available.
 The configured operator accepts a float bitrate and returns the selected path
 for diagnostics. NVIDIA CUDA serves the native tensor-core paths. The EXL3
-Torch backend provides the CPU and ROCm inference paths. NVIDIA CUDA also
-serves the new half-bit Viterbi quantizer.
+Torch backend provides the CPU inference path; on ROCm, RDNA4 (gfx120x) also
+has native HIP GEMV and WMMA GEMM paths (see [RDNA4 HIP dispatch](#rdna4-hip-dispatch)),
+while CDNA keeps reconstruct + hipBLAS. NVIDIA CUDA also serves the new
+half-bit Viterbi quantizer.
 
 Only immutable launch geometry and function attributes are cached across
 streams. CUDA graph allocations retain the pointer addresses of each graph's
@@ -305,6 +307,46 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4 \
 cp /tmp/q4nx_ada.json scripts/exl3_kernel_map_q4nx_ada.json
 python scripts/generate_exl3_kernel_map_packed.py
 ```
+
+## RDNA4 HIP dispatch
+
+ROCm builds compile `quant/exl3_gemm_hip.cu` instead of the CUDA tensor-core
+tables. The HIP entry point owns the whole decision: it runs the fused
+trellis -> WMMA kernel when the device and geometry are covered, and otherwise
+reconstructs the weight and calls hipBLAS, so `bc_linear_exl3_run_configured`
+never raises for a supported geometry. `EXL3_HIP_DISPATCH_NATIVE` (93) and
+`EXL3_HIP_DISPATCH_FALLBACK` (94) report which path ran.
+
+```mermaid
+flowchart TD
+    A["LinearEXL3.forward (ROCm)"] --> B{"reconstruct flag, R4NX, or (Q4NX and bsz > 8)?"}
+    B -->|yes| T["EXL3_TORCH reconstruct + hgemm"]
+    B -->|no| C{"bsz <= 8?"}
+    C -->|yes| D["bc_linear_exl3_run_hip_gemv"]
+    D -->|accepted| J["Projection output"]
+    D -->|declined| Q{"Q4NX?"}
+    C -->|no| Q
+    Q -->|yes| T
+    Q -->|no| E["bc.run -> bc_linear_exl3_run_configured -> exl3_gemm"]
+    E --> F["exl3_gemm_hip: had_r_128, then validate K and N % 128"]
+    F --> G{"c_fp32 and 0 < m <= 512 and gfx120x?"}
+    G -->|yes| H["exl3_hip_gemm_kernel WMMA decode, FP32 accumulate, output Hadamard"]
+    G -->|no| I["reconstruct, hgemm, output Hadamard"]
+    H --> J
+    I --> J
+    T --> J
+```
+
+The native GEMM covers integer rates 1-8 bpw for the `3inst`, `mcg` and
+`mul1` codebooks and the 1.5/2.5/3.5 bpw `mul1` half rates, with K and N
+multiples of 128 and at most 512 rows. Q4NX has no fused ROCm decoder, so it
+keeps the Torch path above the GEMV's batch size. R4NX always reconstructs
+(there is no R4NX GEMM kernel on any backend). CDNA and every non-gfx120x ROCm
+target fall back to reconstruct + hipBLAS.
+
+`EXL3_EXLLAMA_V3` is accepted on RDNA4 only, through the
+`exl3_native_hip_gemm_available` metadata probe. `backend=AUTO` still resolves
+to `EXL3_TORCH` on ROCm, so the fused HIP kernel is opt-in there.
 
 ## A100 validation
 

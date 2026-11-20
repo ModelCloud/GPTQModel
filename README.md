@@ -139,6 +139,8 @@ EXL3 supports 1.5, 2.5, and 3.5 bits per weight with `mul1` and 2.5, 3.0, and 3.
   the [AWQ scaling groups](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-scaling-groups.md) contract. Scale search keeps
   routing in the original-input coordinates, validates replay coverage, and
   restores temporary weights on failure; see [search safety](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-scaling-groups.md#scale-search-safety).
+  A per-module `dynamic` fallback threshold is resolved before selection; see
+  [per-module fallback policy](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-scaling-groups.md#per-module-fallback-policy).
 - **Reject unrepresentable AWQ pack scales.** The native GEMM/GEMV packers
   validate the actual FP16 storage cast before replacing module state; see
   [AWQ pack-time scale representability](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-pack-scale-representability.md).

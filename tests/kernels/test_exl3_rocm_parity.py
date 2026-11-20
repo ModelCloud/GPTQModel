@@ -174,6 +174,7 @@ def _inner_module(packed: dict, bias: torch.Tensor | None = None):
         mcg=packed.get("mcg"),
         mul1=packed.get("mul1"),
         q4nx=packed.get("q4nx"),
+        r4nx=packed.get("r4nx"),
         bias=bias,
         out_dtype=torch.float32,
     )

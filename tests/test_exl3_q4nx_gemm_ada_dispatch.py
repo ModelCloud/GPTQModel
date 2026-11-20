@@ -3,22 +3,20 @@
 
 """Q4NX tensor-core GEMM selection and parity on Ada (sm_89).
 
-The shared EXL3 GEMM tuning table predates the Q4NX codebook, so its CC_ADA
-row is a copy of the 3-instruction sample.  That sample picks a 32-wide K tile
-for 16-row batches and 96-128 cooperative blocks for narrow projections, which
-is slower for Q4NX on a 128-SM part.  The dispatch now overrides both:
-
-* ``size_m <= 16`` and ``size_n <= 8192`` run shape 2 (K tile 16, N tile 128);
-* ``size_n <= 2048`` runs 64 cooperative blocks for K <= 4096 and 96 for wider
-  K, because those shapes are bound by the split-K reduction, not by
-  occupancy, and the wider K needs the extra blocks to keep 128 SMs fed.
-
-This module pins the selection and checks the fused GEMM against the
-reconstruct + HGEMM path the extension uses for the other codebooks.  Both
-compute the same product in FP16, so they differ only by accumulation order.
+The Ada Q4NX samples live in the packed launch table
+(``exl3_packed::samples_*_q4nx``, generated from
+``scripts/exl3_kernel_map_q4nx_ada.json``), so the dispatcher reads a measured
+shape and cooperative-block count for every ``(rate, k, n)`` cell.  This module
+pins that the probe reports the Q4NX instance and the measured sample, and
+checks the fused GEMM against the reconstruct + HGEMM path the extension uses
+for the other codebooks.  Both compute the same product in FP16, so they differ
+only by accumulation order.
 """
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -47,12 +45,7 @@ Q4NX_ALPHA = 1.0 / 42.5**0.5
 # wrong codebook, rotation or scale.
 PARITY_ATOL = 2e-5
 
-# Cooperative blocks for narrow (n <= 2048) projections: the split-K reduction
-# is the bottleneck while K is small, and wider K needs more blocks to fill the
-# 128 SMs.
-NARROW_SMS = 64
-NARROW_SMS_WIDE_K = 96
-WIDE_K = 4096
+Q4NX_SAMPLES = Path(__file__).resolve().parents[1] / "scripts/exl3_kernel_map_q4nx_ada.json"
 
 requires_ada = pytest.mark.skipif(
     not requires_nvidia_cuda() or torch.cuda.get_device_capability() != (8, 9),
@@ -80,6 +73,13 @@ def _probe(ops, m: int, k: int, n: int, step_bits: int):
 
 def _row_shape(m: int) -> int:
     return 7 if m > 48 else 6 if m > 32 else 5 if m > 16 else 0
+
+
+def _ada_sample(step_bits: int, k: int, n: int) -> tuple[int, int]:
+    """The measured Ada sample the packed table must dispatch for this cell."""
+    payload = json.loads(Q4NX_SAMPLES.read_text())
+    shape_idx, num_sms = payload["rates"][str(step_bits)][f"{k},{n}"]
+    return int(shape_idx), int(num_sms)
 
 
 def _packed(k: int, n: int, step_bits: int, seed: int = 37):
@@ -122,7 +122,7 @@ def _reference(weight, suh, svh, x, y, xh) -> None:
 @pytest.mark.parametrize("k", [2048, 4096, 8192])
 @pytest.mark.parametrize("n", [2048, 4096, 8192, 16384])
 def test_q4nx_ada_selects_the_tuned_kernel(ops, step_bits, m, k, n):
-    """The probe must report a Q4NX instance with the tuned geometry and grid."""
+    """The probe must report the Q4NX instance and the measured Ada sample."""
     kernel, shape_idx, num_sms, block_dim, q4nx_shape = _probe(ops, m, k, n, step_bits)
 
     assert kernel, "the dispatch returned no kernel"
@@ -131,25 +131,17 @@ def test_q4nx_ada_selects_the_tuned_kernel(ops, step_bits, m, k, n):
     assert q4nx_shape == shape_idx, "the dispatch did not pick a Q4NX kernel instance"
     assert block_dim == BLOCKDIM[shape_idx]
 
-    if m <= 16 and n <= 8192:
-        # The shared sample's shape 3 (256-wide N tile) loses to shape 2.
-        assert shape_idx == 2
-    elif m <= 16:
-        # Above 8192 columns the packed sample keeps its own choice.  For 3.0
-        # bpw that is shape 3, which also proves the 8192 bound is applied.
-        assert shape_idx in (1, 2, 3, 4)
-        if step_bits == 12:
-            assert shape_idx == 3
-    else:
-        # Multi-row tiles replace two or more slab passes and are unchanged.
+    sample_shape, sample_sms = _ada_sample(step_bits, k, n)
+    if _row_shape(m):
+        # Multi-row tiles replace two or more slab passes and take precedence
+        # over the table shape; the sample still supplies the grid.
         assert shape_idx == _row_shape(m)
+    else:
+        assert shape_idx == sample_shape
 
-    if n <= 2048:
-        # Fewer blocks beat the 96-128 the shared sample asks for; the grid is
-        # still clamped by the number of K x N tiles.
-        max_slices = (k // TILESIZE_K[shape_idx]) * (n // TILESIZE_N[shape_idx])
-        blocks = NARROW_SMS_WIDE_K if k > WIDE_K else NARROW_SMS
-        assert num_sms == min(max_slices, blocks)
+    # The grid is clamped by the number of K x N tiles of the launched shape.
+    max_slices = (k // TILESIZE_K[shape_idx]) * (n // TILESIZE_N[shape_idx])
+    assert num_sms == min(max_slices, sample_sms)
 
 
 @pytest.mark.parametrize("step_bits", sorted(STEP_BITS))

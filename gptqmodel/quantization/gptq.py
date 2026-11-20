@@ -998,6 +998,20 @@ class GPTQ:
 
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
+    def pad_tp_features(self, inp: torch.Tensor) -> torch.Tensor:
+        """Append the planned TP columns to a ``[features, tokens]`` batch.
+
+        Plain GPTQ pads the feature axis while reshaping ``[tokens, features]``.
+        GPTAQ and FOEM transpose first, so their accumulator receives
+        ``[features, tokens]``; pad dimension 0 there instead, otherwise the
+        batch cannot be added to the expanded ``self.columns`` Hessian (#5823).
+        """
+
+        if not self._tp_pad_cols:
+            return inp
+        pad = inp.new_zeros((self._tp_pad_cols, inp.shape[1]))
+        return torch.cat((inp, pad), dim=0)
+
     def add_batch(self, inp: torch.Tensor, out: Optional[torch.Tensor], batch_index: Optional[int] = None):
         if not self._hessian_capture_enabled:
             return
@@ -1217,7 +1231,7 @@ class GPTQ:
                 stats["staging_misses"] += 1
 
             staging_view = staging_workspace[:rows, :]
-            staging_view.copy_(chunk.to(dtype=stage_dtype))
+            staging_view.copy_(chunk)
 
             if stage_dtype == torch.float32:
                 stats["materialized_requests"] += 1
@@ -1250,7 +1264,7 @@ class GPTQ:
 
                     try:
                         fp32_view = fp32_workspace[:rows, :]
-                        fp32_view.copy_(staging_view.to(torch.float32))
+                        fp32_view.copy_(staging_view)
                         yield fp32_view
                     finally:
                         pass
@@ -2144,12 +2158,13 @@ class GPTQ:
 
         if target_device is None:
             target_device = self.H.device if self.H is not None else self.module.weight.device
-        W = self.clone_module(device=target_device)
         # When the Hessian exists its diagonal is the exact input-channel
         # importance for the layer's output error, so weight the SmoothMSE
         # objective with it instead of averaging every channel equally. A
         # fallback without captured activations uses the weight-magnitude
-        # proxy instead of the harmful uniform mean.
+        # proxy instead of the harmful uniform mean. Resolve the diagonal
+        # before cloning so the full matrix is released before the weight
+        # clone and output buffers overlap it (#5778).
         col_weights = None
         if search_mse:
             col_weights = hessian_column_weights(
@@ -2159,6 +2174,8 @@ class GPTQ:
                 col_weights = hessian_column_weights(
                     self.H, self.columns, device=target_device
                 )
+        self.H = None
+        W = self.clone_module(device=target_device)
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
@@ -2298,7 +2315,6 @@ class GPTQ:
         avg_loss = f"fallback({strategy.value}): {mean_abs_err:.7f}"
         damp = 0.0
 
-        self.H = None
         return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
 
     def _rtn_fallback_after_hessian_failure(self, blocksize: int):
@@ -2929,8 +2945,12 @@ class GPTQ:
         # Fit the whole-row grid after dead-column masking: a channel absent
         # from every calibration sample carries no signal, so its weight must
         # not set the per-channel scale that every live column is quantized
-        # with (#5611).
-        self.quantizer.find_params(W, weight=True)
+        # with (#5611). Only the ungrouped solve reads this grid: static
+        # groups fit every group on a deep-copied quantizer and dynamic groups
+        # refit at each group boundary, so a grouped whole-projection range
+        # search would be discarded after its shrink search ran (#5830).
+        if self.qcfg.group_size == -1:
+            self.quantizer.find_params(W, weight=True)
 
         # g_idx = []
         scale = []

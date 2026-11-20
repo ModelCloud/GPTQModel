@@ -349,6 +349,16 @@ class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         weight = (codes.t().float() - zeros.float()) * scales.float()
         return weight.to(self._dequant_scales_dtype if dtype is None else dtype)
 
+    def _checkpoint_scale_dtype(self):
+        """The checkpoint scale width, not the FP32 runtime layout's.
+
+        ``transform_cpu`` widens ``self.scales`` in place for the fused kernel,
+        so the live buffer always reads FP32 after the first forward.
+        """
+
+        recorded = getattr(self, "_dequant_scales_dtype", None)
+        return recorded if recorded is not None else super()._checkpoint_scale_dtype()
+
     def awq_weight_dequantize(self, device, dtype):
         # The dense fallback's natural decode dtype is the checkpoint scale
         # dtype (or the transformed layout's recorded width). Widen only when

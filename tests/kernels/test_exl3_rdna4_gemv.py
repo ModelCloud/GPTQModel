@@ -166,10 +166,12 @@ def test_hip_gemv_declines_batches_over_max_m(hip_gemv):
     result = torch.empty((9, n), dtype=torch.float16, device=x.device)
     assert hip_gemv(*_op_args(module, None), x, result, False) == 0
 
-    # Rows over EXL3_GEMV_MAX_M keep the reconstruct path, bit for bit.
+    # Rows over EXL3_GEMV_MAX_M fall through to the fused GEMM (or to
+    # reconstruct where it does not cover the device), so the layer stays
+    # correct; the WMMA accumulation is not bit-identical to reconstruct.
     actual = module.forward(x, {"reconstruct": False})
     expected = module.forward(x, {"reconstruct": True})
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
 
 
 @torch.inference_mode()
@@ -198,16 +200,16 @@ def test_hip_gemv_declines_q4nx_rate_outside_its_codebook(hip_gemv):
 
 
 @torch.inference_mode()
-def test_linear_forward_falls_back_for_unsupported_rate():
+def test_linear_forward_unsupported_gemv_rate_uses_the_fused_gemm():
     # 5 bpw is a valid EXL3 rate but has no HIP GEMV instantiation, so the
-    # public forward must keep using reconstruct + hgemm.
+    # public forward falls through to the fused GEMM, which covers it.
     k, n = 512, 256
     weights = _packed_projection(k, n, 5.0)
     module = _linear(weights, 5.0)
     x = _input(2, k, seed=13)
     actual = module.forward(x, {"reconstruct": False})
     expected = module.forward(x, {"reconstruct": True})
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
 
 
 @torch.inference_mode()
@@ -234,17 +236,18 @@ def test_linear_forward_dispatches_hip_gemv_up_to_eight_rows(monkeypatch):
         assert len(calls) == 1
         assert results == [1]
 
-    # The default forward of a larger batch never probes the kernel.
+    # The default forward of a larger batch never probes the kernel; the fused
+    # GEMM owns those rows.
     calls.clear()
     module.forward(_input(9, k, seed=9), {})
     assert calls == []
 
-    # An explicit reconstruct=False still probes it, but the kernel declines
-    # over EXL3_GEMV_MAX_M and the layer keeps the reconstruct path.
+    # An explicit reconstruct=False skips the GEMV above EXL3_GEMV_MAX_M too and
+    # stays on the fused GEMM.
     for rows in (9, 24):
         calls.clear()
         results.clear()
         actual = module.forward(_input(rows, k, seed=rows), {"reconstruct": False})
-        assert all(value == 0 for value in results)
+        assert calls == []
         expected = module.forward(_input(rows, k, seed=rows), {"reconstruct": True})
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)

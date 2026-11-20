@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set,
 
 import torch
 import torch.nn.functional as F
+import transformers
 from torch import nn
 from torch.nn import Module
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
@@ -63,6 +64,7 @@ from ..nn_modules.hooked_linear import (
     unwrap_hooked_linears,
 )
 from ..nn_modules.qlinear.paro import ParoLinear
+from ..quantization.awq.utils.packing_utils import source_weight_out_in
 from ..quantization.config import (
     FORMAT,
     METHOD,
@@ -568,19 +570,43 @@ class ParoProcessor(LoopProcessor):
 
     @staticmethod
     def _module_weight_matrix(module: NamedModule) -> torch.Tensor:
-        """Return the 2D weight matrix expected by the Paro optimizer."""
-        weight = module.weight.data
+        """Return the module weight in the optimizer's ``[out, in]`` layout.
+
+        ``transformers.Conv1D`` (GPT-2 and friends) stores ``[in, out]``, so
+        handing it to the optimizer unchanged failed with
+        ``addmm: mat1 and mat2 shapes cannot be multiplied`` whenever the two
+        axes differed (#5856). Presenting the canonical matrix here keeps one
+        orientation contract for the optimizer, the loss, and the write-back.
+        """
+        weight = source_weight_out_in(ParoProcessor._wrapped_module(module))
         if weight.dim() != 2:
             raise ValueError(
                 f"Paro currently expects rank-2 module weights, got {tuple(weight.shape)} for `{module.full_name}`."
             )
+        # A Conv1D transpose is a strided view; the optimizer reshapes it.
+        return weight if weight.is_contiguous() else weight.contiguous()
+
+    @staticmethod
+    def _wrapped_module(module: NamedModule) -> nn.Module:
+        """Return the module behind a ``NamedModule`` (or the object itself)."""
+        return getattr(module, "module", module)
+
+    @staticmethod
+    def _storage_weight_matrix(module: NamedModule, weight: torch.Tensor) -> torch.Tensor:
+        """Return an ``[out, in]`` matrix in the module's own storage layout."""
+        if isinstance(ParoProcessor._wrapped_module(module), transformers.pytorch_utils.Conv1D):
+            return weight.t().contiguous()
         return weight
 
     def _apply_optimization_result(self, module: NamedModule, result, original_weight: torch.Tensor) -> None:
         """Store one optimization result into the wrapped module and its scratch state."""
         weight = self._module_weight_matrix(module)
         pseudo_weight = result.pseudo_weight.to(device=weight.device, dtype=weight.dtype)
-        pack_weight = result.pack_weight.to(dtype=weight.dtype).cpu()
+        # ``pack_weight`` replaces the module weight before packing, so it must
+        # use the module's own layout; the AWQ packer transposes a Conv1D itself.
+        pack_weight = self._storage_weight_matrix(
+            module, result.pack_weight.to(device=weight.device, dtype=weight.dtype)
+        ).cpu()
         q_scales = result.q_scales.to(dtype=weight.dtype).cpu()
         q_zeros = result.q_zeros.cpu()
         pairs = result.pairs.to(dtype=torch.int16).cpu()
@@ -599,16 +625,21 @@ class ParoProcessor(LoopProcessor):
                 }
             )
 
+        # ``pseudo_weight`` is canonical ``[out, in]``. A Conv1D module stores
+        # ``[in, out]``, and both the packed AWQ entry point and the checkpoint
+        # writer read the module's own layout, so restore it exactly once here.
+        storage_weight = self._storage_weight_matrix(module, pseudo_weight)
         if self.calculate_w_wq_diff:
-            if original_weight.dtype == torch.float16:
-                w_wq_diff = original_weight - pseudo_weight
+            original_storage = self._storage_weight_matrix(module, original_weight)
+            if original_storage.dtype == torch.float16:
+                w_wq_diff = original_storage - storage_weight
             else:
-                w_wq_diff = original_weight.to(dtype=torch.float32) - pseudo_weight.to(dtype=torch.float32)
+                w_wq_diff = original_storage.to(dtype=torch.float32) - storage_weight.to(dtype=torch.float32)
             with self.lock:
                 module.state["w_wq_diff"] = w_wq_diff
-                module.state["wq"] = pseudo_weight.detach().to(device=CPU, copy=True)
+                module.state["wq"] = storage_weight.detach().to(device=CPU, copy=True)
 
-        module.weight.data = pseudo_weight
+        module.weight.data = storage_weight
 
     def _log_quant_result(self, module: NamedModule, feat: torch.Tensor, val_loss: float, duration: float) -> None:
         """Append one quantization log row using the same format as other processors."""

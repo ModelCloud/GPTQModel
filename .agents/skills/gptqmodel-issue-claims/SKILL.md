@@ -7,6 +7,12 @@ description: Screen, claim, heartbeat, verify and release GPT-QModel GitHub issu
 
 # Claiming GPT-QModel issues
 
+> **Contracts first.** Read and honour [`contracts/`](../../../contracts/README.md)
+> before acting. In particular, read the
+> [kernel forward dtype contract](../../../contracts/kernel/forward-dtype.md):
+> one activation dtype per module, and output dtype equals input dtype. A
+> different dtype on a later call is a bug. Contracts outrank this skill.
+
 ## At a glance
 
 Hold a live claim under **your session's agent id** before working an issue,

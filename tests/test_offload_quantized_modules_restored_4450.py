@@ -29,6 +29,7 @@ from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import FORMAT
 from gptqmodel.utils.backend import BACKEND
+from gptqmodel.utils.model import move_module_to_cpu_pinned
 from gptqmodel.utils.offload import (
     bind_private_offload_root,
     is_meta_module,
@@ -136,6 +137,74 @@ def test_loop_exit_materializes_disk_offloaded_quantized_modules(tmp_path, loope
     # The in-session model no longer depends on the bundles at all.
     shutil.rmtree(tmp_path / "offload")
     assert torch.equal(_logits(model), reference)
+
+
+def _expected_shift_tables(bits: int, pack_dtype_bits: int):
+    """Independent literal shift tables for the 2/4/8-bit GPTQ layout."""
+
+    shifts = torch.tensor(list(range(0, pack_dtype_bits, bits)), dtype=torch.int32)
+    return shifts.unsqueeze(0).unsqueeze(0), shifts.unsqueeze(0).unsqueeze(-1)
+
+
+@pytest.mark.parametrize("prebuild_tables", [True, False], ids=["built", "lazy"])
+def test_post_quantize_move_keeps_shift_tables_off_meta(tmp_path, prebuild_tables):
+    """#5788: the post-quantization move must not rebuild shift tables on meta.
+
+    ``post_quantize`` moves the finished layer to CPU *after* its packed
+    modules were disk-offloaded, so ``PackableQuantLinear._apply`` runs while
+    ``qweight``/``g_idx`` are meta offload placeholders. Rebuilding the derived
+    ``wf_unsqueeze_*`` tables from that placeholder device leaves them on meta;
+    accelerate's detach hook then has no value for them and the strict loop-exit
+    restore aborts with "quantized modules remain disk-offloaded after
+    quantization". The tables are runtime metadata, so the move must keep the
+    live ones (or leave them absent for the lazy decode path to build) and the
+    restored module must forward exactly like its pre-offload twin.
+    """
+
+    torch.manual_seed(1234)
+    linear = nn.Linear(64, 128, bias=False).half()
+    # Two identical packed modules: one is the untouched reference run, the
+    # other goes through offload -> post-quantize move -> strict restore.
+    reference_module = _packed(linear, seed=11)
+    packed = _packed(linear, seed=11)
+    if prebuild_tables:
+        packed._init_wf_unsqueeze_buffers()
+        assert packed.wf_unsqueeze_zero.device.type == "cpu"
+    else:
+        assert "wf_unsqueeze_zero" not in packed._buffers
+
+    model = nn.Sequential(packed).eval()
+    probe = torch.randn(2, packed.in_features, dtype=torch.float16)
+    with torch.inference_mode():
+        reference = reference_module.eval()(probe)
+
+    offload_to_disk(
+        model=model,
+        module=packed,
+        module_name="0",
+        disk_path=str(tmp_path / "offload"),
+        force=True,
+    )
+    assert is_meta_module(packed)
+
+    # WeightOnlyLooper -> BaseQModel.post_quantize after the offload write.
+    move_module_to_cpu_pinned(model)
+
+    shift_tables = {
+        name: buffer.device.type for name, buffer in packed.named_buffers() if name.startswith("wf_")
+    }
+    expected_devices = {"wf_unsqueeze_zero": "cpu", "wf_unsqueeze_neg_one": "cpu"} if prebuild_tables else {}
+    assert shift_tables == expected_devices
+
+    assert restore_disk_offloaded_modules(model, strict=True) == []
+    assert all(buffer.device.type == "cpu" for buffer in packed.buffers())
+
+    with torch.inference_mode():
+        assert torch.equal(model(probe), reference)
+
+    expected_zero, expected_neg_one = _expected_shift_tables(packed.bits, packed.pack_dtype_bits)
+    assert torch.equal(packed.wf_unsqueeze_zero, expected_zero)
+    assert torch.equal(packed.wf_unsqueeze_neg_one, expected_neg_one)
 
 
 class _SwitchedKernel(TorchLinear):
