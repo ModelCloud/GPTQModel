@@ -3083,37 +3083,13 @@ class GPTQ:
                                     ).flatten()
                                     Q1[:, column - i1] = q
                         else:
-                            # No grouping - vectorized quantization for entire block
-                            maxq_val = 2 ** self.qcfg.bits - 1
-                            if hasattr(self.quantizer, 'scale') and hasattr(self.quantizer, 'zero'):
-                                latest_scale, latest_zero = _replace_zero_scale(
-                                    self.quantizer.scale, self.quantizer.zero
-                                )
-
-                                if latest_scale.dim() == 1:
-                                    latest_scale = latest_scale.view(-1, 1)
-                                if latest_zero.dim() == 1:
-                                    latest_zero = latest_zero.view(-1, 1)
-
-                                if self.qcfg.sym:
-                                    Q1 = latest_scale * torch.clamp(
-                                        torch.round(W1 / latest_scale),
-                                        -(maxq_val // 2),
-                                        maxq_val // 2
-                                    )
-                                else:
-                                    quantized = torch.clamp(
-                                        torch.round(W1 / latest_scale) + latest_zero,
-                                        0,
-                                        maxq_val
-                                    )
-                                    Q1 = latest_scale * (quantized - latest_zero)
-                            else:
-                                # Fallback to individual quantization
-                                for i in range(count):
-                                    w = W1[:, i]
-                                    q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
-                                    Q1[:, i] = q
+                            # No grouping: let the fitted quantizer own the grid
+                            # bounds. A symmetric GPTQ grid stores zero point
+                            # ``2 ** (bits - 1)`` and encodes the full ``[-8, 7]``
+                            # range, while the old manual clamp to ``[-7, 7]``
+                            # dropped code 0 (issue #5756). QQQ keeps its signed
+                            # clamp through ``requires_groupwise_processing``.
+                            Q1 = self.quantizer.quantize(W1)
 
                         Q[:, i1:i2] = Q1
                 else:
