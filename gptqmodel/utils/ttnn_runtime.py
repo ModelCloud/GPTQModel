@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib
 import sys
 import threading
+import weakref
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -34,6 +35,11 @@ log = setup_logger()
 
 _LOCK = threading.RLock()
 _MESH: Optional["TTNNMesh"] = None
+# Live users of the open mesh.  Layers register when they upload their packed
+# tensors and drop the lease in ``release_device``; the mesh closes only after
+# the last lease is gone.  A plain module attribute would keep released layers
+# alive, so the registry holds weak references.
+_LEASES: "weakref.WeakSet[Any]" = weakref.WeakSet()
 
 
 class TTNNUnavailable(RuntimeError):
@@ -298,6 +304,7 @@ def close_mesh(*, owner: Optional[str] = None) -> None:
                 f"from {owner!r}"
             )
         mesh, _MESH = _MESH, None
+        _LEASES.clear()
         mesh.close()
         # Every cached grid operand is device-resident, so it died with this
         # device. Dropping the entries here also keeps a recycled object id from
@@ -327,6 +334,36 @@ def current_mesh() -> Optional[TTNNMesh]:
 
     with _LOCK:
         return _MESH
+
+
+def hold_mesh_lease(owner: Any) -> None:
+    """Record that ``owner`` (normally a kernel module) is using the mesh.
+
+    Every upload path calls this after ``open_mesh`` succeeds, so the model
+    wrapper can release only devices its own kernels hold.  A repeated call is
+    a no-op, which keeps a cache rebuild from inflating the lease count.
+    """
+
+    with _LOCK:
+        if _MESH is None:
+            raise TTNNUnavailable("cannot hold a lease on a closed TTNN mesh")
+        _LEASES.add(owner)
+
+
+def release_mesh_lease(owner: Any) -> bool:
+    """Drop ``owner``'s mesh lease.
+
+    Returns ``True`` only when ``owner`` held the last live lease, which is the
+    caller's signal to close the shared mesh.  Releasing an owner that never
+    acquired one returns ``False`` so an unleased or already-released handle is
+    left untouched.
+    """
+
+    with _LOCK:
+        if owner not in _LEASES:
+            return False
+        _LEASES.discard(owner)
+        return not _LEASES
 
 
 def _reject_pjrt_owner() -> None:
@@ -384,9 +421,11 @@ __all__ = [
     "TTNNUnavailable",
     "close_mesh",
     "current_mesh",
+    "hold_mesh_lease",
     "import_ttnn",
     "is_ttnn_available",
     "open_mesh",
+    "release_mesh_lease",
     "to_host_replica",
     "ttnn_device_count",
 ]

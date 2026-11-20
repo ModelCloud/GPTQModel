@@ -111,6 +111,7 @@ from .definitions.raon1_mini import Raon1MiniQModel  # noqa: E402
 from .definitions.flint import FlintQModel  # noqa: E402
 from .definitions.ricursive import RicursiveQModel  # noqa: E402
 from .definitions.deepseek_v4 import DeepSeekV4QModel  # noqa: E402
+from .definitions.deepseek_v41_flash import DeepSeekV41FlashQModel  # noqa: E402
 from .definitions.deepseek_ocr2 import DeepSeekOCR2QModel  # noqa: E402
 from .definitions.deepseek_vl import DeepSeekVLQModel  # noqa: E402
 from .definitions.deepseek_vl_v2 import DeepSeekVLV2QModel  # noqa: E402
@@ -399,6 +400,7 @@ MODEL_MAP = {
     "flint": FlintQModel,
     "ricursive": RicursiveQModel,
     "deepseek_v4": DeepSeekV4QModel,
+    "deepseek_v41": DeepSeekV41FlashQModel,
     "deepseek_ocr2": DeepSeekOCR2QModel,
     "deepseek_vl": DeepSeekVLQModel,
     "deepseek_vl_v2": DeepSeekVLV2QModel,
@@ -645,6 +647,73 @@ def _get_config_load_kwargs(kwargs: dict) -> dict:
     config_kwargs = get_config_selection_kwargs(kwargs)
     config_kwargs.update(get_hf_gguf_load_kwargs(kwargs))
     return config_kwargs
+
+
+def _legacy_sidecar_names() -> tuple:
+    """The sidecar filenames a legacy checkpoint may carry."""
+
+    return (QUANT_CONFIG_FILENAME, "quant_config.json")
+
+
+def _cached_sidecar_exists(
+    repo_id: str,
+    filename: str,
+    *,
+    subfolder: str,
+    revision,
+) -> bool:
+    """Whether the local Hub cache holds one sidecar file for this selection."""
+
+    try:
+        from huggingface_hub import hf_hub_download
+
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            subfolder=subfolder or None,
+            revision=revision,
+            local_files_only=True,
+        )
+        return True
+    except Exception:  # pragma: no cover - missing cache entry / offline miss
+        return False
+
+
+def _has_legacy_quant_sidecar(
+    model_id_or_path,
+    config_kwargs: dict,
+    *,
+    treat_as_local_path: bool,
+) -> bool:
+    """Whether the *selected* checkpoint carries a legacy quantize sidecar.
+
+    The probe has to resolve the same ``subfolder``/``revision`` as the config
+    and the weights (#5379): a nested checkpoint keeps its sidecar beside its
+    config, and a pinned revision keeps it in that revision. An offline caller
+    must never list the remote repository, so offline probes consult only the
+    local cache.
+    """
+
+    subfolder = config_kwargs.get("subfolder") or ""
+    if treat_as_local_path:
+        root = join(model_id_or_path, subfolder) if subfolder else model_id_or_path
+        return any(os.path.exists(join(root, name)) for name in _legacy_sidecar_names())
+
+    revision = config_kwargs.get("revision")
+    from huggingface_hub import constants as hub_constants
+
+    if hub_constants.HF_HUB_OFFLINE:
+        return any(
+            _cached_sidecar_exists(
+                model_id_or_path, name, subfolder=subfolder, revision=revision
+            )
+            for name in _legacy_sidecar_names()
+        )
+    files = set(list_repo_files(repo_id=model_id_or_path, revision=revision))
+    return any(
+        (f"{subfolder}/{name}" if subfolder else name) in files
+        for name in _legacy_sidecar_names()
+    )
 
 
 def select_model_definition(model_type: str, config) -> type:
@@ -1001,17 +1070,11 @@ class GPTQModel:
             is_gptqmodel_quantized = True
         else:
             # TODO FIX ME...not decoded to check if quant method is compatible or quantized by gptqmodel
-            for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
-                if treat_as_local_path:  # Local paths should never trigger remote Hub lookups
-                    if isdir(model_id_or_path) and os.path.exists(join(model_id_or_path, name)):
-                        is_gptqmodel_quantized = True
-                        break
-                else:  # Remote
-                    files = list_repo_files(repo_id=model_id_or_path)
-                    for f in files:
-                        if f == name:
-                            is_gptqmodel_quantized = True
-                            break
+            is_gptqmodel_quantized = _has_legacy_quant_sidecar(
+                model_id_or_path,
+                _get_config_load_kwargs(kwargs),
+                treat_as_local_path=treat_as_local_path,
+            )
 
         if is_gptqmodel_quantized:
             if quantize_config is not None:

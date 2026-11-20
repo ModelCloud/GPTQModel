@@ -37,6 +37,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from . import BaseQuantLinear
 from ._compile_support import COMPILE_LEVEL
+from ._numerics import autocast_active
 
 
 #: Values per shared exponent. The hardware format fixes this; a checkpoint
@@ -357,6 +358,7 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
         block: int = BLOCKFLOAT_BLOCK,
         pack_dtype: torch.dtype = torch.uint8,
         block_axis: str = "in",
+        bias_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
         if block != BLOCKFLOAT_BLOCK:
@@ -381,11 +383,19 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
         self.pack_dtype = pack_dtype
         self._init_storage(out_features, in_features, bits, block, block_axis)
         if bias:
-            # Bias is not quantized, so keep the precision of the model it came
-            # from. Narrowing to float16 here would overflow large finite
+            # Bias is not quantized, so keep the precision of the checkpoint it
+            # came from. The loader passes that dtype explicitly when the saved
+            # bias is wider than the weights (issue #5650); otherwise follow the
+            # model dtype. Narrowing to float16 here would overflow large finite
             # values and round ordinary ones even for a float32 checkpoint.
-            bias_dtype = dtype if isinstance(dtype, torch.dtype) else torch.float16
-            self.register_buffer("bias", torch.zeros(out_features, dtype=bias_dtype))
+            resolved_bias_dtype = (
+                bias_dtype
+                if isinstance(bias_dtype, torch.dtype)
+                else dtype if isinstance(dtype, torch.dtype) else torch.float16
+            )
+            self.register_buffer(
+                "bias", torch.zeros(out_features, dtype=resolved_bias_dtype)
+            )
         else:
             self.bias = None
 
@@ -450,11 +460,15 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
                 else out_dtype
             )
             weight = self.dequantize(dtype=compute_dtype)
-            out = F.linear(
-                x.to(compute_dtype),
-                weight,
-                None if bias is None else bias.to(compute_dtype),
-            )
+            bias = None if bias is None else bias.to(compute_dtype)
+            # Ambient autocast would narrow these explicitly wide operands back
+            # to the activation dtype before the bias cancels the product, so
+            # the reduction must run with autocast disabled and round once.
+            if autocast_active(x.device.type):
+                with torch.autocast(device_type=x.device.type, enabled=False):
+                    out = F.linear(x.to(compute_dtype), weight, bias)
+            else:
+                out = F.linear(x.to(compute_dtype), weight, bias)
             # Release the temporary before the activation leaves this scope.
             del weight
 
@@ -570,6 +584,60 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         )
         return out.reshape(*shape, self.in_features)
 
+    def _embedding_row_stride(self) -> Optional[int]:
+        """Bytes per stored row, or ``None`` when a row is not byte-aligned.
+
+        The compact gather slices the packed stream at row boundaries, which is
+        only exact when one row occupies a whole number of bytes. Every width
+        here (2, 4, 8 bits) divides a byte, so the requirement reduces to the
+        row's bit length; the default 16-value block satisfies it for every
+        realistic geometry, and the whole-table path covers the rest.
+        """
+
+        if getattr(self, "block_axis", "in") != "in":
+            # ``block_axis="out"`` stores W^T, so a token id selects a column of
+            # the packed stream instead of a contiguous row slice.
+            return None
+        if (self.in_features * self.bits) % 8:
+            return None
+        return packed_code_bytes(self.in_features, self.bits)
+
+    def _gather_embedding_rows(self, input_ids: torch.Tensor) -> Optional[torch.Tensor]:
+        """Decode only the requested rows of the packed table, or ``None``.
+
+        A lookup table is read, not multiplied, so the dense table is never
+        built here: the compact code and exponent rows are gathered first and
+        decoded afterwards. One token then costs one row of scratch instead of
+        the whole vocabulary, and prefill costs its own rows. Past a query
+        wider than the table the whole-table decode reads each row once
+        instead of repeatedly, so that crossover keeps the dense path.
+        """
+
+        from ...utils.tt_blockfloat_quant import _unpack_codes, recompose_blockfloat
+
+        # ``F.embedding`` rejects non-integer ids; without this the cast below
+        # would truncate a float query instead of raising.
+        if input_ids.dtype not in (torch.int32, torch.int64):
+            return None
+        stride = self._embedding_row_stride()
+        if stride is None:
+            return None
+        flat = input_ids.reshape(-1)
+        if flat.numel() > self.out_features:
+            return None
+        # An out-of-range id must keep ``F.embedding``'s IndexError. Declining
+        # here hands the query to the whole-table path, which raises it, rather
+        # than letting ``index_select`` wrap a negative id or depend on its own
+        # bounds check matching across Torch versions.
+        if int(flat.min()) < 0 or int(flat.max()) >= self.out_features:
+            return None
+        index = flat.to(torch.int64)
+        packed = self.codes.reshape(self.out_features, stride).index_select(0, index)
+        codes = _unpack_codes(packed, self.bits, (index.numel(), self.in_features))
+        exponents = self.exponents.index_select(0, index)
+        rows = recompose_blockfloat(codes, exponents, bits=self.bits, block=self.block)
+        return rows.reshape(*input_ids.shape, self.in_features).to(self.output_dtype)
+
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         if input_ids.numel() == 0:
             # An empty gather still has a shape and a dtype to preserve; the
@@ -583,6 +651,9 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         kernel = self._kernel_embedding(input_ids)
         if kernel is not None:
             return kernel
+        gathered = self._gather_embedding_rows(input_ids)
+        if gathered is not None:
+            return gathered
         weight = self.dequantize(dtype=self.output_dtype)
         return F.embedding(input_ids, weight)
 
@@ -649,6 +720,7 @@ def swap_blockfloat_modules(
     block: int = BLOCKFLOAT_BLOCK,
     quantized_prefixes: Optional[list] = None,
     block_axis: str = "in",
+    bias_dtypes: Optional[dict] = None,
 ) -> dict:
     """Replace quantized modules on an already-built model with block-float ones.
 
@@ -656,9 +728,15 @@ def swap_blockfloat_modules(
     ``bits_per_layer``. Returns ``{prefix: [out_features, in_features]}`` for
     everything swapped. Used by the library loader and by the modeling file the
     checkpoint ships, so both produce the same object graph.
+
+    ``bias_dtypes`` maps a prefix to the dtype its checkpoint stores the bias
+    in. A checkpoint may keep a float32 bias alongside bfloat16 weights, and
+    sizing the fresh bias buffer at the weight dtype would narrow it during
+    ``load_state_dict`` (issue #5650). The activation dtype is unaffected.
     """
 
     bits_per_layer = dict(bits_per_layer or {})
+    bias_dtypes = dict(bias_dtypes or {})
     targets = list(quantized_prefixes or bits_per_layer)
 
     restored = {}
@@ -696,6 +774,7 @@ def swap_blockfloat_modules(
                 dtype=module.weight.dtype,
                 block=block,
                 block_axis=block_axis,
+                bias_dtype=bias_dtypes.get(prefix),
             )
         else:
             continue

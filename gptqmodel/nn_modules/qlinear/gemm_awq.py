@@ -13,7 +13,12 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear, empty_linear_output, input_rows
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns, source_weight_out_in
+from ...quantization.awq.utils.packing_utils import (
+    AWQ_ORDER,
+    dequantize_gemm,
+    pack_awq_columns,
+    source_weight_out_in,
+)
 from ...utils.awq import (
     awq_dequantize_weights,
     awq_gemm_forward,
@@ -26,6 +31,11 @@ from ...utils.kernel import resolve_kernel_config
 from ...utils.packing_math import scale_to_storage_dtype
 from ...utils.rocm import IS_ROCM
 from ._compile_support import COMPILE_LEVEL
+from ._numerics import (
+    linear_wide_bias,
+    needs_wide_bias_epilogue,
+    scales_narrowed_by,
+)
 
 
 def _awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool = None, kernel=None):
@@ -388,6 +398,13 @@ class AwqGEMMLinear(AWQuantLinear):
 
         compute_scales = self._scales_for_compute(compute_dtype)
         compute_bias = self._bias_for_compute(compute_dtype)
+        # The native split-K kernels only accept FP16/BF16 scales, so a stored
+        # FP32 scale would be rounded before the FP32 bias epilogue and the
+        # epilogue could not recover those bits (#5764). Decode at the
+        # checkpoint precision for this call and use the wide epilogue.
+        wide_scale = needs_wide_bias_epilogue(
+            self.bias, compute_dtype
+        ) and scales_narrowed_by(self.scales.dtype, compute_dtype)
 
         # Keep eval-mode autograd and in-place adapter application viable;
         # only ordinary no-grad inference needs an inference tensor here.
@@ -396,19 +413,31 @@ class AwqGEMMLinear(AWQuantLinear):
         )
         ctx = nullcontext() if self.training or needs_grad or self.adapter else torch.inference_mode()
         with ctx:
-            out = AwqGemmFn.apply(
-                x,
-                self.qweight,
-                self.qzeros,
-                compute_scales,
-                self.bits,
-                self.group_size,
-                compute_bias,
-                self.out_features,
-                "cuda",
-                self.fp32_accum,
-                self.kernel,
-            )
+            if wide_scale:
+                # Transient decode: nothing outlives this call, and the
+                # reconstructed FP32 weight is only the matmul operand.
+                weight = dequantize_gemm(
+                    qweight=self.qweight,
+                    qzeros=self.qzeros,
+                    scales=self.scales,
+                    bits=self.bits,
+                    group_size=self.group_size,
+                )
+                out = linear_wide_bias(x, weight.t(), self.bias)
+            else:
+                out = AwqGemmFn.apply(
+                    x,
+                    self.qweight,
+                    self.qzeros,
+                    compute_scales,
+                    self.bits,
+                    self.group_size,
+                    compute_bias,
+                    self.out_features,
+                    "cuda",
+                    self.fp32_accum,
+                    self.kernel,
+                )
 
         if out.dtype != input_dtype:
             out = out.to(dtype=input_dtype)
@@ -423,12 +452,15 @@ class AwqGEMMLinear(AWQuantLinear):
         assert scales is not None and zeros is not None
         scales = scales.t().contiguous()
         zeros = zeros.t().contiguous()
-        scale_zeros = zeros.float() * scales.float()
 
         scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
         # Validate the storage cast before replacing any module state: a scale
         # that overflows or underflows here would silently corrupt every code.
         stored_scales = scale_to_storage_dtype(scales, scale_dtype).clone()
+        # The checkpoint decodes with the stored scale, so build the affine
+        # offset from that same grid. Mixing the wider source scale into the
+        # offset shifts the zero point whenever the storage cast rounds (#5605).
+        scale_zeros = zeros.float() * stored_scales.float()
         if linear.bias is not None:
             # The bias is not a quantization operand. Keep the source precision:
             # the forward epilogue adds it in FP32, so narrowing it to the scale

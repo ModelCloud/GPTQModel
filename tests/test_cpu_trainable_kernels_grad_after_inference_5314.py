@@ -24,8 +24,10 @@ from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
 from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
+from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from gptqmodel.utils.torch import TORCH_HAS_FUSED_OPS
+from tests.test_cpu_int4_snapshot_5013 import _desc_act_gptq_module
 
 
 IN_FEATURES = 256
@@ -44,7 +46,7 @@ def _skip_unless_valid(cls):
         pytest.skip(str(err))
 
 
-def _gptq_layer(cls):
+def _gptq_layer(cls, bias: bool = False):
     layer = cls(
         bits=4,
         group_size=GROUP_SIZE,
@@ -52,7 +54,7 @@ def _gptq_layer(cls):
         desc_act=False,
         in_features=IN_FEATURES,
         out_features=OUT_FEATURES,
-        bias=False,
+        bias=bias,
         format=FORMAT.GPTQ,
         pack_dtype=torch.int32,
         register_buffers=True,
@@ -63,15 +65,17 @@ def _gptq_layer(cls):
     scales = weight.reshape(OUT_FEATURES, groups, GROUP_SIZE).abs().amax(dim=-1).clamp_min(1e-4) / 7.0
     zeros = torch.full((OUT_FEATURES, groups), 8.0)
     groups_idx = torch.arange(IN_FEATURES, dtype=torch.int32) // GROUP_SIZE
-    source = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=False)
+    source = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=bias)
     with torch.no_grad():
         source.weight.copy_(weight)
+        if bias:
+            source.bias.copy_(torch.randn(OUT_FEATURES))
     layer.pack_original(source, scales, zeros, groups_idx)
     layer.post_init()
     return layer
 
 
-def _awq_layer(cls):
+def _awq_layer(cls, bias: bool = False):
     layer = cls(
         bits=4,
         group_size=GROUP_SIZE,
@@ -79,7 +83,7 @@ def _awq_layer(cls):
         desc_act=False,
         in_features=IN_FEATURES,
         out_features=OUT_FEATURES,
-        bias=False,
+        bias=bias,
         format=FORMAT.GEMM,
         pack_dtype=torch.int32,
         register_buffers=True,
@@ -94,6 +98,9 @@ def _awq_layer(cls):
     layer.qzeros.copy_(qzeros)
     layer.scales.copy_(scales)
     layer.post_init()
+    if bias:
+        with torch.no_grad():
+            layer.bias.copy_(torch.randn(OUT_FEATURES))
     return layer
 
 
@@ -153,6 +160,11 @@ def _dequantized(layer) -> torch.Tensor:
 def test_grad_forward_after_inference_keeps_the_gradient(builder):
     layer = builder()
     layer.eval()
+    # Decode the checkpoint layout before the first fused forward. A grad call
+    # keeps the runtime layout installed instead of restoring the checkpoint
+    # layout, so the module's own dequantizer no longer sees checkpoint words
+    # after that call (#5509).
+    weight = _dequantized(layer)
 
     x_eval = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16)
     with torch.inference_mode():
@@ -168,12 +180,53 @@ def test_grad_forward_after_inference_keeps_the_gradient(builder):
     out.backward(grad_out)
     assert x.grad is not None
 
-    weight = _dequantized(layer)
     expected = grad_out.float().reshape(-1, OUT_FEATURES) @ weight.T
     torch.testing.assert_close(x.grad.float().reshape(-1, IN_FEATURES), expected, rtol=2e-2, atol=2e-2)
 
-    # A later inference forward must still work after the layout restore.
+    # A later inference forward must still work after the grad call.
     with torch.inference_mode():
         again = layer(x_eval)
     assert again.shape == (4, OUT_FEATURES)
     assert torch.isfinite(again).all()
+
+
+@pytest.mark.parametrize(
+    "cls,backend",
+    [
+        (TorchFusedLinear, BACKEND.GPTQ_TORCH_FUSED),
+        (TorchAtenLinear, BACKEND.GPTQ_TORCH_ATEN),
+    ],
+    ids=["fused", "aten"],
+)
+def test_eval_grad_forward_gathers_desc_act_runtime_layout(cls, backend):
+    """The eager runtime-dense path must gather ``desc_act`` activations.
+
+    A grad call decodes the live int4pack layout, which is in runtime input
+    order, so the activation rows must be gathered with ``ret_idx`` exactly as
+    the fused op does (#5509).
+    """
+
+    in_features = 128
+    out_features = 64
+    reference = _desc_act_gptq_module(
+        cls, backend, in_features=in_features, group_size=32
+    )
+    weight = reference.dequantize_weight().float()
+    layer = _desc_act_gptq_module(
+        cls, backend, in_features=in_features, group_size=32
+    )
+    assert not layer._ret_idx_is_identity()
+
+    layer.eval()
+    with torch.inference_mode():
+        layer(torch.randn(4, in_features, dtype=torch.bfloat16))
+
+    x = torch.randn(4, in_features, dtype=torch.bfloat16, requires_grad=True)
+    out = layer(x)
+    assert out.requires_grad, "the runtime-dense grad path detached the output"
+    grad_out = torch.randn_like(out)
+    out.backward(grad_out)
+    expected = grad_out.float().reshape(-1, out_features) @ weight.T
+    torch.testing.assert_close(
+        x.grad.float().reshape(-1, in_features), expected, rtol=2e-2, atol=2e-2
+    )

@@ -29,6 +29,8 @@ import functools
 
 import torch
 
+from ._decode_dtype import decode_dtype_for_scales
+
 
 #: Candidate rows-per-block values. ``64`` is AVX512, ``32`` AVX2, ``16`` the
 #: common NEON/VSX width, and ``4``/``8`` the scalar and 256-bit-float widths.
@@ -108,11 +110,17 @@ def int4pack_block_size() -> int | None:
     return None
 
 
-def int4pack_to_codes(packed: torch.Tensor) -> torch.Tensor:
+def int4pack_to_codes(
+    packed: torch.Tensor, block_size: int | None = None
+) -> torch.Tensor:
     """Return the 4-bit codes the CPU int4pack op was given.
 
     Raises ``RuntimeError`` when the local layout cannot be verified, so a
     caller never rebuilds a checkpoint from an assumed permutation.
+
+    ``block_size`` may carry the value the transform already probed. A traced
+    forward passes it explicitly because dynamo would otherwise re-enter the
+    probe (and its ``torch.Generator``) inside the graph.
     """
 
     if not isinstance(packed, torch.Tensor) or packed.dim() != 2:
@@ -121,10 +129,115 @@ def int4pack_to_codes(packed: torch.Tensor) -> torch.Tensor:
         raise RuntimeError(
             f"CPU int4pack qweight must be uint8, got {packed.dtype}"
         )
-    block_size = int4pack_block_size()
+    if block_size is None:
+        block_size = int4pack_block_size()
+    elif block_size not in _CANDIDATE_BLOCK_SIZES:
+        raise RuntimeError(f"unsupported CPU int4pack block size: {block_size}")
     if block_size is None:
         raise RuntimeError("cannot verify the local CPU int4pack layout")
     return _unpack_blocks(packed, block_size)
+
+
+def int4pack_decode_dtype(module, activation_dtype: torch.dtype | None = None) -> torch.dtype:
+    """Return a dtype that decodes the module's int4pack operands safely."""
+
+    chooser = getattr(module, "_decode_dtype_for_activation", None)
+    if callable(chooser) and activation_dtype is not None:
+        return chooser(activation_dtype)
+    return decode_dtype_for_scales(
+        getattr(module, "scales", None),
+        int(getattr(module, "bits", 0)),
+        activation_dtype,
+    )
+
+
+def runtime_int4pack_dense_weight(
+    module,
+    *,
+    use_zero_codes: bool = False,
+    activation_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Decode a live CPU int4pack runtime layout to a dense ``[in, out]`` weight.
+
+    The inference transform replaces the checkpoint ``qweight`` with the ATen
+    int4pack words and ``qzeros`` with the affine offsets the fused op consumes.
+    A grad-requiring call cannot use that op (it runs under ``no_grad``), and a
+    traced graph must not restore the checkpoint layout by mutating the module.
+    This decodes the runtime operands with the same affine identity instead:
+
+        ``scale * (signed_code - 2**(bits-1)) + zero_offset``
+
+    The result stays in runtime input order; a ``desc_act`` caller must gather
+    its activations with ``ret_idx`` before the matmul, exactly as the fused op
+    does. Nothing is cached or written back to the module.
+
+    ``use_zero_codes`` decodes the offsets from the checkpoint zero codes and
+    the current ``scales`` instead of the installed ``qzeros``. A traced graph
+    cannot run the eager scale-change refresh (#5372) because it reads
+    ``tensor_cache_key`` and writes module state, so the compiled grad branch
+    asks for this read-only form and sees a scale change immediately (#5571).
+
+    ``activation_dtype`` selects the decode dtype. A half activation decodes
+    in the stored scale dtype only while that holds every decoded weight;
+    otherwise the operands are converted to FP32 (or FP64) first, exactly as
+    the checkpoint-layout AWQ decode does (#5367, #5577).
+    """
+
+    bits = int(getattr(module, "bits", 0))
+    if bits != 4:
+        raise RuntimeError(
+            f"{type(module).__name__} cannot decode a {bits}-bit CPU int4pack layout"
+        )
+    block_size = getattr(module, "_cpu_int4pack_block_size", None)
+    if block_size is None:
+        raise RuntimeError(
+            f"{type(module).__name__} has no verified CPU int4pack block size; "
+            "run the first inference forward before a compiled grad forward"
+        )
+    qweight = getattr(module, "qweight", None)
+    scales = getattr(module, "scales", None)
+    zeros = getattr(module, "qzeros", None)
+    if not all(isinstance(tensor, torch.Tensor) for tensor in (qweight, scales, zeros)):
+        raise RuntimeError(
+            f"{type(module).__name__} has no live CPU int4pack weight operands"
+        )
+    decode_dtype = int4pack_decode_dtype(module, activation_dtype)
+    if use_zero_codes:
+        from ._fused_train_state import runtime_zero_offsets_from_codes
+
+        fresh_zeros = runtime_zero_offsets_from_codes(
+            module, bits=bits, dtype=decode_dtype
+        )
+        if fresh_zeros is not None:
+            zeros = fresh_zeros
+
+    codes = int4pack_to_codes(qweight, block_size=block_size)  # [out, in]
+    out_features, in_features = codes.shape
+    if scales.dim() != 2 or zeros.dim() != 2:
+        raise RuntimeError(
+            f"{type(module).__name__} CPU int4pack metadata must be 2D: "
+            f"scales={tuple(scales.shape)}, zeros={tuple(zeros.shape)}"
+        )
+    groups = scales.shape[0]
+    if (
+        tuple(scales.shape) != (groups, out_features)
+        or tuple(zeros.shape) != tuple(scales.shape)
+        or groups == 0
+        or in_features % groups != 0
+    ):
+        raise RuntimeError(
+            f"{type(module).__name__} CPU int4pack metadata does not match the "
+            f"packed weight: codes={tuple(codes.shape)}, "
+            f"scales={tuple(scales.shape)}, zeros={tuple(zeros.shape)}"
+        )
+
+    group_size = in_features // groups
+    # The op dequantizes with one scale/offset per input group; expand them to
+    # the runtime input order without touching the module's buffers.
+    scale = scales.repeat_interleave(group_size, dim=0).to(decode_dtype)
+    zero = zeros.repeat_interleave(group_size, dim=0).to(decode_dtype)
+    center = 1 << (bits - 1)
+    return scale * (codes.t().to(decode_dtype) - center) + zero
 
 
 def rebuild_gptq_qweight(module) -> torch.Tensor:
@@ -343,4 +456,5 @@ __all__ = [
     "rebuild_avx512_qweight",
     "rebuild_awq_qweight",
     "rebuild_gptq_qweight",
+    "runtime_int4pack_dense_weight",
 ]

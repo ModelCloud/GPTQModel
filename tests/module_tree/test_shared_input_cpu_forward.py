@@ -9,6 +9,7 @@ every quantizable module of every decoder layer, and asserts the plan derived fr
 definition matches the activations actually observed.
 """
 
+from contextlib import contextmanager
 from copy import deepcopy
 from functools import lru_cache
 from types import SimpleNamespace
@@ -330,7 +331,52 @@ def _build(name):
 
 def _probe_layer(model, layer, plan):
     input_ids = torch.randint(0, VOCAB, (2, 6))
-    return probe_shared_inputs(layer, plan, lambda: model(input_ids, use_cache=False))
+    with _eager_torch_mamba_kernels():
+        return probe_shared_inputs(layer, plan, lambda: model(input_ids, use_cache=False))
+
+
+_EAGER_MAMBA_KERNELS = {
+    "transformers.models.jamba.modeling_jamba": (
+        "causal_conv1d_fn",
+        "causal_conv1d_update",
+        "mamba_inner_fn",
+        "mamba_selective_scan",
+        "mamba_selective_state_update",
+    ),
+    "transformers.models.nemotron_h.modeling_nemotron_h": (
+        "mamba2_chunk_scan",
+        "mamba2_split_conv1d_scan_combined",
+        "mamba2_selective_state_update",
+    ),
+}
+
+
+@contextmanager
+def _eager_torch_mamba_kernels():
+    """Pin the Torch Mamba reference for one CPU forward.
+
+    ``transformers`` resolves ``mamba_ssm``/``causal_conv1d`` at import time and
+    those kernels are CUDA-only. This module verifies real CPU forwards, so use
+    the undecorated Torch reference kept on ``__wrapped__``.
+    """
+
+    import importlib
+
+    saved = []
+    try:
+        for module_path, names in _EAGER_MAMBA_KERNELS.items():
+            module = importlib.import_module(module_path)
+            for name in names:
+                wrapper = getattr(module, name, None)
+                reference = getattr(wrapper, "__wrapped__", None)
+                if wrapper is None or reference is None:
+                    continue
+                saved.append((module, name, wrapper))
+                setattr(module, name, reference)
+        yield
+    finally:
+        for module, name, wrapper in reversed(saved):
+            setattr(module, name, wrapper)
 
 
 def _verified_model_types():

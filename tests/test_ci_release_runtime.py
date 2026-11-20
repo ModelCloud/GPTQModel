@@ -9,6 +9,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -20,6 +22,7 @@ CI = ROOT / ".github"
 WORKFLOWS = CI / "workflows"
 CUDA_IMAGE = "nvidia/cuda:13.2.1-devel-ubuntu24.04@sha256:0e1f7b8e96fa9ec5e36d4709a38c62df7b5665977446081811c12b8234d874bf"
 CI_WORKFLOW = CI / "scripts/ci_workflow.py"
+CI_TESTS = CI / "scripts/ci_tests.py"
 GITHUB_MATRIX_ENTRY_LIMIT = 256
 GITHUB_WORKFLOW_INPUT_LIMIT = 65_535
 LINUX_MAX_ARG_STRLEN = 131_072
@@ -271,3 +274,236 @@ def test_default_unit_test_plan_file_exceeds_one_environment_value(tmp_path):
         shards = plan.get(f"{group}_matrix_shards") or [matrix]
         assert [entry for shard in shards for entry in shard] == matrix
         assert all(len(shard) <= GITHUB_MATRIX_ENTRY_LIMIT for shard in shards)
+
+
+def _start_allocator_stub(gpu_ids):
+    """Local allocator that reports ``gpu_ids`` for every keepalive."""
+    keepalives = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def _reply(self):
+            payload = json.dumps({"gpuIds": gpu_ids}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            self.rfile.read(length)
+            if self.path.endswith("/keepalive"):
+                keepalives.append(self.path)
+            self._reply()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, keepalives
+
+
+def _run_ci_tests_loopback(tmp_path, *, extra_args, cuda_visible_devices, gpu_ids):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    # The contracts job installs only pytest/pyyaml, so isolate the keepalive
+    # payload's optional host-inventory dependency at its import boundary.
+    stub_dir = tmp_path / "stubs"
+    stub_dir.mkdir()
+    (stub_dir / "device_smi.py").write_text(
+        "class Device:\n"
+        "    def __init__(self, kind):\n"
+        "        self.model = kind\n"
+        "        self.arch = 'x86_64'\n"
+        "        self.name = 'Linux'\n",
+        encoding="utf-8",
+    )
+    seen_env = tmp_path / "seen-cuda-visible-devices.txt"
+    (tests_dir / "test_ci_lease_probe.py").write_text(
+        "import os\n"
+        "import pathlib\n"
+        "import time\n"
+        "\n"
+        "\n"
+        "def test_lease_probe():\n"
+        "    pathlib.Path(os.environ['PROBE_OUTPUT']).write_text(\n"
+        "        os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>'), encoding='utf-8'\n"
+        "    )\n"
+        "    time.sleep(2.5)\n",
+        encoding="utf-8",
+    )
+    server, keepalives = _start_allocator_stub(gpu_ids)
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(CI_TESTS),
+                "run",
+                "--base-url",
+                f"http://127.0.0.1:{server.server_address[1]}",
+                "--run-id",
+                "5370",
+                "--test-script",
+                "test_ci_lease_probe",
+                "--runner",
+                "loopback",
+                "--gpu-id",
+                cuda_visible_devices,
+                "--monitor-interval-sec",
+                "1",
+                "--log-root",
+                str(tmp_path / "logs"),
+                *extra_args,
+            ],
+            cwd=tmp_path,
+            env={
+                **os.environ,
+                "CUDA_VISIBLE_DEVICES": cuda_visible_devices,
+                "PROBE_OUTPUT": str(seen_env),
+                "PYTHONPATH": os.pathsep.join(
+                    value
+                    for value in (str(stub_dir), os.environ.get("PYTHONPATH", ""))
+                    if value
+                ),
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    return result, keepalives, seen_env
+
+
+def test_cpu_runtime_without_a_lease_clears_cuda_and_skips_keepalives(tmp_path):
+    result, keepalives, seen_env = _run_ci_tests_loopback(
+        tmp_path,
+        extra_args=[],
+        cuda_visible_devices="0",
+        gpu_ids="-1",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert keepalives == []
+    assert "start to keep alive" not in result.stdout
+    assert seen_env.read_text(encoding="utf-8") == ""
+
+
+def test_leased_gpu_runtime_keeps_cuda_and_starts_keepalives(tmp_path):
+    result, keepalives, seen_env = _run_ci_tests_loopback(
+        tmp_path,
+        extra_args=["--gpu-lease"],
+        cuda_visible_devices="0",
+        gpu_ids="0",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert keepalives
+    assert "start to keep alive" in result.stdout
+    assert seen_env.read_text(encoding="utf-8") == "0"
+
+
+def test_leased_runtime_without_cuda_visibility_fails_closed(tmp_path):
+    result, keepalives, seen_env = _run_ci_tests_loopback(
+        tmp_path,
+        extra_args=["--gpu-lease"],
+        cuda_visible_devices="",
+        gpu_ids="0",
+    )
+
+    assert result.returncode == 22
+    assert keepalives == []
+    assert "GPU lease declared" in result.stdout
+    assert not seen_env.exists()
+
+
+def test_unit_workflow_leases_only_after_gpu_allocation():
+    reusable = _yaml(WORKFLOWS / "unit_tests_reusable.yml")
+    run_step = next(step for step in reusable["jobs"]["test"]["steps"] if step.get("name") == "Run tests")
+    script = run_step["run"]
+    block = script.split("extra_args=()", 1)[1].split('if [[ "${XPU_MODE}"', 1)[0]
+    skip_branch, lease_branch = block.split("else", 1)
+
+    assert 'if [[ "${SKIP_GPU_ALLOCATION}" == "true" ]]; then' in skip_branch
+    assert "--clear-cuda" in skip_branch
+    assert "--gpu-lease" not in skip_branch
+    assert "--gpu-lease" in lease_branch
+    assert "extra_args+=(--xpu-mode)" in script
+
+
+def test_unit_workflow_passes_the_matrix_group_to_runtime_resolution():
+    reusable = _yaml(WORKFLOWS / "unit_tests_reusable.yml")
+    activate = next(step for step in reusable["jobs"]["test"]["steps"] if step.get("name") == "Activate test environment")
+
+    assert '"${{ matrix.test_group }}"' in activate["run"]
+    assert '--test-group "$test_group"' in (CI / "scripts/ci_unit_activate_uv_env.sh").read_text(encoding="utf-8")
+
+
+def test_cpu_marked_test_skips_allocation_without_xpu_mode():
+    module = _load_ci_workflow()
+    runtime = module.resolve_test_runtime("test_threadx_shutdown", tests_root=ROOT / "tests")
+
+    assert runtime.skip_gpu_allocation is True
+    assert runtime.xpu_mode is False
+
+
+def test_cpu_matrix_entry_without_a_marker_still_skips_allocation():
+    module = _load_ci_workflow()
+
+    assert module.resolve_test_runtime("test_threadx_cpu_locks", tests_root=ROOT / "tests").skip_gpu_allocation is False
+    runtime = module.resolve_test_runtime(
+        "test_threadx_cpu_locks",
+        tests_root=ROOT / "tests",
+        test_group="cpu",
+    )
+    assert runtime.skip_gpu_allocation is True
+    assert runtime.xpu_mode is False
+
+
+def test_cpu_runtime_resolution_clears_cuda_for_the_whole_job(tmp_path):
+    github_env = tmp_path / "github-env"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(CI_WORKFLOW),
+            "resolve-test-runtime",
+            "--test-name",
+            "test_threadx_cpu_locks",
+            "--test-group",
+            "cpu",
+        ],
+        cwd=ROOT,
+        env={**os.environ, "GITHUB_ENV": str(github_env)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "skip_gpu_allocation=true" in result.stdout
+    written = github_env.read_text(encoding="utf-8").splitlines()
+    assert "SKIP_GPU_ALLOCATION=true" in written
+    assert "CUDA_VISIBLE_DEVICES=" in written
+
+
+def test_gpu_runtime_resolution_keeps_cuda_for_the_job(tmp_path):
+    github_env = tmp_path / "github-env"
+    subprocess.run(
+        [
+            sys.executable,
+            str(CI_WORKFLOW),
+            "resolve-test-runtime",
+            "--test-name",
+            "test_threadx_cpu_locks",
+            "--test-group",
+            "torch",
+        ],
+        cwd=ROOT,
+        env={**os.environ, "GITHUB_ENV": str(github_env)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "CUDA_VISIBLE_DEVICES=" not in github_env.read_text(encoding="utf-8").splitlines()

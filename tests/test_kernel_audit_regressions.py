@@ -181,15 +181,17 @@ def test_cpu_layer_accepts_new_activation_dtype_after_move(
 
 
 @pytest.mark.parametrize(
-    ("module_name", "class_name"),
+    ("module_name", "class_name", "requires_avx512"),
     (
-        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel", "TorchAtenLinear"),
-        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq", "TorchAtenAwqLinear"),
-        ("gptqmodel.nn_modules.qlinear.torch_fused", "TorchFusedLinear"),
-        ("gptqmodel.nn_modules.qlinear.torch_fused_awq", "TorchFusedAwqLinear"),
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel", "TorchAtenLinear", False),
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq", "TorchAtenAwqLinear", False),
+        ("gptqmodel.nn_modules.qlinear.torch_fused", "TorchFusedLinear", False),
+        ("gptqmodel.nn_modules.qlinear.torch_fused_awq", "TorchFusedAwqLinear", False),
+        ("gptqmodel.nn_modules.qlinear.torch_cpu_avx512", "TorchCpuAvx512Linear", True),
+        ("gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq", "TorchCpuAvx512AwqLinear", True),
     ),
 )
-def test_device_move_restores_checkpoint_layout(module_name, class_name):
+def test_device_move_restores_checkpoint_layout(module_name, class_name, requires_avx512):
     """A device move must not hand one backend's packed layout to another.
 
     The CPU int4pack packing is not the XPU packing, so the runtime layout is
@@ -201,15 +203,20 @@ def test_device_move_restores_checkpoint_layout(module_name, class_name):
     from tests.module_tree.test_fusion_kernel_backends import _projection
 
     cls = getattr(importlib.import_module(module_name), class_name)
+    if requires_avx512:
+        ok, error = cls.cached_validate_once()
+        if not ok:
+            pytest.skip(f"{class_name} requires AVX512-BF16: {error}")
+
     torch.manual_seed(1234)
     linear = torch.nn.Linear(256, 256, bias=True)
-    layer, _weight, _bias, _checkpoint = _projection(cls, linear, torch.float16, "cpu")
+    layer, _weight, _bias, _checkpoint = _projection(cls, linear, torch.bfloat16, "cpu")
     checkpoint_shape = tuple(layer.qweight.shape)
     checkpoint_dtype = layer.qweight.dtype
 
     layer.eval()
     with torch.no_grad():
-        layer(torch.randn(2, 5, 256, dtype=torch.float16))
+        layer(torch.randn(2, 5, 256, dtype=torch.bfloat16))
     runtime_shape = tuple(layer.qweight.shape)
     assert (runtime_shape, layer.qweight.dtype) != (checkpoint_shape, checkpoint_dtype)
 
@@ -217,9 +224,60 @@ def test_device_move_restores_checkpoint_layout(module_name, class_name):
 
     assert tuple(layer.qweight.shape) == checkpoint_shape
     assert layer.qweight.dtype == checkpoint_dtype
-    assert layer.linear_mode is None
+    assert getattr(layer, "linear_mode", None) is None
     assert getattr(layer, "_cpu_transformed", False) is False
-    assert layer._fused_train_state is None
+    assert getattr(layer, "_fused_train_state", None) is None
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "requires_avx512"),
+    (
+        ("gptqmodel.nn_modules.qlinear.torch", "TorchLinear", False),
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel", "TorchAtenLinear", False),
+        ("gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq", "TorchAtenAwqLinear", False),
+        ("gptqmodel.nn_modules.qlinear.torch_fused", "TorchFusedLinear", False),
+        ("gptqmodel.nn_modules.qlinear.torch_fused_awq", "TorchFusedAwqLinear", False),
+        ("gptqmodel.nn_modules.qlinear.torch_cpu_avx512", "TorchCpuAvx512Linear", True),
+        ("gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq", "TorchCpuAvx512AwqLinear", True),
+    ),
+)
+def test_meta_to_empty_roundtrip_restores_exact_output(module_name, class_name, requires_avx512):
+    """``meta`` -> ``to_empty`` -> ``load_state_dict`` must preserve the output.
+
+    The GPTQ torch kernels keep their unpack shift tables as non-persistent
+    buffers, so ``to_empty`` materializes them from uninitialized storage and
+    the subsequent load cannot restore them. The AVX512 AWQ transform also
+    replaced ``qweight`` with its runtime layout, so a meta move must restore
+    the checkpoint layout before ``to_empty``; otherwise the load either
+    crashes on the retained meta scales or copies into the wrong shape.
+    """
+
+    from tests.module_tree.test_fusion_kernel_backends import _projection
+
+    cls = getattr(importlib.import_module(module_name), class_name)
+    if requires_avx512:
+        ok, error = cls.cached_validate_once()
+        if not ok:
+            pytest.skip(f"{class_name} requires AVX512-BF16: {error}")
+
+    torch.manual_seed(1234)
+    linear = torch.nn.Linear(256, 256, bias=True)
+    layer, _weight, _bias, _checkpoint = _projection(cls, linear, torch.bfloat16, "cpu")
+    state = {name: value.clone() for name, value in layer.state_dict().items()}
+    activation = torch.randn(2, 5, 256, dtype=torch.bfloat16)
+
+    layer.eval()
+    with torch.no_grad():
+        expected = layer(activation)
+
+    layer._apply(lambda tensor: tensor.to("meta") if isinstance(tensor, torch.Tensor) else tensor)
+    layer.to_empty(device="cpu")
+    layer.load_state_dict(state)
+
+    with torch.no_grad():
+        actual = layer(activation)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_gemv_fast_rejects_unaligned_shapes_before_packing():

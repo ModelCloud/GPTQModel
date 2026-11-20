@@ -31,13 +31,12 @@ import torch
 from gptqmodel.utils.marlin import (
     MXFP8_GROUP_SIZE,
     gptq_marlin_gemm,
-    gptq_marlin_repack,
     marlin_import_exception,
     marlin_interleave_8bit_scales,
     marlin_make_workspace_new,
-    marlin_permute_scales,
     marlin_runtime_available,
     marlin_runtime_error,
+    mxfp4_marlin_prepare,
     mxfp8_marlin_prepare,
 )
 from gptqmodel.utils.marlin_scalar_type import scalar_types
@@ -81,16 +80,7 @@ def _mxfp4_operands(size_n: int, size_k: int, device: torch.device, seed: int):
     nibbles = torch.randint(0, 16, (size_n, size_k), generator=g)
     packed = (nibbles[:, 0::2] | (nibbles[:, 1::2] << 4)).to(torch.uint8)  # low nibble = even k
     scales, scale = _e8m0_scales(size_n, size_k, g)
-    qweight = gptq_marlin_repack(
-        packed.view(torch.int32).T.contiguous().to(device),
-        perm=torch.empty(0, dtype=torch.int32, device=device),
-        size_k=size_k, size_n=size_n, num_bits=4, dtype=torch.bfloat16,
-    )
-    marlin_scales = marlin_permute_scales(
-        scales.view(torch.uint8).T.contiguous().to(device), size_k=size_k, size_n=size_n,
-        group_size=MXFP8_GROUP_SIZE,
-    )
-    marlin_scales = marlin_interleave_8bit_scales(marlin_scales).view(torch.float8_e8m0fnu)
+    qweight, marlin_scales = mxfp4_marlin_prepare(packed.to(device), scales.to(device))
     return qweight, marlin_scales, scalar_types.float4_e2m1f, _E2M1[nibbles] * scale
 
 

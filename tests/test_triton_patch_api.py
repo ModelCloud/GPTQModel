@@ -393,5 +393,5 @@ def test_macaq_triton_kernels_use_the_patched_jit_function():
 
     # MACaQ launches through the same JITFunction.run path as AWQ, so the
     # process-wide compile lock covers it without a second patch.
-    assert isinstance(macaq._dense_w4a4_kernel, jit_module.JITFunction)
+    assert isinstance(macaq._dense_mx_gemm_kernel, jit_module.JITFunction)
     assert getattr(jit_module.JITFunction, "_gptqmodel_compile_serialized", False)

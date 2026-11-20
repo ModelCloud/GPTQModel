@@ -191,7 +191,7 @@ def test_allspark_rejects_unrepresentable_scale(scale):
         (
             float(torch.nextafter(torch.tensor(2.0**-25), torch.tensor(torch.inf))),
             2.0**-24,
-            65,
+            129,
         ),
     ],
     ids=["max-finite", "just-below-overflow-midpoint", "min-subnormal", "just-above-underflow-midpoint"],

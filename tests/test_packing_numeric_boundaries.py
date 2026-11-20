@@ -261,15 +261,18 @@ def test_mxfp4_minimum_scale_and_rounding_neighbors():
 
 
 @pytest.mark.parametrize("cls", [MacheteLinear, AwqMacheteLinear])
-def test_machete_rejects_offset_overflow_before_repacking(device, cls):
+def test_machete_rejects_affine_overflow_before_repacking(device, cls):
     module = _bare(cls)
     module.sym = False
+    module.desc_act = False
     module.weight_type = scalar_types.uint4
     module.register_buffer("scales", torch.full((1, 64), 5000., dtype=torch.float16, device=device))
     module.register_buffer("qzeros", _words(torch.full((1, 64), 14), 4).to(device))
-    module.register_buffer("qweight", torch.zeros((16, 64), dtype=torch.int32, device=device))
+    # GPTQ packs eight codes per word along in_features; AWQ along out_features.
+    qweight_shape = (16, 64) if cls is MacheteLinear else (128, 8)
+    module.register_buffer("qweight", torch.zeros(qweight_shape, dtype=torch.int32, device=device))
     before = {name: value.clone() for name, value in module.state_dict().items()}
-    with pytest.raises(ValueError, match="Scaled zero-point offset"):
+    with pytest.raises(ValueError, match="Scaled zero-point product"):
         module.post_init()
     for name, value in before.items():
         assert torch.equal(module.state_dict()[name], value)

@@ -132,10 +132,11 @@ def _checkpoint_keys(path):
 
 
 def _capture_accelerate_checkpoint(monkeypatch):
-    seen = {}
+    seen = {"calls": 0}
     real = accelerate.load_checkpoint_in_model
 
     def wrapper(model, *args, **kwargs):
+        seen["calls"] += 1
         checkpoint = kwargs.get("checkpoint")
         if checkpoint is None and args:
             checkpoint = args[0]
@@ -197,8 +198,13 @@ def test_fp8_load_keeps_packed_weights_out_of_accelerate(tmp_path, monkeypatch):
         packed_fp8_buffer_dtypes=fp8_dtypes,
     )
 
-    assert set(fp8_dtypes).isdisjoint(seen["keys"])
-    assert set(tensors) - set(fp8_dtypes) <= seen["keys"]
+    # #5584: an FP8 checkpoint now takes the lazy placement path, so Accelerate
+    # is not called at all; the copy fallback still hands it a checkpoint
+    # without the packed weights. Either way it never sees them.
+    accelerate_keys = seen.get("keys", set())
+    assert set(fp8_dtypes).isdisjoint(accelerate_keys)
+    if seen["calls"]:
+        assert set(tensors) - set(fp8_dtypes) <= accelerate_keys
     assert all(
         module.weight.dtype == module.fp8_dtype for _, module in _fp8_modules(model)
     )
@@ -232,8 +238,13 @@ def test_fp8_load_subset_handles_shards_and_key_conversion(tmp_path, monkeypatch
         key_converter=lambda name: name.removeprefix("hf_"),
     )
 
-    assert set(fp8_dtypes).isdisjoint(seen["keys"])
-    assert set(tensors) - set(fp8_dtypes) <= seen["keys"]
+    # #5584: an FP8 checkpoint now takes the lazy placement path, so Accelerate
+    # is not called at all; the copy fallback still hands it a checkpoint
+    # without the packed weights. Either way it never sees them.
+    accelerate_keys = seen.get("keys", set())
+    assert set(fp8_dtypes).isdisjoint(accelerate_keys)
+    if seen["calls"]:
+        assert set(tensors) - set(fp8_dtypes) <= accelerate_keys
     assert all(
         module.weight.dtype == module.fp8_dtype for _, module in _fp8_modules(model)
     )

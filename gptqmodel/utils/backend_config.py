@@ -131,6 +131,21 @@ class GGUFCUDAConfig(BackendConfig):
 
 
 @dataclass(frozen=True)
+class EXL3CUDAConfig(BackendConfig):
+    """Native EXL3 CUDA policy. INT8 uses 0 (off), 1 (residual), or 2 (plain)."""
+
+    backend: ClassVar[BACKEND] = BACKEND.EXL3_EXLLAMA_V3
+    _kernel_fields: ClassVar[dict[str, str]] = {
+        "fp16_gemv": "exl3_fp16_gemv",
+        "fused_gemm": "exl3_fused_gemm",
+        "int8_gemv": "exl3_int8_gemv",
+    }
+    fp16_gemv: bool = False
+    fused_gemm: bool = False
+    int8_gemv: int = 0
+
+
+@dataclass(frozen=True)
 class ParoCUDAConfig(BackendConfig):
     backend: ClassVar[BACKEND] = BACKEND.PARO_CUDA
     _kernel_fields: ClassVar[dict[str, str]] = {
@@ -218,7 +233,7 @@ class RuntimeConfig(_KernelSettings):
     paro_rotate_cta_m: Optional[int] = None
     paro_rotate_row_pad: Optional[int] = None
     paro_autotune_cache: bool = True
-    exl3_tile_batch: int = 256
+    exl3_tile_batch: Optional[int] = None
     exl3_host_rss_limit_bytes: int = 0
     exl3_cuda_allocation_limit_bytes: int = 0
     exl3_memory_telemetry_interval_batches: int = 0
@@ -332,5 +347,5 @@ __all__ = [
     "BackendConfig", "MarlinConfig", "TorchConfig", "AwqTorchConfig", "AwqGemmConfig",
     "AwqTritonConfig", "SwordfishConfig", "GGUFTorchConfig", "GGUFCPPConfig", "GGUFCUDAConfig",
     "ParoCUDAConfig", "ParoTritonConfig", "BitsAndBytesConfig", "TTBlockFloatConfig",
-    "RuntimeConfig",
+    "EXL3CUDAConfig", "RuntimeConfig",
 ]

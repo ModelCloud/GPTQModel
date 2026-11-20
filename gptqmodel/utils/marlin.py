@@ -617,23 +617,48 @@ def marlin_pad_awq_qweight(qweight: torch.Tensor, size_n: int, size_k: int,
     )
 
 
-def marlin_pad_awq_qzeros(qzeros: torch.Tensor, size_n: int, size_k: int,
-                          padded_n: int, padded_k: int, group_size: int,
-                          num_bits: int) -> torch.Tensor:
-    """Zero-pad AWQ packed zero-points to the padded group and N extents."""
+def marlin_pad_packed_qzeros(qzeros: torch.Tensor, size_n: int, size_k: int,
+                             padded_n: int, padded_k: int, group_size: int,
+                             num_bits: int, *,
+                             layout: str = "Packed") -> torch.Tensor:
+    """Zero-pad packed zero-point words to the padded group and N extents.
+
+    GPTQ and AWQ both store ``pack_factor`` consecutive output lanes per int32
+    word along N, so one helper pads either checkpoint layout before the Marlin
+    zero-point permutation. ``size_k`` is the logical input width and the group
+    count follows ``group_size`` (``-1`` is one channelwise group). Zero
+    padding keeps padded columns and groups inert once the matching weights and
+    scales are also zero.
+    """
     pack_factor = 32 // num_bits
     groups = size_k // group_size if group_size > 0 else 1
     padded_groups = padded_k // group_size if group_size > 0 else 1
     expected_shape = (groups, size_n // pack_factor)
     if tuple(qzeros.shape) != expected_shape:
         raise ValueError(
-            f"AWQ qzeros shape must be {expected_shape}, got {tuple(qzeros.shape)}."
+            f"{layout} qzeros shape must be {expected_shape}, got {tuple(qzeros.shape)}."
         )
     if (padded_n, padded_k) == (size_n, size_k):
         return qzeros
     return torch.nn.functional.pad(
         qzeros,
         (0, (padded_n - size_n) // pack_factor, 0, padded_groups - groups),
+    )
+
+
+def marlin_pad_awq_qzeros(qzeros: torch.Tensor, size_n: int, size_k: int,
+                          padded_n: int, padded_k: int, group_size: int,
+                          num_bits: int) -> torch.Tensor:
+    """Zero-pad AWQ packed zero-points to the padded group and N extents."""
+    return marlin_pad_packed_qzeros(
+        qzeros,
+        size_n,
+        size_k,
+        padded_n,
+        padded_k,
+        group_size,
+        num_bits,
+        layout="AWQ",
     )
 
 
@@ -782,6 +807,46 @@ def pack_fp8_to_int32(fp8_weight: torch.Tensor) -> torch.Tensor:
 MXFP8_GROUP_SIZE = 32
 
 
+def _microscaling_marlin_prepare(
+    packed: torch.Tensor, scales: torch.Tensor, size_k: int, size_n: int, num_bits: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    scale_shape = (size_n, size_k // MXFP8_GROUP_SIZE)
+    if scales.dtype != torch.float8_e8m0fnu or scales.shape != scale_shape:
+        raise ValueError(
+            f"MXFP{num_bits} scales must be float8_e8m0fnu with shape {scale_shape}, "
+            f"got {scales.dtype} {tuple(scales.shape)}"
+        )
+    if size_k % MXFP8_GROUP_SIZE != 0:
+        raise ValueError(f"MXFP{num_bits} needs in_features divisible by {MXFP8_GROUP_SIZE}, got {size_k}")
+
+    qweight = gptq_marlin_repack(
+        packed,
+        perm=torch.empty(0, dtype=torch.int32, device=packed.device),
+        size_k=size_k,
+        size_n=size_n,
+        num_bits=num_bits,
+        dtype=torch.bfloat16,
+    )
+    # Permute the raw exponent bytes so no float round trip can touch them.
+    marlin_scales = marlin_permute_scales(
+        scales.view(torch.uint8).T.contiguous(), size_k=size_k, size_n=size_n,
+        group_size=MXFP8_GROUP_SIZE,
+    )
+    marlin_scales = marlin_interleave_8bit_scales(marlin_scales)
+    return qweight, marlin_scales.view(torch.float8_e8m0fnu)
+
+
+def mxfp4_marlin_prepare(
+    weight: torch.Tensor, scales: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Repack low-nibble-first FP4 weights and per-row E8M0 scales for Marlin."""
+    if weight.ndim != 2 or weight.dtype not in (torch.uint8, torch.int8) or weight.size(1) % 4:
+        raise ValueError("MXFP4 expects a 2-D byte tensor holding eight FP4 values per int32 word")
+    size_n, packed_k = weight.shape
+    packed = weight.contiguous().view(torch.int32).T.contiguous()
+    return _microscaling_marlin_prepare(packed, scales, 2 * packed_k, size_n, 4)
+
+
 def mxfp8_marlin_prepare(
     weight: torch.Tensor, scales: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -793,30 +858,9 @@ def mxfp8_marlin_prepare(
     ``b_q_type = scalar_types.float8_e4m3fn`` and bfloat16 activations.
     """
 
+    packed = pack_fp8_to_int32(weight)
     size_n, size_k = weight.shape
-    if scales.dtype != torch.float8_e8m0fnu or scales.shape != (size_n, size_k // MXFP8_GROUP_SIZE):
-        raise ValueError(
-            f"MXFP8 scales must be float8_e8m0fnu with shape {(size_n, size_k // MXFP8_GROUP_SIZE)}, "
-            f"got {scales.dtype} {tuple(scales.shape)}"
-        )
-    if size_k % MXFP8_GROUP_SIZE != 0:
-        raise ValueError(f"MXFP8 needs in_features divisible by {MXFP8_GROUP_SIZE}, got {size_k}")
-
-    qweight = gptq_marlin_repack(
-        pack_fp8_to_int32(weight),
-        perm=torch.empty(0, dtype=torch.int32, device=weight.device),
-        size_k=size_k,
-        size_n=size_n,
-        num_bits=8,
-        dtype=torch.bfloat16,
-    )
-    # Permute the raw exponent bytes so no float round trip can touch them.
-    marlin_scales = marlin_permute_scales(
-        scales.view(torch.uint8).T.contiguous(), size_k=size_k, size_n=size_n,
-        group_size=MXFP8_GROUP_SIZE,
-    )
-    marlin_scales = marlin_interleave_8bit_scales(marlin_scales)
-    return qweight, marlin_scales.view(torch.float8_e8m0fnu)
+    return _microscaling_marlin_prepare(packed, scales, size_k, size_n, 8)
 
 
 def get_scale_perms():

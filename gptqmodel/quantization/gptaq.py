@@ -16,7 +16,7 @@ import transformers
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..utils.fallback import resolve_fallback_strategy
+from ..utils.fallback import resolve_fallback_strategy, should_use_fallback
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
 from ..utils.torch import torch_sync
@@ -27,7 +27,13 @@ from .gar import (
     extend_perm_with_tail,
     invert_perm,
 )
-from .gptq import GPTQ, _device_reduction_key, _move_static_groups
+from .gptq import (
+    GPTQ,
+    _device_reduction_key,
+    _move_static_groups,
+    _static_group_of_column,
+    conv_patch_matrix,
+)
 from .quantizer import _neutralize_dead_columns
 
 
@@ -68,7 +74,7 @@ class GPTAQ(GPTQ):
         if not self._use_native_delta:
             self.native_inps = []
 
-    def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
+    def add_batch(self, inp: torch.Tensor, out: Optional[torch.Tensor], batch_index: Optional[int] = None):
         with self.lock:
             self.fwd_counter += 1
             self.process_batch(inp, batch_index=batch_index)
@@ -163,19 +169,15 @@ class GPTAQ(GPTQ):
             if self._use_native_delta:
                 native_inp = native_inp.t()
 
-        if isinstance(self.module, nn.Conv2d):
-            unfold = nn.Unfold(
-                self.module.kernel_size,
-                dilation=self.module.dilation,
-                padding=self.module.padding,
-                stride=self.module.stride,
-            )
-            inp = unfold(inp)
-            inp = inp.permute([1, 0, 2])
-            inp = inp.flatten(1)
+        if isinstance(self.module, (nn.Conv1d, nn.Conv2d)):
+            # Share GPTQ's grouped im2col geometry: it applies the layer's own
+            # padding mode and folds groups the same way for every solver
+            # (#3917, #5646, #5763).
+            inp = conv_patch_matrix(self.module, inp, columns_first=True)
             if self._use_native_delta:
-                native_inp = unfold(native_inp)
-                native_inp = native_inp.permute([1, 0, 2]).flatten(1)
+                native_inp = conv_patch_matrix(
+                    self.module, native_inp, columns_first=True
+                )
 
         self._accumulate_device_batch(inp, native_inp, batch_request_count)
         self._gptaq_batch_request_count += batch_request_count
@@ -195,6 +197,12 @@ class GPTAQ(GPTQ):
 
         device = inp.device
         use_native = self._use_native_delta
+
+        # ``process_batch`` hands over ``[features, tokens]``; pad the feature
+        # axis so the outer product matches the expanded TP Hessian (#5823).
+        inp = self.pad_tp_features(inp)
+        if use_native:
+            native_inp = self.pad_tp_features(native_inp)
 
         if self._gptaq_active_device is not None and device != self._gptaq_active_device:
             # A second device appeared: demote the live single-device buffers
@@ -239,6 +247,19 @@ class GPTAQ(GPTQ):
             hessian.mul_(ratio)
             if use_native:
                 dxxT.mul_(ratio)
+
+        # ``inp`` is [columns, tokens], so the sink-row cap must reduce over the
+        # column axis and scale each token. Plain GPTQ applies the same cap to
+        # its [tokens, columns] batch in ``compute_hessian_xtx``; without this
+        # the correction path ignored ``HessianConfig.sink_row_cap_median_multiple``
+        # (#5769). The native delta uses the same factors so ``dXXT`` stays the
+        # cross product of the capped rows.
+        cap_scale = self.resolve_sink_row_cap_scale(inp, None, feature_dim=0)
+        if cap_scale is not None:
+            cap_scale = cap_scale.unsqueeze(0)
+            inp = inp * cap_scale
+            if use_native:
+                native_inp = native_inp * cap_scale
 
         device_count += batch_request_count
         scale = math.sqrt(2 / device_count)
@@ -411,17 +432,31 @@ class GPTAQ(GPTQ):
             blocksize=128,
     ):
         self._finalize_gptaq_hessian()
-        if self.nsamples == 0 or self.H is None:
-            # No calibration rows reached this module (for example an unrouted
-            # expert). GPTQ falls back to data-independent quantization; mirror
-            # that here instead of dereferencing a missing Hessian.
+        # Mirror GPTQ's shared low-sample decision: an unrouted expert can see a
+        # few calibration rows, which is still not enough to trust its Hessian
+        # (#5377).
+        below_threshold = should_use_fallback(
+            self.fallback,
+            float(self.nsamples),
+            self.expected_nsamples,
+        )
+        if self.nsamples == 0 or self.H is None or below_threshold:
             strategy = resolve_fallback_strategy(self.fallback)
-            log.warn(
-                "Quantization: Module `%s` -> GPTAQ received no calibration "
-                "samples; using `%s` fallback quantization.",
-                self.name,
-                strategy.value,
-            )
+            if self.nsamples == 0 or self.H is None:
+                log.warn(
+                    "Quantization: Module `%s` -> GPTAQ received no calibration "
+                    "samples; using `%s` fallback quantization.",
+                    self.name,
+                    strategy.value,
+                )
+            else:
+                log.warn(
+                    "Quantization: Module `%s` -> GPTAQ observed %s samples, "
+                    "below the fallback threshold; using `%s` fallback quantization.",
+                    self.name,
+                    self.nsamples,
+                    strategy.value,
+                )
             self.native_inps = []
             self.dXXT = None
             return self._fallback_quantize(strategy, blocksize)
@@ -445,14 +480,19 @@ class GPTAQ(GPTQ):
             self.module_copy = None
         self._align_gptaq_hessian_device()
 
-        self.quantizer.find_params(W, weight=True)
-
         H = self.H
         del self.H
         if self._use_native_delta:
             _neutralize_dead_columns(H, W, self.dXXT)
         else:
             _neutralize_dead_columns(H, W)
+
+        # Fit the whole-row grid after dead-column masking: a channel absent
+        # from every calibration sample carries no signal, so its weight must
+        # not set the per-channel scale that every live column is quantized
+        # with. GPTQ/QQQ got this ordering in #5611; the subclasses that
+        # re-implement the block pass kept the old order (#5714).
+        self.quantizer.find_params(W, weight=True)
 
         # g_idx = []
         scale = []
@@ -502,12 +542,23 @@ class GPTAQ(GPTQ):
                 static_group_perm = perm
             elif self.qcfg.act_group_aware:
                 static_group_perm = final_perm
+        # One host read for the module instead of one per column (#5720).
+        static_group_of_column = _static_group_of_column(static_group_perm, self.qcfg.group_size)
 
         if self.qcfg.gptaq is None:
             raise ValueError("GPTAQ requires `gptaq` configuration.")
         result_device = torch.device(self.module.weight.data.device)
 
-        Losses = torch.zeros_like(W)
+        # The block loss is only consumed as one scalar, so keep a block-sized
+        # fp32 scratch plus a device scalar instead of a full rows x columns
+        # buffer (issue #5734). Every scratch column is written before it is
+        # read.
+        loss_scratch = torch.empty(
+            (W.shape[0], min(blocksize, self.columns)),
+            dtype=torch.float32,
+            device=W.device,
+        )
+        loss_total = torch.zeros((), dtype=torch.float32, device=W.device)
         Q = torch.zeros_like(W)
 
         def _inverse_and_delta():
@@ -525,14 +576,19 @@ class GPTAQ(GPTQ):
             )
 
         def _prepare_cpu(cdu_device):
-            nonlocal H, W, Q, Losses, perm, invperm, final_perm, global_perm
-            nonlocal static_group_perm, scale, zero
+            nonlocal H, W, Q, loss_scratch, loss_total, perm, invperm, final_perm, global_perm
+            nonlocal static_group_perm, static_group_of_column, scale, zero
             H = H.to(device=cdu_device)
             W = W.to(device=cdu_device)
-            # ``Q``/``Losses`` were sized from the accelerator weight, but the
-            # block pass now writes host tensors.
+            # ``Q``/``loss_scratch`` were sized from the accelerator weight,
+            # but the block pass now writes host tensors.
             Q = torch.zeros_like(W)
-            Losses = torch.zeros_like(W)
+            loss_scratch = torch.empty(
+                (W.shape[0], min(blocksize, self.columns)),
+                dtype=torch.float32,
+                device=cdu_device,
+            )
+            loss_total = torch.zeros((), dtype=torch.float32, device=cdu_device)
             if self._use_native_delta:
                 self.dXXT = self.dXXT.to(device=cdu_device)
             if self.qcfg.desc_act:
@@ -550,6 +606,9 @@ class GPTAQ(GPTQ):
                     static_group_perm = perm
                 elif self.qcfg.act_group_aware:
                     static_group_perm = final_perm
+                # Only the device changed; rebuild so the map matches it.
+                static_group_of_column = _static_group_of_column(
+                    static_group_perm, self.qcfg.group_size)
             if self.qcfg.group_size == -1 and self.qcfg.desc_act:
                 # An ungrouped ``desc_act`` module never refits the quantizer in
                 # the block loop, so rebuild the pre-reorder measurement from
@@ -583,12 +642,20 @@ class GPTAQ(GPTQ):
             W1 = W[:, i1:i2].clone()
             Q1 = torch.zeros_like(W1)
             Err1 = torch.zeros_like(W1)
-            Losses1 = torch.zeros_like(W1)
+            Losses1 = loss_scratch[:, :count]
             Hinv1 = Hinv[i1:i2, i1:i2]
             P1 = P[i1:i2, i1:i2] if P is not None else None
+            # The in-block updates below mutate ``W1``. The deferred native
+            # delta product must see each column's pre-update working value,
+            # exactly like the in-block ``P1`` term does; reading ``W1`` after
+            # the loop would apply the correction to the post-update weight
+            # (#5647).
+            W1_pre = torch.empty_like(W1) if P is not None else None
 
             for i in range(count):
                 w = W1[:, i]
+                if W1_pre is not None:
+                    W1_pre[:, i] = w
                 d = Hinv1[i, i]
 
                 if self.qcfg.group_size != -1:
@@ -602,10 +669,10 @@ class GPTAQ(GPTQ):
                             now_idx += 1
                     else:
                         idx = i1 + i
-                        if static_group_perm is not None:
-                            idx = static_group_perm[idx]
-
-                        self.quantizer = groups[idx // self.qcfg.group_size]
+                        if static_group_of_column is not None:
+                            self.quantizer = groups[static_group_of_column[idx]]
+                        else:
+                            self.quantizer = groups[idx // self.qcfg.group_size]
 
                 q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                 Q1[:, i] = q
@@ -620,12 +687,13 @@ class GPTAQ(GPTQ):
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
-            Losses[:, i1:i2] = Losses1 / 2
+            Losses1.div_(2)
+            loss_total.add_(Losses1.sum())
 
             if P is None:
                 W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
             else:
-                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1.matmul(P[i1:i2, i2:])
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1_pre.matmul(P[i1:i2, i2:])
 
         del Hinv
         del P
@@ -633,16 +701,14 @@ class GPTAQ(GPTQ):
         torch_sync()
 
         avg_loss = self._token_normalized_avg_loss(
-            torch.sum(Losses).item(),
+            loss_total.item(),
             self._gptaq_batch_request_count,
             self.nsamples,
         )
 
         if math.isnan(avg_loss):
-            print("Losses sum item:", torch.sum(Losses).item())
+            print("Losses sum item:", loss_total.item())
             raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
-
-        del Losses
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
@@ -676,13 +742,7 @@ class GPTAQ(GPTQ):
             Q = Q[:, :valid_cols]
             g_idx = g_idx[:valid_cols]
 
-        if isinstance(self.module, transformers.Conv1D):
-            Q = Q.t()
-
-        if Q.shape != self.module.weight.shape:
-            Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
-        else:
-            Q = Q.type_as(self.module.weight.data)
+        Q = self._narrow_reconstruction(Q)
 
         # Q = Q.to(device=DEVICE_1)
 

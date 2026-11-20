@@ -30,6 +30,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from gptqmodel.nn_modules.qlinear._numerics import linear_fp32_reduce
 from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear, MacaqTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD, MacaqConfig, QuantizeConfig
 from gptqmodel.quantization import macaq as macaq
@@ -110,8 +111,10 @@ def test_macaq_weight_quantizer_requests_compiled_flips_by_default():
 # Packed codes and E8M0 exponents for the seed-0 8x64 matrix below, captured
 # from the implementation before the dead-reference release.  The lifetime fix
 # only drops locals, so every code and exponent must stay bit-identical.
+# Re-captured once for #5840: the balance pre-scale is now rounded to the
+# stored BF16 value before the weight and Hessian are transformed.
 _MACAQ_PRE_FIX_GOLDEN_PACKED_B64 = (
-    "QAudLq4toeobwwBKGsaqTLPa1BowKh2juTctCwEuuSTwyakEJQCRHcHcYB7DoQWQQC1BKw1QQzEqGqdGoK1SFL0Z7mEm3eA/bNnds5mr3nBQSssJFjEeJSIBJTQ5CzLNphIGHtTqcyxJH+/p8TSs5CDg2joqMwrdygOlW8TBFbQq/gWXrlVBT1N9v+ZdVdo7GxPwwEsaRTMEkAIjGaRbslMC6QTmITPNAs7RHlAjLmqWCkOhxyrDmQXAQ5KhwgwrZtySliwh29yzsxbCxH4TSyUC8knBVREzuq3hLJurGjUiC8zNIEA80KYbav1MwdrgLdS7BikqDCml4FtNatHsQA=="
+    "QAudLq4toeobwwBKGsaqTLPa1BowKx2juTctCwEuuSTwyakEJQCRHcHcYB7DoQWQQC1AKw1QQzEqGqdGoK1SFL0Z7mEm3eA/bNnds5mr3nBQSssJFjEeJSIBJTQ5CzLNlhIHHtTpcjw5H+/q8TSs5SDg2joqNJrcygOVW8TBFbQq/gWXrlVBT1N9v+ZdVdo7GxPwwEsaRTMEkAIjGaRbslMC6QTmITPNAs7RHlAjLmqWCkOhxyrDmQXAQ5KhwgwrZtyTliwh29yzsxbCxH4TSiUC8knBVRE0yq3hLJurGjUiC8zNIEA80KYbav1MwdrgLdS7BikqDCml4FtNatHsQA=="
 )
 _MACAQ_PRE_FIX_GOLDEN_SCALES_B64 = "fn5+fn1+fX59fn5+fn5+fg=="
 
@@ -722,9 +725,9 @@ def test_macaq_linear_torch_matches_reference():
         result.W_packed, result.W_scales, 128, dtype=torch.bfloat16
     )
     reference_input = macaq.macaq_quantize_activations(x, result.pre_scale, result.BH).to(torch.bfloat16)
-    expected = torch.nn.functional.linear(
-        reference_input, reference_weight, layer.bias.to(torch.bfloat16)
-    )
+    # The packed bias keeps its FP32 dtype (#5632), so the reference adds it
+    # after the FP32 reduction instead of narrowing it to BF16 first.
+    expected = linear_fp32_reduce(reference_input, reference_weight, layer.bias)
 
     assert output.dtype == torch.bfloat16
     assert torch.equal(output, expected)
@@ -802,7 +805,7 @@ def test_triton_dense_kernel_masks_k_tail(k):
     a_packed, a_scales = macaq_triton.quantize_mxfp4(activations.float())
 
     out = torch.empty(rows, cols, device=device, dtype=torch.float32)
-    macaq_triton._dense_w4a4_kernel[
+    macaq_triton._dense_mx_gemm_kernel[
         (triton.cdiv(rows, 64), triton.cdiv(cols, 128))
     ](
         a_packed, w_packed, a_scales, w_scales, out, w_scales,
@@ -896,9 +899,10 @@ def _reference_weight_mxfp4(weight, bh, offset=0):
     out_features, in_features = weight.shape
     rotated = _reference_rotate(weight.to(torch.float32), bh.float())
     grouped = rotated.reshape(out_features, in_features // 32, 32)
-    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-12)
+    amax = grouped.abs().amax(dim=-1, keepdim=True)
+    amax = torch.where(amax == 0, torch.full_like(amax, 1e-12), amax)
     exponent = (torch.floor(torch.log2(amax)) - 2.0 + offset).clamp(-127.0, 127.0)
-    scale = torch.exp2(exponent)
+    scale = torch.pow(2.0, exponent)
     normalized = (grouped / scale).abs()
     code = torch.zeros_like(grouped, dtype=torch.long)
     for threshold, level in _E2M1_THRESHOLDS:
@@ -950,9 +954,10 @@ def _reference_activation_mxfp4(values):
 
     rows, k = values.shape
     grouped = values.to(torch.float32).reshape(rows, k // 32, 32)
-    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-20)
+    amax = grouped.abs().amax(dim=-1, keepdim=True)
+    amax = torch.where(amax == 0, torch.full_like(amax, 1e-20), amax)
     exponent = (torch.floor(torch.log2(amax)) - 2.0).clamp(-127.0, 127.0)
-    scale = torch.exp2(exponent)
+    scale = torch.pow(2.0, exponent)
     normalized = (grouped / scale).abs()
     code = torch.zeros_like(grouped, dtype=torch.long)
     for threshold, level in _E2M1_THRESHOLDS:
@@ -1509,7 +1514,9 @@ def test_plain_mxfp4_layer_stores_only_mxfp4_tensors(activation_precision):
 
     if activation_precision == "w4a16":
         weight = macaq.dequantize_mxfp4(result.W_packed, result.W_scales, 128, dtype=torch.bfloat16)
-        expected = torch.nn.functional.linear(x, weight, bias.to(torch.bfloat16))
+        # The packed bias keeps its FP32 dtype (#5632), so the reference adds
+        # it after the FP32 reduction instead of narrowing it to BF16 first.
+        expected = linear_fp32_reduce(x, weight, bias)
         assert torch.equal(fast, expected)
 
 

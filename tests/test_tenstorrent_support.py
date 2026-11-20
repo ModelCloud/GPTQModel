@@ -695,14 +695,43 @@ def test_native_ttnn_device_resolution_never_initializes_pjrt(monkeypatch):
     assert options == [{"single_capability_group": True}], options
 
 
-def test_native_ttnn_auto_device_selection_skips_the_xla_probe(monkeypatch):
+@pytest.mark.parametrize("backend", [BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_BF8])
+def test_native_ttnn_auto_device_selection_skips_the_xla_probe(monkeypatch, backend):
     from gptqmodel.utils import importer as importer_module
 
     def _explode(*args, **kwargs):
-        raise AssertionError("auto_select_device must not probe XLA for GPTQ_TTNN")
+        raise AssertionError(f"auto_select_device must not probe XLA for {backend}")
 
     monkeypatch.setattr(importer_module, "is_xla_available", _explode)
-    assert importer_module.auto_select_device(None, BACKEND.GPTQ_TTNN) == DEVICE.XLA
+    assert importer_module.auto_select_device(None, backend) == DEVICE.XLA
+
+
+@pytest.mark.parametrize("backend", [BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_BF8])
+def test_native_ttnn_layerwise_resolution_never_initializes_pjrt(monkeypatch, backend):
+    """Both native TTNN backends share one host-staging and counting contract.
+
+    ``GPTQ_TT_BF8`` used to be classified as a PJRT backend, so a default load
+    resolved the XLA family through ``xla_device_count()``. That initializes
+    the Tenstorrent PJRT plugin and claims every chip, which then collides with
+    the TT-Metal mesh the kernel opens in ``post_init``.
+    """
+    from gptqmodel.models import loader as loader_module
+    from gptqmodel.utils import torch as torch_module
+    from gptqmodel.utils import ttnn_runtime
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("the native TTNN path must not initialize PJRT")
+
+    monkeypatch.setattr(loader_module, "expand_selector_device_family", _explode)
+    monkeypatch.setattr(torch_module, "require_xla_runtime", _explode)
+    monkeypatch.setattr(ttnn_runtime, "ttnn_device_count", lambda: 4)
+
+    assert loader_module._native_ttnn_backend(backend)
+    assert loader_module._resolve_default_layerwise_device(DEVICE.XLA, backend) == DEVICE.XLA
+    assert loader_module._layerwise_device_count(DEVICE.XLA, backend) == 4
+    assert loader_module._layerwise_device_strings(DEVICE.XLA, 4, backend) == [
+        "xla:0", "xla:1", "xla:2", "xla:3",
+    ]
 
 
 def test_ttnn_rejects_non_8_aligned_widths():
@@ -726,6 +755,89 @@ def test_ttnn_rejects_non_8_aligned_widths():
         args.update(kwargs)
         ok, _ = TTNNLinear._validate(**args)
         assert not ok, kwargs
+
+
+def test_tt_bf8_matmul_uses_hifi4_and_fp32_destination(monkeypatch):
+    """The block-float GEMM must not run on TT-Metal's default LoFi config.
+
+    Default ``ttnn.linear`` uses LoFi with ``math_approx_mode``; that rounds
+    ``258 + (-256)`` to zero instead of two. ``TTNNLinear`` already passes
+    HiFi4 with FP32 destination accumulation, and the BF8 path must match it.
+    """
+
+    from gptqmodel.nn_modules.qlinear import ttnn_blockfloat as bf
+
+    calls = []
+    configs = []
+
+    class _FakeTTNN:
+        class Arch:
+            BLACKHOLE = "blackhole"
+
+        class MathFidelity:
+            HiFi4 = "hifi4"
+
+        @staticmethod
+        def get_arch_name():
+            return "blackhole"
+
+        @staticmethod
+        def init_device_compute_kernel_config(arch, **kwargs):
+            config = {"arch": arch, **kwargs}
+            configs.append(config)
+            return config
+
+        @staticmethod
+        def linear(activation, weight, **kwargs):
+            calls.append(kwargs)
+            return activation
+
+    layer = bf.TTNNBlockFloat8Linear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    )
+    layer._ttnn_weight = object()
+    layer._ttnn_bias = None
+    layer._ttnn_devices = 1
+    monkeypatch.setattr(bf, "import_ttnn", lambda: _FakeTTNN)
+
+    layer._compute(_FakeTTNN, None, torch.zeros(1, 64, dtype=torch.bfloat16))
+
+    assert calls[0]["compute_kernel_config"] is configs[0]
+    assert configs[0]["math_fidelity"] == "hifi4"
+    assert configs[0]["fp32_dest_acc_en"] is True
+    assert configs[0]["math_approx_mode"] is False
+
+
+def test_tt_bf8_clearing_the_weight_cache_drops_the_compute_config(monkeypatch):
+    """A cleared layer must rebuild both the weight and its compute config."""
+
+    from gptqmodel.nn_modules.qlinear import ttnn_blockfloat as bf
+
+    class _FakeTTNN:
+        class Arch:
+            BLACKHOLE = "blackhole"
+
+        class MathFidelity:
+            HiFi4 = "hifi4"
+
+        @staticmethod
+        def get_arch_name():
+            return "blackhole"
+
+        @staticmethod
+        def init_device_compute_kernel_config(arch, **kwargs):
+            return {"arch": arch, **kwargs}
+
+    layer = bf.TTNNBlockFloat8Linear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    )
+    assert layer._compute_config(_FakeTTNN) is not None
+    layer.clear_weight_cache()
+    assert layer._ttnn_compute_config is None
 
 
 def test_ttnn_arch_lookup_never_assumes_blackhole():
@@ -873,6 +985,83 @@ def test_ttnn_open_mesh_reuse_must_match_the_requested_placement(monkeypatch):
     finally:
         runtime.close_mesh(owner="t")
     assert [entry[0] for entry in opened] == ["device", "mesh"]
+
+
+def test_ttnn_mesh_lease_closes_only_after_the_last_holder(monkeypatch):
+    """The process-wide mesh may serve several kernels; only the last lets go.
+
+    ``release_mesh_lease`` is the signal a kernel uses to decide whether it may
+    close the shared handle. A second holder must keep the device open, and a
+    repeated hold must not inflate the count.
+    """
+
+    from gptqmodel.utils.ttnn_runtime import TTNNUnavailable
+
+    class _Holder:
+        pass
+
+    opened = []
+    runtime = _patch_ttnn_runtime(monkeypatch, _fake_ttnn_module(opened))
+    first, second = _Holder(), _Holder()
+    try:
+        mesh = runtime.open_mesh(device_count=1, owner="t")
+        runtime.hold_mesh_lease(first)
+        runtime.hold_mesh_lease(second)
+        runtime.hold_mesh_lease(first)
+
+        assert runtime.release_mesh_lease(first) is False
+        assert runtime.current_mesh() is mesh, "another holder still owns the mesh"
+        assert runtime.release_mesh_lease(second) is True
+        assert runtime.release_mesh_lease(second) is False, "a lease is released once"
+    finally:
+        runtime.close_mesh(owner="t")
+
+    with pytest.raises(TTNNUnavailable, match="closed TTNN mesh"):
+        runtime.hold_mesh_lease(first)
+
+
+def test_release_device_on_a_non_native_wrapper_leaves_the_mesh_alone(monkeypatch):
+    """A CPU wrapper must return False without touching another model's mesh."""
+
+    from types import SimpleNamespace
+
+    from gptqmodel.models.base import BaseQModel
+    from gptqmodel.utils import ttnn_runtime
+
+    calls = []
+    monkeypatch.setattr(ttnn_runtime, "close_mesh", lambda **kwargs: calls.append(kwargs))
+
+    wrapper = SimpleNamespace(model=_tiny_decoder_model()())
+    assert BaseQModel.release_device(wrapper) is False
+    assert calls == []
+
+
+def test_release_device_delegates_to_each_native_kernel(monkeypatch):
+    """The wrapper releases only its own native kernels, once each."""
+
+    from types import SimpleNamespace
+
+    from gptqmodel.models.base import BaseQModel
+
+    released = []
+
+    class _Native(torch.nn.Module):
+        SUPPORTS_BACKENDS = [BACKEND.GPTQ_TTNN]
+
+        def __init__(self, name):
+            super().__init__()
+            self.name = name
+
+        def release_device(self):
+            released.append(self.name)
+            return self.name == "b"
+
+    wrapper = SimpleNamespace(model=torch.nn.Module())
+    wrapper.model.a = _Native("a")
+    wrapper.model.b = _Native("b")
+
+    assert BaseQModel.release_device(wrapper) is True
+    assert released == ["a", "b"]
 
 
 class _GridFakeTTNN:
@@ -2327,6 +2516,42 @@ def test_int4_kernel_reference_matches_packing():
     # Nibble order is low-first, which is GPTQ's checkpoint convention.
     single = kern.pack_codes_to_words(torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]))
     assert int(single[0]) & 0xFFFFFFFF == 0x87654321
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+def test_tt_bf8_matmul_keeps_finite_cancellation_residuals():
+    """BF8 weights that are exactly one must not round ``258 - 256`` to zero.
+
+    TT-Metal's default LoFi matmul returns 0 for every row; HiFi4 with FP32
+    destination accumulation returns the exact sum the dense oracle keeps.
+    """
+
+    from gptqmodel.nn_modules.qlinear.ttnn_blockfloat import TTNNBlockFloat8Linear
+    from gptqmodel.utils.ttnn_runtime import close_mesh
+
+    layer = TTNNBlockFloat8Linear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.qweight.fill_(0x99999999 - 2**32)  # all code 9
+    layer.qzeros.fill_(0x88888888 - 2**32)   # all zero point 8
+    layer.qzero_format(2)
+    layer.scales.fill_(1)                    # exact device BF8 weight 1
+    x = torch.zeros(3, 64, dtype=torch.bfloat16)
+    x[:, 0] = torch.tensor([258, 256, 256])
+    x[:2, 1] = -256
+    expected = x.double().sum(-1, keepdim=True).expand(-1, 128).bfloat16()
+    try:
+        with torch.inference_mode():
+            actual = layer(x)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
 
 
 @pytest.mark.skipif(
@@ -4502,6 +4727,55 @@ def test_actual_ttnn_linear_matches_torch_oracle(device_count):
         assert module._build_layer() is first
     finally:
         module.release_device()
+        close_mesh()
+
+
+@pytest.mark.skipif(os.environ.get("GPTQMODEL_TEST_TTNN") != "1", reason="explicit TTNN hardware gate")
+def test_cpu_wrapper_release_device_leaves_a_native_mesh_open():
+    """A CPU wrapper must not close a mesh another model's kernels still use.
+
+    Reproduced on Blackhole: ``release_device()`` on a CPU wrapper returned
+    ``True`` and closed the process-wide mesh, so the next native forward raised
+    that it had no open device.
+    """
+
+    from gptqmodel.models.definitions.opt import OptQModel
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+    from gptqmodel.utils.ttnn_runtime import close_mesh, current_mesh
+
+    try:
+        from transformers import OPTConfig, OPTForCausalLM
+    except Exception:  # pragma: no cover - transformers is a runtime dependency
+        pytest.skip("transformers is not installed")
+
+    cpu = OptQModel(
+        model=OPTForCausalLM(OPTConfig(
+            hidden_size=32, word_embed_proj_dim=32, ffn_dim=64,
+            num_attention_heads=2, num_hidden_layers=1, vocab_size=32,
+        )).eval(),
+        quantized=False, quantize_config=None,
+    )
+    native = TTNNLinear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    ).eval()
+    native.qweight.fill_(0x99999999 - 2**32)
+    native.qzeros.fill_(0x88888888 - 2**32)
+    native.qzero_format(2)
+    native.scales.fill_(1)
+    x = torch.zeros(1, 64, dtype=torch.bfloat16)
+    x[0, 0] = 1
+    try:
+        assert cpu.release_device() is False
+        first = native(x)
+        torch.testing.assert_close(first, torch.ones_like(first), rtol=0, atol=0)
+        assert current_mesh() is not None
+        assert cpu.release_device() is False
+        assert current_mesh() is not None, "the CPU wrapper closed another model's mesh"
+        torch.testing.assert_close(native(x), first, rtol=0, atol=0)
+    finally:
+        native.release_device()
         close_mesh()
 
 

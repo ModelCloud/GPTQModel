@@ -39,6 +39,7 @@ from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear._compile_support import supports_compiled_generation
+from ..nn_modules.qlinear._fused_train_state import ensure_cpu_inference_layout
 from ..nn_modules.qlinear.fp4 import TorchFP4Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
@@ -94,7 +95,18 @@ from ..utils.backend import (
     normalize_backend,
 )
 from ..utils.backend_config import Backend, resolve_quantize_backend
-from ..utils.calibration import AUTO_BATCH_SIZE, auto_batch_size, prepare_calibration_dataset
+from ..utils.calibration import (
+    AUTO_BATCH_SIZE,
+    _chat_calibration_row_tokens,
+    _columnar_mapping_examples,
+    _frame_columns,
+    _hf_dataset_rows,
+    _is_columnar_mapping,
+    _message_template,
+    _messages_char_count,
+    auto_batch_size,
+    prepare_calibration_dataset,
+)
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
@@ -154,7 +166,7 @@ from ._const import (
     normalize_device,
 )
 from .fusable import FusableConfig, require_fusable_config
-from .loader import ModelLoader, _setup_rotation_online_had
+from .loader import ModelLoader, _setup_rotation_online_had, model_load_lock
 from .module_plan import ModulePlan
 from .quantization_run_plan import ProcessorStep, QuantizationRunPlan, processor_class
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -404,12 +416,48 @@ def _log_quantize_summary(
 
 
 
+def _device_index(tensor: object) -> int:
+    device = getattr(tensor, "device", None)
+    return device.index if getattr(device, "type", None) == "cuda" and device.index is not None else -1
+
+
+def _runtime_weight_tensors(inner: object):
+    """Yield weight tensors a backend keeps outside the parameter registry.
+
+    The hook is looked up on the class, not the instance: a bound-method
+    lookup for every module in a large model costs more than the walk itself,
+    and this runs on the resource-reporting path.
+    """
+
+    modules = getattr(inner, "modules", None)
+    if not callable(modules):
+        return
+    try:
+        walker = modules()
+    except Exception:  # pragma: no cover - exotic module trees
+        return
+    for module in walker:
+        hook = getattr(type(module), "iter_runtime_weight_tensors", None)
+        if hook is None:
+            continue
+        try:
+            yield from hook(module)
+        except Exception:  # pragma: no cover - backend bookkeeping
+            continue
+
+
 def _parameter_devices(inner: object) -> Dict[int, int]:
     """(measured) Weight bytes per device index, meta tensors skipped.
 
     Parameters and buffers whose storage does not live on a CUDA device are
     reported under ``-1`` so a CPU or meta-only model still has a measured
     weight total.
+
+    Quantized kernels can move their weight out of the parameter/buffer
+    registry into a derived packed cache (QQQ's AVX512 operands, #4856). Each
+    module is asked for those tensors too; they are counted by storage so an
+    alias of a registered tensor or of another cache entry is counted once
+    (#5810).
     """
 
     per_device: Dict[int, int] = {}
@@ -417,12 +465,32 @@ def _parameter_devices(inner: object) -> Dict[int, int]:
         tensors = list(inner.parameters()) + list(inner.buffers())
     except Exception:  # pragma: no cover - exotic module trees
         return per_device
+    seen_storages = set()
     for tensor in tensors:
         if getattr(tensor, "is_meta", False):
             continue
-        device = getattr(tensor, "device", None)
-        index = device.index if getattr(device, "type", None) == "cuda" and device.index is not None else -1
+        index = _device_index(tensor)
         per_device[index] = per_device.get(index, 0) + tensor.numel() * tensor.element_size()
+        try:
+            seen_storages.add((index, tensor.untyped_storage().data_ptr()))
+        except Exception:  # pragma: no cover - non-torch stand-ins
+            pass
+    for tensor in _runtime_weight_tensors(inner):
+        if getattr(tensor, "is_meta", False):
+            continue
+        index = _device_index(tensor)
+        try:
+            storage = tensor.untyped_storage()
+            key = (index, storage.data_ptr())
+            nbytes = storage.nbytes()
+        except Exception:  # pragma: no cover - non-torch stand-ins
+            continue
+        # A view adds nothing of its own: the storage it aliases is already
+        # resident under its source tensor, so count that storage once.
+        if nbytes == 0 or key in seen_storages:
+            continue
+        seen_storages.add(key)
+        per_device[index] = per_device.get(index, 0) + nbytes
     return per_device
 
 
@@ -524,52 +592,150 @@ def _kv_cache_estimate_for(inner: object, *, dtype: Optional[torch.dtype] = None
     )
 
 
+def _calibration_rows(calibration) -> List[Any]:
+    """The rows the quantizer will see, normalized like the looper does.
+
+    ``batch_size="auto"`` used to read the raw ``calibration.dataset``, so the
+    estimate depended on the container: a ``DataFrame`` iterated its column
+    labels, a columnar mapping counted its columns as rows, a ``[1, S]`` tensor
+    row reported ``shape[-2] == 1`` and a bare tensor row raised from
+    ``Tensor.values()`` (#5505). Normalizing through the helpers
+    ``prepare_calibration_dataset`` already uses keeps the estimate on the rows
+    that are actually calibrated.
+    """
+
+    dataset = calibration.dataset
+    columns = _frame_columns(dataset)
+    if columns is not None:
+        return _columnar_mapping_examples(columns)
+    if isinstance(dataset, Mapping):
+        if _is_columnar_mapping(dataset):
+            return _columnar_mapping_examples(dataset)
+        return [dataset]
+    hf_rows = _hf_dataset_rows(dataset)
+    if hf_rows is not None:
+        return hf_rows
+    try:
+        return list(dataset)
+    except TypeError:
+        return [dataset]
+
+
+def _sequence_length(value: Any) -> int:
+    """Length of the last sequence dimension of a token-id container, else 0."""
+
+    if torch.is_tensor(value):
+        return int(value.shape[-1]) if value.dim() else 0
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return 0
+        head = value[0]
+        if isinstance(head, (list, tuple)) or torch.is_tensor(head):
+            return _sequence_length(value[-1])
+        return len(value)
+    return 0
+
+
+def _count_calibration_tokens(qmodel, text: Any) -> int:
+    """Tokenizer length of one text row, 0 when it cannot be measured."""
+
+    tokenizer = getattr(qmodel, "tokenizer", None)
+    if tokenizer is None or not isinstance(text, str):
+        return 0
+    try:
+        return len(tokenizer(text)["input_ids"])
+    except Exception:  # pragma: no cover - exotic tokenizers
+        return 0
+
+
 def _calibration_row_count(calibration) -> int:
     """Rows the calibration set will produce, or a conservative estimate."""
 
     try:
-        return max(1, len(calibration.dataset))
-    except TypeError:
+        return max(1, len(_calibration_rows(calibration)))
+    except Exception:
         return 1
 
 
 def _calibration_tokens_per_row(qmodel, calibration) -> int:
-    """Tokens in a typical calibration row: declared concat size or sampled."""
+    """Longest calibration row in tokens: declared concat size or measured."""
 
     if calibration.concat_size:
         return int(calibration.concat_size)
 
     try:
-        iterator = iter(calibration.dataset)
-    except TypeError:
+        rows = _calibration_rows(calibration)
+    except Exception:
         return 512
-    samples = []
-    for _ in range(4):
-        try:
-            samples.append(next(iterator))
-        except StopIteration:
-            break
 
-    # Tensor-kwargs rows already carry their sequence dimension.
-    for sample in samples:
-        values = getattr(sample, "values", lambda: [])()
-        for value in values:
-            if torch.is_tensor(value) and value.dim() >= 2:
-                return int(value.shape[-2])
+    # A `messages` row only yields tokens after the chat template runs, so the
+    # estimator could not measure it and kept the 512 default (#5568). Render
+    # the longest few through the same path preparation uses.
+    chat_template = _message_template(getattr(qmodel, "tokenizer", None))[0] is not None
 
-    tokenizer = getattr(qmodel, "tokenizer", None)
-    if tokenizer is None or not samples:
-        return 512
-    lengths = []
-    for sample in samples:
-        text = sample if isinstance(sample, str) else (sample.get("text") if isinstance(sample, dict) else None)
-        if not isinstance(text, str):
+    longest = 0
+    texts: List[str] = []
+    chat_rows: List[Any] = []
+    for row in rows:
+        ids = row.get("input_ids") if isinstance(row, Mapping) else row
+        length = _sequence_length(ids) if ids is not None else 0
+        if length:
+            longest = max(longest, length)
             continue
-        try:
-            lengths.append(len(tokenizer(text)["input_ids"]))
-        except Exception:  # pragma: no cover - exotic tokenizers
+        messages = row.get("messages") if isinstance(row, Mapping) else None
+        if messages is not None and chat_template:
+            chat_rows.append(row)
             continue
-    return max(lengths) if lengths else 512
+        text = row if isinstance(row, str) else (
+            row.get("text") if isinstance(row, Mapping) else None
+        )
+        if isinstance(text, str):
+            texts.append(text)
+    if chat_rows:
+        chat_rows.sort(key=_messages_char_count, reverse=True)
+        longest = max(
+            longest,
+            max((_chat_calibration_row_tokens(qmodel, row) for row in chat_rows[:4]), default=0),
+        )
+    if texts:
+        # Tokenizing every row would repeat the whole calibration pass. The
+        # longest few by character count bound the padded row far better than
+        # the first four rows, which is all the old estimate ever looked at.
+        texts.sort(key=len, reverse=True)
+        longest = max(
+            longest,
+            max((_count_calibration_tokens(qmodel, text) for text in texts[:4]), default=0),
+        )
+    return longest or 512
+
+
+def _materialized_calibration_config(calibration):
+    """Return a calibration config whose one-shot inputs are materialised once.
+
+    ``batch_size="auto"`` sizes the run by reading the calibration rows before
+    ``prepare_calibration_dataset`` runs, and ``quantize()`` may size the native
+    and EoRA passes separately. A generator (or ``iter(list)``/``map``) is
+    exhausted by the first read, so the later preparation saw no rows and
+    failed with "Quantize: calibration dataset is empty" (#5567). Materialise
+    the inputs up front so every read and every processor sees the same rows;
+    sized containers and ``datasets.IterableDataset`` are returned unchanged.
+    """
+
+    from dataclasses import replace
+
+    from ..looper.loop_processor import _reusable_calibration_dataset
+
+    dataset = _reusable_calibration_dataset(calibration.dataset)
+    adapter_dataset = _reusable_calibration_dataset(calibration.adapter_dataset)
+    if dataset is calibration.dataset and adapter_dataset is calibration.adapter_dataset:
+        return calibration
+
+    bound = replace(calibration, dataset=dataset, adapter_dataset=adapter_dataset)
+    if calibration.prepare_dataset is not None:
+        # ``replace()`` drops the non-init field, and a bound config must keep
+        # the preparer that its owner installed.
+        object.__setattr__(bound, "prepare_dataset", calibration.prepare_dataset)
+    return bound
 
 
 def _module_weight_dtype(module: object) -> Optional[torch.dtype]:
@@ -2545,12 +2711,43 @@ class BaseQModel(nn.Module):
         for line in _budget_for(getattr(self, "model", None), wrapper=self).describe():
             log.info(line)
 
+    def _calibration_batch_size(self, calibration) -> int:
+        """Resolve ``CalibrationConfig(batch_size="auto")`` for any entry point.
+
+        ``quantize()`` used to be the only caller that resolved the sentinel, so
+        ``requantize(norm=...)`` and ``adapter.generate()`` handed the raw
+        ``"auto"`` string to ``prepare_dataset`` and crashed in
+        ``range(0, len(dataset), "auto")`` with a ``TypeError`` that never named
+        ``batch_size`` (#5504).
+        """
+
+        batch_size = calibration.batch_size
+        if batch_size == AUTO_BATCH_SIZE:
+            batch_size = self._auto_calibration_batch_size(calibration)
+        return batch_size
+
     def _auto_calibration_batch_size(self, calibration) -> int:
         """Pick a calibration batch that fits, or 1 when the device is unmeasurable."""
 
         config = getattr(getattr(self, "model", None), "config", None)
-        hidden_size = int(getattr(config, "hidden_size", 0) or 0)
-        num_layers = int(getattr(config, "num_hidden_layers", 0) or 0)
+        # Composite configs (VLM / omni / Qwen3.5) keep the decoder dims on
+        # `text_config` and leave the top-level fields unset. Reading them as 0
+        # shrank the per-row estimate by `hidden * layers` and silently
+        # disabled the memory guard (#5568).
+        text_config = config
+        get_text_config = getattr(config, "get_text_config", None)
+        if callable(get_text_config):
+            try:
+                text_config = get_text_config() or config
+            except Exception:  # pragma: no cover - exotic configs
+                text_config = config
+        hidden_size = int(getattr(text_config, "hidden_size", 0) or 0)
+        num_layers = int(getattr(text_config, "num_hidden_layers", 0) or 0)
+        if hidden_size <= 0 or num_layers <= 0:
+            log.warn(
+                "Calibrate: batch_size=auto -> 1 (the model config exposes no hidden_size/num_hidden_layers)"
+            )
+            return 1
 
         dtype_bytes = 2
         inner = getattr(self, "model", None)
@@ -2563,7 +2760,7 @@ class BaseQModel(nn.Module):
             dtype_bytes = 2
 
         free_bytes = None
-        device = self.quantize_config.device
+        device = getattr(getattr(self, "quantize_config", None), "device", None)
         device_type = getattr(device, "type", None) or str(device).split(":")[0].lower()
         if device_type == "cuda":
             try:
@@ -2608,10 +2805,16 @@ class BaseQModel(nn.Module):
         checkpoint: Optional["CheckpointConfig"] = None,
         fuse: Optional[bool] = None,
         config=None,
+        # Weight-only direct-pack methods (GGUF, BitsAndBytes, NF12) skip the
+        # logging-only weight-error MAE by default; requesting it reconstructs
+        # every dense weight. It never changes the packed payload.
+        measure_weight_error: bool = False,
     ) -> Dict[str, List[Dict[str, str]]]:
         """Quantize the model with the calibration data and policy in ``calibration``.
 
         ``calibration`` may be ``None`` only for a weight-only quantize config.
+        ``measure_weight_error`` requests the direct-pack weight-error MAE; it
+        reconstructs each dense weight and never changes the packed payload.
         """
         run_started = time.perf_counter()
         if calibration is None:
@@ -2782,9 +2985,8 @@ class BaseQModel(nn.Module):
             if self.quantize_config.method != METHOD.AWQ:
                 raise ValueError(f"Staged GSQ is unsupported for {self.quantize_config.method}")
 
-        batch_size = calibration.batch_size
-        if batch_size == AUTO_BATCH_SIZE:
-            batch_size = self._auto_calibration_batch_size(calibration)
+        calibration = _materialized_calibration_config(calibration)
+        batch_size = self._calibration_batch_size(calibration)
         if not self.support_batch_quantize:
             log.warn("Quantize: batch_size overridden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
@@ -2905,6 +3107,12 @@ class BaseQModel(nn.Module):
 
             if not torch.cuda.is_available():
                 raise ValueError("EXL3 quantization requires CUDA/HIP.")
+
+            if IS_ROCM and (
+                self.quantize_config.codebook == "q4nx"
+                or any(rule.get("codebook") == "q4nx" for rule in (self.quantize_config.dynamic or {}).values())
+            ):
+                raise ValueError("EXL3 q4nx quantization requires NVIDIA CUDA.")
 
             quant_device = self.quantize_config.device
             if isinstance(quant_device, DEVICE):
@@ -3118,6 +3326,7 @@ class BaseQModel(nn.Module):
                     calibration=calibration,
                     backend=backend,
                     embed_quant_config=embed_quant_config,
+                    measure_weight_error=measure_weight_error,
                 )
             else:
                 if calibration.dataset is None:
@@ -3241,6 +3450,7 @@ class BaseQModel(nn.Module):
                 "requantize(calibration=...) must be a CalibrationConfig, got "
                 f"{type(calibration).__name__}; pass `CalibrationConfig(dataset=...)`."
             )
+        calibration = _materialized_calibration_config(calibration)
         if not self.quantized:
             raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
         embed_quant_config = self._normalize_embed_quant_config(embed_quant_config, embed_quant_mode)
@@ -3378,7 +3588,7 @@ class BaseQModel(nn.Module):
             calibration_dataset=calibration.dataset,
             calibration_dataset_concat_size=calibration.concat_size,
             calibration_dataset_sort=calibration.sort,
-            batch_size=calibration.batch_size,
+            batch_size=self._calibration_batch_size(calibration),
             calibration_data_min_length=calibration.min_length,
             calibration_concat_separator=calibration.concat_separator,
         )
@@ -3387,15 +3597,20 @@ class BaseQModel(nn.Module):
         owns_teacher = not isinstance(teacher, nn.Module)
         if owns_teacher:
             device = get_device(self.get_input_embeddings())
-            # The teacher is another transformers construction: its
-            # ``local_torch_dtype`` window takes the writer itself (#5304), so
-            # the surrounding weight I/O stays concurrent.
-            teacher = AutoModelForCausalLM.from_pretrained(
-                teacher,
-                dtype=self.model.dtype,
-                device_map={"": device},
-                trust_remote_code=self.trust_remote_code,
-            )
+            # The teacher is a GPT-QModel-owned transformers construction, so it
+            # takes the same load lock as every other build: another thread
+            # must not be inside its own ``post_init`` while this one
+            # constructs, or the class-wide no-tie patch leaves the shell
+            # untied (#5421). The construction window still holds the
+            # global-state writer by itself (#5304), so the teacher's weight
+            # I/O stays concurrent with optimized forwards.
+            with model_load_lock():
+                teacher = AutoModelForCausalLM.from_pretrained(
+                    teacher,
+                    dtype=self.model.dtype,
+                    device_map={"": device},
+                    trust_remote_code=self.trust_remote_code,
+                )
         try:
             stats = tune_norm_params(self.model, teacher, batches, names, norm)
         finally:
@@ -3817,6 +4032,7 @@ class BaseQModel(nn.Module):
         backend: Optional[BACKEND],
         embed_quant_config: Optional[QuantizeEmbedConfig],
         run_plan: Optional[QuantizationRunPlan] = None,
+        measure_weight_error: bool = False,
     ):
         from ..looper.loop_processor import release_failed_run_processors
         from ..looper.weight_only_looper import WeightOnlyLooper
@@ -3843,6 +4059,7 @@ class BaseQModel(nn.Module):
             processor = processor_class(ProcessorStep.WEIGHT_ONLY)(
                 tokenizer=self.tokenizer,
                 qcfg=self.quantize_config,
+                measure_weight_error=measure_weight_error,
             )
 
             gc_context = (
@@ -3894,6 +4111,8 @@ class BaseQModel(nn.Module):
         if self.quantized:
             raise EnvironmentError("eora_generate() is called a model that is already quantized")
 
+        calibration = _materialized_calibration_config(calibration)
+
         # Use the provided tokenizer if one is passed to quantize()
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
@@ -3934,7 +4153,10 @@ class BaseQModel(nn.Module):
             self.quantize_config.auto_dtype_cast = AutoDtypeCast.OFF
 
         # init processor with EoRA processor
-        calibration_config = calibration.bind(self.prepare_dataset)
+        calibration_config = calibration.bind(
+            self.prepare_dataset,
+            batch_size=self._calibration_batch_size(calibration),
+        )
         processors = []
         try:
             if getattr(self.quantize_config, "preprocessors", None):
@@ -4659,6 +4881,31 @@ class BaseQModel(nn.Module):
             self.model,
             layers=[BaseQuantLinear, ExllamaV3TorchLinear],
         )
+        # The CPU int4pack kernels only build their runtime layout in an eager
+        # forward, so compiling before the first forward traced the dense
+        # fallback and kept dequantizing every weight on every token (#5515).
+        # Install the layout for every eval-mode CPU module first; a kernel
+        # that cannot use the fused layout is left to its own forward.
+        model_dtype = getattr(self.model, "dtype", None)
+        if not isinstance(model_dtype, torch.dtype):
+            # ``nn.Module`` has no ``dtype``; a quantized model still carries
+            # the model dtype on its unquantized parameters (norms, embeddings).
+            model_dtype = next((param.dtype for param in self.model.parameters()), None)
+        if isinstance(model_dtype, torch.dtype):
+            for module in modules.values():
+                if (
+                    getattr(module, "linear_mode", "unsupported") is not None
+                    and not callable(
+                        getattr(module, "_prepare_cpu_inference_layout", None)
+                    )
+                ):
+                    continue
+                try:
+                    ensure_cpu_inference_layout(module, model_dtype)
+                except Exception:
+                    log.debug(
+                        "CPU int4pack warm-up skipped for `%s`", type(module).__name__, exc_info=True
+                    )
         for name in modules.keys():
             modules[name].optimize(fullgraph=False, backend=backend, mode=mode)
 
@@ -4738,6 +4985,19 @@ class BaseQModel(nn.Module):
     def after_model_load(self, model, load_quantized_model):
         return model
 
+    @classmethod
+    def after_make_quant(cls, model):
+        """Reattach runtime modules that the quantized shell did not replace.
+
+        A quantized load replaces only the leaves declared by ``module_tree``.
+        Definitions whose runtime model shares those leaves with another branch
+        (for example a weight-tied encoder/decoder stack) restore the aliases
+        here: the checkpoint load and its unmaterialized-parameter guard run
+        before ``after_model_load`` (#5514).
+        """
+
+        return model
+
     def release_device(self) -> bool:
         """Release Tenstorrent devices held by this model's kernels.
 
@@ -4754,15 +5014,33 @@ class BaseQModel(nn.Module):
 
         Returns ``True`` when a Tenstorrent device was actually released, and
         ``False`` for every other backend so the call is safe to make
-        unconditionally.
+        unconditionally.  The mesh is process-wide and may serve several
+        wrappers, so this releases only the leases held by this wrapper's own
+        native kernels and closes the shared handle once none remain.
         """
 
-        from ..utils.ttnn_runtime import close_mesh, current_mesh
-
-        if current_mesh() is None:
+        native_backends = {BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_BF8}
+        model = getattr(self, "model", None)
+        modules = getattr(model, "modules", None)
+        if modules is None:
             return False
-        close_mesh()
-        return True
+        owned = [
+            module
+            for module in modules()
+            if native_backends.intersection(
+                getattr(module, "SUPPORTS_BACKENDS", ()) or ()
+            )
+        ]
+        if not owned:
+            # A CPU (or any non-native) wrapper must not tear down a mesh that
+            # another model in this process is still using.
+            return False
+        released = False
+        for module in owned:
+            release = getattr(module, "release_device", None)
+            if release is not None:
+                released = bool(release()) or released
+        return released
 
     def pre_quantize_generate_hook_start(self):
         pass
@@ -6051,6 +6329,34 @@ class BaseQModel(nn.Module):
             f"and scale shape={tuple(scale.shape)}."
         )
 
+    def _fp8_compact_block_size(
+        self,
+        *,
+        weight: torch.Tensor,
+        scale: Optional[torch.Tensor],
+    ) -> Optional[tuple[int, int]]:
+        """Return the checkpoint block size when ``scale`` is its compact grid.
+
+        Some FP8 checkpoints use ceil blocking, so the scale grid is
+        ``ceil(N / br) x ceil(K / bc)``. That compact grid is exactly the
+        per-block layout ``TorchFP8Linear`` stores, so the loader must keep it
+        instead of expanding it to ``N x K`` (an FP32 tensor four times the
+        size of the FP8 weight) for the module's lifetime (#5593).
+        """
+
+        if not isinstance(scale, torch.Tensor) or scale.ndim != 2 or weight.ndim != 2:
+            return None
+        block_size = self._decoder_block_size()
+        if block_size is None:
+            return None
+        block_rows, block_cols = block_size
+        rows, cols = weight.shape
+        compact = (
+            (rows + block_rows - 1) // block_rows,
+            (cols + block_cols - 1) // block_cols,
+        )
+        return block_size if tuple(scale.shape) == compact else None
+
     def _build_fp8_forward_module(
         self,
         *,
@@ -6071,22 +6377,34 @@ class BaseQModel(nn.Module):
         if not isinstance(weight, torch.Tensor):
             return None
 
-        scale_inv = self._decoder_scale_tensor(
-            scale_tensor=checkpoint_tensors.get("weight_scale_inv"),
-            result_shape=tuple(weight.shape),
-        )
-        if isinstance(scale_inv, torch.Tensor):
+        raw_scale_inv = checkpoint_tensors.get("weight_scale_inv")
+        # A compact ceil-blocked grid is already the wrapper's per-block layout;
+        # expanding it to N x K would keep an FP32 scale four times the size of
+        # the FP8 weight for the module's lifetime (#5593).
+        compact_block_size = self._fp8_compact_block_size(weight=weight, scale=raw_scale_inv)
+        if isinstance(raw_scale_inv, torch.Tensor):
             scale_semantics = self._decoder_fp8_scale_semantics()
+            if compact_block_size is not None:
+                scale_inv = raw_scale_inv
+            else:
+                scale_inv = self._decoder_scale_tensor(
+                    scale_tensor=raw_scale_inv,
+                    result_shape=tuple(weight.shape),
+                )
         else:
             # ModelOpt-style FP8 checkpoints store direct scales instead of inverse scales;
             # normalize them here so TorchFP8Linear can use one consistent metadata form.
             direct_scale = checkpoint_tensors.get("weight_scale")
             if not isinstance(direct_scale, torch.Tensor):
                 direct_scale = checkpoint_tensors.get("scale")
-            scale = self._decoder_scale_tensor(
-                scale_tensor=direct_scale,
-                result_shape=tuple(weight.shape),
-            )
+            compact_block_size = self._fp8_compact_block_size(weight=weight, scale=direct_scale)
+            if compact_block_size is not None:
+                scale = direct_scale
+            else:
+                scale = self._decoder_scale_tensor(
+                    scale_tensor=direct_scale,
+                    result_shape=tuple(weight.shape),
+                )
             if not isinstance(scale, torch.Tensor):
                 return None
             scale = scale.to(torch.float32)
@@ -6103,11 +6421,16 @@ class BaseQModel(nn.Module):
         format_name = str(weight.dtype).split(".")[-1]
         try:
             # Infer the wrapper layout from the normalized inverse-scale tensor so native
-            # FP8 execution works for either checkpoint convention.
-            weight_scale_method, weight_block_size = self._infer_fp8_forward_layout(
-                weight=weight,
-                scale_inv=scale_inv,
-            )
+            # FP8 execution works for either checkpoint convention. A compact
+            # ceil-blocked grid keeps the checkpoint block size, which its shape
+            # alone cannot express.
+            if compact_block_size is not None:
+                weight_scale_method, weight_block_size = "block", compact_block_size
+            else:
+                weight_scale_method, weight_block_size = self._infer_fp8_forward_layout(
+                    weight=weight,
+                    scale_inv=scale_inv,
+                )
             forward_module = TorchFP8Linear(
                 bits=8,
                 group_size=-1,

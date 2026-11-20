@@ -271,8 +271,10 @@ class MlxEXL3Linear(nn.Module):
 
     def __init__(self, in_features, out_features, bits, codebook="3inst", bias=False):
         super().__init__()
+        if codebook == "q4nx":
+            raise ValueError("Q4NX inference on Apple Silicon requires BACKEND.EXL3_TORCH.")
         if bits not in range(1, 9):
-            raise ValueError("EXL3 MLX inference supports 1 through 8 bits")
+            raise ValueError("EXL3 MLX inference supports integer bit rates from 1 through 8")
         if codebook not in _CODEBOOK_IDS:
             raise ValueError(f"Unsupported EXL3 codebook: {codebook}")
         if in_features <= 0 or in_features % 128:

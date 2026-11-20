@@ -59,12 +59,15 @@ from ...utils.ttnn_runtime import (
     TTNNUnavailable,
     close_mesh,
     current_mesh,
+    hold_mesh_lease,
     import_ttnn,
     open_mesh,
+    release_mesh_lease,
     to_host_replica,
 )
 from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
+from .ttnn import _ttnn_arch
 
 
 log = setup_logger()
@@ -141,6 +144,9 @@ class _TTNNBlockFloatMixin:
         weights = self._host_weights().to(torch.bfloat16).contiguous()
 
         mesh = self._mesh()
+        # Lease the shared handle for this layer; the model wrapper releases
+        # only devices its own kernels hold.
+        hold_mesh_lease(self)
         dev = mesh.device
         count = mesh.num_devices
         if self.out_features % count:
@@ -178,6 +184,28 @@ class _TTNNBlockFloatMixin:
         self._ttnn_devices = count
         return weight
 
+    def _compute_config(self, ttnn):
+        """Return the HiFi4 / FP32-destination compute config for this layer.
+
+        TT-Metal defaults to ``LoFi`` with ``math_approx_mode``. On real OPT
+        ``q_proj`` data that measured 0.0456 maximum absolute error, while the
+        same GEMM with HiFi4 and FP32 accumulation measured 0.0093 -- the floor
+        the dense FP32 Torch oracle itself shows. ``TTNNLinear`` already uses
+        this configuration; the block-float path must match it or it drops
+        finite cancellation residuals that the exact result keeps.
+        """
+
+        config = getattr(self, "_ttnn_compute_config", None)
+        if config is None:
+            config = ttnn.init_device_compute_kernel_config(
+                _ttnn_arch(ttnn),
+                math_fidelity=ttnn.MathFidelity.HiFi4,
+                math_approx_mode=False,
+                fp32_dest_acc_en=True,
+            )
+            self._ttnn_compute_config = config
+        return config
+
     def _device_weight(self):
         if getattr(self, "_ttnn_weight", None) is None:
             return self._build_device_weight()
@@ -191,6 +219,7 @@ class _TTNNBlockFloatMixin:
     def clear_weight_cache(self) -> None:
         weight, self._ttnn_weight = getattr(self, "_ttnn_weight", None), None
         bias, self._ttnn_bias = getattr(self, "_ttnn_bias", None), None
+        self._ttnn_compute_config = None
         if weight is None and bias is None:
             return
         ttnn = import_ttnn()
@@ -205,11 +234,16 @@ class _TTNNBlockFloatMixin:
                     # follows will reclaim it. Record it instead of hiding it.
                     log.debug(f"TTNN: block-float weight deallocate failed: {exc}")
 
-    def release_device(self) -> None:
+    def release_device(self) -> bool:
+        """Drop this layer's mesh lease, closing the mesh only when last."""
+
         self.clear_weight_cache()
+        if not release_mesh_lease(self):
+            return False
         mesh = current_mesh()
         if mesh is not None:
             close_mesh(owner=mesh.owner)
+        return True
 
     def pack(self, linear, scales, zeros, g_idx, **kwargs):
         self.clear_weight_cache()
@@ -221,7 +255,12 @@ class _TTNNBlockFloatMixin:
     def _compute(self, ttnn, mesh, activation):
         weight = self._device_weight()
         bias = getattr(self, "_ttnn_bias", None)
-        output = ttnn.linear(activation, weight, bias=bias)
+        output = ttnn.linear(
+            activation,
+            weight,
+            bias=bias,
+            compute_kernel_config=self._compute_config(ttnn),
+        )
         if self._ttnn_devices > 1:
             gathered = ttnn.all_gather(output, 1)
             ttnn.deallocate(output)

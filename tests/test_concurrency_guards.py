@@ -171,6 +171,9 @@ def _install_cpu_bf16x3_state(monkeypatch, precision="none"):
     monkeypatch.setattr(cpu_features, "_set_cpu_bf16x3_precision", setter)
     monkeypatch.setattr(cpu_features, "_CPU_BF16X3_DEPTH", 0)
     monkeypatch.setattr(cpu_features, "_CPU_BF16X3_RESTORE", None)
+    # #5070 replaced the lru_cache with a module-global process constant, so a
+    # reset means clearing that global rather than calling `cache_clear()`.
+    monkeypatch.setattr(cpu_features, "_CPU_BF16X3_PRECISION", None)
     return state, writes
 
 
@@ -300,7 +303,9 @@ def test_cpu_bf16x3_capability_probe_respects_an_active_scope(monkeypatch):
         return value
 
     monkeypatch.setattr(cpu_features, "_cpu_bf16x3_precision", gated_getter)
-    cpu_features.has_cpu_bf16x3_precision.cache_clear()
+    # The capability is a module-global process constant since #5070; clear it
+    # so the probe below re-reads the gated getter.
+    monkeypatch.setattr(cpu_features, "_CPU_BF16X3_PRECISION", None)
 
     def probe():
         try:
@@ -338,7 +343,7 @@ def test_cpu_bf16x3_capability_probe_respects_an_active_scope(monkeypatch):
         forward_thread.join(timeout=10)
     finally:
         release_probe.set()
-        cpu_features.has_cpu_bf16x3_precision.cache_clear()
+        monkeypatch.setattr(cpu_features, "_CPU_BF16X3_PRECISION", None)
 
     assert not probe_thread.is_alive()
     assert not forward_thread.is_alive()

@@ -190,13 +190,16 @@ except Exception:
     log.warning("TritonPatch.apply() failed; triton autotuner threading fix is NOT active", exc_info=True)
 
 
-def _patch_transformers_local_torch_dtype_global_state():
-    """Hold the model-global-state writer for the default-dtype window only.
+def _patch_transformers_model_construction_global_state():
+    """Hold the model-global-state writer for each construction window.
 
     transformers opens a process-global ``torch.set_default_dtype`` window for
-    each construction. Published version of the fix (#5304): only the window is
-    exclusive, so a compiled forward no longer waits for a dense load's weight
-    I/O, dtype casts and device placement.
+    each construction (#5304) and, in the same init-context group, disables
+    ``PreTrainedModel.tie_weights`` class-wide and swaps registered classes
+    (#5421). Only the window was exclusive, so a foreign construction in
+    another thread could untie a GPT-QModel shell. Every construction now holds
+    the writer for the window; a compiled forward still does not wait for a
+    dense load's weight I/O, dtype casts and device placement.
     """
 
     from .utils.torch import install_model_global_state_dtype_guard
@@ -912,14 +915,31 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
                 # the RoPE buffers uninitialized (#5433, same symptom as
                 # #5311 for AWQ checkpoints). This is also the path a
                 # third-party checkpoint takes through the prepare fallback.
+                qcfg = hf_gptqmodel_native_awq_config(
+                    model,
+                    checkpoint_files=kwargs.get("checkpoint_files"),
+                )
                 hf_gptqmodel_finish_awq_load_without_rebuild(
                     model,
-                    qcfg=hf_gptqmodel_native_awq_config(
-                        model,
-                        checkpoint_files=kwargs.get("checkpoint_files"),
-                    ),
+                    qcfg=qcfg,
                 )
-                return original_post_init(self, model, **kwargs)
+                if qcfg is None:
+                    # A third-party checkpoint only took the remote-code
+                    # repairs above, so Transformers still owes it the native
+                    # post-init and its own hook is the only place that runs it.
+                    return original_post_init(self, model, **kwargs)
+                # ``qcfg is not None``: the native post-init already ran, with
+                # the serialized config. ``original_post_init`` is
+                # ``hf_gptqmodel_post_init`` -> ``gptqmodel_post_init``, so
+                # calling it here repacks an already-repacked ``qweight`` and
+                # raises ``AWQ qweight shape must be ...`` on CUDA/Marlin
+                # (#5511).
+                #
+                # The one side effect of that hook we do still owe is the
+                # Optimum bridge retry (``hf_gptqmodel_post_init`` installs it
+                # before delegating, #4749); it is idempotent and cheap.
+                _ensure_optimum_gptqmodel_load_bridge()
+                return None
             return hf_gptqmodel_post_init_for_load(model, context)
 
         # Transformers 5.23 records a checkpoint tensor whose shape differs from
@@ -991,9 +1011,78 @@ def _ensure_transformers_awq_gptqmodel_load_bridge():
         # importing it again cannot succeed.
         return False
 
+    _capture_awq_quantizer_from_frames()
     if _patch_transformers_awq_gptqmodel_load_bridge():
         return True
     _AWQ_BRIDGE_UNAVAILABLE = True
+    return False
+
+
+def _capture_awq_quantizer_from_frames() -> bool:
+    """Publish the in-flight AWQ load's model before the bridge is installed.
+
+    ``transformers.integrations.awq.replace_with_awq_linear`` imports
+    ``gptqmodel`` from inside ``AwqQuantizer._process_model_before_weight_loading``,
+    so the bridge installed by that import only wraps *later* calls: the load
+    that triggered the import never reaches ``_prepare_with_gptqmodel_bridge``,
+    and ``self._gptqmodel_model`` stays unset. ``validate_environment`` still
+    runs afterwards with the placement resolved from ``max_memory``, but
+    ``_reselect_kernels_for_resolved_device_map`` needs the model to rebuild a
+    CUDA-only Marlin module for a CPU/disk-offloaded layer (#5395).
+
+    The quantizer and model are still live locals of the prepare call that is
+    on this thread's stack. Walk a bounded number of frames for exactly that
+    pair and publish the same state the wrapper would have published, so the
+    existing resolved-map reselection covers the current load too. This is a
+    compatibility shim for Transformers' AWQ import order; it is a no-op for
+    every other caller (package init, post-weight hook, later loads).
+    """
+
+    import torch.nn as nn
+
+    try:
+        from transformers.quantizers.quantizer_awq import AwqQuantizer
+    except ImportError:
+        return False
+
+    frame = sys._getframe(1)
+    for _ in range(32):
+        if frame is None:
+            return False
+        local_vars = frame.f_locals
+        quantizer = local_vars.get("self")
+        model = local_vars.get("model")
+        if isinstance(quantizer, AwqQuantizer) and isinstance(model, nn.Module):
+            from .utils.hf_load import (
+                hf_gptqmodel_reselect_context,
+                is_native_gptqmodel_checkpoint,
+            )
+
+            kwargs = local_vars.get("kwargs")
+            if not isinstance(kwargs, dict):
+                kwargs = {}
+            if getattr(quantizer, "_gptqmodel_model", None) is None:
+                quantizer._gptqmodel_model = model
+            # A native checkpoint gets its own repair from the post-weight hook,
+            # which rebuilds from the serialized per-module config. Publishing a
+            # context built from the *global* config here would replace the
+            # modules with the wrong geometry before that repair runs.
+            if (
+                getattr(model, "_gptqmodel_hf_reselect_context", None) is None
+                and not is_native_gptqmodel_checkpoint(
+                    model, kwargs.get("checkpoint_files")
+                )
+            ):
+                context = hf_gptqmodel_reselect_context(
+                    model,
+                    checkpoint_files=kwargs.get("checkpoint_files"),
+                    backend=_hf_quantizer_backend(quantizer),
+                    dtype=kwargs.get("dtype"),
+                )
+                if context is not None:
+                    model._gptqmodel_hf_reselect_context = context
+            return True
+        frame = frame.f_back
     return False
 
 
@@ -1209,7 +1298,7 @@ class _LazyDeviceThreadPoolProxy:
 DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
 _patch_transformers_gptq_device_map_compat()
-_patch_transformers_local_torch_dtype_global_state()
+_patch_transformers_model_construction_global_state()
 _patch_transformers_gptqmodel_gguf_quantizer_compat()
 _patch_transformers_refusing_quantizers()
 _patch_transformers_save_pretrained_runtime_layout_guard()
@@ -1240,6 +1329,7 @@ from .backend import (  # noqa: F401
     AwqTritonConfig,
     BackendConfig,
     BitsAndBytesConfig,
+    EXL3CUDAConfig,
     GGUFCPPConfig,
     GGUFCUDAConfig,
     GGUFTorchConfig,

@@ -78,6 +78,59 @@ not. `mamba.x_proj` is now quantized with no fold, and `dt_proj` keeps its
 checkpoint weights. A gain norm (1-D `weight`, divided by `scale_ln_fcs`) and a
 quantized Linear remain valid sources.
 
+## Per-module fallback policy
+
+`AWQConfig.fallback` is the run-wide policy; a `dynamic` rule may replace it
+for one projection, for example
+`{"fallback": {"strategy": "stdclip", "threshold": 4096}}`. The merged
+`Fallback` is resolved per module by `AWQProcessor._fallback_for_module` and
+drives every selection gate, not only the strategy on a fallback path that was
+already chosen (#5820):
+
+- `_starved_group_members` compares each member's captured coverage with that
+  member's own threshold.
+- `_group_coverage_is_sufficient` accepts the group total only when every
+  member's policy accepts it.
+- `_quantize_layer` uses the group's merged policy for the fallback branch, the
+  missing-feature guard and the replay-error fallback.
+- `_fallback_strategy_for_module` still resolves the strategy on a chosen
+  fallback path, including `apply_quant(..., scales_list=[])` (#5726).
+
+A member with no policy at all (`fallback=None` and no override) still aborts a
+layer with missing features; a dynamic override that enables the fallback for
+that module is enough to fold it and plain-quantize it.
+
+```mermaid
+flowchart TD
+    A["AWQProcessor._quantize_layer"] --> B["named_childs<br/>bound resolved_module_config per member"]
+    B --> C["_fallback_for_member<br/>normalize_fallback(dynamic override, run-wide)"]
+    C --> D{"group has any fallback policy?"}
+    D -- "no" --> E["AWQ search only<br/>missing rows raise"]
+    D -- "yes" --> F{"member starved?<br/>captured rows below own threshold"}
+    F -- "no" --> G["AWQ scale search"]
+    F -- "yes" --> H{"shared search input<br/>and a covered member?"}
+    H -- "yes" --> I["search covered members<br/>fold all, plain-quantize starved"]
+    H -- "no" --> J["plain-quantize group"]
+    J --> K["_fallback_strategy_for_module<br/>merged strategy on the fallback path"]
+    I --> K
+    style E fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style J fill:#fff3cd,stroke:#997404,stroke-width:2px
+    style K fill:#d1e7dd,stroke:#0f5132,stroke-width:2px
+```
+
+| Before (#5820) | Now |
+| --- | --- |
+| `_starved_group_members` passed `self.fallback` for every projection (`awq_processor.py:3952` at `078e7f51`). | Each member's merged policy decides its own coverage. |
+| `_quantize_layer` gated the group decision and the replay-error fallback on the run-wide object (`awq_processor.py:4118`, `:4292` at `078e7f51`). | The group's merged policy decides both. |
+| The dynamic override was merged only after the fallback path was already chosen (`awq_processor.py:966-983` at `078e7f51`). | One merged resolver feeds selection and strategy. |
+
+On the tiny Llama fixture in
+`tests/test_awq_dynamic_fallback_threshold_5820.py`, a dynamic STDCLIP
+threshold of 4096 used to reproduce the disabled-threshold pack (255 of 256
+packed words away from the run-wide STDCLIP control; maximum scale error
+0.0055802 against 0.0000109645). It now matches the run-wide STDCLIP control
+exactly, while a threshold below the captured coverage still keeps AWQ.
+
 ## Scale-search safety
 
 The search-safety checks were introduced in [#4144](https://github.com/ModelCloud/GPTQModel/pull/4144).
@@ -198,6 +251,7 @@ The immediate repairs use existing declarations, not a graph compiler or DSL:
 | `inkling_mm_model` | The norm fed unhandled native 3-D shared experts as well as routed experts. | Disable that norm's fold and explicitly exclude shared-expert, scale, convolution and relative-logit owners. |
 | `qwen` | The inferred `w2` source crosses SiLU. | Mark `w2:nosrc`. |
 | `granitemoehybrid` | Tree order folded `in_proj` into `out_proj` across the convolution and the SSM scan, and the post-attention norm was folded for the routed experts although `shared_mlp.input_linear` also reads it. | Mark `in_proj:nosrc`, `post_attention_layernorm:nosrc`; declare the router owner; `out_proj` folds the gated output `norm` (exact). |
+| `lfm3`, `lfm3_vl`, `lfm3_omni` | The tree named the legacy `gate_proj`, so `operator_norm` was folded into Q/K/V **and** `o_proj`, while the live `g_proj` sigmoid gate was not compensated; `conv.conv` was undeclared. | Rename to `g_proj:!:nosrc` and keep it in the Q/K/V stage as a scale consumer; move `o_proj` to its own `:nosrc` stage; declare `conv.conv:!`. |
 
 ```mermaid
 flowchart TD

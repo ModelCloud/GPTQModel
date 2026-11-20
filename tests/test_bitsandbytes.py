@@ -310,7 +310,16 @@ def test_bitsandbytes_int8_chunked_epilogue_matches_single_expression(
     weight_scb = torch.rand(cols, dtype=torch.float32) * 64.0 + 1.0
     bias_tensor = torch.randn(cols, dtype=torch.float32) * 3.0 if bias else None
 
-    expected = mm_out.to(torch.float32) * x_stats.reshape(-1, 1) * weight_scb.reshape(1, -1) / (127.0 * 127.0)
+    # #5694 made the FP32 epilogue exponent-safe: the integer dot is multiplied
+    # by sub-unit mantissas and the summed binary exponent is restored with
+    # ``ldexp``. This is that single expression, repeated independently of the
+    # helper, so the assertion still pins chunk neutrality exactly.
+    row_mant, row_exp = torch.frexp(x_stats.reshape(-1, 1))
+    col_mant, col_exp = torch.frexp(weight_scb.reshape(1, -1))
+    expected = torch.ldexp(
+        mm_out.to(torch.float32) * (row_mant / 127.0) * (col_mant / 127.0),
+        row_exp + col_exp,
+    )
     if bias_tensor is not None:
         expected = expected + bias_tensor
 

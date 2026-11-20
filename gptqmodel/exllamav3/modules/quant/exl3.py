@@ -10,14 +10,26 @@ from __future__ import annotations
 
 import torch
 
+from ....utils.kernel import KernelConfig
 from ...ext import exllamav3_ext as ext
-from ...trellis import validate_trellis_k
-from .exl3_lib.quantize import had_k, had_n, preapply_had_l, preapply_had_r
+from ...trellis import trellis_rate
+from .exl3_lib.quantize import (
+    had_k,
+    had_n,
+    preapply_had_l,
+    preapply_had_r,
+    reconstruct_q4nx_inner,
+    reconstruct_r4nx_inner,
+)
 
 
 class LinearEXL3:
 
     quant_type: str = "exl3"
+    q4nx: bool = False
+    q4nx_tensor: torch.Tensor | None = None
+    r4nx: bool = False
+    r4nx_tensor: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -35,7 +47,11 @@ class LinearEXL3:
         bias: torch.Tensor | None = None,
         out_dtype: torch.dtype | None = None,
         transformers_fix: bool = False,
-        key: str | None = None
+        key: str | None = None,
+        kernel: KernelConfig | None = None,
+        *,
+        q4nx: torch.Tensor | None = None,
+        r4nx: torch.Tensor | None = None,
     ):
         assert scale is None, "scale is no longer used"
         assert su is not None or suh is not None, "either su (packed) or suh (unpacked) is required"
@@ -48,8 +64,6 @@ class LinearEXL3:
         assert trellis.dtype == torch.int16, "trellis is wrong datatype"
         assert len(trellis.shape) == 3, "trellis must have dim = 3"
 
-        if bias is not None and bias.dtype == torch.float: bias = bias.to(torch.half)
-
         self.transformers_fix = transformers_fix
         self.key = key
 
@@ -59,7 +73,6 @@ class LinearEXL3:
         self.suh = suh if suh is not None else self.unpack_bf(su)
         self.svh = svh if svh is not None else self.unpack_bf(sv)
         self.trellis = trellis
-        self.K = trellis.shape[-1] // 16
         self.in_features = in_features
         self.out_features = out_features
         self.bias = bias
@@ -68,13 +81,16 @@ class LinearEXL3:
 
         self.mcg_tensor = mcg
         self.mul1_tensor = mul1
+        self.q4nx_tensor = q4nx
+        self.r4nx_tensor = r4nx
         self.mcg = self.mcg_tensor is not None
         self.mul1 = self.mul1_tensor is not None
+        self.q4nx = self.q4nx_tensor is not None
+        self.r4nx = self.r4nx_tensor is not None
 
-        # The native reconstruct op selects a kernel from K (1..8) and the
-        # mcg/mul1 variant. Reject a checkpoint that would index past the
-        # 24-entry table instead of launching a garbage function pointer.
-        validate_trellis_k(self.K, self.mcg, self.mul1)
+        self.K = trellis_rate(
+            trellis.shape[-1], self.mcg, self.mul1, q4nx=self.q4nx, r4nx=self.r4nx
+        )
 
         self.bc = ext.BC_LinearEXL3(
             self.trellis,
@@ -83,7 +99,10 @@ class LinearEXL3:
             self.K,
             self.bias,
             self.mcg,
-            self.mul1
+            self.mul1,
+            **({"kernel": kernel} if kernel is not None else {}),
+            **({"q4nx": True} if self.q4nx else {}),
+            **({"r4nx": True} if self.r4nx else {}),
         )
 
 
@@ -105,6 +124,8 @@ class LinearEXL3:
                 ("bias", self.bias),
                 ("mcg", self.mcg_tensor),
                 ("mul1", self.mul1_tensor),
+                ("q4nx", self.q4nx_tensor),
+                ("r4nx", self.r4nx_tensor),
             ] if tensor is not None
         }
 
@@ -122,40 +143,77 @@ class LinearEXL3:
                 return ovr[self.key].forward(x, params, out_dtype)
 
         bsz = x.numel() // x.shape[-1]
-        # The small-batch tensor-core GEMM (`bc.run`) is NVIDIA-only. On ROCm the
-        # extension exports null kernel tables for it, so always take the
-        # reconstruct + hgemm (hipBLAS) path there.
+        # On CUDA `bc.run` selects the tensor-core GEMM. On ROCm the native HIP
+        # GEMV handles decode-sized batches when it accepts the shape, codebook
+        # and device, and the native RDNA4 GEMM (`exl3_gemm_hip.cu`) handles the
+        # rest of the shapes it covers. Both fall back to reconstruct + hgemm
+        # (hipBLAS) internally.
         if torch.version.hip is not None:
-            torch_mode = True
+            # Q4NX has no fused GEMM decoder on ROCm, so above the GEMV's batch
+            # size it keeps the portable torch path. R4NX has no fused GEMM
+            # kernel on any backend, so it always reconstructs.
+            torch_mode = (
+                bool(params.get("reconstruct", False))
+                or self.r4nx
+                or (self.q4nx and bsz > 8)
+            )
         else:
-            torch_mode = params.get("reconstruct", bsz > 32)
+            # R4NX has no tensor-core GEMM kernel on any backend, so it always
+            # decodes through reconstruct + HGEMM.
+            torch_mode = self.r4nx or params.get("reconstruct", bsz > 32 and not self.q4nx)
 
         out_shape = x.shape[:-1] + (self.out_features,)
+        result_dtype = out_dtype or self.out_dtype or torch.half
         if bsz == 0:
             # A zero-row batch has no Hadamard/HGEMM work. The native
             # had_r_128 would otherwise launch a zero-row grid, which the
             # CUDA/HIP runtime rejects.
-            return torch.empty(out_shape, dtype = out_dtype or self.out_dtype or torch.half, device = x.device)
+            return torch.empty(out_shape, dtype=result_dtype, device=x.device)
         # The native hadamard/hgemm/bc kernels treat the operand as densely
         # packed rows and take `data_ptr()` directly. `view` succeeds on some
         # strided inputs (column slices, `hidden_states[:, -1:, :]`), which
         # then produced silently wrong rows, so pack before the kernels.
         x = x.reshape(-1, self.in_features).contiguous()
-        y = torch.empty(out_shape, dtype = out_dtype or self.out_dtype or torch.half, device = x.device)
+        include_bias = params.get("include_bias", True)
+
+        if torch.version.hip is not None and not torch_mode and bsz <= 8:
+            y = torch.empty(out_shape, dtype=result_dtype, device=x.device)
+            if ext.bc_linear_exl3_run_hip_gemv(
+                self.trellis,
+                self.suh,
+                self.svh,
+                float(self.K),
+                self.bias if include_bias else None,
+                self.mcg,
+                self.mul1,
+                x,
+                y,
+                self.q4nx,
+                self.bc.int8_gemv,
+            ):
+                return y
+            # Shape, device or codebook not eligible: Q4NX has no fused GEMM
+            # decoder on ROCm and reconstructs; every other codebook lets
+            # `bc.run` pick the fused GEMM (which reconstructs internally when
+            # the shape is out of its range).
+            torch_mode = self.q4nx
 
         if torch_mode:
-            y_ = y.view(x.shape[0], self.out_features)
+            y = torch.empty((x.shape[0], self.out_features), dtype=torch.float32, device=x.device)
             xh = torch.empty_like(x)
             ext.had_r_128(x, xh, self.suh, None, 1.0)
             w = self.get_inner_weight_tensor()
-            ext.hgemm(xh, w, y_)
-            ext.had_r_128(y_, y_, None, self.svh, 1.0)
-            if self.bias is not None:
-                y += self.bias
-            y = y.view(out_shape)
+            ext.hgemm(xh, w, y)
+            ext.had_r_128(y, y, None, self.svh, 1.0)
+            if include_bias and self.bias is not None:
+                y.add_(self.bias)
+            return y.view(out_shape).to(result_dtype)
 
-        else:
+        y = torch.empty(out_shape, dtype=result_dtype, device=x.device)
+        if include_bias:
             self.bc.run(x, y)
+        else:
+            self.bc.run(x, y, include_bias=False)
 
         return y
 
@@ -179,16 +237,25 @@ class LinearEXL3:
         # suh = self.unpack_bf(self.su).unsqueeze(1)
         suh = self.unpack_bf(self.su).unsqueeze(1) if self.su else self.suh.unsqueeze(1)
         svh = self.unpack_bf(self.sv).unsqueeze(0) if self.sv else self.svh.unsqueeze(0)
-        w = self.get_inner_weight_tensor()
+        if self.r4nx:
+            w = reconstruct_r4nx_inner(self.trellis)
+        elif self.q4nx:
+            w = reconstruct_q4nx_inner(self.trellis)
+        else:
+            w = self.get_inner_weight_tensor()
         w = preapply_had_l(w, had_k)
         w *= suh
         w = preapply_had_r(w, had_n)
         w *= svh
         # w *= self.scale
-        return w
+        return w.half() if (self.q4nx or self.r4nx) else w
 
 
     def get_inner_weight_tensor(self):
+        if self.r4nx:
+            return reconstruct_r4nx_inner(self.trellis).half()
+        if self.q4nx:
+            return reconstruct_q4nx_inner(self.trellis).half()
         w = torch.empty((self.in_features, self.out_features), dtype = torch.half, device = self.trellis.device)
         ext.reconstruct(w, self.trellis, self.K, self.mcg, self.mul1)
         return w
@@ -234,6 +301,8 @@ class LinearEXL3:
             "bias": producer.send(self.bias),
             "mcg": producer.send(self.mcg_tensor),
             "mul1": producer.send(self.mul1_tensor),
+            "q4nx": producer.send(self.q4nx_tensor),
+            "r4nx": producer.send(self.r4nx_tensor),
             "out_dtype": self.out_dtype,
         }
 
@@ -247,6 +316,8 @@ class LinearEXL3:
         id_bias = exported["bias"]
         mcg = consumer.recv(exported["mcg"], cuda = True)
         mul1 = consumer.recv(exported["mul1"], cuda = True)
+        q4nx = consumer.recv(exported["q4nx"], cuda = True) if "q4nx" in exported else None
+        r4nx = consumer.recv(exported["r4nx"], cuda = True) if "r4nx" in exported else None
 
         if split is not None:
             split_out, first, last = split
@@ -280,6 +351,8 @@ class LinearEXL3:
             trellis = trellis,
             mcg = mcg,
             mul1 = mul1,
+            q4nx = q4nx,
+            r4nx = r4nx,
             bias = bias,
             out_dtype = exported["out_dtype"],
         )

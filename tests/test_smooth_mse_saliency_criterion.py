@@ -20,6 +20,7 @@ import torch
 
 import gptqmodel.quantization.gptq as gptq_module
 import gptqmodel.quantization.qqq as qqq_module
+import gptqmodel.quantization.rtn as rtn_module
 from gptqmodel.quantization.config import (
     Fallback,
     FallbackStrategy,
@@ -28,7 +29,7 @@ from gptqmodel.quantization.config import (
     RTNConfig,
     SmoothMSE,
 )
-from gptqmodel.quantization.fallback_smooth import mse_optimal_quant
+from gptqmodel.quantization.fallback_smooth import mse_optimal_quant, smooth_applies
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.quantization.qqq import QQQ
 from gptqmodel.quantization.rtn import RTN
@@ -400,3 +401,189 @@ def test_qqq_quantize_fallback_uses_the_captured_hessian_diagonal(monkeypatch):
 
     assert captured, "the fallback never reached mse_optimal_quant"
     _assert_weights_follow_hessian(captured[0], expected)
+
+
+def _rtn_grid(block, smooth, *, group_size=GROUP_SIZE):
+    source = torch.nn.Linear(block.shape[1], block.shape[0], bias=False)
+    with torch.no_grad():
+        source.weight.copy_(block)
+    config = RTNConfig(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        smooth=smooth,
+        offload_to_disk=False,
+    )
+    dequant, *_ = RTN(source, config).quantize()
+    return dequant
+
+
+def _gptq_fallback_grid(block, smooth, *, group_size=GROUP_SIZE):
+    source = torch.nn.Linear(block.shape[1], block.shape[0], bias=False)
+    with torch.no_grad():
+        source.weight.copy_(block)
+    config = GPTQConfig(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        fallback=Fallback(strategy=FallbackStrategy.RTN, smooth=smooth),
+        offload_to_disk=False,
+    )
+    task = GPTQ(source, config)
+    task.quantizer.configure(perchannel=True)
+    dequant, *_ = task._fallback_quantize(FallbackStrategy.RTN, blocksize=GROUP_SIZE)
+    return dequant
+
+
+def _qqq_fallback_grid(block, smooth, *, group_size=GROUP_SIZE):
+    source = torch.nn.Linear(block.shape[1], block.shape[0], bias=False)
+    with torch.no_grad():
+        source.weight.copy_(block)
+    config = QQQConfig(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        fallback=Fallback(strategy=FallbackStrategy.RTN, smooth=smooth),
+        offload_to_disk=False,
+    )
+    task = QQQ(source, config)
+    task.quantizer.configure(
+        bits=config.bits, perchannel=True, sym=config.sym, groupsize=config.group_size
+    )
+    dequant, *_ = task._fallback_quantize(FallbackStrategy.RTN)
+    return dequant
+
+
+GRID_BUILDERS = [
+    pytest.param(_rtn_grid, id="rtn"),
+    pytest.param(_gptq_fallback_grid, id="gptq"),
+    pytest.param(_qqq_fallback_grid, id="qqq"),
+]
+
+
+@pytest.mark.parametrize("build_grid", GRID_BUILDERS)
+def test_smooth_mse_group_size_threshold_gates_the_search(build_grid):
+    """A disabled SmoothMSE must not change the grid (#5366).
+
+    The RTN loop and the GPTQ/QQQ fallback loops entered ``mse_optimal_quant``
+    whenever the smoother was a ``SmoothMSE``, so ``group_size_threshold`` only
+    gated the non-MSE branch. An above-threshold smoother must produce exactly
+    the no-smoother grid, while the equal-threshold control must still search.
+    """
+
+    torch.manual_seed(5366)
+    block = torch.randn(16, GROUP_SIZE)
+
+    plain = build_grid(block, None)
+    disabled = build_grid(block, SmoothMSE(group_size_threshold=GROUP_SIZE * 2))
+    enabled = build_grid(block, SmoothMSE(group_size_threshold=GROUP_SIZE))
+
+    assert torch.equal(disabled, plain), (
+        "SmoothMSE ran below group_size_threshold and changed the quantized weights"
+    )
+    assert not torch.equal(enabled, plain), (
+        "the equal-threshold control never reached the MSE search"
+    )
+
+
+@pytest.mark.parametrize("build_grid", GRID_BUILDERS)
+def test_smooth_mse_threshold_uses_the_resolved_whole_row_size(build_grid):
+    """``group_size=-1`` resolves to the row width before the threshold gate."""
+
+    torch.manual_seed(5367)
+    block = torch.randn(16, GROUP_SIZE)
+
+    plain = build_grid(block, None, group_size=-1)
+    disabled = build_grid(
+        block, SmoothMSE(group_size_threshold=GROUP_SIZE + 1), group_size=-1
+    )
+    enabled = build_grid(
+        block, SmoothMSE(group_size_threshold=GROUP_SIZE), group_size=-1
+    )
+
+    assert torch.equal(disabled, plain), (
+        "a whole-row group must still honour group_size_threshold"
+    )
+    assert not torch.equal(enabled, plain), (
+        "a whole-row group at the threshold must still reach the MSE search"
+    )
+
+
+def test_default_smooth_mse_is_not_gated_by_the_clipping_threshold():
+    """``SmoothMSE()`` must not inherit the clipping smoothers' g128 default (#5530).
+
+    The search runs per group, so it has no reason to skip small groups. The
+    shared ``128`` default belongs to the clipping smoothers; inheriting it made
+    ``SmoothMSE()`` a silent no-op at the common g32/g64 sizes while
+    ``quantize_config.json`` still recorded ``smooth: mse``.
+    """
+
+    assert SmoothMSE().group_size_threshold == 0
+    assert smooth_applies(SmoothMSE(), 32)
+    assert smooth_applies(SmoothMSE(), 64)
+    # An explicit threshold keeps its documented meaning.
+    assert not smooth_applies(SmoothMSE(group_size_threshold=128), 64)
+    assert smooth_applies(SmoothMSE(group_size_threshold=128), 128)
+
+
+def test_default_smooth_mse_reaches_the_rtn_search_at_group_size_64(monkeypatch):
+    """The RTN loop must reach ``mse_optimal_quant`` at g64 without a threshold (#5530)."""
+
+    captured = _spy_mse_weights(monkeypatch, rtn_module)
+    torch.manual_seed(5530)
+    block = torch.randn(16, 64)
+
+    _rtn_grid(block, SmoothMSE(), group_size=64)
+    assert captured, "the default SmoothMSE search was skipped at group_size=64"
+
+    captured.clear()
+    _rtn_grid(block, SmoothMSE(group_size_threshold=128), group_size=64)
+    assert not captured, "an explicit above-group threshold must still skip the search"
+
+
+def test_default_smooth_mse_reaches_the_gptq_fallback_at_group_size_64(monkeypatch):
+    """The GPTQ/QQQ fallback loops must search at g64 without a threshold (#5530)."""
+
+    captured = _spy_mse_weights(monkeypatch, gptq_module)
+    torch.manual_seed(5531)
+    block = torch.randn(16, 64)
+
+    _gptq_fallback_grid(block, SmoothMSE(), group_size=64)
+    assert captured, "the default SmoothMSE search was skipped at group_size=64"
+
+
+SMOOTH_CONFIG_FORMS = [SmoothMSE(), "mse", {"type": "mse"}]
+
+
+@pytest.mark.parametrize("smooth", SMOOTH_CONFIG_FORMS, ids=["object", "string", "dict"])
+def test_default_smooth_mse_threshold_agrees_across_config_forms(smooth):
+    """Every way of asking for the MSE smoother must resolve threshold 0 (#5572).
+
+    #5541 only changed the ``SmoothMSE.__init__`` default. The dict/string
+    builder reads the dataclass field default, which stayed at the clipping
+    smoothers' 128, so saved JSON/YAML and CLI configs silently skipped the
+    search at g32/g64.
+    """
+
+    assert smooth_applies(smooth, 32)
+    assert smooth_applies(smooth, 64)
+
+    config = RTNConfig(bits=4, group_size=64, smooth=smooth)
+    assert config.smooth.group_size_threshold == 0
+    assert smooth_applies(config.smooth, 32)
+    assert smooth_applies(config.smooth, 64)
+
+    fallback = Fallback(strategy=FallbackStrategy.RTN, smooth=smooth)
+    assert fallback.smooth.group_size_threshold == 0
+
+
+@pytest.mark.parametrize("smooth", SMOOTH_CONFIG_FORMS, ids=["object", "string", "dict"])
+def test_default_smooth_mse_from_every_config_form_reaches_the_rtn_search_at_g64(monkeypatch, smooth):
+    """The parsed forms must actually run the RTN search at g64 (#5572)."""
+
+    captured = _spy_mse_weights(monkeypatch, rtn_module)
+    torch.manual_seed(5572)
+    block = torch.randn(16, 64)
+
+    _rtn_grid(block, smooth, group_size=64)
+    assert captured, "the default SmoothMSE search was skipped at group_size=64"

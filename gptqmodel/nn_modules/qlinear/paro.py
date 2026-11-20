@@ -32,11 +32,13 @@ from ...utils.paro import (
     validate_rotation_buffers,
 )
 from ...utils.rocm import IS_ROCM
+from ...utils.torch import dynamo_is_compiling
 from . import detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
+    checkpoint_layout_tensor,
     discard_fused_train_state,
     finalize_fused_train_state,
     restore_fused_train_state,
@@ -54,6 +56,9 @@ from .torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
 
 
 log = setup_logger()
+
+# ``torch.compile`` must not trace the one-time CPU layout transform.
+_disable_compile = getattr(getattr(torch, "compiler", None), "disable", lambda fn: fn)
 
 # INT4 AWQ stores eight codes per int32, so `pack_awq` rejects a packed
 # dimension that is not a multiple of eight. Paro reuses that packer for
@@ -609,6 +614,12 @@ class ParoLinear(AwqTorchLinear):
             krot=self.krot,
             device=weight.device if isinstance(weight, torch.Tensor) else None,
         )
+        # ``BaseQModel.optimize`` warms every layer, but a direct per-layer
+        # ``optimize()`` call must install the CPU layout too: the traced CPU
+        # branches only read it (#5581).
+        scales = getattr(self, "scales", None)
+        if isinstance(scales, torch.Tensor):
+            self._prepare_cpu_inference_layout(scales.dtype)
         super().optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     @classmethod
@@ -712,7 +723,7 @@ class ParoLinear(AwqTorchLinear):
         device: torch.device,
         dtype: torch.dtype,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # `tensor_cache_key` reads `is_inference()`/`_version`/`data_ptr()`,
             # all hard dynamo graph breaks, and publishing the cache is a state
             # write a traced graph must not perform. The eager warmup built the
@@ -790,12 +801,19 @@ class ParoLinear(AwqTorchLinear):
             return False
         return bool(x_flat.requires_grad or self._rotation_parameters_need_grad())
 
+    def _rotation_parameters_trainable(self) -> bool:
+        """Whether an optimizer can update the rotation operands in place."""
+
+        return bool(self.theta.requires_grad or self.channel_scales.requires_grad)
+
     def _rotate_inputs(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Apply the learned input transform before quantized matmul."""
-        if self._rotation_identity and not self._rotation_parameters_need_grad():
+        if self._rotation_identity and not self._rotation_parameters_trainable():
             # The identity is exact, so the shortcut is bit-identical for the
-            # activations; it may only run when the rotation parameters are
-            # frozen or the caller disabled grad (issue #5419).
+            # activations. Trainable operands must skip it even when grad is
+            # disabled: an optimizer step changes them without clearing the
+            # cached identity flag, and the no-grad forward has to observe the
+            # new values (#5636).
             return x_flat
         needs_autograd = self._rotation_needs_autograd(x_flat)
         if (
@@ -837,21 +855,44 @@ class ParoLinear(AwqTorchLinear):
             group_size=self.group_size,
         )
 
+    @_disable_compile
+    def _checkpoint_operands_for_trace(self):
+        """Checkpoint ``qweight``/``qzeros`` for a traced dense call (#5581).
+
+        A traced graph must not restore the runtime layout (that rewrites the
+        registered buffers), so read the snapshot the transform captured.
+        """
+
+        with self._cpu_transform_lock:
+            return (
+                checkpoint_layout_tensor(self, "qweight"),
+                checkpoint_layout_tensor(self, "qzeros"),
+            )
+
     def _forward_dense(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Fallback reference path: dequantize AWQ weights and run dense matmul."""
         # The dense path dequantizes the checkpoint tensors, so a CPU kernel
         # layout must be returned first.
         if self._live_cpu_layout() is not None:
-            if torch.compiler.is_compiling():
+            if dynamo_is_compiling():
                 # Restoring rewrites the registered buffers, which a traced
-                # graph must not do. A layer whose activation dtype or int4pack
-                # availability does not match the warmup-built layout reaches
-                # here; compiling before the first eager forward keeps the
-                # checkpoint layout live and takes this dense path instead.
-                raise RuntimeError(
-                    f"{type(self).__name__}: a CPU runtime layout is live and no "
-                    "traceable fused path was selected. Compile the layer before "
-                    "its first eager forward, or run this layer eagerly."
+                # graph must not do. Decode the checkpoint tensors the transform
+                # captured instead, so a traced grad call (which no fused path
+                # accepts) still returns the reference product (#5581).
+                qweight, qzeros = self._checkpoint_operands_for_trace()
+                if qweight is None or qzeros is None:
+                    raise RuntimeError(
+                        f"{type(self).__name__}: a CPU runtime layout is live and no "
+                        "traceable fused path was selected. Compile the layer before "
+                        "its first eager forward, or run this layer eagerly."
+                    )
+                compute_dtype = (
+                    torch.float32
+                    if x_flat.dtype in (torch.float16, torch.bfloat16)
+                    else x_flat.dtype
+                )
+                return self._dense_matmul_for_dtype(
+                    x_flat, compute_dtype, qweight=qweight, qzeros=qzeros
                 )
             self._restore_cpu_checkpoint_layout()
         # Keep the reconstructed grid, the reduction and the stored bias in
@@ -864,9 +905,18 @@ class ParoLinear(AwqTorchLinear):
         )
         return self._dense_matmul_for_dtype(x_flat, compute_dtype)
 
-    def _dense_matmul_for_dtype(self, x_flat: torch.Tensor, compute_dtype: torch.dtype) -> torch.Tensor:
+    def _dense_matmul_for_dtype(
+        self,
+        x_flat: torch.Tensor,
+        compute_dtype: torch.dtype,
+        *,
+        qweight: Optional[torch.Tensor] = None,
+        qzeros: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Dequantize at ``compute_dtype`` and run the wide dense product."""
-        weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
+        weight = self._dequantize_weight_for_inference(
+            x_flat, dtype=compute_dtype, qweight=qweight, qzeros=qzeros
+        )
         return linear_wide_bias(
             x_flat,
             # AWQ reconstructs [in_features, out_features]; the wide epilogue
@@ -994,6 +1044,60 @@ class ParoLinear(AwqTorchLinear):
             out = out.to(dtype=x_flat.dtype)
         return out
 
+    def _cpu_aten_shape_supported(self) -> bool:
+        """Whether the layer fits ATen's native CPU int4pack GEMM."""
+        return (
+            self.bits == 4
+            and getattr(self, "requested_group_size", self.group_size) != -1
+            and self.group_size in (32, 64, 128, 256)
+        )
+
+    @_disable_compile
+    def _prepare_cpu_inference_layout(self, dtype: Optional[torch.dtype]) -> bool:
+        """Build the packed CPU operands before ``torch.compile`` traces.
+
+        The AVX512 and ATen branches only *read* the runtime layout while dynamo
+        traces; the one-time transform rewrites registered buffers and takes a
+        lock, so it only ever ran in an eager forward. A compile made before the
+        first eager forward therefore traced the dense dequantize path and kept
+        re-expanding every weight on every token (#5581).
+        """
+
+        if self.training:
+            return False
+        weight = getattr(self, "qweight", None)
+        if not isinstance(weight, torch.Tensor) or weight.device.type != "cpu":
+            return False
+        if self._live_cpu_layout() is not None:
+            return True
+        if dtype not in (torch.float16, torch.bfloat16):
+            return False
+
+        if (
+            dtype == torch.bfloat16
+            and self._paro_cpu_avx512
+            and has_avx512_bf16()
+            and self._cpu_avx512_shape_supported()
+        ):
+            with self._cpu_transform_lock:
+                if self._ensure_cpu_layout("avx512"):
+                    return True
+
+        if (
+            self._cpu_aten_shape_supported()
+            and _has_local_int4pack_cpu_ops()
+            and TorchAtenAwqLinear.cached_validate_once()[0]
+        ):
+            with self._cpu_transform_lock:
+                if not self._ensure_cpu_layout("aten", dtype):
+                    return False
+                from .torch_fused import _cpu_int4pack_mm
+
+                self._paro_int4pack_mm = _cpu_int4pack_mm
+                return True
+
+        return False
+
     def _forward_cpu_avx512(
         self,
         x_flat: torch.Tensor,
@@ -1006,7 +1110,7 @@ class ParoLinear(AwqTorchLinear):
 
         gemm = TorchCpuAvx512AwqLinear.gemm_int4_qzero_group_scaled_cpu_kernel
         if gemm is None:
-            if torch.compiler.is_compiling():
+            if dynamo_is_compiling():
                 # Resolving the handle loads the JIT extension through
                 # importlib, which dynamo cannot trace (a `setattr` on the
                 # extension module is a hard graph break). The eager warmup
@@ -1021,7 +1125,7 @@ class ParoLinear(AwqTorchLinear):
 
         original_dtype = x_flat.dtype
         kernel_input = x_flat if x_flat.is_contiguous() else x_flat.contiguous()
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # The transform rewrites registered buffers and takes the RLock
             # dynamo cannot enter; a traced graph must not do either. The eager
             # warmup built this layout, so only read it. Without a warmup, fall
@@ -1082,7 +1186,7 @@ class ParoLinear(AwqTorchLinear):
         ):
             return None
 
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # The transform rewrites registered buffers and takes the RLock
             # dynamo cannot enter; a traced graph only reads the eager-built
             # layout. A biased layer asks for the FP32 product and adds the
@@ -1173,6 +1277,11 @@ class ParoLinear(AwqTorchLinear):
 
         out = self._forward_cuda_awq_kernel(rotated)
         if out is None:
+            if dynamo_is_compiling() and self._live_cpu_layout() is None:
+                # A cold trace must not bake in the dense fallback: install the
+                # layout here (a graph break) and retrace into the fused
+                # branch (#5581).
+                self._prepare_cpu_inference_layout(rotated.dtype)
             out = self._forward_cpu_avx512(
                 rotated,
                 enabled=self._paro_cpu_avx512 and rotated.dtype == torch.bfloat16,

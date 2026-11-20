@@ -10,8 +10,12 @@
 /*
 
 Row-major matmul using cuBLAS, a @ b -> c
-- if c is float16, operation is float16 @ float16 -> float16 (float16 accumulate)
+- if c is float16, operation is float16 @ float16 -> float16 (float32 accumulate)
 - if c is float32, operation is float16 @ float16 -> float32 (float32 accumulate)
+
+Both output dtypes reduce in float32. cublasHgemm would accumulate in float16
+for the float16 output, which is 4-9x less accurate than the decode path and the
+float32-output GEMM at K=8192 (#5512).
 */
 
 void hgemm
@@ -77,19 +81,24 @@ void hgemm
 
     if (output_fp16)
     {
-        half alpha_ = __float2half(1.0f);
-        half beta_ = __float2half(0.0f);
+        // Keep the FP16 output buffer, but reduce in FP32 like the FP32-output
+        // branch below. cublasHgemm's compute type is FP16, so its K reduction
+        // accumulates in half precision; that path is 4-9x less accurate than
+        // the bc kernel and the FP32-output GEMM on the same rows (#5512).
+        float alpha_ = 1.0f;
+        float beta_ = 0.0f;
 
         half* c_ptr = (half*) c.data_ptr();
-        auto r = cublasHgemm
+        auto r = cublasGemmEx
         (
             cublas_handle,
-            CUBLAS_OP_N,
-            CUBLAS_OP_N,
+            CUBLAS_OP_N, CUBLAS_OP_N,
             size_n, size_m, size_k,
-            &alpha_, b_ptr, size_n,
-                     a_ptr, size_k,
-            &beta_,  c_ptr, size_n
+            &alpha_, b_ptr, CUDA_R_16F, size_n,
+                     a_ptr, CUDA_R_16F, size_k,
+            &beta_,  c_ptr, CUDA_R_16F, size_n,
+            CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT_TENSOR_OP
         );
         cublas_check(r);
         cuda_check(cudaPeekAtLastError());

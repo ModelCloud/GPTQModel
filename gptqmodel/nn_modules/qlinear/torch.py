@@ -34,13 +34,15 @@ from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.planar_packing import planar_decode_rows
 from ...utils.rocm import IS_ROCM
-from ...utils.torch import model_execution_device_scope, model_global_state_lock, torch_compile
+from ...utils.torch import dynamo_is_compiling, model_execution_device_scope, model_global_state_lock, torch_compile
 from ._compile_support import COMPILE_LEVEL
+from ._decode_dtype import _HALF_DTYPES, decode_dtype_for_scales, scales_fit_dtype
 from ._g_idx import validate_g_idx_bounds
 from ._numerics import (
     _wants_fp32_reduce,
     autocast_active,
     linear_needs_wide_bias,
+    linear_wide_bias,
     matmul_fp32_reduce,
 )
 from ._runtime_cache import tensor_cache_key
@@ -136,6 +138,31 @@ def _log_fallback_once(reason: str, message: str) -> None:
         return
     _LOGGED_FALLBACKS.add(reason)
     log.debug(message)
+
+
+def fused_scale_pair_supported(
+    scale_dtype: torch.dtype, activation_dtype: torch.dtype
+) -> bool:
+    """Whether the fused GPTQ kernels may read ``scale_dtype`` for this activation.
+
+    ``gptq_gemv``/``gptq_gemm`` load every scale, widen it to FP32, form the
+    decoded weight and round that product once to the activation dtype.  The
+    stored scale operand therefore does not have to be the activation dtype: it
+    only has to be one of the half dtypes the kernels were measured with.
+
+    GPTQ checkpoints store FP16 scales (``_scales_for_storage``) while a BF16
+    model runs BF16 activations, so that mixed pair is the one this admits
+    (#5740); before it, every BF16 model missed the fused kernels and paid the
+    dense dequantize + matmul fallback.  An equal pair keeps its previous
+    behaviour, and any other pair (for example FP32 scales with BF16
+    activations) keeps the dense path because the fused kernels are not
+    measured for it.  Range safety is a separate check
+    (``TorchLinear._decoded_weight_fits``), not part of this pair rule.
+    """
+
+    if scale_dtype == activation_dtype:
+        return True
+    return scale_dtype in _HALF_DTYPES and activation_dtype in _HALF_DTYPES
 
 
 def _right_shift_unpack(values: torch.Tensor, shifts: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -328,6 +355,11 @@ class TorchLinear(PackableQuantLinear):
         self._embedding_row_state = None
         self._stream_dequant_streams = {}
         self._cache_enabled = False
+        # Range-safe decode dtypes, refreshed eagerly by ``clear_weight_cache``
+        # so a traced graph can read them as constants (#5606).
+        self._decode_dtype_cache = None
+        self._decode_fit_cache = None
+        self._decode_dtype_cache_key = None
         triton_flag = kernel.torch_triton_dequant
         if triton_flag is None:
             self._triton_dequant_enabled = _TRITON_DEQUANT_AVAILABLE
@@ -420,7 +452,13 @@ class TorchLinear(PackableQuantLinear):
             metadata = self._weight_metadata = _LinearWeightMetadata(self)
         return metadata
 
-    def dequantize_weight(self, num_itr: int = 1):
+    def dequantize_weight(self, num_itr: int = 1, dtype: torch.dtype | None = None):
+        """Reconstruct the packed weight, preferably in ``dtype``.
+
+        ``dtype`` is the caller's requested decode dtype (the base class takes
+        the same argument).  It is honoured only when every decoded weight fits
+        it; otherwise the range-safe decode keeps the reduction wide (#5606).
+        """
         # Triton dequant currently handles the common single-iteration layout.
         # Multi-iteration requests (num_itr > 1) are routed to the torch path below.
         if (
@@ -428,14 +466,14 @@ class TorchLinear(PackableQuantLinear):
             and self._triton_dequant_enabled
             and self._can_use_triton_dequant()
         ):
-            return self._dequantize_weight_triton()
+            return self._dequantize_weight_triton(dtype=dtype)
 
         # Eval-time fast path for 2/4/8-bit torch dequant.
         # This is also the fallback when Triton is enabled but not eligible.
         if not self.training and self.bits in (2, 4, 8):
-            return self._dequantize_weight_cached_248(num_itr=num_itr)
+            return self._dequantize_weight_cached_248(num_itr=num_itr, dtype=dtype)
 
-        return super().dequantize_weight(num_itr=num_itr)
+        return super().dequantize_weight(num_itr=num_itr, dtype=dtype)
 
     def optimize(self, backend: str = None, mode: str = None, fullgraph: bool = False):
         if self.optimized:
@@ -576,9 +614,23 @@ class TorchLinear(PackableQuantLinear):
             return out
 
         num_itr = self.g_idx.shape[0] // x.shape[-1]
-        weights = self.dequantize_weight(num_itr=num_itr)
+        # Decode into the forward's activation dtype when every weight fits it:
+        # the fallback narrows the weight to that dtype anyway, and decoding in
+        # a different half dtype first rounds it twice (#5740).
+        weights = self.dequantize_weight(
+            num_itr=num_itr, dtype=self._forward_decode_dtype(x.dtype)
+        )
         bias = self.bias
-        if x.device.type == "cpu" and x.dtype in (torch.float16, torch.bfloat16) and bias is not None:
+        if weights.dtype != x.dtype and not self._decoded_weight_fits(x.dtype):
+            # The reconstructed weight is outside the activation dtype's finite
+            # range, so narrowing it would turn it into `inf` (and `0 * inf`
+            # into `NaN`). Promote the activation for this call, reduce wide,
+            # and round once at the output (#5606). This is the same epilogue
+            # the sibling dense fallbacks use.
+            if weights.device != x.device:
+                weights = weights.to(device=x.device)
+            out = linear_wide_bias(x, weights.t(), bias).reshape(out_shape)
+        elif x.device.type == "cpu" and x.dtype in (torch.float16, torch.bfloat16) and bias is not None:
             weights = weights.to(device=x.device)
             bias = bias.to(device=x.device)
             # CPU matmul rounds the product before a separate bias addition.
@@ -702,6 +754,13 @@ class TorchLinear(PackableQuantLinear):
         (RTX 4090 / SM 8.9), whose launch entries and gates are measured in the
         `gptq_gemv`/`gptq_gemm` tables.  Every other CUDA family keeps the
         portable dequantize + matmul path.
+
+        The scale dtype does not have to equal the activation dtype: the
+        kernels widen every scale to FP32 before the product, so
+        :func:`fused_scale_pair_supported` admits the FP16-scale/BF16-activation
+        pair a GPTQ checkpoint produces for a BF16 model (#5740).  The range
+        guard below still keeps a decode that would overflow the activation
+        dtype on the dense path.
         """
         return (
             (IS_ROCM or _arch_is_cuda_fused(x.device))
@@ -717,7 +776,11 @@ class TorchLinear(PackableQuantLinear):
             and self.g_idx.numel() == self.in_features
             and x.is_contiguous()
             and not x.requires_grad
-            and self.scales.dtype == x.dtype
+            and fused_scale_pair_supported(self.scales.dtype, x.dtype)
+            # The fused kernels stage the decoded weight in the activation
+            # dtype, so they are only range-safe when every decoded weight fits
+            # it; otherwise the dense path keeps the reduction wide (#5606).
+            and self._decoded_weight_fits(x.dtype)
             and self.qweight.device == x.device
             and self._rocm_arch_is_fused(x)
         )
@@ -865,6 +928,12 @@ class TorchLinear(PackableQuantLinear):
         zeros_tile = zeros.narrow(1, start, width)
         scales_tile = self.scales.narrow(1, start, width)
 
+        # Keep the multiply in a dtype that holds every decoded weight; the
+        # stored half-precision scale would otherwise overflow here (#5606).
+        decode_dtype = self._decode_dtype()
+        if decode_dtype != self.scales.dtype:
+            scales_tile = scales_tile.to(decode_dtype)
+            zeros_tile = zeros_tile.to(decode_dtype)
         dequant = scales_tile[g_idx] * (weight - zeros_tile[g_idx])
         buffer.narrow(1, 0, width).copy_(dequant.to(dtype))
         return width
@@ -879,7 +948,7 @@ class TorchLinear(PackableQuantLinear):
         return zeros[:, :self.scales.shape[1]]
 
     def _stream_decode_qzeros(self):
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # `tensor_cache_key` reads `is_inference()`/`_version`/`data_ptr()`,
             # all hard dynamo graph breaks, and publishing a fresh key is an
             # attribute write a graph must not perform. The decoded zero-points
@@ -907,7 +976,7 @@ class TorchLinear(PackableQuantLinear):
             else:
                 target_device = self.g_idx.device
 
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # Same reason as `_stream_decode_qzeros`: the cache key is
             # untraceable and the cache publication is a state write. A traced
             # graph reads the eager-built cache, or converts `g_idx` inline.
@@ -1000,6 +1069,10 @@ class TorchLinear(PackableQuantLinear):
             x.requires_grad or self.scales.requires_grad or (self.bias is not None and self.bias.requires_grad)
         ):
             return False
+        if not self._decoded_weight_fits(x.dtype):
+            # A decoded weight outside the activation dtype cannot be staged in
+            # the x.dtype tile buffer; the eager path keeps the reduction wide.
+            return False
         return True
 
     def enable_streaming(self, enabled: bool = True, tile_cols: int = None):
@@ -1027,6 +1100,7 @@ class TorchLinear(PackableQuantLinear):
         self._gptq_gemm_uniform_id = None
         self._gptq_gemm_uniform_version = None
         self._stream_reset_cache()
+        self._refresh_decode_dtypes()
 
     @property
     def _gptq_gemm_uniform_group(self) -> bool:
@@ -1128,9 +1202,11 @@ class TorchLinear(PackableQuantLinear):
             return False
         return True
 
-    def _dequantize_weight_triton(self) -> torch.Tensor:
-        # Use the Triton helper to decode weights directly on device.
-        dtype = self.scales.dtype
+    def _dequantize_weight_triton(self, dtype: torch.dtype | None = None) -> torch.Tensor:
+        # Use the Triton helper to decode weights directly on device. The
+        # kernel accumulates in FP32 but stores the requested dtype, so a half
+        # scale that overflows must ask for the range-safe decode (#5606).
+        dtype = self._resolve_decode_dtype(dtype)
         weights = triton_dequant(
             dtype,
             self.qweight,
@@ -1143,11 +1219,122 @@ class TorchLinear(PackableQuantLinear):
         )
         return weights
 
-    def _dequantize_weight_cached_248(self, num_itr: int = 1) -> torch.Tensor:
+    #: Activation dtypes whose range answer is precomputed for a traced graph.
+    _DECODE_FIT_ACTIVATIONS = (torch.float16, torch.bfloat16, torch.float32)
+
+    def _refresh_decode_dtypes(self) -> None:
+        """Precompute the range-safe decode dtypes for the live scales.
+
+        ``scales_fit_dtype`` runs a host reduction, which a traced graph cannot
+        execute, so the answers are computed here and read back as plain Python
+        constants (dynamo guards on them). ``clear_weight_cache()`` refreshes
+        them on every checkpoint load, device/dtype move and training
+        transition. ``None`` is the decoder's own dtype; the fit entries say
+        whether the decoded weights are representable in an activation dtype.
+        """
+        scales = getattr(self, "scales", None)
+        self._decode_dtype_cache = decode_dtype_for_scales(scales, self.bits)
+        self._decode_fit_cache = {
+            dtype: scales_fit_dtype(scales, self.bits, dtype)
+            for dtype in self._DECODE_FIT_ACTIVATIONS
+        }
+        self._decode_dtype_cache_key = tensor_cache_key(scales)
+
+    def _ensure_decode_caches(self) -> None:
+        """Refresh the eager-built range answers after a scales change."""
+        cached = self._decode_dtype_cache
+        scales = getattr(self, "scales", None)
+        # The range check is a host reduction, so it must not run inside a
+        # traced graph or a CUDA-graph capture; both read the precomputed
+        # answer instead (the eager warm-up built it).
+        capturing = (
+            scales is not None
+            and scales.device.type == "cuda"
+            and torch.cuda.is_current_stream_capturing()
+        )
+        if not dynamo_is_compiling() and not capturing:
+            if cached is None or self._decode_dtype_cache_key != tensor_cache_key(scales):
+                self._refresh_decode_dtypes()
+
+    def _decode_dtype(self) -> torch.dtype:
+        """Return a dtype that decodes every stored weight without range loss.
+
+        The stored scale dtype is kept while it holds every decoded weight;
+        otherwise the decode runs in FP32 (or FP64 for a pathological BF16
+        scale), exactly like the base decoder (#5606).
+        """
+        self._ensure_decode_caches()
+        cached = self._decode_dtype_cache
+        if cached is not None:
+            return cached
+        return decode_dtype_for_scales(self.scales, self.bits)
+
+    def _resolve_decode_dtype(self, dtype: torch.dtype | None) -> torch.dtype:
+        """Pick the decode dtype for a caller-requested ``dtype``.
+
+        A caller may ask for a dtype narrower than the range-safe decode; the
+        dense forward asks for its activation dtype.  Honour the request only
+        when every decoded weight fits it, and keep the range-safe decode
+        (#5606) otherwise.
+        """
+        safe = self._decode_dtype()
+        if dtype is None or dtype == safe:
+            return safe
+        if not self._decoded_weight_fits(dtype):
+            return safe
+        return dtype
+
+    def _forward_decode_dtype(self, activation_dtype: torch.dtype) -> torch.dtype:
+        """Decode dtype for the dense fallback of one forward.
+
+        The fallback narrows the reconstructed weight to ``activation_dtype``
+        anyway.  Decoding in a different half dtype first rounds every weight
+        twice and then copies the whole matrix: a GPTQ checkpoint stores FP16
+        scales, so a BF16 model decoded FP16 and narrowed to BF16, one bf16 ulp
+        away from the single rounding the fused kernels perform (#5740).  Ask
+        for the activation dtype when every decoded weight fits it; a decode
+        that does not fit keeps the range-safe dtype.
+        """
+        if (
+            activation_dtype in _HALF_DTYPES
+            and self.scales.dtype != activation_dtype
+            and self._decoded_weight_fits(activation_dtype)
+        ):
+            return activation_dtype
+        return self._decode_dtype()
+
+    def _decoded_weight_fits(self, activation_dtype: torch.dtype) -> bool:
+        """Whether every decoded weight is representable in ``activation_dtype``.
+
+        This gates narrowing a reconstructed weight to the forward's operand
+        dtype: an overflowing decode must keep the reduction wide instead
+        (#5606).
+        """
+        self._ensure_decode_caches()
+        cached = self._decode_fit_cache
+        if cached is not None:
+            resolved = cached.get(activation_dtype)
+            if resolved is not None:
+                return resolved
+        return scales_fit_dtype(self.scales, self.bits, activation_dtype)
+
+    def _dequantize_weight_cached_248(
+        self, num_itr: int = 1, dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
         self._init_wf_unsqueeze_buffers()
         zeros = self._stream_decode_qzeros()
         g_idx_long = self._stream_g_idx_long(target_device=self.qweight.device)
         self._maybe_offload_g_idx_to_cpu()
+
+        # Decode in a dtype that holds every stored weight. A half-precision
+        # scale overflows on the multiply here, before the caller widens the
+        # result, so the eval fast path used to return `inf`/`NaN` (#5606).
+        # The scale dtype is kept whenever it is safe, so a finite fast path is
+        # bitwise unchanged.
+        decode_dtype = self._resolve_decode_dtype(dtype)
+        wide = decode_dtype != self.scales.dtype
+        if wide:
+            zeros = zeros.to(decode_dtype)
 
         weight = torch.bitwise_and(
             _right_shift_unpack(
@@ -1160,10 +1347,15 @@ class TorchLinear(PackableQuantLinear):
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
         if num_itr == 1:
+            if wide:
+                return self.scales.to(decode_dtype)[g_idx_long] * (
+                    weight[:self.in_features].to(decode_dtype) - zeros[g_idx_long]
+                )
             return self.scales[g_idx_long] * (weight[:self.in_features] - zeros[g_idx_long])
 
         num_dim = self.g_idx.shape[0] // num_itr
         out_dim = weight.shape[1] // num_itr
+        scales = self.scales.to(decode_dtype) if wide else self.scales
         weights = []
         for i in range(num_itr):
             row_start = i * num_dim
@@ -1171,10 +1363,12 @@ class TorchLinear(PackableQuantLinear):
             col_start = i * out_dim
             col_end = (i + 1) * out_dim if i < (num_itr - 1) else weight.shape[1]
 
-            scale_i = self.scales[:, col_start:col_end]
+            scale_i = scales[:, col_start:col_end]
             weight_i = weight[row_start:row_end, col_start:col_end]
             zeros_i = zeros[:, col_start:col_end]
             g_idx_i = g_idx_long[row_start:row_end]
+            if wide:
+                weight_i = weight_i.to(decode_dtype)
             weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
 
         return torch.cat(weights, dim=1)
@@ -1290,6 +1484,12 @@ class TorchQuantEmbeddings(TorchLinear):
     EMBEDDING_ROW_DECODE_LIMIT = 1024
     EMBEDDING_ROW_DECODE_MIN_TABLE_BYTES = 64 * 1024 * 1024
 
+    #: CPU row decode decodes bounded chunks so the transient code/scale
+    #: tensors stay proportional to the chunk instead of the whole query. CPU
+    #: has no kernel-launch amortization to recover, so the accelerator cutoffs
+    #: above do not apply there (#5772).
+    EMBEDDING_CPU_ROW_DECODE_CHUNK = 8192
+
     #: Dtype the forward returns. A quantized embedding's stored ``scales`` keep
     #: the checkpoint dtype (FP16 for GPTQ), which is not the model's compute
     #: dtype; returning it promoted a BF16 residual stream to FP32 and made a
@@ -1333,7 +1533,7 @@ class TorchQuantEmbeddings(TorchLinear):
         weight is retained. The state is keyed on the packed tensors so a
         replaced or mutated checkpoint invalidates it.
         """
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # `tensor_cache_key` reads `is_inference()`/`_version`/`data_ptr()`,
             # all hard dynamo graph breaks, and publishing the metadata is a
             # state write. The eager warmup built it for this constant
@@ -1439,16 +1639,64 @@ class TorchQuantEmbeddings(TorchLinear):
 
         The result is transient scratch for this forward: only the packed
         `qweight`/`qzeros`/`scales`/`g_idx` metadata persists afterwards.
+        CPU queries are decoded in bounded chunks so the intermediate code and
+        scale tensors stay proportional to the chunk, not the whole query.
         """
         self._init_wf_unsqueeze_buffers()
         state = self._embedding_row_decode_state()
         rows = input_ids.reshape(-1).to(device=self.qweight.device, dtype=torch.int32)
+        decode_dtype = self._decode_dtype()
+        chunk = (
+            int(self.EMBEDDING_CPU_ROW_DECODE_CHUNK)
+            if self.qweight.device.type == "cpu"
+            else 0
+        )
+        if chunk <= 0 or rows.numel() <= chunk:
+            return self._dequantize_embedding_row_chunk(rows, state, decode_dtype)
+        result = torch.empty(
+            rows.numel(), self.out_features, dtype=decode_dtype, device=rows.device
+        )
+        for start in range(0, rows.numel(), chunk):
+            stop = min(start + chunk, rows.numel())
+            result[start:stop] = self._dequantize_embedding_row_chunk(
+                rows[start:stop], state, decode_dtype
+            )
+        return result
 
+    def _dequantize_embedding_row_chunk(self, rows, state, decode_dtype):
+        """Decode one bounded batch of packed embedding rows."""
         codes = self._embedding_row_codes(rows, state)
         groups = state["groups"].index_select(0, rows)
         scales = self.scales.index_select(0, groups)
         zeros = state["zeros"].index_select(0, groups)
+        # The row gather multiplies in the scale dtype too; a half scale that
+        # overflows must decode wide exactly like the whole-table path (#5606).
+        if decode_dtype != self.scales.dtype:
+            return scales.to(decode_dtype) * (codes.to(decode_dtype) - zeros.to(decode_dtype))
         return scales * (codes - zeros)
+
+    def _embedding_row_decode_eligible(self, input_ids: torch.Tensor) -> bool:
+        """Cheap gate for row decode; CPU and accelerator policies differ.
+
+        The GPU cutoffs amortize kernel-launch cost and were measured on
+        accelerators. CPU gathers only the queried rows, so it uses row decode
+        whenever the query is no wider than the table; whole-table decode is
+        reserved for queries with more lookups than vocabulary rows, where it
+        decodes each row once instead of repeatedly (#5772).
+        """
+        if self.training or self.qweight is None:
+            return False
+        if input_ids.dtype not in (torch.int32, torch.int64):
+            return False
+        if input_ids.device != self.qweight.device:
+            return False
+        if self.qweight.device.type == "cpu":
+            return input_ids.numel() <= self.in_features
+        return (
+            input_ids.numel() <= self.EMBEDDING_ROW_DECODE_LIMIT
+            and self.in_features * self.out_features * self.scales.element_size()
+            >= self.EMBEDDING_ROW_DECODE_MIN_TABLE_BYTES
+        )
 
     def forward(self, input_ids: torch.Tensor):
         output_dtype = self.embedding_output_dtype()
@@ -1459,13 +1707,7 @@ class TorchQuantEmbeddings(TorchLinear):
                 device=self.scales.device,
             )
         if (
-            not self.training
-            and self.qweight is not None
-            and input_ids.numel() <= self.EMBEDDING_ROW_DECODE_LIMIT
-            and input_ids.dtype in (torch.int32, torch.int64)
-            and input_ids.device == self.qweight.device
-            and self.in_features * self.out_features * self.scales.element_size()
-            >= self.EMBEDDING_ROW_DECODE_MIN_TABLE_BYTES
+            self._embedding_row_decode_eligible(input_ids)
             and self._embedding_row_decode_state() is not None
         ):
             rows = self._dequantize_embedding_rows(input_ids)

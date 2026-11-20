@@ -28,6 +28,7 @@ from ..exllamav3.modules.quant.exl3_lib.quantize import (
     reconstruct_exl3_tensors,
     validate_exl3_quantization_geometry,
 )
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, validate_trellis_k
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
@@ -128,7 +129,7 @@ from ..utils.fallback import (
     should_use_fallback,
 )
 from ..utils.host_memory import malloc_trim
-from ..utils.kernel import get_kernel_config
+from ..utils.kernel import get_kernel_config, resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.model import recurse_setattr
 from ..utils.module_locks import parent_module_lock
@@ -218,6 +219,30 @@ _OUT_SCALES_TO_ARG = {
     "auto": None,
     None: None,
 }
+
+
+def build_exl3_quant_args(
+    config: EXL3Config, *, bits: int | float, device: torch.device,
+) -> Dict[str, object]:
+    """Build the common arguments for one resolved EXL3 projection."""
+    codebook = config.codebook
+    validate_trellis_k(
+        bits,
+        codebook == "mcg",
+        codebook == "mul1",
+        q4nx=codebook == "q4nx",
+        r4nx=codebook == "r4nx",
+    )
+    quant_args: Dict[str, object] = {
+        "K": bits,
+        "devices": [device],
+        "apply_out_scales": _OUT_SCALES_TO_ARG.get(config.out_scales, None),
+        "sigma_reg": _EXL3_SIGMA_REG,
+        "seed": 787,
+    }
+    if codebook in EXL3_CODEBOOK_MARKERS:
+        quant_args[codebook] = True
+    return quant_args
 
 
 def _inline_candidate_role(policy) -> str:
@@ -848,6 +873,8 @@ class _EXL3NaturalRouteCapture:
 def clone_exllamav3_config_for_module(
     qcfg: EXL3Config,
     module_full_name: str,
+    *,
+    lm_head_name: str = "lm_head",
 ) -> Optional[EXL3Config]:
     """Clones and applies per-module EXL3 dynamic overrides, or skips the module."""
 
@@ -859,23 +886,29 @@ def clone_exllamav3_config_for_module(
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
+    is_head = lm_head_name in (module_full_name, module_full_name.rsplit(".", 1)[-1])
+    qcfg_clone.head_bits = resolved_cfg.get("head_bits", qcfg.head_bits) if is_head else None
 
     if qcfg.dynamic is not None:
         qcfg_clone.bits = resolved_cfg.get("bits", qcfg_clone.bits)
-        qcfg_clone.head_bits = resolved_cfg.get("head_bits", qcfg_clone.head_bits)
 
         out_scales_override = resolved_cfg.get("out_scales", None)
         if out_scales_override is not None:
             qcfg_clone.out_scales = out_scales_override
 
         codebook_override = resolved_cfg.get("codebook", None)
-        if codebook_override is not None:
+        if codebook_override is not None and codebook_override != qcfg.codebook:
             qcfg_clone.codebook = codebook_override
+            if qcfg_clone.head_bits is not None:
+                qcfg_clone.bits = qcfg_clone.head_bits
 
         calibration_override = resolved_cfg.get("calibration", None)
         if calibration_override is not None:
             qcfg_clone.calibration = calibration_override
 
+    # The rules were normalized against the model defaults. This clone already
+    # resolved its module, so its codebook must not reinterpret another rule.
+    qcfg_clone.dynamic = None
     qcfg_clone.__post_init__()
     return qcfg_clone
 
@@ -2318,7 +2351,9 @@ class EXL3Processor(SharedInputCaptureProcessor):
 
         del kwargs
 
-        module_qcfg = clone_exllamav3_config_for_module(self.qcfg, module.full_name)
+        module_qcfg = clone_exllamav3_config_for_module(
+            self.qcfg, module.full_name, lm_head_name=getattr(self, "lm_head_name", "lm_head"),
+        )
         if module_qcfg is None:
             return
         # The fallback is honoured for starved modules at quantization time
@@ -2338,7 +2373,9 @@ class EXL3Processor(SharedInputCaptureProcessor):
         )
 
         capture_qcfg = GPTQConfig(
-            bits=max(1, module_qcfg.runtime_bits),
+            # This GPTQ object captures the Hessian. The EXL3 packer uses
+            # the precise rate from module_qcfg when quantization starts.
+            bits=max(2, int(module_qcfg.runtime_bits)),
             group_size=-1,
             desc_act=False,
             sym=True,
@@ -2520,12 +2557,12 @@ class EXL3Processor(SharedInputCaptureProcessor):
 
         return module.full_name == self.lm_head_name or module.name == self.lm_head_name
 
-    def _target_bits(self, module: NamedModule, module_qcfg: EXL3Config) -> int:
+    def _target_bits(self, module: NamedModule, module_qcfg: EXL3Config) -> int | float:
         """Chooses lm_head-specific bitwidth overrides when configured."""
 
         if self._is_lm_head(module) and module_qcfg.head_bits is not None:
-            return max(1, int(module_qcfg.head_bits))
-        return max(1, module_qcfg.runtime_bits)
+            return module_qcfg.head_bits
+        return module_qcfg.runtime_bits
 
     def _build_quant_args(
         self,
@@ -2533,28 +2570,12 @@ class EXL3Processor(SharedInputCaptureProcessor):
         module_qcfg: EXL3Config,
         device: torch.device,
         *,
-        bits_override: int | None = None,
+        bits_override: int | float | None = None,
     ) -> Dict[str, object]:
         """Builds the argument bundle passed into the EXL3 quantizer."""
 
-        quant_args: Dict[str, object] = {
-            "K": (
-                self._target_bits(module, module_qcfg)
-                if bits_override is None
-                else int(bits_override)
-            ),
-            "devices": [device],
-            "apply_out_scales": _OUT_SCALES_TO_ARG.get(module_qcfg.out_scales, None),
-            "sigma_reg": _EXL3_SIGMA_REG,
-            "seed": 787,
-        }
-
-        if module_qcfg.codebook == "mcg":
-            quant_args["mcg"] = True
-        elif module_qcfg.codebook == "mul1":
-            quant_args["mul1"] = True
-
-        return quant_args
+        bits = self._target_bits(module, module_qcfg) if bits_override is None else bits_override
+        return build_exl3_quant_args(module_qcfg, bits=bits, device=device)
 
     def _quant_input_weight(self, capture: GPTQ, device: torch.device) -> torch.Tensor:
         """Exports the captured dense weight in EXL3's padded quantizer layout.
@@ -2687,7 +2708,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
             )
 
         module.stream_sync()
-        packed_names = ("trellis", "suh", "svh", "su", "sv", "mcg", "mul1")
+        packed_names = ("trellis", "suh", "svh", "su", "sv", *EXL3_CODEBOOK_MARKERS)
         packed = {
             name: module.state[name]
             for name in packed_names
@@ -3158,7 +3179,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
         remote_client,
         execution_slot,
         execution_lease: ExecutionSlotLease | None,
-        bits_override: int | None = None,
+        bits_override: int | float | None = None,
         inline_context: dict[str, Any] | None = None,
         defer_stats: bool = False,
     ):
@@ -3245,7 +3266,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 else None
             )
             quantizer_contract = {
-                "bits": int(quant_args["K"]),
+                "bits": quant_args["K"],
                 "codebook": module_qcfg.codebook,
                 "apply_out_scales": quant_args["apply_out_scales"],
                 "sigma_reg": float(quant_args["sigma_reg"]),
@@ -3426,7 +3447,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
             ledger_record = build_projection_record(
                 module_full_name=module.full_name,
                 layer_index=module.layer_index,
-                bits=int(quant_args["K"]),
+                bits=quant_args["K"],
                 codebook=module_qcfg.codebook,
                 sample_count=capture.nsamples,
                 duration_seconds=duration,
@@ -3480,7 +3501,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
             expected_ledger_record = build_projection_record(
                 module_full_name=module.full_name,
                 layer_index=module.layer_index,
-                bits=int(quant_args["K"]),
+                bits=quant_args["K"],
                 codebook=module_qcfg.codebook,
                 sample_count=capture.nsamples,
                 duration_seconds=duration,
@@ -3495,7 +3516,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 legacy_ledger_record = build_projection_record(
                     module_full_name=module.full_name,
                     layer_index=module.layer_index,
-                    bits=int(quant_args["K"]),
+                    bits=quant_args["K"],
                     codebook=module_qcfg.codebook,
                     sample_count=capture.nsamples,
                     duration_seconds=duration,
@@ -3659,8 +3680,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 "su",
                 "sv",
                 "bias",
-                "mcg",
-                "mul1",
+                *EXL3_CODEBOOK_MARKERS,
             ):
                 tensor = module.state.pop(tensor_name, None)
                 if tensor is not None:
@@ -3673,6 +3693,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 name=module.full_name,
                 submodule=module,
                 tensors=tensors,
+                kernel=resolve_kernel_config(self.qcfg),
             )
 
         module.unregister_parameter("weight")
@@ -4170,6 +4191,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 name=module_name,
                 submodule=named,
                 tensors=tensors,
+                kernel=resolve_kernel_config(self.qcfg),
             )
             if materialize_device is None:
                 # Preserve scalar multiplier values before replacing every
@@ -4333,6 +4355,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 name=module_name,
                 tensor_storage=tensor_storage,
                 out_dtype=packed.out_dtype,
+                kernel=packed.kernel,
             )
             recurse_setattr(model.model, module_name, placeholder)
 

@@ -350,6 +350,31 @@ def _gguf_quantize_sign_only(blocks: np.ndarray, *, block_size: int) -> np.ndarr
     return packed
 
 
+def _pad_sign_only_tail(
+    weight: torch.Tensor,
+    *,
+    padded_in_features: int,
+    block_size: int,
+) -> torch.Tensor:
+    """Zero-pad a sign-only weight without diluting its final partial block.
+
+    ``_gguf_quantize_sign_only`` stores one scale per block: the mean magnitude
+    over all ``block_size`` columns. Filling the synthetic tail with the real
+    tail's mean magnitude keeps that mean unchanged, so the packed scale is the
+    least-squares optimum over the real columns. Forward paths always zero-pad
+    activations, so the filled columns never contribute to a result.
+    """
+    padding = padded_in_features - weight.shape[1]
+    if padding <= 0:
+        return weight
+    tail_columns = weight.shape[1] % block_size
+    if tail_columns == 0:  # pragma: no cover - padding implies a partial block
+        tail_scale = weight.new_zeros((weight.shape[0], 1))
+    else:
+        tail_scale = weight[:, -tail_columns:].abs().mean(dim=1, keepdim=True)
+    return torch.cat((weight, tail_scale.expand(-1, padding)), dim=1)
+
+
 def _gguf_roundf(values: np.ndarray) -> np.ndarray:
     absolute = np.abs(values)
     floored = np.floor(absolute)
@@ -480,6 +505,67 @@ def _torch_left_shift(values: torch.Tensor, shifts: int | torch.Tensor) -> torch
     return shifted.to(values.dtype)
 
 
+# Smallest positive FP16 subnormal. A nonzero K-quant superblock base below
+# half of this rounds to zero in FP16 and erases the whole block, so the packer
+# clamps it to this value and rebuilds the codes against the stored base
+# (#5628).
+_FP16_MIN_SUBNORMAL = np.float16(2.0**-24)
+
+
+def _stored_k_base(base: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Cast a superblock base to FP16 without erasing a nonzero block.
+
+    Returns ``(stored, underflow)``. ``underflow`` marks rows whose FP32 base
+    is positive but rounds to zero in FP16; those rows are clamped to the
+    smallest positive FP16 subnormal so their scale codes can be rebuilt.
+    """
+
+    stored = base.astype(np.float16)
+    underflow = (base > 0) & (stored == 0)
+    stored = np.where(underflow, _FP16_MIN_SUBNORMAL, stored).astype(np.float16)
+    return stored, underflow
+
+
+def _rebuild_underflow_scale_codes(
+    subblocks: np.ndarray,
+    base: np.ndarray,
+    *,
+    maxq: int,
+    scale_quant_max: int,
+    signed: bool,
+    eff_min: np.ndarray | None = None,
+) -> np.ndarray:
+    """Pick the scale code that best reconstructs a clamped-base superblock.
+
+    The normal path derives the scale codes from the FP32 base. When the base
+    had to be clamped to the smallest FP16 subnormal, those codes can erode to
+    zero or overflow ``maxq`` and saturate the values. Search every
+    representable scale code instead and keep the grid with the smallest
+    reconstruction error (#5628).
+    """
+
+    base = base.astype(np.float32)
+    best_error = np.full(subblocks.shape[:2], np.inf, dtype=np.float64)
+    best_code = np.ones(subblocks.shape[:2], dtype=np.int32)
+    # Score one candidate code at a time so the temporaries stay proportional
+    # to the block instead of the number of candidate codes.
+    for code in range(1, scale_quant_max + 1):
+        eff_scale = base[:, :, None] * np.float32(code)
+        if signed:
+            q = np.clip(np.rint(subblocks / eff_scale), -32, 31)
+            reconstructed = q * eff_scale
+        else:
+            assert eff_min is not None
+            shifted = subblocks + eff_min[..., None]
+            q = np.clip(np.rint(shifted / eff_scale), 0, maxq)
+            reconstructed = q * eff_scale - eff_min[..., None]
+        error = np.abs(reconstructed - subblocks).sum(axis=-1)
+        better = error < best_error
+        best_error[better] = error[better]
+        best_code[better] = code
+    return best_code
+
+
 def _quantize_k_subblocks(
     subblocks: np.ndarray,
     *,
@@ -489,37 +575,86 @@ def _quantize_k_subblocks(
 ) -> tuple[np.ndarray, ...]:
     if signed:
         scale = np.abs(subblocks).max(axis=-1) / maxq
-        base = scale.max(axis=-1, keepdims=True) / scale_quant_max
+        base_f32 = scale.max(axis=-1, keepdims=True) / scale_quant_max
+        base, underflow = _stored_k_base(base_f32)
         with np.errstate(divide="ignore", invalid="ignore"):
-            quant_scales = np.where(base > 0, np.rint(scale / base), 0.0)
+            quant_scales = np.where(base_f32 > 0, np.rint(scale / base_f32), 0.0)
         quant_scales = np.clip(quant_scales, 0, scale_quant_max).astype(np.int32)
-        eff_scale = base * quant_scales.astype(np.float32)
+        underflow_rows = np.flatnonzero(underflow.reshape(-1))
+        if underflow_rows.size:
+            quant_scales[underflow_rows] = _rebuild_underflow_scale_codes(
+                subblocks[underflow_rows],
+                base[underflow_rows],
+                maxq=maxq,
+                scale_quant_max=scale_quant_max,
+                signed=True,
+            )
+        effective_base = np.where(underflow, base.astype(np.float32), base_f32)
+        eff_scale = effective_base * quant_scales.astype(np.float32)
         with np.errstate(divide="ignore", invalid="ignore"):
             q = np.where(eff_scale[..., None] > 0, np.rint(subblocks / eff_scale[..., None]), 0.0)
         q = np.clip(q, -32, 31).astype(np.int8)
-        return base.astype(np.float16), quant_scales.astype(np.int8), q
+        return base, quant_scales.astype(np.int8), q
 
     mins = np.maximum(-subblocks.min(axis=-1), 0.0)
     scale = (subblocks.max(axis=-1) + mins) / maxq
 
-    base = scale.max(axis=-1, keepdims=True) / scale_quant_max
-    min_base = mins.max(axis=-1, keepdims=True) / scale_quant_max
+    base_f32 = scale.max(axis=-1, keepdims=True) / scale_quant_max
+    min_base_f32 = mins.max(axis=-1, keepdims=True) / scale_quant_max
+    base, underflow = _stored_k_base(base_f32)
+    min_base, min_underflow = _stored_k_base(min_base_f32)
 
     with np.errstate(divide="ignore", invalid="ignore"):
-        quant_scales = np.where(base > 0, np.rint(scale / base), 0.0)
-        quant_mins = np.where(min_base > 0, np.rint(mins / min_base), 0.0)
+        quant_scales = np.where(base_f32 > 0, np.rint(scale / base_f32), 0.0)
+        quant_mins = np.where(min_base_f32 > 0, np.rint(mins / min_base_f32), 0.0)
 
     quant_scales = np.clip(quant_scales, 0, scale_quant_max).astype(np.uint8)
     quant_mins = np.clip(quant_mins, 0, scale_quant_max).astype(np.uint8)
 
-    eff_scale = base * quant_scales.astype(np.float32)
-    eff_min = min_base * quant_mins.astype(np.float32)
+    min_underflow_rows = np.flatnonzero(min_underflow.reshape(-1))
+    if min_underflow_rows.size:
+        # Rebuild the minimum codes against the clamped base so a nonzero
+        # minimum does not erode to zero either (#5628).
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rebuilt_mins = np.where(
+                min_base[min_underflow_rows].astype(np.float32) > 0,
+                np.rint(
+                    mins[min_underflow_rows]
+                    / min_base[min_underflow_rows].astype(np.float32)
+                ),
+                0.0,
+            )
+        quant_mins[min_underflow_rows] = np.clip(
+            rebuilt_mins, 0, scale_quant_max
+        ).astype(np.uint8)
+
+    effective_base = np.where(underflow, base.astype(np.float32), base_f32)
+    effective_min_base = np.where(
+        min_underflow, min_base.astype(np.float32), min_base_f32
+    )
+    eff_min = effective_min_base * quant_mins.astype(np.float32)
+
+    underflow_rows = np.flatnonzero(underflow.reshape(-1))
+    if underflow_rows.size:
+        quant_scales[underflow_rows] = _rebuild_underflow_scale_codes(
+            subblocks[underflow_rows],
+            base[underflow_rows],
+            maxq=maxq,
+            scale_quant_max=scale_quant_max,
+            signed=False,
+            eff_min=eff_min[underflow_rows],
+        ).astype(np.uint8)
+
+    # The rebuilt codes change the effective scale, so derive it afterwards:
+    # the stored values must be quantized against the scale that is decoded.
+    eff_scale = effective_base * quant_scales.astype(np.float32)
+
     shifted = subblocks + eff_min[..., None]
     with np.errstate(divide="ignore", invalid="ignore"):
         q = np.where(eff_scale[..., None] > 0, np.rint(shifted / eff_scale[..., None]), 0.0)
     q = np.clip(q, 0, maxq).astype(np.uint8)
 
-    return base.astype(np.float16), min_base.astype(np.float16), quant_scales, quant_mins, q
+    return base, min_base, quant_scales, quant_mins, q
 
 
 def _gguf_quantize_q4_k(blocks: np.ndarray) -> np.ndarray:
@@ -1485,7 +1620,14 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             group_size=self.smooth_block_size(),
         )
         if weight.shape[1] != self.padded_in_features:
-            weight = torch.nn.functional.pad(weight, (0, self.padded_in_features - weight.shape[1]))
+            if self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+                weight = _pad_sign_only_tail(
+                    weight,
+                    padded_in_features=self.padded_in_features,
+                    block_size=self.gguf_block_size,
+                )
+            else:
+                weight = torch.nn.functional.pad(weight, (0, self.padded_in_features - weight.shape[1]))
 
         weight = weight.contiguous()
         if _mlx_quantization_available() and weight.numel() >= _MLX_GGUF_MIN_ELEMENTS:
@@ -2028,19 +2170,30 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         dequantizing a full layer.
 
         Q2_0 uses a signed code in [-1, 2] with an FP16 scale, while Q8_K
-        uses a signed int8 code with an FP32 scale. Their bounds are 2 and
-        128 times the absolute block scale.
+        uses a signed int8 code with an FP32 scale. Their overflow bounds are
+        2 and 128 times the absolute block scale. Q8_K additionally reports a
+        block whose FP32 scale would round its smallest nonzero code to zero
+        in FP16, because that erasure happens at decode time, not at pack time.
         """
         if not target_dtype.is_floating_point:
             return True
         if self.gguf_tensor_qtype in ("Q2_0", "Q8_K"):
             if self.gguf_tensor_qtype == "Q2_0":
                 d = blocks[..., :2].contiguous().view(torch.float16).float().abs()
-                code_max = 2
-            else:
-                d = blocks[..., :4].contiguous().view(torch.float32).abs()
-                code_max = 128
-            return bool(((d * code_max) > torch.finfo(target_dtype).max).any())
+                return bool(((d * 2) > torch.finfo(target_dtype).max).any())
+            d = blocks[..., :4].contiguous().view(torch.float32).abs()
+            if bool(((d * 128) > torch.finfo(target_dtype).max).any()):
+                return True
+            # Q8_K keeps an FP32 block scale, so a tiny nonzero block survives
+            # packing and is only erased when the decoded weights are narrowed
+            # to FP16. Inspect the codes only for blocks whose smallest
+            # possible magnitude (|d| * 1) rounds to zero; an all-zero block
+            # stays narrow.
+            tiny = d.reshape(-1) <= float(_FP16_MIN_SUBNORMAL) / 2.0
+            if not bool(tiny.any()):
+                return False
+            nonzero = blocks[..., 4:260].contiguous().view(torch.int8) != 0
+            return bool((tiny & nonzero.reshape(-1, 256).any(dim=-1)).any())
         if self.gguf_tensor_qtype in ("Q4_0", "Q8_0"):
             d = blocks[..., :2].contiguous().view(torch.float16).float().abs()
             # Signed codes reach -8 in Q4_0 and -128 in Q8_0.

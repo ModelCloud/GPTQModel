@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import List, Optional, Tuple
 
 import torch
+import transformers
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import CPU, DEVICE, PLATFORM
@@ -19,7 +20,9 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
 from ...utils.rocm import IS_ROCM
+from ...utils.torch import dynamo_is_compiling
 from ._compile_support import COMPILE_LEVEL
+from ._numerics import scaled_accumulation
 from ._runtime_cache import tensor_cache_key
 
 
@@ -315,9 +318,11 @@ class QQQLinear(GroupedQuantLinear):
             )
         # Quantization builds this module with `register_buffers=False`, so the
         # bias attribute must be initialized outside the buffer preallocation
-        # block or `pack()` cannot tell whether a bias is expected.
+        # block or `pack()` cannot tell whether a bias is expected. A caller
+        # that already knows the checkpoint width (the kernel rebuild path)
+        # passes ``bias_dtype``; the packer adopts the source width otherwise.
         if bias:
-            self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
+            self.register_buffer("bias", torch.zeros((self.out_features), dtype=self.bias_dtype))
         else:
             self.bias = None
 
@@ -522,6 +527,10 @@ class QQQLinear(GroupedQuantLinear):
             device=CPU,
         )
         weight = linear.weight.data
+        if isinstance(linear, transformers.Conv1D):
+            # ``transformers.Conv1D`` stores ``[in_features, out_features]``;
+            # the tiling below addresses the logical ``[out, in]`` layout.
+            weight = weight.t()
         perm = self._perm.to(device=weight.device)
         for input_start in range(0, self.in_features, input_chunk_size):
             input_end = min(input_start + input_chunk_size, self.in_features)
@@ -612,11 +621,19 @@ class QQQLinear(GroupedQuantLinear):
                 persistent=False,
             )
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device=packed_weight.device, dtype=torch.float16)
+            # A bias is model-dtype storage, not quantization state: narrowing
+            # a finite BF16 bias into the FP16 placeholder turns e.g. 65536
+            # into +inf before any kernel runs (#5603). Keep the source width
+            # and let each forward promote it at the accumulation epilogue.
+            bias = linear.bias.detach().to(device=packed_weight.device)
             if "bias" in self._buffers:
-                self.bias.copy_(bias)
+                if self.bias.dtype != bias.dtype:
+                    self.register_buffer("bias", bias)
+                else:
+                    self.bias.copy_(bias)
             else:
                 self.register_buffer("bias", bias)
+            self.bias_dtype = bias.dtype
         elif not hasattr(self, "bias"):
             self.bias = None
         # A repack replaces ``B``/scales, so any derived CPU cache (and the
@@ -625,11 +642,50 @@ class QQQLinear(GroupedQuantLinear):
         if callable(clear):
             clear()
 
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        """Adopt the checkpoint bias width before the generic buffer copy.
+
+        ``nn.Module.load_state_dict`` copies into the preallocated FP16
+        placeholder, so a BF16 checkpoint bias would be narrowed - and can
+        become +inf - before the kernel ever runs (#5603). Replacing the
+        buffer with the checkpoint width makes the generic ``copy_`` exact.
+        """
+        key = prefix + "bias"
+        incoming = state_dict.get(key)
+        current = getattr(self, "bias", None)
+        if (
+            isinstance(incoming, torch.Tensor)
+            and isinstance(current, torch.Tensor)
+            and current.device.type != "meta"
+            and incoming.dtype != current.dtype
+            and incoming.shape == current.shape
+        ):
+            self.bias = incoming.to(device=current.device)
+            self.bias_dtype = self.bias.dtype
+        return super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
         if (x.device.type == "cuda" and x.is_contiguous() and 0 < x.shape[-1] <= 32768
                 and x.dtype in QQQ_ACTIVATION_DTYPES
-                and not torch.compiler.is_compiling()):
+                and not dynamo_is_compiling()):
             quantizer = _qqq_gpu_quantizer()
             if quantizer is not None:
                 return quantizer(x)
@@ -1026,10 +1082,35 @@ class QQQTorchLinear(QQQLinear):
                 self._torch_packed_cache_key = self._torch_weight_state_key()
             return True
 
-    def materialize_checkpoint_layout_for_export(self) -> bool:
-        """Publish the dropped checkpoint buffers so an export can see them."""
+    def iter_runtime_weight_tensors(self):
+        """Yield the packed CPU operands that replaced the checkpoint buffers.
 
-        return self._materialize_dropped_checkpoint()
+        ``_torch_packed_cache`` is a plain tuple, so a budget walk that only
+        reads ``parameters()`` and ``buffers()`` misses almost all of the
+        projection's weight bytes once the first forward has dropped
+        ``B``/``s_group``/``s_channel`` (#5810).
+        """
+
+        yield from self._torch_packed_cache or ()
+
+    def materialize_checkpoint_layout_for_export(self) -> bool:
+        """Publish the dropped checkpoint buffers so an export can see them.
+
+        The packed cache is released in the same critical section. The rebuilt
+        checkpoint buffers hold the exact same weight, so keeping both would
+        leave two full copies resident after a save; the refreshed cache key
+        would then make the next forward take the cache hit and never run the
+        rebuild-and-verify drop (#5804). The next native forward rebuilds the
+        packed terms and ``_maybe_drop_checkpoint_tensors()`` drops the
+        checkpoint buffers again only after proving the inverse exact.
+        """
+
+        with self._cpu_transform_lock:
+            materialized = self._materialize_dropped_checkpoint()
+            if materialized:
+                self._torch_packed_cache = None
+                self._torch_packed_cache_key = None
+            return materialized
 
     def _maybe_drop_checkpoint_tensors(self) -> bool:
         """Release the checkpoint copy once the cache proves it is rebuildable.
@@ -1144,7 +1225,7 @@ class QQQTorchLinear(QQQLinear):
             or self.in_features > INT8_INT32_MAX_REDUCTION
         ):
             return None
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # ``_qqq_cpu_kernel()`` resolves the extension through
             # ``importlib`` (a dynamo-skipped call) and
             # ``_packed_weight_for_cpu()`` takes the transform lock and may drop
@@ -1259,8 +1340,15 @@ class QQQTorchLinear(QQQLinear):
                     quant_A.to(torch.float32),
                     weight.to(device=A_flat.device, dtype=torch.float32),
                 )
-        accum = accum * s1
-        accum = accum * s_channel.to(device=A_flat.device, dtype=torch.float32)
+        # Apply both scales through the overflow-safe product: the historical
+        # left-to-right order overflows an FP32 intermediate for a finite
+        # BF16 result (#5608), while the helper keeps that order's exact bits
+        # whenever it is representable.
+        accum = scaled_accumulation(
+            accum,
+            s1,
+            s_channel.to(device=A_flat.device, dtype=torch.float32),
+        )
         if self.bias is not None:
             # The INT8 reduction and scales are still FP32 here. Add bias
             # before the output cast so a finite sum cannot overflow in FP16.

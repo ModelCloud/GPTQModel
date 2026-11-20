@@ -40,6 +40,7 @@ from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
 from ..adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS
 from ..looper.named_module import NamedModule
 from ..models._const import (
     CPU,
@@ -51,6 +52,7 @@ from ..nn_modules.qlinear import (
     QZEROS_FORMAT_BUFFER,
     BaseQuantLinear,
     GPTQQuantLinear,
+    checkpoint_qzeros_layout,
 )
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
@@ -81,7 +83,12 @@ from .kernel import resolve_kernel_config, snapshot_kernel_config
 from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
 from .p2p import safe_module_to, safe_move_to
-from .packing import _auto_pack_impl
+from .packing import (
+    _auto_pack_impl,
+    _is_accelerator_pack_family,
+    _pack_target_family,
+    _requests_auto_pack_impl,
+)
 from .tensor import tensor_buffer
 from .tied_weights import tied_weights_keys
 from .torch import HAS_CUDA, as_torch_device, release_pinned_host_cache, torch_empty_cache
@@ -1003,7 +1010,7 @@ def hf_convert_gptq_v1_to_v2_format(
     except (TypeError, ValueError):
         source_format = None
     converted = False
-    if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+    if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GPTQ_P):
         # Optimum calls this before `save_pretrained()` can run. Record the
         # on-disk layout here so the state-dict hook emits the checkpoint
         # convention instead of the kernel's runtime one.
@@ -1011,13 +1018,14 @@ def hf_convert_gptq_v1_to_v2_format(
             if not isinstance(module, GPTQQuantLinear):
                 continue
             module._checkpoint_format_on_disk = source_format
-            if source_format == FORMAT.GPTQ_V2:
-                # A v2 file already stores logical zero points and the kernel
-                # decodes v2, so no word conversion runs. Mark the runtime
-                # layout anyway: without it the module keeps the constructor's
-                # v1 placeholder, `checkpoint_layout_qzeros` mistakes the live
-                # v2 words for v1, and the next save adds one to every zero
-                # point (issue #4952). The call also initializes the persistent
+            if checkpoint_qzeros_layout(source_format) == 2:
+                # A v2 or planar gptq_p file already stores logical zero points
+                # and the kernel decodes logical words, so no word conversion
+                # runs. Mark the runtime layout anyway: without it the module
+                # keeps the constructor's v1 placeholder,
+                # `checkpoint_layout_qzeros` mistakes the live logical words
+                # for v1, and the next save adds one to every zero point
+                # (issue #4952). The call also initializes the persistent
                 # `qzeros_format` marker, which an HF-loaded module otherwise
                 # leaves as uninitialized memory.
                 module.qzero_format(format=2)
@@ -1318,9 +1326,14 @@ def resolve_pack_device(
     ``QuantizeConfig.device`` is normalized to an index-less ``DEVICE`` enum by
     the loader, so on a multi-GPU host it would silently pin GPU packing to
     ``cuda:0`` even when the module was quantized on another GPU. Callers that
-    know the assigned device pass it here; a CPU assignment keeps the historical
-    auto-select behavior because ``pack_impl="auto"`` still prefers GPU packing
-    when one is available.
+    know the assigned device pass it here; a non-CPU assignment overrides the
+    configured family, while a CPU assignment leaves the configured family in
+    place.
+
+    The result is the target ``pack_impl="auto"`` honours. An explicit CPU
+    ``QuantizeConfig.device`` resolves to ``torch.device("cpu")``, so AUTO
+    selects the CPU block packer even when an accelerator is visible (#5761).
+    An unspecified target (``None``) keeps AUTO's accelerator preference.
     """
 
     cfg_device = getattr(quantize_config, "device", None)
@@ -1421,16 +1434,34 @@ def pack_module(
                 g_idx=q_g_idx,
             )
     else:
-        effective_impl = (pack_impl or "original").lower()
+        auto_selected = _requests_auto_pack_impl(pack_impl)
+        effective_impl = (pack_impl or "original").strip().lower()
 
         if effective_impl in {"cpu", "block", "pack_block"}:
             effective_impl = "block"
         elif effective_impl in {"original", "pack_original"}:
             effective_impl = "original"
-        elif effective_impl in {"auto", "default"}:
-            effective_impl = _auto_pack_impl(module=module, linear=layer)
+        elif auto_selected:
+            # AUTO must see the resolved target: an explicit CPU target packs
+            # on the CPU block packer instead of a GPU branch that rejects it
+            # and falls through to the slower original packer (#5761).
+            effective_impl = _auto_pack_impl(
+                module=module, linear=layer, target=target_device
+            )
         elif effective_impl == "gpu":
-            if not HAS_CUDA:
+            if not _is_accelerator_pack_family(_pack_target_family(target_device)):
+                # An explicit CPU/XPU/NPU/MPS/XLA target cannot run the GPU
+                # packer. Use the CPU block packer when the kernel has one so
+                # the explicit target still packs on CPU.
+                fallback = "block" if hasattr(module, "pack_block") else "original"
+                log.warning(
+                    "pack_module: GPU packing requested but the target device `%s` is not a "
+                    "CUDA/ROCm accelerator; falling back to %s pack.",
+                    target_device,
+                    fallback,
+                )
+                effective_impl = fallback
+            elif not HAS_CUDA:
                 log.warning("pack_module: GPU packing requested but CUDA is unavailable; falling back to original pack.")
                 effective_impl = "original"
             elif not hasattr(module, "pack_gpu"):
@@ -1443,21 +1474,15 @@ def pack_module(
             )
             effective_impl = "original"
 
-        label_map = {
-            "gpu": "module.pack_gpu",
-            "block": "module.pack_block",
-            "original": "module.pack_original",
-        }
-
-        packer_label = label_map[effective_impl]
-
-        with log_time_block(
-            packer_label,
-            logger=log,
-            module_name=name,
-        ):
-            if effective_impl == "gpu":
-                try:
+        # The label names the packer that actually finished, not the one AUTO
+        # selected before its fallback chain ran.
+        if effective_impl == "gpu":
+            try:
+                with log_time_block(
+                    "module.pack_gpu",
+                    logger=log,
+                    module_name=name,
+                ):
                     module.pack_gpu(
                         linear=layer,
                         scales=q_scales,
@@ -1465,20 +1490,84 @@ def pack_module(
                         g_idx=q_g_idx,
                         device=target_device,
                     )
-                except (ValueError, NotImplementedError):
-                    module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
-            elif effective_impl == "block":
-                try:
+                packer_label = "module.pack_gpu"
+            except (ValueError, NotImplementedError):
+                if auto_selected and hasattr(module, "pack_block"):
+                    # AUTO chose the GPU packer from device availability, but
+                    # this layer's geometry/word width is unsupported there.
+                    # The bounded CPU block packer is the next-fastest
+                    # implementation; the original packer stays the last resort.
+                    log.warning(
+                        "pack_module: GPU packing rejected `%s` under AUTO; trying the CPU block packer.",
+                        type(module).__name__,
+                    )
+                    try:
+                        with log_time_block(
+                            "module.pack_block",
+                            logger=log,
+                            module_name=name,
+                        ):
+                            module.pack_block(
+                                linear=layer,
+                                scales=q_scales,
+                                zeros=q_zeros,
+                                g_idx=q_g_idx,
+                            )
+                        packer_label = "module.pack_block"
+                    except (ValueError, NotImplementedError):
+                        with log_time_block(
+                            "module.pack_original",
+                            logger=log,
+                            module_name=name,
+                        ):
+                            module.pack_original(
+                                linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx
+                            )
+                        packer_label = "module.pack_original"
+                else:
+                    with log_time_block(
+                        "module.pack_original",
+                        logger=log,
+                        module_name=name,
+                    ):
+                        module.pack_original(
+                            linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx
+                        )
+                    packer_label = "module.pack_original"
+        elif effective_impl == "block":
+            try:
+                with log_time_block(
+                    "module.pack_block",
+                    logger=log,
+                    module_name=name,
+                ):
                     module.pack_block(
                         linear=layer,
                         scales=q_scales,
                         zeros=q_zeros,
                         g_idx=q_g_idx,
                     )
-                except ValueError:
-                    module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
-            else:
-                module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
+                packer_label = "module.pack_block"
+            except ValueError:
+                with log_time_block(
+                    "module.pack_original",
+                    logger=log,
+                    module_name=name,
+                ):
+                    module.pack_original(
+                        linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx
+                    )
+                packer_label = "module.pack_original"
+        else:
+            packer_label = "module.pack_original"
+            with log_time_block(
+                "module.pack_original",
+                logger=log,
+                module_name=name,
+            ):
+                module.pack_original(
+                    linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx
+                )
 
         target_format = (
             resolve_quant_format(quantize_config.format, quantize_config.method)
@@ -1874,14 +1963,33 @@ def has_cpu_offload_hooks(model: nn.Module) -> bool:
     return False
 
 
+def _cpu_or_mps_placement(device) -> Optional[Tuple[str, int]]:
+    """Canonicalise one CPU/MPS device-map entry for the single-device shortcut.
+
+    ``mps`` and ``mps:0`` name the same accelerator, and a map may hold strings,
+    integers or ``torch.device`` values. Entries that name another device (or a
+    non-device value such as ``"disk"``) return ``None``.
+    """
+
+    try:
+        resolved = torch.device(device)
+    except (TypeError, RuntimeError):
+        return None
+    if resolved.type not in ("cpu", "mps"):
+        return None
+    return resolved.type, resolved.index if resolved.index is not None else 0
+
+
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
     device_map = dict(device_map)
     single_root = "" in device_map and len(device_map) == 1
-    all_single_cpu_or_mps = all(
-        d in ("cpu", "mps") for d in device_map.values()
-    )
+    # The shortcut is only valid when every entry resolves to the same CPU/MPS
+    # device. A mixed cpu/mps map must reach the per-entry hook path below, or
+    # the first entry silently overrides every other placement (#5713).
+    placements = {_cpu_or_mps_placement(d) for d in device_map.values()}
+    all_single_cpu_or_mps = len(placements) == 1 and None not in placements
     # CPU offload is unnecessary for all-CPU/MPS device maps and must be skipped.
     if single_root or all_single_cpu_or_mps:
         d = next(iter(device_map.values()))
@@ -3286,7 +3394,7 @@ def _checkpoint_suffix_tensor(module: nn.Module, suffix: str) -> Optional[torch.
 def validate_checkpoint_qweights(
     model: nn.Module, checkpoint: str | os.PathLike, format: FORMAT, key_converter=None,
 ) -> None:
-    """Fail a load whose checkpoint lacks a kernel's required payload.
+    """Validate required quantized payloads against the checkpoint keys.
 
     Every quantized kernel declares the checkpoint tensors it cannot rebuild
     (``CHECKPOINT_REQUIRED_BUFFERS``): the packed ``qweight``/``scales``/
@@ -3316,8 +3424,9 @@ def validate_checkpoint_qweights(
     NF12 derives an empty escape table, and a symmetric BitBLAS layer has no
     zero points. A non-empty buffer of the same name stays required.
 
-    ``format`` is kept for the call-site signature; the per-kernel declaration
-    is the source of truth.
+    EXL3 codebook markers must also be declared by the module shell created
+    from ``tensor_storage``. A packed tile can have the correct width for a
+    different codebook, so losing an undeclared marker can change its decoder.
     """
 
     checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
@@ -3356,6 +3465,23 @@ def validate_checkpoint_qweights(
             f"Missing required quantized weights in checkpoint {os.fspath(checkpoint)!r}: "
             + ", ".join(missing)
         )
+
+    if format == FORMAT.EXL3:
+        declared_markers = {
+            key
+            for (_, suffix), keys in module_keys.items()
+            if suffix in EXL3_CODEBOOK_MARKERS
+            for key in keys
+        }
+        undeclared_markers = sorted(
+            key for key in checkpoint_keys
+            if key.rpartition(".")[-1] in EXL3_CODEBOOK_MARKERS and key not in declared_markers
+        )
+        if undeclared_markers:
+            raise ValueError(
+                f"EXL3 codebook markers in checkpoint {os.fspath(checkpoint)!r} missing from tensor_storage: "
+                + ", ".join(undeclared_markers)
+            )
 
 
 def _matches_ignore_pattern(name: str, pattern) -> bool:
@@ -3469,14 +3595,22 @@ def _tie_weights_after_checkpoint_load(
                 checkpoint_keys |= set(extra_keys)
             missing_keys = set(model.state_dict().keys()) - checkpoint_keys
 
-    if missing_keys is None:
-        model.tie_weights()
-        return
+    # transformers replaces ``PreTrainedModel.tie_weights`` class-wide while
+    # another thread is inside its construction window; a tie that runs then is
+    # silently skipped and the model keeps a separate, never-populated
+    # ``lm_head`` (#5421). The writer excludes every construction window, so
+    # the call below always reaches the real method.
+    from .torch import model_global_state_lock
 
-    try:
-        model.tie_weights(missing_keys=missing_keys)
-    except TypeError:
-        model.tie_weights()
+    with model_global_state_lock():
+        if missing_keys is None:
+            model.tie_weights()
+            return
+
+        try:
+            model.tie_weights(missing_keys=missing_keys)
+        except TypeError:
+            model.tie_weights()
 
 
 def _convert_safetensors_header_keys(
@@ -3503,6 +3637,11 @@ def _convert_safetensors_header_keys(
         converted_header[converted_name] = tensor_info
         changed |= converted_name != name
     return converted_header, changed, excluded
+
+
+# Loader scratch written next to a checkpoint by the copy fallback. Never
+# checkpoint content, and never left behind by a clean load (#5584).
+_REMAP_TEMP_PREFIX = "gptqmodel-key-remap-"
 
 
 def _write_safetensors_with_converted_header(
@@ -3606,10 +3745,10 @@ def _remap_safetensors_index(
 
     try:
         remap_dir = tempfile.mkdtemp(
-            prefix="gptqmodel-key-remap-", dir=_remap_temp_dir(checkpoint)
+            prefix=_REMAP_TEMP_PREFIX, dir=_remap_temp_dir(checkpoint)
         )
     except OSError:
-        remap_dir = tempfile.mkdtemp(prefix="gptqmodel-key-remap-")
+        remap_dir = tempfile.mkdtemp(prefix=_REMAP_TEMP_PREFIX)
     try:
         target_names = {}
         used_shards = set(converted_weight_map.values())
@@ -3651,7 +3790,7 @@ def _cleanup_remapped_checkpoint(checkpoint: Optional[str]) -> None:
     parent = os.path.dirname(checkpoint)
     if (
         os.path.basename(checkpoint).endswith(".index.json")
-        and os.path.basename(parent).startswith("gptqmodel-key-remap-")
+        and os.path.basename(parent).startswith(_REMAP_TEMP_PREFIX)
     ):
         shutil.rmtree(parent, ignore_errors=True)
         return
@@ -3712,13 +3851,13 @@ def _remap_safetensors_checkpoint_keys(
 
     try:
         descriptor, converted_path = tempfile.mkstemp(
-            prefix="gptqmodel-key-remap-",
+            prefix=_REMAP_TEMP_PREFIX,
             suffix=".safetensors",
             dir=_remap_temp_dir(checkpoint),
         )
     except OSError:
         descriptor, converted_path = tempfile.mkstemp(
-            prefix="gptqmodel-key-remap-", suffix=".safetensors"
+            prefix=_REMAP_TEMP_PREFIX, suffix=".safetensors"
         )
     os.close(descriptor)
     try:
@@ -4130,6 +4269,7 @@ def _load_key_converted_safetensors(
     checkpoint,
     key_converter,
     *,
+    exclude_names=frozenset(),
     device_map,
     dtype,
     offload_state_dict: bool,
@@ -4143,6 +4283,11 @@ def _load_key_converted_safetensors(
     each tensor with ``safe_open`` and place it with Accelerate's
     ``set_module_tensor_to_device``, so device placement and dtype casting stay
     the same. The caller ties weights afterwards, as it does for the copy path.
+
+    ``exclude_names`` are runtime names the caller loads itself (for example
+    packed FP8 weights restored from the source checkpoint). They are neither
+    read nor placed here, and their absence still counts as a header change:
+    the copy path used to be entered only to hide them from Accelerate.
 
     Returns ``False`` when the checkpoint needs the copy path (pickle, disk
     offload, bitsandbytes SCB metadata, a shape/name mismatch, ...). The caller
@@ -4188,6 +4333,11 @@ def _load_key_converted_safetensors(
                     return False
                 for source_name in keys:
                     runtime_name = key_converter(source_name)
+                    if runtime_name in exclude_names:
+                        # The caller reads this tensor from the source
+                        # checkpoint. Skipping it is still a header change.
+                        changed = True
+                        continue
                     changed |= runtime_name != source_name
                     if runtime_name in seen:
                         raise ValueError(
@@ -4315,19 +4465,20 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     restore_name_map = None
     lazy_loaded = False
     if checkpoint is not None and (callable(key_converter) or fp8_weight_names):
-        if (
-            callable(key_converter)
-            and not fp8_weight_names
-            and len(args) <= 1
-            and not kwargs.get("broadcast_from_rank0", False)
-        ):
+        if len(args) <= 1 and not kwargs.get("broadcast_from_rank0", False):
             # Rename the header keys lazily instead of copying every shard
-            # (issue #4959). A legacy-layout VL checkpoint can be many GiB,
-            # and the copy was ~80% of its load time.
+            # (issues #4959, #5584). A legacy-layout VL checkpoint can be many
+            # GiB, and the copy was ~80% of its load time. A block-FP8
+            # checkpoint entered the copy path only to hide its packed weights
+            # from Accelerate, so skip those keys here and let the packed-FP8
+            # restore read them from the source checkpoint. A checkpoint whose
+            # layout already matches needs no converter; exclusions still make
+            # the header differ, so use the identity converter for them.
             lazy_loaded = _load_key_converted_safetensors(
                 model,
                 checkpoint,
-                key_converter,
+                key_converter or (lambda name: name),
+                exclude_names=fp8_weight_names,
                 device_map=kwargs.get("device_map"),
                 dtype=kwargs.get("dtype"),
                 offload_state_dict=bool(kwargs.get("offload_state_dict", False)),
@@ -4966,7 +5117,13 @@ def is_embeddings_module_quantized(
     safetensor_files = [
         os.path.join(model_dir, filename)
         for filename in os.listdir(model_dir)
+        # A loader killed mid-copy can leave a partial
+        # `gptqmodel-key-remap-*.safetensors` in the checkpoint directory.
+        # It is loader scratch, never checkpoint content: reading it either
+        # warns about a truncated header or poisons the detection with
+        # another process's half-written key set (#5584).
         if filename.endswith(".safetensors")
+        and not filename.startswith(_REMAP_TEMP_PREFIX)
     ]
     for safefile in safetensor_files:
         try:

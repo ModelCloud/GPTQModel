@@ -222,10 +222,10 @@ def test_format_scales_units():
 
 
 def test_compressed_attention_counts_sliding_branch_plus_pooled_entries():
-    """DeepSeek V4-style: bounded sliding K/V plus one entry per compress_rate."""
+    """DeepSeek V4-style: bounded sliding K/V plus pooled entries and their state."""
     config = SimpleNamespace(
         hidden_size=4096, num_hidden_layers=4, num_attention_heads=64,
-        num_key_value_heads=1, head_dim=512, sliding_window=128,
+        num_key_value_heads=1, head_dim=512, index_head_dim=128, sliding_window=128,
         layer_types=["heavily_compressed_attention", "heavily_compressed_attention",
                      "compressed_sparse_attention", "compressed_sparse_attention"],
         compress_rates={"heavily_compressed_attention": 128, "compressed_sparse_attention": 4},
@@ -236,17 +236,134 @@ def test_compressed_attention_counts_sliding_branch_plus_pooled_entries():
     assert estimate.growing_layers == 4
     assert estimate.is_exact is True
 
-    # Two HCA layers (rate 128) plus two CSA layers (rate 4), each storing one
-    # shared K=V tensor of head_dim elements, capped at the 128-token window.
+    # HCA keeps one pooled stream, a K+gate buffer of 2 * head_dim per buffered
+    # source token, and no overlap state.
+    def hca(tokens):
+        entries = tokens // 128
+        buffered = min(tokens, 127) if tokens else 0
+        return 512 * min(tokens, 128) + 512 * entries + 2 * 512 * buffered
+
+    # CSA keeps a compressor and a Lightning Indexer stream (head_dim and
+    # index_head_dim), the two-series projector's 4 * pooled elements per
+    # buffered source token, and 2 * rate * pooled of fixed overlap state.
+    pooled = 512 + 128
+
+    def csa(tokens):
+        entries = tokens // 4
+        buffered = min(tokens, 3) if tokens else 0
+        fixed = 2 * 4 * pooled if entries else 0
+        return 512 * min(tokens, 128) + pooled * entries + 4 * pooled * buffered + fixed
+
     def expected(tokens):
-        hca = 2 * 512 * min(tokens, 128) + 2 * 512 * ((tokens + 127) // 128)
-        csa = 2 * 512 * min(tokens, 128) + 2 * 512 * ((tokens + 3) // 4)
-        return (hca + csa) * 2
+        return (2 * hca(tokens) + 2 * csa(tokens)) * 2
 
     assert estimate.kv_bytes_for(128) == expected(128)
     assert estimate.kv_bytes_for(8192) == expected(8192)
     # The compressed slope dominates long contexts and is far below per-head K/V.
     assert estimate.kv_bytes_for(32768) < 32768 * 2 * 64 * 512
+    assert estimate.compressed_streams == 6
+
+
+def test_csa_indexer_is_counted_at_its_own_head_dim():
+    """#5409: the Lightning Indexer is a second stream, not a copy of the compressor."""
+
+    def estimate_for(index_head_dim):
+        config = SimpleNamespace(
+            hidden_size=256, num_hidden_layers=1, num_attention_heads=4,
+            num_key_value_heads=1, head_dim=64, index_head_dim=index_head_dim,
+            sliding_window=8,
+            layer_types=["compressed_sparse_attention"],
+            compress_rates={"compressed_sparse_attention": 4},
+        )
+        return estimate_kv_cache(config, dtype=torch.float16)
+
+    small = estimate_for(32)
+    large = estimate_for(64)
+    delta = 64 - 32
+    # One extra entry per window, the full two-series buffer (rate - 1 tokens),
+    # and the fixed overlap state, all at the indexer's own head_dim.
+    expected_delta = (
+        delta * (64 // 4)
+        + 4 * delta * 3
+        + 2 * 4 * delta
+    ) * 2
+    assert large.kv_bytes_for(64) - small.kv_bytes_for(64) == expected_delta
+
+
+def _retained_cache_bytes(cache_layer):
+    """Bytes transformers actually retains in one cache layer, aliases once."""
+
+    seen = set()
+    total = 0
+
+    def visit(value):
+        nonlocal total
+        if torch.is_tensor(value):
+            key = (value.data_ptr(), value.numel(), value.dtype)
+            if key in seen:
+                return
+            seen.add(key)
+            total += value.numel() * value.element_size()
+        elif isinstance(value, dict):
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                visit(item)
+        elif hasattr(value, "__dict__"):
+            for name, item in vars(value).items():
+                if not name.startswith("_"):
+                    visit(item)
+
+    visit(cache_layer)
+    return total
+
+
+def test_deepseek_v4_csa_estimate_covers_the_native_cache():
+    """#5409: the native CSA cache also retains the indexer and overlap state.
+
+    Measured on a tiny native model, the estimator reported 192 bytes at eight
+    tokens and claimed exact while transformers retained 736: 96 for the
+    aliased sliding K/V, 64 for the compressor stream, 64 for the indexer
+    stream, and four 128-byte overlap tensors.
+    """
+
+    pytest.importorskip("transformers.models.deepseek_v4")
+    from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
+    from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
+
+    config = DeepseekV4Config(
+        vocab_size=128, hidden_size=32, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=1, head_dim=8,
+        q_lora_rank=16, n_routed_experts=4, num_experts_per_tok=2,
+        moe_intermediate_size=16, o_groups=1, o_lora_rank=8,
+        index_n_heads=2, index_head_dim=8, index_topk=4,
+        sliding_window=4,
+        compress_rates={"compressed_sparse_attention": 4, "heavily_compressed_attention": 128},
+        layer_types=["compressed_sparse_attention"],
+        mlp_layer_types=["moe"],
+        max_position_embeddings=1024,
+        num_nextn_predict_layers=0,
+        tie_word_embeddings=True,
+        attention_dropout=0.0,
+    )
+    estimate = estimate_kv_cache(config, dtype=torch.float32)
+    assert estimate is not None
+    assert estimate.is_exact is True
+
+    torch.manual_seed(0)
+    model = DeepseekV4ForCausalLM(config).eval().to(torch.float32)
+    for tokens in (1, 2, 3, 4, 5, 8, 16):
+        with torch.no_grad():
+            output = model(torch.randint(3, 128, (1, tokens)), use_cache=True)
+        measured = _retained_cache_bytes(output.past_key_values.layers[0])
+        estimated = estimate.kv_bytes_for(tokens)
+        assert estimated >= measured, (tokens, estimated, measured)
+        if tokens < 4:
+            # Before the first window closes the buffer is the only extra state,
+            # so the estimate is exact.
+            assert estimated == measured, (tokens, estimated, measured)
+    assert estimate.compressed_streams == 2
 
 
 def test_chunked_attention_is_capped_at_its_chunk_size():
@@ -279,12 +396,20 @@ def test_non_attention_blocks_contribute_nothing():
 
     config = _gqa(num_hidden_layers=4)
     config.layer_types = ["linear_attention", "moe", "full_attention", "mlp"]
+    # The linear layer is a Mamba-1 mixer: its conv/SSM state is sized from the
+    # declared dims, so the estimate stays exact and counts it per sequence.
+    config.mamba_d_state = 16
+    config.mamba_d_conv = 4
+    config.mamba_expand = 2
     estimate = estimate_kv_cache(config, dtype=torch.float16)
     assert estimate.is_exact is True
     assert estimate.growing_layers == 1
     assert estimate.linear_layers == 1
     assert estimate.block_layers == 2
     assert estimate.kv_bytes_per_token == 2 * 8 * 128 * 2
+    d_inner = 2 * 4096
+    assert estimate.state_layers == 1
+    assert estimate.state_bytes_per_sequence == d_inner * 16 * 4 + d_inner * 4 * 2
     line = estimate.describe()
     assert "2 non-attention block(s)" in line
     assert "linear-attention" in line

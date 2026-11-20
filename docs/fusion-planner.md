@@ -415,14 +415,14 @@ forward must pass source validation; custom forwards require dedicated tests.
 flowchart LR
     SOURCE["Original checkpoint-owned projections"] --> REFRESH["_refresh validates configuration and live tensors"]
     REFRESH --> BUILD["Packed concatenation and separate Marlin workspace"] --> VIEWS["_share_operands rebinds source weights to disjoint views<br/>release separate allocations"]
-    VIEWS --> DESCRIPTOR["Cached bound executor, widths, dtype/device, mutation guard"]
-    DESCRIPTOR --> VALID{"execute: guard valid?"}
+    VIEWS --> DESCRIPTOR["Published record: bound executor, widths, dtype/device, mutation guard"]
+    DESCRIPTOR --> VALID{"execute: lease record, guard valid?"}
     VALID -->|"yes"| USE["One existing native kernel call"]
     VALID -->|"no"| REFRESH
     REFRESH -->|"incompatible"| FALLBACK["Original continuation; native preamble is not repeated"]
     USE --> OUT["Split outputs: forward locals only"]
     OUT --> RELEASE["Return or exception releases activations"]
-    MUTATE["clear_weight_cache / load_state_dict / device or dtype move"] --> INVALID["invalidate: retire guard and clear its bindings<br/>release operands and descriptor"]
+    MUTATE["clear_weight_cache / load_state_dict / device or dtype move"] --> INVALID["invalidate: retire published record<br/>release storage when its last lease returns"]
     INVALID --> REFRESH
     DIRECT["Direct projection API or fallback parent"] --> LEAF["Original source kernel<br/>temporary contiguous packed copies when needed"]
     OFF["fuse(False)"] --> RESTORE["Clone source views to independent contiguous tensors<br/>release fused executor and workspace"]
@@ -435,6 +435,13 @@ to disjoint views into that allocation. Their checkpoint names, shapes, and
 values remain intact; their former separate allocations are released. The wider
 native kernel consumes the contiguous fused tensors directly, so source views
 add no projection work to the normal fused token path.
+
+`_FusionGroup.execute()` leases the published record for the whole forward. A
+`clear_weight_cache()` or a sibling's refresh retires that record, but
+`_retire()` clears the guard globals and releases the packed storage only after
+the last lease returns, so an in-flight executor never loses its operands. A
+cold caller that lost the refresh race reuses the record published while it
+waited instead of rebuilding the same operands.
 
 A kernel that caches a change detector over its bound operands must also drop
 that cache when its storage is replaced. `FusionKernelSpec.release_operand_snapshots()`

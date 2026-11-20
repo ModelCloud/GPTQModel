@@ -19,6 +19,7 @@ from ...utils.gemv import calculate_zeros_width
 from ...utils.logger import setup_logger
 from ...utils.packing_math import scale_to_storage_dtype
 from ._compile_support import COMPILE_LEVEL
+from ._numerics import fp32_epilogue_context
 
 
 log = setup_logger()
@@ -259,7 +260,6 @@ class AwqGEMVLinear(AWQuantLinear):
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor=None):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
-        scale_zeros = zeros.float() * scales.float()
 
         pack_num = 32 // self.bits
         qscales = torch.zeros(
@@ -272,6 +272,11 @@ class AwqGEMVLinear(AWQuantLinear):
         )
         # Reject an unrepresentable FP16 scale before replacing module state.
         qscales[:, : scales.shape[1]] = scale_to_storage_dtype(scales, qscales.dtype)
+        stored_scales = qscales[:, : scales.shape[1]]
+        # The checkpoint decodes with the stored FP16 scale, so build the
+        # affine offset from that same grid. Mixing the FP32 source scale into
+        # the offset shifts the zero point whenever the cast rounds (#5605).
+        scale_zeros = zeros.float() * stored_scales.float()
         stored_bias = None if linear.bias is None else linear.bias.detach().clone()
         self.register_buffer("scales", qscales)
         if stored_bias is not None:
@@ -289,7 +294,7 @@ class AwqGEMVLinear(AWQuantLinear):
         group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
             (weight.float() + scale_zeros.index_select(1, group_index))
-            / self.scales.index_select(1, group_index).float()
+            / stored_scales.index_select(1, group_index).float()
         ).clamp_(0, (1 << self.bits) - 1).to(torch.int32)
         self.register_buffer("qweight", pack_awq_columns(intweight, self.bits))
 
@@ -593,10 +598,14 @@ class AwqGEMVTorchLinear(AwqGEMVLinear):
         # One wide reduction and a single rounding at the end: the FP32
         # accumulator is what the accelerator GEMV kernels use, so the portable
         # path is a reference for them rather than a lower-precision shortcut.
-        output = torch.matmul(inputs.to(torch.float32), weight)
-        if self.bias is not None:
-            output = output + self.bias.to(device=output.device, dtype=torch.float32)
-        output = output.to(dtype=input_dtype)
+        # An ambient autocast would narrow this explicit FP32 matmul and round
+        # the product before the bias cancels it (#5613), so the epilogue runs
+        # outside it and the caller's context is restored afterwards.
+        with fp32_epilogue_context(inputs.device.type):
+            output = torch.matmul(inputs.to(torch.float32), weight)
+            if self.bias is not None:
+                output = output + self.bias.to(device=output.device, dtype=torch.float32)
+            output = output.to(dtype=input_dtype)
 
         if self.adapter:
             output = self.adapter.apply(x=inputs, out=output)

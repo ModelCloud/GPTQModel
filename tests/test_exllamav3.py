@@ -222,8 +222,7 @@ def test_exllamav3_module_include_rejects_invalid_regex():
 
 
 def test_exllamav3_rejects_fractional_bits():
-    """EXL3 packs one integer trellis depth per module; a fractional width cannot
-    be realised and would silently quantize narrower than requested."""
+    """The default mcg codebook accepts integer rates only."""
 
     for bits in (2.5, 2.25, 3.5):
         with pytest.raises(ValueError, match="not an integer trellis width"):

@@ -150,8 +150,10 @@ def test_vlm_pretokenized_mapping_rows_take_base_text_path(cls, monkeypatch):
     batches = model.prepare_dataset(rows, batch_size=1)
 
     assert len(batches) == 2
-    assert [batch["input_ids"].shape for batch in batches] == [(1, 12), (1, 13)]
-    assert batches[1]["attention_mask"].tolist() == [[0] + [1] * 12]
+    # The leading mask-0 slot is tokenizer padding and is stripped since #4889.
+    assert [batch["input_ids"].shape for batch in batches] == [(1, 12), (1, 12)]
+    assert batches[1]["input_ids"].tolist() == [list(range(1, 13))]
+    assert batches[1]["attention_mask"].tolist() == [[1] * 12]
 
 
 @pytest.mark.parametrize(

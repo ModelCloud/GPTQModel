@@ -63,10 +63,10 @@ flowchart TD
 
 | Path | Weight traffic per forward | Enabled when |
 | --- | --- | --- |
-| `_forward_block_gemv` (`gptqmodel/utils/fp8_block_triton.py`) | reads the 1 B/element payload once; no decoded temporary | block payload, `float8_e4m3fn`/`float8_e5m2`, CUDA, FP16/BF16 activations, exact divisible 128-wide column blocks, range-safe FP16 bound, no autograd graph, row count at or below the measured fused limit |
+| `_forward_block_gemv` (`gptqmodel/utils/fp8_block_triton.py`) | reads the 1 B/element payload once; no decoded temporary | block payload, `float8_e4m3fn`/`float8_e5m2`, CUDA, a target that can lower that FP8 operand, FP16/BF16 activations, exact divisible 128-wide column blocks, range-safe FP16 bound, no autograd graph, row count at or below the measured fused limit |
 | `_forward_block_decode` | reads 1 B/element, writes the activation dtype once | the same payload conditions without the fused kernel's row/GEMM/grad limits, and a decoded weight that narrows into the activation dtype without overflow |
 | `_forward_lean_scaled_matmul` | reads 1 B/element, no decoded temporary | row/tensor scales (unchanged, #5146) |
-| portable decode | the two-pass cast and scale | every payload the predicates above reject: E8M0, AMD `fnuz` formats, padded/cropped block scales, non-CUDA, ROCm, `torch.compile`/`export`, non-contiguous activations |
+| portable decode | the two-pass cast and scale | every payload the predicates above reject: E8M0, AMD `fnuz` formats, padded/cropped block scales, non-CUDA, ROCm, an FP8 operand the target cannot lower, `torch.compile`/`export`, non-contiguous activations |
 
 The fused limit is not a correctness boundary. It is where a general GEMM
 overtakes the decode-in-the-loop tiling that the fused kernel uses; past it the
@@ -77,6 +77,39 @@ kernel. The two thresholds are measured, not tuned per call:
 | --- | --- |
 | `out_features < 2048` | M = 64 |
 | `out_features >= 2048` | M = 192 |
+
+## Device and format qualification
+
+The operand type a block kernel declares is a property of the payload's FP8
+format, and Triton's CUDA backend only adds `fp8e4nv` -- the type behind
+`torch.float8_e4m3fn` -- to a target's supported operands at SM 8.9 and later.
+`float8_e5m2` lowers to `fp8e5`, which every target supports. Before #5400 the
+gate qualified the environment (CUDA, not ROCm) but not the concrete device
+and format, so an Ampere target selected a kernel that raised
+`ValueError: type fp8e4nv not supported in this architecture` inside the
+layer's forward.
+
+```mermaid
+flowchart TD
+    A["block payload<br/>exact divisible layout"] --> B{"triton_fp8_available<br/>CUDA, not ROCm"}
+    B -- "no" --> P["portable two-pass decode"]
+    B -- "yes" --> C{"triton_fp8_supports_format<br/>format vs compute capability"}
+    C -- "no: e4m3fn below SM 8.9" --> P
+    C -- "yes" --> D["_forward_block_gemv<br/>or _forward_block_decode"]
+    classDef fallback fill:#fdd,stroke:#c00,color:#000
+    class P fallback
+```
+
+| Decision input | Before #5400 | After #5400 |
+| --- | --- | --- |
+| Runtime family | CUDA, not ROCm | unchanged |
+| Device capability | not consulted | `TRITON_FP8_MIN_CAPABILITY[format]`, `(8, 9)` for `float8_e4m3fn`, `(0, 0)` for `float8_e5m2` |
+| Payload format | membership in `TRITON_FP8_FORMATS` only | the same membership, then the capability lookup for that format |
+| Ampere (SM 8.0/8.6) + `float8_e4m3fn` | fused or single-pass launch, Triton compile error | portable decode, reference result |
+
+The capability is read with `torch.cuda.get_device_capability(device)` for the
+ordinal that owns the payload, inside the payload-derived decode plan, so it is
+resolved once per payload and shares that plan's cache invalidation.
 
 ## Failures and fallbacks
 
@@ -89,6 +122,10 @@ kernel. The two thresholds are measured, not tuned per call:
   which decodes and multiplies in FP32 and narrows only the result. The fused
   product carries the same requirement; BF16 and FP32 keep the FP32 exponent
   range and are unaffected.
+- A target whose Triton backend cannot lower the payload's FP8 operand keeps
+  the portable decode (#5400). Triton only accepts `fp8e4nv` (`float8_e4m3fn`)
+  at SM 8.9 and later, so an Ampere layer decodes through the portable path
+  instead of failing to compile inside its forward.
 - `torch.compile`/`export` never see the launch. The decode plan is declined
   inside a trace, so the traced graph keeps the Torch decode, and
   `SUPPORTS_COMPILE_LEVEL` is unchanged. CUDA-graph capture is supported: the
@@ -109,6 +146,8 @@ kernel. The two thresholds are measured, not tuned per call:
 | `...::test_block_decode_tiles_are_the_measured_ones` | The launch tiles are the measured ones |
 | `...::test_block_decode_keeps_an_out_of_fp16_range_payload_finite` | A decoded weight of 65536 (both scale conventions) stays finite and exact in FP16/BF16/FP32; the FP16 payload leaves the single-pass decode, BF16/FP32 keep it; fails on the pre-fix tree with `non-finite output for torch.float16: tensor([[nan, ...]])` |
 | `...::test_block_decode_range_gate_keeps_the_in_range_fast_path` | The range gate does not move an in-range payload off the fused product: one fused launch, no single-pass decode |
+| `...::test_block_dispatch_skips_an_operand_the_device_cannot_lower` | An SM 8.0 capability keeps the block forward on the portable path and returns the reference value, while the same payload still takes the fused product at the host's real capability; fails on the pre-fix tree with `ValueError: type fp8e4nv not supported in this architecture` |
+| `tests/test_fp8.py::test_block_triton_operand_capability_table` | `float8_e4m3fn` needs SM 8.9+, `float8_e5m2` needs no minimum, and a format outside the table is never a Triton operand |
 | `tests/kernels/test_fp8_kernel.py`, `tests/test_fp8_dequant_inplace.py`, `tests/test_fp8_packed_weight_lifecycle.py`, `tests/test_rocm_fp8_gating.py` | Existing FP8 forward, decode arithmetic, storage lifecycle and ROCm gating behaviour |
 
 Measured on sm_89 (torch 2.15.0+cu132, Triton 3.9) with an L2 flush before each

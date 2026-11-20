@@ -319,29 +319,27 @@ def test_valid_smoother_and_fallback_dicts_still_compile():
         assert isinstance(resolved, expected), legacy
 
 
-def test_smoother_and_fallback_round_trip_still_works():
+def test_rtn_smoother_round_trip_still_works():
+    """RTN applies only its top-level smoother; `fallback.smooth` is refused (#5401)."""
+
     config = RTNConfig(
         bits=4,
         group_size=128,
         smoother={"type": "mad", "k": 2.5},
-        fallback={
-            "strategy": "rtn",
-            "threshold": "5%",
-            "smooth": {"type": "percentile", "percentile": 95},
-        },
+        fallback={"strategy": "rtn", "threshold": "5%"},
     )
     restored = QuantizeConfig.from_quant_config(config.to_dict())
 
     assert isinstance(restored.smoother.smooth, SmoothMAD)
     assert restored.smoother.smooth.k == pytest.approx(2.5)
-    assert isinstance(restored.fallback.smooth, SmoothPercentile)
-    assert restored.fallback.smooth.percentile == pytest.approx(95.0)
+    assert restored.fallback.smooth is None
 
 
-def test_gptq_still_round_trips_the_fallback_smoother_it_applies():
-    """`fallback.smooth` is applied by the GPTQ fallback path (#5302 control)."""
+@pytest.mark.parametrize("config_cls", [GPTQConfig, QQQConfig], ids=["gptq", "qqq"])
+def test_calibrated_still_round_trips_the_fallback_smoother_it_applies(config_cls):
+    """`fallback.smooth` is applied by the calibrated fallback path (#5302 control)."""
 
-    config = GPTQConfig(
+    config = config_cls(
         bits=4,
         group_size=128,
         fallback={

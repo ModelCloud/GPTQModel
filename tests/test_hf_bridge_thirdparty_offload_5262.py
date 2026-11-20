@@ -69,7 +69,7 @@ def hf_bridge_environment(tmp_path_factory):
 
     transformers_import_utils.is_gptqmodel_available.cache_clear()
     try:
-        yield
+        yield str(dist_root)
     finally:
         monkey.undo()
         transformers_import_utils.is_gptqmodel_available.cache_clear()
@@ -333,3 +333,148 @@ def test_reselect_context_is_built_for_a_third_party_config():
 
     model.config.quantization_config = None
     assert hf_gptqmodel_reselect_context(model) is None
+
+
+_LATE_IMPORT_LOAD = r"""
+import sys
+
+import torch
+from transformers import AutoModelForCausalLM
+
+result_path = sys.argv[1]
+checkpoint = sys.argv[2]
+spill = sys.argv[3]
+offload_folder = sys.argv[4]
+
+# The regression is about the load that imports gptqmodel from inside
+# transformers' `replace_with_awq_linear`; a pre-imported package would install
+# the prepare hook before this load and hide it.
+assert "gptqmodel" not in sys.modules, "gptqmodel was imported before the load"
+
+kwargs = {
+    "dtype": torch.float16,
+    "device_map": "auto",
+    "max_memory": {0: "512KiB", "cpu": "10GiB" if spill == "cpu" else "64KiB"},
+    "attn_implementation": "eager",
+}
+if spill == "disk":
+    kwargs["offload_folder"] = offload_folder
+    kwargs["offload_state_dict"] = True
+
+model = AutoModelForCausalLM.from_pretrained(checkpoint, **kwargs)
+
+from gptqmodel.utils.hf_load import _resolved_placement
+from gptqmodel.utils.importer import is_offload_placement
+
+resolved = dict(model.hf_device_map)
+offloaded = []
+for name, module in model.named_modules():
+    if name.endswith(".self_attn.q_proj") and is_offload_placement(
+        _resolved_placement(resolved, name)
+    ):
+        offloaded.append(type(module).__name__)
+
+device = next(
+    parameter.device
+    for parameter in model.parameters()
+    if parameter.device.type != "meta"
+)
+input_ids = torch.tensor([[1, 5, 7, 9, 11]], dtype=torch.long, device=device)
+with torch.inference_mode():
+    logits = model(input_ids).logits.float().cpu()
+
+torch.save(
+    {
+        "logits": logits,
+        "offloaded_kernels": offloaded,
+        "placements": sorted({str(value) for value in resolved.values()}),
+    },
+    result_path,
+)
+print("LOADED", flush=True)
+"""
+
+
+@pytest.mark.parametrize("spill", ["cpu", "disk"])
+def test_late_import_load_reselects_offload_safe_kernel(
+    checkpoints, hf_bridge_environment, spill, tmp_path
+):
+    """The load that imports gptqmodel mid-prepare must re-select kernels (#5395).
+
+    Transformers imports ``gptqmodel`` from inside
+    ``replace_with_awq_linear``, so the bridge's prepare wrapper never runs for
+    that first load and ``validate_environment`` had no model to re-select
+    against. A third-party AWQ checkpoint with ``device_map="auto"`` and a
+    CPU/disk spill therefore kept ``AwqMarlinLinear`` and crashed in
+    ``post_init``. Each load must run in a fresh process with no prior
+    ``gptqmodel`` import, so this is a subprocess test.
+    """
+
+    _require_cuda()
+    _require_hf_quantizers()
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from transformers import AutoModelForCausalLM
+
+    checkpoint = checkpoints["awq_gemm"]["third_party"]
+    reference = AutoModelForCausalLM.from_pretrained(
+        checkpoint,
+        dtype=torch.float16,
+        device_map={"": 0},
+        attn_implementation="eager",
+    )
+    expected = _logits(reference)
+    del reference
+    torch.cuda.empty_cache()
+
+    repo_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        part
+        for part in (
+            str(repo_root),
+            hf_bridge_environment,
+            env.get("PYTHONPATH"),
+        )
+        if part
+    )
+    result_path = tmp_path / "late-import-load.pt"
+    offload_folder = tmp_path / "offload"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _LATE_IMPORT_LOAD,
+            str(result_path),
+            checkpoint,
+            spill,
+            str(offload_folder),
+        ],
+        capture_output=True,
+        cwd=str(tmp_path),
+        env=env,
+        text=True,
+    )
+
+    assert completed.returncode == 0, (
+        f"a plain-transformers AWQ load with a {spill} spill failed:\n"
+        f"{completed.stdout}\n{completed.stderr}"
+    )
+    payload = torch.load(result_path, weights_only=True)
+    assert spill in payload["placements"], payload["placements"]
+    assert payload["offloaded_kernels"], payload["placements"]
+    assert set(payload["offloaded_kernels"]) <= OFFLOAD_SAFE_KERNELS, (
+        f"AUTO kept a CUDA-only kernel for a {spill}-offloaded layer: "
+        f"{payload['offloaded_kernels']}"
+    )
+    tolerance = 8 * torch.finfo(torch.float16).eps * max(
+        float(expected.abs().max()), 1.0
+    )
+    delta = (payload["logits"] - expected).abs().max().item()
+    assert delta <= tolerance, (
+        f"the {spill}-spilled load differs by {delta:.3e} from the single-GPU "
+        f"load (tolerance {tolerance:.3e})"
+    )

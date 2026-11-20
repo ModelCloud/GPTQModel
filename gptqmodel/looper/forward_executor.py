@@ -120,6 +120,23 @@ class ForwardExecutor:
         return finalize() if callable(finalize) else collection
 
     @staticmethod
+    def _batch_placement(layer_inputs, batch_idx: int) -> Tuple[bool, Optional[torch.device]]:
+        """Resolve one replay batch's presence and device without reading it.
+
+        Lazy sequences advertise placement from validated metadata. Opening a
+        disk-backed batch reads its shard and hashes the whole file, so the
+        placement scan must not materialize batches it only schedules.
+        """
+
+        placement = getattr(layer_inputs, "batch_placement", None)
+        if callable(placement):
+            return placement(batch_idx)
+        batch = layer_inputs[batch_idx]
+        if not batch:
+            return False, None
+        return True, batch[0].device
+
+    @staticmethod
     def _shared_kv_key(layer_index: int, batch_idx: int) -> Tuple[int, int]:
         """Identity of one batch's cross-layer KV inside the shared cache.
 
@@ -317,6 +334,7 @@ class ForwardExecutor:
             need_outputs=need_outputs,
             reuse_kv=reuse_kv,
             devices=devices,
+            devices_filtered=True,
             progress_pb=progress_pb,
             progress_title=progress_title,
             progress_stage=progress_stage,
@@ -599,6 +617,7 @@ class ForwardExecutor:
         need_outputs: bool,
         reuse_kv: bool,
         devices: List[torch.device],
+        devices_filtered: bool = False,
         progress_pb: "ProgressBar" | None = None,
         progress_title: Optional[str] = None,
         progress_stage: Optional[str] = None,
@@ -610,6 +629,13 @@ class ForwardExecutor:
         device_thread_pool=DEVICE_THREAD_POOL,
     ) -> List[List[torch.Tensor]]:
         """Fan batches across device replicas and preserve result ordering."""
+
+        # `run` filters the pool once before the serial/parallel decision and
+        # passes the survivors here. Direct parallel calls still resolve the
+        # filter at entry so the staged replicas and batch assignment always
+        # come from the same pool.
+        if not devices_filtered:
+            devices = self._filter_forward_devices(devices)
 
         effective_title = progress_title or (progress_stage or "Forward")
         total_batches, batch_row_counts, total_rows = self._resolve_batch_progress(
@@ -710,7 +736,7 @@ class ForwardExecutor:
             input_devices: Dict[int, torch.device] = {}
             processed_rows = 0
 
-            forward_devices = self._filter_forward_devices(devices)
+            forward_devices = devices
 
             device_segments: Dict[torch.device, List[int]] = {}
             num_devices = len(forward_devices)
@@ -726,22 +752,25 @@ class ForwardExecutor:
                 for batch_idx in range(total_batches):
                     if batch_idx in committed_indices:
                         continue
-                    if layer_inputs[batch_idx]:
-                        batch_device = layer_inputs[batch_idx][0].device
-                        # Check if this device is in our forward_devices, otherwise use first one
-                        if batch_device in device_segments:
-                            device_segments[batch_device].append(batch_idx)
-                        else:
-                            # Fallback: data is on a device not in forward_devices, use round-robin
-                            fallback_device = forward_devices[batch_idx % num_devices]
-                            device_segments[fallback_device].append(batch_idx)
+                    batch_present, batch_device = self._batch_placement(layer_inputs, batch_idx)
+                    if not batch_present:
+                        continue
+                    # Check if this device is in our forward_devices, otherwise use first one
+                    if batch_device in device_segments:
+                        device_segments[batch_device].append(batch_idx)
+                    else:
+                        # Fallback: data is on a device not in forward_devices, use round-robin
+                        fallback_device = forward_devices[batch_idx % num_devices]
+                        device_segments[fallback_device].append(batch_idx)
             else:
                 # Default behavior: split batches contiguously across devices
-                pending_indices = [
-                    index
-                    for index in range(total_batches)
-                    if index not in committed_indices and layer_inputs[index]
-                ]
+                pending_indices = []
+                for index in range(total_batches):
+                    if index in committed_indices:
+                        continue
+                    batch_present, _ = self._batch_placement(layer_inputs, index)
+                    if batch_present:
+                        pending_indices.append(index)
                 pending_start = 0
                 for index, device in enumerate(forward_devices):
                     remaining_batches = max(

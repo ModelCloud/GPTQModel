@@ -461,6 +461,49 @@ def active_padding_mask(processor):
     return getattr(tls, "padding_value", getattr(tls, "value", None))
 
 
+def install_moe_padding_zero_hook(processor, moe_block: Module, handles: List[Any]) -> bool:
+    """Zero calibration padding rows on a MoE block input.
+
+    Natively routed experts run through the model's own router, so their forward
+    hooks see ``[routed_rows, H]`` rows whose count is unrelated to the
+    calibration keep mask and the padding cannot be filtered there. Zeroing the
+    padded rows of the MoE input makes them reach every expert as an all-zero
+    row, which contributes exactly nothing to the per-expert statistics while
+    leaving real rows untouched (#5719).
+
+    The mask is read per batch, so one hook serves every replayed sample. A
+    caller that also wants attention sinks zeroed must not use this: a sink is a
+    real token whose output later positions attend to.
+    """
+
+    def zero_masked_rows(_module, args, kwargs):
+        """Scale the hidden states by the active padding mask."""
+
+        keep_mask = active_padding_mask(processor)
+        if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+            return None
+
+        hidden_states = kwargs.get("hidden_states") if kwargs else None
+        from_kwargs = hidden_states is not None
+        if hidden_states is None:
+            if not args or not torch.is_tensor(args[0]):
+                return None
+            hidden_states = args[0]
+        if hidden_states.dim() != 3 or tuple(hidden_states.shape[:2]) != tuple(keep_mask.shape):
+            return None
+
+        row_mask = keep_mask.to(device=hidden_states.device, dtype=hidden_states.dtype).unsqueeze(-1)
+        masked = hidden_states * row_mask
+        if from_kwargs:
+            kwargs = dict(kwargs)
+            kwargs["hidden_states"] = masked
+            return args, kwargs
+        return (masked,) + tuple(args[1:]), kwargs
+
+    handles.append(moe_block.register_forward_pre_hook(zero_masked_rows, with_kwargs=True))
+    return True
+
+
 def resolve_calibration_keep_mask(processor, keep_mask, *, batch_index, layer_input):
     """Return ``processor``'s calibration row mask for one replayed batch.
 

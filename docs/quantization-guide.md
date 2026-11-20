@@ -359,6 +359,9 @@ qcfg = EXL3Config(bits=4.0, codebook="mcg")
 backend = BACKEND.EXL3_EXLLAMA_V3
 ```
 
+Set `codebook="q4nx"` with `bits=2.5`, `3.0`, or `3.5` to use EXL3's Q4NX
+codebook on NVIDIA CUDA. [Q4NX checkpoint layout and per-projection recipe](exl3-native-decode.md#q4nx)
+
 `bits` is a target average bitrate, not a uniform integer field width.
 Quantization requires CUDA/HIP and the ExLlama V3 integration and its build
 dependencies, including the Python package `pydantic`. After saving,

@@ -1901,6 +1901,18 @@ class GGUFTritonKernel(GGUFTorchLinear):
     # bit width is not enough to identify one (Q4_0 and Q4_K are both 4-bit),
     # so AUTO selection must consult the resolved qtype.
     SUPPORTS_GGUF_QTYPES = frozenset({"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"})
+
+    #: GGUF tensor types whose fused Triton forward is safe under an explicit
+    #: ``torch.cuda.CUDAGraph`` capture (#5591). The fused kernels are pure
+    #: device work (``tl.load``/``tl.dot``) with no host copy, so every layout
+    #: the constructor accepts is capturable. The inherited
+    #: ``GGUFTorchLinear.GRAPH_CAPTURE_QTYPES`` is *not* this kernel's answer: it
+    #: lists Q4_0/Q8_0, which this constructor rejects, and omits the 1-bit
+    #: formats it does build, so the per-instance answer under-claimed them.
+    #: Measured on sm_120 (RTX 5090, torch 2.15.0+cu132, triton 3.9.0): capture,
+    #: replay and a changed-input replay are bitwise identical to eager for all
+    #: five layouts, including the Q6_K wide-scale path.
+    GRAPH_CAPTURE_QTYPES = frozenset({"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"})
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True
@@ -1992,6 +2004,21 @@ class GGUFTritonKernel(GGUFTorchLinear):
         with _triton_cache_build_lock(self):
             self._gguf_triton_cache.clear()
         return super().clear_weight_cache()
+
+    def iter_runtime_weight_tensors(self):
+        """Yield the fused-kernel metadata tensors this module owns (#5810).
+
+        ``_gguf_triton_cache`` is a plain dict, so a budget walk that only
+        reads ``parameters()`` and ``buffers()`` misses the derived scale and
+        min planes the kernels read. The packed code bytes in each entry are
+        strided views of ``qweight``; the budget counts their storage once
+        through the registered buffer.
+        """
+
+        for entry in tuple(self._gguf_triton_cache.values()):
+            for value in entry.values():
+                if isinstance(value, torch.Tensor):
+                    yield value
 
     def _packed_weight_is_permuted(self) -> bool:
         """True when ``qweight`` holds the transposed runtime storage (#4811)."""

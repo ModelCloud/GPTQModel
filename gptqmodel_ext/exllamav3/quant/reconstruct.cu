@@ -2,14 +2,13 @@
 #include "reconstruct.cuh"
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include "../util.h"
 #include "../util.cuh"
 #include "../frag.cuh"
 #include "exl3_dq.cuh"
 
-// TODO: Benchmark, profile, unit test
-
-template <int K, int cb>
+template <int K, int cb, bool half_k = false>
 __global__ __launch_bounds__(256)
 void reconstruct_kernel
 (
@@ -17,7 +16,7 @@ void reconstruct_kernel
     const uint16_t* __restrict__ g_packed
 )
 {
-    constexpr int packed_size = 256 * K / 16;  // in uint16s
+    constexpr int packed_size = 16 * K + 8 * half_k;  // uint16s
 
     int t = threadIdx.x;
     int lane_id = t % 32;
@@ -29,14 +28,14 @@ void reconstruct_kernel
 
     // Load packed 16*128 tile
     __shared__ uint32_t s_packed[8][packed_size / 2];
-    g_packed += (k * blocks_n + n) * packed_size;
+    g_packed += ((int64_t) k * blocks_n + n) * packed_size;
     for (int s = t; s < packed_size * 8 / 8; s += 256)
         ((int4*) s_packed)[t] = ((int4*) g_packed)[t];
     __syncthreads();
 
     // Dequant
     FragB frag[2];
-    dq_dispatch<K, cb>(s_packed[warp_id], lane_id * 8, frag[0], frag[1]);
+    dq_dispatch<K, cb, half_k>(s_packed[warp_id], lane_id * 8, frag[0], frag[1]);
 
     // Shuffle from tensor core layout to row major tile
 //    __shared__ half tile[16 * 8 * 16];
@@ -48,7 +47,6 @@ void reconstruct_kernel
     half2 n1 = __shfl_down_sync(__activemask(), frag[0][1], 4, 32);
     half2 n2 = __shfl_down_sync(__activemask(), frag[1][0], 4, 32);
     half2 n3 = __shfl_down_sync(__activemask(), frag[1][1], 4, 32);
-    __syncwarp();
 
     if (!(lane_id & 4))
     {
@@ -81,7 +79,7 @@ void reconstruct_kernel
     int r = t / 16;
     int c = t % 16;
     int4* tile_int4 = (reinterpret_cast<int4*> (tile));
-    int4* out_int4 = ((int4*) g_unpacked) + (k * 16 + r) * 2 * blocks_n + n * 2 + c;
+    int4* out_int4 = ((int4*) g_unpacked) + ((int64_t) k * 16 + r) * 2 * blocks_n + n * 2 + c;
     *out_int4 = tile_int4[t];
 }
 
@@ -90,35 +88,38 @@ constexpr auto reconstruct_kernel_instances = std::array
 {
     __(1, 0), __(2, 0), __(3, 0), __(4, 0), __(5, 0), __(6, 0), __(7, 0), __(8, 0),
     __(1, 1), __(2, 1), __(3, 1), __(4, 1), __(5, 1), __(6, 1), __(7, 1), __(8, 1),
-    __(1, 2), __(2, 2), __(3, 2), __(4, 2), __(5, 2), __(6, 2), __(7, 2), __(8, 2)
+    __(1, 2), __(2, 2), __(3, 2), __(4, 2), __(5, 2), __(6, 2), __(7, 2), __(8, 2),
+    reconstruct_kernel<1, 2, true>, reconstruct_kernel<2, 2, true>, reconstruct_kernel<3, 2, true>
 };
 #undef __
 
 /*
 Reconstruct encoded+packed tensor
 */
-void reconstruct
+static void reconstruct_impl
 (
     at::Tensor unpacked,
     at::Tensor packed,
-    int K,
-    bool mcg,
-    bool mul1
+    int words_per_tile,
+    decltype(&reconstruct_kernel<1, 0>) kernel
 )
 {
     const at::cuda::OptionalCUDAGuard device_guard(unpacked.device());
     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
+    TORCH_CHECK_DIM(unpacked, 2);
+    TORCH_CHECK_DIM(packed, 3);
     TORCH_CHECK_SHAPES(unpacked, 0, packed, 0, 16);
     TORCH_CHECK_SHAPES(unpacked, 1, packed, 1, 16);
-    TORCH_CHECK_SIZE(packed, 2, 256 * K / 16);
+    TORCH_CHECK_SIZE(packed, 2, words_per_tile);
     TORCH_CHECK_DTYPE(unpacked, kHalf);
-    // The trellis K selects one of 24 kernel instantiations (K in [1, 8] for
-    // each of plain/mcg/mul1). Out-of-range K indexed the table past its end
-    // and launched a garbage function pointer; match the GEMM path's contract.
-    TORCH_CHECK(K >= 1 && K <= 8 && !(mcg && mul1),
-                "EXL3 reconstruct requires 1 <= K <= 8 and not both mcg and mul1 (got K=", K,
-                ", mcg=", mcg, ", mul1=", mul1, ")");
+    TORCH_CHECK_DTYPE(packed, kShort);
+    TORCH_CHECK(packed.device() == unpacked.device() && packed.is_contiguous() && unpacked.is_contiguous(),
+                "EXL3 reconstruct requires contiguous buffers on one device");
+    if (unpacked.numel() == 0) return;
+    TORCH_CHECK(unpacked.size(1) % 128 == 0, "EXL3 reconstruct requires N divisible by 128");
+    TORCH_CHECK((reinterpret_cast<uintptr_t>(unpacked.data_ptr()) | reinterpret_cast<uintptr_t>(packed.data_ptr()))
+                % 16 == 0, "EXL3 reconstruct requires 16-byte aligned buffers");
 
     int rows = packed.size(0);
     int cols = packed.size(1);
@@ -126,19 +127,51 @@ void reconstruct
     dim3 blockDim(256);
     dim3 gridDim(cols / 8, rows);
 
-    int cbi = K - 1;
-    if (mcg) cbi += 8;
-    else if (mul1) cbi += 16;
-    TORCH_CHECK(cbi >= 0 && cbi < static_cast<int>(reconstruct_kernel_instances.size()),
-                "EXL3 reconstruct kernel index ", cbi, " is outside the 24-entry table");
-
-    // See pack.cu: an indexed instantiation is mis-parsed by HIPify, so bind it to
-    // a local identifier before the launch.
-    auto reconstruct_kernel = reconstruct_kernel_instances[cbi];
-    reconstruct_kernel<<<gridDim, blockDim, 0, stream>>>
+    kernel<<<gridDim, blockDim, 0, stream>>>
     (
         (half*) unpacked.data_ptr(),
         (const uint16_t*) packed.data_ptr()
     );
-    cuda_check(cudaPeekAtLastError());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+
+void reconstruct(at::Tensor unpacked, at::Tensor packed, int K, bool mcg, bool mul1)
+{
+    TORCH_CHECK(K >= 1 && K <= 8 && !(mcg && mul1),
+                "EXL3 reconstruct requires 1 <= K <= 8 and not both mcg and mul1 (got K=", K,
+                ", mcg=", mcg, ", mul1=", mul1, ")");
+    const int cb = mcg ? 1 : mul1 ? 2 : 0;
+    reconstruct_impl(unpacked, packed, K * 16, reconstruct_kernel_instances[8 * cb + K - 1]);
+}
+
+void reconstruct_frac(at::Tensor unpacked, at::Tensor packed, int K)
+{
+    TORCH_CHECK(K >= 1 && K <= 3, "EXL3 fractional reconstruction requires K in 1..3");
+    reconstruct_impl(unpacked, packed, K * 16 + 8, reconstruct_kernel_instances[24 + K - 1]);
+}
+
+void reconstruct_r4nx(at::Tensor unpacked, at::Tensor packed, double rate)
+{
+    TORCH_CHECK(rate == 2.5 || rate == 3.0 || rate == 3.5 || rate == 4.0,
+                "R4NX reconstruction requires 2.5, 3.0, 3.5, or 4.0 bpw (got ", rate, ")");
+    const int K = static_cast<int>(rate);
+    const bool half_k = rate != static_cast<double>(K);
+    decltype(&reconstruct_kernel<1, 0>) kernel;
+    if (rate == 2.5) kernel = reconstruct_kernel<2, EXL3_R4NX_CODEBOOK, true>;
+    else if (rate == 3.0) kernel = reconstruct_kernel<3, EXL3_R4NX_CODEBOOK>;
+    else if (rate == 3.5) kernel = reconstruct_kernel<3, EXL3_R4NX_CODEBOOK, true>;
+    else kernel = reconstruct_kernel<4, EXL3_R4NX_CODEBOOK>;
+    reconstruct_impl(unpacked, packed, 16 * K + 8 * half_k, kernel);
+}
+
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
+void reconstruct_q4nx(at::Tensor unpacked, at::Tensor packed, int K, bool half_k)
+{
+    TORCH_CHECK(q4nx_supports_step_bits(4 * K + 2 * half_k),
+                "Q4NX reconstruction requires 2.5, 3.0, or 3.5 bpw");
+    const auto kernel = K == 2 ? reconstruct_kernel<2, EXL3_Q4NX_CODEBOOK, true>
+                              : half_k ? reconstruct_kernel<3, EXL3_Q4NX_CODEBOOK, true>
+                                       : reconstruct_kernel<3, EXL3_Q4NX_CODEBOOK>;
+    reconstruct_impl(unpacked, packed, 16 * K + 8 * half_k, kernel);
+}
+#endif

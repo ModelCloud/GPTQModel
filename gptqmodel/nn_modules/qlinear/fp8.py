@@ -35,7 +35,7 @@ from ...utils.fp8_block_triton import (
 )
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
-from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
+from ...utils.torch import TORCH_HAS_COMPILE, dynamo_is_compiling, torch_compile
 from . import WeightOnlyQuantLinear
 from ._compile_support import COMPILE_LEVEL
 from ._numerics import autocast_active, matmul_fp32_reduce
@@ -58,6 +58,10 @@ _FUSED_DECODE_WIDE_OUT_FEATURES = 2048
 #: ``(hip?, device index, output dtype) -> bool`` answers for the row-wise
 #: ``torch._scaled_mm`` contract, measured once per process.
 _SCALED_MM_ROW_SCALE_SUPPORT: dict = {}
+
+#: ``(device index, fp8 dtype, output dtype) -> bool`` answers for the native
+#: FP8 cast contract, measured once per process on HIP devices (#5429).
+_NATIVE_FP8_CAST_SUPPORT: dict = {}
 
 #: ``GPTQMODEL_FP8_SCALED_MM``: ``auto`` (default) measures the contract,
 #: ``on``/``off`` skip the measurement and force the answer. ``off`` keeps a
@@ -94,8 +98,22 @@ _SCALED_MM_OVERRIDE: Optional[bool] = _parse_scaled_mm_override(
 def _is_compiling() -> bool:
     """Whether this call is being traced by ``torch.compile``/``torch.export``."""
 
-    compiler = getattr(torch, "compiler", None)
-    return bool(compiler is not None and compiler.is_compiling())
+    return dynamo_is_compiling()
+
+
+def _tensor_version(tensor: torch.Tensor) -> int:
+    """Return ``tensor._version``, or ``-1`` for an inference tensor.
+
+    Tensors created inside ``torch.inference_mode()`` do not track a version
+    counter, and reading ``_version`` on them raises. In-place writes to such a
+    tensor are only legal inside inference mode, so the identity half of a
+    payload key still covers a rebind.
+    """
+
+    try:
+        return tensor._version
+    except RuntimeError:
+        return -1
 
 
 def _probe_must_wait() -> bool:
@@ -220,6 +238,112 @@ def _scaled_mm_row_scale_supported(device: torch.device, out_dtype: torch.dtype)
     """
 
     return _scaled_mm_row_scale_verdict(device, out_dtype) is True
+
+
+def _compare_fp8_casts(expected: torch.Tensor, actual: torch.Tensor) -> torch.Tensor:
+    """Whether *actual* matches *expected* for every code, NaN payloads aside.
+
+    A NaN cannot contribute a finite value to a matmul and the IEEE conversion
+    contract does not pin its sign or payload, so two casts agree when they
+    agree on which codes are NaN and are bit-equal on the rest. ROCm preserves
+    the source NaN payload while the CPU reference canonicalises it; comparing
+    raw bits rejected every otherwise bit-exact ROCm cast (#5570). NaN-ness
+    itself is still compared, so a cast that turns a NaN into a number (or the
+    reverse) is rejected.
+    """
+
+    expected_nan = torch.isnan(expected)
+    nan_matches = torch.equal(expected_nan, torch.isnan(actual))
+    finite = ~expected_nan
+    bits_match = (
+        actual[finite].view(torch.uint8) == expected[finite].view(torch.uint8)
+    ).all()
+    return torch.tensor(nan_matches, dtype=torch.bool) & bits_match
+
+
+def _probe_native_fp8_cast(
+    device: torch.device, fp8_dtype: torch.dtype, out_dtype: torch.dtype
+) -> torch.Tensor:
+    """Device-side verdict for the native FP8 -> *out_dtype* cast.
+
+    Every 8-bit pattern is a code in each of the four FP8 formats, so the 256
+    patterns cover the whole domain. The CPU cast is the reference: a device
+    whose cast matches it for every non-NaN code cannot lose weight precision
+    when the lean epilogue casts the codes to the activation dtype (#5429).
+    NaN payloads are allowed to differ (#5570); see ``_compare_fp8_casts``.
+    Returns a 0-dim bool tensor.
+    """
+
+    codes = torch.arange(256, dtype=torch.uint8).view(fp8_dtype)
+    expected = codes.to(out_dtype)
+    actual = codes.to(device).to(out_dtype).to("cpu")
+    return _compare_fp8_casts(expected, actual)
+
+
+def _native_fp8_cast_verdict(
+    device: torch.device, fp8_dtype: torch.dtype, out_dtype: torch.dtype
+) -> Optional[bool]:
+    """Whether this device casts every FP8 code to *out_dtype* bit-exactly.
+
+    CUDA casts are already qualified, so the answer is ``True`` without a
+    measurement there. HIP targets are not: gfx1201 is bit-exact for all four
+    formats and both activation dtypes, but the gate used to reject every ROCm
+    device wholesale (#5429). The cast is therefore measured once per process,
+    device and dtype pair, like the row-wise ``torch._scaled_mm`` contract
+    above. ``None`` means this context could not measure it (a CUDA-graph
+    capture or a ``torch.compile`` trace); the caller keeps the reference path
+    for this call without caching a "no".
+    """
+
+    if not IS_ROCM:
+        return True
+
+    index = device.index
+    if index is None:  # pragma: no cover - tensors always carry an index
+        index = torch.cuda.current_device() if device.type == "cuda" else -1
+    key = (index, fp8_dtype, out_dtype)
+    cached = _NATIVE_FP8_CAST_SUPPORT.get(key)
+    if cached is not None:
+        return cached
+
+    if _probe_must_wait():
+        return None
+
+    try:
+        supported = bool(_probe_native_fp8_cast(device, fp8_dtype, out_dtype))
+    except torch.cuda.OutOfMemoryError:
+        # An allocation failure says nothing about the cast contract.
+        return None
+    except Exception:
+        # A build/kernel rejection is a real answer for this combination.
+        supported = False
+
+    if _probe_must_wait():
+        # Defensive: the context turned into capture/tracing mid-measurement.
+        return supported
+
+    _NATIVE_FP8_CAST_SUPPORT[key] = supported
+    if not supported:
+        log.warn.once(
+            "FP8: the native "
+            f"`{str(fp8_dtype).replace('torch.', '')}` -> "
+            f"`{str(out_dtype).replace('torch.', '')}` cast is not bit-exact on "
+            "this device; row/tensor FP8 layers use the dequantize + matmul path."
+        )
+    return supported
+
+
+def _native_fp8_cast_supported(
+    device: torch.device, fp8_dtype: torch.dtype, out_dtype: torch.dtype
+) -> bool:
+    """``True`` only when the cast contract is known and bit-exact.
+
+    An unmeasured combination reports ``False`` for this call but stays
+    uncached, so a capture-time or traced call cannot poison the process-wide
+    answer (#5195, #5429).
+    """
+
+    return _native_fp8_cast_verdict(device, fp8_dtype, out_dtype) is True
 
 
 def _normalize_fp8_activation_quant_method(value: Optional[str]) -> str:
@@ -365,25 +489,16 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         # Set when a HIP build cannot cast this format natively, so later forwards
         # go straight to the validated CPU path instead of retrying the GPU cast.
         self._native_dequant_disabled = False
-        # The block-scale decode plan is payload-derived; ``_invalidate_compiled``
-        # raises the generation so a reload/move cannot reuse a stale answer.
-        self._fp8_block_plan_generation = 0
-        self._fp8_block_plan_key = None
-        self._fp8_block_plan_value = (False, False)
-        # Range-bound cache for the in-dtype weight narrowing. ``_apply`` and
-        # ``_load_from_state_dict`` reset it, and ``post_init`` warms it, so a
-        # captured/traced forward only reads it (#5195).
-        self._decoded_weight_bound_ready = False
-        self._decoded_weight_bound = None
-        self._scale_inv_min = None
-
-        if self.weight_scale_method == "block" and self.weight_block_size is not None:
-            block_rows, block_cols = self.weight_block_size
-            if out_features % block_rows != 0 or in_features % block_cols != 0:
-                raise ValueError(
-                    f"TorchFP8Linear block scaling requires out_features/in_features "
-                    f"to be divisible by `weight_block_size={self.weight_block_size}`."
-                )
+        # The block-scale decode plan is payload-derived and published as one
+        # immutable ``(key, value)`` tuple: a free-threaded reader sees either
+        # the old pair or the new pair, never a new key with the old value
+        # (#5592). ``_invalidate_compiled`` drops the tuple.
+        self._fp8_block_plan: Optional[tuple] = None
+        # Range-bound cache for the in-dtype weight narrowing, keyed on the
+        # inverse-scale payload so a rebind or in-place ``copy_`` recomputes it
+        # (#5592). ``post_init`` warms it, so a captured/traced forward only
+        # reads it (#5195).
+        self._decoded_weight_cache: Optional[tuple] = None
 
         super().__init__(
             bits=bits,
@@ -459,9 +574,12 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         if self.weight_block_size is None:
             raise ValueError("TorchFP8Linear block scaling requires `weight_block_size`.")
         block_rows, block_cols = self.weight_block_size
+        # A checkpoint may use ceil blocking, where the last block covers only
+        # the remainder of the axis. Store that compact grid instead of
+        # expanding it to the dense weight shape (#5593).
         return (
-            self.out_features // block_rows,
-            self.in_features // block_cols,
+            (self.out_features + block_rows - 1) // block_rows,
+            (self.in_features + block_cols - 1) // block_cols,
         )
 
     def _allocate_buffers(self, *, bias: bool) -> None:
@@ -582,6 +700,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             return scale_inv.view(-1, 1)
         if self.weight_block_size is None:
             raise ValueError("TorchFP8Linear block scaling requires `weight_block_size`.")
+        if scale_inv.shape == (self.out_features, self.in_features):
+            # An element-wise scale is already dense; repeating it as a block
+            # grid would apply only its first row/column.
+            return scale_inv
 
         block_rows, block_cols = self.weight_block_size
         expanded = scale_inv.repeat_interleave(block_rows, dim=0)
@@ -677,15 +799,26 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         return deq.to(target_dtype).transpose(0, 1).contiguous()
 
     def _dequantize_cpu(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
-        # ``dequantize_fp8``'s ``scale`` argument always multiplies. Convert the
-        # stored inverse-scale tensor into the arithmetic this module declares
-        # so the CPU fallback is exactly ``_dequantize_native``.
-        stored_scale = self.weight_scale_inv.to(device="cpu", dtype=torch.float32)
-        if self.weight_scale_semantics == "inverse":
-            stored_scale = torch.reciprocal(stored_scale)
+        # Pass the stored scale through with its declared semantics so an
+        # inverse scale is divided out directly. Recreating its reciprocal
+        # first overflows FP32 for a finite scale below 2**-128 and turns an
+        # exact decode into ``inf``/``NaN`` (#5654).
+        scale_inv = self.weight_scale_inv
+        if self.weight_scale_method == "block" and self.weight_block_size is not None:
+            block_rows, block_cols = self.weight_block_size
+            rows, cols = self.weight.shape
+            if rows % block_rows or cols % block_cols:
+                # The shared decoder infers one uniform repeat from the scale
+                # shape, which cannot express a ceil-blocked grid's partial
+                # last block. Expand for this call only; nothing is retained
+                # (#5593).
+                scale_inv = self._expanded_scale_inv(
+                    target_device=torch.device("cpu"), target_dtype=torch.float32
+                )
         weight = dequantize_fp8(
             self.weight.to(device="cpu"),
-            scale=stored_scale,
+            scale_inv=scale_inv.to(device="cpu", dtype=torch.float32),
+            scale_semantics=self.weight_scale_semantics,
             axis=None if self.weight_scale_method == "block" else (0 if self.weight_scale_method == "row" else 0),
             target_dtype=target_dtype,
         )
@@ -788,6 +921,54 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             )
         )
 
+    def _scale_payload_key(self) -> tuple:
+        """Identity of the current inverse-scale payload, in-place edits included.
+
+        ``id``/``data_ptr`` catch a rebind (including a ``_buffers[...]`` write,
+        which bypasses ``__setattr__``); ``_version`` catches an in-place
+        ``copy_`` or slice write that keeps the storage address. Both the
+        decoded-weight bound and the block-decode plan key on this tuple, so a
+        scale change cannot leave a stale answer behind (#5592).
+        """
+
+        scale = self.weight_scale_inv
+        return (
+            id(scale),
+            scale.data_ptr(),
+            _tensor_version(scale),
+            scale.dtype,
+            scale.device,
+        )
+
+    @property
+    def _fp8_block_plan_key(self) -> Optional[tuple]:
+        """The cached block-decode plan key; assign ``None`` to force a recompute."""
+
+        plan = self._fp8_block_plan
+        return None if plan is None else plan[0]
+
+    @_fp8_block_plan_key.setter
+    def _fp8_block_plan_key(self, value: Optional[tuple]) -> None:
+        if value is not None:
+            raise AttributeError("the block-decode plan key is derived; assign None to clear it")
+        self._fp8_block_plan = None
+
+    @property
+    def _decoded_weight_bound_ready(self) -> bool:
+        """Whether the range-bound cache still describes the current scale payload."""
+
+        cache = self._decoded_weight_cache
+        if cache is None:
+            return False
+        if _probe_must_wait():
+            # Comparing the payload key calls ``data_ptr()``, which dynamo
+            # rejects inside a graph ("Data pointer comparison"). The eager
+            # warm-up (``post_init``/``_apply``) publishes the facts for the
+            # current payload before a capture or trace, so the cached entry is
+            # that payload's answer.
+            return True
+        return cache[0] == self._scale_payload_key()
+
     def _decoded_weight_absmax_bound(self) -> Optional[float]:
         """Upper bound on ``|decoded weight|`` without materialising it.
 
@@ -796,24 +977,30 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         needed. ``None`` means no bound could be established, and callers keep
         the wide path.
         """
-        if self._decoded_weight_bound_ready:
-            return self._decoded_weight_bound
+        cache = self._decoded_weight_cache
+        if _probe_must_wait():
+            # Establishing the bound copies the scale to the host, which a
+            # capture or trace forbids. Use what the eager warm-up published;
+            # a cold cache keeps the exact wide path (#5195).
+            return None if cache is None else cache[1]
+        scale = self.weight_scale_inv
+        key = self._scale_payload_key()
+        if cache is not None and cache[0] == key:
+            return cache[1]
         bound: Optional[float] = None
         smallest_scale: Optional[float] = None
         try:
             code_max = float(torch.finfo(self.fp8_dtype).max)
         except (TypeError, ValueError):
             code_max = None
-        if code_max is not None and self.weight_scale_inv.numel() > 0:
-            scale = self.weight_scale_inv.detach().to(device="cpu", dtype=torch.float32).abs()
-            smallest_scale = float(scale.min())
+        if code_max is not None and scale.numel() > 0:
+            scale_abs = scale.detach().to(device="cpu", dtype=torch.float32).abs()
+            smallest_scale = float(scale_abs.min())
             if self.weight_scale_semantics == "multiplier":
-                bound = code_max * float(scale.max())
+                bound = code_max * float(scale_abs.max())
             else:
                 bound = float("inf") if smallest_scale == 0.0 else code_max / smallest_scale
-        self._decoded_weight_bound = bound
-        self._scale_inv_min = smallest_scale
-        self._decoded_weight_bound_ready = True
+        self._decoded_weight_cache = (key, bound, smallest_scale)
         return bound
 
     def _weights_fit_activation_dtype(self, dtype: torch.dtype) -> bool:
@@ -867,7 +1054,9 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
                 # path instead of synchronising the device (#5195).
                 return False
             self._decoded_weight_absmax_bound()
-        return self._scale_inv_min is not None and self._scale_inv_min > 0.0
+        cache = self._decoded_weight_cache
+        smallest_scale = None if cache is None else cache[2]
+        return smallest_scale is not None and smallest_scale > 0.0
 
     def _block_scale_matches_weight(self) -> bool:
         """Whether the block scale has the exact per-block shape of the weight.
@@ -897,17 +1086,20 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         weight is in range.
 
         Everything this gate rejects keeps the existing dequantize-then-matmul
-        path bit-for-bit: ROCm (native FP8 casts are not qualified there), the
-        E8M0 format (its CUDA cast produces NaNs), a disabled native cast, a
-        non-range-safe payload, zero inverse scales, padded block scales, and
-        an autograd graph that needs the wide-GEMM ``Function``.
+        path bit-for-bit: a device whose measured native FP8 cast is not
+        bit-exact (ROCm measures it once per process, #5429), the E8M0 format
+        (its CUDA cast produces NaNs), a disabled native cast, a non-range-safe
+        payload, zero inverse scales, padded block scales, and an autograd graph
+        that needs the wide-GEMM ``Function``.
         """
 
-        if IS_ROCM or self._native_dequant_disabled:
+        if self._native_dequant_disabled:
             return False
         if self.fp8_format == "float8_e8m0fnu":
             return False
         if not self._native_gemm_eligible(x_flat):
+            return False
+        if not _native_fp8_cast_supported(x_flat.device, self.fp8_dtype, x_flat.dtype):
             return False
         if self.weight_scale_method not in {"row", "tensor", "block"}:
             return False
@@ -940,18 +1132,19 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         """
 
         weight = self.weight
-        scale = self.weight_scale_inv
         key = (
             weight.data_ptr(),
-            scale.data_ptr(),
+            self._scale_payload_key(),
             device,
             dtype,
-            scale.dtype,
             self._native_dequant_disabled,
-            self._fp8_block_plan_generation,
         )
-        if self._fp8_block_plan_key == key:
-            return self._fp8_block_plan_value
+        # Read the pair into one local and publish it with one assignment: a
+        # concurrent reader cannot observe a new key next to the old value
+        # under ``PYTHON_GIL=0`` (#5592).
+        plan = self._fp8_block_plan
+        if plan is not None and plan[0] == key:
+            return plan[1]
 
         if _probe_must_wait():
             # Deciding needs the smallest scale on the host. Inside a graph
@@ -959,8 +1152,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             # the portable decode and does not cache the answer.
             return (False, False)
         value = self._compute_block_decode_plan(device=device, dtype=dtype)
-        self._fp8_block_plan_key = key
-        self._fp8_block_plan_value = value
+        self._fp8_block_plan = (key, value)
         return value
 
     def _compute_block_decode_plan(
@@ -1000,13 +1192,20 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             and fp8_block_decode_supported(
                 weight,
                 scale.to(dtype=torch.float32) if scale.dtype != torch.float32 else scale,
+                fp8_format=self.fp8_format,
                 block_size=block,
                 dtype=dtype,
             )
         )
         fused = (
             decode
-            and fp8_block_gemv_payload_supported(weight, scale, block_size=block, dtype=dtype)
+            and fp8_block_gemv_payload_supported(
+                weight,
+                scale,
+                fp8_format=self.fp8_format,
+                block_size=block,
+                dtype=dtype,
+            )
             # The fused product keeps the codes in the activation dtype through
             # the whole reduction, so it needs the same range safety
             # ``_native_gemm_eligible`` asks for on the row/tensor epilogue.
@@ -1061,8 +1260,9 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
         ``fused`` selects the W8A16 product that folds the decode into the
         GEMM. It needs the exact divisible 128-wide block layout, a range-safe
-        payload, and no autograd graph; every other range-safe payload uses the
-        single-pass decode followed by ``matmul_fp32_reduce``.
+        payload, and no autograd graph on the activation, weight, scale or
+        bias; every other range-safe payload uses the single-pass decode
+        followed by ``matmul_fp32_reduce``.
         """
 
         if self.weight_scale_method != "block" or _is_compiling():
@@ -1094,6 +1294,11 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
                 x_flat.requires_grad
                 or self.weight.requires_grad
                 or self.weight_scale_inv.requires_grad
+                # The bias is added inside the opaque Triton epilogue, so a
+                # trainable bias needs the differentiable decode path too
+                # (#5402). A frozen bias is a constant and keeps the fused
+                # product.
+                or (self.bias is not None and self.bias.requires_grad)
             )
         )
 
@@ -1268,14 +1473,11 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     def _invalidate_compiled(self) -> None:
         self._compiled_forward = None
         self.optimized = False
-        # A new payload, device or dtype invalidates the cached decode plan.
-        self._fp8_block_plan_generation = getattr(self, "_fp8_block_plan_generation", 0) + 1
-        self._fp8_block_plan_key = None
-        self._fp8_block_plan_value = (False, False)
-        # The decoded-weight range bound is derived from the loaded payload.
-        self._decoded_weight_bound_ready = False
-        self._decoded_weight_bound = None
-        self._scale_inv_min = None
+        # A new payload, device or dtype invalidates the cached decode plan and
+        # the range facts derived from it. Dropping the single plan tuple is the
+        # whole reset: the value can never outlive its key (#5592).
+        self._fp8_block_plan = None
+        self._decoded_weight_cache = None
 
     def _apply(self, fn, recurse=True):
         # Module.to()/half()/bfloat16() normally cast every floating buffer.

@@ -669,3 +669,45 @@ def test_exllamav3_wide_activations_stay_finite_through_torch_inner(dtype):
 
     expected = _oracle(module, x)
     assert _relative_l2(actual, expected) <= 2e-3
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_exllamav3_torch_autocast_keeps_fp32_hadamard_and_projection(dtype):
+    """CPU FP16 autocast must not narrow the portable Hadamard/projection (#5837).
+
+    A constant activation tile concentrates the linear weight at the DC entries
+    of the two normalized 128-point Hadamards. The packed codes decode to
+    ``2**-10`` at every output, so the first output of each 128-column block is
+    ``4 * 6000 * 128 * 1.84375 * 2**-10`` and every other output is zero.
+    Autocast previously rounded the Hadamard output to FP16 before the
+    projection, overflowing every output to ``inf``.
+    """
+
+    in_features, out_features = 512, 256
+    layer = exllamav3_torch.ExllamaV3TorchLinear(
+        in_features=in_features,
+        out_features=out_features,
+        name="autocast_probe",
+        tensors={
+            "trellis": torch.zeros((in_features // 16, out_features // 16, 64), dtype=torch.int16),
+            "suh": torch.ones(in_features, dtype=torch.float16),
+            "svh": torch.full((out_features,), 2**-10, dtype=torch.float16),
+            "mcg": torch.tensor(0xCBAC1FED - 2**32, dtype=torch.int32),
+        },
+    ).eval()
+    x = torch.full((1, in_features), 6000.0, dtype=dtype)
+
+    expected = torch.zeros(1, out_features, dtype=dtype)
+    expected[:, ::128] = 4 * 6000.0 * (128 * 1.84375 * 2**-10)
+
+    # The eager FP32 path is the oracle for this fixture.
+    torch.testing.assert_close(layer(x), expected, rtol=2e-6, atol=2e-3)
+
+    with torch.autocast("cpu", dtype=torch.float16):
+        actual = layer(x)
+        # Leaving the module must restore the caller's autocast state.
+        assert torch.is_autocast_enabled("cpu")
+
+    assert actual.dtype == dtype
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=2e-6, atol=2e-3)

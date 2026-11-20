@@ -163,8 +163,11 @@ def test_native_int8_group_layout_output_and_storage_oracle(group_size, dtype, m
     torch.testing.assert_close(
         candidate.dequantize_weight().double(), weight, rtol=0, atol=0
     )
+    # ``qweight`` is released after ``post_init`` (#5718); ``state_dict()``
+    # rebuilds the checkpoint words, so compare through that surface.
+    saved = candidate.state_dict()
     for name in candidate.GPTQ_BUFFER_NAMES:
-        torch.testing.assert_close(getattr(candidate, name), checkpoint[name], rtol=0, atol=0)
+        torch.testing.assert_close(saved[name], checkpoint[name], rtol=0, atol=0)
 
     # The runtime scales are the checkpoint's own group scales, one row per
     # group, so the group-wise dynamic range is preserved rather than being

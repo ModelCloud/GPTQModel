@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from gptqmodel.exllamav3.modules.quant.exl3_lib import quantize as implementation
-from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
 
 
 def test_workspace_is_private_per_stream(monkeypatch):
@@ -94,6 +94,44 @@ def test_oversized_tile_sets_are_split_into_launches(monkeypatch):
     assert calls == [2]
 
 
+@pytest.mark.parametrize(
+    ("bits", "scale_search", "limit"),
+    [(2.5, False, 512), (3.0, False, 512), (3.5, False, 1024),
+     (2.5, True, 1024), (3.0, True, 1024), (3.5, True, 1024)],
+)
+def test_q4nx_launch_limits_follow_history_size_and_keep_explicit_caps(monkeypatch, bits, scale_search, limit):
+    class CudaTiles:
+        is_cuda = True
+
+        def __init__(self, count):
+            self.shape = (count, 256)
+
+        def __getitem__(self, rows):
+            start, stop, _ = rows.indices(self.shape[0])
+            return CudaTiles(stop - start)
+
+    calls = []
+
+    def quantize(tiles, output, indices, kv, search):
+        assert tiles.shape == output.shape == indices.shape
+        calls.append((tiles.shape[0], kv, search))
+
+    monkeypatch.setattr(implementation.torch.version, "hip", None)
+    monkeypatch.setattr(implementation, "ext", SimpleNamespace(quantize_tiles_q4nx=quantize))
+    previous = get_kernel_config()
+    try:
+        for policy, expected in [(KernelConfig(), [limit, 5]), (KernelConfig(exl3_tile_batch=256), [256, 5])]:
+            configure_kernel(policy)
+            tiles = CudaTiles(sum(expected))
+            implementation._quantize_tiles_with_workspace(
+                tiles, tiles, tiles, bits, False, False, q4nx=True, scale_search=scale_search,
+            )
+            assert calls == [(size, int(4 * bits), scale_search) for size in expected]
+            calls.clear()
+    finally:
+        configure_kernel(previous)
+
+
 @pytest.mark.parametrize("device", ["cuda:0", "cuda:1"])
 def test_concurrent_streams_do_not_overwrite_tile_workspace(device):
     if torch.cuda.device_count() <= torch.device(device).index:
@@ -123,18 +161,6 @@ def test_concurrent_streams_do_not_overwrite_tile_workspace(device):
         list(pool.map(quantize, range(4)))
 
 
-def _reset_quant_stream_cache():
-    """Clear whichever stream cache the implementation keeps."""
-
-    streams = getattr(implementation, "_quant_streams", None)
-    if streams is not None:
-        with implementation._quant_streams_lock:
-            streams.clear()
-    tls = getattr(implementation, "_quant_stream_tls", None)
-    if tls is not None:
-        tls.__dict__.clear()
-
-
 def test_quant_stream_is_shared_per_device_across_threads(monkeypatch):
     """Every worker thread must reuse one quantization stream per device.
 
@@ -152,7 +178,8 @@ def test_quant_stream_is_shared_per_device_across_threads(monkeypatch):
 
     fake_torch = SimpleNamespace(device=torch.device, cuda=FakeCuda())
     monkeypatch.setattr(implementation, "torch", fake_torch)
-    _reset_quant_stream_cache()
+    # Keep the synthetic stream objects out of subsequent native launches.
+    monkeypatch.setattr(implementation, "_quant_streams", {})
 
     barrier = threading.Barrier(8)
     results = []

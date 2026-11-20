@@ -16,6 +16,7 @@ from gptqmodel.quantization.config import (
     _DYNAMIC_OVERRIDE_CACHE,
     _DYNAMIC_PATTERN_CACHE,
     _DYNAMIC_REGEX_PATTERN_CACHE,
+    AWQConfig,
     GPTQConfig,
     MSEConfig,
 )
@@ -46,8 +47,13 @@ def clear_caches():
     ],
 )
 def test_mse_config_leaf_edit_invalidates_fresh_resolution(field_name, replacement):
-    mse = MSEConfig(norm=2.0, grid_budget=1 << 20, clip_grid_budget=1 << 20)
-    cfg = GPTQConfig(dynamic={"^layer$": {"mse": mse}})
+    if field_name == "clip_grid_budget":
+        # Only AWQ reads the clip budget; GPTQ refuses it (#5583).
+        mse = MSEConfig(clip_grid_budget=1 << 20)
+        cfg = AWQConfig(bits=4, group_size=128, dynamic={"^layer$": {"mse": mse}})
+    else:
+        mse = MSEConfig(norm=2.0, grid_budget=1 << 20)
+        cfg = GPTQConfig(dynamic={"^layer$": {"mse": mse}})
 
     # Warm every cache layer before the edit.
     first = cfg.dynamic_get("layer", "mse")

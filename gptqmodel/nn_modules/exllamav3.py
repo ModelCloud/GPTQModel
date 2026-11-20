@@ -14,8 +14,9 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import torch
 import torch.nn as nn
 
-from ..exllamav3.trellis import validate_trellis_k
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, trellis_rate
 from ..models._const import DEVICE, normalize_device
+from ..utils.kernel import KernelConfig, snapshot_kernel_config
 from . import exllamav3_bf16_kernels as _bf16_kernels
 
 
@@ -30,7 +31,8 @@ if TYPE_CHECKING:
     from ..exllamav3.modules.quant.exl3 import LinearEXL3
 
 
-_EXL3_BUFFER_NAMES = ("trellis", "suh", "svh", "su", "sv", "bias", "mcg", "mul1")
+_EXL3_BUFFER_NAMES = ("trellis", "suh", "svh", "su", "sv", "bias", *EXL3_CODEBOOK_MARKERS)
+_EXL3_REQUIRED_BUFFERS = ("trellis", "suh", "svh", "su", "sv", *EXL3_CODEBOOK_MARKERS)
 
 # The native EXL3 kernels accept FP16 only. A BF16 activation inside FP16's
 # finite range converts exactly, so the default BF16 checkpoint can use them.
@@ -56,33 +58,64 @@ class ExllamaV3Linear(nn.Module):
     QUANT_TYPE = "exl3"
     # The trellis codes and sign vectors are the EXL3 payload. The sign
     # vectors are stored either unpacked (`suh`/`svh`) or packed (`su`/`sv`),
-    # and the codebook is `mcg` on one recipe and `mul1` on another. A module
-    # built for a recipe owns only one side of each pair, and the validator
-    # skips the absent suffix.
-    CHECKPOINT_REQUIRED_BUFFERS = (
-        "trellis",
-        "suh",
-        "svh",
-        "su",
-        "sv",
-        "mcg",
-        "mul1",
-    )
+    # and a per-projection marker selects the decoder. The validator skips
+    # buffers that are absent for the module's recipe.
+    CHECKPOINT_REQUIRED_BUFFERS = _EXL3_REQUIRED_BUFFERS
     # Every floating EXL3 buffer (the fp16 `suh`/`svh` sign vectors and the
     # bias) loads at its checkpoint dtype; the Hadamard kernels require fp16.
     MODEL_DTYPE_BUFFERS = ()
     SUPPORTS_SHARDS = True
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    # NVIDIA CUDA runs the tensor-core kernels; ROCm runs the native HIP GEMV
+    # and WMMA GEMM on the RDNA4 family (gfx120x). The family declaration is
+    # static; `validate_device`/`supports_device` own the per-architecture gate.
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+
+    @classmethod
+    def _native_hip_available(cls, device) -> bool:
+        """Whether the HIP kernels cover ``device``'s ROCm architecture."""
+        from ..exllamav3.ext import exl3_native_hip_gemm_available
+
+        probe = device.to_torch_device() if isinstance(device, DEVICE) else device
+        return exl3_native_hip_gemm_available(probe)
+
+    @classmethod
+    def supports_device(cls, device) -> bool:
+        """Whether the native EXL3 kernel can run on ``device``.
+
+        NVIDIA CUDA is always eligible. ROCm is eligible only on the RDNA4
+        (gfx120x) family the HIP kernels are compiled for and only when the
+        EXL3 extension is loadable or buildable on this host. This is the
+        selection-time gate ``backend=AUTO`` uses; it never compiles. Use
+        :meth:`validate_device` for the architecture-only check on the explicit
+        backend path.
+        """
+        family = normalize_device(device)
+        if family == DEVICE.CUDA:
+            return True
+        if family != DEVICE.ROCM:
+            return False
+        from ..exllamav3.ext import exl3_native_hip_gemm_usable
+
+        probe = device.to_torch_device() if isinstance(device, DEVICE) else device
+        return exl3_native_hip_gemm_usable(probe)
 
     @classmethod
     def validate_device(cls, device) -> None:
+        if isinstance(device, (tuple, list)):
+            for target in device:
+                cls.validate_device(target)
+            return
         family = normalize_device(device)
-        if family not in cls.SUPPORTS_DEVICES:
-            raise NotImplementedError(
-                "EXL3_EXLLAMA_V3 inference requires NVIDIA CUDA, but the module is on "
-                f"`{getattr(family, 'value', family)}`; move the model to a CUDA device "
-                "(or use EXL3_TORCH on ROCm or CPU)."
-            )
+        if family == DEVICE.CUDA:
+            return
+        if family == DEVICE.ROCM and cls._native_hip_available(device):
+            return
+        raise NotImplementedError(
+            "EXL3_EXLLAMA_V3 inference requires NVIDIA CUDA or an RDNA4 "
+            "(gfx120x) device on ROCm, but the module is on "
+            f"`{getattr(family, 'value', family)}`; move the model to a CUDA device "
+            "(or an RDNA4 device on ROCm, or use EXL3_TORCH on CPU)."
+        )
 
     def __init__(
         self,
@@ -93,12 +126,14 @@ class ExllamaV3Linear(nn.Module):
         tensor_storage: Optional[Dict[str, Any]] = None,
         tensors: Optional[Dict[str, torch.Tensor]] = None,
         out_dtype: torch.dtype = torch.float16,
+        kernel: Optional[KernelConfig] = None,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.name = name
         self.out_dtype = out_dtype
+        self.kernel = snapshot_kernel_config(kernel)
         self.tensor_storage = tensor_storage or {}
 
         self.weight = torch.zeros((1,), dtype=torch.float16, device="meta")
@@ -141,12 +176,14 @@ class ExllamaV3Linear(nn.Module):
         out_features: int,
         name: str,
         tensors: Dict[str, torch.Tensor],
+        kernel: Optional[KernelConfig] = None,
     ) -> "ExllamaV3Linear":
         return cls(
             in_features=in_features,
             out_features=out_features,
             name=name,
             tensors=tensors,
+            kernel=kernel,
         )
 
     def _bias_version(self) -> Optional[int]:
@@ -179,7 +216,7 @@ class ExllamaV3Linear(nn.Module):
         the packed trellis remains aliased by the native handle and is never
         duplicated here.
         """
-        for name in ("suh", "svh", "su", "sv", "mcg", "mul1"):
+        for name in ("suh", "svh", "su", "sv", *EXL3_CODEBOOK_MARKERS):
             tensor = getattr(self, name, None)
             if tensor is not None and tensor.device.type != "meta" and tensor.is_inference():
                 with torch.inference_mode(False), torch.no_grad():
@@ -235,13 +272,15 @@ class ExllamaV3Linear(nn.Module):
     def _stored_features(self) -> tuple[int, int]:
         """Infer storage geometry; architecture dimensions remain logical."""
         trellis = getattr(self, "trellis", None)
-        if trellis is None or trellis.ndim != 3:
+        if trellis is None or trellis.ndim != 3 or trellis.dtype != torch.int16:
             raise ValueError(f"EXL3 module `{self.name}` has invalid trellis geometry")
         try:
-            validate_trellis_k(
-                int(trellis.shape[-1]) // 16,
+            trellis_rate(
+                trellis.shape[-1],
                 getattr(self, "mcg", None) is not None,
                 getattr(self, "mul1", None) is not None,
+                q4nx=getattr(self, "q4nx", None) is not None,
+                r4nx=getattr(self, "r4nx", None) is not None,
             )
         except ValueError as exc:
             raise ValueError(f"EXL3 module `{self.name}`: {exc}") from exc
@@ -309,10 +348,13 @@ class ExllamaV3Linear(nn.Module):
             trellis=trellis,
             mcg=getattr(self, "mcg", None),
             mul1=getattr(self, "mul1", None),
+            q4nx=getattr(self, "q4nx", None),
+            r4nx=getattr(self, "r4nx", None),
             bias=bias,
             out_dtype=self.out_dtype,
             transformers_fix=True,
             key=self.name,
+            kernel=self.kernel,
         )
         inner = self._inner
         self._inner_signature = signature
@@ -326,9 +368,9 @@ class ExllamaV3Linear(nn.Module):
     def _needs_torch_fallback(self) -> bool:
         """Whether this module must reconstruct through the portable kernel.
 
-        The native EXL3 kernels are compiled for CUDA only
-        (``SUPPORTS_DEVICES``). A materialized trellis on any other device
-        cannot run them, so the forward uses the same bounded FP32
+        The native EXL3 kernels run on NVIDIA CUDA and on ROCm's ``cuda``
+        namespace for RDNA4 (gfx120x). A materialized trellis on any other
+        device cannot run them, so the forward uses the same bounded FP32
         reconstruction that FP32 and off-CUDA BF16 already use. An absent or
         meta trellis is left to the native path, which reports that state with
         its existing message.
@@ -373,6 +415,8 @@ class ExllamaV3Linear(nn.Module):
 
     def __setstate__(self, state):
         super().__setstate__(state)
+        if "kernel" not in self.__dict__:
+            self.kernel = snapshot_kernel_config()
         self._inner_guard = threading.RLock()
         # The native handle belongs to the source module's process and may be
         # shared with a shallow copy, so never unload it here - just forget it.
@@ -413,10 +457,9 @@ class ExllamaV3Linear(nn.Module):
         Rows already inside the safe range keep a scale of 1 and stay bit-exact.
 
         Returns ``(fp16_input, output_scale)``, where ``output_scale`` is
-        ``None`` only for an empty batch. Otherwise the kernel result must have
-        the bias removed, be multiplied by ``output_scale``, and have the bias
-        restored. Rows that need no scaling carry a scale of exactly 1, so the
-        rescale is the identity for them. Returns ``None`` for non-finite
+        ``None`` only for an empty batch. Multiply the unbiased kernel result
+        by ``output_scale`` before adding the checkpoint bias. Rows that need
+        no scaling carry a scale of exactly 1. Returns ``None`` for non-finite
         activations so they keep the FP32 Torch reconstruction path.
 
         The whole decision is computed on the device: there is no
@@ -494,11 +537,11 @@ class ExllamaV3Linear(nn.Module):
         The fused path writes BF16 directly; this returns FP32.
         """
         bias = getattr(self, "bias", None)
-        output = result.to(torch.float32)
+        output = result.float() * output_scale.reshape(*result.shape[:-1], 1)
         if bias is None:
-            return output * output_scale
+            return output
         bias = bias[:self.out_features].to(torch.float32)
-        return (output - bias) * output_scale + bias
+        return output + bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
@@ -535,7 +578,7 @@ class ExllamaV3Linear(nn.Module):
                 # (#5331). Keep the result in FP32 until the BF16 re-scale.
                 native_result = inner.forward(
                     native_input,
-                    {},
+                    {"include_bias": False},
                     out_dtype=torch.float32,
                 )
                 if output_scale is not None:
@@ -544,6 +587,7 @@ class ExllamaV3Linear(nn.Module):
                         output_scale,
                         getattr(self, "bias", None),
                         self.out_features,
+                        result_has_bias=False,
                     )
                     if fused is not None:
                         # Already BF16: the trailing ``.to`` is a no-op.
@@ -585,14 +629,17 @@ class ExllamaV3Linear(nn.Module):
         }
         trellis = getattr(self, "trellis", None)
         if trellis is not None:
-            entry["bits_per_weight"] = int(trellis.shape[-1] // 16)
+            entry["bits_per_weight"] = trellis_rate(
+                trellis.shape[-1],
+                getattr(self, "mcg", None) is not None,
+                getattr(self, "mul1", None) is not None,
+                q4nx=getattr(self, "q4nx", None) is not None,
+                r4nx=getattr(self, "r4nx", None) is not None,
+            )
 
-        mcg_multiplier = self._multiplier_value("mcg")
-        if mcg_multiplier is not None:
-            entry["mcg_multiplier"] = mcg_multiplier
-
-        mul1_multiplier = self._multiplier_value("mul1")
-        if mul1_multiplier is not None:
-            entry["mul1_multiplier"] = mul1_multiplier
+        for name in EXL3_CODEBOOK_MARKERS:
+            multiplier = self._multiplier_value(name)
+            if multiplier is not None:
+                entry[f"{name}_multiplier"] = multiplier
 
         return entry

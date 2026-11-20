@@ -52,10 +52,26 @@ class AwqExllamaV2Linear(AWQuantLinear):
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
+    # ``ext_awq.cpp`` has a native quantized GEMM only for FP16 activations.
+    # BF16/FP32 inputs take the extension's dense fallback, which rebuilds the
+    # full FP16 weight and an FP32 copy on every forward (the same fallback
+    # #4213 measured for the GPTQ sibling). AUTO must therefore rank ExLlamaV2
+    # below kernels with a native path for those dtypes. Explicit backend
+    # selection still reaches this kernel.
+    AUTO_NON_FP16_PRIORITY = 1
+
     REQUIRES_FORMAT_V2 = True
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_exllamav2"
+
+    @classmethod
+    def auto_select_priority(cls, fmt, dtype=None):
+        priority = super().auto_select_priority(fmt, dtype)
+        if dtype is not None and dtype != torch.float16:
+            # Never raise the declared rank; only demote the dense fallback.
+            return min(priority, cls.AUTO_NON_FP16_PRIORITY)
+        return priority
 
     # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
     # ``torch.cuda.graph`` capture both run with matching output; the q-handle

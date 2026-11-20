@@ -14,6 +14,7 @@ from .config import (
     QuantizeConfig,
     SmoothLog,
     SmoothMAD,
+    SmoothMethod,
     SmoothMSE,
     SmoothOutlier,
     SmoothPercentile,
@@ -47,20 +48,38 @@ def affine_range_with_zero(
     return torch.minimum(lo, zero), torch.maximum(hi, zero)
 
 
-def symmetric_range(block: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Return the zero-centered range every symmetric kernel expects.
+def symmetric_range_from_bounds(
+    lo: torch.Tensor, hi: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Zero-center a strategy-selected interval for a symmetric grid.
 
     Symmetric GPTQ stores a fixed zero point of ``2 ** (bits - 1)`` and the
     kernels that ignore ``qzeros`` (Marlin) assume it. The fallback strategies
     therefore cannot fit their own midpoint/mean/median/STDCLIP endpoints under
-    ``sym=True``: they must all use ``[-max|x|, max|x|]`` so the derived zero
-    point is that fixed value. An all-zero group gets the same ``+-1`` sentinel
-    as ``Quantizer.find_params`` so the scale stays finite.
+    ``sym=True``. Keep the selected interval's clipping decision and fit the
+    smallest zero-centered interval that contains it, ``[-max(|lo|, |hi|),
+    max(|lo|, |hi|)]``, instead of remeasuring the raw block. An all-zero
+    selection gets the same ``+-1`` sentinel as ``Quantizer.find_params`` so
+    the scale stays finite.
     """
 
-    max_abs = block.abs().amax(dim=1, keepdim=True)
+    max_abs = torch.maximum(lo.abs(), hi.abs())
     max_abs = torch.where(max_abs == 0, torch.ones_like(max_abs), max_abs)
     return -max_abs, max_abs
+
+
+def symmetric_range(block: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return the zero-centered range every symmetric kernel expects.
+
+    This is ``symmetric_range_from_bounds`` applied to the raw block bounds.
+    Callers that already selected a clipped interval must pass that interval
+    to ``symmetric_range_from_bounds`` instead of the raw block.
+    """
+
+    return symmetric_range_from_bounds(
+        block.min(dim=1, keepdim=True).values,
+        block.max(dim=1, keepdim=True).values,
+    )
 
 
 def _quantile(block: torch.Tensor, percentile: float) -> torch.Tensor:
@@ -86,6 +105,31 @@ def _clamp_block(block: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor) -> tor
     return torch.max(torch.min(block, hi), lo)
 
 
+def smooth_applies(
+    method: Optional[SmoothMethod],
+    group_size: Optional[int],
+    *,
+    width: Optional[int] = None,
+) -> bool:
+    """Return whether ``method`` is enabled for the effective group size.
+
+    ``group_size=-1`` means one group per row. ``width`` resolves that sentinel
+    so the threshold still sees the real row width; callers that already
+    resolved the effective group size can omit it. A ``None`` group size keeps
+    the legacy "no information, apply" behavior used by direct callers.
+    """
+
+    if method is None:
+        return False
+    if group_size is None:
+        return True
+    if group_size < 0:
+        if width is None:
+            return True
+        group_size = width
+    return group_size >= getattr(method, "group_size_threshold", 0)
+
+
 def smooth_block(
     block: torch.Tensor,
     fallback: Fallback,
@@ -94,11 +138,7 @@ def smooth_block(
     group_size: Optional[int] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     method = getattr(fallback, "smooth", None)
-    if method is None:
-        return block, None
-    if group_size is not None and group_size < 0:
-        group_size = block.shape[1]
-    if group_size is not None and group_size < getattr(method, "group_size_threshold", 0):
+    if not smooth_applies(method, group_size, width=block.shape[1]):
         return block, None
 
     if isinstance(method, SmoothRowCol):
@@ -156,7 +196,10 @@ def smooth_block(
         log_mu = math.log1p(mu)
         log_vals = torch.log1p(abs_block * mu) / log_mu
         threshold = _quantile(log_vals, float(method.percentile))
-        lin_threshold = (torch.exp(threshold * log_mu) - 1.0) / mu
+        # ``exp(t) - 1`` rounds to exactly 0 for the small log-space
+        # thresholds a tiny ``mu`` produces, which clamps a constant row to
+        # zero (#5629). ``expm1`` keeps the threshold exact near zero.
+        lin_threshold = torch.expm1(threshold * log_mu) / mu
         return torch.clamp(block_f, -lin_threshold, lin_threshold).to(block.dtype), None
 
     if isinstance(method, SmoothMSE):

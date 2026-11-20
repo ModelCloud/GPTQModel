@@ -327,6 +327,35 @@ def _column_entries(value: Any) -> Optional[List[Any]]:
     return None
 
 
+def _pin_hf_attention_mask_column(rows: List[Any]) -> List[Any]:
+    """Pin an HF dataset's float 0/1 ``attention_mask`` column to integers.
+
+    A ``Dataset`` is columnar, so the 0/1-versus-additive convention can be
+    decided from the whole column exactly as ``_columnar_mapping_examples``
+    does for a dict or a ``DataFrame`` (#5368). Splitting into rows first loses
+    that context and an all-padding row is read as an all-zero additive mask
+    that attends everything (#5134, #5506). Pinning the column to ``int64``
+    keeps the per-row normalizer on the 0/1 branch.
+
+    Anything that is not a uniform list of mappings with an ``attention_mask``
+    is returned unchanged, and so is a column without a 0/1 sentinel.
+    """
+
+    masks: List[Any] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or "attention_mask" not in row:
+            return rows
+        masks.append(row["attention_mask"])
+    if not _columnar_attention_mask_is_binary(masks):
+        return rows
+    pinned = []
+    for row, mask in zip(rows, masks):
+        updated = dict(row)
+        updated["attention_mask"] = None if mask is None else torch.as_tensor(mask).to(torch.int64)
+        pinned.append(updated)
+    return pinned
+
+
 def _hf_dataset_rows(dataset: Any) -> Optional[List[Any]]:
     """Return an HF dataset's rows as python mappings, or ``None`` if not HF.
 
@@ -335,13 +364,17 @@ def _hf_dataset_rows(dataset: Any) -> Optional[List[Any]]:
     ``pyarrow.Table`` objects instead of the documented python rows, and every
     row was rejected purely because of that format (issue #4882). Clearing the
     format keeps the same rows, so the rejection depends on the content only.
+
+    The rows are still columnar data, so a float 0/1 ``attention_mask`` column
+    is pinned before the split (#5506).
     """
 
     hf_dataset_types = _hf_dataset_types()
     if not hf_dataset_types or not isinstance(dataset, hf_dataset_types):
         return None
     reset_format = getattr(dataset, "with_format", None)
-    return list(reset_format(None) if callable(reset_format) else dataset)
+    rows = list(reset_format(None) if callable(reset_format) else dataset)
+    return _pin_hf_attention_mask_column(rows)
 
 
 def _frame_columns(dataset: Any) -> Optional[Mapping[str, Any]]:
@@ -726,6 +759,34 @@ def _to_python_containers(value: Any) -> Any:
     return value
 
 
+def _columnar_attention_mask_is_binary(column) -> bool:
+    """Return whether a columnar attention mask uses the 0/1 convention.
+
+    A floating-point all-zero row on its own is read as an additive mask that
+    attends everything (#5134). Inside a column whose other rows carry ``1``,
+    the column is plainly a 0/1 mask, so an all-zero row means "all padding".
+    The convention has to be decided from the whole column before the split;
+    deciding it per row made a padded row fully attended (#5368).
+    """
+
+    saw_one = False
+    for entry in column:
+        if entry is None:
+            continue
+        try:
+            values = torch.as_tensor(entry)
+        except (TypeError, ValueError):
+            return False
+        if values.dtype == torch.bool or values.is_complex():
+            return False
+        if values.is_floating_point() and not bool(torch.isfinite(values).all()):
+            return False
+        if bool((values < 0).any()) or bool((values > 1).any()):
+            return False
+        saw_one = saw_one or bool((values == 1).any())
+    return saw_one
+
+
 def _columnar_mapping_examples(mapping: Mapping) -> List[Dict[str, Any]]:
     """Split a columnar calibration mapping into one mapping per row.
 
@@ -755,6 +816,15 @@ def _columnar_mapping_examples(mapping: Mapping) -> List[Dict[str, Any]]:
                 f"Quantize: calibration mapping column `{name}` has {column_length} rows, "
                 f"expected {row_count} (same as `{primary}`)."
             )
+
+    mask_column = columns.get("attention_mask")
+    if mask_column is not None and _columnar_attention_mask_is_binary(mask_column):
+        # Pin the column's 0/1 convention as integers so the per-row mask
+        # normalizer keeps an all-zero row as all-padding (#5368).
+        columns["attention_mask"] = [
+            None if entry is None else torch.as_tensor(entry).to(torch.int64)
+            for entry in mask_column
+        ]
 
     return [
         {name: column[row_index] for name, column in columns.items()}
@@ -787,6 +857,138 @@ def _is_integer_sequence(value: Any) -> bool:
     if torch.is_tensor(value):
         return value.dtype != torch.bool and not value.is_floating_point() and not value.is_complex()
     return _is_integer_scalar(value)
+
+
+def _message_template(tokenizer):
+    """Resolve the tokenizer's chat formatter, or ``(None, None)``.
+
+    Prefers the model's native ``apply_template`` when calibration rows carry
+    ``messages``, but only when the tokenizer has an actual template to use.
+    Some HF tokenizers expose ``apply_chat_template()`` while leaving
+    ``chat_template=None``, which raises at runtime.
+    """
+
+    if tokenizer is None:
+        return None, None
+
+    apply_fn = getattr(tokenizer, "apply_template", None)
+    if callable(apply_fn):
+        return apply_fn, "apply_template"
+
+    apply_chat_fn = getattr(tokenizer, "apply_chat_template", None)
+    if callable(apply_chat_fn):
+        chat_template = getattr(tokenizer, "chat_template", None)
+        if chat_template is None:
+            get_chat_template = getattr(tokenizer, "get_chat_template", None)
+            if callable(get_chat_template):
+                try:
+                    chat_template = get_chat_template(None, None)
+                except Exception:
+                    chat_template = None
+        if chat_template is not None:
+            return apply_chat_fn, "apply_chat_template"
+
+    return None, None
+
+
+def _render_chat_row(apply_fn, template_name, messages_value, row=None):
+    """Render one ``messages`` row with a resolved chat template.
+
+    Arrow unifies the ``messages`` struct schema across rows and turns, so a
+    user turn carries ``tool_calls: None`` and every tool call's ``arguments``
+    mapping gains the other rows' argument names (#5082). The row's
+    ``tools``/``documents`` are passed through as well: dropping them rendered
+    the row as if no tools were declared, so the schema block the model sees at
+    inference never reached the Hessian (#4858).
+
+    Returns ``(out, rejected_exc, template_inputs)``. ``rejected_exc`` is the
+    exception a template raised for the row's ``tools``/``documents`` before
+    succeeding without them, so the caller can warn once. Mirrors
+    ``prepare_calibration_dataset``'s rendering so the auto batch estimator and
+    the tokenization path agree (#5568).
+    """
+
+    messages_value = _normalize_chat_messages(messages_value)
+    template_inputs = {}
+    if isinstance(row, Mapping):
+        for key in _TEMPLATE_INPUT_COLUMNS:
+            value = row.get(key)
+            if value is not None:
+                template_inputs[key] = _normalize_template_input_payload(value, key=key)
+    try:
+        if template_name == "apply_chat_template":
+            out = apply_fn(
+                messages_value, tokenize=False, add_generation_prompt=False, **template_inputs
+            )
+        else:
+            out = apply_fn(messages_value, tokenize=False, **template_inputs)
+    except TypeError:
+        out = apply_fn(messages_value)
+    except Exception as exc:
+        if not template_inputs:
+            raise
+        out = apply_fn(messages_value)
+        return out, exc, template_inputs
+    return out, None, template_inputs
+
+
+def _messages_char_count(row) -> int:
+    """Cheap size proxy for one ``messages`` row: characters of its text parts."""
+
+    messages = row.get("messages") if isinstance(row, Mapping) else row
+    if not isinstance(messages, (list, tuple)):
+        return 0
+
+    total = 0
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, (list, tuple)):
+            for part in content:
+                if isinstance(part, str):
+                    total += len(part)
+                elif isinstance(part, Mapping):
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        total += len(text)
+    return total
+
+
+def _chat_calibration_row_tokens(qmodel, row) -> int:
+    """Token length of one ``messages`` calibration row, or 0 when unmeasurable.
+
+    Renders the row through the same chat-template path
+    ``prepare_calibration_dataset`` uses and counts the tokens, so the
+    ``batch_size="auto"`` estimator sees chat rows instead of the 512 default
+    (#5568). Never raises: an unrenderable row keeps the default.
+    """
+
+    tokenizer = getattr(qmodel, "tokenizer", None)
+    if tokenizer is None or not isinstance(row, Mapping):
+        return 0
+
+    apply_fn, template_name = _message_template(tokenizer)
+    if apply_fn is None:
+        return 0
+
+    try:
+        out, _, _ = _render_chat_row(apply_fn, template_name, row.get("messages"), row)
+        if out is None:
+            return 0
+        if isinstance(out, str):
+            return len(tokenizer(out)["input_ids"])
+        if hasattr(out, "get"):
+            ids = out.get("input_ids")
+            if ids is not None:
+                return len(ids)
+        if isinstance(out, (list, tuple)):
+            return len(out)
+    except Exception:
+        return 0
+    return 0
 
 
 def prepare_calibration_dataset(
@@ -891,42 +1093,13 @@ def prepare_calibration_dataset(
     message_template_checked = False
 
     def _get_message_template():
-        # Prefer the model's native chat formatter when calibration rows carry
-        # `messages`, but only when the tokenizer has an actual template to use.
-        # Some HF tokenizers expose `apply_chat_template()` while leaving
-        # `chat_template=None`, which raises at runtime.
         nonlocal message_apply_fn, message_apply_name, message_template_checked
         if message_template_checked:
             return message_apply_fn, message_apply_name
 
         message_template_checked = True
-
-        if tokenizer is None:
-            return None, None
-
-        apply_fn = getattr(tokenizer, "apply_template", None)
-        if callable(apply_fn):
-            message_apply_fn = apply_fn
-            message_apply_name = "apply_template"
-            return message_apply_fn, message_apply_name
-
-        apply_chat_fn = getattr(tokenizer, "apply_chat_template", None)
-        if callable(apply_chat_fn):
-            chat_template = getattr(tokenizer, "chat_template", None)
-            if chat_template is None:
-                get_chat_template = getattr(tokenizer, "get_chat_template", None)
-                if callable(get_chat_template):
-                    try:
-                        chat_template = get_chat_template(None, None)
-                    except Exception:
-                        chat_template = None
-
-            if chat_template is not None:
-                message_apply_fn = apply_chat_fn
-                message_apply_name = "apply_chat_template"
-                return message_apply_fn, message_apply_name
-
-        return None, None
+        message_apply_fn, message_apply_name = _message_template(tokenizer)
+        return message_apply_fn, message_apply_name
 
     def _to_2d_long_tensor(value: Any, name: str, idx: int) -> torch.Tensor:
         try:
@@ -1039,51 +1212,19 @@ def prepare_calibration_dataset(
             raise ValueError(
                 "tokenizer must expose `apply_template` or `apply_chat_template` to handle `messages` calibration data."
             )
-        # Arrow unifies the `messages` struct schema across rows and turns, so
-        # a user turn carries `tool_calls: None` and every tool call's
-        # `arguments` mapping gains the other rows' argument names (#5082).
-        # Render the conversation inference actually sends, before templating.
-        messages_value = _normalize_chat_messages(messages_value)
-        # A chat row carries more than `messages`: the standard HF layout puts
-        # the tool schemas in `tools` (and RAG templates read `documents`).
-        # Dropping them rendered the row as if no tools were declared, so the
-        # schema block the model sees at inference never reached the Hessian
-        # (#4858).
-        template_inputs = {}
-        if isinstance(row, Mapping):
-            for key in _TEMPLATE_INPUT_COLUMNS:
-                value = row.get(key)
-                if value is not None:
-                    # HF storage layouts (JSON string, Arrow-unified schema with
-                    # injected `null` properties) are normalized back to the
-                    # payload inference sends (#4934).
-                    template_inputs[key] = _normalize_template_input_payload(value, key=key)
-        try:
-            if template_name == "apply_chat_template":
-                templated = apply_fn(
-                    messages_value, tokenize=False, add_generation_prompt=False, **template_inputs
-                )
-            else:
-                templated = apply_fn(messages_value, tokenize=False, **template_inputs)
-        except TypeError:
-            templated = apply_fn(messages_value)
-        except Exception as exc:
-            # A tokenizer whose template does not use `tools`/`documents`
-            # rejects them (Jinja raises). Keep the row rather than failing the
-            # run, but say so once: the schema is then missing from the tokens.
-            if not template_inputs:
-                raise
-            if not dropped_template_inputs:
-                dropped_template_inputs = True
-                log.warn(
-                    "Quantize: this tokenizer's chat template rejected the calibration row's "
-                    f"{sorted(template_inputs)}; rendering without them: {type(exc).__name__}: {exc}"
-                )
-            templated = apply_fn(messages_value)
+        templated, rejected_exc, template_inputs = _render_chat_row(
+            apply_fn, template_name, messages_value, row
+        )
+        if rejected_exc is not None and not dropped_template_inputs:
+            dropped_template_inputs = True
+            log.warn(
+                "Quantize: this tokenizer's chat template rejected the calibration row's "
+                f"{sorted(template_inputs)}; rendering without them: "
+                f"{type(rejected_exc).__name__}: {rejected_exc}"
+            )
 
         if templated is None:
             raise ValueError(f"tokenizer.apply_template returned None for calibration item {idx}.")
-
         message_examples += 1
         message_template_name = template_name
 

@@ -185,3 +185,217 @@ def test_nemotron_h_puzzle_empty_expert_does_not_require_dense_weight():
 
     assert torch.equal(output, hidden_states)
     assert not hasattr(moe.experts[1].down_proj, "weight")
+
+
+# --- Issue #5739: the expert MLP is `down_proj(relu2(up_proj(x)))` ------------
+#
+# `relu2` is not positively homogeneous of degree 1, so an expert `up_proj` is
+# not a valid AWQ scale source for its own `down_proj`. The Puzzle definition
+# overrides `module_tree` and used to drop the parent's `:nosrc` flag, which let
+# `_filter_awq_scaling_sources` keep the `up_proj -> down_proj` group. Folding
+# `s` there computes `down(relu2(u) / s)` instead of `down(relu2(u))`.
+
+
+class _ReluSquared(nn.Module):
+    def forward(self, hidden_states):
+        return torch.relu(hidden_states) ** 2
+
+
+class _PuzzleRelu2Expert(nn.Module):
+    def __init__(self, hidden_size, intermediate_size):
+        super().__init__()
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+        self.act_fn = _ReluSquared()
+
+    def forward(self, hidden_states):
+        return self.down_proj(self.act_fn(self.up_proj(hidden_states)))
+
+
+class _PuzzleMoE(nn.Module):
+    """Routed and shared experts reading one post-attention norm."""
+
+    def __init__(self, hidden_size, intermediate_size, shared_intermediate_size, num_experts):
+        super().__init__()
+        self.experts = nn.ModuleList([_PuzzleRelu2Expert(hidden_size, intermediate_size) for _ in range(num_experts)])
+        self.shared_experts = _PuzzleRelu2Expert(hidden_size, shared_intermediate_size)
+
+    def forward(self, hidden_states):
+        output = self.shared_experts(hidden_states)
+        for expert in self.experts:
+            output = output + expert(hidden_states)
+        return output
+
+
+class _PuzzleLayer(nn.Module):
+    def __init__(self, hidden_size=16, intermediate_size=8, shared_intermediate_size=12, num_experts=2):
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden_size)
+        self.mixer = _PuzzleMoE(hidden_size, intermediate_size, shared_intermediate_size, num_experts)
+
+    def forward(self, hidden_states):
+        return self.mixer(self.norm(hidden_states))
+
+
+class _PuzzleShell(nn.Module):
+    """The `model.layers` shell the Puzzle definition resolves its tree against."""
+
+    def __init__(self, hidden_size=16, intermediate_size=8, shared_intermediate_size=12, num_experts=2):
+        super().__init__()
+        self.config = SimpleNamespace(n_routed_experts=num_experts)
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList(
+            [_PuzzleLayer(hidden_size, intermediate_size, shared_intermediate_size, num_experts)]
+        )
+
+
+def _puzzle_awq_layer(seed=0):
+    """Build a synthetic Puzzle MoE layer, its plan and its AWQ scaling nodes."""
+
+    from gptqmodel.models.module_plan import ModulePlan
+
+    torch.manual_seed(seed)
+    shell = _PuzzleShell()
+    model_def = NemotronHPuzzleQModel.__new__(NemotronHPuzzleQModel)
+    nn.Module.__init__(model_def)
+    model_def.__dict__["model"] = shell
+    tree = NemotronHPuzzleQModel._resolve_effective_module_tree(shell, None)
+    model_def.__dict__["effective_module_tree"] = tree
+    model_def.__dict__["module_tree"] = tree
+
+    layer = shell.model.layers[0]
+    plan = ModulePlan.from_tree(tree)
+    features = {}
+    for spec in plan.specs:
+        if not spec.quantize:
+            continue
+        templates = [spec.template]
+        if "{expert_index}" in spec.template:
+            head, _, tail = spec.template.partition("{expert_index}")
+            container_path = head.rstrip(".")
+            container = layer.get_submodule(container_path)
+            templates = [
+                f"{container_path}.{name}.{tail.lstrip('.')}"
+                for name, _ in container.named_children()
+                if name.isdigit()
+            ]
+        for template in templates:
+            try:
+                module = layer.get_submodule(template)
+            except AttributeError:
+                continue
+            weight = getattr(module, "weight", None)
+            if weight is None or weight.ndim != 2:
+                continue
+            features[template] = torch.randn(4, weight.shape[1])
+
+    return layer, plan, model_def.awq_get_modules_for_scaling(layer, features, {})
+
+
+def test_nemotron_h_puzzle_expert_up_proj_is_not_an_awq_scale_source():
+    """#5739: routed and shared `up_proj` must keep the parent's `:nosrc`."""
+
+    from gptqmodel.models.definitions.nemotron_h import NemotronHQModel
+    from gptqmodel.models.module_plan import ModulePlan
+    from gptqmodel.quantization.awq.utils.module import get_op_name
+
+    layer, _plan, nodes = _puzzle_awq_layer()
+    puzzle_plan = ModulePlan.from_tree(NemotronHPuzzleQModel.module_tree)
+    parent_plan = ModulePlan.from_tree(NemotronHQModel.module_tree)
+
+    expert_sources = (
+        "mixer.experts.0.up_proj",
+        "mixer.experts.1.up_proj",
+        "mixer.shared_experts.up_proj",
+    )
+    for path in expert_sources:
+        spec = puzzle_plan.find(path)
+        assert spec is not None, path
+        # `nosrc` only removes the fold source; the projection stays quantized.
+        assert "nosrc" in spec.flags, (path, spec.flags)
+        assert spec.quantize, (path, spec.flags)
+        parent = parent_plan.find(path)
+        assert parent is not None and parent.flags == spec.flags, (path, spec.flags, parent.flags)
+
+    groups = [
+        (get_op_name(layer, node["prev_op"]), [get_op_name(layer, module) for module in node["layers"]])
+        for node in nodes
+        if node.get("prev_op") is not None
+    ]
+    used_sources = {prev_op for prev_op, _consumers in groups}
+    assert not (used_sources & set(expert_sources)), (
+        f"expert up_proj is still an AWQ fold source: {sorted(used_sources & set(expert_sources))}"
+    )
+
+    # The up_proj projections are still folded from the shared post-attention
+    # norm, together with the shared expert: one norm, one scale group.
+    assert len(groups) == 1, groups
+    prev_op, consumers = groups[0]
+    assert prev_op == "norm", groups
+    assert sorted(consumers) == sorted(expert_sources), groups
+
+
+def test_nemotron_h_puzzle_expert_neutral_fold_preserves_relu2_output():
+    """A neutral (unquantized) fold of every emitted group must not change the layer.
+
+    Before the fix the extra `up_proj -> down_proj` groups fail this check: the
+    fold divides `up_proj` rows by `s` and multiplies `down_proj` columns by
+    `s`, and `relu2(u / s) != relu2(u) / s`.
+    """
+
+    from gptqmodel.quantization.awq.quantize.scale import apply_scale, is_foldable_source
+    from gptqmodel.quantization.awq.utils.module import get_op_name
+
+    layer, _plan, nodes = _puzzle_awq_layer()
+    hidden = torch.randn(6, layer.norm.weight.numel())
+    with torch.no_grad():
+        before = layer(hidden).clone()
+
+    folded = 0
+    worst = 0.0
+    for node in nodes:
+        prev_op = node.get("prev_op")
+        consumers = node.get("layers") or []
+        if prev_op is None or not consumers or not is_foldable_source(prev_op):
+            continue
+        prev_name = get_op_name(layer, prev_op)
+        layer_names = [get_op_name(layer, module) for module in consumers]
+        # A Linear source divides its output rows; a norm divides its gain.
+        source_width = prev_op.weight.shape[0] if isinstance(prev_op, nn.Linear) else prev_op.weight.numel()
+        scales = torch.rand(source_width) + 0.5
+        consumers_map = node.get("_scale_consumers") or []
+        consumer_map = {prev_name: consumers_map} if consumers_map else None
+        with torch.no_grad():
+            apply_scale(layer, [(prev_name, layer_names, scales, None)], consumer_map=consumer_map)
+            after = layer(hidden)
+        worst = max(worst, float((after - before).norm() / before.norm()))
+        with torch.no_grad():
+            apply_scale(layer, [(prev_name, layer_names, 1.0 / scales, None)], consumer_map=consumer_map)
+        folded += 1
+
+    assert folded >= 1, "the Puzzle layer emitted no foldable AWQ group"
+    assert worst < 1e-5, f"neutral AWQ fold changed the relu2 expert layer output by {worst:.3e}"
+
+
+def test_nemotron_h_puzzle_gptq_grouping_is_unchanged_by_nosrc():
+    """`nosrc` is an AWQ source flag: it must not change the GPTQ quantized blocks."""
+
+    config = SimpleNamespace(n_routed_experts=2)
+    expected = [
+        ["norm:!"],
+        ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj", "mixer.in_proj"],
+        ["mixer.o_proj", "mixer.out_proj"],
+        ["mixer.fc1_latent_proj"],
+        ["mixer.experts.0.up_proj", "mixer.experts.1.up_proj"],
+        ["mixer.experts.0.down_proj", "mixer.experts.1.down_proj"],
+        ["mixer.fc2_latent_proj"],
+        ["mixer.shared_experts.up_proj"],
+        ["mixer.shared_experts.down_proj"],
+    ]
+    gptq_blocks = NemotronHPuzzleQModel.full_layer_modules(config, is_awq_quantize=False, include_capture_only=True)
+    awq_blocks = NemotronHPuzzleQModel.full_layer_modules(config, is_awq_quantize=True, include_capture_only=True)
+
+    assert gptq_blocks == expected
+    # The flag only removes the AWQ fold source, so both methods quantize the
+    # same blocks in the same order.
+    assert awq_blocks == gptq_blocks

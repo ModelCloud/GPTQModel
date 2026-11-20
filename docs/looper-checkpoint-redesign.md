@@ -263,11 +263,44 @@ flowchart TD
 | Uncommitted batch recovery | Incomplete batches existed only in process RAM and disappeared on abort. | Staged files are removed by `abort()` or the next writer initialization; only shards recorded in `progress.json` are reusable. |
 | Concurrent sequential appends | `gptqmodel/looper/input_cache.py:581-585` computed an index and released the lock before `put()`, allowing another caller to choose the same index. | `append()` holds the writer's reentrant lock through `put()`, so each call claims one distinct index. |
 | Reads after opening | `gptqmodel/looper/input_cache.py:320-329` checked shape but did not recheck the shard hash. | `__getitem__()` checks containment and the manifest's shard hash on every read before issuing the tensor. |
+| Placement of pending disk-backed batches | `gptqmodel/looper/forward_executor.py:738-752` materialized every pending batch to test presence and device, and dispatch at `:790` read it again; `balanced` materialized it a third time. | `batch_placement()` answers presence and CPU device from the validated manifest; dispatch performs the one shard open and hash. |
+
+Multi-device scheduling must not call `__getitem__()` to decide placement.
+`ForwardExecutor.run_parallel()` asks a lazy sequence for
+`batch_placement(index)`, which `DiskBackedLayerOutputSequence` answers from
+its validated manifest: every declared batch is present and every payload is
+issued on CPU. The default split and `calibration_data_device="balanced"` both
+place batches from that metadata, then each dispatched worker performs exactly
+one `__getitem__()`: one shard open and one integrity hash per pending batch.
+Ordinary list-backed replay still probes the in-memory slot, so empty slots are
+skipped as before, and a changed shard still fails closed at the dispatch read.
+
+```mermaid
+flowchart TD
+    A["ForwardExecutor.run_parallel"] --> B{"layer_inputs has batch_placement?"}
+    B -- "yes" --> C["DiskBackedLayerOutputSequence.batch_placement"]
+    C --> D["present, device=cpu from validated manifest"]
+    B -- "no" --> E["layer_inputs[index]"]
+    E --> F{"slot non-empty?"}
+    F -- "no" --> G["Skip batch; no worker"]
+    F -- "yes" --> H["present, device=slot[0].device"]
+    D --> I["Assign batch to a device segment"]
+    H --> I
+    I --> J["Dispatch worker: layer_inputs[index]"]
+    J --> K["safe_open shard"]
+    K --> L{"xxh3_128 matches manifest?"}
+    L -- "no" --> X["ValueError; batch not forwarded"]
+    L -- "yes" --> M["Forward on the replica"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X failure
+```
 
 The disk-backed writer was introduced in PR #3588. Focused regressions in
 `tests/test_disk_backed_layer_outputs.py` cover out-of-order payload spills,
 restart cleanup, staged-file mutation, and same-shape shard replacement after
-both `finalize()` and `open()`.
+both `finalize()` and `open()`. `tests/test_disk_backed_replay_single_read_5789.py`
+pins one shard hash per dispatched batch in default and `balanced` scheduling,
+corruption detection at dispatch, and empty-slot skipping for list-backed replay.
 
 ## Scope and operational limits
 

@@ -51,7 +51,7 @@ from ..adapter.adapter import Adapter, normalize_adapter
 from ..adapter.remote import configure_explicit_remote_adapter, resolve_checkpoint_adapter_path
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
-from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear, checkpoint_qzeros_layout
 from ..nn_modules.qlinear.allspark import AllSparkLinear
 from ..nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
@@ -71,7 +71,14 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
-from ..utils.backend import BACKEND, PROFILE, backend_for_activation, normalize_backend, normalize_profile
+from ..utils.backend import (
+    BACKEND,
+    NATIVE_TTNN_BACKENDS,
+    PROFILE,
+    backend_for_activation,
+    normalize_backend,
+    normalize_profile,
+)
 from ..utils.backend_config import Backend, RuntimeConfig, resolve_backend_config, resolve_quantize_backend
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
@@ -684,7 +691,7 @@ def _layerwise_device_strings(
 
 def _native_ttnn_backend(backend: BACKEND) -> bool:
     """Return whether ``backend`` owns its chips without the Torch/XLA runtime."""
-    return backend in (BACKEND.GPTQ_TTNN,)
+    return backend in NATIVE_TTNN_BACKENDS
 
 
 def _module_tensor_bytes(module: torch.nn.Module) -> int:
@@ -966,6 +973,34 @@ def _normalize_explicit_placement(device, device_map, max_memory):
             explicit_device_map = {"": explicit_device}
             requested_device_map = explicit_device_map
     return requested_device_map, explicit_device_map
+
+
+def _dense_placement_device_map(device, device_map, resolved_device):
+    """Return the placement map for the dense (non-quantized) Transformers load.
+
+    Transformers' ``"auto"`` policy fills the first visible accelerator, so an
+    explicit ``device="cpu"`` on a CUDA host silently loaded a CUDA model: the
+    requested device only selected the dtype and was then replaced by ``auto``
+    (#5373). An explicit ``device_map`` still wins; otherwise the requested
+    device becomes a full-model root mapping. A device pool is a layer-wise
+    request with no single root target, so it keeps the auto policy.
+    """
+
+    if device_map:
+        return device_map
+    if device is None or isinstance(resolved_device, tuple):
+        return "auto"
+    # ``_indexed_device_request`` keeps an accelerator ordinal that the family
+    # resolution below drops (``device=1`` resolves to the CUDA family).
+    target = _indexed_device_request(device)
+    if target is None:
+        if isinstance(resolved_device, DEVICE):
+            target = str(resolved_device.to_torch_device())
+        elif isinstance(resolved_device, torch.device):
+            target = str(resolved_device)
+        else:
+            return "auto"
+    return {"": target}
 
 
 def _max_memory_device_name_is_cpu(name: str) -> bool:
@@ -1593,6 +1628,21 @@ def model_global_state_lock():
     return _MODEL_GLOBAL_STATE_LOCK
 
 
+def _default_dtype_outside_construction() -> torch.dtype:
+    """Read torch's default dtype while no construction window can be open.
+
+    transformers' ``local_torch_dtype`` window saves, sets and restores the
+    process default dtype in the constructing thread. A bare
+    ``torch.get_default_dtype()`` at load entry or exit can therefore observe
+    another thread's temporary dtype and report a change the load did not make
+    (#5421). The writer excludes every construction window, so the value read
+    here is the process's settled default dtype.
+    """
+
+    with model_global_state_lock():
+        return torch.get_default_dtype()
+
+
 def _serialized_model_load(method):
     """Serialize a model-construction entry point across threads."""
 
@@ -2141,19 +2191,27 @@ def _load_quantized_gguf_checkpoint_into_model(
 def _resolve_exl3_auto_backend(device, *, cuda_available: Optional[bool] = None) -> "BACKEND":
     """Pick the EXL3 kernel for ``backend=AUTO``.
 
-    Only the CUDA family gets ``EXL3_EXLLAMA_V3``: its tensor-core GEMM dispatch
-    table is populated exclusively for CUDA.  On ROCm every entry of that table
-    is ``nullptr`` (``exl3_gemm.cu`` already rejects HIP with an explicit
-    ``TORCH_CHECK``), so the AUTO branch used to load a backend that cannot run.
-    ROCm -- CDNA and RDNA4 alike -- therefore resolves to ``EXL3_TORCH``, the
-    portable kernel that is the supported ROCm path.
+    The CUDA family keeps the native tensor-core kernel. On ROCm
+    ``exl3_gemm.cu`` forwards to ``exl3_gemm_hip.cu``, which runs a native
+    wave32 WMMA GEMM and the packed HIP GEMV on RDNA4 (gfx120x) and reconstruct
+    + hgemm everywhere else. AUTO selects that native wrapper only when every
+    selected device is a supported RDNA4 target and the EXL3 extension is
+    usable; CDNA, other ROCm targets and hosts whose build has no HIP ops keep
+    the portable ``EXL3_TORCH`` kernel instead of selecting a path that cannot
+    load.
     """
 
     if cuda_available is None:
         cuda_available = torch.cuda.is_available()
+    if not cuda_available:
+        return BACKEND.EXL3_TORCH
     device_family = selector_device_family(device)
-    if cuda_available and device_family in ExllamaV3Linear.SUPPORTS_DEVICES:
+    if device_family == DEVICE.CUDA:
         return BACKEND.EXL3_EXLLAMA_V3
+    if device_family == DEVICE.ROCM:
+        targets = _selector_devices(device) or ()
+        if targets and all(ExllamaV3Linear.supports_device(target) for target in targets):
+            return BACKEND.EXL3_EXLLAMA_V3
     return BACKEND.EXL3_TORCH
 
 
@@ -2244,7 +2302,7 @@ def ModelLoader(cls):
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
         torch._dynamo.disable()
-        default_dtype_before = torch.get_default_dtype()
+        default_dtype_before = _default_dtype_outside_construction()
 
         pretrained_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             pretrained_model_id_or_path,
@@ -2413,7 +2471,9 @@ def ModelLoader(cls):
                 # come from these arguments rather than the previous load.
                 configure_kernel(kernel)
             hf_model_init_kwargs = dict(model_init_kwargs_without_internal)
-            hf_model_init_kwargs["device_map"] = device_map if device_map else "auto"
+            hf_model_init_kwargs["device_map"] = _dense_placement_device_map(
+                device, device_map, resolved_device
+            )
             set_dtype_compat(hf_model_init_kwargs, dtype)
             hf_model_init_kwargs.update(hf_gguf_load_kwargs)
             if (
@@ -2717,7 +2777,7 @@ def ModelLoader(cls):
         # this one before any device is claimed. The native TTNN backend also
         # gates its own mesh open; the two gates share one rate limit, so a load
         # never pays the cooldown twice.
-        if normalize_backend(backend) in (BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_XLA):
+        if normalize_backend(backend) in NATIVE_TTNN_BACKENDS | {BACKEND.GPTQ_TT_XLA}:
             from ..utils.tt_thermal import before_device_open
 
             before_device_open(owner=f"{cls.__name__}.from_quantized[{normalize_backend(backend).value}]")
@@ -2726,7 +2786,7 @@ def ModelLoader(cls):
         # pre-enablement below and the inference-time copies use it.
         configure_p2p(p2p)
         # Install the kernel policy before any quantized module is built.
-        configure_kernel(kernel)
+        kernel_policy = configure_kernel(kernel)
 
         # A load must not reset dynamo's caches: ``torch._dynamo.reset()``
         # discards every compiled frame in the process, including the graphs of
@@ -2739,7 +2799,7 @@ def ModelLoader(cls):
         # to a discarded model are dropped with it: ``release_compile_trace_garbage``
         # reclaims the trace cycles that keep a dropped model alive (#5020), so a
         # load does not need a process-wide reset for them.
-        default_dtype_before = torch.get_default_dtype()
+        default_dtype_before = _default_dtype_outside_construction()
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,
@@ -3032,8 +3092,8 @@ def ModelLoader(cls):
                 backend = _resolve_exl3_auto_backend(device)
             if backend == BACKEND.EXL3_EXLLAMA_V3:
                 if not torch.cuda.is_available():
-                    raise ValueError("EXL3_EXLLAMA_V3 loading requires NVIDIA CUDA; use EXL3_TORCH instead.")
-                ExllamaV3Linear.validate_device(selector_device_family(device))
+                    raise ValueError("EXL3_EXLLAMA_V3 loading requires CUDA or ROCm; use EXL3_TORCH instead.")
+                ExllamaV3Linear.validate_device(device)
         elif format_code == FORMAT.BITSANDBYTES:
             if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES, BACKEND.MLX):
                 raise TypeError("FORMAT.BITSANDBYTES requires AUTO, BITSANDBYTES, or MLX backend.")
@@ -3436,6 +3496,7 @@ def ModelLoader(cls):
                     module_names=list(qcfg.tensor_storage.keys()),
                     tensor_storage=qcfg.tensor_storage,
                     module_cls=exl3_module_cls,
+                    kernel=kernel_policy,
                 )
                 preload_qlinear_kernel = exl3_module_cls
             else:
@@ -3450,6 +3511,16 @@ def ModelLoader(cls):
                     is_sharded=is_sharded,
                     cpu_offload=cpu_offload,
                 )
+
+        # The shell replaced only the modules named by `module_tree`. Let the
+        # definition reattach any runtime modules it shares with those leaves
+        # before the checkpoint is loaded: the unmaterialized-parameter guard
+        # inside `load_checkpoint_in_model_then_tie_weights` would otherwise
+        # reject the sibling branch before `after_model_load` can fix it
+        # (#5514).
+        after_make_quant = getattr(cls, "after_make_quant", None)
+        if callable(after_make_quant):
+            model = after_make_quant(model)
 
         validate_checkpoint_qweights(
             model,
@@ -3875,11 +3946,12 @@ def ModelLoader(cls):
                 **load_extra_kwargs,
             )
 
-            if format_code == FORMAT.GPTQ_V2:
-                # Native v2 checkpoints store logical zero points; the v1->v2
-                # conversion above only runs for v1 checkpoints. Mark the
-                # loaded modules so decoders and repack bookkeeping read the
-                # words as v2 instead of misreading every zero point one high.
+            if checkpoint_qzeros_layout(format_code) == 2:
+                # Native v2 and planar gptq_p checkpoints store logical zero
+                # points; the v1->v2 conversion above only runs for v1
+                # checkpoints. Mark the loaded modules so decoders and repack
+                # bookkeeping read the words as v2 instead of misreading every
+                # zero point one high.
                 for m in model.modules():
                     if isinstance(m, GPTQQuantLinear):
                         m.qzero_format(format=2)

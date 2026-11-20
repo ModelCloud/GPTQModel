@@ -334,13 +334,27 @@ def _linear_fp32_gate_planes_rows(
         gl.store(out_row + 5 * n, gl.sum(acc5, 1) + bias, mask=base_m + 5 < m)
 
 
-@_jit
+@_jit(do_not_specialize=["m"])
 def _linear_fp32(
     x_ptr, packed_ptr, escapes_ptr, bias_ptr, rows_ptr, out_ptr,
-    n: tl.constexpr, output_n: tl.constexpr, k: tl.constexpr, m: tl.constexpr,
+    n: tl.constexpr, output_n: tl.constexpr, k: tl.constexpr, m,
     exp_base: tl.constexpr, block_m: tl.constexpr, block_k: tl.constexpr,
     has_bias: tl.constexpr, indexed: tl.constexpr,
 ):
+    """One packed-output-row CTA per activation tile for any row count ``m``.
+
+    Shapes: ``x`` contiguous FP32 ``[m, k]``; ``packed``/``escapes`` the NF12
+    weight storage; ``rows`` an optional output-row map; ``out`` contiguous
+    FP32 ``[m, output_n]``. Grid ``(output_n, cdiv(m, block_m))``.
+
+    ``m`` is a runtime argument that Triton does not specialize (no ``== 1``
+    or divisibility variants): it only masks activation loads and output
+    stores, never the K loop, tile shape or accumulation order. As a
+    ``tl.constexpr`` it compiled one variant per distinct batch width. The
+    launcher buckets ``block_m`` to ``min(next_pow2(m), 8)``, so the mask
+    geometry stays compile-time and a router geometry has at most four
+    variants instead of up to 254.
+    """
     output_row = tl.program_id(0)
     # Compare before narrowing: an out-of-range int64 ID can otherwise wrap
     # into a valid int32 row and read the wrong packed weight.
@@ -495,14 +509,20 @@ def _linear_fp32_short(
     tl.store(out_ptr + input_row * output_n + output_rows, result, output_rows < output_n)
 
 
-@_jit
+@_jit(do_not_specialize=["m"])
 def _linear_bf16_fp32_tc(
     x_ptr, packed_ptr, escapes_ptr, bias_ptr, out_ptr,
-    n: tl.constexpr, k: tl.constexpr, m: tl.constexpr,
+    n: tl.constexpr, k: tl.constexpr, m,
     exp_base: tl.constexpr, block_n: tl.constexpr, block_k: tl.constexpr,
     has_bias: tl.constexpr,
 ):
-    """Decode a short-K output tile once for an FP32-accumulating BF16 MMA."""
+    """Decode a short-K output tile once for an FP32-accumulating BF16 MMA.
+
+    ``m`` is the runtime row count and is deliberately not specialized: it
+    only masks activation loads and the output store, so every width runs the
+    same per-element instruction sequence. As a ``tl.constexpr`` it compiled
+    one variant per distinct batch width.
+    """
     output_rows = tl.program_id(0) * block_n + tl.arange(0, block_n)
     input_rows = tl.program_id(1) * 16 + tl.arange(0, 16)
     row_n = output_rows[:, None]

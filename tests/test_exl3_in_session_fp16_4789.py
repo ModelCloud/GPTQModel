@@ -75,7 +75,7 @@ def _reloaded_module(in_features: int = 128, out_features: int = 128, *, name: s
 def test_in_session_module_starts_on_cpu_with_the_native_class():
     module = _in_session_module()
     assert type(module) is ExllamaV3Linear
-    assert module.SUPPORTS_DEVICES == [DEVICE.CUDA]
+    assert module.SUPPORTS_DEVICES == [DEVICE.CUDA, DEVICE.ROCM]
     assert module.trellis.device.type == "cpu"
     assert module._needs_torch_fallback()
 

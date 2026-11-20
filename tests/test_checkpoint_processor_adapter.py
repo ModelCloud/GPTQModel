@@ -60,9 +60,13 @@ def test_auto_checkpoint_path_uses_offload_root(tmp_path):
         patch.object(checkpoint_module, "CheckpointExtension", DummyExtension),
         gptq_checkpoint.checkpoint_session(CheckpointConfig(), model),
     ):
-        pass
+        attempt = Path(model._checkpoint_offload_attempt_root)
     assert captured["path"] == str(offload_root)
-    assert model.quantize_config.offload_to_disk_path != str(offload_root)
+    assert attempt.parent == offload_root
+    # The attempt is run-owned state; the caller's config keeps its root so a
+    # second model sharing it still resolves `auto` there (#5361).
+    assert model.quantize_config.offload_to_disk_path == str(offload_root)
+    assert not hasattr(model, "_checkpoint_offload_attempt_root")
 
 
 def test_auto_checkpoint_path_reuses_root_after_retry(tmp_path):
@@ -90,12 +94,45 @@ def test_auto_checkpoint_path_reuses_root_after_retry(tmp_path):
     checkpoint = CheckpointConfig()
     with patch.object(checkpoint_module, "CheckpointExtension", DummyExtension):
         with gptq_checkpoint.checkpoint_session(checkpoint, model):
-            first_attempt = Path(model.quantize_config.offload_to_disk_path)
+            first_attempt = Path(model._checkpoint_offload_attempt_root)
         with gptq_checkpoint.checkpoint_session(checkpoint, model):
-            second_attempt = Path(model.quantize_config.offload_to_disk_path)
+            second_attempt = Path(model._checkpoint_offload_attempt_root)
     assert captured == [str(offload_root), str(offload_root)]
     assert first_attempt != second_attempt
     assert first_attempt.parent == second_attempt.parent == offload_root
+    assert model.quantize_config.offload_to_disk_path == str(offload_root)
+
+
+def test_checkpoint_session_restores_run_state_after_failure(tmp_path):
+    offload_root = tmp_path / "offload"
+    offload_root.mkdir()
+    shared = SimpleNamespace(
+        offload_to_disk=True,
+        offload_to_disk_path=str(offload_root),
+    )
+    model = SimpleNamespace(quantize_config=shared)
+
+    class DummyExtension:
+        def __init__(self, config, adapter):
+            self.store = SimpleNamespace(root=Path(config.path))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    with patch.object(checkpoint_module, "CheckpointExtension", DummyExtension):
+        with pytest.raises(RuntimeError, match="boom"):
+            with gptq_checkpoint.checkpoint_session(
+                CheckpointConfig(offload_root), model
+            ):
+                assert hasattr(model, "_checkpoint_offload_attempt_root")
+                raise RuntimeError("boom")
+
+    assert not hasattr(model, "_checkpoint_offload_attempt_root")
+    assert model.quantize_config is shared
+    assert shared.offload_to_disk_path == str(offload_root)
 
 
 def test_checkpoint_identity_includes_method_specific_settings():
