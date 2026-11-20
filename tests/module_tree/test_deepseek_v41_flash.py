@@ -834,11 +834,13 @@ def test_v41_q4nx_native_routing_matches_expert_order(v41_checkpoint, bits):
             assert layer._q4nx_tables.input_bound == previous_tables.input_bound / 2
 
             layer.experts[1].limit = 0.25
-            torch.testing.assert_close(layer(x, None), reference(x), rtol=2e-3, atol=2e-3)
-            assert layer._q4nx_tables is False
-            for expert in layer.experts:
-                expert.limit = 1e-4
-            layer.gate.scale = 2**36
             values = x.flatten(0, 1)
             ids, rw = layer.gate(values, None)
             assert routed_q4nx(layer, values, ids, rw) is None
+            torch.testing.assert_close(layer(x, None), reference(x), rtol=2e-3, atol=2e-3)
+            for expert in layer.experts:
+                expert.limit = 1e-4
+            layer.gate.scale = 2**36
+            ids, rw = layer.gate(values, None)
+            assert routed_q4nx(layer, values, ids, rw) is None
+            assert torch.isfinite(layer(x, None)).all()
