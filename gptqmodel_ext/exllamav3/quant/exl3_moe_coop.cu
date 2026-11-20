@@ -50,7 +50,10 @@ static MoeCoopKernel moe_coop_kernel_a(float K_, int cb, int Hi, bool wide)
     const BitsK bk = bits_from_K(K_);
     const int K = bk.bits;
     if (cb == EXL3_Q4NX_CODEBOOK)
-        return bk.half ? q4nx_kernel_a<2, true>(Hi, wide) : q4nx_kernel_a<3, false>(Hi, wide);
+    {
+        if (K == 2) return q4nx_kernel_a<2, true>(Hi, wide);
+        return bk.half ? q4nx_kernel_a<3, true>(Hi, wide) : q4nx_kernel_a<3, false>(Hi, wide);
+    }
     if (bk.half)
     {
         TORCH_CHECK(cb == 2, "exl3_moe_coop: half-integer bitrates require the mul1 codebook");
@@ -79,7 +82,10 @@ static MoeCoopKernel moe_coop_kernel_b(float K_, int cb, bool wide)
     const BitsK bk = bits_from_K(K_);
     const int K = bk.bits;
     if (cb == EXL3_Q4NX_CODEBOOK)
-        return bk.half ? q4nx_kernel_b<2, true>(wide) : q4nx_kernel_b<3, false>(wide);
+    {
+        if (K == 2) return q4nx_kernel_b<2, true>(wide);
+        return bk.half ? q4nx_kernel_b<3, true>(wide) : q4nx_kernel_b<3, false>(wide);
+    }
     if (bk.half)
     {
         TORCH_CHECK(cb == 2, "exl3_moe_coop: half-integer bitrates require the mul1 codebook");
@@ -219,8 +225,14 @@ MoeCoopParams exl3_moe_coop_prepare
     TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) <= 1, "exl3_moe_coop: conflicting codebooks");
     TORCH_CHECK(Kg >= 1 && Kg <= 8 && Ku >= 1 && Ku <= 8 && Kd >= 1 && Kd <= 8, "exl3_moe_coop: K out of range");
     TORCH_CHECK(!gated || Kg == Ku, "exl3_moe_coop: gate and up must share a bit width");
-    TORCH_CHECK(!q4nx || ((Ku == 2.5f || Ku == 3.f) && (Kd == 2.5f || Kd == 3.f)),
-                "exl3_moe_coop: Q4NX requires 2.5 or 3.0 bpw");
+    if (q4nx)
+    {
+        const auto up = bits_from_K(Ku);
+        const auto down = bits_from_K(Kd);
+        TORCH_CHECK(q4nx_supports_step_bits(4 * up.bits + 2 * up.half)
+                    && q4nx_supports_step_bits(4 * down.bits + 2 * down.half),
+                    "exl3_moe_coop: Q4NX requires 2.5, 3.0, or 3.5 bpw");
+    }
     TORCH_CHECK(act >= 0 && act <= 3, "exl3_moe_coop: unknown activation");
 
     MoeCoopParams p = {};

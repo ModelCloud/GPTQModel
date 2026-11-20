@@ -81,7 +81,7 @@ def _fixture(op, bits, *, q4nx=False):
     return x, run, reference
 
 
-@pytest.mark.parametrize("bits", (3, 2.5))
+@pytest.mark.parametrize("bits", (3, 2.5, 3.5))
 @pytest.mark.parametrize("q4nx", (False, True))
 @torch.inference_mode()
 def test_routed_exl3_matches_torch_and_replays_changed_input(bits, q4nx):

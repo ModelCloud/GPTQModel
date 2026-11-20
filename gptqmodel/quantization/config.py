@@ -1335,7 +1335,7 @@ def _normalize_exl3_bits(
     if bits < 1.0 or bits > 8.0:
         raise ValueError(f"EXL3Config: `{field}` must be between 1.0 and 8.0.")
     if codebook == "q4nx" and bits not in Q4NX_RATES:
-        raise ValueError(f"EXL3Config: q4nx supports 2.5 or 3.0 bpw, got `{field}={bits:g}`.")
+        raise ValueError(f"EXL3Config: q4nx supports 2.5, 3.0, or 3.5 bpw, got `{field}={bits:g}`.")
     if bits.is_integer():
         return int(bits)
     if (bits in HALF_RATES and codebook == "mul1") or codebook == "q4nx":

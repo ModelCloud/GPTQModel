@@ -8,7 +8,7 @@ from __future__ import annotations
 
 HALF_RATES = (1.5, 2.5, 3.5)
 HALF_RATE_MASK = 0xAAAA
-Q4NX_RATES = (2.5, 3)
+Q4NX_RATES = (2.5, 3, 3.5)
 EXL3_CODEBOOK_MARKERS = ("mcg", "mul1", "q4nx")
 
 
@@ -23,7 +23,7 @@ def validate_trellis_k(
     if isinstance(k, bool) or not isinstance(k, (int, float)) or not 1 <= k <= max_integer_rate:
         raise ValueError(f"EXL3 trellis K must be in [1, {max_integer_rate}], got {k}")
     if q4nx and k not in Q4NX_RATES:
-        raise ValueError(f"EXL3 q4nx supports 2.5 or 3.0 bpw, got {k}")
+        raise ValueError(f"EXL3 q4nx supports 2.5, 3.0, or 3.5 bpw, got {k}")
     if not q4nx and k != int(k) and (k not in HALF_RATES or not mul1):
         raise ValueError(f"EXL3 trellis K={k} requires a supported half-bit rate (1.5, 2.5, 3.5) and mul1")
 

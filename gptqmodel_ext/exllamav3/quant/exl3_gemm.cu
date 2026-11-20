@@ -49,7 +49,8 @@ int exl3_gemm(
     const bool half_k = words_per_tile % 16 == 8;
     if (q4nx)
     {
-        TORCH_CHECK(words_per_tile == 40 || words_per_tile == 48, "Q4NX requires 2.5 or 3.0 bpw");
+        TORCH_CHECK(words_per_tile % 4 == 0 && q4nx_supports_step_bits(words_per_tile / 4),
+                    "Q4NX requires 2.5, 3.0, or 3.5 bpw");
     }
     else
     {

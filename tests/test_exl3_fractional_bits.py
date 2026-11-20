@@ -54,7 +54,7 @@ def test_dynamic_half_rate_can_select_its_own_codebook():
     assert (cfg.runtime_bits, cfg.codebook) == (2, "mcg")
 
 
-@pytest.mark.parametrize("bits", [2.5, 3])
+@pytest.mark.parametrize("bits", [2.5, 3, 3.5])
 def test_q4nx_recipe_reaches_projection_quantizer_after_config_round_trip(bits):
     defaults = QuantizeConfig.from_quant_config(EXL3Config(bits=bits, codebook="q4nx").to_dict())
     assert defaults.runtime_bits == bits and defaults.codebook == "q4nx"
@@ -82,7 +82,7 @@ def test_q4nx_recipe_reaches_projection_quantizer_after_config_round_trip(bits):
     assert restored.codebook == "mcg"
 
 
-@pytest.mark.parametrize("bits", [1.5, 2, 3.5, 4])
+@pytest.mark.parametrize("bits", [1.5, 2, 4, 7])
 def test_q4nx_rejects_other_rates_in_global_and_dynamic_config(bits):
     with pytest.raises(ValueError, match="q4nx.*2.5.*3.0"):
         EXL3Config(bits=bits, codebook="q4nx")

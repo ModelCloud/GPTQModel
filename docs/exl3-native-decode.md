@@ -11,11 +11,14 @@ rates from 1 to 8 bits per weight. The `mul1` codebook also handles
 16×16 tile. The half-bit tiles alternate widths and use the same codebook
 values as their integer relatives.
 
-## Q4NX at 2.5 and 3.0 bits per weight
+## Q4NX
 
 AlexBrandes (Alex Brandes) developed Q4NX for routed MoE experts. GPT-QModel
 adapts his beam search from ExLlamaV3 and the fragment decoder from his vLLM
 fork. [Q4NX format specification](https://github.com/AlexBrandes/exllamav3/blob/41ef7819945fe421626da3c40c678053d240d051/doc/q4nx.md) · [CUDA fragment decoder](https://github.com/AlexBrandes/vllm/blob/ff413b2df19718342e02d9763f161d69afce7b4a/csrc/exl3/codec_q4n.cuh)
+
+The original implementation supports 2.5 and 3.0 bits per weight. GPT-QModel
+extends the same layout to 3.5 bits per weight.
 
 Set `EXL3Config(bits=2.5, codebook="q4nx")` for all selected projections,
 or assign both the rate and codebook to a subset through `dynamic`.
@@ -37,18 +40,20 @@ qcfg = EXL3Config(
 
 | Tile property | `3inst`, `mcg`, `mul1` | `q4nx` |
 | --- | --- | --- |
-| 16×16 payload at 2.5 and 3.0 bpw | 40 and 48 int16 words, respectively. Only `mul1` supports 2.5 bpw. | 40 and 48 int16 words, respectively |
-| State | 256 scalar steps with overlapping 16-bit states | 64 steps with four weights per state and 22 or 20 state bits |
+| 16×16 payload at 2.5, 3.0, and 3.5 bpw | 40, 48, and 56 int16 words, respectively. The half-bit rates use `mul1`. | 40, 48, and 56 int16 words, respectively |
+| State | 256 scalar steps with overlapping 16-bit states | 64 steps with four weights per state and 22, 20, or 18 state bits |
 | Tile boundary | Window wraps to the end of the same tile | Bits before the start are zero |
 | Checkpoint selection | `.mcg`, `.mul1` or no marker | A scalar int32 `.q4nx` marker with multiplier `0x83DCD12D` |
 
-Each step adds a 10- or 12-bit suffix, most significant bit first. Safetensors
+Each step adds a 10-, 12-, or 14-bit suffix, most significant bit first. Safetensors
 stores each 32-bit word as its low and then high 16-bit halfword. The nibble
 sums of the low 32 bits of `state * 0x83DCD12D` give four
 integers in `[-15, 15]`. The decoder divides them by `sqrt(42.5)`. NVIDIA
 CUDA kernels feed the integer values into FP16 tensor-core operands and
-apply the normalization in FP32 after accumulation. The scale search uses
-a 16-state beam and the final encoder uses a 128-state beam.
+apply the normalization in FP32 after accumulation. W2.5 and W3.0 use a
+16-state beam for scale search and a 128-state beam for final encoding.
+W3.5 preserves all 16 overlap classes at each step and uses exact Viterbi
+search for both operations.
 
 ```mermaid
 flowchart LR

@@ -120,9 +120,11 @@ fp_exl3_gemm_kernel get_gemm_kernel_ptr(int K, int shape_idx, bool c_fp32, int c
 {
     if (cb == EXL3_Q4NX_CODEBOOK)
     {
-        TORCH_CHECK((K == 2 && half_k) || (K == 3 && !half_k), "Q4NX requires 2.5 or 3.0 bpw");
-        if (half_k)
+        TORCH_CHECK(q4nx_supports_step_bits(4 * K + 2 * half_k), "Q4NX requires 2.5, 3.0, or 3.5 bpw");
+        if (K == 2)
             return (c_fp32 ? tfp_exl3_gemm_kernel_fp32_q4nx_w25 : tfp_exl3_gemm_kernel_fp16_q4nx_w25)[shape_idx];
+        if (half_k)
+            return (c_fp32 ? tfp_exl3_gemm_kernel_fp32_q4nx_w35 : tfp_exl3_gemm_kernel_fp16_q4nx_w35)[shape_idx];
         return (c_fp32 ? tfp_exl3_gemm_kernel_fp32_q4nx_w30 : tfp_exl3_gemm_kernel_fp16_q4nx_w30)[shape_idx];
     }
     if (half_k)

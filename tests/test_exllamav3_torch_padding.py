@@ -147,7 +147,7 @@ def test_mul1_half_rate_safetensors_round_trip_matches_ring_oracle(bits, tmp_pat
         _module(packed, outputs)(x)
 
 
-@pytest.mark.parametrize("bits", [2.5, 3.0])
+@pytest.mark.parametrize("bits", [2.5, 3.0, 3.5])
 def test_q4nx_safetensors_round_trip_matches_zero_prefix_oracle(bits, tmp_path):
     outputs = 129
     packed = _packed(outputs, bits=bits, codebook="q4nx")
@@ -174,7 +174,7 @@ def test_q4nx_safetensors_round_trip_matches_zero_prefix_oracle(bits, tmp_path):
 
 
 @pytest.mark.cuda
-@pytest.mark.parametrize("bits", [2.5, 3.0])
+@pytest.mark.parametrize("bits", [2.5, 3.0, 3.5])
 @torch.inference_mode()
 def test_q4nx_packed_cuda_decode_matches_oracle_for_decode_and_prefill(bits, monkeypatch):
     if not requires_nvidia_cuda():
@@ -201,7 +201,10 @@ def test_q4nx_packed_cuda_decode_matches_oracle_for_decode_and_prefill(bits, mon
         assert visible.dtype == dtype
         if dtype == torch.bfloat16:
             assert torch.equal(visible, raw.bfloat16())
-        torch.testing.assert_close(visible, expected.to(dtype), rtol=2e-3, atol=5e-4)
+        # Near a rounding boundary the FP32 error can move the final BF16
+        # result by one representable step (0.0009766 on the W3.5 fixture).
+        visible_atol = 1e-3 if dtype == torch.bfloat16 else 5e-4
+        torch.testing.assert_close(visible, expected.to(dtype), rtol=2e-3, atol=visible_atol)
 
 
 @pytest.mark.cpu

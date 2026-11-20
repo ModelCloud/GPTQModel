@@ -23,6 +23,18 @@ constexpr int slot_bits = 7;  // Up to 128 live beam states.
 constexpr int slot_mask = (1 << slot_bits) - 1;
 constexpr Key empty_key = ~Key{0};
 
+__device__ __forceinline__ Key candidate_key(uint32_t state, int previous, float prior, const float* target)
+{
+    const uint32_t sums = q4nx_nibble_sums(state);
+    const float e0 = int(sums & 255) - 15 - target[0];
+    const float e1 = int((sums >> 8) & 255) - 15 - target[1];
+    const float e2 = int((sums >> 16) & 255) - 15 - target[2];
+    const float e3 = int(sums >> 24) - 15 - target[3];
+    const float cost = prior + (e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3);
+    const uint32_t path = (state << slot_bits) | previous;
+    return (Key{__float_as_uint(cost)} << 32) | path;
+}
+
 // Select a cutoff by cost and state so equal-cost candidates are retained
 // deterministically. The state identifies the predecessor class and suffix.
 template <int classes, int beam>
@@ -74,6 +86,7 @@ __global__ void __launch_bounds__(256) quantize_kernel(
 {
     constexpr int class_count = 1 << (32 - 2 * KV);
     constexpr int suffix_count = 1 << KV;
+    constexpr bool exact = beam == class_count;
     __shared__ float targets[tile_weights];
     __shared__ Key candidates[class_count];
     __shared__ float costs[beam];
@@ -100,32 +113,51 @@ __global__ void __launch_bounds__(256) quantize_kernel(
             count = 0;
         __syncthreads();
 
-        const int live = step == 0 ? 1 : beam;
         const float* target = targets + 4 * step;
-        for (int i = threadIdx.x; i < live * suffix_count; i += blockDim.x)
+        if constexpr (exact)
         {
-            const int previous = i >> KV;
-            const uint32_t state = (classes[previous] << KV) | (i & (suffix_count - 1));
-            const uint32_t sums = q4nx_nibble_sums(state);
-            const float e0 = int(sums & 255) - 15 - target[0];
-            const float e1 = int((sums >> 8) & 255) - 15 - target[1];
-            const float e2 = int((sums >> 16) & 255) - 15 - target[2];
-            const float e3 = int(sums >> 24) - 15 - target[3];
-            const float cost = costs[previous] + (e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3);
-            const uint32_t path = (state << slot_bits) | previous;
-            const Key key = (Key{__float_as_uint(cost)} << 32) | path;
-            atomicMin(&candidates[state & (class_count - 1)], key);
+            // W3.5 keeps every overlap class. Sixteen threads reduce each
+            // class independently, with slots indexed directly by class.
+            static_assert(class_count == 16);
+            const int successor = threadIdx.x / 16;
+            const int lane = threadIdx.x % 16;
+            const int prefixes = step == 0 ? suffix_count / class_count : suffix_count;
+            Key best = empty_key;
+            for (int prefix = lane; prefix < prefixes; prefix += 16)
+            {
+                const uint32_t state = prefix * class_count + successor;
+                const int previous = state >> KV;
+                const Key key = candidate_key(state, previous, costs[previous], target);
+                best = min(best, key);
+            }
+            for (int offset = 8; offset > 0; offset /= 2)
+                best = min(best, __shfl_xor_sync(0xffffffffu, best, offset, 16));
+            if (lane == 0)
+                candidates[successor] = best;
+        }
+        else
+        {
+            const int live = step == 0 ? 1 : beam;
+            for (int i = threadIdx.x; i < live * suffix_count; i += blockDim.x)
+            {
+                const int previous = i >> KV;
+                const uint32_t state = (classes[previous] << KV) | (i & (suffix_count - 1));
+                const Key key = candidate_key(state, previous, costs[previous], target);
+                atomicMin(&candidates[state & (class_count - 1)], key);
+            }
         }
         __syncthreads();
 
-        // Both rates have at least 256 distinct classes even on the first step.
-        const Key cutoff = beam_cutoff<class_count, beam>(candidates);
+        // The first step can reach at least as many classes as the beam holds.
+        Key cutoff = empty_key;
+        if constexpr (!exact)
+            cutoff = beam_cutoff<class_count, beam>(candidates);
         for (int i = threadIdx.x; i < class_count; i += blockDim.x)
         {
             const Key key = candidates[i];
             if (key == empty_key || key > cutoff)
                 continue;
-            const unsigned slot = atomicAdd(&count, 1u);
+            const unsigned slot = exact ? i : atomicAdd(&count, 1u);
             history[step * beam + slot] = uint32_t(key);
             costs[slot] = __uint_as_float(key >> 32);
             classes[slot] = i;
@@ -186,7 +218,7 @@ __global__ void pack_kernel(const int16_t* suffixes, uint16_t* packed, int64_t t
 
 void quantize_tiles(const at::Tensor& input, at::Tensor& output, at::Tensor& suffixes, int64_t kv, bool scale_search)
 {
-    TORCH_CHECK(kv == 10 || kv == 12, "Q4NX requires 2.5 or 3.0 bpw");
+    TORCH_CHECK(q4nx_supports_step_bits(kv), "Q4NX requires 2.5, 3.0, or 3.5 bpw");
     TORCH_CHECK(input.dim() == 2 && input.size(1) == tile_weights
         && output.sizes() == input.sizes() && suffixes.sizes() == input.sizes(),
         "Q4NX quantization expects matching [tiles, 256] buffers");
@@ -201,7 +233,7 @@ void quantize_tiles(const at::Tensor& input, at::Tensor& output, at::Tensor& suf
     TORCH_CHECK(tiles <= std::numeric_limits<int>::max(), "Too many Q4NX tiles");
     const c10::cuda::CUDAGuard guard(input.device());
     const auto stream = at::cuda::getCurrentCUDAStream();
-    auto history = at::empty({tiles, steps, scale_search ? 16 : 128}, input.options().dtype(at::kInt));
+    auto history = at::empty({tiles, steps, scale_search || kv == 14 ? 16 : 128}, input.options().dtype(at::kInt));
     const float* in = input.const_data_ptr<float>();
     float* out = output.data_ptr<float>();
     auto* codes = suffixes.data_ptr<int16_t>();
@@ -210,16 +242,18 @@ void quantize_tiles(const at::Tensor& input, at::Tensor& output, at::Tensor& suf
         quantize_kernel<10, 16><<<tiles, 256, 0, stream>>>(in, out, codes, back);
     else if (kv == 10)
         quantize_kernel<10, 128><<<tiles, 256, 0, stream>>>(in, out, codes, back);
-    else if (scale_search)
+    else if (kv == 12 && scale_search)
         quantize_kernel<12, 16><<<tiles, 256, 0, stream>>>(in, out, codes, back);
-    else
+    else if (kv == 12)
         quantize_kernel<12, 128><<<tiles, 256, 0, stream>>>(in, out, codes, back);
+    else
+        quantize_kernel<14, 16><<<tiles, 256, 0, stream>>>(in, out, codes, back);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void pack_trellis(at::Tensor& packed, const at::Tensor& suffixes, int64_t kv)
 {
-    TORCH_CHECK(kv == 10 || kv == 12, "Q4NX requires 2.5 or 3.0 bpw");
+    TORCH_CHECK(q4nx_supports_step_bits(kv), "Q4NX requires 2.5, 3.0, or 3.5 bpw");
     TORCH_CHECK(suffixes.dim() == 3 && packed.dim() == 3 && suffixes.size(2) == tile_weights
         && packed.size(0) == suffixes.size(0) && packed.size(1) == suffixes.size(1)
         && packed.size(2) == 4 * kv, "Q4NX pack received mismatched tile buffers");
@@ -237,8 +271,10 @@ void pack_trellis(at::Tensor& packed, const at::Tensor& suffixes, int64_t kv)
     auto* words = reinterpret_cast<uint16_t*>(packed.data_ptr<int16_t>());
     if (kv == 10)
         pack_kernel<10><<<blocks, 128, 0, stream>>>(codes, words, tiles);
-    else
+    else if (kv == 12)
         pack_kernel<12><<<blocks, 128, 0, stream>>>(codes, words, tiles);
+    else
+        pack_kernel<14><<<blocks, 128, 0, stream>>>(codes, words, tiles);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

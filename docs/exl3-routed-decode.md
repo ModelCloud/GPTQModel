@@ -13,9 +13,9 @@ Callers provide these tensors on the input device.
 - INT64 pointer tables for packed trellis, SU, SV and optional bias. Each
   table is a one-dimensional device array with an entry per local expert.
   Gate and up share a bitrate. Down may use another bitrate with the same
-  codebook. Pass `q4nx=True` for AlexBrandes's Q4NX payloads at 2.5 or 3.0
-  bpw, with `mcg=False` and `mul1=False`. Keep the packed tensors and tables alive through execution and
-  graph replay. Synchronize the publishing stream before consuming them.
+  codebook. Pass `q4nx=True` for Q4NX at 2.5, 3.0, or 3.5 bpw with
+  `mcg=False` and `mul1=False`. Keep the packed tensors and tables alive through
+  execution and graph replay. Synchronize the publishing stream before consuming them.
 - Caller-owned scratch for `S` slots, where `rows * topk <= S <= 256`.
   If the padded gate input, intermediate and down output widths are `H`,
   `I` and `O`, allocate FP16 `had_gate[S,H]`, `had_up[S,H]` and

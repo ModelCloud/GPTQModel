@@ -324,7 +324,7 @@ __device__ __forceinline__ void dq_dispatch(const uint32_t* ptr, int idx, FragB&
     if constexpr (cb == EXL3_Q4NX_CODEBOOK)
     {
         constexpr int KV = 4 * bits + 2 * half_k;
-        static_assert(KV == 10 || KV == 12);
+        static_assert(q4nx_supports_step_bits(KV));
         dq_q4nx<KV>(ptr, idx >> 3, frag0, frag1);
     }
     else if constexpr (half_k)
