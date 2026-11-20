@@ -69,9 +69,13 @@ flowchart LR
 
 Quantization requires NVIDIA CUDA. Inference uses native CUDA kernels for
 FP16 and BF16 on NVIDIA, or `BACKEND.EXL3_TORCH` for portable reconstruction.
-Q4NX CUDA dispatch on Ampere selects a packed GEMV for one to eight rows when
-the column groups fit in a co-resident wave. Each warp unpacks AlexBrandes's
-zero-prefixed windows, including Qubitium's W3.5 extension, from registers.
+Q4NX CUDA dispatch on Ampere and Ada (sm_89) selects a packed GEMV for one to
+eight rows when the column groups fit in a co-resident wave. On Ada the wide
+config is limited to the measured small-k, large-n band (2.5 and 3.5 bpw,
+`k <= 2048`, `n >= 12288`), and a 3.0 bpw tile of 64 Mi elements or more keeps
+the packed kernel, which reads the trellis from L2 there. Each warp unpacks
+AlexBrandes's zero-prefixed windows, including Qubitium's W3.5 extension, from
+registers.
 The kernel accumulates in FP32 and applies normalization with the output
 Hadamard transform.
 

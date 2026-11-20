@@ -2876,6 +2876,15 @@ def ModelWriter(cls):
                 bias_dtype=model_dtype,
             )
 
+        # A definition may reattach runtime modules that ``make_quant`` did not
+        # replace (for example DiffusionGemma's tied decoder leaves). The
+        # checkpoint fill below runs the same unmaterialized-parameter guard as
+        # the loader, so apply the hook before it, exactly like the load path
+        # (#5514, #5716).
+        after_make_quant = getattr(type(self), "after_make_quant", None)
+        if callable(after_make_quant):
+            model = after_make_quant(model)
+
         if qcfg.activation_mode in {"w4afp8", "w4a_nvfp4"}:
             # The native W4A load assigns the raw checkpoint words directly.
             # Declare the source layout first, exactly as the non-W4A branch
