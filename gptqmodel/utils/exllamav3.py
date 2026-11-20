@@ -17,6 +17,7 @@ from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
 from ..nn_modules.exllamav3 import ExllamaV3Linear
+from .kernel import KernelConfig
 from .model import recurse_setattr
 
 
@@ -52,6 +53,7 @@ def create_exllamav3_module(
     submodule: nn.Module,
     tensors: Dict[str, torch.Tensor],
     module_cls: Type[nn.Module] = ExllamaV3Linear,
+    kernel: Optional[KernelConfig] = None,
 ) -> nn.Module:
     in_features, out_features = _resolve_linear_shape(submodule)
     new_module = module_cls.from_tensors(
@@ -59,6 +61,7 @@ def create_exllamav3_module(
         out_features=out_features,
         name=name,
         tensors=tensors,
+        **({"kernel": kernel} if kernel is not None and issubclass(module_cls, ExllamaV3Linear) else {}),
     )
     recurse_setattr(module_root, name, new_module)
     return new_module
@@ -78,9 +81,11 @@ def replace_exllamav3_placeholders(
     module_names: Iterable[str],
     tensor_storage: Optional[Dict[str, Dict[str, Any]]] = None,
     module_cls: Type[nn.Module] = ExllamaV3Linear,
+    kernel: Optional[KernelConfig] = None,
 ) -> None:
     module_lookup = dict(model.named_modules())
     storage_map = tensor_storage or {}
+    kernel_kwargs = {"kernel": kernel} if kernel is not None and issubclass(module_cls, ExllamaV3Linear) else {}
 
     for module_name in module_names:
         submodule = module_lookup.get(module_name)
@@ -96,5 +101,6 @@ def replace_exllamav3_placeholders(
             out_features=out_features,
             name=module_name,
             tensor_storage=storage_map.get(module_name),
+            **kernel_kwargs,
         )
         recurse_setattr(model, module_name, new_module)

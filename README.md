@@ -99,6 +99,8 @@ compatible deployment engine.
 
 Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kernel scratch, one quantization stream and one tile-scratch pair per device, per-device plan lifetimes and the single GGUF CUDA weight copy are documented in [kernel scratch lifecycle](docs/kernel-scratch-lifecycle.md). CPU layer packing quantizes and packs each bounded input block in one shift/reduce pass; see [CPU block packing](docs/cpu-block-packing.md). Compiled CPU int4pack forwards decode the live runtime layout for grad-requiring calls; see [compiled CPU int4pack gradient fallback](docs/cpu-int4pack-compiled-grad.md).
 
+EXL3 supports packed 1.5, 2.5 and 3.5 bits per weight with the `mul1` codebook. [Native half-bit EXL3 rates](docs/exl3-runtime-weights.md#native-mul1-half-bit-rates)
+
 ### Control, scale, and quality ⚙️
 
 - **Choose where to spend precision.** Mix bit widths, keep sensitive modules

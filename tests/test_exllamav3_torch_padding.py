@@ -7,14 +7,16 @@ import struct
 
 import pytest
 import torch
+from safetensors.torch import load_file, save_file
 
+from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 
 
 def _packed(outputs=576, *, bits=6, codebook="mcg", bias=True):
     stored_outputs = math.ceil(outputs / 128) * 128
     gen = torch.Generator().manual_seed(787)
-    trellis = torch.randint(-32768, 32768, (8, stored_outputs // 16, 16 * bits),
+    trellis = torch.randint(-32768, 32768, (8, stored_outputs // 16, int(16 * bits)),
                             dtype=torch.int16, generator=gen)
     trellis.flatten()[:8] = torch.tensor(
         [0, 1, 32767, -32768, -1, 0x5555, -21846, 31], dtype=torch.int16)
@@ -36,13 +38,16 @@ def _packed(outputs=576, *, bits=6, codebook="mcg", bias=True):
 def _oracle_inner(packed):
     """Decode explicit circular bit windows, then place fragment coordinates."""
     trellis = packed["trellis"].cpu()
-    bits = trellis.shape[-1] // 16
+    bits = trellis.shape[-1] / 16
     words = trellis.long() & 65535
     words = words.reshape(*words.shape[:2], -1, 2).flip(-1).reshape_as(words)
     positions = torch.arange(15, -1, -1)
     stream = ((words[..., None] >> positions) & 1).flatten(-2)
-    ends = (torch.arange(256) + 1) * bits
-    windows = (ends[:, None] - 16 + torch.arange(16)) % (256 * bits)
+    widths = torch.full((256,), int(bits), dtype=torch.long)
+    if bits != int(bits):
+        widths[1::2] += 1
+    ends = widths.cumsum(0)
+    windows = (ends[:, None] - 16 + torch.arange(16)) % stream.shape[-1]
     states = (stream[..., windows] * (1 << positions)).sum(-1)
     if "mul1" in packed:
         raw = (states * 0x83DCD12D) & 0xFFFFFFFF
@@ -87,6 +92,37 @@ def _oracle_weight(packed, *, device="cpu"):
 def _module(packed, outputs=576):
     return ExllamaV3TorchLinear.from_tensors(
         in_features=128, out_features=outputs, name="kv_a", tensors=packed)
+
+
+@pytest.mark.parametrize("bits", [1.5, 2.5, 3.5])
+def test_mul1_half_rate_safetensors_round_trip_matches_ring_oracle(bits, tmp_path):
+    outputs = 129
+    packed = _packed(outputs, bits=bits, codebook="mul1")
+    module = _module(packed, outputs)
+    x = torch.randn((3, 128), generator=torch.Generator().manual_seed(45)) * 0.125
+    expected = x @ _oracle_weight(packed)[:, :outputs] + packed["bias"].float()
+    torch.testing.assert_close(module(x), expected, atol=2e-6, rtol=2e-6)
+    assert module.tensor_storage_entry()["bits_per_weight"] == bits
+
+    path = tmp_path / "model.safetensors"
+    save_file(module.state_dict(), path, metadata={"format": "exl3", "bits": str(bits)})
+    for module_cls in (ExllamaV3TorchLinear, ExllamaV3Linear):
+        restored = module_cls(
+            name="kv_a",
+            in_features=128,
+            out_features=outputs,
+            tensor_storage=module.tensor_storage_entry(),
+        )
+        restored.load_state_dict(load_file(path), assign=True)
+        assert restored.tensor_storage_entry()["bits_per_weight"] == bits
+        assert restored.state_dict().keys() == packed.keys()
+        for name, tensor in restored.state_dict().items():
+            assert torch.equal(tensor, packed[name])
+        torch.testing.assert_close(restored(x), expected, atol=2e-6, rtol=2e-6)
+
+    packed.pop("mul1")
+    with pytest.raises(ValueError, match="half-bit rate .* and mul1"):
+        _module(packed, outputs)(x)
 
 
 @pytest.mark.cpu

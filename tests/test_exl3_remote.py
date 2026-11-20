@@ -37,6 +37,7 @@ from gptqmodel.utils.exl3_remote import (
     exl3_quantization_failure_message,
     remote_client_from_provenance,
     validate_exl3_hessian_metrics,
+    validate_remote_inputs,
     validate_remote_output_tensors,
 )
 
@@ -72,6 +73,9 @@ def _request(
     weight: torch.Tensor,
     hessian: torch.Tensor,
     endpoint: RemoteEndpoint,
+    *,
+    bits: int | float = 2,
+    codebook: str = "mcg",
 ) -> dict:
     return build_projection_request(
         module_full_name="model.layers.7.mlp.experts.31.gate_proj",
@@ -80,8 +84,8 @@ def _request(
         hessian=hessian,
         sample_count=1024,
         quantizer_contract={
-            "bits": 2,
-            "codebook": "mcg",
+            "bits": bits,
+            "codebook": codebook,
             "hessian_capture": "raw-xtx-sum-fp32-v1",
             "hessian_numerical": EXL3_HESSIAN_NUMERICAL_CONTRACT,
             "hessian_symmetry": EXL3_HESSIAN_SYMMETRY_CONTRACT,
@@ -400,6 +404,27 @@ def test_output_geometry_is_bound_to_request() -> None:
     tensors["trellis"] = torch.zeros((8, 8, 16), dtype=torch.int16)
     with pytest.raises(ValueError, match="geometry"):
         validate_remote_output_tensors(request, tensors)
+
+
+def test_half_rate_remote_request_binds_the_mul1_trellis_width():
+    endpoint = _endpoint("spark-a")
+    weight, hessian = _inputs()
+    inputs = {"input_weight": weight, "hessian": hessian}
+    request = _request(weight, hessian, endpoint, bits=2.5, codebook="mul1")
+    assert validate_remote_inputs(request, inputs)[2]["bits"] == 2.5
+
+    packed = {
+        "trellis": torch.zeros((8, 8, 40), dtype=torch.int16),
+        "suh": torch.ones(128, dtype=torch.float16),
+        "svh": torch.ones(128, dtype=torch.float16),
+        "mul1": torch.tensor(0x83DCD12D - 2**32, dtype=torch.int32),
+    }
+    validate_remote_output_tensors(request, packed)
+    packed["trellis"] = torch.zeros((8, 8, 32), dtype=torch.int16)
+    with pytest.raises(ValueError, match="geometry"):
+        validate_remote_output_tensors(request, packed)
+    with pytest.raises(ValueError, match="half-bit rate .* and mul1"):
+        validate_remote_inputs(_request(weight, hessian, endpoint, bits=2.5), inputs)
 
 
 def test_output_validation_rejects_unhashable_codebook() -> None:

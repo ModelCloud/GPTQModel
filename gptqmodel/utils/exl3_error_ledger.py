@@ -652,7 +652,7 @@ def build_projection_record(
     *,
     module_full_name: str,
     layer_index: int | None,
-    bits: int,
+    bits: int | float,
     codebook: str,
     sample_count: int,
     duration_seconds: float,
@@ -672,7 +672,7 @@ def build_projection_record(
         "record_kind": "projection",
         "module": module_full_name,
         "processor_layer_index": layer_index,
-        "bits": int(bits),
+        "bits": bits,
         "codebook": str(codebook),
         "sample_count": int(sample_count),
         "duration_seconds": float(duration_seconds),
@@ -726,9 +726,7 @@ def build_projection_record(
 
 def _family_record(records: list[dict[str, Any]]) -> dict[str, Any]:
     first = records[0]
-    projection_bits = {
-        record["projection"]: int(record["bits"]) for record in records
-    }
+    projection_bits = {record["projection"]: record["bits"] for record in records}
     reconstructions = [
         record["quantizer_metrics"]["reconstruction"] for record in records
     ]

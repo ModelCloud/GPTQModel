@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+from ..exllamav3.trellis import trellis_rate
 from ..models._const import DEVICE
 from ..utils.cpu_features import cpu_bf16x3_scope, has_avx512_bf16, has_cpu_bf16x3_precision
 from ..utils.logger import setup_logger
@@ -369,11 +370,19 @@ class ExllamaV3TorchLinear(nn.Module):
             return "mul1"
         return "3inst"
 
-    def _bits_per_weight(self) -> int:
+    def _bits_per_weight(self) -> int | float:
         trellis = getattr(self, "trellis", None)
         if trellis is None:
             raise RuntimeError(f"EXL3 module `{self.name}` is missing `trellis`.")
-        return int(trellis.shape[-1] // 16)
+        try:
+            return trellis_rate(
+                trellis.shape[-1],
+                getattr(self, "mcg", None) is not None,
+                getattr(self, "mul1", None) is not None,
+                max_integer_rate=16,
+            )
+        except ValueError as exc:
+            raise ValueError(f"EXL3 module `{self.name}` has invalid trellis geometry: {exc}") from exc
 
     def _runtime_weight_dtype(self) -> torch.dtype:
         trellis = getattr(self, "trellis", None)
@@ -384,14 +393,9 @@ class ExllamaV3TorchLinear(nn.Module):
     def _stored_features(self) -> tuple[int, int]:
         """Validate full Hadamard storage against the logical linear shape."""
         trellis = getattr(self, "trellis", None)
-        # Packing width is `bits` 16-bit words, so it is always a multiple of 16.
-        # The upper bound follows from the bit width, not a fixed 128: EXL3
-        # supports 2..16 bits (16 bits -> 256 words), and capping at 128/8 bits
-        # rejected every valid 10/12/16-bit checkpoint. ``_bits_per_weight()``
-        # derives the same value from this dimension.
-        if (trellis is None or trellis.ndim != 3 or trellis.dtype != torch.int16
-                or trellis.shape[-1] <= 0 or trellis.shape[-1] % 16 != 0):
+        if trellis is None or trellis.ndim != 3 or trellis.dtype != torch.int16:
             raise ValueError(f"EXL3 module `{self.name}` has invalid trellis geometry or dtype")
+        self._bits_per_weight()
         inputs, outputs = int(trellis.shape[0]) * 16, int(trellis.shape[1]) * 16
         padded_outputs = ((self.out_features + 127) // 128) * 128
         if (self.in_features <= 0 or self.out_features <= 0
@@ -428,9 +432,22 @@ class ExllamaV3TorchLinear(nn.Module):
             )
 
         bits = self._bits_per_weight()
-        mask = (1 << bits) - 1
         words = (trellis[:, tile_n_start:tile_n_end].to(torch.int32) & 0xFFFF).contiguous()
         words = words.view(*words.shape[:-1], -1, 2).flip(-1).reshape(*words.shape)
+        if bits != int(bits):
+            # Each alternating pair consumes 2*floor(bits)+1 bits. Gather
+            # the 16-bit state ending at each position, wrapping at the tile
+            # boundary. As for integer tiles, the preceding flip puts each
+            # packed uint32 into bitstream-order uint16 words.
+            positions = torch.arange(1, 257, device=words.device, dtype=torch.long)
+            offsets = (positions * int(bits) + positions // 2 - 16) % (16 * words.shape[-1])
+            word_idx = offsets // 16
+            joined = _torch_left_shift(words[..., word_idx], 16)
+            joined = joined | words[..., (word_idx + 1) % words.shape[-1]]
+            return (_torch_right_shift(joined, 16 - offsets % 16) & 0xFFFF).to(torch.long)
+
+        bits = int(bits)
+        mask = (1 << bits) - 1
         words = words.view(*words.shape[:-1], 16, bits)
 
         # Unpack all 16 positions in one pass. Each position selects one of the
