@@ -55,7 +55,8 @@ def test_native_mul1_half_rate_packer_matches_alternating_ring(bits):
 
 @pytest.mark.cuda
 @pytest.mark.integration
-def test_half_rate_tiny_llama_quantize_and_reload(tmp_path):
+@pytest.mark.parametrize("bits", [2.5, 3.5])
+def test_half_rate_tiny_llama_quantize_and_reload(tmp_path, bits):
     if (
         not torch.cuda.is_available()
         or torch.version.hip is not None
@@ -85,7 +86,7 @@ def test_half_rate_tiny_llama_quantize_and_reload(tmp_path):
     build_wordlevel_tokenizer(128).save_pretrained(source)
     projection = "model.layers.0.self_attn.q_proj"
     cfg = EXL3Config(
-        bits=2.5, codebook="mul1", offload_to_disk=False, module_include=[f"^{projection}$"],
+        bits=bits, codebook="mul1", offload_to_disk=False, module_include=[f"^{projection}$"],
         kernel=KernelConfig(exl3_tile_batch=4),
     )
     model = GPTQModel.load(str(source), quantize_config=cfg, device="cuda:0", dtype=torch.float16)
@@ -95,8 +96,8 @@ def test_half_rate_tiny_llama_quantize_and_reload(tmp_path):
     packed = model.model.get_submodule(projection)
     assert isinstance(packed, ExllamaV3Linear)
     assert packed.kernel.exl3_tile_batch == 4
-    assert packed.trellis.dtype == torch.int16 and packed.trellis.shape == (8, 8, 40)
-    assert packed.tensor_storage_entry()["bits_per_weight"] == 2.5
+    assert packed.trellis.dtype == torch.int16 and packed.trellis.shape == (8, 8, int(16 * bits))
+    assert packed.tensor_storage_entry()["bits_per_weight"] == bits
     x = torch.linspace(-0.5, 0.5, 128, device="cuda", dtype=torch.float16).unsqueeze(0)
     packed.to(x.device)
     with torch.inference_mode():
@@ -115,8 +116,8 @@ def test_half_rate_tiny_llama_quantize_and_reload(tmp_path):
     assert isinstance(reloaded, ExllamaV3Linear)
     assert reloaded.kernel.exl3_tile_batch == 2
     assert packed.kernel.exl3_tile_batch == 4
-    assert restored.quantize_config.runtime_bits == 2.5
-    assert reloaded.tensor_storage_entry()["bits_per_weight"] == 2.5
+    assert restored.quantize_config.runtime_bits == bits
+    assert reloaded.tensor_storage_entry()["bits_per_weight"] == bits
     for name, value in reloaded.state_dict().items():
         assert torch.equal(tensors[f"{projection}.{name}"], value.cpu())
     with torch.inference_mode():

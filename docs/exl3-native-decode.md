@@ -118,3 +118,42 @@ The packaged extension also passed 148 focused A100 tests, including changed
 inputs on graph replay, live graphs on independent streams, round trips for
 half-bit tiles, and grouped decode. ROCm, Turing, and newer NVIDIA
 architectures remain unmeasured for this port.
+
+## Llama 3.2 1B Instruct at 3.5 bits
+
+The full-model test quantizes all 112 attention and MLP projections with
+`mul1` using 256 C4 training windows of 512 tokens. It saves the model as
+safetensors, verifies the 56-word trellises, and reloads the native CUDA
+backend. It compares both models on all WikiText-2 test tokens and the same
+256 seeded GSM8K questions. A second reload with the Torch backend checks
+prefill loss and cached decode logits using the same packed weights.
+
+| Metric | BF16 | EXL3 W3.5 |
+| --- | ---: | ---: |
+| WikiText-2 test perplexity | 11.6343 | 12.2846 |
+| GSM8K correct | 125/256 | 116/256 |
+| Safetensors payload | 2.472 GB | 0.953 GB |
+
+The A100 results and sampling details are in the
+[PR discussion](https://github.com/ModelCloud/GPTQModel/pull/5619#issuecomment-7029571986).
+
+Run the test with a local Llama 3.2 1B Instruct BF16 checkpoint, an Ampere
+or newer NVIDIA GPU, and a directory containing these evaluation assets.
+
+- `c4-train-*.arrow` from Hugging Face Datasets
+  `load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz", split="train", revision="1588ec454efa1a09f29cd18ddd04fe05fc8653a2")`.
+  This shard contains 356,318 documents.
+- `wikitext-test.arrow` from `load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test", revision="b08601e04326c79dfdd32d625aee71d232d685c3")`.
+- `gsm8k-test.jsonl` from the [official GSM8K test split](https://raw.githubusercontent.com/openai/grade-school-math/3101c7d5072418e28b9008a6636bde82a006892c/grade_school_math/data/test.jsonl).
+
+Use the Arrow files listed in each dataset's `cache_files` in their shard order.
+
+```bash
+GPTQMODEL_EXL3_E2E_MODEL_DIR=/path/to/Llama-3.2-1B-Instruct \
+GPTQMODEL_EXL3_E2E_DATA_DIR=/path/to/eval-data \
+python -m pytest -m exl3_cuda_e2e tests/models/test_llama3_2_exl3_cuda.py
+```
+
+The test permits up to a 10% perplexity increase and a ten percentage-point
+GSM8K drop relative to the BF16 baseline measured in the same run. The regular
+CUDA suite covers W3.5 save and reload on a tiny Llama without external assets.
