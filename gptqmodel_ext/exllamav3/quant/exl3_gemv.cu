@@ -100,7 +100,11 @@ bool exl3_gemv_try_launch
     // Q4NX small-batch decode measured on the RTX 4090 (sm_89, 128 SMs, m 1..8 x k 2048..8192 x
     // n 2048..16384 x 2.5 / 3.0 / 3.5 bpw, tests/benchmark_exl3_q4nx_gemv_ada.py): the GEMV is
     // 1.03-1.72x the block-pipelined kernel cold and 1.00-1.72x warm (geomean 1.19x / 1.30x), so
-    // Ada joins Ampere. Blackwell is unmeasured.
+    // Ada joins Ampere. The same matrix on an RTX 5090 (sm_120, 170 SMs, 96 MiB L2,
+    // tests/benchmark_exl3_q4nx_gemv_blackwell.py) keeps Blackwell out: the sm_120 GEMV is 0.16-0.82
+    // relative off the reconstructed FP32 weight in all 180 cells, mul1 W3 and mcg W2/W4 miss by
+    // 0.26-0.43 on the same device, and the speedup is only 1.06x cold / 1.18x warm with 61
+    // regressing cells. sm_120 runs the block-pipelined kernel.
     if (q4nx && cc != CC_AMPERE && cc != CC_ADA) return false;
     int mmode = size_m == 1 ? 0 : 1;
     int num_sms = DevCtx::instance().get_num_sms(device);
