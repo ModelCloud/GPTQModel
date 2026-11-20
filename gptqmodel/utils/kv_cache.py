@@ -34,6 +34,7 @@ resolved layer by layer; anything unclassifiable is named instead of being folde
 into a total that looks authoritative.
 """
 
+from collections.abc import Mapping as _MappingABC
 from collections.abc import Sequence as _SequenceABC
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence, Tuple
@@ -86,7 +87,16 @@ _LINEAR_ATTENTION_TYPES = frozenset({
     "mamba", "mamba2", "ssm", "lightning_attention",
 })
 
-_LAYER_TYPE_FIELDS = ("layer_types", "attention_layer_types", "attn_layer_types")
+_LAYER_TYPE_FIELDS = (
+    "layer_types", "attention_layer_types", "attn_layer_types", "layers_block_type",
+)
+# Nemotron-H/Jamba-style remote configs publish only ``hybrid_override_pattern``:
+# ``M`` is a Mamba2 mixer, ``*`` a full-attention layer, ``-`` an MLP and ``E`` a MoE
+# block. The remote NemotronH config also exposes ``layers_block_type`` built from it;
+# the pattern is the fallback for configs that do not.
+_HYBRID_OVERRIDE_TYPES = {
+    "m": "mamba", "*": "attention", "-": "mlp", "e": "moe",
+}
 
 
 def _safe_get(obj: Any, name: str, default: Any = None) -> Any:
@@ -415,6 +425,11 @@ def _declared_layer_types(source: Any, layers: int) -> Optional[list]:
         declared = _safe_get(source, field_name)
         if isinstance(declared, (list, tuple)) and declared:
             return [str(entry).lower() for entry in declared]
+    pattern = _safe_get(source, "hybrid_override_pattern")
+    if isinstance(pattern, str) and pattern:
+        if layers and len(pattern) != int(layers):
+            return None
+        return [_HYBRID_OVERRIDE_TYPES.get(char.lower(), char.lower()) for char in pattern]
     return None
 
 
@@ -447,6 +462,87 @@ def _positive_int(value: Any) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _field(obj: Any, name: str) -> Any:
+    """Read a field from a config object or a raw config ``dict``.
+
+    Remote configs arrive either as the class their ``auto_map`` names (which
+    may build ``block_configs`` into dataclasses) or as the plain dictionary
+    from ``config.json`` when the remote module is unavailable.
+    """
+
+    if isinstance(obj, _MappingABC):
+        return obj.get(name)
+    return _safe_get(obj, name)
+
+
+@dataclass(frozen=True)
+class _LayerLayout:
+    """Per-layer KV layout declared outside ``num_key_value_heads``.
+
+    ``kv_heads`` overrides the global head count, ``skip`` names why the layer
+    keeps no K/V at all, and ``partial`` records a declaration the estimator
+    cannot model (the answer is then reported as inexact).
+    """
+
+    kv_heads: Optional[int] = None
+    skip: Optional[str] = None
+    partial: Optional[str] = None
+
+
+def _per_layer_layout(source: Any, index: Optional[int]) -> _LayerLayout:
+    """Resolve DeciLM/Nemotron-NAS per-layer KV declarations for one layer.
+
+    DeciLM publishes ``num_key_value_heads_per_layer``; Nemotron-NAS publishes
+    ``block_configs[i].attention`` where ``n_heads_in_group`` is the query/KV
+    grouping and ``no_op`` / ``replace_with_linear`` mean the layer has no
+    attention module and therefore no cache. Reading only the global
+    ``num_key_value_heads`` (absent on both) assumed MHA and overstated the
+    cache by 15-40x while still reporting ``is_exact``.
+    """
+
+    if index is None:
+        return _LayerLayout()
+
+    per_layer_heads = _safe_get(source, "num_key_value_heads_per_layer")
+    if isinstance(per_layer_heads, (list, tuple)) and per_layer_heads:
+        if index >= len(per_layer_heads):
+            return _LayerLayout(
+                partial="num_key_value_heads_per_layer is shorter than the stack")
+        kv_heads = _positive_int(per_layer_heads[index])
+        if kv_heads is None:
+            return _LayerLayout(
+                partial=f"num_key_value_heads_per_layer[{index}] is not a positive int")
+        return _LayerLayout(kv_heads=kv_heads)
+
+    block_configs = _safe_get(source, "block_configs")
+    if isinstance(block_configs, (list, tuple)) and block_configs:
+        if index >= len(block_configs):
+            return _LayerLayout(partial="block_configs is shorter than the stack")
+        attention = _field(block_configs[index], "attention")
+        if attention is None:
+            return _LayerLayout(
+                partial=f"block_configs[{index}] declares no attention block")
+        if _field(attention, "no_op"):
+            return _LayerLayout(skip="no-op attention")
+        if _field(attention, "replace_with_linear"):
+            return _LayerLayout(skip="linear attention replacement")
+        partial = None
+        if (_field(attention, "window_length")
+                or _field(attention, "num_sink_tokens")
+                or _field(attention, "sparsify")):
+            partial = "block_configs attention options are not modelled"
+        heads = _positive_int(_safe_get(source, "num_attention_heads"))
+        in_group = _positive_int(_field(attention, "n_heads_in_group"))
+        if in_group is None:
+            return _LayerLayout(
+                partial=partial or "block_configs attention does not declare n_heads_in_group")
+        if heads is None or heads % in_group:
+            return _LayerLayout(
+                partial="n_heads_in_group does not divide num_attention_heads")
+        return _LayerLayout(kv_heads=heads // in_group, partial=partial)
+    return _LayerLayout()
 
 
 def _read_attr(obj: Any, name: str) -> Tuple[Any, bool]:
@@ -499,10 +595,18 @@ def _mla_dims(source: Any, layer_cfg: Any) -> Optional[int]:
         return None
 
 
-def _gqa_dims(source: Any, layer_cfg: Any) -> Optional[int]:
+def _gqa_dims(
+        source: Any,
+        layer_cfg: Any,
+        *,
+        kv_heads: Optional[int] = None,
+) -> Optional[int]:
     heads, heads_ambiguous = _layer_attr(source, layer_cfg, "num_attention_heads")
     hidden, hidden_ambiguous = _layer_attr(source, layer_cfg, "hidden_size")
-    kv_heads, kv_ambiguous = _layer_attr(source, layer_cfg, "num_key_value_heads")
+    if kv_heads is None:
+        kv_heads, kv_ambiguous = _layer_attr(source, layer_cfg, "num_key_value_heads")
+    else:
+        kv_ambiguous = False
     head_dim, head_dim_ambiguous = _layer_attr(source, layer_cfg, "head_dim")
     if heads_ambiguous or hidden_ambiguous or kv_ambiguous or head_dim_ambiguous:
         # The value varies per layer and the caller did not give us the layer
@@ -593,13 +697,22 @@ def _estimate_for_stack(
     global_window = _positive_int(_safe_get(source, "sliding_window"))
 
     declared_types = _declared_layer_types(source, layer_count)
+    if declared_types is None and _safe_get(source, "hybrid_override_pattern"):
+        # A pattern that does not match the stack cannot be mapped; falling
+        # back to "every layer is attention" would be confidently wrong.
+        partial_note = "hybrid_override_pattern does not match the layer count"
+    else:
+        partial_note = None
+    if declared_types is not None and len(declared_types) != layer_count:
+        partial_note = (
+            f"declared layer layout covers {len(declared_types)} of {layer_count} layers")
     mtp = int(_safe_get(source, "num_nextn_predict_layers", 0) or 0)
     shared = _positive_int(_safe_get(source, "num_kv_shared_layers")) or 0
     shared_from = max(0, layer_count - shared)
 
     resolved: list[LayerCache] = []
     unclassified: list[str] = []
-    partial: list[str] = []
+    partial: list[str] = [partial_note] if partial_note else []
     for index in range(layer_count):
         # Gemma 3n/4 reuse an earlier layer's K/V for the tail; transformers does
         # not call ``past_key_values.update`` for them, so they add no bytes.
@@ -624,10 +737,17 @@ def _estimate_for_stack(
             resolved.append(LayerCache(kind="block"))
             continue
 
+        layout = _per_layer_layout(source, index)
+        if layout.partial:
+            partial.append(layout.partial)
+        if layout.skip:
+            resolved.append(LayerCache(kind="block"))
+            continue
+
         dims = _mla_dims(source, layer_cfg)
         kind = "mla"
         if dims is None:
-            dims = _gqa_dims(source, layer_cfg)
+            dims = _gqa_dims(source, layer_cfg, kv_heads=layout.kv_heads)
             kind = "gqa"
         if dims is None:
             if layer_type is None:
