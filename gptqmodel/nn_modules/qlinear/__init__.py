@@ -287,6 +287,31 @@ def _pack_shifts(bits: int, pack_factor: int) -> t.Tensor:
     return (t.arange(pack_factor, dtype=t.int32) * bits).view(1, pack_factor, 1)
 
 
+def unpack_qzero_lanes(
+        qzeros: t.Tensor,
+        shifts: t.Tensor,
+        *,
+        pack_factor: int,
+        maxq: int,
+        dtype: t.dtype,
+        out_features: int,
+) -> t.Tensor:
+    """Decode continuous 2/4/8-bit GPTQ zero words to ``[groups, out_features]``.
+
+    Each 32-bit word packs ``pack_factor`` output lanes, so the decoded width is
+    ``ceil(out_features / pack_factor) * pack_factor``. The lanes past the
+    logical width are padding: reshaping the decoded lanes straight to the
+    scale shape fails for e.g. ``out_features=5`` (8 lanes). Cropping here is
+    what keeps the logical width for every caller.
+    """
+    lanes = _torch_right_shift(
+        t.unsqueeze(qzeros, 2).expand(-1, -1, pack_factor),
+        shifts,
+    ).to(dtype)
+    lanes = t.bitwise_and(lanes, maxq).reshape(qzeros.shape[0], -1)
+    return lanes[:, :out_features]
+
+
 @t.no_grad()
 @t.inference_mode(False)
 def _pack_codes_to_words(
@@ -2451,12 +2476,14 @@ class PackableQuantLinear(GPTQQuantLinear):
             )
 
         if self.bits in [2, 4, 8]:
-            zeros = _torch_right_shift(
-                t.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
+            return unpack_qzero_lanes(
+                self.qzeros,
                 wf_zero,
-            ).to(self.dequant_dtype)
-            zeros = t.bitwise_and(zeros, self.maxq).reshape(self.qzeros.shape[0], -1)
-            return zeros[:, :self.scales.shape[1]]
+                pack_factor=self.pack_factor,
+                maxq=self.maxq,
+                dtype=self.dequant_dtype,
+                out_features=self.scales.shape[1],
+            )
 
         if self.bits != 3:
             raise NotImplementedError(

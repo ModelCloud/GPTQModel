@@ -187,6 +187,9 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "pack_signs",
         "reconstruct",
         "reconstruct_frac",
+        "reconstruct_r4nx",
+        "pack_trellis_r4nx",
+        "unpack_trellis_r4nx",
         "quantize_tiles_frac",
         "pack_trellis_frac",
         "unpack_trellis_frac",
@@ -287,6 +290,7 @@ class _BCLinearEXL3:
         *,
         kernel: KernelConfig | None = None,
         q4nx: bool = False,
+        r4nx: bool = False,
     ):
         if not exllamav3_runtime_available():
             raise ModuleNotFoundError("ExLlamaV3 torch.ops kernels are not properly installed. Error: " + exllamav3_runtime_error())
@@ -298,6 +302,7 @@ class _BCLinearEXL3:
         self.mcg = bool(mcg)
         self.mul1 = bool(mul1)
         self.q4nx = q4nx
+        self.r4nx = bool(r4nx)
         policy = resolve_kernel_config(kernel)
         self.fp16_gemv = policy.exl3_fp16_gemv
         self.int8_gemv = policy.exl3_int8_gemv
@@ -310,6 +315,17 @@ class _BCLinearEXL3:
         if self.q4nx:
             gemv = self.fp16_gemv or not self.fused_gemm
             _runtime_op("bc_linear_exl3_run_configured")(*args, gemv, 0, self.fused_gemm, q4nx=True)
+        elif self.r4nx:
+            # No tensor-core R4NX kernel: the op validates the marker and rate
+            # and reports the reconstruct path (LinearEXL3 never runs this).
+            _runtime_op("bc_linear_exl3_run_configured")(
+                *args,
+                self.fp16_gemv,
+                0,
+                self.fused_gemm,
+                q4nx=False,
+                r4nx=True,
+            )
         elif self._configured:
             _runtime_op("bc_linear_exl3_run_configured")(*args, self.fp16_gemv, self.int8_gemv, self.fused_gemm)
         else:
@@ -357,6 +373,15 @@ class _ExllamaV3TorchOpsFacade:
 
     def pack_trellis_q4nx(self, packed: torch.Tensor, suffixes: torch.Tensor, kv: int) -> None:
         _runtime_op("pack_trellis_q4nx")(packed, suffixes, kv)
+
+    def pack_trellis_r4nx(self, packed: torch.Tensor, suffixes: torch.Tensor, kv: int) -> None:
+        _runtime_op("pack_trellis_r4nx")(packed, suffixes, int(kv))
+
+    def unpack_trellis_r4nx(self, states: torch.Tensor, packed: torch.Tensor, kv: int) -> None:
+        _runtime_op("unpack_trellis_r4nx")(states, packed, int(kv))
+
+    def reconstruct_r4nx(self, unpacked: torch.Tensor, packed: torch.Tensor, K: int | float) -> None:
+        _runtime_op("reconstruct_r4nx")(unpacked, packed, float(K))
 
     def unpack_trellis(self, unpacked: torch.Tensor, packed: torch.Tensor, K: int) -> None:
         _runtime_op("unpack_trellis")(unpacked, packed, int(K))

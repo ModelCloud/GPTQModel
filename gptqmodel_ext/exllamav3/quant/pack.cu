@@ -5,6 +5,7 @@
 #include "../util.h"
 #include "../util.cuh"
 #include "codebook.cuh"
+#include "r4nx.cuh"
 
 template <int K>
 __global__ __launch_bounds__(128)
@@ -233,3 +234,139 @@ void pack_signs
     cuda_check(cudaPeekAtLastError());
 }
 
+
+// R4NX (and Q4NX) trellis packing: 64 kv-bit states per 256-weight tile,
+// concatenated MSB-first and stored as little-endian uint16 pairs. kv = 10, 12,
+// 14 cover the fractional 2.5/3.0/3.5 bpw rates and kv = 16 is 4.0 bpw. The
+// packer is codebook independent, so the same kernel serves both families; it
+// lives here, outside the CUDA-only Q4NX quantizer, so ROCm can pack and unpack
+// R4NX checkpoints too.
+__global__ __launch_bounds__(128)
+void pack_trellis_r4nx_kernel
+(
+    uint16_t* __restrict__ g_packed,
+    const int16_t* __restrict__ g_states,
+    int64_t tiles,
+    int kv
+)
+{
+    const int64_t tile = int64_t{blockIdx.x} * blockDim.x + threadIdx.x;
+    if (tile >= tiles) return;
+
+    const uint32_t mask = (1u << kv) - 1u;
+    uint16_t* packed = g_packed + tile * 4 * kv;
+    const int16_t* states = g_states + tile * 64;
+
+    uint32_t buf = 0;
+    int bits = 0;
+    int word = 0;
+    for (int step = 0; step < 64; ++step)
+    {
+        buf = (buf << kv) | (static_cast<uint32_t>(static_cast<uint16_t>(states[step])) & mask);
+        bits += kv;
+        if (bits >= 16)
+        {
+            bits -= 16;
+            // Each 32-bit word is stored little-endian, i.e. its low uint16
+            // second in memory.
+            packed[word ^ 1] = static_cast<uint16_t>(buf >> bits);
+            buf &= (1u << bits) - 1u;
+            ++word;
+        }
+    }
+}
+
+void pack_trellis_r4nx(at::Tensor packed, at::Tensor states, int kv)
+{
+    const at::cuda::OptionalCUDAGuard device_guard(states.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+    TORCH_CHECK(r4nx_supports_step_bits(kv), "R4NX packing requires kv in {10, 12, 14, 16}");
+    // The kernel walks one 64-entry state row per tile, so the row stride must
+    // be exactly 64 (a wider row would make it read the wrong tile).
+    TORCH_CHECK(states.dim() == 2 && states.size(1) == 64,
+                "R4NX packing expects [tiles, 64] int16 state fields");
+    TORCH_CHECK(packed.dim() == 2 && packed.size(0) == states.size(0) && packed.size(1) == 4 * kv,
+                "R4NX packing expects [tiles, 4 * kv] int16 output");
+    TORCH_CHECK_DTYPE(states, kShort);
+    TORCH_CHECK_DTYPE(packed, kShort);
+    TORCH_CHECK(states.device() == packed.device() && states.is_contiguous() && packed.is_contiguous(),
+                "R4NX packing requires contiguous buffers on one device");
+
+    const int64_t tiles = states.size(0);
+    if (!tiles) return;
+
+    dim3 blockDim(128);
+    dim3 gridDim(static_cast<unsigned>(CEIL_DIVIDE(tiles, 128)));
+    pack_trellis_r4nx_kernel<<<gridDim, blockDim, 0, stream>>>
+    (
+        (uint16_t*) packed.data_ptr(),
+        (const int16_t*) states.data_ptr(),
+        tiles,
+        kv
+    );
+    cuda_check(cudaPeekAtLastError());
+}
+
+__global__ __launch_bounds__(128)
+void unpack_trellis_r4nx_kernel
+(
+    int16_t* __restrict__ g_states,
+    const uint16_t* __restrict__ g_packed,
+    int64_t tiles,
+    int kv
+)
+{
+    const int64_t tile = int64_t{blockIdx.x} * blockDim.x + threadIdx.x;
+    if (tile >= tiles) return;
+
+    const uint32_t mask = (1u << kv) - 1u;
+    const uint16_t* packed = g_packed + tile * 4 * kv;
+    int16_t* states = g_states + tile * 64;
+
+    uint32_t buf = 0;
+    int bits = 0;
+    int word = 0;
+    for (int step = 0; step < 64; ++step)
+    {
+        while (bits < kv)
+        {
+            buf = (buf << 16) | packed[word ^ 1];
+            bits += 16;
+            ++word;
+        }
+        bits -= kv;
+        states[step] = static_cast<int16_t>((buf >> bits) & mask);
+        buf &= (1u << bits) - 1u;
+    }
+}
+
+void unpack_trellis_r4nx(at::Tensor states, at::Tensor packed, int kv)
+{
+    const at::cuda::OptionalCUDAGuard device_guard(packed.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+    TORCH_CHECK(r4nx_supports_step_bits(kv), "R4NX unpacking requires kv in {10, 12, 14, 16}");
+    TORCH_CHECK(states.dim() == 2 && states.size(1) == 64,
+                "R4NX unpacking expects [tiles, 64] int16 states");
+    TORCH_CHECK(packed.dim() == 2 && packed.size(0) == states.size(0) && packed.size(1) == 4 * kv,
+                "R4NX unpacking expects [tiles, 4 * kv] int16 input");
+    TORCH_CHECK_DTYPE(states, kShort);
+    TORCH_CHECK_DTYPE(packed, kShort);
+    TORCH_CHECK(states.device() == packed.device() && states.is_contiguous() && packed.is_contiguous(),
+                "R4NX unpacking requires contiguous buffers on one device");
+
+    const int64_t tiles = states.size(0);
+    if (!tiles) return;
+
+    dim3 blockDim(128);
+    dim3 gridDim(static_cast<unsigned>(CEIL_DIVIDE(tiles, 128)));
+    unpack_trellis_r4nx_kernel<<<gridDim, blockDim, 0, stream>>>
+    (
+        (int16_t*) states.data_ptr(),
+        (const uint16_t*) packed.data_ptr(),
+        tiles,
+        kv
+    );
+    cuda_check(cudaPeekAtLastError());
+}

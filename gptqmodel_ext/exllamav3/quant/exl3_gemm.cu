@@ -22,6 +22,7 @@
 #include "exl3_gemv.cuh"
 #include "hadamard.cuh"
 #include "reconstruct.cuh"
+#include "r4nx.cuh"
 
 namespace {
 std::set<void*> kernel_attr_set[MAX_DEVICES];
@@ -31,7 +32,7 @@ std::shared_mutex kernel_attr_mutex;
 int exl3_gemm(
     const at::Tensor& A, const at::Tensor& B, at::Tensor& C,
     const at::Tensor& suh, const at::Tensor& A_had, const at::Tensor& svh,
-    bool mcg, bool mul1, bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx)
+    bool mcg, bool mul1, bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx, bool r4nx)
 {
     const at::cuda::OptionalCUDAGuard device_guard(A.device());
 
@@ -42,14 +43,27 @@ int exl3_gemm(
     TORCH_CHECK_DTYPE(B, kShort);
     const bool c_fp32 = C.dtype() == at::kFloat;
     if (!c_fp32) TORCH_CHECK_DTYPE(C, kHalf);
-    TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) <= 1, "conflicting EXL3 codebooks");
+    TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) + int(r4nx) <= 1, "conflicting EXL3 codebooks");
     TORCH_CHECK(int8_gemv >= 0 && int8_gemv <= 2, "EXL3 INT8 mode must be 0, 1 or 2");
 
     const int64_t words_per_tile = B.size(2);
     TORCH_CHECK(words_per_tile >= 16 && words_per_tile <= 128, "invalid EXL3 trellis width");
     const int K = words_per_tile / 16;
     const bool half_k = words_per_tile % 16 == 8;
-    if (q4nx)
+    if (r4nx)
+    {
+        // R4NX is decoded by the reconstruct + HGEMM path on every backend
+        // (see gptqmodel/exllamav3/modules/quant/exl3.py). There is no
+        // tensor-core R4NX GEMM kernel, and the packed kernel tables are
+        // indexed by codebook, so reject here instead of decoding this trellis
+        // with another codebook's kernel.
+        TORCH_CHECK(words_per_tile % 4 == 0 && r4nx_supports_step_bits(words_per_tile / 4),
+                    "R4NX requires 2.5, 3.0, 3.5, or 4.0 bpw");
+        TORCH_CHECK(false,
+                    "EXL3 has no tensor-core R4NX GEMM kernel; decode the trellis with "
+                    "reconstruct_r4nx and run the HGEMM (the torch_mode path) instead.");
+    }
+    else if (q4nx)
     {
         TORCH_CHECK(words_per_tile % 4 == 0 && q4nx_supports_step_bits(words_per_tile / 4),
                     "Q4NX requires 2.5, 3.0, or 3.5 bpw");
