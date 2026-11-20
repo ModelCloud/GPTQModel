@@ -104,7 +104,16 @@ def test_dense_fallback_accumulates_grid_and_bias_in_float32(case):
     assert "weight" not in vars(layer)
 
 
-def test_tied_head_fallback_does_not_narrow_the_shared_grid():
+@pytest.mark.parametrize("autocast", [False, True])
+def test_tied_head_fallback_does_not_narrow_the_shared_grid(autocast):
+    """The wide fallback also runs under an ambient FP16 autocast (#5796).
+
+    Autocast narrowed the explicitly float32 operands back to float16 before
+    the reduction, so the cancelling ``+65536 / -65536`` dot came back as NaN
+    instead of the exact zero. The call must disable autocast locally and
+    leave the caller's context active.
+    """
+
     grid = torch.zeros(1, 16)
     grid[0, 0] = 65536.0
     grid[0, 1] = -65536.0
@@ -117,7 +126,13 @@ def test_tied_head_fallback_does_not_narrow_the_shared_grid():
     hidden[0, 0] = 1
     hidden[0, 1] = 1
 
-    got = head(hidden)
+    if autocast:
+        with torch.autocast("cpu", dtype=torch.float16):
+            got = head(hidden)
+            assert torch.is_autocast_enabled("cpu")
+    else:
+        got = head(hidden)
+        assert not torch.is_autocast_enabled("cpu")
     expected = (hidden.float() @ grid.T).to(torch.float16)
     assert torch.isfinite(got).all()
     assert torch.equal(got, expected)
