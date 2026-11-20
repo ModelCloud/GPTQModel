@@ -117,55 +117,74 @@ __device__ __forceinline__ void decode8(uint32_t w0, uint32_t w1, uint32_t w2, u
     }
 }
 
-// Window extraction from two already-loaded words, same order as dq8_aligned_4bits
+// Window extraction from two already-loaded words, same order as dq8_aligned_4bits. w[i] is
+// the trellis window of weight i of the lane's eight (see the column/k mapping below), which
+// the INT8 kernel needs without the codebook decode.
+__device__ __forceinline__ void ext8_regs_4bits(uint32_t a, uint32_t b, uint32_t (&w)[8])
+{
+    uint32_t s;
+    FSHF_IMM(s, b, a, 20);
+    w[7] = b & 0xffff;
+    BFE16_IMM(w[6], b, 4);
+    BFE16_IMM(w[5], b, 8);
+    BFE16_IMM(w[4], b, 12);
+    BFE16_IMM(w[3], b, 16);
+    w[2] = s & 0xffff;
+    BFE16_IMM(w[1], s, 4);
+    BFE16_IMM(w[0], s, 8);
+}
+
 template <int cb>
 __device__ __forceinline__ void dq8_regs_4bits(uint32_t a, uint32_t b, FragB& f0, FragB& f1)
 {
-    uint32_t s, w0, w1, w2, w3, w4, w5, w6, w7;
-    FSHF_IMM(s, b, a, 20);
-    w7 = b & 0xffff;
-    BFE16_IMM(w6, b, 4);
-    BFE16_IMM(w5, b, 8);
-    BFE16_IMM(w4, b, 12);
-    BFE16_IMM(w3, b, 16);
-    w2 = s & 0xffff;
-    BFE16_IMM(w1, s, 4);
-    BFE16_IMM(w0, s, 8);
-    decode8<cb>(w0, w1, w2, w3, w4, w5, w6, w7, f0, f1);
+    uint32_t w[8];
+    ext8_regs_4bits(a, b, w);
+    decode8<cb>(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], f0, f1);
 }
 
 // Register form of dq8_aligned_2bits: the two words and the funnel shift are lane-dependent
+__device__ __forceinline__ void ext8_regs_2bits(uint32_t a, uint32_t b, int t_offset, uint32_t (&w)[8])
+{
+    b = fshift(b, a, ((~t_offset) & 8) << 1);
+    w[7] = b & 0xffff;
+    BFE16_IMM(w[6], b, 2);
+    BFE16_IMM(w[5], b, 4);
+    BFE16_IMM(w[4], b, 6);
+    BFE16_IMM(w[3], b, 8);
+    BFE16_IMM(w[2], b, 10);
+    BFE16_IMM(w[1], b, 12);
+    BFE16_IMM(w[0], b, 14);
+}
+
 template <int cb>
 __device__ __forceinline__ void dq8_regs_2bits(uint32_t a, uint32_t b, int t_offset, FragB& f0, FragB& f1)
 {
-    uint32_t w0, w1, w2, w3, w4, w5, w6, w7;
-    b = fshift(b, a, ((~t_offset) & 8) << 1);
-    w7 = b & 0xffff;
-    BFE16_IMM(w6, b, 2);
-    BFE16_IMM(w5, b, 4);
-    BFE16_IMM(w4, b, 6);
-    BFE16_IMM(w3, b, 8);
-    BFE16_IMM(w2, b, 10);
-    BFE16_IMM(w1, b, 12);
-    BFE16_IMM(w0, b, 14);
-    decode8<cb>(w0, w1, w2, w3, w4, w5, w6, w7, f0, f1);
+    uint32_t w[8];
+    ext8_regs_2bits(a, b, t_offset, w);
+    decode8<cb>(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], f0, f1);
 }
 
 // Register form of dq8<3, cb, 4> with the per-lane funnel alignment precomputed
+__device__ __forceinline__ void ext8_regs_3bits(uint32_t a, uint32_t b, int s2, uint32_t (&w)[8])
+{
+    w[7] = fshift(b, a, s2);
+    w[6] = w[7] >> 3;
+    w[5] = w[6] >> 3;
+    w[4] = w[5] >> 3;
+    w[3] = fshift(b, a, s2 + 12);
+    w[2] = w[3] >> 3;
+    w[1] = w[2] >> 3;
+    w[0] = w[1] >> 3;
+    w[7] &= 0xffff; w[6] &= 0xffff; w[5] &= 0xffff; w[4] &= 0xffff;
+    w[3] &= 0xffff; w[2] &= 0xffff; w[1] &= 0xffff; w[0] &= 0xffff;
+}
+
 template <int cb>
 __device__ __forceinline__ void dq8_regs_3bits(uint32_t a, uint32_t b, int s2, FragB& f0, FragB& f1)
 {
-    uint32_t w0, w1, w2, w3, w4, w5, w6, w7;
-    w7 = fshift(b, a, s2);
-    w6 = w7 >> 3;
-    w5 = w6 >> 3;
-    w4 = w5 >> 3;
-    w3 = fshift(b, a, s2 + 12);
-    w2 = w3 >> 3;
-    w1 = w2 >> 3;
-    w0 = w1 >> 3;
-    decode8<cb>(w0 & 0xffff, w1 & 0xffff, w2 & 0xffff, w3 & 0xffff,
-                w4 & 0xffff, w5 & 0xffff, w6 & 0xffff, w7 & 0xffff, f0, f1);
+    uint32_t w[8];
+    ext8_regs_3bits(a, b, s2, w);
+    decode8<cb>(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], f0, f1);
 }
 
 // Register form of dq8_half<KA, cb> (exl3_dq.cuh): the two window groups' word pairs and funnel alignments are
@@ -600,74 +619,101 @@ __device__ __forceinline__ void decode8(uint32_t w0, uint32_t w1, uint32_t w2, u
     f1[1] = decode_3inst_2<cb>(w6, w7);
 }
 
-// Window extraction from two already-loaded words, same order as dq8_aligned_4bits
+// Window extraction from two already-loaded words, same order as dq8_aligned_4bits. w[i] is
+// the trellis window of weight i of the lane's eight (see the column/k mapping below), which
+// the INT8 kernel needs without the codebook decode.
+__device__ __forceinline__ void ext8_regs_4bits(uint32_t a, uint32_t b, uint32_t (&w)[8])
+{
+    uint32_t s;
+    FSHF_IMM(s, b, a, 20);
+    w[7] = b & 0xffff;
+    BFE16_IMM(w[6], b, 4);
+    BFE16_IMM(w[5], b, 8);
+    BFE16_IMM(w[4], b, 12);
+    BFE16_IMM(w[3], b, 16);
+    w[2] = s & 0xffff;
+    BFE16_IMM(w[1], s, 4);
+    BFE16_IMM(w[0], s, 8);
+}
+
 template <int cb>
 __device__ __forceinline__ void dq8_regs_4bits(uint32_t a, uint32_t b, FragB& f0, FragB& f1)
 {
-    uint32_t s, w0, w1, w2, w3, w4, w5, w6, w7;
-    FSHF_IMM(s, b, a, 20);
-    w7 = b & 0xffff;
-    BFE16_IMM(w6, b, 4);
-    BFE16_IMM(w5, b, 8);
-    BFE16_IMM(w4, b, 12);
-    BFE16_IMM(w3, b, 16);
-    w2 = s & 0xffff;
-    BFE16_IMM(w1, s, 4);
-    BFE16_IMM(w0, s, 8);
-    decode8<cb>(w0, w1, w2, w3, w4, w5, w6, w7, f0, f1);
+    uint32_t w[8];
+    ext8_regs_4bits(a, b, w);
+    decode8<cb>(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], f0, f1);
 }
 
 // Register form of dq8_aligned_2bits: the two words and the funnel shift are lane-dependent
+__device__ __forceinline__ void ext8_regs_2bits(uint32_t a, uint32_t b, int t_offset, uint32_t (&w)[8])
+{
+    b = fshift(b, a, ((~t_offset) & 8) << 1);
+    w[7] = b & 0xffff;
+    BFE16_IMM(w[6], b, 2);
+    BFE16_IMM(w[5], b, 4);
+    BFE16_IMM(w[4], b, 6);
+    BFE16_IMM(w[3], b, 8);
+    BFE16_IMM(w[2], b, 10);
+    BFE16_IMM(w[1], b, 12);
+    BFE16_IMM(w[0], b, 14);
+}
+
 template <int cb>
 __device__ __forceinline__ void dq8_regs_2bits(uint32_t a, uint32_t b, int t_offset, FragB& f0, FragB& f1)
 {
-    uint32_t w0, w1, w2, w3, w4, w5, w6, w7;
-    b = fshift(b, a, ((~t_offset) & 8) << 1);
-    w7 = b & 0xffff;
-    BFE16_IMM(w6, b, 2);
-    BFE16_IMM(w5, b, 4);
-    BFE16_IMM(w4, b, 6);
-    BFE16_IMM(w3, b, 8);
-    BFE16_IMM(w2, b, 10);
-    BFE16_IMM(w1, b, 12);
-    BFE16_IMM(w0, b, 14);
-    decode8<cb>(w0, w1, w2, w3, w4, w5, w6, w7, f0, f1);
+    uint32_t w[8];
+    ext8_regs_2bits(a, b, t_offset, w);
+    decode8<cb>(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], f0, f1);
 }
 
 // Register form of dq8<3, cb, 4> with the per-lane funnel alignment precomputed
+__device__ __forceinline__ void ext8_regs_3bits(uint32_t a, uint32_t b, int s2, uint32_t (&w)[8])
+{
+    w[7] = fshift(b, a, s2);
+    w[6] = w[7] >> 3;
+    w[5] = w[6] >> 3;
+    w[4] = w[5] >> 3;
+    w[3] = fshift(b, a, s2 + 12);
+    w[2] = w[3] >> 3;
+    w[1] = w[2] >> 3;
+    w[0] = w[1] >> 3;
+    w[7] &= 0xffff; w[6] &= 0xffff; w[5] &= 0xffff; w[4] &= 0xffff;
+    w[3] &= 0xffff; w[2] &= 0xffff; w[1] &= 0xffff; w[0] &= 0xffff;
+}
+
 template <int cb>
 __device__ __forceinline__ void dq8_regs_3bits(uint32_t a, uint32_t b, int s2, FragB& f0, FragB& f1)
 {
-    uint32_t w0, w1, w2, w3, w4, w5, w6, w7;
-    w7 = fshift(b, a, s2);
-    w6 = w7 >> 3;
-    w5 = w6 >> 3;
-    w4 = w5 >> 3;
-    w3 = fshift(b, a, s2 + 12);
-    w2 = w3 >> 3;
-    w1 = w2 >> 3;
-    w0 = w1 >> 3;
-    decode8<cb>(w0 & 0xffff, w1 & 0xffff, w2 & 0xffff, w3 & 0xffff,
-                w4 & 0xffff, w5 & 0xffff, w6 & 0xffff, w7 & 0xffff, f0, f1);
+    uint32_t w[8];
+    ext8_regs_3bits(a, b, s2, w);
+    decode8<cb>(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], f0, f1);
 }
 
 // Register form of dq8_half<KA, cb> (exl3_dq.cuh); the four words and both funnel alignments
 // are lane constants resolved by the caller.
+template <int KA>
+__device__ __forceinline__ void ext8_regs_half(uint32_t a7, uint32_t b7, int s7, uint32_t a3, uint32_t b3, int s3,
+                                               uint32_t (&w)[8])
+{
+    w[7] = fshift(b7, a7, s7);
+    w[6] = w[7] >> (KA + 1);
+    w[5] = w[6] >> KA;
+    w[4] = w[5] >> (KA + 1);
+    w[3] = fshift(b3, a3, s3);
+    w[2] = w[3] >> (KA + 1);
+    w[1] = w[2] >> KA;
+    w[0] = w[1] >> (KA + 1);
+    w[7] &= 0xffff; w[6] &= 0xffff; w[5] &= 0xffff; w[4] &= 0xffff;
+    w[3] &= 0xffff; w[2] &= 0xffff; w[1] &= 0xffff; w[0] &= 0xffff;
+}
+
 template <int KA, int cb>
 __device__ __forceinline__ void dq8_regs_half(uint32_t a7, uint32_t b7, int s7, uint32_t a3, uint32_t b3, int s3,
                                               FragB& f0, FragB& f1)
 {
-    uint32_t w0, w1, w2, w3, w4, w5, w6, w7;
-    w7 = fshift(b7, a7, s7);
-    w6 = w7 >> (KA + 1);
-    w5 = w6 >> KA;
-    w4 = w5 >> (KA + 1);
-    w3 = fshift(b3, a3, s3);
-    w2 = w3 >> (KA + 1);
-    w1 = w2 >> KA;
-    w0 = w1 >> (KA + 1);
-    decode8<cb>(w0 & 0xffff, w1 & 0xffff, w2 & 0xffff, w3 & 0xffff,
-                w4 & 0xffff, w5 & 0xffff, w6 & 0xffff, w7 & 0xffff, f0, f1);
+    uint32_t w[8];
+    ext8_regs_half<KA>(a7, b7, s7, a3, b3, s3, w);
+    decode8<cb>(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], f0, f1);
 }
 
 }  // namespace exl3_gemv_hip_ns
@@ -872,8 +918,9 @@ void exl3_gemv_hip_kernel(EXL3_GEMM_ARGS)
 }
 
 // Input Hadamard + suh, one warp per 128 elements. Same arithmetic as the CUDA kernel's
-// first stage; a separate launch replaces its grid.sync().
-__global__ __launch_bounds__(256)
+// first stage; a separate launch replaces its grid.sync(). Internal linkage so the fp16 and
+// int8 GEMV translation units can each include this header.
+static __global__ __launch_bounds__(256)
 void exl3_gemv_hip_had_in_kernel
 (
     const half* __restrict__ input,
