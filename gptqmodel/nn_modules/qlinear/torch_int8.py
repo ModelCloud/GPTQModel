@@ -16,7 +16,7 @@ from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear, unpack_qzero_lanes
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.torch import dynamo_is_compiling
@@ -714,11 +714,17 @@ class TorchInt8Linear(GPTQQuantLinear):
 
         self._ensure_unpack_buffers()
 
-        zeros = torch.bitwise_right_shift(
-            torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
+        # Shared with `PackableQuantLinear.unpack_zero_points`: the packed zero
+        # words hold ceil(out_features / pack_factor) lanes, so a non-aligned
+        # output width decodes padding lanes that must be cropped here.
+        zeros = unpack_qzero_lanes(
+            self.qzeros,
             self.wf_unsqueeze_zero,
-        ).to(self.dequant_dtype)
-        zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
+            pack_factor=self.pack_factor,
+            maxq=self.maxq,
+            dtype=self.dequant_dtype,
+            out_features=self.out_features,
+        )
 
         weight = torch.bitwise_and(
             torch.bitwise_right_shift(
@@ -780,11 +786,16 @@ class TorchInt8Linear(GPTQQuantLinear):
             raise RuntimeError("TorchInt8Linear missing GPTQ checkpoint buffers for native INT8 conversion.")
         self._ensure_unpack_buffers()
 
-        zeros = torch.bitwise_right_shift(
-            torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
+        # See `_dequantize_gptq_source_weight`: the shared decode drops the
+        # packed lanes that pad the output axis past `out_features`.
+        zeros = unpack_qzero_lanes(
+            self.qzeros,
             self.wf_unsqueeze_zero,
-        ).to(self.dequant_dtype)
-        zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
+            pack_factor=self.pack_factor,
+            maxq=self.maxq,
+            dtype=self.dequant_dtype,
+            out_features=self.out_features,
+        )
 
         codes = torch.bitwise_and(
             torch.bitwise_right_shift(
