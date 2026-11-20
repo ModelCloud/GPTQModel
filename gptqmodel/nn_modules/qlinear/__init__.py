@@ -727,6 +727,18 @@ class BaseQuantLinear(nn.Module):
         if callable(clear):
             clear()
 
+    def iter_runtime_weight_tensors(self):
+        """Yield weight tensors kept outside the parameter/buffer registry.
+
+        A kernel may replace its checkpoint buffers with a derived packed
+        cache (QQQ does, #4856). Those tensors own real weight storage that
+        ``parameters()``/``buffers()`` cannot see, so resource reporting would
+        undercount the module (#5810). Backends that keep such a cache
+        override this; the default owns nothing extra.
+        """
+
+        return ()
+
     def materialize_checkpoint_layout_for_export(self) -> bool:
         """Restore checkpoint buffers a derived cache replaced; True if restored.
 
