@@ -70,7 +70,7 @@ class GPTAQ(GPTQ):
         if not self._use_native_delta:
             self.native_inps = []
 
-    def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
+    def add_batch(self, inp: torch.Tensor, out: Optional[torch.Tensor], batch_index: Optional[int] = None):
         with self.lock:
             self.fwd_counter += 1
             self.process_batch(inp, batch_index=batch_index)

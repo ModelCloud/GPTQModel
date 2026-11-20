@@ -146,7 +146,7 @@ class FOEM(GPTQ):
             if self._routed_expert:
                 self.native_inps = []
 
-    def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
+    def add_batch(self, inp: torch.Tensor, out: Optional[torch.Tensor], batch_index: Optional[int] = None):
         with self.lock:
             self.fwd_counter += 1
             self.process_batch(inp, batch_index=batch_index)
