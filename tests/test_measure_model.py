@@ -186,3 +186,46 @@ def test_only_requested_metrics_appear(tiny_model):
 
     assert set(report.values) == {"KLD"}
     assert report.positions > 0
+
+def test_batch_size_groups_equal_length_rows(tiny_model):
+    model, _source = tiny_model
+    reference = _Counting(model.model)
+    candidate = _Counting(model.model)
+    rows = [torch.tensor(row).unsqueeze(0) for row in ROWS]  # all length 10
+
+    report = measure_models(candidate, reference, rows, MeasureConfig(
+        metrics=Metric.PPL, dataset=ROWS, reference=reference, batch_size=2, max_batches=4,
+    ))
+
+    assert reference.calls == 1      # 2 rows of equal length -> 1 batch
+    assert candidate.calls == 1
+    assert report.batches == 1
+
+
+def test_unequal_rows_are_not_padded_into_one_batch(tiny_model):
+    model, _source = tiny_model
+    reference = _Counting(model.model)
+    candidate = _Counting(model.model)
+    rows = [torch.tensor([[1, 2, 3]]), torch.tensor([[4, 5, 6, 7]])]
+
+    report = measure_models(candidate, reference, rows, MeasureConfig(
+        metrics=Metric.PPL, dataset=ROWS, reference=reference, batch_size=2,
+    ))
+
+    # Padding the short row would add padding tokens to the PPL sum, so the two
+    # lengths stay in separate batches.
+    assert reference.calls == 2
+    assert report.batches == 2
+
+
+def test_positions_reports_what_was_actually_sampled(tiny_model):
+    model, _source = tiny_model
+    rows = [torch.tensor([[1, 2, 3]]), torch.tensor([[4, 5, 6, 7]])]
+
+    report = measure_models(model.model, model.model, rows, MeasureConfig(
+        metrics=KLDConfig(positions=64), dataset=ROWS, reference=model.model,
+    ))
+
+    # 2 usable positions in the first row and 3 in the second, not the 64 asked
+    # for: the report must not claim a sample it did not read.
+    assert report.positions == 5

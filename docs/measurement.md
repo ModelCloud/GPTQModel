@@ -34,7 +34,8 @@ report = quantized.measure(MeasureConfig(
     ),
     dataset=texts,          # strings, HF dataset rows, or token-id lists
     reference=reference,
-    max_batches=4,
+    batch_size=4,           # rows of equal length are batched together
+    max_batches=4,          # forward batches per model
 ))
 
 print(report)              # aligned columns for a terminal or TUI
@@ -137,7 +138,11 @@ kernel.
   `TOP_K {1: 1.0}` - not "close to zero". A harness that cannot do that is
   measuring drifted positions rather than models.
 - **One forward per batch** for any number of fused metrics (asserted by a
-  counting test).
+  counting test). Rows of different lengths are never padded together - padding
+  tokens would enter the PPL sum - so `batch_size` batches only equal-length
+  rows.
+- **`report.positions` is what was actually sampled**, not what was requested:
+  a short row contributes its own two or three positions, not the configured 64.
 - **Report-only by default**: no grades, no verdict.
 
 ## Not in this version

@@ -62,6 +62,7 @@ class _Captures:
 
     nll_sum: float = 0.0
     tokens: int = 0
+    positions: int = 0
     logits: List[torch.Tensor] = field(default_factory=list)
 
     def perplexity(self) -> Optional[float]:
@@ -109,6 +110,30 @@ def build_token_rows(
     if not rows:
         raise ValueError("measurement dataset produced no usable token rows")
     return rows[:max_rows]
+
+
+def _batch_rows(rows: Sequence[torch.Tensor], batch_size: int) -> List[torch.Tensor]:
+    """Group rows of equal length into batches of ``batch_size``.
+
+    Padding a short row to a long one would put padding tokens into the PPL sum
+    and change what the metrics mean, so rows of different lengths stay in
+    separate batches.
+    """
+
+    if batch_size <= 1:
+        return list(rows)
+    pending: Dict[int, List[torch.Tensor]] = {}
+    batches: List[torch.Tensor] = []
+    for row in rows:
+        bucket = pending.setdefault(int(row.shape[1]), [])
+        bucket.append(row)
+        if len(bucket) == batch_size:
+            batches.append(torch.cat(bucket, dim=0))
+            pending[row.shape[1]] = []
+    for bucket in pending.values():
+        if bucket:
+            batches.append(torch.cat(bucket, dim=0))
+    return batches
 
 
 def _sample_positions(length: int, count: int) -> torch.Tensor:
@@ -159,6 +184,7 @@ def _capture(
             picked = _sample_positions(logits.shape[1], positions)
             if picked.numel() == 0:
                 raise ValueError("measurement rows are too short to sample a prediction position")
+            captures.positions += int(picked.numel())
             captures.logits.append(
                 logits[:, picked, :].detach().cpu().to(torch.float16)
             )
@@ -180,7 +206,7 @@ def measure_models(
 
     reference_device = config.device or _model_device(reference)
     candidate_device = config.device or _model_device(candidate)
-    batches = list(token_rows)[: max(1, config.max_batches)]
+    batches = _batch_rows(list(token_rows), config.batch_size)[: max(1, config.max_batches)]
 
     # `fuse` plans the passes; the captures those passes must produce are the
     # union of what the members read.
@@ -230,7 +256,7 @@ def measure_models(
         grades=grades,
         reference=reference_values,
         batches=len(batches),
-        positions=positions_wanted,
+        positions=candidate_captures.positions,
     )
     if config.strict and report.overall is MetricGrades.FAIL:
         raise MeasurementError(report)
