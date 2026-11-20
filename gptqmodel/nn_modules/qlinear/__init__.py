@@ -2335,6 +2335,22 @@ class PackableQuantLinear(GPTQQuantLinear):
         else:
             self.wf_unsqueeze_neg_one = wf_neg_one
 
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse=recurse)
+        if self.enable_wf_unsqueeze:
+            # ``wf_unsqueeze_*`` are non-persistent shift tables derived from
+            # ``bits``/``pack_dtype``. ``to_empty`` materializes every buffer
+            # from uninitialized storage and a device move relocates it, so
+            # rebuild the tables for the operands ``fn`` just produced.
+            self._buffers.pop("wf_unsqueeze_zero", None)
+            self._buffers.pop("wf_unsqueeze_neg_one", None)
+            if not getattr(self, "planar", False) and (
+                getattr(self, "qweight", None) is not None
+                or getattr(self, "g_idx", None) is not None
+            ):
+                self._init_wf_unsqueeze_buffers()
+        return result
+
     def post_init(self, **kwargs):
         self._init_wf_unsqueeze_buffers()
         super().post_init(**kwargs)

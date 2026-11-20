@@ -24,6 +24,7 @@ from ._fused_train_state import (
     ensure_cpu_inference_layout,
     finalize_fused_train_state,
     fused_autograd_needs_dense,
+    refinalize_fused_state_after_apply,
 )
 from ._numerics import matmul_fp32_reduce
 from .torch_aten_kernel import TorchAtenLinear
@@ -189,6 +190,11 @@ class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
     def transform_cpu(self):
         if self._cpu_transformed:
             return
+        if getattr(self, "_fused_train_state", None) is None:
+            # A direct ``transform_cpu`` (outside ``forward``) still needs the
+            # checkpoint snapshot so a later ``meta``/``to_empty`` move can
+            # restore the checkpoint layout instead of the runtime one.
+            capture_fused_train_state(self)
 
         self._dequant_scales_dtype = self.scales.dtype
         if self.pack_awq_int4_kernel is None:
@@ -241,10 +247,22 @@ class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         the resulting device. Scales and zero points are quantization metadata,
         not expanded weights, so retaining them is allowed; the packed integer
         codes are untouched by a move and are never repacked here.
+
+        A device or low-precision move invalidates the packed runtime layout
+        itself. In that case the checkpoint snapshot (whose buffers ``fn``
+        moved as well) is restored and the next forward re-transforms. This
+        also keeps a ``meta`` move from retaining meta scales that
+        ``to_empty`` cannot copy.
         """
 
         if not getattr(self, "_cpu_transformed", False):
             return super()._apply(fn, recurse=recurse)
+
+        scales = getattr(self, "scales", None)
+        previous_dtype = getattr(self, "_dequant_scales_dtype", None)
+        if previous_dtype is None and isinstance(scales, torch.Tensor):
+            previous_dtype = scales.dtype
+        previous_device = scales.device if isinstance(scales, torch.Tensor) else None
 
         kept = {
             name: getattr(self, name)
@@ -252,6 +270,14 @@ class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
             if isinstance(getattr(self, name, None), torch.Tensor)
         }
         result = super()._apply(fn, recurse=recurse)
+        if refinalize_fused_state_after_apply(self, previous_dtype, previous_device):
+            # A device or low-precision move invalidated the runtime layout.
+            # The snapshot buffers moved with ``fn``, so the module is back on
+            # the checkpoint layout and the next forward re-transforms. Never
+            # reinstall the pre-move meta tensors: ``to_empty`` would try to
+            # copy out of them.
+            self._refresh_decode_range_fits()
+            return result
         for name, value in kept.items():
             current = getattr(self, name, None)
             device = current.device if isinstance(current, torch.Tensor) else value.device
