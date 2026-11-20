@@ -134,6 +134,6 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4 PYTHONPATH=$PWD \
   tests/kernels/test_gptq_bf16_fp16_scales_5740.py
 ```
 
-Introduced in PR #<number> for [issue #5740](https://github.com/ModelCloud/GPTQModel/issues/5740).
+Introduced in PR #5921 for [issue #5740](https://github.com/ModelCloud/GPTQModel/issues/5740).
 The fused launch tables and their contracts are documented in
 [GPTQ Triton decode and small-M dispatch](triton-dispatch.md).
