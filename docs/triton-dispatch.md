@@ -23,9 +23,11 @@ split-K on is never less accurate than the old kernel.
 ## TritonV2 forward
 
 `TritonV2Linear.forward` now reshapes to 2-D and asks the inherited gates before
-choosing a path. A gate miss keeps the original `QuantLinearFunction` path, so
-3-bit, v1 qzeros, non-contiguous input, autograd, training and unregistered
-architectures are unchanged.
+choosing a path. The first gate is the range check: when the decoded weight does
+not fit the activation dtype, the whole-weight Triton decode is skipped and the
+parent's wide decode (#5606) produces the output. A later gate miss keeps the
+original `QuantLinearFunction` path, so 3-bit, v1 qzeros, non-contiguous input,
+autograd, training and unregistered architectures are unchanged.
 
 ```mermaid
 flowchart TD
@@ -35,10 +37,76 @@ flowchart TD
     D --> E{"_can_use_rocm_gemv(x2)<br/>or _can_use_rocm_gemm(x2)"}
     E -->|"yes"| F["_apply_rotation_to_input(x2)"]
     F --> G["TorchLinear._forward_eager<br/>gptq_gemv / gptq_gemm"]
-    E -->|"no"| H["QuantLinearFunction.apply<br/>dequantize + matmul"]
+    E -->|"no"| R{"_decoded_weight_fits(x.dtype)"}
+    R -->|"no: decoded weight<br/>outside x.dtype"| W["super().forward<br/>wide decode + linear_wide_bias"]:::fallback
+    R -->|"yes"| H["QuantLinearFunction.apply<br/>dequantize in x.dtype + matmul"]
     G --> I["adapter then out.to(x.dtype)"]
     H --> I
+    C --> I
+    W --> I
+
+    classDef fallback fill:#ffdddd,stroke:#cc0000,color:#660000
 ```
+
+## Range-safe decode
+
+`QuantLinearFunction` asks the Triton dequant kernel to store its output in the
+activation dtype (`dequant.py:352`). The kernel accumulates in FP32, but the
+store rounds the decoded weight to that dtype first. A checkpoint whose
+per-group scale makes `(code - zero) * scale` exceed the activation dtype's
+finite range therefore produces an `inf` weight, and a later `0 * inf` in the
+GEMM produces `NaN` before any wide reduction can help. `BACKEND.TORCH` does
+not have this hole: `TorchLinear` decodes in `decode_dtype_for_scales`' dtype
+and keeps the reduction wide (`torch.py:588`).
+
+Before #5738, the TritonV2 eval path had no range gate:
+
+```mermaid
+flowchart TD
+    A["TritonV2Linear.forward<br/>eval"] --> B["QuantLinearFunction.apply"]
+    B --> C["dequant<br/>out_dtype = input.dtype"]
+    C --> D{"decoded weight fits<br/>input.dtype"}
+    D -->|"yes"| E["finite matmul"]
+    D -->|"no"| F["inf weight<br/>then 0 * inf = NaN"]:::failure
+
+    classDef failure fill:#ffdddd,stroke:#cc0000,color:#660000
+```
+
+After #5738, the module reuses the #5606 range-safe decode when the Triton
+kernel cannot stage the weight:
+
+```mermaid
+flowchart TD
+    A["TritonV2Linear.forward<br/>eval"] --> B{"fused GEMV/GEMM gate"}
+    B -->|"yes"| F["gptq_gemv / gptq_gemm<br/>range-gated by #5606"]
+    B -->|"no"| R{"_decoded_weight_fits(x.dtype)"}
+    R -->|"yes"| C["QuantLinearFunction.apply<br/>dequant in x.dtype"]
+    R -->|"no"| D["TorchLinear.forward<br/>wide decode + linear_wide_bias"]:::fallback
+    C --> E["finite matmul"]
+    D --> E
+
+    classDef fallback fill:#ffdddd,stroke:#cc0000,color:#660000
+```
+
+The gate reads the eager-precomputed answer from `_decoded_weight_fits`
+(`torch.py:1229`), the same cache the fused gate already consults, so a
+steady-state forward adds no host reduction or device synchronization and the
+packed weights are untouched. It also covers the FP64 decode that the Triton
+kernel cannot store. AUTO still selects `TritonV2Linear`; only the overflowing
+decode falls back, exactly as the fused GEMV/GEMM gate already does
+(`torch.py:740`).
+
+| Mechanism | Before (`main`) | After |
+| --- | --- | --- |
+| `TritonV2Linear.forward` (`tritonv2.py:160-196`) | eval always calls `QuantLinearFunction` | `_decoded_weight_fits(x.dtype)` gate before the whole-weight decode; an overflowing decode takes `TorchLinear.forward` |
+| Triton decode `out_dtype` (`dequant.py:352`) | always `input.dtype` | unchanged for a fitting weight; not reached for an overflowing weight |
+| Torch wide branch (`torch.py:588`) | only `BACKEND.TORCH` | reused by the TritonV2 range fallback |
+| Fused GEMV/GEMM gate (`torch.py:740`) | range-gated by #5606 | unchanged |
+
+The contract is finite-for-finite parity with `BACKEND.TORCH`. The 4-bit
+asymmetric fixture (code 15, zero 0, FP16 scale 8192, so the weight is 122880)
+returns 32 `NaN` values on the old FP16 path and `30720.0` on both backends
+after the gate; BF16 was already finite and is unchanged.
 
 ## Packed-load small-M GEMM
 
@@ -101,6 +169,7 @@ flowchart TD
 | Ada gate (`gptq_gemm.py:144-146`, `arch.py:70-71`) | `M <= 16`, `K <= 2048`, `N <= 2048` | `M <= 64`, no K/N caps |
 | Blackwell | no launch entry | `blackwell` entry, same kernel |
 | split-K | none | deterministic FP32 partials, `S` in `{2, 4, 8}` |
+| overflow decode (`tritonv2.py:185`) | `QuantLinearFunction` stores `inf`, GEMM returns `NaN` | parent wide decode, finite output |
 
 ## Contracts
 
@@ -112,6 +181,11 @@ flowchart TD
   oracle, and stays inside `1e-3 + 1e-5 * max|ref|`. On K=14336 the measured
   drift is about 5x-10x lower than the single-pass kernel.
 - `M == 1` is never routed through the small-M GEMM.
+- **Range-safe decode:** a TritonV2 FP16/BF16 eval forward is finite wherever
+  `BACKEND.TORCH` is finite. The 4-bit overflowing fixture returns `30720.0` on
+  both backends instead of 32 `NaN` values. The gate is selected by
+  `_decoded_weight_fits`, not an environment switch, and retains packed
+  weights.
 - Unsupported widths, v1 qzeros, non-contiguous input and autograd keep the
   portable path; no environment switch selects a path.
 
@@ -122,6 +196,8 @@ CUDA_VISIBLE_DEVICES=GPU-... PYTHONPATH=$PWD \
   /opt/venvs/cu130t/bin/python -m pytest -q tests/kernels/test_gptq_ada_gemm.py
 CUDA_VISIBLE_DEVICES=GPU-... PYTHONPATH=$PWD \
   /opt/venvs/cu130t/bin/python -m pytest -q tests/kernels/test_tritonv2_dispatch.py
+CUDA_VISIBLE_DEVICES=GPU-... PYTHONPATH=$PWD \
+  /opt/venvs/cu130t/bin/python -m pytest -q tests/kernels/test_tritonv2_range_safe_decode_5738.py
 HIP_VISIBLE_DEVICES=1 PYTHONPATH=$PWD \
   /opt/venvs/rocm101t/bin/python -m pytest -q tests/kernels/test_gptq_rocm_gemm.py
 ```
@@ -159,4 +235,6 @@ the entry follows the issue's indicative sm_120 report (1.3x-5.9x); no sm_120
 timing was taken here.
 
 Introduced in [PR #3999](https://github.com/ModelCloud/GPTQModel/pull/3999) for
-[issue #3982](https://github.com/ModelCloud/GPTQModel/issues/3982).
+[issue #3982](https://github.com/ModelCloud/GPTQModel/issues/3982). The
+range-safe decode gate was added for
+[issue #5738](https://github.com/ModelCloud/GPTQModel/issues/5738) in PR #5738-FIX.
