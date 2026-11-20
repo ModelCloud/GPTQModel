@@ -148,4 +148,4 @@ Run `python -m pytest tests/test_cptc.py` on each GPU runtime and on CPU.
 GPU cases skip on other architectures and fail when a supported device
 cannot build or run the native extension.
 
-[Tracking issue #5954](https://github.com/ModelCloud/GPTQModel/issues/5954)
+[Implementation PR #5959](https://github.com/ModelCloud/GPTQModel/pull/5959) · [Tracking issue #5954](https://github.com/ModelCloud/GPTQModel/issues/5954)
