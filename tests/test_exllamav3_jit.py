@@ -7,7 +7,9 @@ import pytest
 import torch
 
 import gptqmodel.exllamav3.ext as exllamav3_ext_module
+from gptqmodel.backend import BACKEND, EXL3CUDAConfig
 from gptqmodel.utils import cpp as cpp_module
+from gptqmodel.utils.kernel import KernelConfig
 
 
 class _FakeExtension:
@@ -74,6 +76,32 @@ def test_exllamav3_bc_linear_wrapper_uses_jit_op(monkeypatch):
         "x_shape": (3, 128),
         "y_shape": (3, 64),
     }
+
+
+def test_exllamav3_half_rate_wrapper_owns_kernel_policy(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        exllamav3_ext_module, "_EXLLAMAV3_TORCH_OPS_EXTENSION",
+        _FakeExtension({"bc_linear_exl3_run_configured": lambda *args: calls.append(args)}),
+    )
+    backend = EXL3CUDAConfig(fp16_gemv=False, int8_gemv=1)
+    assert backend.backend == BACKEND.EXL3_EXLLAMA_V3
+    policy = backend.to_kernel_config()
+    weight = torch.zeros((8, 8, 40), dtype=torch.int16)
+    signs = torch.ones((128,), dtype=torch.float16)
+    wrapper = exllamav3_ext_module.exllamav3_ext.BC_LinearEXL3(
+        weight, signs, signs, 2.5, None, False, True, kernel=policy,
+    )
+    policy.exl3_int8_gemv = 2
+    wrapper.run(signs.view(1, -1), torch.empty((1, 128), dtype=torch.float16))
+    assert calls[0][3] == 2.5
+    assert calls[0][-3:] == (False, 1, False)
+
+
+@pytest.mark.parametrize("value", (-1, 3, True, None))
+def test_exllamav3_rejects_invalid_int8_policy(value):
+    with pytest.raises((TypeError, ValueError), match="exl3_int8_gemv"):
+        KernelConfig(exl3_int8_gemv=value)
 
 
 def test_exllamav3_quantize_tiles_uses_jit_op(monkeypatch):

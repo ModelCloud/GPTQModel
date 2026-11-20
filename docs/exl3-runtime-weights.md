@@ -137,6 +137,40 @@ flowchart TD
     G --> H["packed trellis stores padded outputs"]
 ```
 
+## Native mul1 half-bit rates
+
+Pass `EXL3Config(bits=2.5, codebook="mul1")` when loading a model for
+quantization. The same 1.5, 2.5 and 3.5 rates are accepted for `head_bits`
+and in per-module `dynamic` rules. Each half-bit tile uses alternating
+transition widths of `floor(bits)` and `floor(bits) + 1`, starting with the
+smaller transition. The 256-weight tiles occupy 24, 40 and 56 int16 words,
+respectively. The checkpoint identifies the codebook through the `mul1`
+marker and the decoder derives the exact rate from the tile width.
+
+| Operation | Prior runtime | Runtime with half-bit tiles |
+| --- | --- | --- |
+| Config validation | Accept integer EXL3 rates | Also accept 1.5, 2.5 and 3.5 with `mul1` |
+| Quantization | Fixed transition width and `pack_trellis` | Alternate widths with native Viterbi and `pack_trellis_frac` |
+| Save and reload | Integer rate and `16 * bits` words per tile | Half-bit rate preserved in JSON and in the packed tensor shape |
+| Inference | Derive integer depth from shape | Read the exact packed rate for CUDA or portable Torch |
+
+```mermaid
+flowchart LR
+    A["EXL3Config"] --> B{"Integer rate or supported mul1 half rate?"}
+    B -- "yes" --> C["EXL3Processor._build_quant_args"]
+    B -- "no" --> D["Reject before packing"]
+    style D fill:#ffd6d6,stroke:#b00020,stroke-width:2px
+    C --> E["quantize_exl3 and pack_trellis"]
+    E --> F["Packed safetensors and tensor_storage"]
+    F --> G["trellis_rate checks tile width and codebook marker"]
+    G --> H["CUDA and portable Torch forward"]
+```
+
+`3inst`, `mcg`, and `mul1` still support integer rates. Use
+`dynamic` to express a mix of per-projection rates. MLX inference and the
+RCO EXL3 allocator support integer rates. The transition layout is from
+[ExLlamaV3 1.6.7](https://github.com/turboderp-org/exllamav3/blob/8c593e4e5c88da76a4aaf8f1b1838bb7c1fce4e0/exllamav3/exllamav3_ext/quant/frac.cu).
+
 ## Failure and ambiguity contract
 
 | Situation | Before | After |

@@ -2,196 +2,117 @@
 #include "exl3_gemm.cuh"
 
 #include <algorithm>
-
-#include <ATen/ATen.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include "../util.h"
-#include "../util.cuh"
-#include "exl3_kernel_map.cuh"
-#include "exl3_devctx.cuh"
+#include <limits>
 #include <set>
 #include <shared_mutex>
+#include <ATen/ops/empty.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
+#include "../util.h"
+#include "exl3_kernel_map.cuh"
+#include "exl3_devctx.cuh"
+#include "exl3_gemv.cuh"
 
-constexpr int EXL3_GEMM_SMEM_MAX = 90 * 1024;
-
-/*
-EXL3 matmul, A @ B -> C
-
-- A: row-major A tensor, shape (m, k), dtype float16, contiguous
-- B: EXL3-quantized B tensor, shape (k//16, n//16, 16*K), dtype uint16
-- C: empty row-major C tensor, shape (m, n), dtype float16 or float32, contiguous. Does not need to be zero-initialized
-- suh: optional, packed input scales/flips, shape (k//16), dtype float16
-- A_had: required if suh given, may be reference to A, temporary storage for input transform, size and dtype as A
-- svh: optional, packed output scales/flips, shape (n//16), dtype float16
-
-limitations:
-- k % 16 == 0
-- n % 128 == 0
-*/
-
-// One entry per (device, kernel) records that the shared-memory attribute was
-// already raised.  The set is process-wide and is filled on the first launch of
-// each kernel variant, which GIL=0 callers can reach concurrently; an
-// unsynchronized find/insert on a std::set is a data race.  The steady state
-// only reads, so a shared lock keeps concurrent launches parallel and the
-// exclusive lock is taken only the first time a kernel variant is seen on a
-// device.
-std::set<void*> kernel_attr_set[MAX_DEVICES] = {};
+namespace {
+std::set<void*> kernel_attr_set[MAX_DEVICES];
 std::shared_mutex kernel_attr_mutex;
+}
 
-int exl3_gemm
-(
-    const at::Tensor& A,
-    const at::Tensor& B,
-    at::Tensor& C,
-    const c10::optional<at::Tensor>& suh,
-    const c10::optional<at::Tensor>& A_had,
-    const c10::optional<at::Tensor>& svh,
-    int force_shape_idx,
-    bool mcg,
-    bool mul1,
-    int force_num_sms
-)
+int exl3_gemm(
+    const at::Tensor& A, const at::Tensor& B, at::Tensor& C,
+    const at::Tensor& suh, const at::Tensor& A_had, const at::Tensor& svh,
+    bool mcg, bool mul1, bool fp16_gemv, int64_t int8_gemv, bool fused_gemm)
 {
+#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
+    TORCH_CHECK(false,
+        "ExLlamaV3 tensor-core GEMM is not available in this build (ROCm/HIP); "
+        "use the reconstruct + hgemm path (torch_mode) instead.");
+#else
     const at::cuda::OptionalCUDAGuard device_guard(A.device());
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+    const auto stream = at::cuda::getCurrentCUDAStream().stream();
+    const int device = A.get_device();
 
     TORCH_CHECK_DIM(B, 3);
     TORCH_CHECK_SHAPES(A, -1, B, 0, 16);
     TORCH_CHECK_SHAPES(C, -1, B, 1, 16);
-    // TORCH_CHECK_SHAPES(A, 0, C, 0, 1);
     TORCH_CHECK_DTYPE(A, kHalf);
     TORCH_CHECK_DTYPE(B, kShort);
-    bool c_fp32 = C.dtype() == at::kFloat;
+    const bool c_fp32 = C.dtype() == at::kFloat;
     if (!c_fp32) TORCH_CHECK_DTYPE(C, kHalf);
+    TORCH_CHECK(!(mcg && mul1), "specified both mcg and mul1");
+    TORCH_CHECK(int8_gemv >= 0 && int8_gemv <= 2, "EXL3 INT8 mode must be 0, 1 or 2");
 
-    // Get SU, optionally
-    const half* suh_ptr = (const half*) OPTPTR(suh);
-    half* A_had_ptr = nullptr;
-    if (suh_ptr)
-    {
-        // TORCH_CHECK_SHAPES(suh.value(), 0, A, 1, 1);
-        A_had_ptr = (half*) OPTPTR(A_had);
-        // TORCH_CHECK(A_had_ptr, "Must supply A_had with suh");
-        // TORCH_CHECK_SHAPES_FULL(A_had.value(), A);
-    }
+    const int64_t words_per_tile = B.size(2);
+    TORCH_CHECK(words_per_tile >= 16 && words_per_tile <= 128, "invalid EXL3 trellis width");
+    const int K = words_per_tile / 16;
+    const bool half_k = words_per_tile % 16 == 8;
+    TORCH_CHECK(words_per_tile % 16 == 0 || (half_k && K <= 3 && mul1),
+                "EXL3 half-integer bitrates require mul1 at 1.5, 2.5 or 3.5 bpw");
 
-    // Get SV, optionally
-    const half* svh_ptr = (const half*) OPTPTR(svh);
-    // if (svh_ptr)
-        // TORCH_CHECK_SHAPES(svh.value(), 0, B, 1, 16);
+    if (C.numel() == 0) return 0;
+    TORCH_CHECK(A.size(-1) > 0 && A.size(-1) % 128 == 0 && C.size(-1) % 128 == 0,
+                "EXL3 fused transforms require K and N divisible by 128");
+    const int64_t rows = A.numel() / A.size(-1);
+    TORCH_CHECK(rows == C.numel() / C.size(-1), "inconsistent EXL3 input and output rows");
+    TORCH_CHECK(std::max(A.numel(), C.numel()) <= std::numeric_limits<int>::max(),
+                "EXL3 kernel supports up to INT32_MAX activation elements");
+    const int size_m = rows;
+    const int size_k = A.size(-1);
+    const int size_n = C.size(-1);
+    const int cb = mcg ? 1 : mul1 ? 2 : 0;
+    const int num_sms = DevCtx::instance().get_num_sms(device);
+    const int cc = DevCtx::instance().get_cc(device);
 
-    // Device properties
-    int device;
-    cudaGetDevice(&device);
-    // Per-device tables below are MAX_DEVICES entries. Reject an ordinal that
-    // would index past them instead of writing host memory out of bounds.
-    TORCH_CHECK(device >= 0 && device < MAX_DEVICES,
-                "EXL3 device ordinal ", device, " exceeds MAX_DEVICES=", MAX_DEVICES);
-    int num_sms = force_num_sms ? force_num_sms : DevCtx::instance().get_num_sms(device);
-    int cc = DevCtx::instance().get_cc(device);
+    if (int8_gemv && mul1 && size_m <= (int8_gemv == 1 ? 1 : 2)
+        && exl3_gemv_int8(A, B, C, suh, A_had, svh, int8_gemv, stream))
+        return 91;
 
-    // Dispatch
-    int K = B.size(2) / 16;
-    const half* A_ptr = (const half*) A.data_ptr();
-    const uint16_t* B_ptr = (const uint16_t*) B.data_ptr();
-    void* C_ptr = (void*) C.data_ptr();
+    const half* A_ptr = reinterpret_cast<const half*>(A.const_data_ptr());
+    const uint16_t* B_ptr = reinterpret_cast<const uint16_t*>(B.const_data_ptr());
+    void* C_ptr = C.data_ptr();
+    const half* su = reinterpret_cast<const half*>(suh.const_data_ptr());
+    half* xh = reinterpret_cast<half*>(A_had.data_ptr());
+    const half* sv = reinterpret_cast<const half*>(svh.const_data_ptr());
+    int* locks = nullptr;
+    void* args[] = {
+        (void*)&A_ptr, (void*)&B_ptr, (void*)&C_ptr, (void*)&size_m, (void*)&size_k,
+        (void*)&size_n, (void*)&locks, (void*)&su, (void*)&xh, (void*)&sv
+    };
+    if (fp16_gemv && exl3_gemv_try_launch(args, size_m, size_k, size_n, K, half_k, cb, c_fp32, device, stream))
+        return 90;
 
-    int size_m = 1;
-    int dim = A.dim();
-    for (int d = 0; d < dim - 1; ++d) size_m *= A.size(d);
-    int size_k = A.size(-1);
-    int size_n = B.size(1) * 16;
+    const bool use_fused = fused_gemm || half_k;
+    const int smem_max = std::min<int>(SMEM_MAX, at::cuda::getDeviceProperties(device)->sharedMemPerBlockOptin);
+    const TResult* config = select_exl3_gemm_kernel_tuned(
+        cc, size_k, size_n, K, c_fp32, -1, 0, cb, half_k, use_fused, size_m, smem_max);
+    TORCH_CHECK(config && config->kernel, "no EXL3 GEMM kernel for this shape");
+    void* kernel = reinterpret_cast<void*>(config->kernel);
 
-    // Select kernel
-    TORCH_CHECK(!(mcg && mul1), "Specified both mcg and mul1")
-    int cb = 0;
-    if (mcg) cb = 1;
-    if (mul1) cb = 2;
+    // The split-K counters belong to this launch (#4619). The caching
+    // allocator preserves captured addresses and keeps streams isolated.
+    const int lock_rows = use_fused ? 1 : CEIL_DIVIDE(size_m, EXL3_GEMM_TILESIZE_M);
+    auto locks_tensor = at::empty({(int64_t) lock_rows * (size_n / 16)}, A.options().dtype(at::kInt));
+    locks = locks_tensor.data_ptr<int>();
+    C10_CUDA_CHECK(cudaMemsetAsync(locks, 0, locks_tensor.nbytes(), stream));
 
-    int block_dim;
-    int shape_idx;
-    fp_exl3_gemm_kernel kernel;
-
-    TResult* tr = select_exl3_gemm_kernel_tuned(cc, size_k, size_n, K, c_fp32, force_shape_idx, force_num_sms, cb);
-    if (!tr) return 0;
-    num_sms = MIN(num_sms, tr->num_sms);
-    kernel = tr->kernel;
-    block_dim = tr->block_dim;
-    shape_idx = tr->shape_idx;
-
-    // On ROCm the tensor-core GEMM kernels are not implemented, so the kernel
-    // tables are populated with null entries (see exl3_kernel_map.cuh). Fail
-    // with an actionable message instead of launching a null pointer.
-    TORCH_CHECK(
-        kernel != nullptr,
-        "ExLlamaV3 tensor-core GEMM is not available in this build (ROCm/HIP); "
-        "use the reconstruct + hgemm path (torch_mode) instead."
-    );
-
-    // Cross-CTA split-K barrier state.  The kernel increments and resets these
-    // counters while it runs and leaves them zeroed, so the array belongs to
-    // exactly one launch.  A per-device array was shared by every stream: two
-    // co-resident launches (a kernel that does not fill the SMs, e.g. a narrow
-    // N) then read and reset each other's counters, which produced wrong
-    // output or deadlocked the device (#4619).  Allocate zeroed storage for
-    // this call from the caching allocator; the block is released once the
-    // launch is enqueued, and the allocator only hands it to ordered work on
-    // the same stream.  The kernel indexes `locks[slice_m * blocks_n +
-    // slice2_n]`, where blocks_n = size_n / 16, so that product is the bound.
-    const int tiles_m = (size_m + EXL3_GEMM_TILESIZE_M - 1) / EXL3_GEMM_TILESIZE_M;
-    const int64_t num_locks = std::max<int64_t>(1, (int64_t) tiles_m * (size_n / 16));
-    at::Tensor locks_tensor = at::zeros({num_locks}, A.options().dtype(at::kInt));
-    int* locks = (int*) locks_tensor.data_ptr();
-
-    // Launch
     bool attr_ready;
     {
-        std::shared_lock<std::shared_mutex> guard(kernel_attr_mutex);
-        attr_ready = kernel_attr_set[device].find((void*) kernel) != kernel_attr_set[device].end();
+        const std::shared_lock<std::shared_mutex> guard(kernel_attr_mutex);
+        attr_ready = kernel_attr_set[device].find(kernel) != kernel_attr_set[device].end();
     }
     if (!attr_ready)
     {
-        // First launch of this kernel variant on this device.  Re-check under the
-        // exclusive lock: another thread may have raised the attribute while this
-        // one waited for it.
-        std::unique_lock<std::shared_mutex> guard(kernel_attr_mutex);
-        if (kernel_attr_set[device].find((void*) kernel) == kernel_attr_set[device].end())
+        const std::unique_lock<std::shared_mutex> guard(kernel_attr_mutex);
+        if (kernel_attr_set[device].find(kernel) == kernel_attr_set[device].end())
         {
-            // HIP only provides hipFuncSetAttribute(const void*, ...); the CUDA
-            // template overload that accepts a function pointer directly has no HIP
-            // equivalent, so cast to the void* form that both runtimes expose.
-            cudaFuncSetAttribute((const void*) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, EXL3_GEMM_SMEM_MAX);
-            cuda_check(cudaPeekAtLastError());
-            // Publish only after the attribute call succeeded, so a failed setup
-            // is retried by the next launch instead of being treated as done.
-            kernel_attr_set[device].insert((void*) kernel);
+            C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max));
+            kernel_attr_set[device].insert(kernel);
         }
     }
-    void* kernelArgs[] =
-    {
-        (void*)& A_ptr,
-        (void*)& B_ptr,
-        (void*)& C_ptr,
-        (void*)& size_m,
-        (void*)& size_k,
-        (void*)& size_n,
-        (void*)& locks,
-        (void*)& suh_ptr,
-        (void*)& A_had_ptr,
-        (void*)& svh_ptr
-    };
-    cudaLaunchCooperativeKernel
-    (
-        (void*) kernel,
-        num_sms,
-        block_dim,
-        kernelArgs,
-        EXL3_GEMM_SMEM_MAX,
-        stream
-    );
 
-    cuda_check(cudaPeekAtLastError());
-    return shape_idx;
+    C10_CUDA_CHECK(cudaLaunchCooperativeKernel(
+        kernel, MIN(num_sms, config->num_sms), config->block_dim, args, smem_max, stream));
+    return config->shape_idx;
+#endif
 }

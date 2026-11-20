@@ -32,6 +32,7 @@ from .._quant_methods import (
     LEGACY_PARO_QUANT_METHOD,
 )
 from ..adapter.adapter import Lora, normalize_adapter
+from ..exllamav3.trellis import HALF_RATES
 from ..utils.backend_config import RuntimeConfig
 from ..utils.hf import resolve_checkpoint_subfolder
 from ..utils.kernel import KernelConfig, resolve_kernel_config
@@ -193,11 +194,8 @@ class METHOD(str, Enum):
     TT_BLOCKFLOAT = "tt-blockfloat"
 
 
-# Integer bit widths each method's packer and kernels can actually realize.
-# Fractional widths are never valid: every layout stores an integer number of
-# bits per weight, so accepting a fractional request would silently floor it
-# while the saved config still advertises the original value.
-METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int, ...]] = {
+# Bit widths each method's packer and kernels can actually realize.
+METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int | float, ...]] = {
     # GPTQ/RTN pack 2-8 bit weights (5/6/7 use the planar layout).
     METHOD.GPTQ: (2, 3, 4, 5, 6, 7, 8),
     # AWQ native GEMM/GEMV kernels require 4 bits.
@@ -211,8 +209,8 @@ METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int, ...]] = {
     # FP8 is a fixed 8-bit storage format.
     METHOD.FP8: (8,),
     METHOD.BITSANDBYTES: (4, 8),
-    # EXL3 stores one integer trellis depth per module.
-    METHOD.EXL3: (1, 2, 3, 4, 5, 6, 7, 8),
+    # Half-bit EXL3 rates use the alternating-width mul1 trellis.
+    METHOD.EXL3: tuple(sorted((*range(1, 9), *HALF_RATES))),
     # GGUF subtypes cover q1/q2/q3/q4/q5/q6/q8 in the C++ and torch kernels.
     METHOD.GGUF: (1, 2, 3, 4, 5, 6, 8),
     # VPTQ's nominal bpw label is derived from codebook sizes and clamped to
@@ -1116,11 +1114,9 @@ def _fractional_bits_error(
     floored_width = max(1, int(math.floor(bits)))
     if format_value == FORMAT.EXL3:
         return (
-            f"EXL3Config: `{field}={bits:g}` is not an integer trellis width. EXL3 "
-            "packs one integer trellis depth (`K`) per module, so a fractional width "
-            f"cannot be realised and would silently quantize at {floored_width} bpw. "
-            "Pass an integer `bits` and express a fractional average with per-module "
-            "widths, e.g. `dynamic={'model.layers.0.mlp.down_proj': {'bits': 3}}`."
+            f"EXL3Config: `{field}={bits:g}` is not an integer trellis width. "
+            "Use `EXL3Config` with `codebook='mul1'` for native 1.5, 2.5, or 3.5 bpw. "
+            "Use per-module `dynamic` widths to target other mixed-rate averages."
         )
     return (
         f"QuantizeConfig: `{field}={bits:g}` is not an integer bit width. "
@@ -1318,17 +1314,10 @@ def serialize_quant_bits(bits: Union[int, str, GGUFBits]) -> Union[int, str]:
     return normalized.serialize() if isinstance(normalized, GGUFBits) else normalized
 
 
-def _normalize_exl3_bits(bits: Union[int, float, str], *, field: str = "bits") -> float:
-    """Normalize and validate an EXL3 integer trellis width.
-
-    EXL3 stores exactly one integer trellis depth (``K``) per module: the packer
-    builds ``256 * K // 16`` entries per tile and the kernel takes ``K`` as an
-    ``int``. A fractional width therefore cannot be realised -- ``quant_bits_width``
-    floors it -- so accepting one would mislabel the checkpoint (a saved
-    ``bits: 2.5`` describing 2.0 bpw tensors). Reject it rather than silently
-    quantizing narrower. A fractional *average* is expressed with per-module
-    ``dynamic`` widths, each of which is an integer.
-    """
+def _normalize_exl3_bits(
+    bits: Union[int, float, str], *, codebook: str, field: str = "bits"
+) -> int | float:
+    """Keep the exact per-projection EXL3 trellis rate."""
 
     if isinstance(bits, bool):
         raise ValueError(
@@ -1345,15 +1334,16 @@ def _normalize_exl3_bits(bits: Union[int, float, str], *, field: str = "bits") -
         raise ValueError(f"EXL3Config: `{field}` must be finite.")
     if bits < 1.0 or bits > 8.0:
         raise ValueError(f"EXL3Config: `{field}` must be between 1.0 and 8.0.")
-    if not bits.is_integer():
-        raise ValueError(
-            f"EXL3Config: `{field}={bits:g}` is not an integer trellis width. EXL3 "
-            "packs one integer trellis depth (`K`) per module, so a fractional width "
-            f"cannot be realised and would silently quantize at {quant_bits_width(bits)} bpw. "
-            "Pass an integer `bits` and express a fractional average with per-module "
-            "widths, e.g. `dynamic={'model.layers.0.mlp.down_proj': {'bits': 3}}`."
-        )
-    return float(bits)
+    if bits.is_integer():
+        return int(bits)
+    if bits in HALF_RATES and codebook == "mul1":
+        return bits
+    raise ValueError(
+        f"EXL3Config: `{field}={bits:g}` is not an integer trellis width. "
+        "Native half-bit rates are 1.5, 2.5, and 3.5 bpw with `codebook='mul1'`. "
+        f"An integer conversion would change this rate to {int(bits)} bpw. "
+        "Use per-module `dynamic` widths for a mixed-rate average."
+    )
 
 
 # Canonical FP8 aliases are normalized here before validating torch runtime
@@ -6755,7 +6745,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         self.format = _normalize_format(self.format)
         return self.format
 
-    def supported_bit_widths(self) -> Tuple[int, ...]:
+    def supported_bit_widths(self) -> Tuple[int | float, ...]:
         """Return the integer bit widths this quantization method can realize."""
 
         return METHOD_SUPPORTED_BITS.get(self.method, tuple(range(1, 9)))
@@ -9375,13 +9365,13 @@ class BitsAndBytesConfig(PreProcessorConfig):
 
 @dataclass
 class EXL3Config(PreProcessorConfig):
-    bits: float = field(default=3.0)
+    bits: int | float = field(default=3)
     method: METHOD = field(default=METHOD.EXL3)
     format: FORMAT = field(default=FORMAT.EXL3)
     group_size: int = field(default=-1)
     desc_act: Optional[bool] = field(default=False)
     sym: bool = field(default=True)
-    head_bits: Optional[float] = field(default=None)
+    head_bits: Optional[int | float] = field(default=None)
     out_scales: Optional[str] = field(default="auto")
     codebook: str = field(default="mcg")
     tensor_storage: Optional[Dict[str, Any]] = field(default=None)
@@ -9392,8 +9382,8 @@ class EXL3Config(PreProcessorConfig):
     )
 
     @property
-    def runtime_bits(self) -> int:
-        return quant_bits_width(self.bits)
+    def runtime_bits(self) -> int | float:
+        return self.bits
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.EXL3,)
@@ -9411,7 +9401,7 @@ class EXL3Config(PreProcessorConfig):
         *,
         field: str = "bits",
     ):
-        return _normalize_exl3_bits(bits_value, field=field)
+        return _normalize_exl3_bits(bits_value, codebook=self.codebook, field=field)
 
     def _normalize_dynamic_layer_config(
         self,
@@ -9423,16 +9413,17 @@ class EXL3Config(PreProcessorConfig):
     ) -> None:
         _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         del valid_bit_widths, checkpoint_format
+        codebook = str(layer_dict.get("codebook") or self.codebook).strip().lower()
         for key, value in layer_dict.items():
             if key == "bits":
                 layer_dict[key] = _normalize_exl3_bits(
-                    value, field=f"dynamic['{layer_name}'].bits"
+                    value, codebook=codebook, field=f"dynamic['{layer_name}'].bits"
                 )
             elif key == "head_bits":
                 layer_dict[key] = (
                     None
                     if value is None
-                    else _normalize_exl3_bits(value, field=f"dynamic['{layer_name}'].head_bits")
+                    else _normalize_exl3_bits(value, codebook=codebook, field=f"dynamic['{layer_name}'].head_bits")
                 )
             elif key == "group_size" and value not in (-1, None):
                 raise ValueError("EXL3Config: `group_size` is not used; keep it at `-1`.")
@@ -9448,11 +9439,15 @@ class EXL3Config(PreProcessorConfig):
         self.method = _normalize_quant_method(self.method)
         self.format = _normalize_format(self.format)
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
-        self.bits = _normalize_exl3_bits(self.bits, field="bits")
+        self.codebook = str(self.codebook).strip().lower()
+        if self.codebook not in {"mcg", "mul1", "3inst"}:
+            raise ValueError("EXL3Config: `codebook` must be one of `mcg`, `mul1`, or `3inst`.")
+
+        self.bits = _normalize_exl3_bits(self.bits, codebook=self.codebook, field="bits")
         self.head_bits = (
             None
             if self.head_bits is None
-            else _normalize_exl3_bits(self.head_bits, field="head_bits")
+            else _normalize_exl3_bits(self.head_bits, codebook=self.codebook, field="head_bits")
         )
 
         if self.method != METHOD.EXL3:
@@ -9499,10 +9494,6 @@ class EXL3Config(PreProcessorConfig):
             if normalized_out_scales not in out_scale_aliases:
                 raise ValueError("EXL3Config: `out_scales` must be one of `always`, `never`, or `auto`.")
             self.out_scales = out_scale_aliases[normalized_out_scales]
-
-        self.codebook = str(self.codebook).strip().lower()
-        if self.codebook not in {"mcg", "mul1", "3inst"}:
-            raise ValueError("EXL3Config: `codebook` must be one of `mcg`, `mul1`, or `3inst`.")
 
         if self.tensor_storage is not None and not isinstance(self.tensor_storage, dict):
             raise ValueError("EXL3Config: `tensor_storage` must be a dictionary when provided.")
@@ -9570,12 +9561,10 @@ class EXL3Config(PreProcessorConfig):
         self._normalize_runtime_config()
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
-        # EXL3 matrices always have an integer trellis width. Keep that type in
-        # portable metadata as well: some standard HF consumers reject `2.0`.
-        # Artifact-average mixed BPW belongs in an explicit tier-plan extension,
-        # never in this standard per-matrix field.
-        out["bits"] = int(self.bits)
-        out["head_bits"] = None if self.head_bits is None else int(self.head_bits)
+        # Integer rates keep the JSON integer type used by existing readers.
+        # Half rates retain the exact width of the packed mul1 tiles.
+        out["bits"] = self.bits
+        out["head_bits"] = self.head_bits
         out["out_scales"] = self.out_scales
         out["codebook"] = self.codebook
         out["tensor_storage"] = self.tensor_storage

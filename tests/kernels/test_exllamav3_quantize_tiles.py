@@ -13,6 +13,117 @@ import pytest
 import torch
 
 
+@pytest.mark.cuda
+@pytest.mark.parametrize("bits", [1.5, 2.5, 3.5])
+def test_native_mul1_half_rate_packer_matches_alternating_ring(bits):
+    if (
+        not torch.cuda.is_available()
+        or torch.version.hip is not None
+        or torch.cuda.get_device_capability(0)[0] < 8
+    ):
+        pytest.skip("requires NVIDIA Ampere or newer")
+
+    from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import clear_tile_workspace, pack_trellis, quantize_tiles
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
+
+    source = torch.linspace(-3, 3, 256, dtype=torch.float32, device="cuda").roll(7).reshape(1, 256)
+    previous = get_kernel_config()
+    configure_kernel(KernelConfig(exl3_tile_batch=1))
+    try:
+        args = {"K": bits, "mul1": True}
+        quantized, encoded = quantize_tiles(source, args)
+        packed = pack_trellis(encoded.view(1, 1, 256), args).cpu()
+        encoded = encoded.cpu().long().flatten() & 0xFFFF
+        quantized = quantized.cpu().flatten()
+    finally:
+        clear_tile_workspace()
+        configure_kernel(previous)
+
+    widths = [int(bits) + index % 2 for index in range(256)]
+    ring = "".join(f"{int(state) & ((1 << width) - 1):0{width}b}" for state, width in zip(encoded, widths))
+    expected_words = torch.tensor([int(ring[start:start + 16], 2) for start in range(0, len(ring), 16)])
+    expected_words = expected_words.view(-1, 2).flip(-1).reshape(1, 1, int(16 * bits)).to(torch.int16)
+    assert torch.equal(packed, expected_words)
+    tail_biting_ring = ring[-16:] + ring
+    end = 0
+    for index, width in enumerate(widths):
+        end += width
+        assert encoded[index] == int(tail_biting_ring[end:end + 16], 2)
+    assert encoded.unique().numel() > 20
+    assert torch.equal(quantized, _codebook("mul1")[encoded])
+
+
+@pytest.mark.cuda
+@pytest.mark.integration
+@pytest.mark.parametrize("bits", [2.5, 3.5])
+def test_half_rate_tiny_llama_quantize_and_reload(tmp_path, bits):
+    if (
+        not torch.cuda.is_available()
+        or torch.version.hip is not None
+        or torch.cuda.get_device_capability(0)[0] < 8
+    ):
+        pytest.skip("requires NVIDIA Ampere or newer")
+
+    from safetensors.torch import load_file
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+    from gptqmodel.quantization.config import EXL3Config
+    from gptqmodel.utils.kernel import KernelConfig
+    from tests.tiny_remote_models import build_wordlevel_tokenizer
+
+    source = tmp_path / "source"
+    quantized = tmp_path / "quantized"
+    config = LlamaConfig(
+        vocab_size=128, hidden_size=128, intermediate_size=256, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=4, max_position_embeddings=32,
+        bos_token_id=0, eos_token_id=1, pad_token_id=3,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(17)
+        LlamaForCausalLM(config).eval().half().save_pretrained(source)
+    build_wordlevel_tokenizer(128).save_pretrained(source)
+    projection = "model.layers.0.self_attn.q_proj"
+    cfg = EXL3Config(
+        bits=bits, codebook="mul1", offload_to_disk=False, module_include=[f"^{projection}$"],
+        kernel=KernelConfig(exl3_tile_batch=4),
+    )
+    model = GPTQModel.load(str(source), quantize_config=cfg, device="cuda:0", dtype=torch.float16)
+    tokens = torch.randint(4, 128, (8, 32), generator=torch.Generator().manual_seed(119)).tolist()
+    dataset = [{"input_ids": row, "attention_mask": [1] * len(row)} for row in tokens]
+    model.quantize(CalibrationConfig(dataset=dataset, batch_size=2))
+    packed = model.model.get_submodule(projection)
+    assert isinstance(packed, ExllamaV3Linear)
+    assert packed.kernel.exl3_tile_batch == 4
+    assert packed.trellis.dtype == torch.int16 and packed.trellis.shape == (8, 8, int(16 * bits))
+    assert packed.tensor_storage_entry()["bits_per_weight"] == bits
+    x = torch.linspace(-0.5, 0.5, 128, device="cuda", dtype=torch.float16).unsqueeze(0)
+    packed.to(x.device)
+    with torch.inference_mode():
+        expected = packed(x)
+    model.save(str(quantized))
+    tensors = load_file(quantized / "model.safetensors")
+    for name, value in packed.state_dict().items():
+        assert torch.equal(tensors[f"{projection}.{name}"], value.cpu())
+
+    loaded_policy = KernelConfig(exl3_tile_batch=2)
+    restored = GPTQModel.load(
+        str(quantized), device="cuda:0", backend=BACKEND.EXL3_EXLLAMA_V3, dtype=torch.float16,
+        kernel=loaded_policy,
+    )
+    reloaded = restored.model.get_submodule(projection)
+    assert isinstance(reloaded, ExllamaV3Linear)
+    assert reloaded.kernel.exl3_tile_batch == 2
+    assert packed.kernel.exl3_tile_batch == 4
+    assert restored.quantize_config.runtime_bits == bits
+    assert reloaded.tensor_storage_entry()["bits_per_weight"] == bits
+    for name, value in reloaded.state_dict().items():
+        assert torch.equal(tensors[f"{projection}.{name}"], value.cpu())
+    with torch.inference_mode():
+        assert torch.equal(reloaded(x), expected)
+
+
 def _codebook(codebook):
     states = torch.arange(65536, dtype=torch.int64)
     if codebook == "mul1":
