@@ -935,6 +935,43 @@ def test_tt_bf8_device_weight_rebuilds_when_the_source_changes(monkeypatch):
     assert builds == [0, 1, 2, 3, 4], "an explicit clear must force a rebuild"
 
 
+def test_ttnn_zero_words_are_repacked_per_shard():
+    """A zero word that straddles a shard boundary must be split by column.
+
+    ``out_features=40`` packs into five global words, but four shards of ten
+    columns each need two padded words apiece. Slicing the global words by
+    column would give the second shard a word it does not own.
+    """
+
+    from gptqmodel.nn_modules.qlinear.ttnn import _shard_zero_words
+
+    def _decode(words, columns):
+        values = []
+        for word in words.tolist():
+            for lane in range(8):
+                values.append((word >> (4 * lane)) & 0xF)
+        return values[:columns]
+
+    torch.manual_seed(5)
+    groups = 2
+    for out_features, device_count in ((40, 4), (64, 2), (40, 1)):
+        logical = torch.randint(0, 16, (groups, out_features), dtype=torch.int64)
+        global_words = _pack_output_nibbles(logical)
+        sharded = _shard_zero_words(
+            global_words, out_features=out_features, device_count=device_count
+        )
+        shard_out = out_features // device_count
+        words_per_shard = (shard_out + 7) // 8
+        assert sharded.shape == (groups, device_count * words_per_shard), (
+            out_features, device_count, tuple(sharded.shape)
+        )
+        for index in range(device_count):
+            chunk = sharded[:, index * words_per_shard:(index + 1) * words_per_shard]
+            decoded = [_decode(row, shard_out) for row in chunk]
+            expected = logical[:, index * shard_out:(index + 1) * shard_out].tolist()
+            assert decoded == expected, (out_features, device_count, index)
+
+
 def test_ttnn_arch_lookup_never_assumes_blackhole():
 
     from gptqmodel.nn_modules.qlinear.ttnn import _ttnn_arch
@@ -2618,6 +2655,39 @@ def test_int4_kernel_reference_matches_packing():
     os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
     reason="explicit TTNN hardware gate",
 )
+@pytest.mark.parametrize("chips", [1, 4])
+def test_ttnn_zero_words_crossing_shard_boundaries(chips):
+    """A supported GPTQ width with a partial qzero word on each shard."""
+
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+    from gptqmodel.utils.ttnn_runtime import close_mesh
+
+    width, outputs = 64, 40
+    layer = TTNNLinear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=width, out_features=outputs, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.ttnn_device_count = chips
+    codes = torch.arange(outputs, dtype=torch.int32) % 16
+    lane_pattern = 0x11111111 * codes.long()
+    layer.qweight.copy_(lane_pattern.expand_as(layer.qweight).to(torch.int32))
+    layer.qzeros.fill_(0x88888888 - 2**32)
+    layer.qzero_format(2)
+    layer.scales.fill_(0.125)
+    x = torch.zeros(4, width, dtype=torch.bfloat16)
+    x[:, 0] = 1
+    expected = ((codes.double() - 8) * 0.125).expand(4, -1).bfloat16()
+    try:
+        with torch.inference_mode():
+            layer.post_init()
+            actual = layer(x)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
+
+
 @pytest.mark.skipif(
     os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
     reason="explicit TTNN hardware gate",

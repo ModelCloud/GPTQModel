@@ -525,13 +525,20 @@ sequenceDiagram
     P->>R: open_mesh device_count 4 fabric FABRIC_1D
     R->>R: set_fabric_config FABRIC_1D
     R->>M: open_mesh_device MeshShape 1 4
-    P->>M: weights shard dim 0, zeros and scales shard dim 1
+    P->>M: weights shard dim 0, zeros repacked per shard, scales shard dim 1
     P->>M: activations replicated
     M->>C: per-chip dequant and GEMM on out_features slice
     C-->>M: local output rows by 192 columns
     M->>M: all_gather dim 1
     M-->>P: 768 output features
 ```
+
+The checkpoint packs zero points along the full output width, so a word can
+straddle a shard boundary: `out_features=40` on four chips packs into five
+global words, while each ten-column shard needs two padded words.
+`_shard_zero_words` decodes the logical nibbles, splits by output column, and
+repacks every shard before the dim-1 mapper runs; slicing the global words by
+column instead fails the mesh shard-shape check at `post_init`.
 
 Operational requirements and measured behavior:
 
