@@ -482,6 +482,10 @@
       "definition": "DeepSeekV4QModel",
       "reason": "Native sliding/compressed attention and hash/routed experts have no independently qualified fused executor."
     },
+    "deepseek_v41": {
+      "definition": "DeepSeekV41FlashQModel",
+      "reason": "The published FP8 and FP4 weights use dedicated projection modules."
+    },
     "deepseek_vl": {
       "definition": "DeepSeekVLQModel",
       "profiles": {

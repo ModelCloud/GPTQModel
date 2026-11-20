@@ -485,13 +485,9 @@ configs on `meta` and asserts every decoder weight owner resolves through
 instead of inheriting `LlamaQModel.module_tree`. On the unpatched tree the same
 test fails 13 cases with undeclared owners; on the patched tree it passes 21.
 
-DeepSeek-V4.1-Flash is not included: its checkpoint declares
-`model_type=deepseek_v41`, which Transformers 5.23 does not ship. GPT-QModel's
-package-owned port (`gptqmodel/models/ports/deepseek_v41`) backs an explicit
-calibration API and is not registered in `MODEL_MAP`. The test activates when the
-family is registered instead of relabeling V4-Flash as V4.1. See the pinned
-[V4.1 checkpoint inventory](deepseek-v41-module-inventory.md) for the current
-evidence and remaining work.
+GPT-QModel registers DeepSeek V4.1 Flash separately as `deepseek_v41`.
+`test_deepseek_v41_flash.py` checks the module plan against the loaded decoder
+weights and scales for all attention layouts. [V4.1 checkpoint inventory](deepseek-v41-module-inventory.md)
 
 ### Rotation
 

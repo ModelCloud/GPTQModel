@@ -8,12 +8,7 @@ run the registered Defuser conversion, and then exercise the same tree consumers
 used by quantization: ``simple_layer_modules``, ``ModulePlan``, the MoE lifecycle
 hooks, and the module looper helpers.
 
-The DeepSeek-V4.1-Flash checkpoint declares ``model_type=deepseek_v41``.  Its
-package-owned port (``gptqmodel/models/ports/deepseek_v41``) backs an explicit
-calibration API and is deliberately not registered in ``MODEL_MAP`` or the
-native ``CONFIG_MAPPING``; ``tests/test_deepseek_v41_local_port.py`` covers it.
-``deepseek_v4`` is kept as the supported V4-Flash control, and the V4.1 tree
-test activates automatically once the family is registered.
+DeepSeek V4.1 Flash has a dedicated checkpoint and module-plan test.
 """
 
 from __future__ import annotations
@@ -631,37 +626,3 @@ def test_ricursive_ripple_package_model_matches_declared_tree(tmp_path):
     assert not looper._is_attention_module_name("self_attn.g_proj")
     assert not looper._is_attention_module_name("self_attn.o_proj")
     assert looper._extract_moe_group_key("mlp.down_proj") is None
-
-
-def test_deepseek_v41_flash_model_tree_when_upstream_support_lands():
-    """Build V4.1 only once its config/model are vendored.
-
-    The checkpoint ``deepseek-ai/DeepSeek-V4.1-Flash`` declares
-    ``model_type=deepseek_v41``.  Its port is an unregistered calibration API,
-    so there is no registered config or definition to build here.  Keeping this
-    test conditional means it becomes real V4.1 tree coverage as soon as the
-    family is registered, instead of silently testing V4-Flash under a V4.1
-    label.
-    """
-
-    if "deepseek_v41" not in CONFIG_MAPPING:
-        pytest.skip(
-            "the deepseek_v41 port is an unregistered calibration API "
-            "(see tests/test_deepseek_v41_local_port.py)"
-        )
-    if "deepseek_v41" not in MODEL_MAP:
-        pytest.fail(
-            "A deepseek_v41 config is vendored but GPTQModel has no "
-            "DeepSeek-V4.1 definition; add the definition and tree tests"
-        )
-
-    config = CONFIG_MAPPING["deepseek_v41"]()
-    definition = MODEL_MAP["deepseek_v41"]
-    with torch.device("meta"):
-        model = definition.loader.from_config(config)
-    _convert_model_with_defuser(definition, model, cleanup_original=False)
-    layers, _ = get_layers_with_prefixes(model, definition.extract_layers_node())
-    assert layers
-
-    specs = _quantizable_specs(definition, config)
-    assert not _missing_specs(specs, _resolved_modules(layers))

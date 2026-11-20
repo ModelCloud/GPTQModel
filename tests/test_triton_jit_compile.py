@@ -158,4 +158,6 @@ def test_macaq_triton_kernels_use_the_package_jit_function():
     macaq = pytest.importorskip("gptqmodel.utils.macaq_triton")
     if not getattr(macaq, "TRITON_AVAILABLE", False):
         pytest.skip("triton is not available")
-    assert type(macaq._dense_w4a4_kernel) is triton_jit.jit_function_class()
+    jit_function = triton_jit.jit_function_class()
+    assert type(macaq._dense_mx_gemm_kernel) is jit_function
+    assert type(macaq._fp4_to_fp8_codes) is jit_function

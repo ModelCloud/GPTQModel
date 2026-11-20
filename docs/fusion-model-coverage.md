@@ -222,6 +222,7 @@ layout alone does not authorize it.
 | `deepseek_v3` | `DeepSeekV3QModel` | Native MLA low-rank attention and routed/shared experts have no independently qualified fused executor. |
 | `deepseek_v32` | `DeepSeekV32QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `deepseek_v4` | `DeepSeekV4QModel` | Native sliding/compressed attention and hash/routed experts have no independently qualified fused executor. |
+| `deepseek_v41` | `DeepSeekV41FlashQModel` | The published FP8 and FP4 weights use dedicated projection modules. |
 | `deepseek_vl_v2` | `DeepSeekVLV2QModel` | Dense/MLA attention and routed/shared-expert native fusion are not independently qualified; fusion remains disabled. |
 | `dream` | `DreamQModel` | Bidirectional diffusion attention and gated MLP have no qualified fused executor. |
 | `ernie4_5_moe_vl` | `Ernie4_5_VLMoeQModel` | Package-owned native ERNIE VL legacy alias; QKV executor admission has not been qualified for this alias. |

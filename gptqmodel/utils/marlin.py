@@ -785,6 +785,46 @@ def pack_fp8_to_int32(fp8_weight: torch.Tensor) -> torch.Tensor:
 MXFP8_GROUP_SIZE = 32
 
 
+def _microscaling_marlin_prepare(
+    packed: torch.Tensor, scales: torch.Tensor, size_k: int, size_n: int, num_bits: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    scale_shape = (size_n, size_k // MXFP8_GROUP_SIZE)
+    if scales.dtype != torch.float8_e8m0fnu or scales.shape != scale_shape:
+        raise ValueError(
+            f"MXFP{num_bits} scales must be float8_e8m0fnu with shape {scale_shape}, "
+            f"got {scales.dtype} {tuple(scales.shape)}"
+        )
+    if size_k % MXFP8_GROUP_SIZE != 0:
+        raise ValueError(f"MXFP{num_bits} needs in_features divisible by {MXFP8_GROUP_SIZE}, got {size_k}")
+
+    qweight = gptq_marlin_repack(
+        packed,
+        perm=torch.empty(0, dtype=torch.int32, device=packed.device),
+        size_k=size_k,
+        size_n=size_n,
+        num_bits=num_bits,
+        dtype=torch.bfloat16,
+    )
+    # Permute the raw exponent bytes so no float round trip can touch them.
+    marlin_scales = marlin_permute_scales(
+        scales.view(torch.uint8).T.contiguous(), size_k=size_k, size_n=size_n,
+        group_size=MXFP8_GROUP_SIZE,
+    )
+    marlin_scales = marlin_interleave_8bit_scales(marlin_scales)
+    return qweight, marlin_scales.view(torch.float8_e8m0fnu)
+
+
+def mxfp4_marlin_prepare(
+    weight: torch.Tensor, scales: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Repack low-nibble-first FP4 weights and per-row E8M0 scales for Marlin."""
+    if weight.ndim != 2 or weight.dtype not in (torch.uint8, torch.int8) or weight.size(1) % 4:
+        raise ValueError("MXFP4 expects a 2-D byte tensor holding eight FP4 values per int32 word")
+    size_n, packed_k = weight.shape
+    packed = weight.contiguous().view(torch.int32).T.contiguous()
+    return _microscaling_marlin_prepare(packed, scales, 2 * packed_k, size_n, 4)
+
+
 def mxfp8_marlin_prepare(
     weight: torch.Tensor, scales: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -796,30 +836,9 @@ def mxfp8_marlin_prepare(
     ``b_q_type = scalar_types.float8_e4m3fn`` and bfloat16 activations.
     """
 
+    packed = pack_fp8_to_int32(weight)
     size_n, size_k = weight.shape
-    if scales.dtype != torch.float8_e8m0fnu or scales.shape != (size_n, size_k // MXFP8_GROUP_SIZE):
-        raise ValueError(
-            f"MXFP8 scales must be float8_e8m0fnu with shape {(size_n, size_k // MXFP8_GROUP_SIZE)}, "
-            f"got {scales.dtype} {tuple(scales.shape)}"
-        )
-    if size_k % MXFP8_GROUP_SIZE != 0:
-        raise ValueError(f"MXFP8 needs in_features divisible by {MXFP8_GROUP_SIZE}, got {size_k}")
-
-    qweight = gptq_marlin_repack(
-        pack_fp8_to_int32(weight),
-        perm=torch.empty(0, dtype=torch.int32, device=weight.device),
-        size_k=size_k,
-        size_n=size_n,
-        num_bits=8,
-        dtype=torch.bfloat16,
-    )
-    # Permute the raw exponent bytes so no float round trip can touch them.
-    marlin_scales = marlin_permute_scales(
-        scales.view(torch.uint8).T.contiguous(), size_k=size_k, size_n=size_n,
-        group_size=MXFP8_GROUP_SIZE,
-    )
-    marlin_scales = marlin_interleave_8bit_scales(marlin_scales)
-    return qweight, marlin_scales.view(torch.float8_e8m0fnu)
+    return _microscaling_marlin_prepare(packed, scales, size_k, size_n, 8)
 
 
 def get_scale_perms():
