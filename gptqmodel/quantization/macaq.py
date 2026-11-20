@@ -58,6 +58,12 @@ log = setup_logger()
 MXFP4_BLOCK = 32
 _HESSIAN_DTYPE = torch.float32
 
+# E8M0 has no zero and no subnormals: byte 0 is the smallest positive scale,
+# 2**-127, byte 254 is 2**127, and byte 255 is the format's NaN.  The smallest
+# nonzero MXFP4 value is therefore 0.5 * 2**-127 = 2**-128, not 1e-12.
+E8M0_MIN_EXPONENT = -127
+E8M0_MAX_EXPONENT = 127
+
 # Signed E2M1 grid: 15 distinct levels (0 is shared by both signs), matching
 # the OCP MXFP4 element set.  Index 7 is the zero level.
 E2M1_VALUES = torch.tensor(
@@ -218,9 +224,27 @@ def mxfp4_rtn_signed_index(
         )
     groups = in_features // block_size
     grouped = weight.float().view(out_features, groups, block_size)
-    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+    amax = grouped.abs().amax(dim=-1, keepdim=True)
+    # An exact-zero block keeps the historical zero-preserving floor so its
+    # packed scale byte does not move.  A nonzero peak must not take that
+    # floor: `floor(log2(amax)) - 2` is a valid E8M0 exponent down to the
+    # format's smallest scale 2**-127, and the old `clamp(min=1e-12)` flushed
+    # blocks like a constant 2**-50 that are exactly representable as
+    # 4 * 2**-52 (#5627).
+    amax = torch.where(amax == 0, torch.full_like(amax, 1e-12), amax)
     log2_scale = torch.floor(torch.log2(amax)) - 2.0 + float(exp_offset)
-    scale = torch.exp2(log2_scale)
+    # Clamp the finite exponent to E8M0's actual range *before* the codes are
+    # computed.  Inf/NaN are left alone so the packer can still emit 0xFF.
+    log2_scale = torch.where(
+        torch.isfinite(log2_scale),
+        log2_scale.clamp(float(E8M0_MIN_EXPONENT), float(E8M0_MAX_EXPONENT)),
+        log2_scale,
+    )
+    # `2 ** exponent` is bit-exact over the whole E8M0 range; `exp2` rounds
+    # 2**-127 one ulp low on CUDA (the same reason `decode_e8m0_scale` uses
+    # `torch.pow`).  A one-ulp-low scale would change the codes of a block at
+    # the bottom of the range.
+    scale = torch.pow(2.0, log2_scale)
 
     abs_scaled = (grouped / scale).abs()
     code = _e2m1_code_from_scaled(abs_scaled, tie_high=tie_high)
@@ -345,10 +369,12 @@ def dequantize_mxfp4(
     scale_bytes = scales.view(torch.uint8)[:out_features, :groups].to(torch.float32)
     # E8M0 0xFF is the format's NaN, not 2**128; `pack_mxfp4_from_signed_index`
     # writes it for a block that held a NaN/Inf value.
+    # `2 ** exponent` rather than `exp2`: `exp2(0 - 127)` rounds 2**-127 one
+    # ulp low on CUDA, which would decode a representable block incorrectly.
     scale = torch.where(
         scale_bytes == 255.0,
         torch.full_like(scale_bytes, float("nan")),
-        torch.exp2(scale_bytes - 127.0),
+        torch.pow(2.0, scale_bytes - 127.0),
     )
     lo = (packed & 0x0F).to(torch.int64)
     hi = ((packed >> 4) & 0x0F).to(torch.int64)

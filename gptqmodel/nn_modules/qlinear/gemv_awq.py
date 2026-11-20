@@ -19,6 +19,7 @@ from ...utils.gemv import calculate_zeros_width
 from ...utils.logger import setup_logger
 from ...utils.packing_math import scale_to_storage_dtype
 from ._compile_support import COMPILE_LEVEL
+from ._numerics import fp32_epilogue_context
 
 
 log = setup_logger()
@@ -593,10 +594,14 @@ class AwqGEMVTorchLinear(AwqGEMVLinear):
         # One wide reduction and a single rounding at the end: the FP32
         # accumulator is what the accelerator GEMV kernels use, so the portable
         # path is a reference for them rather than a lower-precision shortcut.
-        output = torch.matmul(inputs.to(torch.float32), weight)
-        if self.bias is not None:
-            output = output + self.bias.to(device=output.device, dtype=torch.float32)
-        output = output.to(dtype=input_dtype)
+        # An ambient autocast would narrow this explicit FP32 matmul and round
+        # the product before the bias cancels it (#5613), so the epilogue runs
+        # outside it and the caller's context is restored afterwards.
+        with fp32_epilogue_context(inputs.device.type):
+            output = torch.matmul(inputs.to(torch.float32), weight)
+            if self.bias is not None:
+                output = output + self.bias.to(device=output.device, dtype=torch.float32)
+            output = output.to(dtype=input_dtype)
 
         if self.adapter:
             output = self.adapter.apply(x=inputs, out=output)
