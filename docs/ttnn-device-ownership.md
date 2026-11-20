@@ -107,6 +107,36 @@ hits, which preserves the ~57 ms packing amortisation the cache exists for.
 `close_mesh` now calls `clear_grid_weight_cache()`, so buffers that died with a
 closed device cannot be matched by a recycled object id.
 
+### Block-float packed weights
+
+`TTNNBlockFloat8Linear` keeps one dequantized `bf8_b` weight per layer. Before
+#5844 the cache tested only `_ttnn_weight is None`, so an in-place `scales.mul_()`,
+a replaced checkpoint tensor, or a closed and reopened mesh kept serving the
+first packed object.
+
+```mermaid
+flowchart TD
+    A["_device_weight()"] --> B{"packed weight present"}
+    B -- no --> R["_build_device_weight()"]
+    B -- yes --> C{"_ttnn_key == _weight_key(mesh)"}
+    C -- yes --> H["return the cached weight"]
+    C -- no --> R
+    R --> S["publish new weight and bias"]
+    S --> D["deallocate the replaced tensors"]
+    S --> K["record key: tensor_cache_key of<br/>qweight, qzeros, scales, g_idx, bias<br/>+ qzero_format, WEIGHT_FORMAT<br/>+ mesh generation, num_devices, device_id"]
+
+    classDef good fill:#dcfce7,stroke:#15803d,color:#14532d;
+    class H,R,S,D,K good;
+```
+
+`tensor_cache_key` catches replacement (`id`/`data_ptr`) and in-place writes
+(`_version`). Inference tensors expose no version counter, so for those the key
+falls back to storage identity and the documented
+`clear_weight_cache()` contract still applies. `close_mesh` drops the lease and
+each layer's `release_device()` clears its cache; the mesh `generation` is the
+second guard, so a rebuilt layer cannot match a buffer that died with a
+previous handle even if Python recycles the device object's address.
+
 ## 3. Release is a lease, not a global close
 
 `BaseQModel.release_device()` used to close whatever mesh existed in the

@@ -35,6 +35,7 @@ log = setup_logger()
 
 _LOCK = threading.RLock()
 _MESH: Optional["TTNNMesh"] = None
+_MESH_GENERATION = 0
 # Live users of the open mesh.  Layers register when they upload their packed
 # tensors and drop the lease in ``release_device``; the mesh closes only after
 # the last lease is gone.  A plain module attribute would keep released layers
@@ -63,6 +64,10 @@ class TTNNMesh:
     owner: str
     device_id: int = 0
     trace_region_size: int = 0
+    #: Monotonic per-process open counter. Device-resident caches include it so
+    #: a buffer built for a closed mesh can never match a later handle, even if
+    #: Python recycles the device object's address.
+    generation: int = 0
 
     @property
     def num_devices(self) -> int:
@@ -196,7 +201,7 @@ def open_mesh(
     explicit :func:`close_mesh` first.
     """
 
-    global _MESH
+    global _MESH, _MESH_GENERATION
 
     ttnn = import_ttnn()
     if device_count < 1:
@@ -274,6 +279,7 @@ def open_mesh(
                     log.debug(f"TTNN: fabric reset failed during cleanup: {cleanup_exc}")
             raise _translate_open_failure(exc) from exc
 
+        _MESH_GENERATION += 1
         _MESH = TTNNMesh(
             device=device,
             mesh_shape=mesh_shape,
@@ -281,6 +287,7 @@ def open_mesh(
             owner=owner,
             device_id=device_id,
             trace_region_size=trace_region_size,
+            generation=_MESH_GENERATION,
         )
         log.info(
             f"TTNN: opened "

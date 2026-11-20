@@ -766,6 +766,7 @@ def test_tt_bf8_matmul_uses_hifi4_and_fp32_destination(monkeypatch):
     """
 
     from gptqmodel.nn_modules.qlinear import ttnn_blockfloat as bf
+    from gptqmodel.utils.ttnn_runtime import TTNNMesh
 
     calls = []
     configs = []
@@ -797,9 +798,14 @@ def test_tt_bf8_matmul_uses_hifi4_and_fp32_destination(monkeypatch):
         in_features=64, out_features=128, bias=False,
         pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
     )
+    mesh = TTNNMesh(
+        device=object(), mesh_shape=(), fabric="DISABLED", owner="test", generation=1
+    )
     layer._ttnn_weight = object()
     layer._ttnn_bias = None
     layer._ttnn_devices = 1
+    layer._ttnn_key = layer._weight_key(mesh)
+    monkeypatch.setattr(bf, "current_mesh", lambda: mesh)
     monkeypatch.setattr(bf, "import_ttnn", lambda: _FakeTTNN)
 
     layer._compute(_FakeTTNN, None, torch.zeros(1, 64, dtype=torch.bfloat16))
@@ -838,9 +844,99 @@ def test_tt_bf8_clearing_the_weight_cache_drops_the_compute_config(monkeypatch):
     assert layer._compute_config(_FakeTTNN) is not None
     layer.clear_weight_cache()
     assert layer._ttnn_compute_config is None
+    assert layer._ttnn_key is None
+
+
+def test_tt_bf8_warm_device_weight_does_not_ignore_scale_updates(monkeypatch):
+    """A present packed weight is not a cache hit when its sources changed."""
+
+    from gptqmodel.nn_modules.qlinear import ttnn_blockfloat as bf
+    from gptqmodel.utils.ttnn_runtime import TTNNMesh
+
+    layer = bf.TTNNBlockFloat8Linear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    )
+    mesh = TTNNMesh(
+        device=object(), mesh_shape=(), fabric="DISABLED", owner="test", generation=1
+    )
+    builds = []
+
+    def _fake_build():
+        builds.append(1)
+        return object()
+
+    monkeypatch.setattr(bf, "current_mesh", lambda: mesh)
+    monkeypatch.setattr(layer, "_build_device_weight", _fake_build)
+    layer._ttnn_weight = object()
+
+    layer.scales.mul_(2)
+    layer._device_weight()
+    assert builds, "mutating the checkpoint scales must invalidate the packed weight"
+
+
+def test_tt_bf8_device_weight_rebuilds_when_the_source_changes(monkeypatch):
+    """Presence of a packed weight is not evidence that it is current.
+
+    The cache key must follow in-place scale updates, tensor replacement, and a
+    closed/reopened mesh; an explicit clear must still force a rebuild.
+    """
+
+    from gptqmodel.nn_modules.qlinear import ttnn_blockfloat as bf
+    from gptqmodel.utils.ttnn_runtime import TTNNMesh
+
+    def _mesh(generation):
+        return TTNNMesh(
+            device=object(),
+            mesh_shape=(),
+            fabric="DISABLED",
+            owner="test",
+            generation=generation,
+        )
+
+    layer = bf.TTNNBlockFloat8Linear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    )
+    builds = []
+
+    def _fake_build():
+        builds.append(len(builds))
+        layer._ttnn_weight = object()
+        layer._ttnn_bias = None
+        layer._ttnn_devices = 1
+        layer._ttnn_key = layer._weight_key(bf.current_mesh())
+        return layer._ttnn_weight
+
+    monkeypatch.setattr(bf, "current_mesh", lambda: _mesh(1))
+    monkeypatch.setattr(layer, "_build_device_weight", _fake_build)
+
+    first = layer._device_weight()
+    assert builds == [0]
+    assert layer._device_weight() is first
+    assert builds == [0], "an unchanged layer must reuse its packed weight"
+
+    layer.scales.mul_(2)
+    assert layer._device_weight() is not first
+    assert builds == [0, 1], "an in-place scale update must rebuild"
+
+    layer.qweight = torch.zeros_like(layer.qweight)
+    layer._device_weight()
+    assert builds == [0, 1, 2], "a replaced source tensor must rebuild"
+
+    monkeypatch.setattr(bf, "current_mesh", lambda: _mesh(2))
+    layer._device_weight()
+    assert builds == [0, 1, 2, 3], "a reopened mesh must rebuild"
+
+    layer.clear_weight_cache()
+    layer._device_weight()
+    assert builds == [0, 1, 2, 3, 4], "an explicit clear must force a rebuild"
 
 
 def test_ttnn_arch_lookup_never_assumes_blackhole():
+
     from gptqmodel.nn_modules.qlinear.ttnn import _ttnn_arch
     from gptqmodel.utils.ttnn_runtime import TTNNUnavailable
 
@@ -2522,6 +2618,10 @@ def test_int4_kernel_reference_matches_packing():
     os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
     reason="explicit TTNN hardware gate",
 )
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
 def test_tt_bf8_matmul_keeps_finite_cancellation_residuals():
     """BF8 weights that are exactly one must not round ``258 - 256`` to zero.
 
@@ -2558,7 +2658,43 @@ def test_tt_bf8_matmul_keeps_finite_cancellation_residuals():
     os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
     reason="explicit TTNN hardware gate",
 )
+def test_tt_bf8_weight_cache_follows_scales_after_warmup():
+    """A warmed BF8 layer must rebuild when the checkpoint scales change."""
+
+    from gptqmodel.nn_modules.qlinear.ttnn_blockfloat import TTNNBlockFloat8Linear
+    from gptqmodel.utils.ttnn_runtime import close_mesh
+
+    layer = TTNNBlockFloat8Linear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.qweight.fill_(0x99999999 - 2**32)  # all code 9
+    layer.qzeros.fill_(0x88888888 - 2**32)   # all zero point 8
+    layer.qzero_format(2)
+    layer.scales.fill_(1)
+    x = torch.zeros(1, 64, dtype=torch.bfloat16)
+    x[:, 0] = 1
+    try:
+        with torch.no_grad():
+            before = layer(x)
+            version = layer.scales._version
+            layer.scales.mul_(2)
+            assert layer.scales._version > version
+            rebuilt = layer(x)
+        assert torch.equal(before, torch.ones_like(before))
+        assert torch.equal(rebuilt, torch.full_like(rebuilt, 2))
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
 def test_int4_dequant_kernel_is_bit_exact_on_device():
+
     """Custom TT-Metalium dequant must match the torch reference exactly."""
 
     from gptqmodel.utils.tt_int4_kernel import verify_on_device
