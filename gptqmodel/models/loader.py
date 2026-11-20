@@ -3101,7 +3101,7 @@ def ModelLoader(cls):
         # pre-enablement below and the inference-time copies use it.
         configure_p2p(p2p)
         # Install the kernel policy before any quantized module is built.
-        configure_kernel(kernel)
+        kernel_policy = configure_kernel(kernel)
 
         # A load must not reset dynamo's caches: ``torch._dynamo.reset()``
         # discards every compiled frame in the process, including the graphs of
@@ -3797,6 +3797,7 @@ def ModelLoader(cls):
                     module_names=list(qcfg.tensor_storage.keys()),
                     tensor_storage=qcfg.tensor_storage,
                     module_cls=exl3_module_cls,
+                    kernel=kernel_policy,
                 )
                 preload_qlinear_kernel = exl3_module_cls
             else:

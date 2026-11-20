@@ -145,13 +145,13 @@ def interpreter_tags(python_version: str | None = None) -> set[str]:
 
     major, minor, free_threaded = requested
     platforms = list(platform_tags())
-    abis = [f"cp{major}{minor}t"] if free_threaded else None
-    tags = {str(tag) for tag in cpython_tags(python_version=(major, minor), abis=abis, platforms=platforms)}
+    # Take the ABI from the explicit target. With `abis=None` cpython_tags
+    # reads the *running* interpreter's build flags, so a free-threaded host
+    # advertises `cp313t` for a regular 3.13 target and drops the
+    # `cp313-cp313` wheels that target installs (#5615).
+    abi = f"cp{major}{minor}{'t' if free_threaded else ''}"
+    tags = {str(tag) for tag in cpython_tags(python_version=(major, minor), abis=[abi], platforms=platforms)}
     tags |= {str(tag) for tag in compatible_tags(python_version=(major, minor), platforms=platforms)}
-    if free_threaded:
-        # A free-threaded interpreter advertises its own `t` ABI; packaging
-        # spells that interpreter/ABI pair `cp314t-cp314t-<platform>`.
-        tags |= {f"cp{major}{minor}t-cp{major}{minor}t-{platform}" for platform in platforms}
     return tags
 
 

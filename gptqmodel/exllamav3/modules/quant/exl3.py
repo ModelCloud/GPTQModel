@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import torch
 
+from ....utils.kernel import KernelConfig
 from ...ext import exllamav3_ext as ext
-from ...trellis import validate_trellis_k
+from ...trellis import trellis_rate
 from .exl3_lib.quantize import had_k, had_n, preapply_had_l, preapply_had_r
 
 
@@ -35,7 +36,8 @@ class LinearEXL3:
         bias: torch.Tensor | None = None,
         out_dtype: torch.dtype | None = None,
         transformers_fix: bool = False,
-        key: str | None = None
+        key: str | None = None,
+        kernel: KernelConfig | None = None,
     ):
         assert scale is None, "scale is no longer used"
         assert su is not None or suh is not None, "either su (packed) or suh (unpacked) is required"
@@ -59,7 +61,6 @@ class LinearEXL3:
         self.suh = suh if suh is not None else self.unpack_bf(su)
         self.svh = svh if svh is not None else self.unpack_bf(sv)
         self.trellis = trellis
-        self.K = trellis.shape[-1] // 16
         self.in_features = in_features
         self.out_features = out_features
         self.bias = bias
@@ -71,10 +72,7 @@ class LinearEXL3:
         self.mcg = self.mcg_tensor is not None
         self.mul1 = self.mul1_tensor is not None
 
-        # The native reconstruct op selects a kernel from K (1..8) and the
-        # mcg/mul1 variant. Reject a checkpoint that would index past the
-        # 24-entry table instead of launching a garbage function pointer.
-        validate_trellis_k(self.K, self.mcg, self.mul1)
+        self.K = trellis_rate(trellis.shape[-1], self.mcg, self.mul1)
 
         self.bc = ext.BC_LinearEXL3(
             self.trellis,
@@ -83,7 +81,8 @@ class LinearEXL3:
             self.K,
             self.bias,
             self.mcg,
-            self.mul1
+            self.mul1,
+            **({"kernel": kernel} if kernel is not None else {}),
         )
 
 

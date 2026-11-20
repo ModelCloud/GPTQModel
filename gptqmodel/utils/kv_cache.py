@@ -17,7 +17,9 @@ per layer:
                  V32, GLM MoE DSA, AXK2): the branch above plus ``index_head_dim``
                  indexer keys per token, retained at the indexer cache dtype.
 ``linear``       recurrent layers keep a constant-size state. They do not grow
-                 with context and are reported separately, never in the slope.
+                 with context; each layer's declared state is added once per
+                 sequence, never in the slope. A stack whose state shapes the
+                 config does not declare is reported partial, not exact.
 ``sliding``      growth capped at ``min(context, window)``; chunked attention
                  (Llama 4) uses ``attention_chunk_size`` as its window.
 ``shared``       Gemma 3n/4 tail layers reuse an earlier layer's K/V and add
@@ -34,6 +36,7 @@ resolved layer by layer; anything unclassifiable is named instead of being folde
 into a total that looks authoritative.
 """
 
+from collections.abc import Mapping as _MappingABC
 from collections.abc import Sequence as _SequenceABC
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence, Tuple
@@ -86,7 +89,16 @@ _LINEAR_ATTENTION_TYPES = frozenset({
     "mamba", "mamba2", "ssm", "lightning_attention",
 })
 
-_LAYER_TYPE_FIELDS = ("layer_types", "attention_layer_types", "attn_layer_types")
+_LAYER_TYPE_FIELDS = (
+    "layer_types", "attention_layer_types", "attn_layer_types", "layers_block_type",
+)
+# Nemotron-H/Jamba-style remote configs publish only ``hybrid_override_pattern``:
+# ``M`` is a Mamba2 mixer, ``*`` a full-attention layer, ``-`` an MLP and ``E`` a MoE
+# block. The remote NemotronH config also exposes ``layers_block_type`` built from it;
+# the pattern is the fallback for configs that do not.
+_HYBRID_OVERRIDE_TYPES = {
+    "m": "mamba", "*": "attention", "-": "mlp", "e": "moe",
+}
 
 
 def _safe_get(obj: Any, name: str, default: Any = None) -> Any:
@@ -115,7 +127,10 @@ class LayerCache:
     windows, and ``overlap_dims`` the fixed state the two-series CSA window
     carries across a forward boundary. An ``indexed`` layer additionally keeps
     ``indexer_dims`` per token; ``indexer_dtype`` is the dtype that stream was
-    allocated with (``None`` means the estimate's cache dtype).
+    allocated with (``None`` means the estimate's cache dtype). ``state_bytes``
+    is the fixed per-sequence state of a recurrent branch (Mamba conv/SSM,
+    gated-delta conv/recurrent); it never grows with the context and is
+    already in the dtypes transformers allocates it with.
     """
 
     kind: str                       # "gqa" | "mla" | "indexed" | "linear" | "shared" | "block" | "unknown"
@@ -128,6 +143,7 @@ class LayerCache:
     overlap_dims: int = 0           # fixed elements retained, all streams
     indexer_dims: int = 0           # indexer elements cached per token
     indexer_dtype: Optional[torch.dtype] = None  # dtype of the indexer stream
+    state_bytes: int = 0            # fixed bytes per sequence (recurrent state)
 
 
 @dataclass(frozen=True)
@@ -179,6 +195,18 @@ class KVCacheEstimate:
     @property
     def linear_layers(self) -> int:
         return sum(1 for layer in self.layers if layer.kind == "linear")
+
+    @property
+    def state_layers(self) -> int:
+        """Layers that keep a sized constant state (a recurrent branch)."""
+
+        return sum(1 for layer in self.layers if layer.state_bytes > 0)
+
+    @property
+    def state_bytes_per_sequence(self) -> int:
+        """Constant recurrent state one sequence keeps, across every layer."""
+
+        return sum(layer.state_bytes for layer in self.layers)
 
     @property
     def block_layers(self) -> int:
@@ -257,6 +285,10 @@ class KVCacheEstimate:
                     elements += layer.buffer_dims * min(
                         context_tokens, layer.compress_rate - 1)
             total += elements * self.kv_element_bytes
+            if context_tokens > 0:
+                # Recurrent (Mamba/linear-attention) state is constant per
+                # sequence, not per token: a live sequence keeps one copy.
+                total += layer.state_bytes
         return total * batch
 
     def max_context_tokens(self, kv_budget_bytes: int, *, batch_size: int = 1) -> int:
@@ -352,7 +384,16 @@ class KVCacheEstimate:
         if self.sliding_layers and self.window:
             parts.append(f"{self.sliding_layers} sliding layer(s) capped at {human_tokens(self.window)}")
         if self.linear_layers:
-            parts.append(f"{self.linear_layers} linear-attention layer(s) hold constant state")
+            if self.state_layers == self.linear_layers:
+                parts.append(
+                    f"{self.linear_layers} linear-attention layer(s) hold "
+                    f"{human_bytes(self.state_bytes_per_sequence)} constant state")
+            else:
+                parts.append(f"{self.linear_layers} linear-attention layer(s) hold constant state")
+        elif self.state_layers:
+            parts.append(
+                f"{self.state_layers} hybrid layer(s) hold "
+                f"{human_bytes(self.state_bytes_per_sequence)} constant state")
         if self.block_layers:
             parts.append(f"{self.block_layers} non-attention block(s)")
         if self.shared_layers:
@@ -415,6 +456,11 @@ def _declared_layer_types(source: Any, layers: int) -> Optional[list]:
         declared = _safe_get(source, field_name)
         if isinstance(declared, (list, tuple)) and declared:
             return [str(entry).lower() for entry in declared]
+    pattern = _safe_get(source, "hybrid_override_pattern")
+    if isinstance(pattern, str) and pattern:
+        if layers and len(pattern) != int(layers):
+            return None
+        return [_HYBRID_OVERRIDE_TYPES.get(char.lower(), char.lower()) for char in pattern]
     return None
 
 
@@ -447,6 +493,87 @@ def _positive_int(value: Any) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _field(obj: Any, name: str) -> Any:
+    """Read a field from a config object or a raw config ``dict``.
+
+    Remote configs arrive either as the class their ``auto_map`` names (which
+    may build ``block_configs`` into dataclasses) or as the plain dictionary
+    from ``config.json`` when the remote module is unavailable.
+    """
+
+    if isinstance(obj, _MappingABC):
+        return obj.get(name)
+    return _safe_get(obj, name)
+
+
+@dataclass(frozen=True)
+class _LayerLayout:
+    """Per-layer KV layout declared outside ``num_key_value_heads``.
+
+    ``kv_heads`` overrides the global head count, ``skip`` names why the layer
+    keeps no K/V at all, and ``partial`` records a declaration the estimator
+    cannot model (the answer is then reported as inexact).
+    """
+
+    kv_heads: Optional[int] = None
+    skip: Optional[str] = None
+    partial: Optional[str] = None
+
+
+def _per_layer_layout(source: Any, index: Optional[int]) -> _LayerLayout:
+    """Resolve DeciLM/Nemotron-NAS per-layer KV declarations for one layer.
+
+    DeciLM publishes ``num_key_value_heads_per_layer``; Nemotron-NAS publishes
+    ``block_configs[i].attention`` where ``n_heads_in_group`` is the query/KV
+    grouping and ``no_op`` / ``replace_with_linear`` mean the layer has no
+    attention module and therefore no cache. Reading only the global
+    ``num_key_value_heads`` (absent on both) assumed MHA and overstated the
+    cache by 15-40x while still reporting ``is_exact``.
+    """
+
+    if index is None:
+        return _LayerLayout()
+
+    per_layer_heads = _safe_get(source, "num_key_value_heads_per_layer")
+    if isinstance(per_layer_heads, (list, tuple)) and per_layer_heads:
+        if index >= len(per_layer_heads):
+            return _LayerLayout(
+                partial="num_key_value_heads_per_layer is shorter than the stack")
+        kv_heads = _positive_int(per_layer_heads[index])
+        if kv_heads is None:
+            return _LayerLayout(
+                partial=f"num_key_value_heads_per_layer[{index}] is not a positive int")
+        return _LayerLayout(kv_heads=kv_heads)
+
+    block_configs = _safe_get(source, "block_configs")
+    if isinstance(block_configs, (list, tuple)) and block_configs:
+        if index >= len(block_configs):
+            return _LayerLayout(partial="block_configs is shorter than the stack")
+        attention = _field(block_configs[index], "attention")
+        if attention is None:
+            return _LayerLayout(
+                partial=f"block_configs[{index}] declares no attention block")
+        if _field(attention, "no_op"):
+            return _LayerLayout(skip="no-op attention")
+        if _field(attention, "replace_with_linear"):
+            return _LayerLayout(skip="linear attention replacement")
+        partial = None
+        if (_field(attention, "window_length")
+                or _field(attention, "num_sink_tokens")
+                or _field(attention, "sparsify")):
+            partial = "block_configs attention options are not modelled"
+        heads = _positive_int(_safe_get(source, "num_attention_heads"))
+        in_group = _positive_int(_field(attention, "n_heads_in_group"))
+        if in_group is None:
+            return _LayerLayout(
+                partial=partial or "block_configs attention does not declare n_heads_in_group")
+        if heads is None or heads % in_group:
+            return _LayerLayout(
+                partial="n_heads_in_group does not divide num_attention_heads")
+        return _LayerLayout(kv_heads=heads // in_group, partial=partial)
+    return _LayerLayout()
 
 
 def _read_attr(obj: Any, name: str) -> Tuple[Any, bool]:
@@ -499,10 +626,18 @@ def _mla_dims(source: Any, layer_cfg: Any) -> Optional[int]:
         return None
 
 
-def _gqa_dims(source: Any, layer_cfg: Any) -> Optional[int]:
+def _gqa_dims(
+        source: Any,
+        layer_cfg: Any,
+        *,
+        kv_heads: Optional[int] = None,
+) -> Optional[int]:
     heads, heads_ambiguous = _layer_attr(source, layer_cfg, "num_attention_heads")
     hidden, hidden_ambiguous = _layer_attr(source, layer_cfg, "hidden_size")
-    kv_heads, kv_ambiguous = _layer_attr(source, layer_cfg, "num_key_value_heads")
+    if kv_heads is None:
+        kv_heads, kv_ambiguous = _layer_attr(source, layer_cfg, "num_key_value_heads")
+    else:
+        kv_ambiguous = False
     head_dim, head_dim_ambiguous = _layer_attr(source, layer_cfg, "head_dim")
     if heads_ambiguous or hidden_ambiguous or kv_ambiguous or head_dim_ambiguous:
         # The value varies per layer and the caller did not give us the layer
@@ -518,6 +653,113 @@ def _gqa_dims(source: Any, layer_cfg: Any) -> Optional[int]:
         return 2 * int(kv_heads) * int(head_dim)
     except (TypeError, ValueError):
         return None
+
+
+_HYBRID_TYPES = frozenset({"hybrid"})
+
+_STATE_CACHE_DTYPES = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+    "float64": torch.float64,
+}
+
+
+def _first_positive_int(source: Any, layer_cfg: Any, *names: str) -> Optional[int]:
+    """First declared positive int among ``names``, layer view before the stack."""
+
+    for name in names:
+        value = _positive_int(_safe_get(layer_cfg, name))
+        if value is None and layer_cfg is not source:
+            value = _positive_int(_safe_get(source, name))
+        if value is not None:
+            return value
+    return None
+
+
+def _recurrent_state_dtype(source: Any, layer_cfg: Any) -> torch.dtype:
+    """Dtype transformers allocates a stack's SSM/recurrent state with.
+
+    Mamba and gated-delta mixers build the recurrent state in FP32 whatever the
+    weight dtype; only the conv state follows the activations. Nemotron-H is
+    the exception that declares ``mamba_ssm_cache_dtype``.
+    """
+
+    declared = _safe_get(layer_cfg, "mamba_ssm_cache_dtype")
+    if declared is None and layer_cfg is not source:
+        declared = _safe_get(source, "mamba_ssm_cache_dtype")
+    if isinstance(declared, torch.dtype):
+        return declared
+    if isinstance(declared, str):
+        return _STATE_CACHE_DTYPES.get(declared.replace("torch.", ""), torch.float32)
+    return torch.float32
+
+
+def _state_bytes(source: Any, layer_cfg: Any, dtype: torch.dtype) -> Optional[int]:
+    """Constant per-sequence bytes a recurrent branch keeps, or None if unknown.
+
+    Each formula mirrors the tensors the HF cache layer allocates: the conv
+    state follows the activation dtype, the SSM/recurrent state its own dtype.
+    ``None`` means the config does not declare enough to size the state, so the
+    caller must report a partial estimate instead of counting zero bytes.
+    """
+
+    conv_bytes = _DTYPE_ITEMSIZE.get(dtype)
+    state_element_bytes = _DTYPE_ITEMSIZE.get(_recurrent_state_dtype(source, layer_cfg))
+    if conv_bytes is None or state_element_bytes is None:
+        return None
+
+    # Gated-delta (Qwen3-Next/3.5): a conv state over the key/value channels
+    # plus one value-head x key-head x value-dim recurrent state.
+    value_heads = _first_positive_int(source, layer_cfg, "linear_num_value_heads")
+    if value_heads:
+        key_heads = _first_positive_int(source, layer_cfg, "linear_num_key_heads")
+        key_dim = _first_positive_int(source, layer_cfg, "linear_key_head_dim")
+        value_dim = _first_positive_int(source, layer_cfg, "linear_value_head_dim")
+        conv_kernel = _first_positive_int(source, layer_cfg, "linear_conv_kernel_dim")
+        if not (key_heads and key_dim and value_dim and conv_kernel):
+            return None
+        recurrent = value_heads * key_dim * value_dim
+        conv = (2 * key_heads * key_dim + value_heads * value_dim) * conv_kernel
+        return recurrent * state_element_bytes + conv * conv_bytes
+
+    # Mamba-2 (Bamba, Falcon-H1, Nemotron-H, Zamba2): the recurrent state is
+    # heads x head_dim x d_state; the conv sees d_ssm + 2 * groups * d_state.
+    heads = _first_positive_int(
+        source, layer_cfg, "mamba_n_heads", "mamba_num_heads", "n_mamba_heads", "num_heads")
+    head_dim = _first_positive_int(
+        source, layer_cfg, "mamba_d_head", "mamba_head_dim", "mamba_headdim", "head_dim")
+    groups = _first_positive_int(source, layer_cfg, "mamba_n_groups", "n_groups")
+    d_state = _first_positive_int(
+        source, layer_cfg, "mamba_d_state", "state_size", "ssm_state_size")
+    d_conv = _first_positive_int(source, layer_cfg, "mamba_d_conv", "conv_kernel")
+    if heads and groups and d_state and d_conv:
+        d_ssm = _first_positive_int(source, layer_cfg, "mamba_d_ssm")
+        if head_dim is None and d_ssm and d_ssm % heads == 0:
+            head_dim = d_ssm // heads
+        if head_dim is None:
+            return None
+        if d_ssm is None:
+            expand = _first_positive_int(source, layer_cfg, "mamba_expand", "expand")
+            hidden = _first_positive_int(source, layer_cfg, "hidden_size")
+            if not (expand and hidden):
+                return None
+            d_ssm = expand * hidden
+        recurrent = heads * head_dim * d_state
+        conv = (d_ssm + 2 * groups * d_state) * d_conv
+        return recurrent * state_element_bytes + conv * conv_bytes
+
+    # Mamba-1 (Jamba, Zamba, Falcon-Mamba): d_inner = expand * hidden, and both
+    # the conv and the recurrent state keep ``d_inner`` rows.
+    d_state = _first_positive_int(
+        source, layer_cfg, "mamba_d_state", "state_size", "ssm_state_size")
+    d_conv = _first_positive_int(source, layer_cfg, "mamba_d_conv", "conv_kernel")
+    expand = _first_positive_int(source, layer_cfg, "mamba_expand", "expand")
+    hidden = _first_positive_int(source, layer_cfg, "hidden_size")
+    if not (d_state and d_conv and expand and hidden):
+        return None
+    d_inner = expand * hidden
+    return d_inner * d_state * state_element_bytes + d_inner * d_conv * conv_bytes
 
 
 def _resolve_dtype(source: Any, dtype: Optional[torch.dtype]) -> Optional[torch.dtype]:
@@ -593,13 +835,22 @@ def _estimate_for_stack(
     global_window = _positive_int(_safe_get(source, "sliding_window"))
 
     declared_types = _declared_layer_types(source, layer_count)
+    if declared_types is None and _safe_get(source, "hybrid_override_pattern"):
+        # A pattern that does not match the stack cannot be mapped; falling
+        # back to "every layer is attention" would be confidently wrong.
+        partial_note = "hybrid_override_pattern does not match the layer count"
+    else:
+        partial_note = None
+    if declared_types is not None and len(declared_types) != layer_count:
+        partial_note = (
+            f"declared layer layout covers {len(declared_types)} of {layer_count} layers")
     mtp = int(_safe_get(source, "num_nextn_predict_layers", 0) or 0)
     shared = _positive_int(_safe_get(source, "num_kv_shared_layers")) or 0
     shared_from = max(0, layer_count - shared)
 
     resolved: list[LayerCache] = []
     unclassified: list[str] = []
-    partial: list[str] = []
+    partial: list[str] = [partial_note] if partial_note else []
     for index in range(layer_count):
         # Gemma 3n/4 reuse an earlier layer's K/V for the tail; transformers does
         # not call ``past_key_values.update`` for them, so they add no bytes.
@@ -618,16 +869,27 @@ def _estimate_for_stack(
         window = _positive_int(_safe_get(layer_cfg, "sliding_window", global_window))
 
         if layer_type in _LINEAR_ATTENTION_TYPES:
-            resolved.append(LayerCache(kind="linear"))
+            state_bytes = _state_bytes(source, layer_cfg, resolved_dtype)
+            if state_bytes is None:
+                partial.append(f"{layer_type} state layout not declared")
+                state_bytes = 0
+            resolved.append(LayerCache(kind="linear", state_bytes=state_bytes))
             continue
         if layer_type in _NO_ATTENTION_TYPES:
+            resolved.append(LayerCache(kind="block"))
+            continue
+
+        layout = _per_layer_layout(source, index)
+        if layout.partial:
+            partial.append(layout.partial)
+        if layout.skip:
             resolved.append(LayerCache(kind="block"))
             continue
 
         dims = _mla_dims(source, layer_cfg)
         kind = "mla"
         if dims is None:
-            dims = _gqa_dims(source, layer_cfg)
+            dims = _gqa_dims(source, layer_cfg, kv_heads=layout.kv_heads)
             kind = "gqa"
         if dims is None:
             if layer_type is None:
@@ -652,6 +914,16 @@ def _estimate_for_stack(
                 indexer_dtype = resolved_dtype
             else:
                 partial.append(f"{layer_type} indexer layout not declared")
+
+        hybrid_state = 0
+        if layer_type in _HYBRID_TYPES:
+            # A parallel hybrid keeps standard K/V for its attention half and a
+            # constant recurrent state for its Mamba half (Falcon-H1, Zamba).
+            sized = _state_bytes(source, layer_cfg, resolved_dtype)
+            if sized is None:
+                partial.append(f"{layer_type} state layout not declared")
+            else:
+                hybrid_state = sized
 
         if layer_type in _COMPRESSED_ATTENTION_TYPES:
             # DeepSeek V4-style: a bounded sliding branch plus pooled entries
@@ -703,6 +975,7 @@ def _estimate_for_stack(
                 resolved.append(LayerCache(
                     kind=kind, dims=dims, window=chunk,
                     indexer_dims=indexer_dims, indexer_dtype=indexer_dtype,
+                    state_bytes=hybrid_state,
                 ))
             continue
 
@@ -711,11 +984,13 @@ def _estimate_for_stack(
             resolved.append(LayerCache(
                 kind=kind, dims=dims, window=window or 1024,
                 indexer_dims=indexer_dims, indexer_dtype=indexer_dtype,
+                state_bytes=hybrid_state,
             ))
         elif known_attention:
             resolved.append(LayerCache(
                 kind=kind, dims=dims,
                 indexer_dims=indexer_dims, indexer_dtype=indexer_dtype,
+                state_bytes=hybrid_state,
             ))
         else:
             # An unrecognized layer type may or may not grow; counting it as a

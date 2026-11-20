@@ -32,7 +32,7 @@ from .fallback_smooth import (
     mse_optimal_quant,
     smooth_applies,
     smooth_block,
-    symmetric_range,
+    symmetric_range_from_bounds,
 )
 from .gptq import (
     _is_memory_allocation_failure,
@@ -233,16 +233,24 @@ class Quantizer(nn.Module):
                 ).unsqueeze(1)
                 xmin1 = p * xmin.unsqueeze(0)
                 xmax1 = p * xmax.unsqueeze(0)
-                scale1 = (
-                    (xmax1 - xmin1) / self.maxq
-                    if not groupwise
-                    else xmax1 / self.maxq
-                )
-                zero1 = (
-                    torch.round(-xmin1 / scale1)
-                    if not self.sym
-                    else self.zero.unsqueeze(0).expand(steps, x.shape[0])
-                )
+                if self._maxq_value < 0:
+                    # Ternary levels are stored directly in scale/zero and
+                    # ``maxq == -1`` is a sentinel, so the affine grid would be
+                    # negative. Shrink the extrema themselves and keep the
+                    # unshrunk endpoints as the incumbent (#5601).
+                    scale1 = xmax1
+                    zero1 = xmin1
+                else:
+                    scale1 = (
+                        (xmax1 - xmin1) / self.maxq
+                        if not groupwise
+                        else xmax1 / self.maxq
+                    )
+                    zero1 = (
+                        torch.round(-xmin1 / scale1)
+                        if not self.sym
+                        else self.zero.unsqueeze(0).expand(steps, x.shape[0])
+                    )
                 self.scale, self.zero = _mse_shrink_grid(
                     x,
                     scale1,
@@ -466,9 +474,10 @@ class QQQ:
 
             if self.qcfg.sym:
                 # Every symmetric kernel assumes zero = 2 ** (bits - 1);
-                # Marlin does not even read the stored qzeros. Fit the common
-                # symmetric range so all strategies store that fixed zero.
-                lo, hi = symmetric_range(block_mod)
+                # Marlin does not even read the stored qzeros. Zero-center the
+                # interval the strategy selected so STDCLIP/MEAN/MEDIAN keep
+                # their clipping decision instead of remeasuring the block.
+                lo, hi = symmetric_range_from_bounds(lo, hi)
             else:
                 lo, hi = affine_range_with_zero(lo, hi)
             scale = torch.clamp((hi - lo) / maxq, min=1e-8)

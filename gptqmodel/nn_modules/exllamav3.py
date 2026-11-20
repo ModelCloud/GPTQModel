@@ -14,8 +14,9 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import torch
 import torch.nn as nn
 
-from ..exllamav3.trellis import validate_trellis_k
+from ..exllamav3.trellis import trellis_rate
 from ..models._const import DEVICE, normalize_device
+from ..utils.kernel import KernelConfig, snapshot_kernel_config
 from . import exllamav3_bf16_kernels as _bf16_kernels
 
 
@@ -93,12 +94,14 @@ class ExllamaV3Linear(nn.Module):
         tensor_storage: Optional[Dict[str, Any]] = None,
         tensors: Optional[Dict[str, torch.Tensor]] = None,
         out_dtype: torch.dtype = torch.float16,
+        kernel: Optional[KernelConfig] = None,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.name = name
         self.out_dtype = out_dtype
+        self.kernel = snapshot_kernel_config(kernel)
         self.tensor_storage = tensor_storage or {}
 
         self.weight = torch.zeros((1,), dtype=torch.float16, device="meta")
@@ -141,12 +144,14 @@ class ExllamaV3Linear(nn.Module):
         out_features: int,
         name: str,
         tensors: Dict[str, torch.Tensor],
+        kernel: Optional[KernelConfig] = None,
     ) -> "ExllamaV3Linear":
         return cls(
             in_features=in_features,
             out_features=out_features,
             name=name,
             tensors=tensors,
+            kernel=kernel,
         )
 
     def _bias_version(self) -> Optional[int]:
@@ -235,11 +240,11 @@ class ExllamaV3Linear(nn.Module):
     def _stored_features(self) -> tuple[int, int]:
         """Infer storage geometry; architecture dimensions remain logical."""
         trellis = getattr(self, "trellis", None)
-        if trellis is None or trellis.ndim != 3:
+        if trellis is None or trellis.ndim != 3 or trellis.dtype != torch.int16:
             raise ValueError(f"EXL3 module `{self.name}` has invalid trellis geometry")
         try:
-            validate_trellis_k(
-                int(trellis.shape[-1]) // 16,
+            trellis_rate(
+                trellis.shape[-1],
                 getattr(self, "mcg", None) is not None,
                 getattr(self, "mul1", None) is not None,
             )
@@ -313,6 +318,7 @@ class ExllamaV3Linear(nn.Module):
             out_dtype=self.out_dtype,
             transformers_fix=True,
             key=self.name,
+            kernel=self.kernel,
         )
         inner = self._inner
         self._inner_signature = signature
@@ -373,6 +379,8 @@ class ExllamaV3Linear(nn.Module):
 
     def __setstate__(self, state):
         super().__setstate__(state)
+        if "kernel" not in self.__dict__:
+            self.kernel = snapshot_kernel_config()
         self._inner_guard = threading.RLock()
         # The native handle belongs to the source module's process and may be
         # shared with a shallow copy, so never unload it here - just forget it.
@@ -585,7 +593,9 @@ class ExllamaV3Linear(nn.Module):
         }
         trellis = getattr(self, "trellis", None)
         if trellis is not None:
-            entry["bits_per_weight"] = int(trellis.shape[-1] // 16)
+            entry["bits_per_weight"] = trellis_rate(
+                trellis.shape[-1], getattr(self, "mcg", None) is not None, getattr(self, "mul1", None) is not None
+            )
 
         mcg_multiplier = self._multiplier_value("mcg")
         if mcg_multiplier is not None:

@@ -33,6 +33,7 @@ from ..exllamav3.modules.quant.exl3_lib.quantize import (
     EXL3_HESSIAN_SYMMETRY_CONTRACT,
     quantize_exl3,
 )
+from ..exllamav3.trellis import validate_trellis_k
 from .exl3_projection_checkpoint import (
     CHECKPOINT_SCHEMA,
     CHECKPOINT_SCHEMA_VERSION,
@@ -345,10 +346,6 @@ def validate_remote_inputs(
         or weight.shape[0] % 128
         or weight.shape[1] % 128
         or not isinstance(contract, dict)
-        or isinstance(contract.get("bits"), bool)
-        or not isinstance(contract.get("bits"), int)
-        or contract["bits"] < 1
-        or contract["bits"] > 8
         or contract.get("codebook") not in ("mcg", "mul1")
         or contract.get("hessian_capture") != EXL3_HESSIAN_CAPTURE_CONTRACT
         or contract.get("hessian_numerical") != EXL3_HESSIAN_NUMERICAL_CONTRACT
@@ -364,6 +361,7 @@ def validate_remote_inputs(
         or (not uncalibrated and request["sample_count"] == 0)
     ):
         raise ValueError("EXL3 remote request tensor/quantizer contract is invalid")
+    validate_trellis_k(contract.get("bits"), contract["codebook"] == "mcg", contract["codebook"] == "mul1")
     return weight, hessian, contract
 
 
@@ -385,11 +383,10 @@ def validate_remote_output_tensors(
         not isinstance(shape, list)
         or len(shape) != 2
         or any(isinstance(value, bool) or not isinstance(value, int) for value in shape)
-        or isinstance(bits, bool)
-        or not isinstance(bits, int)
         or codebook not in ("mcg", "mul1")
     ):
         raise ValueError("EXL3 remote output tensor contract is invalid")
+    validate_trellis_k(bits, codebook == "mcg", codebook == "mul1")
     expected_names = {"trellis", "suh", "svh", codebook}
     if set(tensors) != expected_names:
         raise ValueError("EXL3 remote output tensor contract is invalid")
@@ -400,7 +397,7 @@ def validate_remote_output_tensors(
     marker = tensors[codebook]
     if (
         trellis.dtype != torch.int16
-        or list(trellis.shape) != [rows // 16, columns // 16, bits * 16]
+        or list(trellis.shape) != [rows // 16, columns // 16, int(bits * 16)]
         or suh.dtype != torch.float16
         or list(suh.shape) != [rows]
         or svh.dtype != torch.float16

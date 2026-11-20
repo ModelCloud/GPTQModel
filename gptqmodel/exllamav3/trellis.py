@@ -6,18 +6,30 @@
 from __future__ import annotations
 
 
-def validate_trellis_k(k: int, mcg: bool = False, mul1: bool = False) -> None:
-    """Reject a trellis K that the native kernel table cannot represent.
+HALF_RATES = (1.5, 2.5, 3.5)
+HALF_RATE_MASK = 0xAAAA
 
-    ``reconstruct_kernel_instances`` has 24 entries: K in ``[1, 8]`` for the
-    plain, ``mcg`` and ``mul1`` variants. Anything else indexes past the table
-    (or runs the wrong kernel); the GEMM path already enforces this range.
-    """
 
-    if not 1 <= int(k) <= 8:
-        raise ValueError(f"EXL3 trellis K must be in [1, 8], got {k}")
+def validate_trellis_k(
+    k: int | float, mcg: bool = False, mul1: bool = False, *, max_integer_rate: int = 8
+) -> None:
+    """Validate a native rate and its packed codebook marker."""
     if mcg and mul1:
         raise ValueError("EXL3 trellis cannot set both mcg and mul1")
+    if isinstance(k, bool) or not isinstance(k, (int, float)) or not 1 <= k <= max_integer_rate:
+        raise ValueError(f"EXL3 trellis K must be in [1, {max_integer_rate}], got {k}")
+    if k != int(k) and (k not in HALF_RATES or not mul1):
+        raise ValueError(f"EXL3 trellis K={k} requires a supported half-bit rate (1.5, 2.5, 3.5) and mul1")
 
 
-__all__ = ["validate_trellis_k"]
+def trellis_rate(
+    words: int, mcg: bool = False, mul1: bool = False, *, max_integer_rate: int = 8
+) -> int | float:
+    """Derive the exact rate from the number of int16 words per 256 weights."""
+    depth, remainder = divmod(words, 16)
+    rate = words / 16 if remainder else depth
+    validate_trellis_k(rate, mcg, mul1, max_integer_rate=max_integer_rate)
+    return rate
+
+
+__all__ = ["HALF_RATES", "HALF_RATE_MASK", "trellis_rate", "validate_trellis_k"]

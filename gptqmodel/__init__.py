@@ -429,6 +429,7 @@ from .backend import (  # noqa: F401
     AwqTritonConfig,
     BackendConfig,
     BitsAndBytesConfig,
+    EXL3CUDAConfig,
     GGUFCPPConfig,
     GGUFCUDAConfig,
     GGUFTorchConfig,

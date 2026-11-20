@@ -13,6 +13,7 @@ from functools import lru_cache
 import torch
 
 from ....ext import exllamav3_ext as ext
+from ....trellis import HALF_RATE_MASK, trellis_rate, validate_trellis_k
 from ....util.hadamard import get_hadamard_dt
 from ....util.memory import free_mem
 from ....util.progress import ProgressBar
@@ -181,7 +182,7 @@ def clear_tile_workspace() -> None:
         _workspace_buffers.clear()
 
 
-def _stream_temp_buffers(device, K: int, stream):
+def _stream_temp_buffers(device, K: int, stream, batch: int):
     """Return the writable tile scratch owned by *stream*.
 
     A launch indexes the scratch by tile slot, so launches that may run at the
@@ -193,8 +194,7 @@ def _stream_temp_buffers(device, K: int, stream):
     scratch pair alive per device, which is what bounds the allocator cache.
     """
 
-    batch = _tile_batch_size()
-    key = (torch.device(device), int(K), stream, batch)
+    key = (torch.device(device), K, stream, batch)
     with _workspace_registry_lock:
         buffers = _workspace_buffers.get(key)
         if buffers is None:
@@ -211,17 +211,25 @@ def _quantize_tiles_with_workspace(tiles, output, indices, K, mcg, mul1):
     launch over the whole set.
     """
 
+    validate_trellis_k(K, mcg, mul1)
+    depth = int(K)
     stream = torch.cuda.current_stream(tiles.device)
-    temp_costs, temp_edges = _stream_temp_buffers(tiles.device, K, stream)
     batch = _tile_batch_size()
+    if K != depth:
+        # Match the upstream cap for the larger fractional Viterbi histories.
+        # The native fractional op schedules tiles in waves of this size.
+        temp_costs, temp_edges = _stream_temp_buffers(tiles.device, depth, stream, min(batch, 128))
+        ext.quantize_tiles_frac(tiles, output, indices, temp_costs, temp_edges, depth, HALF_RATE_MASK)
+        return
+    temp_costs, temp_edges = _stream_temp_buffers(tiles.device, depth, stream, batch)
     rows = tiles.shape[0]
     if rows <= batch:
-        ext.quantize_tiles(tiles, output, indices, temp_costs, temp_edges, K, mcg, mul1)
+        ext.quantize_tiles(tiles, output, indices, temp_costs, temp_edges, depth, mcg, mul1)
         return
     for start in range(0, rows, batch):
         stop = min(start + batch, rows)
         ext.quantize_tiles(tiles[start:stop], output[start:stop], indices[start:stop],
-                           temp_costs, temp_edges, K, mcg, mul1)
+                           temp_costs, temp_edges, depth, mcg, mul1)
 
 
 def quantize_tiles(tiles, quant_args: dict):
@@ -963,18 +971,20 @@ def finalize_capture_H(
 
 def pack_trellis(encoded: torch.Tensor, quant_args: dict) -> torch.Tensor:
     K = quant_args["K"]
+    validate_trellis_k(K, "mcg" in quant_args, "mul1" in quant_args)
     shape = encoded.shape
     assert len(shape) == 3 and shape[2] == 256
     assert encoded.dtype == torch.int16
-    packed_shape = (shape[0], shape[1], 256 * K // 16)
+    packed_shape = (shape[0], shape[1], int(16 * K))
     # ``pack_trellis_kernel`` writes the whole tile: thread ``t < packed_size / 2``
     # stores one ``uint32`` each, which covers all ``packed_size`` entries, so the
     # zero fill only costs a memset of the packed tensor.
     packed = torch.empty(packed_shape, dtype = torch.int16, device = encoded.device)
-    ext.pack_trellis(packed, encoded.contiguous(), K)
-    # unpacked = torch.zeros_like(encoded)
-    # ext.unpack_trellis(unpacked, packed, K)
-    # assert torch.equal(unpacked, encoded)
+    encoded = encoded.contiguous()
+    if K == int(K):
+        ext.pack_trellis(packed, encoded, int(K))
+    else:
+        ext.pack_trellis_frac(packed, encoded, int(K), HALF_RATE_MASK)
     return packed
 
 
@@ -994,16 +1004,14 @@ def reconstruct_exl3_tensors(
     svh = tensors["svh"]
     if (
         trellis.ndim != 3
+        or trellis.dtype != torch.int16
         or suh.ndim != 1
         or svh.ndim != 1
         or suh.numel() != trellis.shape[0] * 16
         or svh.numel() != trellis.shape[1] * 16
-        or trellis.shape[-1] % 16
     ):
         raise ValueError("EXL3 reconstruction received inconsistent tensor geometry")
-    K = int(trellis.shape[-1] // 16)
-    if K < 1 or K > 8:
-        raise ValueError(f"EXL3 reconstruction received invalid K={K}")
+    K = trellis_rate(trellis.shape[-1], "mcg" in tensors, "mul1" in tensors)
 
     target = torch.device(device)
     packed = trellis.to(device=target, non_blocking=True).contiguous()
@@ -1448,6 +1456,7 @@ def quantize_exl3(
 
     if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
         raise ValueError("EXL3 quantization requires a 2-D weight tensor")
+    validate_trellis_k(quant_args["K"], "mcg" in quant_args, "mul1" in quant_args)
     validate_exl3_quantization_geometry(
         int(weight.shape[0]),
         int(weight.shape[1]),

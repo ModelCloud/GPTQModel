@@ -83,6 +83,7 @@ for path in (_REPO_ROOT, _TESTS_DIR, _MODELS_TESTS_DIR):
 
 
 _OPT_IN_MARKERS = (
+    "exl3_cuda_e2e",
     "gptq_cuda_e2e",
     "gptq_cuda_eval_only",
     "checkpoint_recovery",

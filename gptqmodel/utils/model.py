@@ -3545,6 +3545,11 @@ def _convert_safetensors_header_keys(
     return converted_header, changed, excluded
 
 
+# Loader scratch written next to a checkpoint by the copy fallback. Never
+# checkpoint content, and never left behind by a clean load (#5584).
+_REMAP_TEMP_PREFIX = "gptqmodel-key-remap-"
+
+
 def _write_safetensors_with_converted_header(
     source_path: str, target_path: str, key_converter, exclude_names=frozenset(),
 ) -> bool:
@@ -3647,10 +3652,10 @@ def _remap_safetensors_index(
 
     try:
         remap_dir = tempfile.mkdtemp(
-            prefix="gptqmodel-key-remap-", dir=_remap_temp_dir(checkpoint)
+            prefix=_REMAP_TEMP_PREFIX, dir=_remap_temp_dir(checkpoint)
         )
     except OSError:
-        remap_dir = tempfile.mkdtemp(prefix="gptqmodel-key-remap-")
+        remap_dir = tempfile.mkdtemp(prefix=_REMAP_TEMP_PREFIX)
     try:
         target_names = {}
         used_shards = set(converted_weight_map.values())
@@ -3692,7 +3697,7 @@ def _cleanup_remapped_checkpoint(checkpoint: Optional[str]) -> None:
     parent = os.path.dirname(checkpoint)
     if (
         os.path.basename(checkpoint).endswith(".index.json")
-        and os.path.basename(parent).startswith("gptqmodel-key-remap-")
+        and os.path.basename(parent).startswith(_REMAP_TEMP_PREFIX)
     ):
         shutil.rmtree(parent, ignore_errors=True)
         return
@@ -3753,13 +3758,13 @@ def _remap_safetensors_checkpoint_keys(
 
     try:
         descriptor, converted_path = tempfile.mkstemp(
-            prefix="gptqmodel-key-remap-",
+            prefix=_REMAP_TEMP_PREFIX,
             suffix=".safetensors",
             dir=_remap_temp_dir(checkpoint),
         )
     except OSError:
         descriptor, converted_path = tempfile.mkstemp(
-            prefix="gptqmodel-key-remap-", suffix=".safetensors"
+            prefix=_REMAP_TEMP_PREFIX, suffix=".safetensors"
         )
     os.close(descriptor)
     try:
@@ -4240,6 +4245,7 @@ def _load_key_converted_safetensors(
     checkpoint,
     key_converter,
     *,
+    exclude_names=frozenset(),
     device_map,
     dtype,
     offload_state_dict: bool,
@@ -4253,6 +4259,11 @@ def _load_key_converted_safetensors(
     each tensor with ``safe_open`` and place it with Accelerate's
     ``set_module_tensor_to_device``, so device placement and dtype casting stay
     the same. The caller ties weights afterwards, as it does for the copy path.
+
+    ``exclude_names`` are runtime names the caller loads itself (for example
+    packed FP8 weights restored from the source checkpoint). They are neither
+    read nor placed here, and their absence still counts as a header change:
+    the copy path used to be entered only to hide them from Accelerate.
 
     Returns ``False`` when the checkpoint needs the copy path (pickle, disk
     offload, bitsandbytes SCB metadata, a shape/name mismatch, ...). The caller
@@ -4301,6 +4312,11 @@ def _load_key_converted_safetensors(
                     if not isinstance(runtime_name, str):
                         # Fused tensors need new per-slice shapes and offsets.
                         return False
+                    if runtime_name in exclude_names:
+                        # The caller reads this tensor from the source
+                        # checkpoint. Skipping it is still a header change.
+                        changed = True
+                        continue
                     changed |= runtime_name != source_name
                     if runtime_name in seen:
                         raise ValueError(
@@ -4436,19 +4452,20 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     restore_name_map = None
     lazy_loaded = False
     if checkpoint is not None and (callable(key_converter) or fp8_weight_names):
-        if (
-            callable(key_converter)
-            and not fp8_weight_names
-            and len(args) <= 1
-            and not kwargs.get("broadcast_from_rank0", False)
-        ):
+        if len(args) <= 1 and not kwargs.get("broadcast_from_rank0", False):
             # Rename the header keys lazily instead of copying every shard
-            # (issue #4959). A legacy-layout VL checkpoint can be many GiB,
-            # and the copy was ~80% of its load time.
+            # (issues #4959, #5584). A legacy-layout VL checkpoint can be many
+            # GiB, and the copy was ~80% of its load time. A block-FP8
+            # checkpoint entered the copy path only to hide its packed weights
+            # from Accelerate, so skip those keys here and let the packed-FP8
+            # restore read them from the source checkpoint. A checkpoint whose
+            # layout already matches needs no converter; exclusions still make
+            # the header differ, so use the identity converter for them.
             lazy_loaded = _load_key_converted_safetensors(
                 model,
                 checkpoint,
-                key_converter,
+                key_converter or (lambda name: name),
+                exclude_names=fp8_weight_names,
                 device_map=kwargs.get("device_map"),
                 dtype=kwargs.get("dtype"),
                 offload_state_dict=bool(kwargs.get("offload_state_dict", False)),
@@ -5098,7 +5115,13 @@ def is_embeddings_module_quantized(
     safetensor_files = [
         os.path.join(model_dir, filename)
         for filename in os.listdir(model_dir)
+        # A loader killed mid-copy can leave a partial
+        # `gptqmodel-key-remap-*.safetensors` in the checkpoint directory.
+        # It is loader scratch, never checkpoint content: reading it either
+        # warns about a truncated header or poisons the detection with
+        # another process's half-written key set (#5584).
         if filename.endswith(".safetensors")
+        and not filename.startswith(_REMAP_TEMP_PREFIX)
     ]
     for safefile in safetensor_files:
         try:

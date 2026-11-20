@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-torch-oracle-numerics
-description: Validate quantization math, packed formats, and inference kernels against a Torch oracle; enforce quantized persistent weight storage for inference implementations, dispatch, and cache changes; adjudicate near-tie mismatches.
+description: Validate quantization math, packed formats, and inference kernels against a Torch oracle, including linear bias storage and epilogues. Enforce quantized persistent weight storage for inference, dispatch, and cache changes. Adjudicate near-tie mismatches.
 ---
 
 # Torch oracle for numerical changes
@@ -78,6 +78,29 @@ kernel inventory and measured device report in
 `tests/module_tree/test_fusion_kernel_backends.py` current; unavailable
 architectures, dependencies, and formats need explicit coverage reasons.
 Model-level fusion eligibility is covered by `gptqmodel-model-plan-tests`.
+
+## Linear bias
+
+Trace the bias from pack or load to the final epilogue for each affected path,
+including dispatch and fallbacks. Select regressions from the
+[kernel bias examples](references/kernel-bias.md).
+
+- Preserve the registered bias's checkpoint values, dtype, logical shape, and
+  column order through loading, `post_init`, forward, and re-save. At pack
+  time follow the format's bias storage contract independently of scales and
+  activations. Prove exact representability before a required narrowing or
+  reject the pack before writing the checkpoint. Derive padded, permuted, or
+  converted launch operands without rewriting the registered tensor.
+- For FP16/BF16 outputs, keep the floating reduction, scaled product, and
+  bias add at FP32 or higher. Scale integer accumulators in that wide
+  epilogue. Add the bias once to the complete reduction before the single
+  cast to the public output dtype. Reuse `_numerics.py` helpers whose selected
+  device and dtype branch preserves this ordering, including under autocast.
+- Keep eligible native paths for bias-free and representable cases. A narrow
+  launch operand requires an exact value round trip and a native epilogue that
+  adds it before rounding. For wider bias, use a supported wide native epilogue
+  or add the bias to a wide native result. Exercise the supported fallback or
+  explicit rejection when the native path cannot honor the contract.
 
 ## Acceptance limits
 

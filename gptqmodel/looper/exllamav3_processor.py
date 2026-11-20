@@ -28,6 +28,7 @@ from ..exllamav3.modules.quant.exl3_lib.quantize import (
     reconstruct_exl3_tensors,
     validate_exl3_quantization_geometry,
 )
+from ..exllamav3.trellis import validate_trellis_k
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
@@ -128,7 +129,7 @@ from ..utils.fallback import (
     should_use_fallback,
 )
 from ..utils.host_memory import malloc_trim
-from ..utils.kernel import get_kernel_config
+from ..utils.kernel import get_kernel_config, resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.model import recurse_setattr
 from ..utils.module_locks import parent_module_lock
@@ -2338,7 +2339,9 @@ class EXL3Processor(SharedInputCaptureProcessor):
         )
 
         capture_qcfg = GPTQConfig(
-            bits=max(1, module_qcfg.runtime_bits),
+            # This GPTQ object captures the Hessian. The EXL3 packer uses
+            # the precise rate from module_qcfg when quantization starts.
+            bits=max(2, int(module_qcfg.runtime_bits)),
             group_size=-1,
             desc_act=False,
             sym=True,
@@ -2520,12 +2523,12 @@ class EXL3Processor(SharedInputCaptureProcessor):
 
         return module.full_name == self.lm_head_name or module.name == self.lm_head_name
 
-    def _target_bits(self, module: NamedModule, module_qcfg: EXL3Config) -> int:
+    def _target_bits(self, module: NamedModule, module_qcfg: EXL3Config) -> int | float:
         """Chooses lm_head-specific bitwidth overrides when configured."""
 
         if self._is_lm_head(module) and module_qcfg.head_bits is not None:
-            return max(1, int(module_qcfg.head_bits))
-        return max(1, module_qcfg.runtime_bits)
+            return module_qcfg.head_bits
+        return module_qcfg.runtime_bits
 
     def _build_quant_args(
         self,
@@ -2533,25 +2536,25 @@ class EXL3Processor(SharedInputCaptureProcessor):
         module_qcfg: EXL3Config,
         device: torch.device,
         *,
-        bits_override: int | None = None,
+        bits_override: int | float | None = None,
     ) -> Dict[str, object]:
         """Builds the argument bundle passed into the EXL3 quantizer."""
 
+        bits = self._target_bits(module, module_qcfg) if bits_override is None else bits_override
+        mcg = module_qcfg.codebook == "mcg"
+        mul1 = module_qcfg.codebook == "mul1"
+        validate_trellis_k(bits, mcg, mul1)
         quant_args: Dict[str, object] = {
-            "K": (
-                self._target_bits(module, module_qcfg)
-                if bits_override is None
-                else int(bits_override)
-            ),
+            "K": bits,
             "devices": [device],
             "apply_out_scales": _OUT_SCALES_TO_ARG.get(module_qcfg.out_scales, None),
             "sigma_reg": _EXL3_SIGMA_REG,
             "seed": 787,
         }
 
-        if module_qcfg.codebook == "mcg":
+        if mcg:
             quant_args["mcg"] = True
-        elif module_qcfg.codebook == "mul1":
+        elif mul1:
             quant_args["mul1"] = True
 
         return quant_args
@@ -3158,7 +3161,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
         remote_client,
         execution_slot,
         execution_lease: ExecutionSlotLease | None,
-        bits_override: int | None = None,
+        bits_override: int | float | None = None,
         inline_context: dict[str, Any] | None = None,
         defer_stats: bool = False,
     ):
@@ -3245,7 +3248,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 else None
             )
             quantizer_contract = {
-                "bits": int(quant_args["K"]),
+                "bits": quant_args["K"],
                 "codebook": module_qcfg.codebook,
                 "apply_out_scales": quant_args["apply_out_scales"],
                 "sigma_reg": float(quant_args["sigma_reg"]),
@@ -3426,7 +3429,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
             ledger_record = build_projection_record(
                 module_full_name=module.full_name,
                 layer_index=module.layer_index,
-                bits=int(quant_args["K"]),
+                bits=quant_args["K"],
                 codebook=module_qcfg.codebook,
                 sample_count=capture.nsamples,
                 duration_seconds=duration,
@@ -3480,7 +3483,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
             expected_ledger_record = build_projection_record(
                 module_full_name=module.full_name,
                 layer_index=module.layer_index,
-                bits=int(quant_args["K"]),
+                bits=quant_args["K"],
                 codebook=module_qcfg.codebook,
                 sample_count=capture.nsamples,
                 duration_seconds=duration,
@@ -3495,7 +3498,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 legacy_ledger_record = build_projection_record(
                     module_full_name=module.full_name,
                     layer_index=module.layer_index,
-                    bits=int(quant_args["K"]),
+                    bits=quant_args["K"],
                     codebook=module_qcfg.codebook,
                     sample_count=capture.nsamples,
                     duration_seconds=duration,
@@ -3673,6 +3676,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 name=module.full_name,
                 submodule=module,
                 tensors=tensors,
+                kernel=resolve_kernel_config(self.qcfg),
             )
 
         module.unregister_parameter("weight")
@@ -4170,6 +4174,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 name=module_name,
                 submodule=named,
                 tensors=tensors,
+                kernel=resolve_kernel_config(self.qcfg),
             )
             if materialize_device is None:
                 # Preserve scalar multiplier values before replacing every
@@ -4333,6 +4338,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 name=module_name,
                 tensor_storage=tensor_storage,
                 out_dtype=packed.out_dtype,
+                kernel=packed.kernel,
             )
             recurse_setattr(model.model, module_name, placeholder)
 
