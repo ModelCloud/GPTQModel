@@ -24,7 +24,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS, dynamo_is_compiling
 from ._compile_support import COMPILE_LEVEL
-from ._cpu_int4pack_layout import runtime_int4pack_dense_weight
+from ._cpu_int4pack_layout import int4pack_decode_dtype, runtime_int4pack_dense_weight
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
@@ -35,7 +35,7 @@ from ._fused_train_state import (
     refresh_runtime_zero_offsets,
     restore_fused_train_state,
 )
-from ._numerics import matmul_fp32_reduce
+from ._numerics import linear_wide_bias, matmul_fp32_reduce
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 
 
@@ -673,11 +673,27 @@ class TorchFusedLinear(PackableQuantLinear):
     def _dense_weight_for_activation(self, x: torch.Tensor) -> torch.Tensor:
         """Checkpoint-layout dense weight for a call that cannot use the fused op."""
         num_itr = self.g_idx.shape[0] // x.shape[-1]
-        return self.dequantize_weight(num_itr=num_itr)
+        # Decode in a dtype that holds every stored weight; a half-precision
+        # scale would otherwise overflow before the caller widens it (#5577).
+        dtype = int4pack_decode_dtype(self, x.dtype)
+        return self.dequantize_weight(num_itr=num_itr, dtype=dtype)
 
-    def _runtime_dense_weight(self) -> torch.Tensor:
+    def _runtime_dense_weight(
+        self, activation_dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
         """Decode the live CPU int4pack layout to a dense ``[in, out]`` weight."""
-        return runtime_int4pack_dense_weight(self)
+        return runtime_int4pack_dense_weight(self, activation_dtype=activation_dtype)
+
+    def _dense_matmul(self, x, dense_weight, bias):
+        """Matmul a dense decode without narrowing an already-wide weight."""
+        if dense_weight.dtype == x.dtype:
+            if bias is not None:
+                return matmul_fp32_reduce(x, dense_weight, bias)
+            return torch.matmul(x, dense_weight)
+        # Wide decode: promote the activation for this call, accumulate in
+        # FP32, add the stored bias there, and round once at output. The
+        # reconstructed weight stays call-local.
+        return linear_wide_bias(x, dense_weight.t(), bias)
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
@@ -714,7 +730,9 @@ class TorchFusedLinear(PackableQuantLinear):
                 # The eager refresh below cannot run inside a trace, so decode
                 # the offsets from the checkpoint zero codes and the current
                 # scales instead of the installed stale pair (#5571).
-                dense_weight = runtime_int4pack_dense_weight(self, use_zero_codes=True)
+                dense_weight = runtime_int4pack_dense_weight(
+                    self, use_zero_codes=True, activation_dtype=x.dtype
+                )
             if (
                 not runtime_dense
                 and self.linear_mode is None
@@ -745,7 +763,7 @@ class TorchFusedLinear(PackableQuantLinear):
                         # decode used to read stale (#5571).
                         self._refresh_fused_op()
                         runtime_dense = True
-                        dense_weight = self._runtime_dense_weight()
+                        dense_weight = self._runtime_dense_weight(x.dtype)
                     else:
                         # XPU keeps the checkpoint-layout dense fallback; there
                         # is no CPU int4pack runtime decode for it.
@@ -790,17 +808,15 @@ class TorchFusedLinear(PackableQuantLinear):
 
         if runtime_dense:
             if dense_weight is None:
-                dense_weight = runtime_int4pack_dense_weight(self)
-            weights = dense_weight.to(x.dtype)
+                dense_weight = runtime_int4pack_dense_weight(
+                    self, activation_dtype=x.dtype
+                )
             dense_x = x
             if self._needs_activation_gather(x.device.type):
                 dense_x = x[:, self._build_ret_idx().to(x.device)].contiguous()
             elif not dense_x.is_contiguous():
                 dense_x = dense_x.contiguous()
-            if self.bias is not None:
-                out = matmul_fp32_reduce(dense_x, weights, self.bias).reshape(out_shape)
-            else:
-                out = torch.matmul(dense_x, weights).reshape(out_shape)
+            out = self._dense_matmul(dense_x, dense_weight, self.bias).reshape(out_shape)
         elif linear_mode == LinearMode.INFERENCE:
             out = self._fused_op_forward(x)
             if self.bias is not None:
@@ -811,11 +827,7 @@ class TorchFusedLinear(PackableQuantLinear):
             # make sure dequant dtype matches input x
             if dense_weight is None:
                 dense_weight = self._dense_weight_for_activation(x)
-            weights = dense_weight.to(x.dtype)
-            if self.bias is not None:
-                out = matmul_fp32_reduce(x, weights, self.bias).reshape(out_shape)
-            else:
-                out = torch.matmul(x, weights).reshape(out_shape)
+            out = self._dense_matmul(x, dense_weight, self.bias).reshape(out_shape)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
