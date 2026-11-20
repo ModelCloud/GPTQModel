@@ -33,6 +33,7 @@ import torch.nn as nn
 from gptqmodel.nn_modules.qlinear import gguf as gguf_module
 from gptqmodel.nn_modules.qlinear._compile_support import graph_capture_safe
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
+from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 
 
 pytestmark = [pytest.mark.gpu]
@@ -41,11 +42,19 @@ IN_FEATURES = 512
 OUT_FEATURES = 256
 CAPTURABLE_BITS = ("q4_0", "q8_0", "q4_k", "q5_k", "q6_k")
 HOST_DEQUANT_BITS = ("q2_k", "q3_k")
+# Every layout ``GGUFTritonKernel`` builds (its ``SUPPORTS_GGUF_QTYPES``).
+# #5591: the class used to inherit ``GGUFTorchLinear.GRAPH_CAPTURE_QTYPES``,
+# which listed Q4_0/Q8_0 (rejected by the constructor) and omitted Q1_0.
+TRITON_CAPTURABLE_BITS = ("q1_0", "q1_0_g128", "q4_k", "q5_k", "q6_k")
 
 
 def _require_cuda() -> None:
     if not torch.cuda.is_available():
         pytest.skip("GGUF graph capture needs a CUDA device")
+
+
+def _require_triton() -> None:
+    pytest.importorskip("triton")
 
 
 def _build(bits: str, cls=GGUFTorchLinear) -> GGUFTorchLinear:
@@ -106,13 +115,19 @@ def _activations(rows: int, seed: int) -> torch.Tensor:
     )
 
 
-@pytest.mark.parametrize("bits", CAPTURABLE_BITS)
+@pytest.mark.parametrize(
+    ("cls", "bits"),
+    [(GGUFTorchLinear, bits) for bits in CAPTURABLE_BITS]
+    + [(GGUFTritonKernel, bits) for bits in TRITON_CAPTURABLE_BITS],
+)
 @pytest.mark.parametrize("rows", [1, 64])
-def test_layer_captures_and_replays_bitwise(bits, rows):
+def test_layer_captures_and_replays_bitwise(cls, bits, rows):
     """Capture, then replay both the same and a new input, bitwise vs eager."""
 
     _require_cuda()
-    module = _build(bits)
+    if cls is GGUFTritonKernel:
+        _require_triton()
+    module = _build(bits, cls)
     x = _activations(rows, seed=11)
     x_other = _activations(rows, seed=12)
 
@@ -133,14 +148,16 @@ def test_layer_captures_and_replays_bitwise(bits, rows):
         graph.replay()
         torch.cuda.synchronize()
         assert torch.equal(captured, eager_same), (
-            f"{bits} rows={rows}: the captured replay does not reproduce the eager output"
+            f"{cls.__name__}/{bits} rows={rows}: the captured replay does not "
+            "reproduce the eager output"
         )
 
         x.copy_(x_other)
         graph.replay()
         torch.cuda.synchronize()
         assert torch.equal(captured, eager_other), (
-            f"{bits} rows={rows}: the captured replay does not follow a new input"
+            f"{cls.__name__}/{bits} rows={rows}: the captured replay does not "
+            "follow a new input"
         )
 
 
@@ -264,3 +281,49 @@ def test_instance_refinement_cannot_widen_a_subclass_declaration():
             return True
 
     assert graph_capture_safe(_DuckDeclaredUnsafe()) is False
+
+
+def test_triton_declares_the_qtypes_its_kernels_build():
+    """#5591: the Triton kernel must not inherit the torch capture set.
+
+    The inherited set answers a different question -- which *torch* dequant
+    formats run on the device -- and it lists Q4_0/Q8_0, which the Triton
+    constructor rejects, while omitting Q1_0/Q1_0_g128, which it builds. An
+    inherited answer is an under-claim for the 1-bit layers and an over-claim
+    for the two it cannot construct.
+    """
+
+    declared = GGUFTritonKernel.__dict__.get("GRAPH_CAPTURE_QTYPES")
+    assert declared is not None, (
+        "GGUFTritonKernel must declare its own GRAPH_CAPTURE_QTYPES; inheriting "
+        "GGUFTorchLinear's set misreports the 1-bit and Q4_0/Q8_0 layouts"
+    )
+    assert declared == GGUFTritonKernel.SUPPORTS_GGUF_QTYPES
+    assert "Q4_0" not in declared and "Q8_0" not in declared, (
+        "the Triton constructor rejects Q4_0/Q8_0, so they must not be declared capturable"
+    )
+    # The torch declaration is untouched by the subclass.
+    assert GGUFTorchLinear.GRAPH_CAPTURE_QTYPES == frozenset(
+        {"Q4_0", "Q8_0", "Q4_K", "Q5_K", "Q6_K"}
+    )
+    assert graph_capture_safe(GGUFTritonKernel) is True
+
+
+@pytest.mark.parametrize("bits", TRITON_CAPTURABLE_BITS)
+def test_triton_instances_report_capture_for_every_built_qtype(bits):
+    """The per-instance answer covers exactly the layouts Triton builds."""
+
+    _require_cuda()
+    _require_triton()
+    module = GGUFTritonKernel(
+        bits=bits,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=False,
+    )
+    assert module.gguf_tensor_qtype in GGUFTritonKernel.GRAPH_CAPTURE_QTYPES
+    assert module.supports_graph_capture() is True, bits
+    assert graph_capture_safe(module) is True, bits
