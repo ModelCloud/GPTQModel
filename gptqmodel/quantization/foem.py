@@ -714,9 +714,7 @@ class FOEM(GPTQ):
                 dtype=torch.int32,
                 device=Q.device,
             ) // self.qcfg.group_size
-            if isinstance(self.module, transformers.Conv1D):
-                Q = Q.t()
-            Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
+            Q = self._narrow_reconstruction(Q)
             scale, zero = self._sanitize_scale_and_log(scale, zero)
             return (
                 Q,
@@ -845,13 +843,7 @@ class FOEM(GPTQ):
             Q = Q[:, :valid_cols]
             g_idx = g_idx[:valid_cols]
 
-        if isinstance(self.module, transformers.Conv1D):
-            Q = Q.t()
-
-        if Q.shape != self.module.weight.shape:
-            Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
-        else:
-            Q = Q.type_as(self.module.weight.data)
+        Q = self._narrow_reconstruction(Q)
 
         # Q = Q.to(device=DEVICE_1)
 
