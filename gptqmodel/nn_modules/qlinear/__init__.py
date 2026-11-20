@@ -383,7 +383,7 @@ def _pack_rows_3(codes: t.Tensor) -> t.Tensor:
         raise ValueError(f"3-bit packing expects 32-aligned rows, got shape {tuple(codes.shape)}")
     groups = rows // 32
     x = codes.to(t.int32).view(groups, 32, cols)
-    offsets = t.arange(10, dtype=t.int32).view(1, -1, 1) * 3
+    offsets = t.arange(10, dtype=t.int32, device=codes.device).view(1, -1, 1) * 3
     # A: first 10 values at bit offsets {0,3,6,...,27} plus low 2 bits of the 11th at bit 30
     A = (x[:, 0:10] << offsets).sum(dim=1, dtype=t.int32)
     A = A | (x[:, 10] << 30)
@@ -395,6 +395,24 @@ def _pack_rows_3(codes: t.Tensor) -> t.Tensor:
     C = (x[:, 21] >> 1) & 0x3
     C = C | (x[:, 22:32] << (offsets + 2)).sum(dim=1, dtype=t.int32)
     return t.stack((A, B, C), dim=1).reshape(groups * 3, cols)
+
+
+@t.no_grad()
+@t.inference_mode(False)
+def _pack_gpu_block_3_or_planar(codes: t.Tensor, *, bits: int, planar: bool) -> t.Tensor:
+    """Pack one whole ``pack_gpu`` input block for the 3-bit or planar layouts.
+
+    Both layouts pack whole 32-input groups, so one vectorized shift/reduce
+    covers every group in the block. ``pack_gpu`` previously dispatched a
+    per-32-row-group helper here, which issued roughly 25 tiny kernels per
+    group on the accelerator (#5733). The result is bit-identical.
+    """
+
+    if bits == 3 and not planar:
+        return _pack_rows_3(codes)
+    if planar:
+        return planar_pack_rows(codes, bits)
+    raise NotImplementedError(f"Unsupported bits={bits}")
 
 
 @t.no_grad()
@@ -3033,27 +3051,6 @@ class PackableQuantLinear(GPTQQuantLinear):
             device=target_device,
         )
 
-        range10 = t.arange(10, dtype=t.int64, device=target_device).view(-1, 1)
-
-        @t.inference_mode()
-        def _pack_gpu_rows_3_values(int32_blk_32xN: t.Tensor) -> t.Tensor:
-            x = int32_blk_32xN.to(t.int64)
-            A = ((x[0:10] << (range10 * 3)).sum(dim=0, dtype=t.int64)) & mask_tensor
-            A = (A | ((x[10] << 30) & mask_tensor)) & mask_tensor
-
-            B = (((x[10] >> 2) & 1) & mask_tensor)
-            B = (B | ((x[11:21] << (range10 * 3 + 1)).sum(dim=0, dtype=t.int64))) & mask_tensor
-            B = (B | ((x[21] << 31) & mask_tensor)) & mask_tensor
-
-            C = (((x[21] >> 1) & 0x3) & mask_tensor)
-            C = (C | ((x[22:32] << (range10 * 3 + 2)).sum(dim=0, dtype=t.int64))) & mask_tensor
-
-            return t.stack([A, B, C], dim=0)
-
-        def _pack_gpu_rows_3(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
-            packed = _pack_gpu_rows_3_values(int32_blk_32xN)
-            dst[dst_rows_base:dst_rows_base + 3] = packed.to(self.pack_dtype)
-
         # Derive the block from an element budget instead of trusting the
         # caller's 8192 default, which covers a whole 4096-wide matrix and
         # peaks at ~15x the fp16 weight transient. The input-axis split only
@@ -3089,15 +3086,12 @@ class PackableQuantLinear(GPTQQuantLinear):
                     packed.to(self.pack_dtype)
                 )
             else:
-                for g in range(groups32):
-                    sub = int_block[g * word_bits:(g + 1) * word_bits]
-                    dst_rows = (base_group + g) * rows_per_group
-                    if bits == 3 and not self.planar:
-                        _pack_gpu_rows_3(sub, qweight_dev, dst_rows)
-                    elif self.planar:
-                        qweight_dev[dst_rows:dst_rows + bits] = planar_pack_rows(sub, bits).to(self.pack_dtype)
-                    else:
-                        raise NotImplementedError(f"Unsupported bits={bits}")
+                # 3-bit and planar layouts pack whole 32-input groups, so one
+                # vectorized call covers every group in the block. The former
+                # per-group loop issued ~25 tiny launches per 32-row group.
+                row_lo = base_group * rows_per_group
+                packed = _pack_gpu_block_3_or_planar(int_block, bits=bits, planar=self.planar)
+                qweight_dev[row_lo:row_lo + packed.shape[0]] = packed.to(self.pack_dtype)
 
         zeros_int = zeros_dev.to(dtype=t.int64)
         if bits in (2, 4, 8):
@@ -3121,13 +3115,9 @@ class PackableQuantLinear(GPTQQuantLinear):
                     "3-bit packing requires out_features to be divisible by 32, "
                     f"got out_features={zeros_int.shape[1]}"
                 )
-            groups = zeros_int.shape[1] // word_bits
-            qzeros_chunks: List[t.Tensor] = []
-            for g in range(groups):
-                block = zeros_int[:, g * word_bits:(g + 1) * word_bits]
-                packed = _pack_gpu_rows_3_values(block.T).transpose(0, 1)
-                qzeros_chunks.append(packed.to(dtype=self.pack_dtype))
-            qzeros_dev = t.cat(qzeros_chunks, dim=1)
+            # Pack every 32-column group in one vectorized call; the former
+            # per-group loop concatenated one small chunk per group.
+            qzeros_dev = _pack_code_cols_3(zeros_int).to(dtype=self.pack_dtype)
         elif self.planar:
             qzeros_dev = planar_pack_cols(zeros_int, bits).to(dtype=self.pack_dtype)
         else:
