@@ -70,12 +70,20 @@ class ExllamaV3Linear(nn.Module):
     @classmethod
     def validate_device(cls, device) -> None:
         family = normalize_device(device)
-        if family not in cls.SUPPORTS_DEVICES:
-            raise NotImplementedError(
-                "EXL3_EXLLAMA_V3 inference requires NVIDIA CUDA, but the module is on "
-                f"`{getattr(family, 'value', family)}`; move the model to a CUDA device "
-                "(or use EXL3_TORCH on ROCm or CPU)."
-            )
+        if family in cls.SUPPORTS_DEVICES:
+            return
+        if family == DEVICE.ROCM:
+            from ..exllamav3.ext import exl3_native_hip_gemm_available
+
+            probe = device.to_torch_device() if isinstance(device, DEVICE) else device
+            if exl3_native_hip_gemm_available(probe):
+                return
+        raise NotImplementedError(
+            "EXL3_EXLLAMA_V3 inference requires NVIDIA CUDA or an RDNA4 "
+            "(gfx120x) device on ROCm, but the module is on "
+            f"`{getattr(family, 'value', family)}`; move the model to a CUDA device "
+            "(or an RDNA4 device on ROCm, or use EXL3_TORCH on CPU)."
+        )
 
     def __init__(
         self,

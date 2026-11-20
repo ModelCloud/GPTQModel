@@ -127,11 +127,14 @@ class LinearEXL3:
                 return ovr[self.key].forward(x, params, out_dtype)
 
         bsz = x.numel() // x.shape[-1]
-        # The small-batch tensor-core GEMM (`bc.run`) is NVIDIA-only. On ROCm the
-        # extension exports null kernel tables for it, so always take the
-        # reconstruct + hgemm (hipBLAS) path there.
         if torch.version.hip is not None:
-            torch_mode = True
+            # ROCm has its own fused GEMM (`quant/exl3_gemm_hip.cu`): on RDNA4
+            # it decodes the trellis into the wave32 WMMA operands, and
+            # `exl3_gemm_hip()` itself falls back to reconstruct + hgemm for
+            # the shapes it does not cover (wide batches, other devices), so
+            # `bc.run` is always safe. Q4NX's decoder only exists in the
+            # portable build, so that codebook keeps the torch path.
+            torch_mode = self.q4nx or bool(params.get("reconstruct", False))
         else:
             torch_mode = params.get("reconstruct", bsz > 32 and not self.q4nx)
 

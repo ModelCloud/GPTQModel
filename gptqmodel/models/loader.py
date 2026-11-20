@@ -2184,12 +2184,12 @@ def _load_quantized_gguf_checkpoint_into_model(
 def _resolve_exl3_auto_backend(device, *, cuda_available: Optional[bool] = None) -> "BACKEND":
     """Pick the EXL3 kernel for ``backend=AUTO``.
 
-    Only the CUDA family gets ``EXL3_EXLLAMA_V3``: its tensor-core GEMM dispatch
-    table is populated exclusively for CUDA.  On ROCm every entry of that table
-    is ``nullptr`` (``exl3_gemm.cu`` already rejects HIP with an explicit
-    ``TORCH_CHECK``), so the AUTO branch used to load a backend that cannot run.
-    ROCm -- CDNA and RDNA4 alike -- therefore resolves to ``EXL3_TORCH``, the
-    portable kernel that is the supported ROCm path.
+    Only the CUDA family gets ``EXL3_EXLLAMA_V3`` by default.  On ROCm
+    ``exl3_gemm.cu`` now forwards to ``exl3_gemm_hip.cu``, which runs a native
+    wave32 WMMA kernel on RDNA4 (gfx120x) and reconstruct + hgemm everywhere
+    else, but the fused kernel stays opt-in there: AUTO keeps resolving to the
+    portable ``EXL3_TORCH`` kernel for CDNA and RDNA4 alike.  Load an RDNA4
+    model with an explicit ``EXL3_EXLLAMA_V3`` to use the fused kernel.
     """
 
     if cuda_available is None:
@@ -3067,7 +3067,7 @@ def ModelLoader(cls):
                 backend = _resolve_exl3_auto_backend(device)
             if backend == BACKEND.EXL3_EXLLAMA_V3:
                 if not torch.cuda.is_available():
-                    raise ValueError("EXL3_EXLLAMA_V3 loading requires NVIDIA CUDA; use EXL3_TORCH instead.")
+                    raise ValueError("EXL3_EXLLAMA_V3 loading requires CUDA or ROCm; use EXL3_TORCH instead.")
                 ExllamaV3Linear.validate_device(selector_device_family(device))
         elif format_code == FORMAT.BITSANDBYTES:
             if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES, BACKEND.MLX):

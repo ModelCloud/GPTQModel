@@ -115,6 +115,10 @@ def _source_files() -> list[str]:
         units = sources_dir / "quant/comp_units"
         for pattern in ("exl3_gemv_int8_inst_*.cu", "exl3_moe_coop_inst_*.cu"):
             source_files += [str(path.relative_to(sources_dir)) for path in sorted(units.glob(pattern))]
+    else:
+        # RDNA4 (gfx120x) wave32 WMMA GEMM: the ROCm replacement for the
+        # NVIDIA-only `exl3_gemm_kernel.cuh` path.
+        source_files += ["quant/exl3_gemm_hip.cu"]
     return [str((sources_dir / path).resolve()) for path in source_files]
 
 
@@ -231,6 +235,24 @@ def exllamav3_runtime_error() -> str:
 def prewarm_exllamav3_extension() -> bool:
     _prepare_build_env()
     return _extension_api().load(name="exllamav3")["exllamav3"]
+
+
+def exl3_native_hip_gemm_available(device: torch.device | str | int | None = None) -> bool:
+    """Whether the native RDNA4 EXL3 WMMA GEMM can run on ``device``.
+
+    Mirrors ``exl3_gemm_hip_available()`` in the C++ dispatcher: the fused
+    kernel is built for gfx1200/gfx1201, and every other ROCm target keeps the
+    portable reconstruct + hgemm path. Pure metadata lookup, so the answer is
+    available before the extension is loaded.
+    """
+
+    if torch.version.hip is None:
+        return False
+
+    from ..utils.arch import rocm_arch
+
+    arch = rocm_arch(device)
+    return arch is not None and arch.startswith("gfx120")
 
 
 def _runtime_op(name: str):
