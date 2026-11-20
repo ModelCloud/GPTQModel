@@ -283,7 +283,8 @@ class _BCLinearEXL3:
         bias = self.bias if include_bias else None
         args = (self.trellis, self.suh, self.svh, self.K, bias, self.mcg, self.mul1, x, y)
         if self.q4nx:
-            _runtime_op("bc_linear_exl3_run_configured")(*args, False, 0, True, q4nx=True)
+            gemv = self.fp16_gemv or not self.fused_gemm
+            _runtime_op("bc_linear_exl3_run_configured")(*args, gemv, 0, self.fused_gemm, q4nx=True)
         elif self._configured:
             _runtime_op("bc_linear_exl3_run_configured")(*args, self.fp16_gemv, self.int8_gemv, self.fused_gemm)
         else:
