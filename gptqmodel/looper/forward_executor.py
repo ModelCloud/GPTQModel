@@ -317,6 +317,7 @@ class ForwardExecutor:
             need_outputs=need_outputs,
             reuse_kv=reuse_kv,
             devices=devices,
+            devices_filtered=True,
             progress_pb=progress_pb,
             progress_title=progress_title,
             progress_stage=progress_stage,
@@ -599,6 +600,7 @@ class ForwardExecutor:
         need_outputs: bool,
         reuse_kv: bool,
         devices: List[torch.device],
+        devices_filtered: bool = False,
         progress_pb: "ProgressBar" | None = None,
         progress_title: Optional[str] = None,
         progress_stage: Optional[str] = None,
@@ -610,6 +612,13 @@ class ForwardExecutor:
         device_thread_pool=DEVICE_THREAD_POOL,
     ) -> List[List[torch.Tensor]]:
         """Fan batches across device replicas and preserve result ordering."""
+
+        # `run` filters the pool once before the serial/parallel decision and
+        # passes the survivors here. Direct parallel calls still resolve the
+        # filter at entry so the staged replicas and batch assignment always
+        # come from the same pool.
+        if not devices_filtered:
+            devices = self._filter_forward_devices(devices)
 
         effective_title = progress_title or (progress_stage or "Forward")
         total_batches, batch_row_counts, total_rows = self._resolve_batch_progress(
@@ -710,7 +719,7 @@ class ForwardExecutor:
             input_devices: Dict[int, torch.device] = {}
             processed_rows = 0
 
-            forward_devices = self._filter_forward_devices(devices)
+            forward_devices = devices
 
             device_segments: Dict[torch.device, List[int]] = {}
             num_devices = len(forward_devices)
