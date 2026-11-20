@@ -590,7 +590,10 @@ class QQQ:
             # weight, not the original one: GPTQ error propagation can push
             # max|Q| above max|W|, and a scale fitted to W then saturates the
             # packed codes (and no longer reproduces the in-memory `wq`).
-            quantizer_extra.find_params(Q.clone(), weight=True)
+            # ``Q`` is back in the source ``Conv1D`` [in, out] orientation;
+            # the per-channel scale belongs to the output axis.
+            extra_weight = Q.t() if isinstance(self.layer, transformers.Conv1D) else Q
+            quantizer_extra.find_params(extra_weight.clone(), weight=True)
             scale_extra = quantizer_extra.scale
 
         duration = time.time() - start_time
@@ -1320,7 +1323,10 @@ class QQQ:
             # from the pre-quantization `W`. Error propagation can raise
             # max|Q| above max|W|; a W-fitted scale then clamps packed codes
             # and the export no longer equals the in-memory `wq`.
-            quantizer_extra.find_params(Q.clone(), weight=True)
+            # ``Q`` is back in the source ``Conv1D`` [in, out] orientation;
+            # the per-channel scale belongs to the output axis.
+            extra_weight = Q.t() if isinstance(self.layer, transformers.Conv1D) else Q
+            quantizer_extra.find_params(extra_weight.clone(), weight=True)
             scale_extra = quantizer_extra.scale
 
         duration = time.time() - start

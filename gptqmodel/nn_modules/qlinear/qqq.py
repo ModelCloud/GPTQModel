@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import List, Optional, Tuple
 
 import torch
+import transformers
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import CPU, DEVICE, PLATFORM
@@ -525,6 +526,10 @@ class QQQLinear(GroupedQuantLinear):
             device=CPU,
         )
         weight = linear.weight.data
+        if isinstance(linear, transformers.Conv1D):
+            # ``transformers.Conv1D`` stores ``[in_features, out_features]``;
+            # the tiling below addresses the logical ``[out, in]`` layout.
+            weight = weight.t()
         perm = self._perm.to(device=weight.device)
         for input_start in range(0, self.in_features, input_chunk_size):
             input_end = min(input_start + input_chunk_size, self.in_features)
