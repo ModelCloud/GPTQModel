@@ -1405,6 +1405,12 @@ class TorchQuantEmbeddings(TorchLinear):
     EMBEDDING_ROW_DECODE_LIMIT = 1024
     EMBEDDING_ROW_DECODE_MIN_TABLE_BYTES = 64 * 1024 * 1024
 
+    #: CPU row decode decodes bounded chunks so the transient code/scale
+    #: tensors stay proportional to the chunk instead of the whole query. CPU
+    #: has no kernel-launch amortization to recover, so the accelerator cutoffs
+    #: above do not apply there (#5772).
+    EMBEDDING_CPU_ROW_DECODE_CHUNK = 8192
+
     #: Dtype the forward returns. A quantized embedding's stored ``scales`` keep
     #: the checkpoint dtype (FP16 for GPTQ), which is not the model's compute
     #: dtype; returning it promoted a BF16 residual stream to FP32 and made a
@@ -1554,21 +1560,64 @@ class TorchQuantEmbeddings(TorchLinear):
 
         The result is transient scratch for this forward: only the packed
         `qweight`/`qzeros`/`scales`/`g_idx` metadata persists afterwards.
+        CPU queries are decoded in bounded chunks so the intermediate code and
+        scale tensors stay proportional to the chunk, not the whole query.
         """
         self._init_wf_unsqueeze_buffers()
         state = self._embedding_row_decode_state()
         rows = input_ids.reshape(-1).to(device=self.qweight.device, dtype=torch.int32)
+        decode_dtype = self._decode_dtype()
+        chunk = (
+            int(self.EMBEDDING_CPU_ROW_DECODE_CHUNK)
+            if self.qweight.device.type == "cpu"
+            else 0
+        )
+        if chunk <= 0 or rows.numel() <= chunk:
+            return self._dequantize_embedding_row_chunk(rows, state, decode_dtype)
+        result = torch.empty(
+            rows.numel(), self.out_features, dtype=decode_dtype, device=rows.device
+        )
+        for start in range(0, rows.numel(), chunk):
+            stop = min(start + chunk, rows.numel())
+            result[start:stop] = self._dequantize_embedding_row_chunk(
+                rows[start:stop], state, decode_dtype
+            )
+        return result
 
+    def _dequantize_embedding_row_chunk(self, rows, state, decode_dtype):
+        """Decode one bounded batch of packed embedding rows."""
         codes = self._embedding_row_codes(rows, state)
         groups = state["groups"].index_select(0, rows)
         scales = self.scales.index_select(0, groups)
         zeros = state["zeros"].index_select(0, groups)
         # The row gather multiplies in the scale dtype too; a half scale that
         # overflows must decode wide exactly like the whole-table path (#5606).
-        decode_dtype = self._decode_dtype()
         if decode_dtype != self.scales.dtype:
             return scales.to(decode_dtype) * (codes.to(decode_dtype) - zeros.to(decode_dtype))
         return scales * (codes - zeros)
+
+    def _embedding_row_decode_eligible(self, input_ids: torch.Tensor) -> bool:
+        """Cheap gate for row decode; CPU and accelerator policies differ.
+
+        The GPU cutoffs amortize kernel-launch cost and were measured on
+        accelerators. CPU gathers only the queried rows, so it uses row decode
+        whenever the query is no wider than the table; whole-table decode is
+        reserved for queries with more lookups than vocabulary rows, where it
+        decodes each row once instead of repeatedly (#5772).
+        """
+        if self.training or self.qweight is None:
+            return False
+        if input_ids.dtype not in (torch.int32, torch.int64):
+            return False
+        if input_ids.device != self.qweight.device:
+            return False
+        if self.qweight.device.type == "cpu":
+            return input_ids.numel() <= self.in_features
+        return (
+            input_ids.numel() <= self.EMBEDDING_ROW_DECODE_LIMIT
+            and self.in_features * self.out_features * self.scales.element_size()
+            >= self.EMBEDDING_ROW_DECODE_MIN_TABLE_BYTES
+        )
 
     def forward(self, input_ids: torch.Tensor):
         output_dtype = self.embedding_output_dtype()
@@ -1579,13 +1628,7 @@ class TorchQuantEmbeddings(TorchLinear):
                 device=self.scales.device,
             )
         if (
-            not self.training
-            and self.qweight is not None
-            and input_ids.numel() <= self.EMBEDDING_ROW_DECODE_LIMIT
-            and input_ids.dtype in (torch.int32, torch.int64)
-            and input_ids.device == self.qweight.device
-            and self.in_features * self.out_features * self.scales.element_size()
-            >= self.EMBEDDING_ROW_DECODE_MIN_TABLE_BYTES
+            self._embedding_row_decode_eligible(input_ids)
             and self._embedding_row_decode_state() is not None
         ):
             rows = self._dequantize_embedding_rows(input_ids)
