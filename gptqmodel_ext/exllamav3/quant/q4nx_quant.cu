@@ -20,17 +20,23 @@ namespace {
 using Key = unsigned long long;
 constexpr int tile_weights = 256;
 constexpr int steps = 64;
+constexpr int error_levels = 32;  // A byte's two nibble sums range from 0 to 30.
 constexpr int slot_bits = 7;  // Up to 128 live beam states.
 constexpr int slot_mask = (1 << slot_bits) - 1;
 constexpr Key empty_key = ~Key{0};
 
+template <bool lookup = false>
 __device__ __forceinline__ Key candidate_key(uint32_t state, int previous, float prior, const float* target)
 {
     const uint32_t sums = q4nx_nibble_sums(state);
-    const float e0 = int(sums & 255) - 15 - target[0];
-    const float e1 = int((sums >> 8) & 255) - 15 - target[1];
-    const float e2 = int((sums >> 16) & 255) - 15 - target[2];
-    const float e3 = int(sums >> 24) - 15 - target[3];
+    const int q0 = sums & 255;
+    const int q1 = (sums >> 8) & 255;
+    const int q2 = (sums >> 16) & 255;
+    const int q3 = sums >> 24;
+    const float e0 = lookup ? target[q0] : q0 - 15 - target[0];
+    const float e1 = lookup ? target[error_levels + q1] : q1 - 15 - target[1];
+    const float e2 = lookup ? target[2 * error_levels + q2] : q2 - 15 - target[2];
+    const float e3 = lookup ? target[3 * error_levels + q3] : q3 - 15 - target[3];
     const float cost = prior + (e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3);
     const uint32_t path = (state << slot_bits) | previous;
     return (Key{__float_as_uint(cost)} << 32) | path;
@@ -82,13 +88,14 @@ __device__ Key beam_cutoff(const Key* candidates)
 }
 
 template <int KV, int beam>
-__global__ void __launch_bounds__(256) quantize_kernel(
+__global__ void __launch_bounds__(tile_weights) quantize_kernel(
     const float* input, float* output, int16_t* suffixes, uint32_t* history)
 {
     constexpr int class_count = 1 << (32 - 2 * KV);
     constexpr int suffix_count = 1 << KV;
     constexpr bool exact = beam == class_count;
     __shared__ float targets[tile_weights];
+    __shared__ float errors[exact ? 4 * error_levels : 1];
     __shared__ Key candidates[class_count];
     __shared__ float costs[beam];
     __shared__ int classes[beam];
@@ -108,44 +115,105 @@ __global__ void __launch_bounds__(256) quantize_kernel(
 
     for (int step = 0; step < steps; ++step)
     {
-        for (int i = threadIdx.x; i < class_count; i += blockDim.x)
-            candidates[i] = empty_key;
-        if (threadIdx.x == 0)
-            count = 0;
-        __syncthreads();
-
         const float* target = targets + 4 * step;
+        const int live = step == 0 ? 1 : beam;
+        if constexpr (!exact)
+        {
+            if (threadIdx.x == 0)
+                count = 0;
+        }
         if constexpr (exact)
         {
             // W3.5 keeps every overlap class. Sixteen threads reduce each
             // class independently, with slots indexed directly by class.
-            static_assert(class_count == 16);
-            const int successor = threadIdx.x / 16;
-            const int lane = threadIdx.x % 16;
-            const int prefixes = step == 0 ? suffix_count / class_count : suffix_count;
+            constexpr int lanes = 16;
+            static_assert(class_count * lanes == tile_weights);
+            const int successor = threadIdx.x / lanes;
+            const int lane = threadIdx.x % lanes;
+            // Reuse signed errors while preserving the FP32 sum of squares
+            // and its rounding order in candidate_key.
+            if (threadIdx.x < 4 * error_levels)
+                errors[threadIdx.x] = int(threadIdx.x % error_levels) - 15 - target[threadIdx.x / error_levels];
+            __syncthreads();
             Key best = empty_key;
-            for (int prefix = lane; prefix < prefixes; prefix += 16)
+            for (int previous = 0; previous < live; ++previous)
             {
-                const uint32_t state = prefix * class_count + successor;
-                const int previous = state >> KV;
-                const Key key = candidate_key(state, previous, costs[previous], target);
-                best = min(best, key);
+                const float prior = costs[previous];
+                for (int suffix = lane * class_count + successor; suffix < suffix_count; suffix += lanes * class_count)
+                {
+                    const uint32_t state = (previous << KV) | suffix;
+                    best = min(best, candidate_key<true>(state, previous, prior, errors));
+                }
             }
-            for (int offset = 8; offset > 0; offset /= 2)
-                best = min(best, __shfl_xor_sync(0xffffffffu, best, offset, 16));
+            for (int offset = lanes / 2; offset > 0; offset /= 2)
+                best = min(best, __shfl_xor_sync(0xffffffffu, best, offset, lanes));
             if (lane == 0)
                 candidates[successor] = best;
         }
-        else
+        else if constexpr (KV == 12)
         {
-            const int live = step == 0 ? 1 : beam;
-            for (int i = threadIdx.x; i < live * suffix_count; i += blockDim.x)
+            // W3.0's successor class is the low eight suffix bits.
+            static_assert(class_count == tile_weights);
+            Key best = empty_key;
+            for (int i = threadIdx.x; i < live * suffix_count; i += tile_weights)
             {
                 const int previous = i >> KV;
                 const uint32_t state = (classes[previous] << KV) | (i & (suffix_count - 1));
-                const Key key = candidate_key(state, previous, costs[previous], target);
-                atomicMin(&candidates[state & (class_count - 1)], key);
+                best = min(best, candidate_key(state, previous, costs[previous], target));
             }
+            candidates[threadIdx.x] = best;
+        }
+        else
+        {
+            // W2.5 shares the low eight bits with the owning thread. The next
+            // two suffix bits and low two predecessor bits choose its register.
+            static_assert(KV == 10 && suffix_count == 4 * tile_weights && class_count == 16 * tile_weights);
+            Key best[16];
+            #pragma unroll
+            for (int i = 0; i < 16; ++i)
+                best[i] = empty_key;
+            for (int previous = 0; previous < live; ++previous)
+            {
+                const int previous_class = classes[previous];
+                const float prior = costs[previous];
+                const uint32_t state = (previous_class << KV) | threadIdx.x;
+                const Key key0 = candidate_key(state, previous, prior, target);
+                const Key key1 = candidate_key(state | tile_weights, previous, prior, target);
+                const Key key2 = candidate_key(state | (2 * tile_weights), previous, prior, target);
+                const Key key3 = candidate_key(state | (3 * tile_weights), previous, prior, target);
+                // The switch uses constant register indices and is uniform
+                // across all threads visiting this predecessor.
+                switch (previous_class & 3)
+                {
+                    case 0:
+                        best[0] = min(best[0], key0);
+                        best[1] = min(best[1], key1);
+                        best[2] = min(best[2], key2);
+                        best[3] = min(best[3], key3);
+                        break;
+                    case 1:
+                        best[4] = min(best[4], key0);
+                        best[5] = min(best[5], key1);
+                        best[6] = min(best[6], key2);
+                        best[7] = min(best[7], key3);
+                        break;
+                    case 2:
+                        best[8] = min(best[8], key0);
+                        best[9] = min(best[9], key1);
+                        best[10] = min(best[10], key2);
+                        best[11] = min(best[11], key3);
+                        break;
+                    case 3:
+                        best[12] = min(best[12], key0);
+                        best[13] = min(best[13], key1);
+                        best[14] = min(best[14], key2);
+                        best[15] = min(best[15], key3);
+                        break;
+                }
+            }
+            #pragma unroll
+            for (int i = 0; i < 16; ++i)
+                candidates[i * tile_weights + threadIdx.x] = best[i];
         }
         __syncthreads();
 
@@ -240,15 +308,15 @@ void quantize_tiles(const at::Tensor& input, at::Tensor& output, at::Tensor& suf
     auto* codes = suffixes.data_ptr<int16_t>();
     auto* back = reinterpret_cast<uint32_t*>(history.data_ptr<int32_t>());
     if (kv == 10 && scale_search)
-        quantize_kernel<10, 16><<<tiles, 256, 0, stream>>>(in, out, codes, back);
+        quantize_kernel<10, 16><<<tiles, tile_weights, 0, stream>>>(in, out, codes, back);
     else if (kv == 10)
-        quantize_kernel<10, 128><<<tiles, 256, 0, stream>>>(in, out, codes, back);
+        quantize_kernel<10, 128><<<tiles, tile_weights, 0, stream>>>(in, out, codes, back);
     else if (kv == 12 && scale_search)
-        quantize_kernel<12, 16><<<tiles, 256, 0, stream>>>(in, out, codes, back);
+        quantize_kernel<12, 16><<<tiles, tile_weights, 0, stream>>>(in, out, codes, back);
     else if (kv == 12)
-        quantize_kernel<12, 128><<<tiles, 256, 0, stream>>>(in, out, codes, back);
+        quantize_kernel<12, 128><<<tiles, tile_weights, 0, stream>>>(in, out, codes, back);
     else
-        quantize_kernel<14, 16><<<tiles, 256, 0, stream>>>(in, out, codes, back);
+        quantize_kernel<14, 16><<<tiles, tile_weights, 0, stream>>>(in, out, codes, back);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

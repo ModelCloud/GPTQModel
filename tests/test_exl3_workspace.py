@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from gptqmodel.exllamav3.modules.quant.exl3_lib import quantize as implementation
-from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
 
 
 def test_workspace_is_private_per_stream(monkeypatch):
@@ -92,6 +92,44 @@ def test_oversized_tile_sets_are_split_into_launches(monkeypatch):
         small, torch.zeros_like(small), torch.zeros_like(small), 4, False, False
     )
     assert calls == [2]
+
+
+@pytest.mark.parametrize(
+    ("bits", "scale_search", "limit"),
+    [(2.5, False, 512), (3.0, False, 512), (3.5, False, 1024),
+     (2.5, True, 1024), (3.0, True, 1024), (3.5, True, 1024)],
+)
+def test_q4nx_launch_limits_follow_history_size_and_keep_explicit_caps(monkeypatch, bits, scale_search, limit):
+    class CudaTiles:
+        is_cuda = True
+
+        def __init__(self, count):
+            self.shape = (count, 256)
+
+        def __getitem__(self, rows):
+            start, stop, _ = rows.indices(self.shape[0])
+            return CudaTiles(stop - start)
+
+    calls = []
+
+    def quantize(tiles, output, indices, kv, search):
+        assert tiles.shape == output.shape == indices.shape
+        calls.append((tiles.shape[0], kv, search))
+
+    monkeypatch.setattr(implementation.torch.version, "hip", None)
+    monkeypatch.setattr(implementation, "ext", SimpleNamespace(quantize_tiles_q4nx=quantize))
+    previous = get_kernel_config()
+    try:
+        for policy, expected in [(KernelConfig(), [limit, 5]), (KernelConfig(exl3_tile_batch=256), [256, 5])]:
+            configure_kernel(policy)
+            tiles = CudaTiles(sum(expected))
+            implementation._quantize_tiles_with_workspace(
+                tiles, tiles, tiles, bits, False, False, q4nx=True, scale_search=scale_search,
+            )
+            assert calls == [(size, int(4 * bits), scale_search) for size in expected]
+            calls.clear()
+    finally:
+        configure_kernel(previous)
 
 
 @pytest.mark.parametrize("device", ["cuda:0", "cuda:1"])
