@@ -37,6 +37,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from . import BaseQuantLinear
 from ._compile_support import COMPILE_LEVEL
+from ._numerics import autocast_active
 
 
 #: Values per shared exponent. The hardware format fixes this; a checkpoint
@@ -450,11 +451,15 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
                 else out_dtype
             )
             weight = self.dequantize(dtype=compute_dtype)
-            out = F.linear(
-                x.to(compute_dtype),
-                weight,
-                None if bias is None else bias.to(compute_dtype),
-            )
+            bias = None if bias is None else bias.to(compute_dtype)
+            # Ambient autocast would narrow these explicitly wide operands back
+            # to the activation dtype before the bias cancels the product, so
+            # the reduction must run with autocast disabled and round once.
+            if autocast_active(x.device.type):
+                with torch.autocast(device_type=x.device.type, enabled=False):
+                    out = F.linear(x.to(compute_dtype), weight, bias)
+            else:
+                out = F.linear(x.to(compute_dtype), weight, bias)
             # Release the temporary before the activation leaves this scope.
             del weight
 
