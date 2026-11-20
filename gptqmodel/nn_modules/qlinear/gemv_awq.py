@@ -259,7 +259,6 @@ class AwqGEMVLinear(AWQuantLinear):
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor=None):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
-        scale_zeros = zeros.float() * scales.float()
 
         pack_num = 32 // self.bits
         qscales = torch.zeros(
@@ -272,6 +271,11 @@ class AwqGEMVLinear(AWQuantLinear):
         )
         # Reject an unrepresentable FP16 scale before replacing module state.
         qscales[:, : scales.shape[1]] = scale_to_storage_dtype(scales, qscales.dtype)
+        stored_scales = qscales[:, : scales.shape[1]]
+        # The checkpoint decodes with the stored FP16 scale, so build the
+        # affine offset from that same grid. Mixing the FP32 source scale into
+        # the offset shifts the zero point whenever the cast rounds (#5605).
+        scale_zeros = zeros.float() * stored_scales.float()
         stored_bias = None if linear.bias is None else linear.bias.detach().clone()
         self.register_buffer("scales", qscales)
         if stored_bias is not None:
@@ -289,7 +293,7 @@ class AwqGEMVLinear(AWQuantLinear):
         group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
             (weight.float() + scale_zeros.index_select(1, group_index))
-            / self.scales.index_select(1, group_index).float()
+            / stored_scales.index_select(1, group_index).float()
         ).clamp_(0, (1 << self.bits) - 1).to(torch.int32)
         self.register_buffer("qweight", pack_awq_columns(intweight, self.bits))
 
