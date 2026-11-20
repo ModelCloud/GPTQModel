@@ -67,6 +67,7 @@ from ...utils.ttnn_runtime import (
 )
 from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
+from .ttnn import _ttnn_arch
 
 
 log = setup_logger()
@@ -183,6 +184,28 @@ class _TTNNBlockFloatMixin:
         self._ttnn_devices = count
         return weight
 
+    def _compute_config(self, ttnn):
+        """Return the HiFi4 / FP32-destination compute config for this layer.
+
+        TT-Metal defaults to ``LoFi`` with ``math_approx_mode``. On real OPT
+        ``q_proj`` data that measured 0.0456 maximum absolute error, while the
+        same GEMM with HiFi4 and FP32 accumulation measured 0.0093 -- the floor
+        the dense FP32 Torch oracle itself shows. ``TTNNLinear`` already uses
+        this configuration; the block-float path must match it or it drops
+        finite cancellation residuals that the exact result keeps.
+        """
+
+        config = getattr(self, "_ttnn_compute_config", None)
+        if config is None:
+            config = ttnn.init_device_compute_kernel_config(
+                _ttnn_arch(ttnn),
+                math_fidelity=ttnn.MathFidelity.HiFi4,
+                math_approx_mode=False,
+                fp32_dest_acc_en=True,
+            )
+            self._ttnn_compute_config = config
+        return config
+
     def _device_weight(self):
         if getattr(self, "_ttnn_weight", None) is None:
             return self._build_device_weight()
@@ -196,6 +219,7 @@ class _TTNNBlockFloatMixin:
     def clear_weight_cache(self) -> None:
         weight, self._ttnn_weight = getattr(self, "_ttnn_weight", None), None
         bias, self._ttnn_bias = getattr(self, "_ttnn_bias", None), None
+        self._ttnn_compute_config = None
         if weight is None and bias is None:
             return
         ttnn = import_ttnn()
@@ -231,7 +255,12 @@ class _TTNNBlockFloatMixin:
     def _compute(self, ttnn, mesh, activation):
         weight = self._device_weight()
         bias = getattr(self, "_ttnn_bias", None)
-        output = ttnn.linear(activation, weight, bias=bias)
+        output = ttnn.linear(
+            activation,
+            weight,
+            bias=bias,
+            compute_kernel_config=self._compute_config(ttnn),
+        )
         if self._ttnn_devices > 1:
             gathered = ttnn.all_gather(output, 1)
             ttnn.deallocate(output)
