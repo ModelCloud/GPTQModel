@@ -120,6 +120,23 @@ class ForwardExecutor:
         return finalize() if callable(finalize) else collection
 
     @staticmethod
+    def _batch_placement(layer_inputs, batch_idx: int) -> Tuple[bool, Optional[torch.device]]:
+        """Resolve one replay batch's presence and device without reading it.
+
+        Lazy sequences advertise placement from validated metadata. Opening a
+        disk-backed batch reads its shard and hashes the whole file, so the
+        placement scan must not materialize batches it only schedules.
+        """
+
+        placement = getattr(layer_inputs, "batch_placement", None)
+        if callable(placement):
+            return placement(batch_idx)
+        batch = layer_inputs[batch_idx]
+        if not batch:
+            return False, None
+        return True, batch[0].device
+
+    @staticmethod
     def _shared_kv_key(layer_index: int, batch_idx: int) -> Tuple[int, int]:
         """Identity of one batch's cross-layer KV inside the shared cache.
 
@@ -735,22 +752,25 @@ class ForwardExecutor:
                 for batch_idx in range(total_batches):
                     if batch_idx in committed_indices:
                         continue
-                    if layer_inputs[batch_idx]:
-                        batch_device = layer_inputs[batch_idx][0].device
-                        # Check if this device is in our forward_devices, otherwise use first one
-                        if batch_device in device_segments:
-                            device_segments[batch_device].append(batch_idx)
-                        else:
-                            # Fallback: data is on a device not in forward_devices, use round-robin
-                            fallback_device = forward_devices[batch_idx % num_devices]
-                            device_segments[fallback_device].append(batch_idx)
+                    batch_present, batch_device = self._batch_placement(layer_inputs, batch_idx)
+                    if not batch_present:
+                        continue
+                    # Check if this device is in our forward_devices, otherwise use first one
+                    if batch_device in device_segments:
+                        device_segments[batch_device].append(batch_idx)
+                    else:
+                        # Fallback: data is on a device not in forward_devices, use round-robin
+                        fallback_device = forward_devices[batch_idx % num_devices]
+                        device_segments[fallback_device].append(batch_idx)
             else:
                 # Default behavior: split batches contiguously across devices
-                pending_indices = [
-                    index
-                    for index in range(total_batches)
-                    if index not in committed_indices and layer_inputs[index]
-                ]
+                pending_indices = []
+                for index in range(total_batches):
+                    if index in committed_indices:
+                        continue
+                    batch_present, _ = self._batch_placement(layer_inputs, index)
+                    if batch_present:
+                        pending_indices.append(index)
                 pending_start = 0
                 for index, device in enumerate(forward_devices):
                     remaining_batches = max(
