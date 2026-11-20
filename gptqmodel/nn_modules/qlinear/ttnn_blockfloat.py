@@ -179,9 +179,21 @@ class _TTNNBlockFloatMixin:
                 dev,
             )
 
+        old_weight = getattr(self, "_ttnn_weight", None)
+        old_bias = getattr(self, "_ttnn_bias", None)
         self._ttnn_weight = weight
         self._ttnn_bias = bias
         self._ttnn_devices = count
+        self._ttnn_key = self._weight_key(mesh)
+        # Publish first, then release the replaced tensors: a rebuild that fails
+        # above must leave the previous, still-valid weight in place.
+        for tensor in (old_weight, old_bias):
+            if tensor is None:
+                continue
+            try:
+                ttnn.deallocate(tensor)
+            except Exception as exc:  # pragma: no cover - best-effort release
+                log.debug(f"TTNN: block-float weight deallocate failed: {exc}")
         return weight
 
     def _compute_config(self, ttnn):
@@ -205,11 +217,38 @@ class _TTNNBlockFloatMixin:
             )
             self._ttnn_compute_config = config
         return config
+    def _weight_key(self, mesh):
+        """Identity of every input that the packed BF8 weight is built from.
+
+        ``tensor_cache_key`` catches tensor replacement and in-place mutation;
+        ``generation`` catches a closed and reopened mesh. Inference tensors do
+        not expose a version counter, so for those the key falls back to storage
+        identity and the explicit ``clear_weight_cache()`` contract still
+        applies.
+        """
+
+        from ._runtime_cache import tensor_cache_key
+
+        tensors = (self.qweight, self.qzeros, self.scales, self.g_idx, self.bias)
+        return (
+            tuple(tensor_cache_key(tensor) for tensor in tensors),
+            self.qzero_format(),
+            self.WEIGHT_FORMAT,
+            mesh.generation,
+            mesh.num_devices,
+            mesh.device_id,
+        )
 
     def _device_weight(self):
-        if getattr(self, "_ttnn_weight", None) is None:
-            return self._build_device_weight()
-        return self._ttnn_weight
+        weight = getattr(self, "_ttnn_weight", None)
+        mesh = current_mesh()
+        if (
+            weight is not None
+            and mesh is not None
+            and getattr(self, "_ttnn_key", None) == self._weight_key(mesh)
+        ):
+            return weight
+        return self._build_device_weight()
 
     # -- lifecycle --------------------------------------------------------
 
@@ -220,6 +259,7 @@ class _TTNNBlockFloatMixin:
         weight, self._ttnn_weight = getattr(self, "_ttnn_weight", None), None
         bias, self._ttnn_bias = getattr(self, "_ttnn_bias", None), None
         self._ttnn_compute_config = None
+        self._ttnn_key = None
         if weight is None and bias is None:
             return
         ttnn = import_ttnn()
