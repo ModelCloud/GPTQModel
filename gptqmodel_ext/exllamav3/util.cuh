@@ -1,5 +1,10 @@
 #pragma once
 
+// gpu_assert reports through stderr; CUDA 13.1 no longer provides <cstdio> and
+// <cstdlib> transitively, so the device-side assertion path failed to compile.
+#include <cstdio>
+#include <cstdlib>
+
 // The half2/bfloat162 vectors below are built from the CUDA spellings
 // (__nv_bfloat162, __halves2bfloat162). Hipify rewrites those identifiers to
 // their HIP spellings in the generated util_hip.cuh, but hipify does not add
