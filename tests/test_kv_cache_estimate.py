@@ -396,12 +396,20 @@ def test_non_attention_blocks_contribute_nothing():
 
     config = _gqa(num_hidden_layers=4)
     config.layer_types = ["linear_attention", "moe", "full_attention", "mlp"]
+    # The linear layer is a Mamba-1 mixer: its conv/SSM state is sized from the
+    # declared dims, so the estimate stays exact and counts it per sequence.
+    config.mamba_d_state = 16
+    config.mamba_d_conv = 4
+    config.mamba_expand = 2
     estimate = estimate_kv_cache(config, dtype=torch.float16)
     assert estimate.is_exact is True
     assert estimate.growing_layers == 1
     assert estimate.linear_layers == 1
     assert estimate.block_layers == 2
     assert estimate.kv_bytes_per_token == 2 * 8 * 128 * 2
+    d_inner = 2 * 4096
+    assert estimate.state_layers == 1
+    assert estimate.state_bytes_per_sequence == d_inner * 16 * 4 + d_inner * 4 * 2
     line = estimate.describe()
     assert "2 non-attention block(s)" in line
     assert "linear-attention" in line
