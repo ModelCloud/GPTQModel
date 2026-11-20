@@ -195,6 +195,32 @@ void gemm_half_half_cuda
                  CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DFALT_TENSOR_OP);
 }
 
+void gemm_half_half_float_cuda
+(
+    cublasHandle_t cublas_handle,
+    const half* a,
+    const half* b,
+    float* c,
+    int size_m,
+    int size_n,
+    int size_k,
+    bool clear
+)
+{
+    // FP16 tensor-core GEMM with FP32 accumulate and an FP32 accumulator
+    // written directly to `c`. Keeping A/B in FP16 avoids the FP32 copies and
+    // the FP32 SGEMM the dense fallback used for a wide (biased) prefill.
+    const float alpha = 1.0f;
+    const float beta = clear ? 0.0f : 1.0f;
+    cublasGemmEx(cublas_handle,
+                 CUBLAS_OP_N, CUBLAS_OP_N,
+                 size_n, size_m, size_k,
+                 &alpha, b, CUDA_R_16F, size_n,
+                         a, CUDA_R_16F, size_k,
+                 &beta,  c, CUDA_R_32F, size_n,
+                 CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DFALT_TENSOR_OP);
+}
+
 void gemm_half_q_half_cuda
 (
     cublasHandle_t cublas_handle,

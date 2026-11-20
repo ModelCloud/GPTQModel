@@ -33,6 +33,15 @@
 
 ## Latest News 🗞️🚀
 
+**7.12.2**
+
+- **Quantization accuracy:** SmoothMSE now weights clipping errors by input importance. In a [3-bit RTN benchmark](https://github.com/ModelCloud/GPTQModel/pull/5294), it cut WikiText-2 perplexity by 30% on Qwen2.5-0.5B-Instruct versus the previous SmoothMSE. GPTQ, GPTAQ, FOEM, and QQQ exclude inactive inputs when fitting per-channel scales, and AWQ scores clipping candidates in FP32 to avoid half-precision rounding errors.
+- **Calibration and packing:** AWQ ignores padding when calibrating routed experts, GPTAQ and FOEM fix their native calibration corrections and low-sample fallbacks, and Paro restores its accuracy-tuned optimizer batch size. GSQ exports no longer depend on the search memory budget, asymmetric 8-bit packing preserves the intended codes for BF16 models, and MACaQ selects codes against the same BF16 scales it saves.
+- **Quantization memory:** GPTQ and QQQ used [about 4.4 GiB less temporary GPU memory](https://github.com/ModelCloud/GPTQModel/pull/5488#issuecomment-7003801849) in a large output-layer update benchmark. AWQ scale search also uses less memory. Set `CalibrationConfig(batch_size="auto")` to size calibration batches automatically.
+- **EXL3:** Native half-bit rates and [Q4NX at 2.5, 3.0, and 3.5 bits per weight](docs/exl3-native-decode.md#q4nx), with faster Q4NX encoding and tuned decode and prefill on NVIDIA Ada. On [AMD RDNA4 (gfx1200/gfx1201)](docs/exl3-native-decode.md#rdna4-hip-dispatch), AUTO can select native HIP GEMV and WMMA GEMM; EXL3 also adds the R4NX codebook and optional INT8-activation GEMV.
+- **Models:** Added DeepSeek V4.1 Flash checkpoint support, including packed MX inference on NVIDIA and [fused routed-expert decode for EXL3 Q4NX](docs/exl3-routed-decode.md#deepseek-v41-flash-q4nx).
+- **Inference:** Marlin can now run [asymmetric 4- and 8-bit GPTQ checkpoints](docs/gptq-marlin-asymmetric-selection.md) without activation order. Multiple backends preserve checkpoint bias precision and accumulate before rounding to the output dtype. `model.budget()` reports packed weight memory and estimates which context lengths and batch sizes fit within the memory budget and model limits.
+
 **7.11.4**
 
 - **Quantization:** SmoothMSE weights its shrink search by input saliency (the Hessian diagonal for GPTQ/QQQ fallbacks, weight magnitude for calibration-free RTN) and keeps the unclipped range when clipping would increase that weighted error; QQQ's GSQ calibration now uses the same FP32 activation scales as inference. AWQ samples routed-expert activations uniformly across the calibration set instead of favoring later batches. Paro retains mixed-shape batches, and SenseNova-Loop calibrates on every pass through its repeated layers.

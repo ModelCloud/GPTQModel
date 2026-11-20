@@ -2968,6 +2968,59 @@ def test_ttnn_group_indices_are_stored_row_major(chips):
     os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
     reason="explicit TTNN hardware gate",
 )
+@pytest.mark.parametrize("chips", [1, 4])
+@pytest.mark.parametrize(
+    "bias_value, wide",
+    [
+        (-257.0, True),   # FP16 value that BF16 rounds to -256
+        (-256.0, False),  # exactly representable in BF16
+    ],
+)
+def test_ttnn_bias_keeps_the_checkpoint_value(chips, bias_value, wide):
+    """A wider checkpoint bias is added to the FP32 accumulator (#5808).
+
+    The fused ``ttnn.linear`` bias operand is BF16, so ``-257`` would become
+    ``-256`` before the epilogue and the exact dot ``256 - 257 = -1`` would
+    come back as ``0``. A bias that does not round-trip through BF16 must take
+    the FP32 add; an exactly representable bias keeps the fused fast path.
+    """
+
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+    from gptqmodel.utils.ttnn_runtime import close_mesh, import_ttnn
+
+    layer = TTNNLinear(
+        bits=4, group_size=128, sym=True, desc_act=False,
+        in_features=256, out_features=128, bias=True,
+        format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.qweight.fill_(0x99999999 - 2**32)
+    layer.qzeros.fill_(0x88888888 - 2**32)
+    layer.scales.fill_(1.0)
+    layer.g_idx.copy_(torch.arange(256, dtype=torch.int32) // 128)
+    layer.bias = torch.full((128,), bias_value, dtype=torch.float16)
+    layer.qzero_format(2)
+    layer.ttnn_device_count = chips
+    x = torch.zeros(1, 256, dtype=torch.bfloat16)
+    x[0, 0] = 256
+    expected = (x.double() @ torch.ones(256, 128, dtype=torch.float64)
+                + layer.bias.double()).to(torch.bfloat16)
+    try:
+        layer.post_init()
+        assert layer._ttnn_layer.wide_bias is wide
+        ttnn = import_ttnn()
+        assert layer._ttnn_layer.bias.dtype == (ttnn.float32 if wide else ttnn.bfloat16)
+        with torch.inference_mode():
+            actual = layer(x)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
 def test_block_float_budget_counts_the_device_weight():
     """The ``bf8_b`` kernel's device weight is budgeted too (#5810)."""
 
