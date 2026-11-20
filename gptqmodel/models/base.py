@@ -2796,10 +2796,16 @@ class BaseQModel(nn.Module):
         embed_quant_mode: Optional[QuantizeEmbed] = None,
         checkpoint: Optional["CheckpointConfig"] = None,
         fuse: Optional[bool] = None,
+        # Weight-only direct-pack methods (GGUF, BitsAndBytes, NF12) skip the
+        # logging-only weight-error MAE by default; requesting it reconstructs
+        # every dense weight. It never changes the packed payload.
+        measure_weight_error: bool = False,
     ) -> Dict[str, List[Dict[str, str]]]:
         """Quantize the model with the calibration data and policy in ``calibration``.
 
         ``calibration`` may be ``None`` only for a weight-only quantize config.
+        ``measure_weight_error`` requests the direct-pack weight-error MAE; it
+        reconstructs each dense weight and never changes the packed payload.
         """
         run_started = time.perf_counter()
         if calibration is None:
@@ -3291,6 +3297,7 @@ class BaseQModel(nn.Module):
                     calibration=calibration,
                     backend=backend,
                     embed_quant_config=embed_quant_config,
+                    measure_weight_error=measure_weight_error,
                 )
             else:
                 if calibration.dataset is None:
@@ -3996,6 +4003,7 @@ class BaseQModel(nn.Module):
         backend: Optional[BACKEND],
         embed_quant_config: Optional[QuantizeEmbedConfig],
         run_plan: Optional[QuantizationRunPlan] = None,
+        measure_weight_error: bool = False,
     ):
         from ..looper.loop_processor import release_failed_run_processors
         from ..looper.weight_only_looper import WeightOnlyLooper
@@ -4022,6 +4030,7 @@ class BaseQModel(nn.Module):
             processor = processor_class(ProcessorStep.WEIGHT_ONLY)(
                 tokenizer=self.tokenizer,
                 qcfg=self.quantize_config,
+                measure_weight_error=measure_weight_error,
             )
 
             gc_context = (
