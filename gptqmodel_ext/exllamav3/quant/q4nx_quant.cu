@@ -3,6 +3,7 @@
 // Beam Viterbi adapted from AlexBrandes (Alex Brandes), AlexBrandes/exllamav3
 // at 0674697c45e2450ffd4538eb5ade0cf8e6a78f6d, q4n_quant.cu.
 // Copyright (c) 2025 Turboderp. See ../LICENSE.exllamav3.
+// ModelCloud extended Q4NX to 3.5 bits per weight with exact Viterbi search.
 
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/ops/empty.h>

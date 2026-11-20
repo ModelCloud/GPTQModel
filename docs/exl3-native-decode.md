@@ -15,7 +15,7 @@ values as their integer relatives.
 ## Q4NX
 
 Q4NX was designed for routed MoE experts at 2.5 and 3.0 bits per weight.
-GPT-QModel extends the same layout to 3.5 bits per weight. [Original Q4NX format specification](https://github.com/AlexBrandes/exllamav3/blob/41ef7819945fe421626da3c40c678053d240d051/doc/q4nx.md)
+ModelCloud extended Q4NX to 3.5 bits per weight using the same layout. [Original Q4NX format specification](https://github.com/AlexBrandes/exllamav3/blob/41ef7819945fe421626da3c40c678053d240d051/doc/q4nx.md)
 
 Set `EXL3Config(bits=2.5, codebook="q4nx")` for all selected projections,
 or assign both the rate and codebook to a subset through `dynamic`.
