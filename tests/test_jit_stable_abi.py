@@ -340,6 +340,7 @@ def test_stable_abi_sources_avoid_unstable_tensor_methods():
         ".cumsum(": re.compile(r"\.cumsum\("),
         ".contiguous()": re.compile(r"\.contiguous\(\)"),
         ".zero_()": re.compile(r"\.zero_\(\)"),
+        ".is_meta()": re.compile(r"\.is_meta\(\)"),
     }
     offenders = []
     for path in sorted(root.rglob("*")):

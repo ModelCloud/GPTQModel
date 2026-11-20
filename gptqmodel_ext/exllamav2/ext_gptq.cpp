@@ -84,7 +84,7 @@ int64_t make_q_matrix(
     // indexed by its values. Validate the checkpoint tensor at the op entry so
     // direct API callers cannot reach make_sequential() with an unchecked
     // index. Already-shuffled matrices do not consume g_idx.
-    if (gptq_g_idx.defined() && !gptq_g_idx.device().is_meta() && !already_shuffled)
+    if (gptq_g_idx.defined() && !at::is_meta(gptq_g_idx.device()) && !already_shuffled)
     {
         TORCH_CHECK(gptq_g_idx.is_cpu(), "gptq_g_idx must be a CPU tensor");
         TORCH_CHECK(gptq_g_idx.numel() == height,
