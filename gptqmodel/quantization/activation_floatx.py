@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from contextlib import nullcontext
 
@@ -59,6 +60,9 @@ class NVFP4ActivationHeadroom:
     The histogram records one maximum per 16-value input block.  It is small
     and fixed size regardless of calibration token count, so collecting the
     scale does not retain activation tensors or weaken the memory guard.
+    Blocks outside the histogram domain keep their exact count, minimum, and
+    maximum, so a percentile that resolves into an edge bin still reports a
+    real tail magnitude instead of that bin's midpoint.
     """
 
     _FP8_NORMAL_DYNAMIC_RANGE = 28672.0
@@ -82,6 +86,12 @@ class NVFP4ActivationHeadroom:
         self.log2_max = float(log2_max)
         self.hist: torch.Tensor | None = None
         self.running_max: torch.Tensor | None = None
+        self.running_min: torch.Tensor | None = None
+        # Exact count/min/max of the blocks outside the histogram domain,
+        # ordered underflow then overflow.
+        self.tail_count: torch.Tensor | None = None
+        self.tail_min: torch.Tensor | None = None
+        self.tail_max: torch.Tensor | None = None
 
     def _bin_index(self, values: torch.Tensor) -> torch.Tensor:
         fraction = (values - self.log2_min) / (self.log2_max - self.log2_min)
@@ -103,37 +113,90 @@ class NVFP4ActivationHeadroom:
         nonzero = block_amax[block_amax > 0]
         if nonzero.numel() == 0:
             return
+        current_min = nonzero.min()
+        self.running_min = current_min if self.running_min is None else torch.minimum(
+            self.running_min.to(current_min.device), current_min
+        )
+        log2_values = torch.log2(nonzero)
+        underflow = log2_values < self.log2_min
+        overflow = log2_values >= self.log2_max
         counts = torch.bincount(
-            self._bin_index(torch.log2(nonzero)), minlength=self.num_bins
+            self._bin_index(log2_values[~(underflow | overflow)]), minlength=self.num_bins
         )
         if self.hist is None:
             self.hist = torch.zeros(
                 self.num_bins, dtype=torch.int64, device=block_amax.device
             )
+            # The edge bins would fold every out-of-domain block into one count
+            # whose midpoint is decades away from the data (#5651).
+            self.tail_count = torch.zeros(2, dtype=torch.int64, device=self.hist.device)
+            self.tail_min = torch.full(
+                (2,), float("inf"), dtype=torch.float32, device=self.hist.device
+            )
+            self.tail_max = torch.zeros(2, dtype=torch.float32, device=self.hist.device)
         self.hist += counts.to(self.hist.device)
+        for region, mask in ((0, underflow), (1, overflow)):
+            values = nonzero[mask].to(self.hist.device)
+            if values.numel():
+                self.tail_count[region] += values.numel()
+                self.tail_min[region] = torch.minimum(self.tail_min[region], values.min())
+                self.tail_max[region] = torch.maximum(self.tail_max[region], values.max())
+
+    def _tail_percentile(self, region: int, fraction: float) -> float:
+        """Interpolate a percentile inside the observed under/overflow range."""
+        lo = float(self.tail_min[region].item())
+        hi = float(self.tail_max[region].item())
+        if lo == hi or fraction <= 0.0:
+            return lo
+        if fraction >= 1.0:
+            return hi
+        return float(2.0 ** (math.log2(lo) + fraction * (math.log2(hi) - math.log2(lo))))
+
+    def _clamp_to_observed(self, value: float) -> float:
+        """A percentile estimate must stay inside the block magnitudes seen."""
+        if self.running_min is not None:
+            value = max(value, float(self.running_min.item()))
+        if self.running_max is not None:
+            value = min(value, float(self.running_max.item()))
+        return value
 
     def _percentile(self, percentile: float,
                     floor_value: float | None = None) -> float | None:
         if self.hist is None:
             return None
         counts = self.hist.clone()
+        under_count = int(self.tail_count[0].item())
+        over_count = int(self.tail_count[1].item())
         if floor_value is not None and floor_value > 0:
             floor = torch.tensor(
                 floor_value, device=counts.device, dtype=torch.float32
             )
             floor_bin = int(self._bin_index(torch.log2(floor)).item())
             counts[:floor_bin] = 0
-        total = counts.sum()
-        if int(total.item()) == 0:
+            if floor_bin > 0:
+                # The floor sits above the histogram's first edge, so every
+                # underflow block is below it.
+                under_count = 0
+        total = int(counts.sum().item()) + under_count + over_count
+        if total == 0:
             return None
-        target = percentile / 100.0 * total.float()
-        index = int(torch.searchsorted(counts.cumsum(0), target).clamp(
+        target = percentile / 100.0 * total
+        if under_count and target <= under_count:
+            return self._tail_percentile(0, target / under_count)
+        target -= under_count
+        cumulative = counts.cumsum(0)
+        in_range_total = int(cumulative[-1].item())
+        if over_count and target > in_range_total:
+            return self._tail_percentile(1, (target - in_range_total) / over_count)
+        index = int(torch.searchsorted(
+            cumulative, torch.tensor(target, dtype=torch.float32, device=counts.device)
+        ).clamp(
             0, self.num_bins - 1
         ).item())
         exponent = self.log2_min + (index + 0.5) / self.num_bins * (
             self.log2_max - self.log2_min
         )
-        return float(2.0 ** exponent)
+        return self._clamp_to_observed(2.0 ** exponent)
 
     @torch.no_grad()
     def compute_amax(self) -> torch.Tensor:
