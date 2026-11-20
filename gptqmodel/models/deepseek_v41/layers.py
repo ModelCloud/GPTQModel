@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Torch operators for the published DeepSeek-V4.1-Flash weight format."""
+"""Operators for the published DeepSeek-V4.1-Flash weight format."""
 
 import torch
 from torch import nn
@@ -9,6 +9,7 @@ from torch.nn import functional as F
 
 from ...quantization.activation_floatx import _e2m1_nearest_values
 from ...quantization.dtype import dequantize_fp8
+from ...utils.macaq_triton import mxfp8_scaled_linear
 from ...utils.marlin import (
     gptq_marlin_gemm,
     marlin_is_tile_aligned,
@@ -20,11 +21,16 @@ from ...utils.marlin_scalar_type import scalar_types
 from ...utils.model_dequant import dequantize_deepseek_v4_fp4_expert
 
 
-def fp8_roundtrip(x):
+def _quantize_fp8_blocks(x):
     blocks = x.float().unflatten(-1, (-1, 32))
     scale = (blocks.abs().amax(-1, keepdim=True).clamp_min(1e-4) / 448).log2().ceil().exp2()
-    rounded = (blocks / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float()
-    return (rounded * scale).flatten(-2).to(x.dtype)
+    codes = (blocks / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
+    return codes, scale
+
+
+def fp8_roundtrip(x):
+    codes, scale = _quantize_fp8_blocks(x)
+    return (codes.float() * scale).flatten(-2).to(x.dtype)
 
 
 def fp4_roundtrip(x, *, compressed_kv=False):
@@ -40,7 +46,7 @@ def fp4_roundtrip(x, *, compressed_kv=False):
 
 
 class V41PackedLinear(nn.Module):
-    """Keep source weights packed. Materialize one projection for each Torch matmul."""
+    """Store the published weights for the Torch reference path."""
 
     def __init__(self, in_features, out_features, *, fp4=False, groups=1):
         super().__init__()
@@ -70,6 +76,24 @@ class V41PackedLinear(nn.Module):
             return F.linear(x, weight)
         weight = weight.unflatten(0, (self.groups, -1))
         return torch.einsum("bsgd,grd->bsgr", x, weight)
+
+
+class V41NativeMXLinear(nn.Module):
+    """Run block-scaled MMA directly from the checkpoint's packed bytes."""
+
+    def __init__(self, source):
+        super().__init__()
+        self.groups = source.groups
+        self.register_buffer("weight", source.weight if source.fp4 else source.weight.view(torch.uint8))
+        self.register_buffer("scale", source.scale.view(torch.uint8))
+
+    def forward(self, x):
+        codes, scale = _quantize_fp8_blocks(x)
+        # These scales are powers of two. The FP32 exponent is the E8M0 byte.
+        exponents = (scale.view(torch.int32) >> 23).to(torch.uint8).squeeze(-1)
+        return mxfp8_scaled_linear(
+            codes.flatten(-2), exponents, self.weight, self.scale, groups=self.groups, dtype=x.dtype,
+        )
 
 
 class V41MarlinLinear(nn.Module):

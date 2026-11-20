@@ -310,12 +310,16 @@ def test_v41_packed_projection_matches_independent_weights_and_retains_packed_st
 def test_v41_cuda_load_runs_packed_projections(v41_checkpoint, monkeypatch):
     from gptqmodel.models._const import DEVICE, normalize_device
     from gptqmodel.models.deepseek_v41 import layers
+    from gptqmodel.utils.macaq_triton import TRITON_AVAILABLE
     from gptqmodel.utils.marlin import marlin_runtime_available, marlin_runtime_error
 
     device = torch.device("cuda", torch.cuda.device_count() - 1) if torch.cuda.is_available() else torch.device("cpu")
     if normalize_device(device) != DEVICE.CUDA or torch.cuda.get_device_capability(device) < (8, 0):
         pytest.skip("NVIDIA CUDA compute capability 8.0 or later is required")
-    if not marlin_runtime_available(torch.bfloat16):
+    native_mx = torch.cuda.get_device_capability(device)[0] in (10, 11, 12)
+    if native_mx and not TRITON_AVAILABLE:
+        pytest.skip("Triton is required for native MX")
+    if not native_mx and not marlin_runtime_available(torch.bfloat16):
         pytest.skip(marlin_runtime_error(torch.bfloat16))
 
     source = GPTQModel.load(v41_checkpoint, device="cpu").model
@@ -349,10 +353,16 @@ def test_v41_cuda_load_runs_packed_projections(v41_checkpoint, monkeypatch):
 
         buffers = tuple(projection.buffers())
         assert not list(projection.parameters())
-        assert projection.qweight.nbytes == raw.weight.nbytes
-        assert projection.scales.nbytes == raw.scale.nbytes * (1 if raw.fp4 else 32)
         projection.to(dtype=torch.bfloat16)
-        assert projection.scales.dtype == torch.uint8
+        if native_mx:
+            assert isinstance(projection, layers.V41NativeMXLinear)
+            assert torch.equal(projection.weight.cpu().view(torch.uint8), raw.weight.view(torch.uint8))
+            assert torch.equal(projection.scale.cpu(), raw.scale.view(torch.uint8))
+        else:
+            assert isinstance(projection, layers.V41MarlinLinear)
+            assert projection.qweight.dtype == torch.int32 and projection.qweight.nbytes == raw.weight.nbytes
+            assert projection.scales.dtype == torch.uint8
+            assert projection.scales.nbytes == raw.scale.nbytes * (1 if raw.fp4 else 32)
         for tokens in (1, 17):
             shape = (2, tokens, raw.groups, weight.size(1)) if raw.groups > 1 else (tokens, weight.size(1))
             x = torch.randn(shape, generator=generator).bfloat16()
@@ -366,7 +376,6 @@ def test_v41_cuda_load_runs_packed_projections(v41_checkpoint, monkeypatch):
             actual = projection(x.to(device)).cpu()
             torch.testing.assert_close(actual, expected.bfloat16(), atol=2e-3, rtol=2e-3)
             assert all(a is b for a, b in zip(projection.buffers(), buffers, strict=True))
-            assert tuple(t.dtype for t in buffers) == (torch.int32, torch.uint8)
             assert all(t.device == device for t in buffers)
 
 
@@ -390,6 +399,30 @@ def test_v41_public_load_rejects_quantization(v41_checkpoint):
 def test_v41_marlin_backend_requires_cuda(v41_checkpoint):
     with pytest.raises(ValueError, match="Marlin requires NVIDIA CUDA"):
         GPTQModel.load(v41_checkpoint, device="cpu", backend="marlin")
+
+
+def test_v41_auto_prefers_native_mx_on_blackwell(monkeypatch):
+    from gptqmodel.models._const import DEVICE
+    from gptqmodel.models.deepseek_v41 import checkpoint
+    from gptqmodel.utils.backend import BACKEND
+
+    ampere = torch.device("cuda:1")
+    blackwell = torch.device("cuda:3")
+    monkeypatch.setattr(checkpoint, "normalize_device", lambda device: DEVICE.CUDA)
+    capability = {ampere: (8, 0), blackwell: (12, 0)}
+    monkeypatch.setattr(torch.cuda, "get_device_capability", capability.__getitem__)
+    assert checkpoint._device_projection_backend(ampere, BACKEND.AUTO) == BACKEND.MARLIN
+    assert checkpoint._device_projection_backend(blackwell, BACKEND.AUTO) == BACKEND.TRITON
+    assert checkpoint._device_projection_backend(blackwell, BACKEND.MARLIN) == BACKEND.MARLIN
+    assert checkpoint._device_projection_backend(blackwell, BACKEND.TORCH) == BACKEND.TORCH
+    monkeypatch.setattr(checkpoint, "TRITON_AVAILABLE", True)
+    monkeypatch.setattr(checkpoint, "marlin_runtime_available", lambda _: pytest.fail("Marlin was loaded on Blackwell"))
+    with torch.device("meta"):
+        model = torch.nn.Sequential(checkpoint.V41PackedLinear(128, 128))
+    classes = checkpoint._configure_projection_backends(model, {"0.weight": blackwell}, BACKEND.AUTO)
+    assert classes == {"0": checkpoint.V41NativeMXLinear}
+    monkeypatch.setattr(checkpoint, "normalize_device", lambda device: DEVICE.ROCM)
+    assert checkpoint._device_projection_backend(blackwell, BACKEND.AUTO) == BACKEND.TORCH
 
 
 def test_v41_hyper_connection_normalizes_before_rounding():

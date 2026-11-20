@@ -225,24 +225,31 @@ if TRITON_AVAILABLE:
         )
 
     @triton.jit
-    def _dense_w4a4_kernel(
+    def _dense_mx_gemm_kernel(
         a_ptr, b_ptr, asc_ptr, bsc_ptr, c_ptr, bias_ptr, M, N, K,
         stride_am, stride_bn, stride_asm, stride_bsn, stride_cm,
         OUT_SCALE: tl.constexpr, HAS_BIAS: tl.constexpr,
         BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        A_FORMAT: tl.constexpr = "e2m1", B_FORMAT: tl.constexpr = "e2m1",
+        SCALE_ROWS: tl.constexpr = 1, FP4_AS_FP8: tl.constexpr = False,
     ):
         pid_m = tl.program_id(0)
         pid_n = tl.program_id(1)
+        group = tl.program_id(2).to(tl.int64)
+        A_PACK: tl.constexpr = 2 if A_FORMAT == "e2m1" else 1
+        B_PACK: tl.constexpr = 2 if B_FORMAT == "e2m1" else 1
         offs_m = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
         offs_n = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)).to(tl.int64)
         m_mask = offs_m < M
         n_mask = offs_n < N
-        offs_kb = tl.arange(0, BLOCK_K // 2)
+        offs_n_grouped = group * N + offs_n
+        offs_ka = tl.arange(0, BLOCK_K // A_PACK)
+        offs_kb = tl.arange(0, BLOCK_K // B_PACK)
         offs_ks = tl.arange(0, BLOCK_K // 32)
-        a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_kb[None, :]
-        b_ptrs = b_ptr + offs_n[:, None] * stride_bn + offs_kb[None, :]
-        asc_ptrs = asc_ptr + offs_m[:, None] * stride_asm + offs_ks[None, :]
-        bsc_ptrs = bsc_ptr + offs_n[:, None] * stride_bsn + offs_ks[None, :]
+        a_ptrs = a_ptr + group * (K // A_PACK) + offs_m[:, None] * stride_am + offs_ka[None, :]
+        b_ptrs = b_ptr + offs_n_grouped[:, None] * stride_bn + offs_kb[None, :]
+        asc_ptrs = asc_ptr + group * (K // 32) + offs_m[:, None] * stride_asm + offs_ks[None, :]
+        bsc_ptrs = bsc_ptr + (offs_n_grouped[:, None] // SCALE_ROWS) * stride_bsn + offs_ks[None, :]
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for block in range(0, tl.cdiv(K, BLOCK_K)):
@@ -250,24 +257,40 @@ if TRITON_AVAILABLE:
             # with the loop offset, as the upstream MoE kernel does; a mask
             # built once from offs_kb alone only clips the first tile and lets
             # later tiles read the next row's packed bytes and E8M0 exponents.
-            kb_mask = block * (BLOCK_K // 2) + offs_kb < K // 2
+            ka_mask = block * (BLOCK_K // A_PACK) + offs_ka < K // A_PACK
+            kb_mask = block * (BLOCK_K // B_PACK) + offs_kb < K // B_PACK
             ks_mask = block * (BLOCK_K // 32) + offs_ks < K // 32
-            a = tl.load(a_ptrs, mask=m_mask[:, None] & kb_mask[None, :], other=0)
+            a = tl.load(a_ptrs, mask=m_mask[:, None] & ka_mask[None, :], other=0)
             b = tl.load(b_ptrs, mask=n_mask[:, None] & kb_mask[None, :], other=0)
             asc = tl.load(asc_ptrs, mask=m_mask[:, None] & ks_mask[None, :], other=127)
             bsc = tl.load(bsc_ptrs, mask=n_mask[:, None] & ks_mask[None, :], other=127)
-            acc = tl.dot_scaled(a, asc, "e2m1", b.T, bsc, "e2m1", acc)
-            a_ptrs += BLOCK_K // 2
-            b_ptrs += BLOCK_K // 2
+            if FP4_AS_FP8:
+                # The SM12x Triton lowering takes its hardware path for equal
+                # formats. All E2M1 values have an exact E4M3 encoding.
+                b = _fp4_to_fp8_codes(b)
+                acc = tl.dot_scaled(a, asc, A_FORMAT, b.T, bsc, "e4m3", acc)
+            else:
+                acc = tl.dot_scaled(a, asc, A_FORMAT, b.T, bsc, B_FORMAT, acc)
+            a_ptrs += BLOCK_K // A_PACK
+            b_ptrs += BLOCK_K // B_PACK
             asc_ptrs += BLOCK_K // 32
             bsc_ptrs += BLOCK_K // 32
 
         acc = acc * OUT_SCALE
         if HAS_BIAS:
-            bias = tl.load(bias_ptr + offs_n, mask=n_mask, other=0).to(tl.float32)
+            bias = tl.load(bias_ptr + offs_n_grouped, mask=n_mask, other=0).to(tl.float32)
             acc = acc + bias[None, :]
-        c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :]
+        c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n_grouped[None, :]
         tl.store(c_ptrs, acc, mask=m_mask[:, None] & n_mask[None, :])
+
+    @triton.jit
+    def _fp4_to_fp8_codes(packed):
+        codes = tl.interleave(packed & 15, packed >> 4)
+        magnitude = codes & 7
+        # 0x30 encodes 0.5 in E4M3. E2M1 magnitudes 2–7 step by four.
+        fp8_magnitude = tl.where(magnitude > 1, 0x30 + 4 * magnitude, tl.where(magnitude == 1, 0x30, 0))
+        sign = (codes & 8) << 4
+        return (sign | fp8_magnitude).to(tl.uint8)
 
     @triton.jit
     def _dequant_w4_to_bf16_kernel(pk_ptr, sc_ptr, out_ptr, K, BLOCK_G: tl.constexpr):
@@ -473,7 +496,7 @@ def mxfp4_w4a4_linear(
     w_scales_bytes = w_scales.view(torch.uint8)
     bias_tensor = bias.contiguous() if bias is not None else w_scales_bytes
     with _launch_device(x.device):
-        _dense_w4a4_kernel[grid](
+        _dense_mx_gemm_kernel[grid](
             a_packed, w_packed, a_scales, w_scales_bytes, out, bias_tensor, rows, n, k,
             a_packed.stride(0), w_packed.stride(0), a_scales.stride(0), w_scales_bytes.stride(0),
             out.stride(0),
@@ -482,6 +505,41 @@ def mxfp4_w4a4_linear(
             num_warps=num_warps, num_stages=num_stages,
         )
     return out.reshape(*lead, n)
+
+
+def native_mx_launch_config(capability: tuple[int, int], rows: int, fp4: bool) -> dict:
+    """GEMM tiles that lower to hardware block-scaled MMA on Blackwell."""
+    warp_mma = capability[0] == 12
+    return {
+        "BLOCK_M": (16 if rows <= 16 else 64) if warp_mma else 128,
+        "BLOCK_N": 64 if warp_mma else 128,
+        "BLOCK_K": 128,
+        "FP4_AS_FP8": warp_mma and fp4,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
+
+
+def mxfp8_scaled_linear(activations, activation_scales, weight, weight_scales, *, groups, dtype):
+    """Native MXFP8 activations against E2M1 or E4M3 checkpoint weights."""
+    k = activations.size(-1)
+    n = weight.size(0) // groups
+    rows = activations.numel() // (k * groups)
+    out = activations.new_empty((*activations.shape[:-1], n), dtype=dtype)
+    if not rows:
+        return out
+    fp4 = weight.dtype == torch.int8
+    config = native_mx_launch_config(torch.cuda.get_device_capability(activations.device), rows, fp4)
+    grid = (triton.cdiv(rows, config["BLOCK_M"]), triton.cdiv(n, config["BLOCK_N"]), groups)
+    scales = weight_scales.view(torch.uint8)
+    with _launch_device(activations.device):
+        _dense_mx_gemm_kernel[grid](
+            activations.view(torch.uint8), weight.view(torch.uint8), activation_scales, scales, out, scales,
+            rows, n, k, groups * k, weight.stride(0), groups * (k // 32), scales.stride(0), groups * n,
+            OUT_SCALE=1.0, HAS_BIAS=False, A_FORMAT="e4m3",
+            B_FORMAT="e2m1" if fp4 else "e4m3", SCALE_ROWS=1 if fp4 else 32, **config,
+        )
+    return out
 
 
 def mxfp4_w4a16_linear(
