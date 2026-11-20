@@ -35,7 +35,11 @@ from ._fused_train_state import (
     refresh_runtime_zero_offsets,
     restore_fused_train_state,
 )
-from ._numerics import linear_wide_bias, matmul_fp32_reduce
+from ._numerics import (
+    linear_wide_bias,
+    matmul_fp32_reduce,
+    needs_wide_bias_epilogue,
+)
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 
 
@@ -635,7 +639,13 @@ class TorchFusedLinear(PackableQuantLinear):
                 self.wf_unsqueeze_zero,
             ).to(torch.uint8)
             zero_codes = torch.bitwise_and(zero_codes, self.maxq).reshape(self.scales.shape)
-            compute_dtype = _cpu_int4pack_scale_dtype(self.scales, zero_codes, self.bits, dtype)
+            compute_dtype = _cpu_int4pack_scale_dtype(
+                self.scales,
+                zero_codes,
+                self.bits,
+                dtype,
+                wide_bias=needs_wide_bias_epilogue(self.bias, dtype),
+            )
         else:
             compute_dtype = dtype
         # ``compute_scales`` is the packed runtime metadata; ``self.scales``
