@@ -1606,6 +1606,7 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
         force_serial: bool = False,
         preserve_module_devices: bool = False,
         apply_moe_config: bool = True,
+        consume_inputs: bool = False,
     ) -> List[List[torch.Tensor]]:
         """Run cached batches through the module using serial or parallel execution."""
 
@@ -1632,6 +1633,7 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
             force_serial=force_serial,
             preserve_module_devices=preserve_module_devices,
             apply_moe_config=apply_moe_config,
+            consume_inputs=consume_inputs,
             select_forward_devices_fn=select_forward_devices,
         )
 
