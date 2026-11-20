@@ -34,10 +34,10 @@ if TYPE_CHECKING:
 _EXL3_BUFFER_NAMES = ("trellis", "suh", "svh", "su", "sv", "bias", *EXL3_CODEBOOK_MARKERS)
 _EXL3_REQUIRED_BUFFERS = ("trellis", "suh", "svh", "su", "sv", *EXL3_CODEBOOK_MARKERS)
 
-# The native EXL3 kernels accept FP16 only. A BF16 activation inside FP16's
-# finite range converts exactly, so the default BF16 checkpoint can use them.
+# The native EXL3 kernels accept FP16 only. Bound both the input and its
+# product with the checkpoint's suh scales before the FP16 input rotation.
 # The Hadamard rotation of a 128-wide block is bounded by sqrt(128) times the
-# input maximum, so a row maximum at or below 65504 / sqrt(128) survives the
+# scaled input maximum, so a maximum at or below 65504 / sqrt(128) survives the
 # rotation without overflowing FP16. Rows at or below the bound are passed
 # through untouched, so ordinary activations are bit-exact with the plain FP16
 # path, and a row that carries one massive activation is divided only by the
@@ -400,15 +400,18 @@ class ExllamaV3Linear(nn.Module):
     def _native_bf16_input(
         self, x: torch.Tensor
     ) -> Optional[tuple[torch.Tensor, Optional[torch.Tensor]]]:
-        """Map a BF16 activation onto the FP16-only native kernel contract.
+        """Map FP16/BF16 activations onto the FP16-only native kernel contract.
 
         BF16's 8-bit significand is a subset of FP16's 11-bit one, so every BF16
-        value inside FP16's finite range converts exactly. Above ``_FP16_SAFE_AMAX`` a
-        row is divided by the smallest power of two that brings it back inside
-        the bound, and the kernel output row is multiplied back. The input
+        value inside FP16's finite range converts exactly. Bound both ``x``
+        and ``x * suh``: the native Hadamard applies the checkpoint scales
+        before rotating. Above ``_FP16_SAFE_AMAX`` a row is divided by the
+        smallest power of two that brings it back inside the bound, and the kernel output row is multiplied back. The input
         Hadamard rotation stays inside FP16's range, and power-of-two scaling
         is exact, so only the FP16 cast rounds. The GEMM writes FP32, so an
-        output row above FP16's range is not rounded to inf (#5331).
+        output row above FP16's range is not rounded to inf (#5331). For BF16
+        with checkpoint scales, the bound and output scale use FP64: their
+        exponent range can exceed FP32 even if the projection is finite.
 
         The scale is per row, not per tensor: a single outlier token (the BOS
         massive activation on a prefill, for example) would otherwise divide
@@ -420,7 +423,7 @@ class ExllamaV3Linear(nn.Module):
         ``None`` only for an empty batch. Multiply the unbiased kernel result
         by ``output_scale`` before adding the checkpoint bias. Rows that need
         no scaling carry a scale of exactly 1. Returns ``None`` for non-finite
-        activations so they keep the FP32 Torch reconstruction path.
+        input bounds so they keep the FP32 Torch reconstruction path.
 
         The whole decision is computed on the device: there is no
         ``float(amax)``/``.item()``/``bool()`` of the activation per forward,
@@ -449,20 +452,33 @@ class ExllamaV3Linear(nn.Module):
             self._native_bf16_inputs_finite = True
             return self._prescale_from_row_amax(x, row_amax)
 
-        fused = _try_fused_prescale(x)
+        fused = _try_fused_prescale(x, suh=getattr(self, "suh", None))
         if fused is not None:
             return fused
         return self._prescale_from_row_amax(x, self._row_amax(x))
 
     def _row_amax(self, x: torch.Tensor) -> torch.Tensor:
-        """Per-row max-abs of ``x`` as FP32, reduced on the device (#4955)."""
+        """Bound the input and its checkpoint-scaled values on device."""
         # ``vector_norm(inf)`` is the max-abs reduction without materializing
         # an ``abs`` copy, and it is the cheapest form on CUDA. Reducing per row
         # keeps the decision on the device; a single tensor-wide scalar would
         # have to be read back to the host to be compared (#4955).
-        return torch.linalg.vector_norm(
+        row_amax = torch.linalg.vector_norm(
             x.detach(), ord=float("inf"), dim=-1, keepdim=True
         ).float()
+        suh = getattr(self, "suh", None)
+        if suh is not None:
+            # The native input Hadamard multiplies by the checkpoint scales
+            # before rotating. Bound that product as well as the FP16 input.
+            # BF16's exponent range can overflow an FP32 product or scale
+            # even when the final projection is finite after cancellation.
+            bound_dtype = torch.float64 if x.dtype == torch.bfloat16 else torch.float32
+            scaled_amax = torch.linalg.vector_norm(
+                x.detach().to(bound_dtype) * suh[:x.shape[-1]].to(bound_dtype),
+                ord=float("inf"), dim=-1, keepdim=True,
+            )
+            row_amax = torch.maximum(row_amax, scaled_amax)
+        return row_amax
 
     def _prescale_from_row_amax(
         self, x: torch.Tensor, row_amax: torch.Tensor
@@ -479,11 +495,11 @@ class ExllamaV3Linear(nn.Module):
         # ``device_map`` split or an explicit ``cuda:1`` placement (#5263).
         # ``2**exponent`` is exact for every integer exponent here, and only
         # the rows above the FP16 bound reach this value. The exponent is
-        # widened to float32 first so the process default dtype cannot clip a
-        # large ``2**exponent`` to inf (#5297).
+        # converted to the bound's explicit FP32/FP64 dtype so neither the
+        # default dtype nor BF16's wide range clips the power of two to inf.
         output_scale = torch.where(
             row_amax > _FP16_SAFE_AMAX,
-            torch.pow(2.0, exponent.to(torch.float32)).to(row_amax.dtype),
+            torch.pow(2.0, exponent.to(row_amax.dtype)),
             torch.ones_like(row_amax),
         )
         return (x / output_scale).to(torch.float16), output_scale
@@ -494,7 +510,7 @@ class ExllamaV3Linear(nn.Module):
         """Eager reference/fallback re-scale (#5148).
 
         Undoes ``_native_bf16_input``'s pre-scale, keeping the bias unscaled.
-        The fused path writes BF16 directly; this returns FP32.
+        The fused path writes the requested dtype; this keeps FP32/FP64 until then.
         """
         bias = getattr(self, "bias", None)
         output = result.float() * output_scale.reshape(*result.shape[:-1], 1)
@@ -514,19 +530,10 @@ class ExllamaV3Linear(nn.Module):
             # BF16 off CUDA already used this path, so its behaviour is
             # unchanged.
             return self._ensure_torch_inner().forward(x)
-        if input_dtype == torch.float16:
-            inner = self._ensure_inner()
-            result = inner.forward(
-                x.to(dtype=torch.float16),
-                {},
-                out_dtype=torch.float16,
-            )
-            return result[..., :self.out_features].to(input_dtype)
-
-        # BF16 is the default dtype of most EXL3 checkpoints. Keep it on the
+        # FP16 and BF16 both need the input-range guard. Keep them on the
         # native kernels instead of the ~20-200x slower Torch reconstruction
         # (#4767); the pre-scale keeps #3731's wide-input guarantee.
-        if input_dtype == torch.bfloat16 and x.is_cuda:
+        if input_dtype == torch.float16 or (input_dtype == torch.bfloat16 and x.is_cuda):
             prepared = self._native_bf16_input(x)
             if prepared is not None:
                 inner = self._ensure_inner()
@@ -548,9 +555,10 @@ class ExllamaV3Linear(nn.Module):
                         getattr(self, "bias", None),
                         self.out_features,
                         result_has_bias=False,
+                        output_dtype=input_dtype,
                     )
                     if fused is not None:
-                        # Already BF16: the trailing ``.to`` is a no-op.
+                        # The epilogue casts once, after rescaling and bias.
                         return fused.to(input_dtype)
                     result = self._rescale_native_output(
                         native_result[..., :self.out_features], output_scale

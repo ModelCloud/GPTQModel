@@ -133,7 +133,7 @@ def _disable_fused_ops(monkeypatch):
     ``raising=False`` keeps this usable against a pre-#5148 checkout, where the
     names do not exist yet, so the timing bound can be run red.
     """
-    monkeypatch.setattr(exl3_bridge, "_try_fused_prescale", lambda x: None, raising=False)
+    monkeypatch.setattr(exl3_bridge, "_try_fused_prescale", lambda x, **kw: None, raising=False)
     monkeypatch.setattr(
         exl3_bridge, "_try_fused_rescale", lambda *a, **kw: None, raising=False
     )
@@ -303,13 +303,10 @@ def test_missing_fused_ops_fall_back_to_the_eager_path(fused_ops, quantized_laye
 
 @requires_cuda
 def test_unsupported_inputs_decline_the_fused_path(fused_ops):
-    """CPU, FP16/FP32, empty and non-contiguous activations keep the eager path."""
+    """CPU, FP32, empty and non-contiguous activations keep the eager path."""
     cuda = torch.device("cuda")
     assert fused_kernels.try_prescale(
         torch.zeros(2, 512, dtype=torch.bfloat16)
-    ) is None
-    assert fused_kernels.try_prescale(
-        torch.zeros(2, 512, device=cuda, dtype=torch.float16)
     ) is None
     assert fused_kernels.try_prescale(
         torch.zeros(2, 512, device=cuda, dtype=torch.float32)
@@ -446,3 +443,32 @@ def test_bf16_decode_is_within_1_3x_of_fp16_per_linear(monkeypatch):
     assert eager_us / fp16_us > _MAX_BF16_FP16_RATIO, message
     assert fused_us / fp16_us <= _MAX_BF16_FP16_RATIO, message
     assert fused_us < eager_us, message
+
+
+@requires_cuda
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_checkpoint_scaled_prescale_and_epilogue(fused_ops, dtype):
+    """The fused guard bounds x*suh and retains one final output rounding."""
+    x = torch.tensor([[6000., -4096., 1., 0.], [0.5, -0.5, 0., 1.]],
+                     device="cuda", dtype=dtype)
+    suh = torch.tensor([1., -2., 0.5, 1.], device="cuda", dtype=torch.float16)
+    # The wide row needs scale 2; the ordinary row stays unscaled. These
+    # values are independent of the production bound/scale helper.
+    expected_scale = torch.tensor([[2.], [1.]], device="cuda",
+                                  dtype=torch.float64 if dtype == torch.bfloat16 else torch.float32)
+    prepared, scale = fused_kernels.try_prescale(x, suh=suh)
+    torch.testing.assert_close(scale, expected_scale, rtol=0, atol=0)
+    torch.testing.assert_close(prepared, (x.double() / expected_scale).half(), rtol=0, atol=0)
+    bridge = _bridge(4)
+    bridge.suh = suh
+    eager, eager_scale = bridge._native_bf16_input(x)
+    assert _bits_equal(prepared, eager)
+    assert _bits_equal(scale, eager_scale)
+
+    result = torch.tensor([[32768., 1.001, -32768., 0.], [1., -1., 0., 2.]], device="cuda")
+    bias = torch.tensor([-65535., 0.1, 65535., -0.1], device="cuda")
+    actual = fused_kernels.try_rescale(result, scale, bias, 4,
+                                      result_has_bias=False, output_dtype=dtype)
+    expected = (result.double() * expected_scale.double() + bias.double()).to(dtype)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert actual.dtype == dtype
