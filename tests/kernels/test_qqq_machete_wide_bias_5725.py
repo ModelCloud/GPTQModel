@@ -23,8 +23,6 @@ import torch
 
 import gptqmodel.nn_modules.qlinear.machete as machete_module
 import gptqmodel.nn_modules.qlinear.machete_awq as machete_awq_module
-from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
-from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
 from gptqmodel.utils.machete import scalar_types
 from gptqmodel.utils.qqq import qqq_runtime_available, qqq_runtime_error
@@ -188,8 +186,8 @@ def _bare_machete(cls):
 
 
 MACHETE_CASES = (
-    (machete_module, MacheteLinear),
-    (machete_awq_module, AwqMacheteLinear),
+    (machete_module, machete_module.MacheteLinear),
+    (machete_awq_module, machete_awq_module.AwqMacheteLinear),
 )
 
 
