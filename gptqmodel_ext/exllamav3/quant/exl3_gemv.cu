@@ -171,4 +171,200 @@ bool exl3_gemv_try_launch
     C10_CUDA_CHECK(status);
     return true;
 }
+#else  // __HIP_PLATFORM_AMD__ || USE_ROCM
+
+#include <cuda_fp16.h>
+#include "exl3_gemv.cuh"
+
+#include <c10/cuda/CUDAGuard.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
+#include <cstdlib>
+#include <cstdint>
+#include "../util.h"
+#include "../util.cuh"
+#include "exl3_gemv_kernel.cuh"
+#include "exl3_devctx.cuh"
+
+namespace {
+
+// Launch geometry: both configs are 512 threads, 16 warps. Config 0 gives each warp a
+// 32-column block with an 8-way k split (attention projections), config 1 a 64-column
+// block with a 4-way k split (wide FFN projections).
+struct HipGemvCfg
+{
+    int wk;
+    int wt;
+};
+
+// Per-device arch gate: the kernel is one warp per tile and uses v_dot2_f32_f16, so it
+// only runs on wave32 RDNA3/RDNA4. 0 = unknown, 1 = yes, 2 = no (idempotent, so the race
+// between two first calls is benign).
+int8_t hip_gemv_arch_ok[MAX_DEVICES] = {};
+
+bool exl3_hip_gemv_arch_ok(int device)
+{
+    if (device < 0 || device >= MAX_DEVICES) return false;
+    int8_t& cached = hip_gemv_arch_ok[device];
+    if (cached == 0)
+    {
+        cudaDeviceProp prop;
+        const bool ok = cudaGetDeviceProperties(&prop, device) == cudaSuccess
+                     && prop.major >= 11 && prop.warpSize == 32;
+        if (!ok) (void) cudaGetLastError();
+        cached = ok ? 1 : 2;
+    }
+    return cached == 1;
+}
+
+template <int bits, int cb, bool c_fp32, int MMODE, int WK, int WT, bool HALF>
+inline void* gemv_instance()
+{
+    return reinterpret_cast<void*>(exl3_gemv_hip_kernel<bits, cb, c_fp32, MMODE, WK, WT, HALF>);
+}
+
+template <int bits, int cb, bool c_fp32, int MMODE, bool HALF>
+inline void* gemv_select_cfg(int cfg)
+{
+    return cfg == 0 ? gemv_instance<bits, cb, c_fp32, MMODE, 8, 2, HALF>()
+                    : gemv_instance<bits, cb, c_fp32, MMODE, 4, 4, HALF>();
+}
+
+template <int bits, int cb, bool HALF>
+inline void* gemv_select(bool c_fp32, int mmode, int cfg)
+{
+    // Q4NX only has the FP32-output kernel, so it must not instantiate the
+    // half-output body (it fails the kernel's static_assert).
+    if constexpr (cb == EXL3_Q4NX_CODEBOOK)
+    {
+        return mmode == 0 ? gemv_select_cfg<bits, cb, true, 0, HALF>(cfg)
+                          : gemv_select_cfg<bits, cb, true, 1, HALF>(cfg);
+    }
+    else if (c_fp32)
+    {
+        return mmode == 0 ? gemv_select_cfg<bits, cb, true, 0, HALF>(cfg)
+                          : gemv_select_cfg<bits, cb, true, 1, HALF>(cfg);
+    }
+    else
+    {
+        return mmode == 0 ? gemv_select_cfg<bits, cb, false, 0, HALF>(cfg)
+                          : gemv_select_cfg<bits, cb, false, 1, HALF>(cfg);
+    }
+}
+
+// Every cell the kernel header instantiates: integer 2/3/4 bpw for the cb 1 and cb 2
+// codebooks (cb 0 only exists at 4 bpw), the mul1 half-integer rates, and Q4NX.
+void* exl3_gemv_hip_select(int bits, int cb, bool half_k, bool c_fp32, int mmode, int cfg)
+{
+    #define SEL(b_, cb_, h_) \
+        if (bits == b_ && cb == cb_ && half_k == h_) return gemv_select<b_, cb_, h_>(c_fp32, mmode, cfg);
+    SEL(2, 1, false) SEL(2, 2, false)
+    SEL(3, 1, false) SEL(3, 2, false)
+    SEL(4, 0, false) SEL(4, 1, false) SEL(4, 2, false)
+    SEL(1, 2, true) SEL(2, 2, true) SEL(3, 2, true)
+    SEL(2, EXL3_Q4NX_CODEBOOK, true)
+    SEL(3, EXL3_Q4NX_CODEBOOK, false)
+    SEL(3, EXL3_Q4NX_CODEBOOK, true)
+    #undef SEL
+    return nullptr;
+}
+
+// Benchmark-only override of the launch geometry.
+int exl3_gemv_hip_cfg_override()
+{
+    static const int value = [] () -> int
+    {
+        const char* env = std::getenv("GPTQMODEL_EXL3_HIP_GEMV_CFG");
+        if (!env || !*env) return -1;
+        const int parsed = std::atoi(env);
+        return parsed == 0 || parsed == 1 ? parsed : -1;
+    }();
+    return value;
+}
+
+}  // namespace
+
+// Same entry point and argument array as the CUDA path: the HIP kernel runs the input
+// Hadamard, the GEMV and the output Hadamard as three launches on the caller's stream
+// because HIP has no cooperative grid barrier.
+bool exl3_gemv_try_launch
+(
+    void** kernel_args,
+    int size_m,
+    int size_k,
+    int size_n,
+    int K,
+    bool half_k,
+    int cb,
+    bool c_fp32,
+    int device,
+    cudaStream_t stream
+)
+{
+    const bool q4nx = cb == EXL3_Q4NX_CODEBOOK;
+    if (q4nx)
+    {
+        if (!c_fp32 || !q4nx_supports_step_bits(4 * K + 2 * half_k)) return false;
+    }
+    else if (half_k)
+    {
+        if (K < 1 || K > 3 || cb != 2) return false;
+    }
+    else
+    {
+        if (K < 2 || K > 4) return false;
+        if (K != 4 && cb == 0) return false;
+    }
+    if (size_m < 1 || size_m > EXL3_GEMV_MAX_M) return false;
+    if (size_k % 128 || size_n % 128) return false;
+    if (!exl3_hip_gemv_arch_ok(device)) return false;
+
+    const int mmode = size_m == 1 ? 0 : 1;
+    const int cfg = exl3_gemv_hip_cfg_override() >= 0 ? exl3_gemv_hip_cfg_override()
+                                                      : (size_n >= 8192 ? 1 : 0);
+    void* kernel = exl3_gemv_hip_select(K, cb, half_k, c_fp32, mmode, cfg);
+    if (!kernel) return false;
+
+    const half* A = *(const half**) kernel_args[0];
+    half* A_had = *(half**) kernel_args[8];
+    const half* svh = *(const half**) kernel_args[9];
+
+    const int warps_in = size_m * size_k / 128;
+    const int warps_out = size_m * size_n / 128;
+    constexpr float R_SCALE = 0.088388347648f;   // 1 / sqrt(128)
+    const float out_scale = q4nx ? R_SCALE * EXL3_Q4NX_ALPHA : R_SCALE;
+    const HipGemvCfg geometry = cfg == 0 ? HipGemvCfg{8, 2} : HipGemvCfg{4, 4};
+
+    exl3_gemv_hip_had_in_kernel<<<(warps_in + 7) / 8, 256, 0, stream>>>
+    (
+        A, A_had, *(const half**) kernel_args[7], size_k, warps_in * 128
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    const int grid = (size_n / 16) / geometry.wt;
+    if (grid < 1) return false;
+    C10_CUDA_CHECK(cudaLaunchKernel
+    (
+        kernel,
+        dim3(grid),
+        dim3(32 * geometry.wk * geometry.wt),
+        kernel_args,
+        0,
+        stream
+    ));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    if (c_fp32)
+        exl3_gemv_hip_had_out_kernel<true><<<(warps_out + 7) / 8, 256, 0, stream>>>
+        (
+            *(void**) kernel_args[2], *(void**) kernel_args[2], svh, size_n, warps_out * 128, out_scale
+        );
+    else
+        exl3_gemv_hip_had_out_kernel<false><<<(warps_out + 7) / 8, 256, 0, stream>>>
+        (
+            *(void**) kernel_args[2], *(void**) kernel_args[2], svh, size_n, warps_out * 128, out_scale
+        );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return true;
+}
 #endif
