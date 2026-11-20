@@ -26,7 +26,7 @@ from gptqmodel.utils import (
     machete,
     marlin,
     nf12_hip,
-    paroquant,
+    paro,
     qqq,
     rco_cpp,
     swordfish,
@@ -80,8 +80,8 @@ def test_awq_uses_stable_abi():
     _assert_stable(awq._AWQ_TORCH_OPS_EXTENSION)
 
 
-def test_paroquant_uses_stable_abi():
-    _assert_stable(paroquant._PAROQUANT_ROTATION_EXTENSION)
+def test_paro_uses_stable_abi():
+    _assert_stable(paro._PARO_ROTATION_EXTENSION)
 
 
 def test_exllamav2_gptq_uses_stable_abi():

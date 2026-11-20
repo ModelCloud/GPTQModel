@@ -1,6 +1,6 @@
 #pragma once
 
-#include <ATen/Tensor.h>
+#include "../../torch_stable_compat.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstdint>

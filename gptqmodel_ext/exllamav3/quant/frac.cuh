@@ -1,6 +1,6 @@
 // Adapted from ExLlamaV3 v1.6.7 (8c593e4), copyright TurboDerp and contributors, MIT.
 #pragma once
-#include <ATen/Tensor.h>
+#include "../../torch_stable_compat.h"
 
 // Fractional-bitrate trellis storage (K = KA + popcount(MASK)/16, half-integer in practice): pack /
 // unpack the 16-bit windows to the (kb, nb, 16K)-uint16 tile layout and reconstruct fp16 weights

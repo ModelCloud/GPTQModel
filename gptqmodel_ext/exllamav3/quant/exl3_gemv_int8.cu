@@ -4,9 +4,7 @@
 #include "exl3_gemv.cuh"
 #include "exl3_gemv_int8_kernel.cuh"
 #include "comp_units/exl3_gemv_int8_instances.cuh"
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <ATen/ops/empty.h>
+#include "../../torch_stable_compat.h"
 #include "../util.h"
 #include "../util.cuh"
 #include "../ptx.cuh"
@@ -15,7 +13,6 @@
 #include "hadamard_inner.cuh"
 #include <cooperative_groups.h>
 #include <mutex>
-#include <c10/cuda/CUDAException.h>
 #include <set>
 #include <map>
 
@@ -146,7 +143,7 @@ static bool exl3_gemv_int8_sq
     const size_t ws_ints = SQ_WS_RESERVED + (size_t) ksplit * M * pstride;
     if (ws_ints > GEMV_INT8_WS_INTS) return false;
     auto ws = at::empty({(int64_t) ws_ints}, options.dtype(at::kInt));
-    int* ws_ptr = ws.data_ptr<int>();
+    int* ws_ptr = ws.mutable_data_ptr<int>();
     // The first region is the completion counters. Partial sums and scales
     // have exclusive or idempotent producers before the CTA that consumes them.
     C10_CUDA_CHECK(cudaMemsetAsync(ws_ptr, 0, sizeof(int) * (size_n / 256), stream));
@@ -216,7 +213,7 @@ bool exl3_gemv_int8
     if (at::cuda::getDeviceProperties(device)->sharedMemPerBlockOptin < 80 * 1024) return false;
 
     int num_sms = DevCtx::instance().get_num_sms(device);
-    bool c_fp32 = C.dtype() == at::kFloat;
+    bool c_fp32 = C.scalar_type() == at::kFloat;
     bool residual = mode == 1;
 
     // Per-slice-scale kernel: m == 1, plus m == 2 in plain int8 mode (rows share the decoded
@@ -227,7 +224,7 @@ bool exl3_gemv_int8
         (const half*) A.data_ptr(), (const uint16_t*) B.data_ptr(), C.data_ptr(),
         size_m, size_k, size_n, K, half_k, c_fp32, residual,
         (const half*) suh.data_ptr(), (half*) A_had.data_ptr(), (const half*) svh.data_ptr(),
-        A.options(), device, num_sms, stream))
+        at::options(A), device, num_sms, stream))
         return true;
     if (size_m > 1) return false;
 
@@ -276,8 +273,8 @@ bool exl3_gemv_int8
     // The cooperative kernel initializes the accumulators before its first grid barrier.
     const size_t ws_ints = (size_t) 2 * size_n + 4 * size_m + 1024;
     if (ws_ints > GEMV_INT8_WS_INTS) return false;
-    auto ws = at::empty({(int64_t) ws_ints}, A.options().dtype(at::kInt));
-    int* ws_ptr = ws.data_ptr<int>();
+    auto ws = at::empty({(int64_t) ws_ints}, at::options(A).dtype(at::kInt));
+    int* ws_ptr = ws.mutable_data_ptr<int>();
 
     const half* A_ptr = (const half*) A.data_ptr();
     const uint16_t* B_ptr = (const uint16_t*) B.data_ptr();

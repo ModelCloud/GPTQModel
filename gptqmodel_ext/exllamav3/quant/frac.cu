@@ -1,9 +1,7 @@
 // Adapted from ExLlamaV3 v1.6.7 (8c593e4), copyright TurboDerp and contributors, MIT.
 #include <cuda_fp16.h>
 #include "frac.cuh"
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
+#include "../../torch_stable_compat.h"
 #include <array>
 #include <limits>
 #include "../util.h"
@@ -176,10 +174,10 @@ void quantize_tiles_frac(
         kernel<<<batch, QTF_NT, shmem, stream>>>
         (
             input_tiles.const_data_ptr<float>() + L * start,
-            output_tiles.data_ptr<float>() + L * start,
-            reinterpret_cast<uint16_t*>(output_indices.data_ptr<int16_t>()) + L * start,
-            reinterpret_cast<half*>(temp_costs.data_ptr<at::Half>()),
-            reinterpret_cast<uint16_t*>(temp_edges.data_ptr<int16_t>()),
+            output_tiles.mutable_data_ptr<float>() + L * start,
+            reinterpret_cast<uint16_t*>(output_indices.mutable_data_ptr<int16_t>()) + L * start,
+            reinterpret_cast<half*>(temp_costs.mutable_data_ptr<at::Half>()),
+            reinterpret_cast<uint16_t*>(temp_edges.mutable_data_ptr<int16_t>()),
             nullptr
         );
         C10_CUDA_KERNEL_LAUNCH_CHECK();
