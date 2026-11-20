@@ -689,7 +689,13 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 self.register_buffer(buffer_name, value)
 
         if bias:
-            bias_tensor = torch.zeros(self.out_features, dtype=self.compute_dtype)
+            # The INT8 bias is checkpoint state, not compute state: keep it in
+            # FP32 (the widest supported source precision) so a value such as
+            # -257 is not rounded to a BF16/FP16 compute dtype before the first
+            # forward (#5695). The 4-bit vendor kernel consumes the bias at the
+            # compute dtype, so that path keeps its existing storage.
+            bias_dtype = self.compute_dtype if self.is_4bit else torch.float32
+            bias_tensor = torch.zeros(self.out_features, dtype=bias_dtype)
             if "bias" in self._buffers:
                 self._buffers["bias"] = bias_tensor
             else:
@@ -922,9 +928,28 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         )
         self._cpu_packing_disabled = False
 
-    def _apply(self, fn, *args, **kwargs):
+    def _apply(self, fn, recurse=True):
         self._ensure_unpacked()
-        return super()._apply(fn, *args, **kwargs)
+        bias = self._buffers.get("bias")
+        if self.is_4bit or bias is None:
+            return super()._apply(fn, recurse=recurse)
+
+        # The INT8 bias is stored in FP32 independently of the compute dtype.
+        # Hide it from the generic transform so ``to(bfloat16)``/``to(float16)``
+        # cannot round it, then move it to the device the transform selected.
+        # ``to_empty`` materializes buffers from uninitialized storage, so a
+        # meta bias is recreated on the target device instead of copied.
+        self._buffers["bias"] = None
+        try:
+            result = super()._apply(fn, recurse=recurse)
+        finally:
+            self._buffers["bias"] = bias
+        target_device = self.weight.device
+        if bias.device.type == "meta" and target_device.type != "meta":
+            self._buffers["bias"] = torch.empty_like(bias, device=target_device, dtype=torch.float32)
+        else:
+            self._buffers["bias"] = bias.to(device=target_device, dtype=torch.float32)
+        return result
 
     def post_init(self):
         self._ensure_unpacked()
@@ -1018,7 +1043,11 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             self._buffers["weight_scb"] = scales.contiguous()
 
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device="cpu", dtype=self.compute_dtype).contiguous()
+            # Keep the INT8 bias in FP32 so the source value survives the pack;
+            # the forward epilogue casts it once, after the exact INT32 product.
+            # The 4-bit kernel still takes its bias at the compute dtype.
+            bias_dtype = self.compute_dtype if self.is_4bit else torch.float32
+            bias = linear.bias.detach().to(device="cpu", dtype=bias_dtype).contiguous()
             if "bias" in self._buffers:
                 self._buffers["bias"] = bias
             else:
@@ -1137,6 +1166,10 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                     bias=bias,
                 )
             return out.to(input_dtype)
+
+        # The INT8 bias is stored in FP32; every epilogue below adds it in
+        # FP32 after the exact INT32 product, so do not pre-round it here.
+        bias = self.bias
 
         rows = x.numel() // self.in_features
         if (
