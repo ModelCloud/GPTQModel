@@ -518,7 +518,7 @@ execution performs neither collection nor compiler-cache resets.
 | Execution concern | Fusion disabled | Fusion enabled | Implementation |
 | --- | --- | --- | --- |
 | Projection launches | Original separate calls | One native packed call; split outputs feed the original continuation | `gptqmodel/models/fusion.py:58` (`_parent_template`) |
-| Persistent packed operands | Independent source allocations | One contiguous fused allocation with disjoint source views | `gptqmodel/models/fusion.py:444` (`_share_operands`) |
+| Persistent packed operands | Independent source allocations | One contiguous fused allocation with disjoint source views | `gptqmodel/models/fusion.py:525` (`_share_operands`) |
 | Group selection | No fusion execution installed | Validated definition policy plus compiled-tree roles and live parents | `gptqmodel/models/fusion.py:711` (`FusionPlanner`) |
 | Model lifecycle | Ordinary model execution | Explicit apply/remove; failed admission preserves the installed plan | `gptqmodel/models/base.py:1173` (`BaseQModel.fuse`) |
 

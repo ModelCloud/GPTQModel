@@ -19,7 +19,7 @@ models. Every other model keeps `inference_mode` (#5099).
 | Hook detection | none | `has_cpu_offload_hooks` scans `_hf_hook`, unwraps `SequentialHook`, and matches `CpuOffload` plus `AlignDevicesHook(offload=True)` (`gptqmodel/utils/model.py::has_cpu_offload_hooks`) |
 | Layer materialization | `CpuOffload.pre_forward` calls `module.to(execution_device)` under `inference_mode`; `simple_dispatch_model` installs that hook (`gptqmodel/utils/model.py::simple_dispatch_model`) | the same move runs under `no_grad` |
 | Buffer lifecycle | `Module._apply` replaces buffers outright; the second move of an inference buffer stores a tensor without a version counter | the move allocates a normal tensor, so the buffer keeps its counter |
-| Compiled `generate()` | dynamo's guard on `g_idx._version` raises `RuntimeError: Inference tensors do not track version counter` (`gptqmodel/nn_modules/qlinear/torch.py:1031`) | the trace succeeds and generation produces tokens |
+| Compiled `generate()` | dynamo's guard on `g_idx._version` raises `RuntimeError: Inference tensors do not track version counter` (`gptqmodel/nn_modules/qlinear/torch.py:1114`) | the trace succeeds and generation produces tokens |
 
 Parameters are rebound with `param.data = ...` in `Module._apply`, which keeps
 their version counter even under inference mode; packed GPT-QModel tensors
@@ -94,7 +94,7 @@ buffer's version counter again.
   passes with the fix.
 - `tests/test_optimize_generate_cpu_offload_5099.py::test_optimize_then_generate_on_an_offloaded_placement`
   fails on `e2f9676c6` with the reported `RuntimeError` at
-  `gptqmodel/nn_modules/qlinear/torch.py:1031` and passes with the fix.
+  `gptqmodel/nn_modules/qlinear/torch.py:1114` and passes with the fix.
 - `tests/test_cpu_offload_device_map_tied_head_4866.py`,
   `tests/test_cpu_offload_tied_both_copies_4943.py`,
   `tests/test_marlin_cpu_offload_post_init.py`,
