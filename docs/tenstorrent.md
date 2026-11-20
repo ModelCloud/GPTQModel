@@ -405,6 +405,14 @@ which measured no latency difference at row counts 6, 64 and 128. The residual
 is the Tensix FMA floor: storing inputs as `float32` instead of BF16 does not
 reduce it (`max abs 0.00164` against float64 with FP32 storage).
 
+`TTNNBlockFloat8Linear` uses the same configuration. On a `768x768` BF8
+projection whose weights are exactly representable and 16 BF16 activation rows,
+the default LoFi path measured relative L2 drift `6.9e-3` (4654 of 6144 values
+outside `atol=rtol=2e-3`) versus `8.4e-4` (602 outside) with HiFi4. The added
+fidelity cost 14 % of forward latency on one chip and 5 % on four chips at
+batch 8. LoFi also rounded the exact cancellation `258 + (-256)` to zero; HiFi4
+keeps the two.
+
 ## GDDR thermal pacing
 
 A Blackhole p300c throttles GDDR at 90 C and shuts the card down at 110 C.

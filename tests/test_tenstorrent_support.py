@@ -757,6 +757,89 @@ def test_ttnn_rejects_non_8_aligned_widths():
         assert not ok, kwargs
 
 
+def test_tt_bf8_matmul_uses_hifi4_and_fp32_destination(monkeypatch):
+    """The block-float GEMM must not run on TT-Metal's default LoFi config.
+
+    Default ``ttnn.linear`` uses LoFi with ``math_approx_mode``; that rounds
+    ``258 + (-256)`` to zero instead of two. ``TTNNLinear`` already passes
+    HiFi4 with FP32 destination accumulation, and the BF8 path must match it.
+    """
+
+    from gptqmodel.nn_modules.qlinear import ttnn_blockfloat as bf
+
+    calls = []
+    configs = []
+
+    class _FakeTTNN:
+        class Arch:
+            BLACKHOLE = "blackhole"
+
+        class MathFidelity:
+            HiFi4 = "hifi4"
+
+        @staticmethod
+        def get_arch_name():
+            return "blackhole"
+
+        @staticmethod
+        def init_device_compute_kernel_config(arch, **kwargs):
+            config = {"arch": arch, **kwargs}
+            configs.append(config)
+            return config
+
+        @staticmethod
+        def linear(activation, weight, **kwargs):
+            calls.append(kwargs)
+            return activation
+
+    layer = bf.TTNNBlockFloat8Linear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    )
+    layer._ttnn_weight = object()
+    layer._ttnn_bias = None
+    layer._ttnn_devices = 1
+    monkeypatch.setattr(bf, "import_ttnn", lambda: _FakeTTNN)
+
+    layer._compute(_FakeTTNN, None, torch.zeros(1, 64, dtype=torch.bfloat16))
+
+    assert calls[0]["compute_kernel_config"] is configs[0]
+    assert configs[0]["math_fidelity"] == "hifi4"
+    assert configs[0]["fp32_dest_acc_en"] is True
+    assert configs[0]["math_approx_mode"] is False
+
+
+def test_tt_bf8_clearing_the_weight_cache_drops_the_compute_config(monkeypatch):
+    """A cleared layer must rebuild both the weight and its compute config."""
+
+    from gptqmodel.nn_modules.qlinear import ttnn_blockfloat as bf
+
+    class _FakeTTNN:
+        class Arch:
+            BLACKHOLE = "blackhole"
+
+        class MathFidelity:
+            HiFi4 = "hifi4"
+
+        @staticmethod
+        def get_arch_name():
+            return "blackhole"
+
+        @staticmethod
+        def init_device_compute_kernel_config(arch, **kwargs):
+            return {"arch": arch, **kwargs}
+
+    layer = bf.TTNNBlockFloat8Linear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    )
+    assert layer._compute_config(_FakeTTNN) is not None
+    layer.clear_weight_cache()
+    assert layer._ttnn_compute_config is None
+
+
 def test_ttnn_arch_lookup_never_assumes_blackhole():
     from gptqmodel.nn_modules.qlinear.ttnn import _ttnn_arch
     from gptqmodel.utils.ttnn_runtime import TTNNUnavailable
@@ -2433,6 +2516,42 @@ def test_int4_kernel_reference_matches_packing():
     # Nibble order is low-first, which is GPTQ's checkpoint convention.
     single = kern.pack_codes_to_words(torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]))
     assert int(single[0]) & 0xFFFFFFFF == 0x87654321
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+def test_tt_bf8_matmul_keeps_finite_cancellation_residuals():
+    """BF8 weights that are exactly one must not round ``258 - 256`` to zero.
+
+    TT-Metal's default LoFi matmul returns 0 for every row; HiFi4 with FP32
+    destination accumulation returns the exact sum the dense oracle keeps.
+    """
+
+    from gptqmodel.nn_modules.qlinear.ttnn_blockfloat import TTNNBlockFloat8Linear
+    from gptqmodel.utils.ttnn_runtime import close_mesh
+
+    layer = TTNNBlockFloat8Linear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.qweight.fill_(0x99999999 - 2**32)  # all code 9
+    layer.qzeros.fill_(0x88888888 - 2**32)   # all zero point 8
+    layer.qzero_format(2)
+    layer.scales.fill_(1)                    # exact device BF8 weight 1
+    x = torch.zeros(3, 64, dtype=torch.bfloat16)
+    x[:, 0] = torch.tensor([258, 256, 256])
+    x[:2, 1] = -256
+    expected = x.double().sum(-1, keepdim=True).expand(-1, 128).bfloat16()
+    try:
+        with torch.inference_mode():
+            actual = layer(x)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
 
 
 @pytest.mark.skipif(
