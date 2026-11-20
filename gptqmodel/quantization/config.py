@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from enum import Enum
 from functools import total_ordering
 from os.path import join
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union, get_args, get_type_hints
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple, Union, get_args, get_type_hints
 
 import pcre
 import torch
@@ -4517,6 +4517,13 @@ def apply_scalar_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: Re
     for field_name in ("bits", "sym", "group_size", "damp_percent", "static_groups"):
         setattr(config, field_name, resolved_cfg.get(field_name, getattr(config, field_name)))
     config.mse = _normalize_mse(resolved_cfg.get("mse", None), base=config.mse)
+    # GPTQ reads `damp_auto_increment` from the per-module config while it
+    # rebuilds the Hessian, but this helper never copied it, so the rule was
+    # saved and ignored (#5573).
+    if hasattr(config, "damp_auto_increment"):
+        damp_auto_increment = resolved_cfg.get("damp_auto_increment", None)
+        if damp_auto_increment is not None:
+            config.damp_auto_increment = damp_auto_increment
     desc_act = resolved_cfg.get("desc_act", None)
     if desc_act is not None:
         config.desc_act = desc_act
@@ -4524,6 +4531,80 @@ def apply_scalar_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: Re
     if act_group_aware is not None:
         config.act_group_aware = act_group_aware
     config._resolve_activation_ordering(desc_act, act_group_aware)
+
+
+def apply_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: ResolvedModuleConfig) -> None:
+    """Apply *every* field of one resolved ``dynamic`` rule to a config clone.
+
+    The processors used to copy a hand-written subset of the rule, so a key
+    that ``dynamic`` accepted, validated and saved was silently dropped
+    (#5573). MACaQ's ``preprocess`` already applied the whole rule and
+    re-ran ``__post_init__``; this is that contract, shared.
+    """
+
+    if resolved_cfg.excluded:
+        raise ValueError(f"Cannot apply excluded module config: {resolved_cfg.module_name}")
+    if resolved_cfg.source_pattern is None:
+        return
+    # Nested `dynamic` values that own their own dataclass are rebuilt through
+    # the same normalizer the top-level path uses, so the clone holds the
+    # validated object the processors read.
+    normalizers: Dict[str, Callable[[Any], Any]] = {
+        "fallback": _normalize_fallback,
+        "foem": _normalize_foem,
+        "gptaq": _normalize_gptaq,
+        "gsq": normalize_gsq_config,
+        "hessian": _normalize_hessian,
+        "preprocessors": _normalize_preprocessors,
+    }
+    for key, value in resolved_cfg.overrides.items():
+        canonical = QUANT_CONFIG_ARG_SYNONYMS.get(key, key)
+        if canonical in ("smoother", "smooth"):
+            config.smoother = _normalize_smoother_config(value)
+            continue
+        if canonical == "mse":
+            # Merge partial dict rules onto the run-level value so a rule that
+            # only sets `grid_budget` keeps the configured `norm`.
+            config.mse = _normalize_mse(value, base=getattr(config, "mse", None))
+            continue
+        normalizer = normalizers.get(canonical)
+        if normalizer is not None:
+            setattr(config, canonical, normalizer(value))
+            continue
+        setattr(config, canonical, value)
+
+
+def clone_config_for_module(
+    config: "BaseQuantizeConfig",
+    module_full_name: str,
+    *,
+    resolved_cfg: Optional[ResolvedModuleConfig] = None,
+) -> Optional["BaseQuantizeConfig"]:
+    """Clone ``config`` with every per-module override applied and re-validated.
+
+    Returns ``None`` for an excluded module. The clone is independent of the
+    caller's config, so a processor can read per-module values without
+    mutating the run-level config.
+    """
+
+    if resolved_cfg is None:
+        resolved_cfg = config.resolve_module_config(module_full_name)
+    elif isinstance(resolved_cfg, Mapping):
+        # Some processors attach a plain resolved-values dict to the module
+        # (synthetic fixtures and the fallback tests). Treat it as a snapshot
+        # so the clone still receives those values.
+        resolved_cfg = ResolvedModuleConfig(
+            module_name=module_full_name,
+            source_pattern="<resolved>",
+            excluded=False,
+            _fields=tuple(resolved_cfg.items()),
+        )
+    if resolved_cfg.excluded:
+        return None
+    clone = copy.deepcopy(config)
+    apply_module_overrides(clone, resolved_cfg)
+    clone.__post_init__()
+    return clone
 
 
 def _legacy_optional_number(value: Any) -> Optional[float]:
@@ -7957,6 +8038,52 @@ class AWQConfig(PreProcessorConfig):
         meta_payload["scale_search_chunked_activations"] = self.scale_search_chunked_activations
 
 
+# Per-module `dynamic` keys Paro's grouped scopes (`compute_block`, `layer`)
+# cannot apply: those stages run one optimizer, one epoch loop and one dataset
+# over the whole group, so a per-module value would be accepted and ignored
+# (#5573).
+PARO_GROUPED_SCOPE_SHARED_DYNAMIC_KEYS = frozenset({
+    "opt_amp",
+    "opt_amsgrad",
+    "opt_batch_size",
+    "opt_best_state_dtype",
+    "opt_betas",
+    "opt_eps",
+    "opt_finetune_epochs",
+    "opt_gradient_checkpointing",
+    "opt_optimizer",
+    "opt_quantizer_lr",
+    "opt_rotation_epochs",
+    "opt_rotation_lr",
+    "opt_sgd_dampening",
+    "opt_sgd_momentum",
+    "opt_sgd_nesterov",
+    "opt_stage_cudagraph",
+    "opt_stage_impl",
+    "opt_train_on_noisy_inputs",
+    "opt_train_samples",
+    "opt_validation_samples",
+    "opt_weight_decay",
+    "opt_weight_lr",
+})
+
+# Keys Paro applies per module in every optimization scope.
+PARO_PER_MODULE_DYNAMIC_KEYS = frozenset({
+    "bits",
+    "format",
+    "group_size",
+    "krot",
+    "opt_channel_scale_clamp_max",
+    "opt_channel_scale_clamp_min",
+    "opt_fused_rotation",
+    "opt_pair_impl",
+    "opt_pair_ratio",
+    "opt_quantizer_impl",
+    "opt_seed",
+    "sym",
+})
+
+
 @dataclass
 class ParoConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.PARO)
@@ -8151,6 +8278,42 @@ class ParoConfig(PreProcessorConfig):
             raise ValueError(
                 "ParoConfig: `opt_channel_scale_clamp_min` must be smaller than "
                 "`opt_channel_scale_clamp_max`."
+            )
+        self._validate_dynamic_module_scope()
+
+    def _validate_dynamic_module_scope(self) -> None:
+        """Reject per-module Paro keys this run cannot apply (#5573).
+
+        `dynamic` accepts every known quantize field, but the grouped scopes
+        run one optimizer over a whole layer/compute block. A per-module
+        optimizer-stage value there used to be written to
+        `quantize_config.json` and silently replaced by the global setting.
+        """
+
+        if not self.dynamic:
+            return
+        scope_keys = []
+        shared_keys = []
+        for pattern, rule in self.dynamic.items():
+            if not isinstance(rule, Mapping):
+                continue
+            for key in rule:
+                canonical = QUANT_CONFIG_ARG_SYNONYMS.get(key, key)
+                if canonical == "opt_scope":
+                    scope_keys.append(f"`dynamic[{pattern!r}].{key}`")
+                elif canonical in PARO_GROUPED_SCOPE_SHARED_DYNAMIC_KEYS:
+                    shared_keys.append(f"`dynamic[{pattern!r}].{key}`")
+        if scope_keys:
+            raise ValueError(
+                "ParoConfig: " + ", ".join(scope_keys) + " is not a per-module option: "
+                "`opt_scope` selects the processor-wide optimization mode. Set it at the top level."
+            )
+        if shared_keys and self.opt_scope != "module":
+            raise ValueError(
+                "ParoConfig: " + ", ".join(shared_keys) + " cannot be applied per module with "
+                f"`opt_scope='{self.opt_scope}'`, which runs one optimizer over the whole group. "
+                "Use `opt_scope='module'` or set the value at the top level. Per-module keys "
+                "this scope applies: " + ", ".join(sorted(PARO_PER_MODULE_DYNAMIC_KEYS)) + "."
             )
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
@@ -9716,6 +9879,10 @@ def clone_weight_only_config_for_module(
         if isinstance(qcfg_clone, RTNConfig):
             qcfg_clone.sym = resolved_cfg.get("sym", qcfg_clone.sym)
             qcfg_clone.group_size = resolved_cfg.get("group_size", qcfg_clone.group_size)
+            # RTN's `Quantizer.find_params` runs the MSE shrink grid from
+            # `qcfg.mse`, but this clone never copied the rule, so a per-module
+            # `mse` was accepted, saved and ignored (#5573).
+            qcfg_clone.mse = _normalize_mse(resolved_cfg.get("mse", None), base=qcfg_clone.mse)
 
             desc_act_override = resolved_cfg.get("desc_act", None)
             if desc_act_override is not None:
