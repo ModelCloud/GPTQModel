@@ -8,11 +8,13 @@
 
 // Fused BF16 <-> FP16 activation adaptation for the FP16-only EXL3 kernels.
 // See gptqmodel_ext/exllamav3/bf16_scale.cu for the arithmetic contract.
-std::tuple<at::Tensor, at::Tensor> bf16_prescale(const at::Tensor& x, double bound);
+std::tuple<at::Tensor, at::Tensor> bf16_prescale(
+    const at::Tensor& x, double bound, const std::optional<at::Tensor>& suh);
 
 at::Tensor bf16_rescale(
     const at::Tensor& result,
     const at::Tensor& scale,
     const std::optional<at::Tensor>& bias,
     int64_t n_cols,
-    bool result_has_bias);
+    bool result_has_bias,
+    at::ScalarType output_dtype);
