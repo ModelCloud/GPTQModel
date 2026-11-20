@@ -111,7 +111,7 @@ def test_cache_clear_between_guard_and_executor_keeps_the_live_executor():
     def call():
         try:
             result["output"] = parent(x)
-        except BaseException as error:  # noqa: BLE001 - re-raised on the test thread
+        except Exception as error:  # noqa: BLE001 - re-raised on the test thread
             result["error"] = error
 
     worker = threading.Thread(target=call, name="parked-forward")
@@ -148,7 +148,7 @@ def test_paired_forwards_after_cache_clear_are_exact_and_do_not_raise():
             for job in jobs:
                 try:
                     torch.testing.assert_close(job.result(timeout=10), expected, rtol=0, atol=0)
-                except BaseException as error:  # noqa: BLE001 - aggregate every pair
+                except Exception as error:  # noqa: BLE001 - aggregate every pair
                     failures.append((index, error))
     finally:
         workers.shutdown(wait=True, cancel_futures=True)
