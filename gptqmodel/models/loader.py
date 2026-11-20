@@ -71,7 +71,14 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
-from ..utils.backend import BACKEND, PROFILE, backend_for_activation, normalize_backend, normalize_profile
+from ..utils.backend import (
+    BACKEND,
+    NATIVE_TTNN_BACKENDS,
+    PROFILE,
+    backend_for_activation,
+    normalize_backend,
+    normalize_profile,
+)
 from ..utils.backend_config import Backend, RuntimeConfig, resolve_backend_config, resolve_quantize_backend
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
@@ -684,7 +691,7 @@ def _layerwise_device_strings(
 
 def _native_ttnn_backend(backend: BACKEND) -> bool:
     """Return whether ``backend`` owns its chips without the Torch/XLA runtime."""
-    return backend in (BACKEND.GPTQ_TTNN,)
+    return backend in NATIVE_TTNN_BACKENDS
 
 
 def _module_tensor_bytes(module: torch.nn.Module) -> int:
@@ -2768,7 +2775,7 @@ def ModelLoader(cls):
         # this one before any device is claimed. The native TTNN backend also
         # gates its own mesh open; the two gates share one rate limit, so a load
         # never pays the cooldown twice.
-        if normalize_backend(backend) in (BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_XLA):
+        if normalize_backend(backend) in NATIVE_TTNN_BACKENDS | {BACKEND.GPTQ_TT_XLA}:
             from ..utils.tt_thermal import before_device_open
 
             before_device_open(owner=f"{cls.__name__}.from_quantized[{normalize_backend(backend).value}]")

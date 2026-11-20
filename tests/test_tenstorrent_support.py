@@ -695,14 +695,43 @@ def test_native_ttnn_device_resolution_never_initializes_pjrt(monkeypatch):
     assert options == [{"single_capability_group": True}], options
 
 
-def test_native_ttnn_auto_device_selection_skips_the_xla_probe(monkeypatch):
+@pytest.mark.parametrize("backend", [BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_BF8])
+def test_native_ttnn_auto_device_selection_skips_the_xla_probe(monkeypatch, backend):
     from gptqmodel.utils import importer as importer_module
 
     def _explode(*args, **kwargs):
-        raise AssertionError("auto_select_device must not probe XLA for GPTQ_TTNN")
+        raise AssertionError(f"auto_select_device must not probe XLA for {backend}")
 
     monkeypatch.setattr(importer_module, "is_xla_available", _explode)
-    assert importer_module.auto_select_device(None, BACKEND.GPTQ_TTNN) == DEVICE.XLA
+    assert importer_module.auto_select_device(None, backend) == DEVICE.XLA
+
+
+@pytest.mark.parametrize("backend", [BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_BF8])
+def test_native_ttnn_layerwise_resolution_never_initializes_pjrt(monkeypatch, backend):
+    """Both native TTNN backends share one host-staging and counting contract.
+
+    ``GPTQ_TT_BF8`` used to be classified as a PJRT backend, so a default load
+    resolved the XLA family through ``xla_device_count()``. That initializes
+    the Tenstorrent PJRT plugin and claims every chip, which then collides with
+    the TT-Metal mesh the kernel opens in ``post_init``.
+    """
+    from gptqmodel.models import loader as loader_module
+    from gptqmodel.utils import torch as torch_module
+    from gptqmodel.utils import ttnn_runtime
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("the native TTNN path must not initialize PJRT")
+
+    monkeypatch.setattr(loader_module, "expand_selector_device_family", _explode)
+    monkeypatch.setattr(torch_module, "require_xla_runtime", _explode)
+    monkeypatch.setattr(ttnn_runtime, "ttnn_device_count", lambda: 4)
+
+    assert loader_module._native_ttnn_backend(backend)
+    assert loader_module._resolve_default_layerwise_device(DEVICE.XLA, backend) == DEVICE.XLA
+    assert loader_module._layerwise_device_count(DEVICE.XLA, backend) == 4
+    assert loader_module._layerwise_device_strings(DEVICE.XLA, 4, backend) == [
+        "xla:0", "xla:1", "xla:2", "xla:3",
+    ]
 
 
 def test_ttnn_rejects_non_8_aligned_widths():
