@@ -674,19 +674,22 @@ def test_exllamav3_wide_inputs_route_to_torch_reconstruction():
     assert out.dtype == torch.bfloat16
     assert torch.isfinite(out).all()
 
-    # FP16 keeps the FP16 native kernel with an explicit out_dtype. One
-    # activation dtype per module (contracts/kernel/forward-dtype.md), so the
-    # FP16 case uses its own layer.
+    # FP16 keeps the native kernel behind the same input-range guard as BF16
+    # and asks it for an FP32 result, so an in-range input cannot overflow the
+    # GEMM output (#5331, #5838). One activation dtype per module
+    # (contracts/kernel/forward-dtype.md), so the FP16 case uses its own layer.
     seen.clear()
     layer = SimpleNamespace(
         _needs_torch_fallback=lambda: False,
         _ensure_torch_inner=lambda: pytest.fail("FP16 must keep the native path"),
         _ensure_inner=lambda: NativeInner(),
+        _native_bf16_input=lambda x: (x.to(torch.float16), torch.ones(x.shape[:-1] + (1,))),
+        _rescale_native_output=lambda result, scale: result.float() * scale,
         out_features=4,
     )
     out = ExllamaV3Linear.forward(layer, torch.ones((1, 2), dtype=torch.float16))
 
-    assert seen == {"native": (torch.float16, torch.float16)}
+    assert seen == {"native": (torch.float16, torch.float32)}
     assert out.dtype == torch.float16
 
 

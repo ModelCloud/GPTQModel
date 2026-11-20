@@ -472,3 +472,37 @@ def test_checkpoint_scaled_prescale_and_epilogue(fused_ops, dtype):
     expected = (result.double() * expected_scale.double() + bias.double()).to(dtype)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert actual.dtype == dtype
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_eager_scaled_bound_is_chunked_and_bit_exact(monkeypatch, dtype):
+    """The eager ``x * suh`` bound must not widen a whole prefill at once (#5838).
+
+    Chunking splits rows only, so every row's max must equal the single-shot
+    product bit for bit, while no chunk exceeds the configured element budget.
+    """
+    torch.manual_seed(5838)
+    bridge = _bridge(4)
+    width = 96
+    bridge.suh = (torch.rand(width) * 4 - 2).to(torch.float16)
+    x = (torch.randn(3, 7, width) * 1000).to(dtype)
+    x[1, 3, 5] = 60000.0 if dtype == torch.float16 else 3e38
+    bound_dtype = torch.float64 if dtype == torch.bfloat16 else torch.float32
+    expected = torch.linalg.vector_norm(
+        x.to(bound_dtype) * bridge.suh.to(bound_dtype), ord=float("inf"), dim=-1, keepdim=True,
+    )
+
+    widened = []
+    real_vector_norm = torch.linalg.vector_norm
+
+    def spy(tensor, *args, **kwargs):
+        if tensor.dtype == bound_dtype:
+            widened.append(tensor.numel())
+        return real_vector_norm(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(ExllamaV3Linear, "_SCALED_AMAX_CHUNK_ELEMENTS", 4 * width)
+    monkeypatch.setattr(torch.linalg, "vector_norm", spy)
+    actual = bridge._scaled_row_amax(x, bridge.suh, bound_dtype)
+
+    assert _bits_equal(actual, expected)
+    assert len(widened) == 6 and max(widened) <= 4 * width

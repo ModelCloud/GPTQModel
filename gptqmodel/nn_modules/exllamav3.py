@@ -516,12 +516,34 @@ class ExllamaV3Linear(ForwardDtypeLockMixin, nn.Module):
             # BF16's exponent range can overflow an FP32 product or scale
             # even when the final projection is finite after cancellation.
             bound_dtype = torch.float64 if x.dtype == torch.bfloat16 else torch.float32
-            scaled_amax = torch.linalg.vector_norm(
-                x.detach().to(bound_dtype) * suh[:x.shape[-1]].to(bound_dtype),
-                ord=float("inf"), dim=-1, keepdim=True,
-            )
-            row_amax = torch.maximum(row_amax, scaled_amax)
+            row_amax = torch.maximum(row_amax, self._scaled_row_amax(x, suh, bound_dtype))
         return row_amax
+
+    # Widened ``x * suh`` elements materialized at once by the eager bound: about
+    # 32 MiB in FP64. A whole prefill would otherwise allocate a full widened
+    # copy of the activation (8 bytes/element for BF16) on every warm-up.
+    _SCALED_AMAX_CHUNK_ELEMENTS = 1 << 22
+
+    def _scaled_row_amax(
+        self, x: torch.Tensor, suh: torch.Tensor, bound_dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Per-row ``max|x * suh|`` in ``bound_dtype``, in bounded row chunks.
+
+        Chunking only splits rows, so each row's reduction is unchanged and the
+        result is bit-identical to the single-shot product. Shapes are static,
+        so this stays free of host reads and safe under CUDA Graph capture.
+        """
+        width = x.shape[-1]
+        flat = x.detach().reshape(-1, width)
+        scale = suh[:width].to(bound_dtype)
+        out = torch.empty((flat.shape[0], 1), dtype=bound_dtype, device=x.device)
+        step = max(1, self._SCALED_AMAX_CHUNK_ELEMENTS // max(1, width))
+        for start in range(0, flat.shape[0], step):
+            rows = flat[start:start + step]
+            out[start:start + step] = torch.linalg.vector_norm(
+                rows.to(bound_dtype) * scale, ord=float("inf"), dim=-1, keepdim=True,
+            )
+        return out.reshape(*x.shape[:-1], 1)
 
     def _prescale_from_row_amax(
         self, x: torch.Tensor, row_amax: torch.Tensor
