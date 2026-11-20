@@ -297,7 +297,15 @@ def _awq_affine_qparams(
     minimum = torch.minimum(minimum, zero)
     max_code = (1 << bits) - 1
     limits = torch.finfo(w.dtype)
-    scales = (maximum - minimum).clamp(min=1e-5) / max_code
+    # Strategy bounds are selected in a wide dtype so a finite FP16 range can
+    # neither overflow `center + sigma * deviation` nor its subtraction. Narrow
+    # only the resulting scale: even STDCLIP's widest FP16 interval (6 * std,
+    # and std <= 65504) gives 393024 / 15 = 26202, which is representable. RTN
+    # bounds arrive in `w.dtype` and keep the original expression exactly.
+    wide = torch.promote_types(minimum.dtype, maximum.dtype)
+    scales = (maximum.to(wide) - minimum.to(wide)).clamp(min=1e-5) / max_code
+    if wide != w.dtype:
+        scales = scales.to(w.dtype)
 
     # A finite input range can overflow its low-precision subtraction. The
     # maximum code can also decode outside the dtype even when the scale itself
@@ -351,7 +359,32 @@ def _awq_affine_qparams(
         else:
             raise ValueError("AWQ scaled zero point cannot be represented")
 
-    return scales, zeros, repair
+    return scales.to(w.dtype), zeros.to(w.dtype), repair
+
+
+def _awq_strategy_bounds_typed(
+    values: torch.Tensor, strategy: FallbackStrategy, sigma: float
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Select a fallback strategy's per-row interval in ``values``' dtype."""
+
+    if strategy is FallbackStrategy.MIDPOINT:
+        return (
+            values.amin(dim=1, keepdim=True),
+            values.amax(dim=1, keepdim=True),
+        )
+    if strategy is FallbackStrategy.MEAN:
+        center = values.mean(dim=1, keepdim=True)
+        deviation = (values - center).abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
+        return center - deviation, center + deviation
+    if strategy is FallbackStrategy.MEDIAN:
+        center = values.median(dim=1, keepdim=True).values
+        deviation = (values - center).abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
+        return center - deviation, center + deviation
+    if strategy is FallbackStrategy.STDCLIP:
+        center = values.mean(dim=1, keepdim=True)
+        deviation = values.std(dim=1, keepdim=True, unbiased=False).clamp(min=1e-8)
+        return center - sigma * deviation, center + sigma * deviation
+    raise ValueError(f"Unsupported AWQ fallback strategy: {strategy}")
 
 
 def _awq_strategy_bounds(
@@ -362,26 +395,28 @@ def _awq_strategy_bounds(
     The ranges match the GPTQ fallback branches. AWQ maps them onto its own
     packed code layout in :meth:`AWQProcessor.pseudo_quantize_tensor`; the
     strategy only decides which values the grid must cover.
+
+    A finite FP16 group can have a population standard deviation of 60000, so
+    ``3 * std`` is 180000: forming that endpoint in FP16 overflows to infinity
+    even though the selected interval and its INT4 codes decode finitely
+    (#5821). MEAN/MEDIAN have the same problem when ``center +- deviation``
+    leaves the FP16 range. Keep the narrow arithmetic whenever it is finite so
+    ordinary ranges keep their exact previous grid, and recompute only an
+    overflowing interval in at least FP32.
     """
 
+    minimum, maximum = _awq_strategy_bounds_typed(w, strategy, sigma)
     if strategy is FallbackStrategy.MIDPOINT:
-        return (
-            w.amin(dim=1, keepdim=True),
-            w.amax(dim=1, keepdim=True),
-        )
-    if strategy is FallbackStrategy.MEAN:
-        center = w.mean(dim=1, keepdim=True)
-        deviation = (w - center).abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
-        return center - deviation, center + deviation
-    if strategy is FallbackStrategy.MEDIAN:
-        center = w.median(dim=1, keepdim=True).values
-        deviation = (w - center).abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
-        return center - deviation, center + deviation
-    if strategy is FallbackStrategy.STDCLIP:
-        center = w.mean(dim=1, keepdim=True)
-        deviation = w.std(dim=1, keepdim=True, unbiased=False).clamp(min=1e-8)
-        return center - sigma * deviation, center + sigma * deviation
-    raise ValueError(f"Unsupported AWQ fallback strategy: {strategy}")
+        # The raw extrema of finite weights are finite, so nothing can overflow.
+        return minimum, maximum
+    if bool(torch.isfinite(minimum).all() & torch.isfinite(maximum).all()):
+        return minimum, maximum
+    wide = torch.promote_types(w.dtype, torch.float32)
+    if wide == w.dtype:
+        # The input itself is already wide or non-finite; there is no wider
+        # arithmetic left to try.
+        return minimum, maximum
+    return _awq_strategy_bounds_typed(w.to(wide), strategy, sigma)
 
 
 def _awq_bound_affine_codes(
@@ -394,6 +429,27 @@ def _awq_bound_affine_codes(
     codes = torch.where(decoded < -limit, codes + 1, codes)
     codes = torch.where(decoded > limit, codes - 1, codes)
     return codes.clamp_(0, max_code)
+
+
+def _awq_bound_symmetric_codes(
+    codes: torch.Tensor,
+    scales: torch.Tensor,
+    min_code: int,
+    max_code: int,
+) -> torch.Tensor:
+    """Cap a symmetric code at the largest magnitude that decodes finitely.
+
+    The selected amplitude can exceed the dtype's finite maximum (STDCLIP's
+    ``3 * std`` for alternating ``+-60000`` is 180000). The scale is still
+    finite, but the top codes would decode to infinity. Limit each code to
+    ``floor(limit / scale)``; ordinary ranges keep ``max_code`` and are
+    unchanged.
+    """
+
+    limits = torch.finfo(codes.dtype)
+    limit = limits.max * (1 - limits.eps)
+    safe = torch.floor(limit / scales.float()).clamp(max=max_code).to(codes.dtype)
+    return torch.maximum(torch.minimum(codes, safe), -safe).clamp_(min_code, max_code)
 
 
 #: Sentinel for "the root rotary has not been resolved yet". A resolved `None`
@@ -5280,8 +5336,18 @@ class AWQProcessor(LoopProcessor):
                 maximum = maximum.clamp(min=1e-5)
                 max_int = 2 ** (bits - 1) - 1
                 min_int = -(2 ** (bits - 1))
-                scales = maximum / max_int
-                w = torch.clamp(torch.round(w / scales), min_int, max_int) * scales
+                # Divide the wide amplitude before narrowing; the scale always
+                # fits (STDCLIP's widest FP16 endpoint is |center| + 3 * std
+                # <= 4 * 65504, so its scale is at most 37431). A widened
+                # interval can still put a near-maximum weight on a code whose
+                # product overflows, so repair those codes. Narrow intervals
+                # keep the previous grid.
+                wide_bounds = maximum.dtype != input_dtype
+                scales = (maximum / max_int).to(input_dtype)
+                codes = torch.clamp(torch.round(w / scales), min_int, max_int)
+                if wide_bounds:
+                    codes = _awq_bound_symmetric_codes(codes, scales, min_int, max_int)
+                w = codes * scales
             else:
                 minimum, maximum = affine_range_with_zero(minimum, maximum)
                 max_int = 2**bits - 1
@@ -5317,10 +5383,11 @@ class AWQProcessor(LoopProcessor):
             scales = max_val / max_int
             w = torch.clamp(torch.round(w / scales), min_int, max_int) * scales
 
-        # A single reduction and host read covers both guards. NaN scales and
-        # NaN dequantized weights are independent failures, but each full-tensor
-        # scan previously synchronized the stream separately.
-        assert not bool(torch.isnan(scales).any() | torch.isnan(w).any())
+        # A single reduction and host read covers both guards. Non-finite
+        # scales and NaN dequantized weights are independent failures, but each
+        # full-tensor scan previously synchronized the stream separately. An
+        # infinite scale is as fatal as NaN: it turns every code into 0 * inf.
+        assert not bool((~torch.isfinite(scales) | torch.isnan(w)).any())
         if input_dtype.is_floating_point:
             limits = torch.finfo(input_dtype)
             w.clamp_(limits.min, limits.max)
