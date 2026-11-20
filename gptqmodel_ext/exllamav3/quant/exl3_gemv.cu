@@ -79,6 +79,8 @@ bool exl3_gemv_try_launch
     cudaStream_t stream
 )
 {
+    // R4NX has no packed-GEMV instances; it uses the packed GEMM path instead.
+    if (cb == EXL3_R4NX_CODEBOOK) return false;
     const bool q4nx = cb == EXL3_Q4NX_CODEBOOK;
     if (q4nx)
     {
@@ -331,6 +333,8 @@ bool exl3_gemv_try_launch
     cudaStream_t stream
 )
 {
+    // R4NX has no packed-GEMV instances; it uses the packed GEMM path instead.
+    if (cb == EXL3_R4NX_CODEBOOK) return false;
     const bool q4nx = cb == EXL3_Q4NX_CODEBOOK;
     if (q4nx)
     {

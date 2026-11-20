@@ -27,21 +27,21 @@ void exl3_moe_coop_empty_kernel(const MoeCoopParams p)
     exl3_moe_coop_ns::write_empty_row_chunk(p, blockIdx.x, blockIdx.y, threadIdx.x);
 }
 
-template <int K, bool half_k>
-static MoeCoopKernel q4nx_kernel_a(int Hi, bool wide)
+template <int K, bool half_k, int cb>
+static MoeCoopKernel nx_kernel_a(int Hi, bool wide)
 {
     using namespace exl3_moe_coop_ns;
-    auto kernel = wide ? exl3_moe_coop_a_kernel<K, EXL3_Q4NX_CODEBOOK, true, half_k>
-                       : exl3_moe_coop_a_kernel<K, EXL3_Q4NX_CODEBOOK, false, half_k>;
+    auto kernel = wide ? exl3_moe_coop_a_kernel<K, cb, true, half_k>
+                       : exl3_moe_coop_a_kernel<K, cb, false, half_k>;
     return {reinterpret_cast<void*>(kernel), smem_a_bytes<K, half_k>(Hi)};
 }
 
-template <int K, bool half_k>
-static MoeCoopKernel q4nx_kernel_b(bool wide)
+template <int K, bool half_k, int cb>
+static MoeCoopKernel nx_kernel_b(bool wide)
 {
     using namespace exl3_moe_coop_ns;
-    auto kernel = wide ? exl3_moe_coop_b_kernel<K, EXL3_Q4NX_CODEBOOK, true, half_k>
-                       : exl3_moe_coop_b_kernel<K, EXL3_Q4NX_CODEBOOK, false, half_k>;
+    auto kernel = wide ? exl3_moe_coop_b_kernel<K, cb, true, half_k>
+                       : exl3_moe_coop_b_kernel<K, cb, false, half_k>;
     return {reinterpret_cast<void*>(kernel), smem_b_bytes<K, half_k>()};
 }
 
@@ -51,8 +51,16 @@ static MoeCoopKernel moe_coop_kernel_a(float K_, int cb, int Hi, bool wide)
     const int K = bk.bits;
     if (cb == EXL3_Q4NX_CODEBOOK)
     {
-        if (K == 2) return q4nx_kernel_a<2, true>(Hi, wide);
-        return bk.half ? q4nx_kernel_a<3, true>(Hi, wide) : q4nx_kernel_a<3, false>(Hi, wide);
+        if (K == 2) return nx_kernel_a<2, true, EXL3_Q4NX_CODEBOOK>(Hi, wide);
+        return bk.half ? nx_kernel_a<3, true, EXL3_Q4NX_CODEBOOK>(Hi, wide)
+                       : nx_kernel_a<3, false, EXL3_Q4NX_CODEBOOK>(Hi, wide);
+    }
+    if (cb == EXL3_R4NX_CODEBOOK)
+    {
+        if (K == 2) return nx_kernel_a<2, true, EXL3_R4NX_CODEBOOK>(Hi, wide);
+        if (K == 4) return nx_kernel_a<4, false, EXL3_R4NX_CODEBOOK>(Hi, wide);
+        return bk.half ? nx_kernel_a<3, true, EXL3_R4NX_CODEBOOK>(Hi, wide)
+                       : nx_kernel_a<3, false, EXL3_R4NX_CODEBOOK>(Hi, wide);
     }
     if (bk.half)
     {
@@ -83,8 +91,16 @@ static MoeCoopKernel moe_coop_kernel_b(float K_, int cb, bool wide)
     const int K = bk.bits;
     if (cb == EXL3_Q4NX_CODEBOOK)
     {
-        if (K == 2) return q4nx_kernel_b<2, true>(wide);
-        return bk.half ? q4nx_kernel_b<3, true>(wide) : q4nx_kernel_b<3, false>(wide);
+        if (K == 2) return nx_kernel_b<2, true, EXL3_Q4NX_CODEBOOK>(wide);
+        return bk.half ? nx_kernel_b<3, true, EXL3_Q4NX_CODEBOOK>(wide)
+                       : nx_kernel_b<3, false, EXL3_Q4NX_CODEBOOK>(wide);
+    }
+    if (cb == EXL3_R4NX_CODEBOOK)
+    {
+        if (K == 2) return nx_kernel_b<2, true, EXL3_R4NX_CODEBOOK>(wide);
+        if (K == 4) return nx_kernel_b<4, false, EXL3_R4NX_CODEBOOK>(wide);
+        return bk.half ? nx_kernel_b<3, true, EXL3_R4NX_CODEBOOK>(wide)
+                       : nx_kernel_b<3, false, EXL3_R4NX_CODEBOOK>(wide);
     }
     if (bk.half)
     {
@@ -194,7 +210,7 @@ MoeCoopParams exl3_moe_coop_prepare
     const c10::optional<at::Tensor>& u_bias,
     const c10::optional<at::Tensor>& d_bias,
     float Kg, float Ku, float Kd,
-    bool mcg, bool mul1, bool q4nx,
+    bool mcg, bool mul1, bool q4nx, bool r4nx,
     int act,
     float act_limit,
     bool gated,
@@ -222,16 +238,19 @@ MoeCoopParams exl3_moe_coop_prepare
         check_table(*t);
     for (const auto* t : { &g_bias, &u_bias, &d_bias })
         if (*t) check_table(t->value());
-    TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) <= 1, "exl3_moe_coop: conflicting codebooks");
+    TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) + int(r4nx) <= 1,
+                "exl3_moe_coop: conflicting codebooks");
     TORCH_CHECK(Kg >= 1 && Kg <= 8 && Ku >= 1 && Ku <= 8 && Kd >= 1 && Kd <= 8, "exl3_moe_coop: K out of range");
     TORCH_CHECK(!gated || Kg == Ku, "exl3_moe_coop: gate and up must share a bit width");
-    if (q4nx)
+    if (q4nx || r4nx)
     {
         const auto up = bits_from_K(Ku);
         const auto down = bits_from_K(Kd);
-        TORCH_CHECK(q4nx_supports_step_bits(4 * up.bits + 2 * up.half)
-                    && q4nx_supports_step_bits(4 * down.bits + 2 * down.half),
-                    "exl3_moe_coop: Q4NX requires 2.5, 3.0, or 3.5 bpw");
+        const int cb = r4nx ? EXL3_R4NX_CODEBOOK : EXL3_Q4NX_CODEBOOK;
+        TORCH_CHECK(exl3_nx_supports_step_bits(cb, 4 * up.bits + 2 * up.half)
+                    && exl3_nx_supports_step_bits(cb, 4 * down.bits + 2 * down.half),
+                    r4nx ? "exl3_moe_coop: R4NX requires 2.5, 3.0, 3.5, or 4.0 bpw"
+                         : "exl3_moe_coop: Q4NX requires 2.5, 3.0, or 3.5 bpw");
     }
     TORCH_CHECK(act >= 0 && act <= 3, "exl3_moe_coop: unknown activation");
 
@@ -315,7 +334,7 @@ MoeCoopParams exl3_moe_coop_prepare
 
     K_gu = gated ? Kg : Ku;
     K_d = Kd;
-    cb = q4nx ? EXL3_Q4NX_CODEBOOK : mcg ? 1 : mul1 ? 2 : 0;
+    cb = r4nx ? EXL3_R4NX_CODEBOOK : q4nx ? EXL3_Q4NX_CODEBOOK : mcg ? 1 : mul1 ? 2 : 0;
     return p;
 }
 
@@ -358,7 +377,7 @@ void exl3_moe_coop_run
     // The allocator keeps these call-local buffers alive on this stream,
     // including across capture and replay. Caller-owned FP32 scratch is reused.
     at::Tensor wide_gu;
-    if (cb == EXL3_Q4NX_CODEBOOK && !p.gu_f32 && slots)
+    if (exl3_is_nx_codebook(cb) && !p.gu_f32 && slots)
     {
         wide_gu = at::empty({p.gated ? 2 : 1, p.slots_max, p.I}, x.options().dtype(at::kFloat));
         auto* tmp = wide_gu.data_ptr<float>();
@@ -400,6 +419,7 @@ void exl3_moe_coop
     const c10::optional<at::Tensor>& sh_out,
     const c10::optional<at::Tensor>& sh_gate_w,
     bool q4nx,
+    bool r4nx,
     const c10::optional<at::Tensor>& flash_input_scale
 )
 {
@@ -440,7 +460,8 @@ void exl3_moe_coop
     }
     float K_gu, K_d; int cb;
     MoeCoopParams p = exl3_moe_coop_prepare(Hi, g_trellis, g_suh, g_svh, u_trellis, u_suh, u_svh, d_trellis, d_suh, d_svh,
-                                            g_bias, u_bias, d_bias, Kg, Ku, Kd, mcg, mul1, q4nx, act, act_limit, gated,
+                                            g_bias, u_bias, d_bias, Kg, Ku, Kd, mcg, mul1, q4nx, r4nx, act,
+                                            act_limit, gated,
                                             had_g, had_u, gu_g, gu_u, act_out, d_out, ctr, out, sh_gate_w, K_gu, K_d, cb);
     p.min_expert = min_expert;
     p.max_expert = max_expert;

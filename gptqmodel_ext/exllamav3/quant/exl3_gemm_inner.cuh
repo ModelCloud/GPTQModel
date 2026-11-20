@@ -596,7 +596,7 @@ void exl3_gemm_kernel_inner
     auto output_had_sh_gl = [&]()
     {
         constexpr float had_scale = 0.088388347648f *
-            (cb == EXL3_Q4NX_CODEBOOK ? EXL3_Q4NX_ALPHA : 1.0f);
+            (exl3_is_nx_codebook(cb) ? exl3_nx_alpha<cb>() : 1.0f);
         int sh_warp = warp_id;
         constexpr int active_warps = EXL3_GEMM_BASE_THREADS / 32;
         for (;; sh_warp += active_warps)

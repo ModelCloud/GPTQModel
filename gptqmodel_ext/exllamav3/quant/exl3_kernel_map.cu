@@ -118,6 +118,18 @@ uint16_t lookup_packed_sample(const TPackedTable& table, int cc_idx, int bits, i
 
 fp_exl3_gemm_kernel get_gemm_kernel_ptr(int K, int shape_idx, bool c_fp32, int cb, bool half_k, bool fused_gemm)
 {
+    if (cb == EXL3_R4NX_CODEBOOK)
+    {
+        TORCH_CHECK(r4nx_supports_step_bits(4 * K + 2 * half_k),
+                    "R4NX requires 2.5, 3.0, 3.5, or 4.0 bpw");
+        if (K == 2)
+            return (c_fp32 ? tfp_exl3_gemm_kernel_fp32_r4nx_w25 : tfp_exl3_gemm_kernel_fp16_r4nx_w25)[shape_idx];
+        if (K == 4)
+            return (c_fp32 ? tfp_exl3_gemm_kernel_fp32_r4nx_w40 : tfp_exl3_gemm_kernel_fp16_r4nx_w40)[shape_idx];
+        if (half_k)
+            return (c_fp32 ? tfp_exl3_gemm_kernel_fp32_r4nx_w35 : tfp_exl3_gemm_kernel_fp16_r4nx_w35)[shape_idx];
+        return (c_fp32 ? tfp_exl3_gemm_kernel_fp32_r4nx_w30 : tfp_exl3_gemm_kernel_fp16_r4nx_w30)[shape_idx];
+    }
     if (cb == EXL3_Q4NX_CODEBOOK)
     {
         TORCH_CHECK(q4nx_supports_step_bits(4 * K + 2 * half_k), "Q4NX requires 2.5, 3.0, or 3.5 bpw");

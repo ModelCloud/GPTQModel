@@ -2,6 +2,7 @@
 
 #include "codebook.cuh"
 #include "q4nx.cuh"
+#include "r4nx.cuh"
 #include "../frag.cuh"
 #include "../bitfield.cuh"
 
@@ -324,6 +325,43 @@ __device__ __forceinline__ void dq_q4nx(const uint32_t* ptr, int lane, FragB& fr
     dq_q4nx_window<KV>(__funnelshift_l(second, first, shift), frag0, frag1);
 }
 
+// R4NX decodes the same window as Q4NX but reads the four levels as the
+// signed bytes of `state * R4NX_MULTIPLIER`. The bytes are biased by +128 with
+// a per-byte wrapping add so the Q4NX half-construction trick still applies:
+// 0x6400 + (byte + 128) is exactly 1024 + (byte + 128) in FP16, and the
+// -1152 center folds the bias and the 1024 offset away in one HADD2.
+template <int KV>
+__device__ __forceinline__ void dq_r4nx_window(uint32_t window, FragB& frag0, FragB& frag1)
+{
+    constexpr int state_bits = 32 - KV;
+    const half offset = __ushort_as_half(0xe480);  // -(1024 + 128)
+    const half2 center = __halves2half2(offset, offset);
+
+    #pragma unroll
+    for (int j = 0; j < 2; ++j)
+    {
+        const uint32_t state = (window >> ((1 - j) * KV)) & ((1u << state_bits) - 1);
+        const uint32_t biased = __vadd4(r4nx_bytes(state), 0x80808080u);
+        const uint32_t lo = __byte_perm(biased, 0x6464u, 0x5140);
+        const uint32_t hi = __byte_perm(biased, 0x6464u, 0x5342);
+        const half2 low_pair = __halves2half2(__ushort_as_half(lo), __ushort_as_half(lo >> 16));
+        const half2 high_pair = __halves2half2(__ushort_as_half(hi), __ushort_as_half(hi >> 16));
+        FragB& frag = j == 0 ? frag0 : frag1;
+        frag[0] = __hadd2(low_pair, center);
+        frag[1] = __hadd2(high_pair, center);
+    }
+}
+
+template <int KV>
+__device__ __forceinline__ void dq_r4nx(const uint32_t* ptr, int lane, FragB& frag0, FragB& frag1)
+{
+    const int start = (2 * lane + 2) * KV - 32;
+    const int shift = start & 31;
+    const uint32_t first = start < 0 ? 0 : ptr[start / 32];
+    const uint32_t second = shift ? ptr[(start + 32) / 32] : 0;
+    dq_r4nx_window<KV>(__funnelshift_l(second, first, shift), frag0, frag1);
+}
+
 template <int bits, int cb, bool half_k = false>
 __device__ __forceinline__ void dq_dispatch(const uint32_t* ptr, int idx, FragB& frag0, FragB& frag1)
 {
@@ -332,6 +370,12 @@ __device__ __forceinline__ void dq_dispatch(const uint32_t* ptr, int idx, FragB&
         constexpr int KV = 4 * bits + 2 * half_k;
         static_assert(q4nx_supports_step_bits(KV));
         dq_q4nx<KV>(ptr, idx >> 3, frag0, frag1);
+    }
+    else if constexpr (cb == EXL3_R4NX_CODEBOOK)
+    {
+        constexpr int KV = 4 * bits + 2 * half_k;
+        static_assert(r4nx_supports_step_bits(KV));
+        dq_r4nx<KV>(ptr, idx >> 3, frag0, frag1);
     }
     else if constexpr (half_k)
     {

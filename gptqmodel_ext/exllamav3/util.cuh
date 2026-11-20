@@ -14,6 +14,12 @@
 #include <cuda_bf16.h>
 #endif
 
+// gpu_assert/cublas_assert below use fprintf/stderr/exit; declare them here
+// instead of relying on a transitive include from the CUDA runtime headers
+// (CUDA 13.1 no longer provides them).
+#include <cstdio>
+#include <cstdlib>
+
 typedef struct __align__(8) half4
 {
     half2 x;

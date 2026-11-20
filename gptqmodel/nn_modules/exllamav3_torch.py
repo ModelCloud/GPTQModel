@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from ..exllamav3.q4nx import decode_q4nx_states, unpack_q4nx_states
+from ..exllamav3.r4nx import decode_r4nx_states, unpack_r4nx_states
 from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, trellis_rate
 from ..models._const import DEVICE
 from ..utils.cpu_features import cpu_bf16x3_scope, has_avx512_bf16, has_cpu_bf16x3_precision
@@ -381,6 +382,7 @@ class ExllamaV3TorchLinear(nn.Module):
                 getattr(self, "mcg", None) is not None,
                 getattr(self, "mul1", None) is not None,
                 q4nx=getattr(self, "q4nx", None) is not None,
+                r4nx=getattr(self, "r4nx", None) is not None,
                 max_integer_rate=16,
             )
         except ValueError as exc:
@@ -436,6 +438,8 @@ class ExllamaV3TorchLinear(nn.Module):
         packed = trellis[:, tile_n_start:tile_n_end]
         if getattr(self, "q4nx", None) is not None:
             return unpack_q4nx_states(packed)
+        if getattr(self, "r4nx", None) is not None:
+            return unpack_r4nx_states(packed)
 
         bits = self._bits_per_weight()
         words = (packed.to(torch.int32) & 0xFFFF).contiguous()
@@ -516,6 +520,8 @@ class ExllamaV3TorchLinear(nn.Module):
         codebook = self._codebook_name()
         if codebook == "q4nx":
             decoded = decode_q4nx_states(encoded)
+        elif codebook == "r4nx":
+            decoded = decode_r4nx_states(encoded)
         else:
             lut = _codebook_lut(codebook, trellis.device.type, trellis.device.index)
             decoded = lut[encoded]

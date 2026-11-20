@@ -160,4 +160,15 @@ void reconstruct_q4nx(at::Tensor unpacked, at::Tensor packed, int K, bool half_k
                                        : reconstruct_kernel<3, EXL3_Q4NX_CODEBOOK>;
     reconstruct_impl(unpacked, packed, 16 * K + 8 * half_k, kernel);
 }
+
+void reconstruct_r4nx(at::Tensor unpacked, at::Tensor packed, int K, bool half_k)
+{
+    TORCH_CHECK(r4nx_supports_step_bits(4 * K + 2 * half_k),
+                "R4NX reconstruction requires 2.5, 3.0, 3.5, or 4.0 bpw");
+    const auto kernel = K == 2 ? reconstruct_kernel<2, EXL3_R4NX_CODEBOOK, true>
+                              : half_k ? reconstruct_kernel<3, EXL3_R4NX_CODEBOOK, true>
+                              : K == 4 ? reconstruct_kernel<4, EXL3_R4NX_CODEBOOK>
+                                       : reconstruct_kernel<3, EXL3_R4NX_CODEBOOK>;
+    reconstruct_impl(unpacked, packed, 16 * K + 8 * half_k, kernel);
+}
 #endif

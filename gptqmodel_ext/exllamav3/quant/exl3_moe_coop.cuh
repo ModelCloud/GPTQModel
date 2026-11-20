@@ -96,7 +96,7 @@ MoeCoopParams exl3_moe_coop_prepare
     const c10::optional<at::Tensor>& u_bias,
     const c10::optional<at::Tensor>& d_bias,
     float Kg, float Ku, float Kd,
-    bool mcg, bool mul1, bool q4nx,
+    bool mcg, bool mul1, bool q4nx, bool r4nx,
     int act,
     float act_limit,
     bool gated,
@@ -151,6 +151,7 @@ void exl3_moe_coop
     const c10::optional<at::Tensor>& sh_out,
     const c10::optional<at::Tensor>& sh_gate_w,
     bool q4nx,
+    bool r4nx,
     const c10::optional<at::Tensor>& flash_input_scale
 );
 

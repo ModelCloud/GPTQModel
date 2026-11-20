@@ -30,7 +30,8 @@ std::shared_mutex kernel_attr_mutex;
 int exl3_gemm(
     const at::Tensor& A, const at::Tensor& B, at::Tensor& C,
     const at::Tensor& suh, const at::Tensor& A_had, const at::Tensor& svh,
-    bool mcg, bool mul1, bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx)
+    bool mcg, bool mul1, bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx,
+    bool r4nx)
 {
 #if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
     TORCH_CHECK(false,
@@ -48,17 +49,19 @@ int exl3_gemm(
     TORCH_CHECK_DTYPE(B, kShort);
     const bool c_fp32 = C.dtype() == at::kFloat;
     if (!c_fp32) TORCH_CHECK_DTYPE(C, kHalf);
-    TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) <= 1, "conflicting EXL3 codebooks");
+    TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) + int(r4nx) <= 1, "conflicting EXL3 codebooks");
     TORCH_CHECK(int8_gemv >= 0 && int8_gemv <= 2, "EXL3 INT8 mode must be 0, 1 or 2");
 
     const int64_t words_per_tile = B.size(2);
     TORCH_CHECK(words_per_tile >= 16 && words_per_tile <= 128, "invalid EXL3 trellis width");
     const int K = words_per_tile / 16;
     const bool half_k = words_per_tile % 16 == 8;
-    if (q4nx)
+    const int cb = r4nx ? EXL3_R4NX_CODEBOOK : q4nx ? EXL3_Q4NX_CODEBOOK : mcg ? 1 : mul1 ? 2 : 0;
+    if (exl3_is_nx_codebook(cb))
     {
-        TORCH_CHECK(words_per_tile % 4 == 0 && q4nx_supports_step_bits(words_per_tile / 4),
-                    "Q4NX requires 2.5, 3.0, or 3.5 bpw");
+        TORCH_CHECK(words_per_tile % 4 == 0 && exl3_nx_supports_step_bits(cb, words_per_tile / 4),
+                    cb == EXL3_R4NX_CODEBOOK ? "R4NX requires 2.5, 3.0, 3.5, or 4.0 bpw"
+                                             : "Q4NX requires 2.5, 3.0, or 3.5 bpw");
     }
     else
     {
@@ -76,7 +79,6 @@ int exl3_gemm(
     const int size_m = rows;
     const int size_k = A.size(-1);
     const int size_n = C.size(-1);
-    const int cb = q4nx ? EXL3_Q4NX_CODEBOOK : mcg ? 1 : mul1 ? 2 : 0;
     const int num_sms = DevCtx::instance().get_num_sms(device);
     const int cc = DevCtx::instance().get_cc(device);
 
@@ -85,20 +87,22 @@ int exl3_gemm(
     // Cap the per-call expanded matrix at 48 MiB and require more rows for
     // the wider projections. Keep the HGEMM result wide through normalization.
     const int64_t weight_elements = (int64_t) size_k * size_n;
-    if (q4nx && c_fp32 && cc == CC_AMPERE && !fused_gemm &&
+    if (exl3_is_nx_codebook(cb) && c_fp32 && cc == CC_AMPERE && !fused_gemm &&
         weight_elements >= 4 * 1024 * 1024 && weight_elements <= 24 * 1024 * 1024 &&
         size_m >= (weight_elements <= 12 * 1024 * 1024 ? 64 : 128))
     {
         try
         {
             auto weight = at::empty({size_k, size_n}, A.options());
-            reconstruct_q4nx(weight, B, K, half_k);
+            if (cb == EXL3_R4NX_CODEBOOK) reconstruct_r4nx(weight, B, K, half_k);
+            else reconstruct_q4nx(weight, B, K, half_k);
             auto x = A.view({size_m, size_k});
             auto xh = A_had.view({size_m, size_k});
             auto y = C.view({size_m, size_n});
             had_r_128(x, xh, suh, c10::nullopt, 1.0f);
             hgemm(xh, weight, y);
-            had_r_128(y, y, c10::nullopt, svh, EXL3_Q4NX_ALPHA);
+            had_r_128(y, y, c10::nullopt, svh,
+                      cb == EXL3_R4NX_CODEBOOK ? EXL3_R4NX_ALPHA : EXL3_Q4NX_ALPHA);
             return 92;
         }
         catch (const c10::OutOfMemoryError&)
@@ -125,7 +129,7 @@ int exl3_gemm(
     if (fp16_gemv && exl3_gemv_try_launch(args, size_m, size_k, size_n, K, half_k, cb, c_fp32, device, stream))
         return 90;
 
-    const bool use_fused = fused_gemm || half_k || q4nx;
+    const bool use_fused = fused_gemm || half_k || exl3_is_nx_codebook(cb);
     const int smem_max = std::min<int>(SMEM_MAX, at::cuda::getDeviceProperties(device)->sharedMemPerBlockOptin);
     const TResult* config = select_exl3_gemm_kernel_tuned(
         cc, size_k, size_n, K, c_fp32, -1, 0, cb, half_k, use_fused, size_m, smem_max);
@@ -163,16 +167,28 @@ int exl3_gemm(
 #if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
 namespace {
 
-// Which shape of the Q4NX kernel table holds `kernel`, or -1 when the dispatch
-// picked another codebook's instance. The three Q4NX rates have their own
-// tables, so the answer also pins the packed width the caller asked for.
-int q4nx_kernel_shape(fp_exl3_gemm_kernel kernel, int K, bool c_fp32, bool half_k)
+// Which shape of the NX kernel table holds `kernel`, or -1 when the dispatch
+// picked another codebook's instance. Each NX rate has its own table, so the
+// answer also pins the packed width the caller asked for.
+int nx_kernel_shape(fp_exl3_gemm_kernel kernel, int K, bool c_fp32, bool half_k, int cb)
 {
     if (!kernel) return -1;
-    fp_exl3_gemm_kernel* table =
-        K == 2 ? (c_fp32 ? tfp_exl3_gemm_kernel_fp32_q4nx_w25 : tfp_exl3_gemm_kernel_fp16_q4nx_w25)
-      : half_k ? (c_fp32 ? tfp_exl3_gemm_kernel_fp32_q4nx_w35 : tfp_exl3_gemm_kernel_fp16_q4nx_w35)
-               : (c_fp32 ? tfp_exl3_gemm_kernel_fp32_q4nx_w30 : tfp_exl3_gemm_kernel_fp16_q4nx_w30);
+    fp_exl3_gemm_kernel* table;
+    if (cb == EXL3_R4NX_CODEBOOK)
+    {
+        table =
+            K == 2 ? (c_fp32 ? tfp_exl3_gemm_kernel_fp32_r4nx_w25 : tfp_exl3_gemm_kernel_fp16_r4nx_w25)
+          : K == 4 ? (c_fp32 ? tfp_exl3_gemm_kernel_fp32_r4nx_w40 : tfp_exl3_gemm_kernel_fp16_r4nx_w40)
+          : half_k ? (c_fp32 ? tfp_exl3_gemm_kernel_fp32_r4nx_w35 : tfp_exl3_gemm_kernel_fp16_r4nx_w35)
+                   : (c_fp32 ? tfp_exl3_gemm_kernel_fp32_r4nx_w30 : tfp_exl3_gemm_kernel_fp16_r4nx_w30);
+    }
+    else
+    {
+        table =
+            K == 2 ? (c_fp32 ? tfp_exl3_gemm_kernel_fp32_q4nx_w25 : tfp_exl3_gemm_kernel_fp16_q4nx_w25)
+          : half_k ? (c_fp32 ? tfp_exl3_gemm_kernel_fp32_q4nx_w35 : tfp_exl3_gemm_kernel_fp16_q4nx_w35)
+                   : (c_fp32 ? tfp_exl3_gemm_kernel_fp32_q4nx_w30 : tfp_exl3_gemm_kernel_fp16_q4nx_w30);
+    }
     for (int shape = 1; shape <= EXL3_GEMM_NUM_SHAPES; ++shape)
         if (table[shape] == kernel)
             return shape;
@@ -194,8 +210,8 @@ std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t> exl3_gemm_kernel_probe(
         (int) cc, (int) size_k, (int) size_n, (int) K, c_fp32, -1, 0, (int) cb,
         half_k, fused_gemm, (int) size_m, smem_max);
     TORCH_CHECK(config && config->kernel, "no EXL3 GEMM kernel for this shape");
-    const int q4nx_shape = cb == EXL3_Q4NX_CODEBOOK
-        ? q4nx_kernel_shape(config->kernel, (int) K, c_fp32, half_k) : -1;
+    const int q4nx_shape = exl3_is_nx_codebook(cb)
+        ? nx_kernel_shape(config->kernel, (int) K, c_fp32, half_k, cb) : -1;
     return {
         (int64_t) reinterpret_cast<uintptr_t>(config->kernel),
         config->shape_idx,

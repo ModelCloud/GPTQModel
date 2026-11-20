@@ -226,7 +226,9 @@ def build_exl3_quant_args(
 ) -> Dict[str, object]:
     """Build the common arguments for one resolved EXL3 projection."""
     codebook = config.codebook
-    validate_trellis_k(bits, codebook == "mcg", codebook == "mul1", q4nx=codebook == "q4nx")
+    validate_trellis_k(
+        bits, codebook == "mcg", codebook == "mul1", q4nx=codebook == "q4nx", r4nx=codebook == "r4nx"
+    )
     quant_args: Dict[str, object] = {
         "K": bits,
         "devices": [device],

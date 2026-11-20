@@ -129,6 +129,8 @@ def _read_tensor(shard, source, template, device):
         raise ValueError(f"DeepSeek V4.1 tensor {source} has dtype {value.dtype}, expected {target_dtype}")
     if source.endswith(".q4nx") and value.item() != Q4NX_MULTIPLIER - (1 << 32):
         raise ValueError(f"DeepSeek V4.1 tensor {source} has an invalid Q4NX marker")
+    if source.endswith(".r4nx"):
+        raise ValueError(f"DeepSeek V4.1 checkpoint format does not support R4NX tensors ({source})")
     return value.to(device=device, dtype=target_dtype)
 
 

@@ -32,7 +32,7 @@ from .._quant_methods import (
     LEGACY_PARO_QUANT_METHOD,
 )
 from ..adapter.adapter import Lora, normalize_adapter
-from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, HALF_RATES, Q4NX_RATES
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, HALF_RATES, Q4NX_RATES, R4NX_RATES
 from ..utils.backend_config import RuntimeConfig
 from ..utils.hf import resolve_checkpoint_subfolder
 from ..utils.kernel import KernelConfig, resolve_kernel_config
@@ -1336,9 +1336,11 @@ def _normalize_exl3_bits(
         raise ValueError(f"EXL3Config: `{field}` must be between 1.0 and 8.0.")
     if codebook == "q4nx" and bits not in Q4NX_RATES:
         raise ValueError(f"EXL3Config: q4nx supports 2.5, 3.0, or 3.5 bpw, got `{field}={bits:g}`.")
+    if codebook == "r4nx" and bits not in R4NX_RATES:
+        raise ValueError(f"EXL3Config: r4nx supports 2.5, 3.0, 3.5, or 4.0 bpw, got `{field}={bits:g}`.")
     if bits.is_integer():
         return int(bits)
-    if bits in HALF_RATES and codebook in (None, "mul1", "q4nx"):
+    if bits in HALF_RATES and codebook in (None, "mul1", "q4nx", "r4nx"):
         return bits
     raise ValueError(
         f"EXL3Config: `{field}={bits:g}` is not an integer trellis width. "
@@ -9557,7 +9559,7 @@ class EXL3Config(PreProcessorConfig):
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
         self.codebook = str(self.codebook).strip().lower()
         if self.codebook not in (*EXL3_CODEBOOK_MARKERS, "3inst"):
-            raise ValueError("EXL3Config: `codebook` must be one of `mcg`, `mul1`, `q4nx`, or `3inst`.")
+            raise ValueError("EXL3Config: `codebook` must be one of `mcg`, `mul1`, `q4nx`, `r4nx`, or `3inst`.")
 
         self.bits = _normalize_exl3_bits(self.bits, codebook=self.codebook, field="bits")
 

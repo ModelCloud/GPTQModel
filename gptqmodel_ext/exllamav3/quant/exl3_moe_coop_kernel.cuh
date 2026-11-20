@@ -376,7 +376,7 @@ __device__ __forceinline__ void gemv_tile
     uint32_t* __restrict__ sh_stage     // [WK][STAGE_WORDS], staged widths only
 )
 {
-    constexpr bool Q4NX = cb == EXL3_Q4NX_CODEBOOK;
+    constexpr bool Q4NX = exl3_is_nx_codebook(cb);
     constexpr bool REG = !Q4NX && !HALF && tile_reg<bits>();
     constexpr int TWORDS = HALF ? 4 * (2 * bits + 1) : 8 * bits;              // uint32 per 16x16 tile
     constexpr int GWORDS = WNT * TWORDS;                                        // uint32 per warp per k-slice
@@ -570,7 +570,7 @@ __device__ __forceinline__ void gemv_tile
         for (int j = 0; j < WKK; ++j)
             sum += sh_red[(j * ROWS + r) * TCOLS + c];
         if constexpr (Q4NX)
-            sum *= EXL3_Q4NX_ALPHA;
+            sum *= exl3_nx_alpha<cb>();
         const size_t idx = (size_t) rows[r] * c_stride + group * TCOLS + c;
         if (c_f32) ((float*) C)[idx] = sum;
         else       ((half*) C)[idx] = __float2half_rn(sum);

@@ -110,6 +110,7 @@ def _source_files() -> list[str]:
             "quant/exl3_gemv_int8.cu",
             "quant/exl3_moe_coop.cu",
             "quant/q4nx_quant.cu",
+            "quant/r4nx_quant.cu",
             "quant/comp_units/exl3_gemv_half_inst.cu",
         ]
         units = sources_dir / "quant/comp_units"
@@ -193,7 +194,18 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "bc_linear_exl3_run",
         "bc_linear_exl3_run_configured",
         "bc_linear_exl3_run_hip_gemv",
-    ) + (("exl3_moe_coop", "quantize_tiles_q4nx", "pack_trellis_q4nx") if torch.version.hip is None else ()),
+    ) + (
+        (
+            "exl3_moe_coop",
+            "quantize_tiles_q4nx",
+            "pack_trellis_q4nx",
+            "quantize_tiles_r4nx",
+            "pack_trellis_r4nx",
+            "reconstruct_r4nx",
+        )
+        if torch.version.hip is None
+        else ()
+    ),
     sources=_source_files,
     build_root_env="GPTQMODEL_EXLLAMAV3_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("exllamav3"),
@@ -267,6 +279,7 @@ class _BCLinearEXL3:
         *,
         kernel: KernelConfig | None = None,
         q4nx: bool = False,
+        r4nx: bool = False,
     ):
         if not exllamav3_runtime_available():
             raise ModuleNotFoundError("ExLlamaV3 torch.ops kernels are not properly installed. Error: " + exllamav3_runtime_error())
@@ -278,6 +291,7 @@ class _BCLinearEXL3:
         self.mcg = bool(mcg)
         self.mul1 = bool(mul1)
         self.q4nx = q4nx
+        self.r4nx = bool(r4nx)
         policy = resolve_kernel_config(kernel)
         self.fp16_gemv = policy.exl3_fp16_gemv
         self.int8_gemv = policy.exl3_int8_gemv
@@ -287,9 +301,11 @@ class _BCLinearEXL3:
     def run(self, x: torch.Tensor, y: torch.Tensor, *, include_bias: bool = True) -> None:
         bias = self.bias if include_bias else None
         args = (self.trellis, self.suh, self.svh, self.K, bias, self.mcg, self.mul1, x, y)
-        if self.q4nx:
+        if self.q4nx or self.r4nx:
             gemv = self.fp16_gemv or not self.fused_gemm
-            _runtime_op("bc_linear_exl3_run_configured")(*args, gemv, 0, self.fused_gemm, q4nx=True)
+            _runtime_op("bc_linear_exl3_run_configured")(
+                *args, gemv, 0, self.fused_gemm, q4nx=self.q4nx, r4nx=self.r4nx
+            )
         elif self._configured:
             _runtime_op("bc_linear_exl3_run_configured")(*args, self.fp16_gemv, self.int8_gemv, self.fused_gemm)
         else:
@@ -337,6 +353,12 @@ class _ExllamaV3TorchOpsFacade:
 
     def pack_trellis_q4nx(self, packed: torch.Tensor, suffixes: torch.Tensor, kv: int) -> None:
         _runtime_op("pack_trellis_q4nx")(packed, suffixes, kv)
+
+    def quantize_tiles_r4nx(self, tiles, output, suffixes, kv, scale_search) -> None:
+        _runtime_op("quantize_tiles_r4nx")(tiles, output, suffixes, kv, scale_search)
+
+    def pack_trellis_r4nx(self, packed: torch.Tensor, suffixes: torch.Tensor, kv: int) -> None:
+        _runtime_op("pack_trellis_r4nx")(packed, suffixes, kv)
 
     def unpack_trellis(self, unpacked: torch.Tensor, packed: torch.Tensor, K: int) -> None:
         _runtime_op("unpack_trellis")(unpacked, packed, int(K))
