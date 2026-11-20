@@ -271,9 +271,10 @@ the affected device and dtype where inference selects a fused op, and verify
 the no-grad control still takes that op. If full-graph compilation is
 advertised, execute the compiled forward with `fullgraph=True` too.
 
-- Use cancellation (large product plus opposing bias), range endpoints,
-  underflow, and nonfinite inputs where supported. Check wide accumulation and
-  bias before one output cast; assigning into FP32 cannot undo earlier rounding.
+- For bias changes, apply the
+  [linear bias contract](../gptqmodel-torch-oracle-numerics/SKILL.md#linear-bias).
+  Use cancellation, range endpoints, underflow, and nonfinite inputs where
+  supported. Check that the fixture reaches the intended epilogue.
 - For scale folding, cross the **storage dtype with the activation dtype**.
   Choose a fold that fits on disk but overflows or rounds a nonzero to zero
   on the compute cast. Compare the first forward to an independently scaled
