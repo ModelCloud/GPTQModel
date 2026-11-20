@@ -2230,6 +2230,10 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
                                             calibration_data=processor.calibration_dataset,
                                             use_cache=False)
             processor.receive_input_cache(input_cache)
+            # The processor owns the capture now. A checkpoint restore replaces
+            # its backing cache, so a lingering local would keep the discarded
+            # first-layer replay frontier alive for the rest of the run (#5829).
+            del input_cache
 
         # release calibration_dataset
         for processor in self.processors:
