@@ -351,3 +351,26 @@ def test_fp4_wide_bias_path_does_not_narrow_the_weight(monkeypatch):
     # stored bias still cancels the widened product.
     assert targets and torch.float16 not in targets
     assert float(output.item()) == 49152.0 - 65536.0
+
+
+def test_fp4_forward_locks_the_activation_dtype():
+    """``TorchFP4Linear`` is a kernel module: one activation dtype per instance."""
+
+    module = _make_fp4_linear()
+    x = torch.randn(5, module.in_features, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        module(x)
+
+    with pytest.raises(RuntimeError, match="never switches activation dtype"):
+        module(x.to(torch.float16))
+
+
+def test_fp4_rejects_a_post_forward_dtype_cast():
+    module = _make_fp4_linear()
+    x = torch.randn(5, module.in_features, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        module(x)
+
+    with pytest.raises(RuntimeError, match="Weight dtypes are frozen after the first forward"):
+        module.to(torch.float32)
+    assert module.bias.dtype is torch.bfloat16

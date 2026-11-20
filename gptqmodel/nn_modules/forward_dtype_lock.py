@@ -140,7 +140,9 @@ class ForwardDtypeLockMixin:
         forward = cls.__dict__.get("forward")
         if callable(forward):
             cls.forward = _lock_forward_dtype(forward)
-        apply = cls.__dict__.get("_apply")
+        # Wrap the inherited ``nn.Module._apply`` too, so a module without its
+        # own override still freezes its weight dtypes after the first forward.
+        apply = getattr(cls, "_apply", None)
         if callable(apply):
             cls._apply = _lock_apply_dtypes(apply)
         for name in _REWRITE_METHODS:

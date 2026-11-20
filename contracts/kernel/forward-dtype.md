@@ -7,8 +7,8 @@ A model runs in one dtype. This contract is about what that means for two kinds
 of module:
 
 - **Kernel modules** serve inference forwards from prepared weights. They
-  include every `BaseQuantLinear`, the EXL3 linears, and fused projection
-  executors.
+  include every `BaseQuantLinear`, the EXL3 linears, `TorchFP4Linear`, and
+  fused projection executors.
 - **Source modules** are the modules of a model while it is being quantized:
   the linears being quantized, and the norms, previous linears, routers and
   gates that quantization folds into. Calibration capture stand-ins (AUTO_NF12,
@@ -85,8 +85,9 @@ never be "a later call might use another dtype".
 ## Enforcement
 
 `ForwardDtypeLockMixin` (`gptqmodel/nn_modules/forward_dtype_lock.py`) is a
-base of `BaseQuantLinear`, `ExllamaV3Linear` and `ExllamaV3TorchLinear`. It
-wraps every subclass's `forward`, `_apply` and pack entry points:
+base of `BaseQuantLinear`, `ExllamaV3Linear`, `ExllamaV3TorchLinear` and
+`TorchFP4Linear`. It wraps every subclass's `forward`, `_apply` and pack entry
+points:
 
 - The first eager forward records `_forward_dtype_lock`. A later forward in
   another dtype raises. While `torch.compile` is tracing, the lock is checked
