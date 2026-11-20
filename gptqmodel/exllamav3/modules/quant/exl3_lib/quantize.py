@@ -130,23 +130,22 @@ def tile_core_permute_i(tiles: torch.Tensor, tiles_n: int, size_n: int) -> torch
 
 
 _DEFAULT_TILE_BATCH = 256
+_Q4NX_WIDE_TILE_BATCH = 512
+_Q4NX_NARROW_TILE_BATCH = 1024
 
 
-def _tile_batch_size() -> int:
+def _tile_batch_size(limit: int = _DEFAULT_TILE_BATCH) -> int:
     """Tile slots per quantization launch.
 
-    The scratch buffer below is ``batch x 256 x (65536 >> K)`` int16, i.e. 2 GiB
-    at the default batch of 256, allocated once per quantization stream. There
-    is one quantization stream per device, so a run holds one scratch pair per
-    device. ``KernelConfig.exl3_tile_batch`` lowers the slot count for
-    memory-constrained hosts; tiles are quantized independently, so a smaller
-    batch only means more launches.
+    Legacy Viterbi histories use up to 2 GiB of per-stream scratch at 256
+    slots. Q4NX's launch-local history is much smaller. An explicit
+    ``KernelConfig.exl3_tile_batch`` can lower either codebook's limit.
     """
 
     from .....utils.kernel import get_kernel_config
 
     batch = get_kernel_config().exl3_tile_batch
-    return max(1, min(_DEFAULT_TILE_BATCH, batch))
+    return limit if batch is None else max(1, min(limit, batch))
 
 
 def _allocate_temp_buffers(device, K: int, batch: int):
@@ -213,15 +212,20 @@ def _quantize_tiles_with_workspace(tiles, output, indices, K, mcg, mul1, *, q4nx
     """
 
     validate_trellis_k(K, mcg, mul1, q4nx=q4nx)
-    batch = _tile_batch_size()
     if q4nx:
         if not tiles.is_cuda or torch.version.hip is not None:
             raise ValueError("EXL3 q4nx quantization requires NVIDIA CUDA.")
+        # Each tile stores 64 steps of int32 history. Bound the launch at
+        # 16 MiB with 128 states or 4 MiB with 16 states (search and W3.5).
+        limit = _Q4NX_NARROW_TILE_BATCH if scale_search or K == 3.5 else _Q4NX_WIDE_TILE_BATCH
+        batch = _tile_batch_size(limit)
+        step_bits = int(4 * K)
         for start in range(0, tiles.shape[0], batch):
             stop = start + batch
-            ext.quantize_tiles_q4nx(tiles[start:stop], output[start:stop], indices[start:stop], int(4 * K), scale_search)
+            ext.quantize_tiles_q4nx(tiles[start:stop], output[start:stop], indices[start:stop], step_bits, scale_search)
         return
 
+    batch = _tile_batch_size()
     depth = int(K)
     stream = torch.cuda.current_stream(tiles.device)
     if K != depth:

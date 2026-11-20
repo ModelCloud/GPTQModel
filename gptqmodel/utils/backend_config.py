@@ -233,7 +233,7 @@ class RuntimeConfig(_KernelSettings):
     paro_rotate_cta_m: Optional[int] = None
     paro_rotate_row_pad: Optional[int] = None
     paro_autotune_cache: bool = True
-    exl3_tile_batch: int = 256
+    exl3_tile_batch: Optional[int] = None
     exl3_host_rss_limit_bytes: int = 0
     exl3_cuda_allocation_limit_bytes: int = 0
     exl3_memory_telemetry_interval_batches: int = 0

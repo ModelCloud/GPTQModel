@@ -416,17 +416,22 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
             bits=bits,
             offsets=offsets,
         )
-        current_codes = searched
-        code_rows = score_rows(current_codes, current_scales)
+        code_rows = score_rows(searched, current_scales)
         accepts = code_rows < best_rows * floor
-        best_codes = torch.where(accepts.unsqueeze(-1), current_codes, best_codes)
+        best_codes = torch.where(accepts.unsqueeze(-1), searched, best_codes)
         best_scales = torch.where(accepts.unsqueeze(-1), current_scales, best_scales)
         best_rows = torch.where(accepts, code_rows, best_rows)
+        # Continue from each row's best accepted state so a rejected candidate
+        # never feeds its worse codes or scales into the next candidate family.
+        current_codes = best_codes
+        current_scales = best_scales
         history.append(float(best_rows.sum()))
-        if not config.learn_scales or not bool(accepts.any()):
+        if not config.learn_scales:
             break
         # Candidate 2: refit the scale table under those codes. Scales move the
         # grid, so the next round re-searches the codes on the new table.
+        # Every row gets its own scale trial even when its codes were already
+        # optimal; whether a neighbour improved must not decide this row (#5692).
         scaled = _fit_group_scales(
             current_codes, zero, group, teacher, factor, decode,
             scale_dtype, current_scales,
@@ -435,10 +440,9 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
         accepts = scale_rows < best_rows * floor
         if not bool(accepts.any()):
             break
-        best_codes = torch.where(accepts.unsqueeze(-1), current_codes, best_codes)
         best_scales = torch.where(accepts.unsqueeze(-1), scaled, best_scales)
         best_rows = torch.where(accepts, scale_rows, best_rows)
-        current_scales = torch.where(accepts.unsqueeze(-1), scaled, current_scales)
+        current_scales = best_scales
         history.append(float(best_rows.sum()))
 
     # Final per-row acceptance against the initializer, so a row that got worse
