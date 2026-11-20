@@ -356,12 +356,16 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
         return (error @ factor).square().sum(dim=1)
 
     def recover_codes(candidate_weight, candidate_scales):
-        # Match pack_original: the scale/zero product, addition and division
-        # use the producer tensor dtypes before the integer rounding step.
-        native_scale = candidate_scales.to(scales.dtype)[:, group]
-        native_zero = zeros[:, group]
-        offset = native_zero * native_scale
-        return ((candidate_weight + offset) / native_scale).round().clamp(0, 2**bits - 1).float()
+        # Share the packer's arithmetic instead of re-deriving it here.
+        # ``affine_codes`` widens the weight, scale and zero-point to FP32
+        # before the multiply, exactly like ``pack_original``; multiplying two
+        # FP16 operands first overflowed (zero-point 8 * scale 8192 -> inf) and
+        # turned an exactly representable zero into code 14 (#5697).
+        stored = candidate_scales.to(scale_dtype)
+        return affine_codes(
+            candidate_weight, stored, zeros, group, bits,
+            packing="gptq", scale_dtype=scale_dtype,
+        ).float()
 
     def decode(codes, candidate_scales):
         stored = candidate_scales.to(scale_dtype).float()
