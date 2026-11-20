@@ -862,10 +862,11 @@ def clone_exllamav3_config_for_module(
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
+    is_head = lm_head_name in (module_full_name, module_full_name.rsplit(".", 1)[-1])
+    qcfg_clone.head_bits = resolved_cfg.get("head_bits", qcfg.head_bits) if is_head else None
 
     if qcfg.dynamic is not None:
         qcfg_clone.bits = resolved_cfg.get("bits", qcfg_clone.bits)
-        qcfg_clone.head_bits = resolved_cfg.get("head_bits", qcfg_clone.head_bits)
 
         out_scales_override = resolved_cfg.get("out_scales", None)
         if out_scales_override is not None:
@@ -874,10 +875,7 @@ def clone_exllamav3_config_for_module(
         codebook_override = resolved_cfg.get("codebook", None)
         if codebook_override is not None and codebook_override != qcfg.codebook:
             qcfg_clone.codebook = codebook_override
-            is_head = lm_head_name in (module_full_name, module_full_name.rsplit(".", 1)[-1])
-            if not is_head:
-                qcfg_clone.head_bits = None
-            elif qcfg_clone.head_bits is not None:
+            if qcfg_clone.head_bits is not None:
                 qcfg_clone.bits = qcfg_clone.head_bits
 
         calibration_override = resolved_cfg.get("calibration", None)

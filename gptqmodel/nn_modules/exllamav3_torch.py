@@ -21,7 +21,7 @@ from ..utils.cpu_features import cpu_bf16x3_scope, has_avx512_bf16, has_cpu_bf16
 from ..utils.logger import setup_logger
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from .compiled_state import compiled_module_getstate
-from .exllamav3 import _EXL3_BUFFER_NAMES, _torch_dtype
+from .exllamav3 import _EXL3_BUFFER_NAMES, _EXL3_REQUIRED_BUFFERS, _torch_dtype
 
 
 log = setup_logger()
@@ -298,6 +298,7 @@ def _apply_hadamard_right(x: torch.Tensor) -> torch.Tensor:
 
 class ExllamaV3TorchLinear(nn.Module):
     QUANT_TYPE = "exl3"
+    CHECKPOINT_REQUIRED_BUFFERS = _EXL3_REQUIRED_BUFFERS
     # Every floating EXL3 buffer (the fp16 `suh`/`svh` sign vectors and the
     # bias) loads at its checkpoint dtype; the Hadamard kernels require fp16.
     MODEL_DTYPE_BUFFERS = ()

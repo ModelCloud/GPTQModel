@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 
 _EXL3_BUFFER_NAMES = ("trellis", "suh", "svh", "su", "sv", "bias", *EXL3_CODEBOOK_MARKERS)
+_EXL3_REQUIRED_BUFFERS = ("trellis", "suh", "svh", "su", "sv", *EXL3_CODEBOOK_MARKERS)
 
 # The native EXL3 kernels accept FP16 only. A BF16 activation inside FP16's
 # finite range converts exactly, so the default BF16 checkpoint can use them.
@@ -59,14 +60,7 @@ class ExllamaV3Linear(nn.Module):
     # vectors are stored either unpacked (`suh`/`svh`) or packed (`su`/`sv`),
     # and a per-projection marker selects the decoder. The validator skips
     # buffers that are absent for the module's recipe.
-    CHECKPOINT_REQUIRED_BUFFERS = (
-        "trellis",
-        "suh",
-        "svh",
-        "su",
-        "sv",
-        *EXL3_CODEBOOK_MARKERS,
-    )
+    CHECKPOINT_REQUIRED_BUFFERS = _EXL3_REQUIRED_BUFFERS
     # Every floating EXL3 buffer (the fp16 `suh`/`svh` sign vectors and the
     # bias) loads at its checkpoint dtype; the Hadamard kernels require fp16.
     MODEL_DTYPE_BUFFERS = ()

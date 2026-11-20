@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Callable, Tuple
@@ -613,6 +614,129 @@ def test_truncated_weight_only_checkpoint_fails_closed(
         with pytest.raises(ValueError, match="Missing required quantized weights") as exc:
             GPTQModel.load(str(truncated), device="cpu")
         assert f"model.layers.0.self_attn.q_proj.{suffix}" in str(exc.value)
+
+
+@pytest.fixture(params=["single", "sharded"])
+def mixed_exl3_checkpoint(tmp_path, request):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+    from gptqmodel.quantization.config import EXL3Config
+    from tests.tiny_remote_models import build_wordlevel_tokenizer
+
+    config = LlamaConfig(
+        vocab_size=128,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=32,
+        tie_word_embeddings=False,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(5218)
+        model = LlamaForCausalLM(config).half()
+
+    qcfg = EXL3Config(bits=3, offload_to_disk=False, tensor_storage={})
+    prefix = "model.layers.0.self_attn"
+    q4nx_name = f"{prefix}.q_proj"
+    # A 48-word tile is valid for each of these codecs. A missing W3 Q4NX
+    # marker can therefore select 3inst without triggering width validation.
+    for name, codebook in ((q4nx_name, "q4nx"), (f"{prefix}.k_proj", "mul1"), (f"{prefix}.v_proj", "3inst")):
+        tensors = {
+            "trellis": torch.zeros((8, 8, 48), dtype=torch.int16),
+            "suh": torch.full((128,), 0.125, dtype=torch.float16),
+            "svh": torch.full((128,), 0.125, dtype=torch.float16),
+        }
+        if codebook != "3inst":
+            tensors[codebook] = torch.tensor(-2082680531, dtype=torch.int32)  # 0x83DCD12D
+        layer = ExllamaV3Linear.from_tensors(name=name, in_features=128, out_features=128, tensors=tensors)
+        model.set_submodule(name, layer)
+        qcfg.tensor_storage[name] = layer.tensor_storage_entry()
+
+    config.architectures = ["LlamaForCausalLM"]
+    config.save_pretrained(tmp_path)
+    qcfg.save_pretrained(str(tmp_path))
+    build_wordlevel_tokenizer().save_pretrained(tmp_path)
+
+    state = model.state_dict()
+    marker = f"{q4nx_name}.q4nx"
+    if request.param == "sharded":
+        marker_shard = "model-00002-of-00002.safetensors"
+        weight_map = {
+            name: marker_shard if name.startswith(f"{q4nx_name}.") else "model-00001-of-00002.safetensors"
+            for name in state
+        }
+        for shard in set(weight_map.values()):
+            save_file({name: value for name, value in state.items() if weight_map[name] == shard},
+                      tmp_path / shard, metadata={"format": "pt"})
+        (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}), encoding="utf-8")
+    else:
+        marker_shard = "model.safetensors"
+        save_file(state, tmp_path / marker_shard, metadata={"format": "pt"})
+    return q4nx_name, marker, tmp_path / marker_shard
+
+
+@pytest.mark.parametrize(
+    ("backend", "device"),
+    [
+        pytest.param("exl3_torch", "cpu", marks=pytest.mark.cpu),
+        pytest.param("exl3_exllama_v3", "cuda:0", marks=pytest.mark.cuda),
+    ],
+)
+@pytest.mark.parametrize("mismatch", [None, "manifest", "payload"])
+def test_public_exl3_loader_checks_checkpoint_codebook_markers(tmp_path, mixed_exl3_checkpoint, backend, device, mismatch):
+    from gptqmodel import GPTQModel
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+    from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
+    from tests.accelerator_gates import requires_nvidia_cuda
+
+    if device == "cuda:0" and not requires_nvidia_cuda():
+        pytest.skip("requires NVIDIA CUDA")
+
+    name, marker, shard = mixed_exl3_checkpoint
+
+    def load():
+        return GPTQModel.load(str(tmp_path), backend=backend, device=device, dtype=torch.float16, local_files_only=True)
+
+    if mismatch == "manifest":
+        path = tmp_path / "quantize_config.json"
+        config = json.loads(path.read_text(encoding="utf-8"))
+        del config["tensor_storage"][name]["stored_tensors"][marker]
+        path.write_text(json.dumps(config), encoding="utf-8")
+        with pytest.raises(ValueError, match=r"EXL3 codebook markers.*tensor_storage") as exc:
+            load()
+        assert marker in str(exc.value)
+    elif mismatch == "payload":
+        state = load_file(shard)
+        del state[marker]
+        # Leave the sharded index untouched to exercise the actual header.
+        save_file(state, shard, metadata={"format": "pt"})
+        with pytest.raises(ValueError, match="Missing required quantized weights") as exc:
+            load()
+        assert marker in str(exc.value)
+    else:
+        model = load().model
+        layer = model.get_submodule(name)
+        expected_class = ExllamaV3Linear if device == "cuda:0" else ExllamaV3TorchLinear
+        assert isinstance(layer, expected_class)
+        assert layer.q4nx.device == torch.device(device)
+        torch.testing.assert_close(layer.q4nx.cpu(), torch.tensor(-2082680531, dtype=torch.int32))
+        x = torch.zeros((2, 128), dtype=torch.float16, device=device)
+        x[:, 0] = torch.tensor([0.125, -0.25], dtype=x.dtype, device=device)
+        expected = torch.zeros_like(x)
+        # Zero-prefix state 0 decodes to -15/sqrt(42.5) for each rotated weight.
+        # The normalized Hadamards leave only the first entry of the constant
+        # matrix, scaled by 128, and the stored scales contribute 0.125^2.
+        expected[:, 0] = x[:, 0] * (-30 / math.sqrt(42.5))
+        with torch.inference_mode():
+            torch.testing.assert_close(layer(x), expected, rtol=2e-3, atol=2e-3)
+            logits = model(input_ids=torch.tensor([[1, 3, 4, 5]], device=device), use_cache=False).logits
+        assert torch.isfinite(logits).all()
 
 
 def _nf12_config():

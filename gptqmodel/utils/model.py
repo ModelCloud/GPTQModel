@@ -40,6 +40,7 @@ from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
 from ..adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS
 from ..looper.named_module import NamedModule
 from ..models._const import (
     CPU,
@@ -3286,7 +3287,7 @@ def _checkpoint_suffix_tensor(module: nn.Module, suffix: str) -> Optional[torch.
 def validate_checkpoint_qweights(
     model: nn.Module, checkpoint: str | os.PathLike, format: FORMAT, key_converter=None,
 ) -> None:
-    """Fail a load whose checkpoint lacks a kernel's required payload.
+    """Validate required quantized payloads against the checkpoint keys.
 
     Every quantized kernel declares the checkpoint tensors it cannot rebuild
     (``CHECKPOINT_REQUIRED_BUFFERS``): the packed ``qweight``/``scales``/
@@ -3316,8 +3317,9 @@ def validate_checkpoint_qweights(
     NF12 derives an empty escape table, and a symmetric BitBLAS layer has no
     zero points. A non-empty buffer of the same name stays required.
 
-    ``format`` is kept for the call-site signature; the per-kernel declaration
-    is the source of truth.
+    EXL3 codebook markers must also be declared by the module shell created
+    from ``tensor_storage``. A packed tile can have the correct width for a
+    different codebook, so losing an undeclared marker can change its decoder.
     """
 
     checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
@@ -3356,6 +3358,23 @@ def validate_checkpoint_qweights(
             f"Missing required quantized weights in checkpoint {os.fspath(checkpoint)!r}: "
             + ", ".join(missing)
         )
+
+    if format == FORMAT.EXL3:
+        declared_markers = {
+            key
+            for (_, suffix), keys in module_keys.items()
+            if suffix in EXL3_CODEBOOK_MARKERS
+            for key in keys
+        }
+        undeclared_markers = sorted(
+            key for key in checkpoint_keys
+            if key.rpartition(".")[-1] in EXL3_CODEBOOK_MARKERS and key not in declared_markers
+        )
+        if undeclared_markers:
+            raise ValueError(
+                f"EXL3 codebook markers in checkpoint {os.fspath(checkpoint)!r} missing from tensor_storage: "
+                + ", ".join(undeclared_markers)
+            )
 
 
 def _matches_ignore_pattern(name: str, pattern) -> bool:
