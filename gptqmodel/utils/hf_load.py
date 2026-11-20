@@ -899,6 +899,13 @@ def hf_gptqmodel_post_init_for_load(
             qcfg.method.value if hasattr(qcfg.method, "value") else qcfg.method
         )
         hf_quantization_config.pack_dtype = str(qcfg.pack_dtype).removeprefix("torch.")
+        # `rotation` is model-wide and only meaningful for GPTQ layouts, so
+        # Transformers' GPTQConfig has no field for it. Publish it here or a
+        # rotated checkpoint saved through `save_pretrained()` reloads with the
+        # orthogonal transform missing from its weights' contract (#5827).
+        # `model_rotation` keeps a method that reuses `rotation` for its own
+        # per-layer transform (MACaQ) from being published as model-wide.
+        hf_quantization_config.rotation = resolve_model_rotation(qcfg)
 
     model = gptqmodel_post_init(
         model,
