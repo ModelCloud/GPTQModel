@@ -16,7 +16,7 @@ from ..looper.loop_processor import (
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..quantization.config import CalibrationConfig, QuantizeConfig
+from ..quantization.config import CalibrationConfig, QuantizeConfig, native_correction_requested
 from ..utils.attn_mask import align_single_head_capture
 from ..utils.logger import setup_logger
 from ..utils.torch import CPU, DEVICE_1
@@ -65,11 +65,10 @@ class NativeProcessor(LoopProcessor):
         # once per sample, while this processor captures one entry per
         # forward batch. Capturing per sample here keeps the two lists
         # aligned; other quantizers still receive one entry per batch.
-        foem = getattr(qcfg, "foem", None)
-        self._native_per_sample = bool(
-            getattr(qcfg, "gptaq", None) is not None
-            or (foem is not None and getattr(foem, "alpha", 0) != 0)
-        )
+        # A per-module ``dynamic`` rule can enable GPTAQ/FOEM where the global
+        # options do not, and the capture layout must match what those tasks
+        # consume (#5762).
+        self._native_per_sample = native_correction_requested(qcfg)
         # Preserve the raw [B, S, H] input so the per-sample keep-mask can be
         # applied here exactly as GPTQProcessor applies it to its own input.
         self.preserve_batch_keep_mask = self._native_per_sample

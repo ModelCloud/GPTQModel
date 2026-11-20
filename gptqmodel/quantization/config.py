@@ -4260,6 +4260,43 @@ class ResolvedModuleConfig:
         return copy.deepcopy(_select_dynamic_value(fields, key, default, sub_key))
 
 
+def native_correction_requested(config: "BaseQuantizeConfig") -> bool:
+    """Report whether the run needs the native activation capture pass.
+
+    GPTAQ (any alpha) and FOEM with ``alpha > 0`` consume captured module
+    inputs. The global options decide most runs, but a ``dynamic`` rule can
+    enable the correction for only some projections; the capture pass runs for
+    the whole model, so one such rule is enough to require it (#5762).
+    """
+
+    if getattr(config, "gptaq", None) is not None:
+        return True
+    foem = getattr(config, "foem", None)
+    if foem is not None and getattr(foem, "alpha", 0.0) > 0:
+        return True
+
+    dynamic = getattr(config, "dynamic", None)
+    if not dynamic:
+        return False
+    for values in dynamic.values():
+        if not isinstance(values, dict):
+            continue
+        # GPTAQ always consumes a native entry, even when alpha is 0.
+        if values.get("gptaq") is not None:
+            return True
+        override = values.get("foem")
+        if override is None:
+            continue
+        alpha = (
+            override.get("alpha", 0.0)
+            if isinstance(override, dict)
+            else getattr(override, "alpha", 0.0)
+        )
+        if alpha is not None and float(alpha) > 0:
+            return True
+    return False
+
+
 def resolve_module_config_snapshot(config: "BaseQuantizeConfig", module_name: str) -> ResolvedModuleConfig:
     """Match one rule once and retain its ordered provenance and value snapshot."""
     dynamic = config.dynamic
