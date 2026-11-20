@@ -832,6 +832,9 @@ def _estimate_for_stack(
     if resolved_dtype is None:
         return None
 
+    if _safe_get(source, "model_type") == "deepseek_v41_text":
+        return _estimate_deepseek_v41(source, layer_count, resolved_dtype)
+
     global_window = _positive_int(_safe_get(source, "sliding_window"))
 
     declared_types = _declared_layer_types(source, layer_count)
@@ -1016,6 +1019,32 @@ def _estimate_for_stack(
         context_limit=limit,
         unclassified=tuple(dict.fromkeys(unclassified)),
         partial=tuple(dict.fromkeys(partial)),
+    )
+
+
+def _estimate_deepseek_v41(source, layer_count, dtype):
+    """Count the window for each layer and the compressed bank once per source."""
+    head_dim = _positive_int(_safe_get(source, "head_dim"))
+    index_dim = _positive_int(_safe_get(source, "index_head_dim"))
+    window = _positive_int(_safe_get(source, "sliding_window"))
+    ratios = _safe_get(source, "compress_ratios") or []
+    sources = _safe_get(source, "kv_source_layer_ids") or []
+    if not (head_dim and index_dim and window) or len(ratios) < layer_count:
+        return None
+    if any(not 0 <= index < layer_count or not ratios[index] for index in sources):
+        return None
+
+    layers = [LayerCache(kind="mla", dims=head_dim if window > 1 else 0, window=window - 1)
+              for _ in range(layer_count)]
+    for index in sources:
+        layers[index] = LayerCache(
+            kind="compressed", dims=layers[index].dims, window=window - 1,
+            compressed_dims=head_dim + index_dim, compress_rate=ratios[index], compressed_streams=2,
+            # The incomplete pooling group's values and gates remain FP32.
+            buffer_dims=2 * head_dim * _DTYPE_ITEMSIZE[torch.float32] // _DTYPE_ITEMSIZE[dtype],
+        )
+    return KVCacheEstimate(
+        layers=tuple(layers), dtype=dtype, context_limit=_positive_int(_safe_get(source, "max_position_embeddings")),
     )
 
 

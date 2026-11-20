@@ -8,11 +8,6 @@ run the registered Defuser conversion, and then exercise the same tree consumers
 used by quantization: ``simple_layer_modules``, ``ModulePlan``, the MoE lifecycle
 hooks, and the module looper helpers.
 
-The DeepSeek-V4.1-Flash checkpoint declares ``model_type=deepseek_v41``.  The
-current Transformers release has no ``deepseek_v41`` config/model class, so a
-true model test is impossible until upstream lands.  ``deepseek_v4`` is kept as
-the supported V4-Flash control, and the V4.1 test activates automatically once
-the upstream config exists.
 """
 
 from __future__ import annotations
@@ -25,7 +20,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import transformers
-from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
@@ -637,38 +631,3 @@ def test_ricursive_ripple_real_custom_model_matches_declared_tree(tmp_path):
     assert not looper._is_attention_module_name("self_attn.g_proj")
     assert not looper._is_attention_module_name("self_attn.o_proj")
     assert looper._extract_moe_group_key("mlp.down_proj") is None
-
-
-def test_deepseek_v41_flash_model_tree_when_upstream_support_lands():
-    """Build V4.1 against its real checkpoint only once Transformers supports it.
-
-    The checkpoint ``deepseek-ai/DeepSeek-V4.1-Flash`` declares
-    ``model_type=deepseek_v41``.  Transformers 5.22.2 (the version used by this
-    suite) and its main branch contain only ``deepseek_v4``, so there is no
-    native config or model class to build.  Keeping this test conditional means
-    it becomes real V4.1 coverage as soon as the upstream class and the
-    GPTQModel definition are added, instead of silently testing V4-Flash under a
-    V4.1 label.
-    """
-
-    if "deepseek_v41" not in CONFIG_MAPPING:
-        pytest.skip(
-            "Transformers has no deepseek_v41 config/model implementation; "
-            "DeepSeek-V4.1-Flash cannot be built as a true model yet"
-        )
-    if "deepseek_v41" not in MODEL_MAP:
-        pytest.fail(
-            "Transformers now exposes deepseek_v41 but GPTQModel has no "
-            "DeepSeek-V4.1 definition; add the definition and tree tests"
-        )
-
-    config = transformers.AutoConfig.for_model("deepseek_v41")
-    definition = MODEL_MAP["deepseek_v41"]
-    with torch.device("meta"):
-        model = definition.loader.from_config(config)
-    _convert_model_with_defuser(definition, model, cleanup_original=False)
-    layers, _ = get_layers_with_prefixes(model, definition.extract_layers_node())
-    assert layers
-
-    specs = _quantizable_specs(definition, config)
-    assert not _missing_specs(specs, _resolved_modules(layers))

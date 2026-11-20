@@ -803,7 +803,7 @@ def test_triton_dense_kernel_masks_k_tail(k):
     a_packed, a_scales = macaq_triton.quantize_mxfp4(activations.float())
 
     out = torch.empty(rows, cols, device=device, dtype=torch.float32)
-    macaq_triton._dense_w4a4_kernel[
+    macaq_triton._dense_mx_gemm_kernel[
         (triton.cdiv(rows, 64), triton.cdiv(cols, 128))
     ](
         a_packed, w_packed, a_scales, w_scales, out, w_scales,
