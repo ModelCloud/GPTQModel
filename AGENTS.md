@@ -48,7 +48,11 @@ tests. Mechanism references and diagrams live in `docs/`.
    skips. Open every PR as a draft; include `Fixes #<issue-number>` for each
    issue resolved. Mark ready after review and confirmation that the pushed
    head merges cleanly into the current remote base. For claimed issues,
-   verify before publishing and release with the PR URL after opening.
+   include measured before/after tables for applicable VRAM, performance, and
+   accuracy metrics by the time the PR is ready. Verify the claim before
+   publishing and release with the PR URL after opening. After marking ready,
+   wait for GitHub's code-quality checks, address reviewer notes, and recheck
+   merge conflicts. Follow the agent workflow skill for the full sequence.
 
 ## Repository-wide rules
 
@@ -74,7 +78,7 @@ for the procedure.
 
 | When / required contract | Skill |
 | --- | --- |
-| Starting or delegating any task; opening a draft or marking it ready | [gptqmodel-agent-workflow](.agents/skills/gptqmodel-agent-workflow/SKILL.md) |
+| Starting or delegating any task; opening a draft, marking it ready, or following up on CI and review | [gptqmodel-agent-workflow](.agents/skills/gptqmodel-agent-workflow/SKILL.md) |
 | Choosing, screening, claiming, handing off or releasing issue work | [gptqmodel-issue-claims](.agents/skills/gptqmodel-issue-claims/SKILL.md) |
 | Any bug fix or behaviour-changing refactor: test the transition, not just construction | [gptqmodel-regression-test-design](.agents/skills/gptqmodel-regression-test-design/SKILL.md) |
 | Quantization math, packers, kernels, dispatch, fusion or MLX: no dense, dequantized or expanded weight copy (including INT4 → INT8) may outlive its operation, even on fallback or compiled paths | [gptqmodel-torch-oracle-numerics](.agents/skills/gptqmodel-torch-oracle-numerics/SKILL.md) |

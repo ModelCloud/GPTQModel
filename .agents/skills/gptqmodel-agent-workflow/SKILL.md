@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-agent-workflow
-description: Use when starting or delegating a GPT-QModel task, opening a draft PR, or checking it for review readiness.
+description: Use when starting or delegating a GPT-QModel task, opening a draft PR, or following it through readiness, CI, and review.
 ---
 
 # Agent workspaces and pull requests
@@ -36,3 +36,24 @@ because work was delegated. For issue work, also follow the
    affected checks, push to the same PR and recheck. **Unknown:** wait and
    retry; if still unverifiable, leave draft and report why. **MERGEABLE:**
    once the review and validation above are complete, mark ready for review.
+   For a claimed issue, first confirm the PR description includes the
+   [required before/after measurements](../gptqmodel-issue-claims/SKILL.md#workflow)
+   for applicable metrics.
+
+## After marking ready
+
+For claimed-issue PRs, follow the same PR through these checks:
+
+1. Wait for GitHub Actions to finish the `Ruff Check` workflow's
+   `ruff-check` job (the repository's code-quality gate) and any other
+   configured code-quality scans for the current PR head. Confirm they passed.
+   If a check fails, diagnose it, fix failures caused by the change, and wait
+   for the checks on the updated head.
+2. Check the PR for review summaries, PR comments, and unresolved inline
+   review threads from people and automated reviewers. Address actionable
+   notes, reply with the fix or rationale, and resolve threads once addressed.
+   If you push a fix, repeat the CI and review checks for the new head.
+3. Fetch the current base and recheck GitHub mergeability against the pushed
+   head using the same revision checks as above. Resolve any new conflicts on
+   the same PR and repeat the CI, review, and mergeability checks. Report any
+   remaining check, review, or mergeability blocker.
