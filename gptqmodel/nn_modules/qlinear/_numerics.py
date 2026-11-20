@@ -458,3 +458,37 @@ def codebook_rounding_dtype(
     if activation.max > codebook.max:
         return activation_dtype
     return codebook_dtype
+
+
+def scaled_accumulation(
+    accum: torch.Tensor, s1: torch.Tensor, s_channel: torch.Tensor
+) -> torch.Tensor:
+    """Apply two broadcast scales without letting an intermediate overflow.
+
+    ``accum`` is an INT8 reduction widened to FP32, so every nonzero element
+    is an integer of magnitude at least one.  The historical expression
+    ``(accum * s1) * s_channel`` is kept bitwise unchanged for every element
+    whose intermediate stays finite; only elements that overflowed are
+    recomputed with the other association.
+
+    The fallback is sufficient rather than merely different: when
+    ``(accum * s1) * s_channel`` is non-finite because a factor overflowed,
+    the reversed product ``(accum * s_channel) * s1`` has a first intermediate
+    of ``|accum * s1 * s_channel| / |s1|``, which is below the FP32 maximum
+    whenever the true product is.  If the reversed association overflows too,
+    then both ``|accum * s1|`` and ``|accum * s_channel|`` exceed the FP32
+    maximum, so the exact product exceeds ``max**2 / |accum|`` with
+    ``|accum| >= 1`` and is genuinely unrepresentable in FP32.  Returning the
+    ``inf`` of the fallback is then the correctly rounded result.
+
+    Reversing unconditionally would change rounding in the ordinary range
+    (and can overflow where the historical order cannot), so the choice is
+    made per element on the device: no host reduction and no graph break.
+    """
+    scaled = accum * s1
+    scaled = scaled * s_channel
+    # A non-finite result here can only come from a factor overflow: the INT8
+    # reduction is exact in FP32 and both scales are positive.
+    alternate = accum * s_channel
+    alternate = alternate * s1
+    return torch.where(torch.isfinite(scaled), scaled, alternate)
