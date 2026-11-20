@@ -6,13 +6,18 @@ required for both dispatch and correctness: Tenstorrent's current PJRT lowering
 does not provide the exact packed-word integer operations used by the portable
 Torch GPTQ kernel.
 
-There are two Tenstorrent backends, both validated on four Blackhole p300c
+There are three Tenstorrent backends, all validated on four Blackhole p300c
 cards:
 
 | Backend | Kernel | Execution path | Reaches TTNN |
 | --- | --- | --- | --- |
 | `BACKEND.GPTQ_TT_XLA` | `XLALinear` | Python -> Torch/XLA -> StableHLO -> PJRT TT -> TT-MLIR | indirectly, bundled in the PJRT plugin |
 | `BACKEND.GPTQ_TTNN` | `TTNNLinear` | Python -> `ttnn.MeshDevice` | directly, no StableHLO or PJRT |
+| `BACKEND.GPTQ_TT_BF8` | `TTNNBlockFloat8Linear` | Python -> `ttnn.MeshDevice`, weights converted to `bf8_b` | directly, no StableHLO or PJRT |
+
+The two `ttnn.MeshDevice` backends are grouped by
+`gptqmodel/utils/backend.py:NATIVE_TTNN_BACKENDS`; device selection, host
+staging, device counting and the thermal gate all branch on that one set.
 
 `AUTO` still resolves to `XLALinear` so an existing model load never changes
 execution backend silently; the native kernel must be requested explicitly.
@@ -581,7 +586,7 @@ names the family. The distinction lives in `backend`:
 
 | `backend` | Runtime that owns the chips | Where activations live |
 | --- | --- | --- |
-| `GPTQ_TTNN` | TT-Metal mesh opened by `ttnn_runtime` | host between layers, device inside a resident chain |
+| `GPTQ_TTNN`, `GPTQ_TT_BF8` | TT-Metal mesh opened by `ttnn_runtime` | host between layers, device inside a resident chain |
 | `GPTQ_TT_XLA` | PJRT plugin (which wraps its own `MeshDevice`) | `xla:N` tensors |
 
 **Rule: decide with `backend`, never with `device`.** Resolving the *device*
@@ -594,8 +599,8 @@ which now take `backend` and count over PCIe for the native path.
 The native kernel uploads a layer's packed weights on demand in `forward`, so
 its parameters belong on the **host**. A layer-wise `xla:N` device map would
 send them through PJRT instead, which claims every chip and then collides with
-the mesh `post_init` opens. For `GPTQ_TTNN` the loader therefore pins
-`device_map = {"": "cpu"}`.
+the mesh `post_init` opens. For every backend in `NATIVE_TTNN_BACKENDS` the
+loader therefore pins `device_map = {"": "cpu"}`.
 
 This is also why `{"": "xla"}` is **not** a substitute: `simple_dispatch_model`
 would call `.to("xla")` and initialize PJRT anyway.
