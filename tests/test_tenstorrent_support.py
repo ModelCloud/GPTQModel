@@ -2964,6 +2964,96 @@ def test_ttnn_group_indices_are_stored_row_major(chips):
         close_mesh()
 
 
+def test_ttnn_scale_split_is_exact_for_fp16():
+    """Every finite FP16 scale survives the two-BF16 split exactly (#5822).
+
+    ``ttnn.embedding`` only accepts BF16 tables, so a wider checkpoint scale is
+    carried as a BF16 high and a BF16 residual and recombined in FP32. FP16 has
+    eleven significand bits and BF16 eight, so the three residual bits round
+    trip without loss. The canonical checkpoint tensor must not be mutated.
+    """
+
+    from gptqmodel.nn_modules.qlinear.ttnn import _scales_fit_bf16, _split_bf16_residual
+
+    bits = torch.arange(2**16, dtype=torch.int32).numpy().astype(np.uint16).view(np.float16)
+    scales = torch.from_numpy(bits.copy())
+    finite = scales[torch.isfinite(scales)]
+    high, residual = _split_bf16_residual(finite)
+    assert high.dtype == torch.bfloat16
+    assert residual.dtype == torch.bfloat16
+    assert torch.equal(high.float() + residual.float(), finite.float())
+
+    # Values outside the BF16 grid take the wide path; grid values do not.
+    assert not _scales_fit_bf16(torch.tensor([1.00390625], dtype=torch.float16))
+    assert _scales_fit_bf16(torch.tensor([1.0, 0.5, 256.0], dtype=torch.float16))
+
+    canonical = scales.clone()
+    wide = scales[torch.isfinite(scales) & (scales != scales.to(torch.bfloat16).to(scales.dtype))]
+    _split_bf16_residual(wide)
+    # Compare bit patterns: the table includes NaN payloads, which compare false.
+    assert torch.equal(scales.view(torch.int16), canonical.view(torch.int16))
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+@pytest.mark.parametrize("chips", [1, 4])
+@pytest.mark.parametrize(
+    "scale_value, wide",
+    [
+        (1.00390625, True),  # FP16 scale that BF16 rounds to 1.0
+        (1.0, False),        # exactly representable, keeps the BF16 path
+    ],
+)
+def test_ttnn_scales_keep_the_checkpoint_value(chips, scale_value, wide):
+    """A non-BF16 checkpoint scale reaches the FP32 dot intact (#5822).
+
+    ``ttnn.embedding`` only accepts BF16 tables, so the scale is uploaded as a
+    BF16 high and a BF16 residual and recombined in FP32 before the decoded
+    weight is built. The ``1.00390625`` scale is FP16-exact but not BF16-exact:
+    rounding it to ``1.0`` at upload turned the exact ``256 - 256 = 1``
+    cancellation into ``0``. The equal-scale control must stay ``0``.
+    """
+
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+    from gptqmodel.utils.ttnn_runtime import close_mesh, import_ttnn
+
+    layer = TTNNLinear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.qweight.fill_(0x99999999 - 2**32)  # codes are 9
+    layer.qzeros.fill_(0x88888888 - 2**32)   # logical zero points are 8
+    layer.qzero_format(2)
+    layer.scales.fill_(1)
+    layer.scales[0, :64] = scale_value
+    layer.ttnn_device_count = chips
+    x = torch.zeros(2, 64, dtype=torch.bfloat16)
+    x[:, 0] = 256
+    x[0, 32] = -256
+    weights = layer.scales.double().repeat_interleave(32, dim=0)
+    expected = (x.double() @ weights).bfloat16()
+    canonical = layer.scales.clone()
+    try:
+        layer.post_init()
+        assert (layer._ttnn_layer.scale_residual is not None) is wide
+        ttnn = import_ttnn()
+        assert layer._ttnn_layer.scales.dtype == ttnn.bfloat16
+        with torch.inference_mode():
+            actual = layer(x)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        # The issue's cancellation: 1.0 in the affected columns, 0 elsewhere.
+        assert actual[0, :64].tolist() == ([1.0] if wide else [0.0]) * 64
+        assert actual[0, 64:].tolist() == [0.0] * 64
+        # Uploading the split must not rewrite the canonical checkpoint scale.
+        assert torch.equal(layer.scales, canonical)
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
+
+
 @pytest.mark.skipif(
     os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
     reason="explicit TTNN hardware gate",
