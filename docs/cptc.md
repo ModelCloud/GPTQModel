@@ -62,9 +62,11 @@ bytes, little-endian, with its final windows wrapping to its own first bytes.
 The two Viterbi passes search in FP32 and pin the seam in the second pass.
 The default depth and tap width use fitted Gaussian E2M5 tables from
 `fit_gaussian_table`. Other geometries initialize their tables from Gaussian
-conditional means. The model recipe uses per-block RMS normalization and
-direct weight encoding. The paper's model-level KL and perplexity numbers
-use the separate YAQA calibration pipeline. [CPTC paper](https://arxiv.org/abs/2611.22019)
+conditional means. Direct weight encoding starts from a per-block RMS
+scale. Before Viterbi, it raises the scale as needed to bring the block's
+positive and negative extremes into the reachable codebook range. The
+paper's model-level KL and perplexity numbers use the YAQA calibration
+pipeline. [CPTC paper](https://arxiv.org/abs/2611.22019)
 
 | Tensor | Checkpoint representation |
 | --- | --- |

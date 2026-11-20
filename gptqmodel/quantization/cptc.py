@@ -299,6 +299,9 @@ def quantize_weight(weight: torch.Tensor, spec: CPTCSpec, *, device: torch.devic
     if table.dtype != torch.uint8 or table.shape != (spec.table_size,) or bool(((table & 127) == 127).any()):
         raise ValueError("CPTC requires a finite E2M5 table with 2**table_q entries")
     decoded = _lookup(_indices(spec, device), decode_e2m5(table))
+    lowest, highest = torch.aminmax(decoded)
+    negative_limit = torch.where(lowest < 0, -lowest, math.inf)
+    positive_limit = torch.where(highest > 0, highest, math.inf)
     native = native_ops(device)
     if native is not None and spec.trellis_depth == 16:
         decoded = decoded.half()  # Exact E2M5 values for the register-cached GPU encoder.
@@ -314,11 +317,15 @@ def quantize_weight(weight: torch.Tensor, spec: CPTCSpec, *, device: torch.devic
         end = min(start + rows_per_batch, out_features)
         rows = weight[start:end].to(device=device, dtype=torch.float32)
         blocks = torch.nn.functional.pad(rows, (0, padding)).view(-1, blocks_per_row, spec.block_size)
-        maximum = blocks.abs().amax(dim=-1)
+        low, high = torch.aminmax(blocks, dim=-1)
+        maximum = torch.maximum(low.abs(), high.abs())
         invalid |= ~torch.isfinite(maximum).all()
         normalized = blocks / torch.where(maximum > 0, maximum, 1).unsqueeze(-1)
         rms = (normalized.square().sum(dim=-1) / counts).sqrt() * maximum
-        scale = (rms / _TABLE_STORAGE_SCALE).clamp_max(torch.finfo(torch.float32).max / 8)
+        # Gaussian RMS loading can put an outlier beyond every reachable
+        # trellis value. Reserve its range before running the path search.
+        range_scale = torch.maximum(-low / negative_limit, high / positive_limit)
+        scale = torch.maximum(rms / _TABLE_STORAGE_SCALE, range_scale).clamp_max(torch.finfo(torch.float32).max / 8)
         targets = (blocks / torch.where(scale > 0, scale, 1).unsqueeze(-1)).flatten(0, 1)
         # Cost arithmetic is FP32. Clipping very large normalized values to
         # a finite cost range only affects source weights outside FP32 range.

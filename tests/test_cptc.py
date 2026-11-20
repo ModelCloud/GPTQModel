@@ -139,6 +139,30 @@ def test_scalar_trellis_threshold_and_tail_biting():
     assert bytes(pack_states(path, spec)[0].tolist()) == whole.to_bytes(32, "little")
 
 
+@pytest.mark.parametrize("bits", (3, 4))
+@pytest.mark.parametrize("device_name", ("cpu", "native"))
+def test_block_scale_preserves_isolated_outliers(bits, device_name, request):
+    device = request.getfixturevalue("cptc_gpu")[0] if device_name == "native" else torch.device("cpu")
+    source = torch.nn.Linear(145, 2, bias=False, dtype=torch.bfloat16, device=device)
+    with torch.no_grad():
+        source.weight[0].fill_(0.125)
+        source.weight[0, 0] = 64
+        source.weight[0, 144] = -64
+        source.weight[1].zero_()
+    layer = CPTCLinear(bits, 145, 2, dtype=source.weight.dtype).to(device)
+    layer.pack_original(source, device=device)
+    assert layer.cptc_scale_bits[1].tolist() == [0, 0]
+
+    # Each basis vector isolates the coefficient at one side of the stream,
+    # including the last valid position in a zero-padded block.
+    inputs = torch.zeros((2, 145), dtype=source.weight.dtype, device=device)
+    inputs[0, 0] = inputs[1, 144] = 1
+    expected = source(inputs).detach()
+    with torch.inference_mode():
+        result = layer(inputs)
+    torch.testing.assert_close(result, expected, atol=0, rtol=0.08)
+
+
 @pytest.mark.parametrize("bits", range(1, 7))
 def test_native_decoder_and_encoder(cptc_gpu, bits):
     device, ops = cptc_gpu
