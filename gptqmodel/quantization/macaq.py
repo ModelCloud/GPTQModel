@@ -619,9 +619,15 @@ def macaq_quantize_weight(
 
     pre_scale = None
     if pre_mode != "none":
-        pre_scale = balance_pre_scale(weight, hessian, n_tokens, alpha=pre_alpha)
-        weight = weight / pre_scale.unsqueeze(0)
-        hessian = hessian * pre_scale.unsqueeze(0) * pre_scale.unsqueeze(1)
+        # Round once to the stored BF16 pre-scale before building the
+        # transformed weight and Hessian. Inference applies the stored BF16
+        # value, so quantizing against a different FP32 value changes the codes
+        # (and the reported loss) relative to the transform the layer ships
+        # with (#5840).
+        pre_scale = balance_pre_scale(weight, hessian, n_tokens, alpha=pre_alpha).to(torch.bfloat16)
+        pre_scale_work = pre_scale.float()
+        weight = weight / pre_scale_work.unsqueeze(0)
+        hessian = hessian * pre_scale_work.unsqueeze(0) * pre_scale_work.unsqueeze(1)
 
     if rotation == "hadamard":
         bh_bf16 = make_hadamard(had_block, device=device, dtype=torch.float32).to(torch.bfloat16)
@@ -672,7 +678,7 @@ def macaq_quantize_weight(
         in_features=in_features,
         out_features=out_features,
         block_size=block_size,
-        pre_scale=None if pre_scale is None else pre_scale.to(torch.bfloat16),
+        pre_scale=pre_scale,
     )
     if return_dequantized:
         grid = _device_const(E2M1_VALUES, device)
