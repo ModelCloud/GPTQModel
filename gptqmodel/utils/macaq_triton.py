@@ -505,4 +505,6 @@ def mxfp4_w4a16_linear(
     if bh is not None:
         xb = rotate_blocks(xb, bh)
     weight = dequant_w4_to_bf16(w_packed, w_scales).to(compute_dtype)
-    return linear_fp32_reduce(xb, weight, None if bias is None else bias.to(xb.dtype))
+    # Keep a wider stored bias out of the low-precision operands; the helper
+    # adds it in FP32 and rounds the output once (#5632).
+    return linear_fp32_reduce(xb, weight, bias)

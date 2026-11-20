@@ -117,7 +117,7 @@ buffers load exactly without further code.
 | `BaseQuantLinear` (default) | `("bias",)` | the bias is added at the activation dtype |
 | `AwqTorchLinear` | `()` | the bias is added after an FP32 reduction |
 | `ParoLinear` | `("bias",)` | restores the default its `AwqTorchLinear` base drops; forward adds an activation-dtype runtime bias |
-| `MacaqLinear` | `("bias", "BH", "pre_scale")` | Hadamard block and pre-scale are built in `compute_dtype` and multiply activations |
+| `MacaqLinear` | `("BH", "pre_scale")` | Hadamard block and pre-scale are built in `compute_dtype` and multiply activations; the bias is added after the FP32 reduction |
 | `ExllamaV3Linear`, `ExllamaV3TorchLinear` | `()` | `suh`/`svh` must stay FP16 for the Hadamard kernels |
 
 Format-specific overrides stay where they were: the loader still forces FP8,
@@ -185,7 +185,7 @@ at BF16 and checks every buffer against the safetensors bytes.
 | GGUF `GGUFTorchLinear` | none besides `bias` | n/a | n/a |
 | EXL3 `ExllamaV3TorchLinear` | `suh`, `svh`, `bias` | restored (EXL3 flag) | restored (declaration) |
 | Paro `ParoLinear` | `scales`, `theta`, `channel_scales` | `theta`/`channel_scales` **rounded** | restored |
-| MACaQ `MacaqLinear` | `BH`, `pre_scale` | model dtype | model dtype (declared) |
+| MACaQ `MacaqLinear` | `BH`, `pre_scale`, `bias` | `bias` **rounded to BF16**; `BH`/`pre_scale` model dtype | `bias` restored; `BH`/`pre_scale` model dtype (declared) |
 | VPTQ `VPTQLinear` | `weight_scale`, `weight_bias` | **rounded** | restored |
 | BitsAndBytes 8-bit | `weight_scb` FP32 | **rounded to BF16** | restored |
 | BitsAndBytes 4-bit | absmax / quant maps | restored | restored |
