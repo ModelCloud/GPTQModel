@@ -130,7 +130,9 @@ class LayerCache:
     allocated with (``None`` means the estimate's cache dtype). ``state_bytes``
     is the fixed per-sequence state of a recurrent branch (Mamba conv/SSM,
     gated-delta conv/recurrent); it never grows with the context and is
-    already in the dtypes transformers allocates it with.
+    already in the dtypes transformers allocates it with. ``state_unsized``
+    marks a recurrent branch whose state shape the config does not declare:
+    the byte count is unknown, not zero.
     """
 
     kind: str                       # "gqa" | "mla" | "indexed" | "linear" | "shared" | "block" | "unknown"
@@ -144,6 +146,7 @@ class LayerCache:
     indexer_dims: int = 0           # indexer elements cached per token
     indexer_dtype: Optional[torch.dtype] = None  # dtype of the indexer stream
     state_bytes: int = 0            # fixed bytes per sequence (recurrent state)
+    state_unsized: bool = False     # state exists but its shape is undeclared
 
 
 @dataclass(frozen=True)
@@ -207,6 +210,12 @@ class KVCacheEstimate:
         """Constant recurrent state one sequence keeps, across every layer."""
 
         return sum(layer.state_bytes for layer in self.layers)
+
+    @property
+    def unsized_state_layers(self) -> int:
+        """Layers whose recurrent state exists but the config does not size."""
+
+        return sum(1 for layer in self.layers if layer.state_unsized)
 
     @property
     def block_layers(self) -> int:
@@ -291,12 +300,17 @@ class KVCacheEstimate:
                 total += layer.state_bytes
         return total * batch
 
-    def max_context_tokens(self, kv_budget_bytes: int, *, batch_size: int = 1) -> int:
+    def max_context_tokens(self, kv_budget_bytes: int, *, batch_size: int = 1) -> Optional[int]:
         """Largest usable context for ``budget_bytes`` at ``batch_size``.
 
         Capped by the model's own context limit: a cache that would fit 160k
         tokens is still only usable up to ``max_position_embeddings``, and
         answering past it would be a planning error, not a rounding one.
+
+        ``None`` means the answer is unknown. A cache with no per-token growth
+        is not capped by the budget at all: when the model also declares no
+        context limit, the answer is unknown rather than the ``1 << 20`` bound
+        used to search a growing cache.
         """
 
         budget = max(0, int(kv_budget_bytes)) // max(1, int(batch_size))
@@ -308,8 +322,9 @@ class KVCacheEstimate:
         if self.state_bytes_per_sequence > budget:
             return 0
         if not self.growing_layers:
-            # Nothing per-token to count: only the model's own limit caps it.
-            return self.context_limit or (1 << 20)
+            # Nothing per-token to count: only the model's own limit caps it,
+            # and an undeclared limit is unknown, not the search sentinel.
+            return self.context_limit
         low, high = 0, self.context_limit or (1 << 20)
         while low < high:
             mid = (low + high + 1) // 2
@@ -327,12 +342,18 @@ class KVCacheEstimate:
             return 0
         return max(0, int(kv_budget_bytes)) // per_sequence
 
-    def context_batch_plan(self, kv_budget_bytes: int, batches: Sequence[int] = (1, 2, 4, 8, 16, 32)) -> Tuple[Tuple[int, int], ...]:
-        """``(batch_size, max_context_tokens)`` per batch size, dropping empty rows."""
+    def context_batch_plan(self, kv_budget_bytes: int, batches: Sequence[int] = (1, 2, 4, 8, 16, 32)) -> Optional[Tuple[Tuple[int, int], ...]]:
+        """``(batch_size, max_context_tokens)`` per batch size, dropping empty rows.
+
+        ``None`` when any row's context is unknown: a partial plan would imply
+        the missing batch sizes fit nothing when they are merely unmeasured.
+        """
 
         rows = []
         for batch in batches:
             context = self.max_context_tokens(kv_budget_bytes, batch_size=batch)
+            if context is None:
+                return None
             if context > 0:
                 rows.append((int(batch), int(context)))
         return tuple(rows)
@@ -369,13 +390,13 @@ class KVCacheEstimate:
         prefix = f"KV plan: {human_bytes(kv_budget_bytes)} -> " if kv_budget_bytes is not None else "KV plan: "
         return prefix + ", ".join(parts) + capped + suffix
 
-    def format_context_batch_plan(self, kv_budget_bytes: int, batches: Sequence[int] = (1, 2, 4, 8, 16, 32)) -> str:
-        """One line: what this budget buys, collapsing equal context widths."""
+    def format_context_batch_plan(self, kv_budget_bytes: int, batches: Sequence[int] = (1, 2, 4, 8, 16, 32)) -> Optional[str]:
+        """One line: what this budget buys, or None when the context is unknown."""
 
-        return self.format_plan_rows(
-            self.context_batch_plan(kv_budget_bytes, batches),
-            kv_budget_bytes=int(kv_budget_bytes),
-        )
+        rows = self.context_batch_plan(kv_budget_bytes, batches)
+        if rows is None:
+            return None
+        return self.format_plan_rows(rows, kv_budget_bytes=int(kv_budget_bytes))
 
     def describe(self, contexts: Sequence[int] = (8192, 32768)) -> str:
         parts_of_shape = [f"{self.growing_layers} growing layer(s)"]
@@ -882,10 +903,12 @@ def _estimate_for_stack(
 
         if layer_type in _LINEAR_ATTENTION_TYPES:
             state_bytes = _state_bytes(source, layer_cfg, resolved_dtype)
-            if state_bytes is None:
+            state_unsized = state_bytes is None
+            if state_unsized:
                 partial.append(f"{layer_type} state layout not declared")
                 state_bytes = 0
-            resolved.append(LayerCache(kind="linear", state_bytes=state_bytes))
+            resolved.append(LayerCache(
+                kind="linear", state_bytes=state_bytes, state_unsized=state_unsized))
             continue
         if layer_type in _NO_ATTENTION_TYPES:
             resolved.append(LayerCache(kind="block"))
@@ -928,12 +951,14 @@ def _estimate_for_stack(
                 partial.append(f"{layer_type} indexer layout not declared")
 
         hybrid_state = 0
+        hybrid_unsized = False
         if layer_type in _HYBRID_TYPES:
             # A parallel hybrid keeps standard K/V for its attention half and a
             # constant recurrent state for its Mamba half (Falcon-H1, Zamba).
             sized = _state_bytes(source, layer_cfg, resolved_dtype)
             if sized is None:
                 partial.append(f"{layer_type} state layout not declared")
+                hybrid_unsized = True
             else:
                 hybrid_state = sized
 
@@ -987,7 +1012,7 @@ def _estimate_for_stack(
                 resolved.append(LayerCache(
                     kind=kind, dims=dims, window=chunk,
                     indexer_dims=indexer_dims, indexer_dtype=indexer_dtype,
-                    state_bytes=hybrid_state,
+                    state_bytes=hybrid_state, state_unsized=hybrid_unsized,
                 ))
             continue
 
@@ -996,13 +1021,13 @@ def _estimate_for_stack(
             resolved.append(LayerCache(
                 kind=kind, dims=dims, window=window or 1024,
                 indexer_dims=indexer_dims, indexer_dtype=indexer_dtype,
-                state_bytes=hybrid_state,
+                state_bytes=hybrid_state, state_unsized=hybrid_unsized,
             ))
         elif known_attention:
             resolved.append(LayerCache(
                 kind=kind, dims=dims,
                 indexer_dims=indexer_dims, indexer_dtype=indexer_dtype,
-                state_bytes=hybrid_state,
+                state_bytes=hybrid_state, state_unsized=hybrid_unsized,
             ))
         else:
             # An unrecognized layer type may or may not grow; counting it as a
