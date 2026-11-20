@@ -505,8 +505,23 @@ class ParoProcessor(LoopProcessor):
         entry = (getattr(self, "tasks", None) or {}).get(module_name) or {}
         return int(entry.get("raw_tokens", 0) or 0)
 
-    def _module_fallback_requested(self, module_name: str) -> bool:
-        """Whether a module received less than ``Fallback.threshold`` of the corpus."""
+    def _module_fallback_enabled(self, module_name: str, state) -> bool:
+        """Whether any fallback applies to one module, module rule first."""
+        module = state.modules.get(module_name)
+        if module is not None:
+            fallback = getattr(self._module_qcfg(module), "fallback", None)
+            if fallback is not None:
+                return bool(fallback)
+        return bool(getattr(self, "fallback", None))
+
+    def _module_fallback_requested(self, module: NamedModule) -> bool:
+        """Whether a module received less than ``Fallback.threshold`` of the corpus.
+
+        The threshold comes from the module's resolved config: a per-module
+        `fallback` rule was cloned and then ignored in favour of the
+        processor-level value (#5659).
+        """
+        module_name = getattr(module, "name", module)
         entry = (getattr(self, "tasks", None) or {}).get(module_name) or {}
         if "raw_tokens" not in entry:
             # No capture accounting for this module (direct unit call or a
@@ -514,9 +529,11 @@ class ParoProcessor(LoopProcessor):
             # coverage, so keep the historical optimizer path.
             return False
         expected = getattr(self, "total_calibration_tokens", None)
-        return should_use_fallback(
-            getattr(self, "fallback", None), float(entry["raw_tokens"] or 0), expected
-        )
+        qcfg = self._module_qcfg(module)
+        fallback = getattr(qcfg, "fallback", None)
+        if fallback is None and not isinstance(qcfg, BaseQuantizeConfig):
+            fallback = getattr(self, "fallback", None)
+        return should_use_fallback(fallback, float(entry["raw_tokens"] or 0), expected)
 
     def _identity_fallback_result(self, module: NamedModule):
         """Build the identity-rotation RTN result Paro uses for starved modules."""
@@ -537,7 +554,9 @@ class ParoProcessor(LoopProcessor):
     def _log_fallback(self, module: NamedModule) -> None:
         """Report one threshold-triggered fallback with the GPTQ wording."""
         expected = getattr(self, "total_calibration_tokens", None)
-        fallback = getattr(self, "fallback", None)
+        fallback = getattr(self._module_qcfg(module), "fallback", None)
+        if fallback is None:
+            fallback = getattr(self, "fallback", None)
         threshold_raw, is_percent = resolve_threshold(fallback, expected)
         threshold_text = str(getattr(fallback, "threshold", None))
         threshold_info = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
@@ -636,7 +655,7 @@ class ParoProcessor(LoopProcessor):
         weight = self._module_weight_matrix(module)
         bias = module.bias.data if getattr(module, "bias", None) is not None else None
         original_weight = weight.detach().clone()
-        if self._module_fallback_requested(module.name):
+        if self._module_fallback_requested(module):
             self._log_fallback(module)
             result = self._identity_fallback_result(module)
             self._apply_optimization_result(module, result, original_weight)
@@ -2729,7 +2748,7 @@ class ParoProcessor(LoopProcessor):
 
         input_feat = self._layer_input_features(state)
         for module_name, tensor in input_feat.items():
-            if tensor.numel() == 0 and not self.fallback:
+            if tensor.numel() == 0 and not self._module_fallback_enabled(module_name, state):
                 raise RuntimeError(
                     f"ParoProcessor error: missing activation features for `{module_name}` with fallback disabled."
                 )
@@ -2751,7 +2770,10 @@ class ParoProcessor(LoopProcessor):
                     f"Resolved groups for layer {layer_index}: {[label for label, _modules in optimization_groups]}"
                 )
 
-            starved = {name for name in state.modules if self._module_fallback_requested(name)}
+            starved = {
+                name for name, named_module in state.modules.items()
+                if self._module_fallback_requested(named_module)
+            }
             for name in sorted(starved):
                 self._log_fallback(state.modules[name])
 
@@ -2954,6 +2976,7 @@ class ParoProcessor(LoopProcessor):
 
         module.weight.data = move_to(pack_weight, device=CPU)
         resolved_cfg = get_resolved_module_config(module)
+        module_qcfg = self._module_qcfg(module)
         quant_linear_cls = self._resolve_qlinear_kernel(module.full_name, resolved_cfg=resolved_cfg)
         layers = {module.full_name: model.model.get_submodule(module.full_name)}
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
@@ -2979,7 +3002,15 @@ class ParoProcessor(LoopProcessor):
                     pack_dtype=self.qcfg.pack_dtype,
                     format=self.format,
                     register_buffers=False,
-                    init_kwargs=self.qcfg.quant_linear_init_kwargs(),
+                    # The optimizer built this module's buffers from the
+                    # per-module config, so the packed layer must be
+                    # constructed from the same one: a top-level `krot`/
+                    # `kernel` silently resized or rerouted the copy (#5659).
+                    init_kwargs=(
+                        module_qcfg.quant_linear_init_kwargs()
+                        if isinstance(module_qcfg, BaseQuantizeConfig)
+                        else self.qcfg.quant_linear_init_kwargs()
+                    ),
                     resolved_module_config=resolved_cfg,
                     install=False,
                 )
@@ -3021,6 +3052,20 @@ class ParoProcessor(LoopProcessor):
                 f"Expected `{module.full_name}` to be packed as ParoLinear, got `{type(qmodule).__name__}`."
             )
 
+        # A `krot` mismatch used to be a silent broadcast (top=8, dyn=1) or a
+        # raw RuntimeError (top=8, dyn=16) deep inside `copy_`. Name the real
+        # cause instead of relying on a shape-compatible copy (#5659).
+        for label, packed, produced in (
+            ("pairs", qmodule.pairs, pairs),
+            ("theta", qmodule.theta, theta),
+        ):
+            if tuple(packed.shape) != tuple(produced.shape):
+                raise RuntimeError(
+                    f"ParoProcessor: `{module.full_name}` was packed with {label} shape "
+                    f"{tuple(packed.shape)} but the optimizer produced {tuple(produced.shape)}. "
+                    f"Resolved `krot`={getattr(module_qcfg, 'krot', None)!r} against the "
+                    f"packed layer's `krot`={getattr(qmodule, 'krot', None)!r}."
+                )
         qmodule.pairs.copy_(pairs.to(device=qmodule.pairs.device, dtype=qmodule.pairs.dtype))
         qmodule.theta.copy_(theta.to(device=qmodule.theta.device, dtype=qmodule.theta.dtype))
         qmodule.channel_scales.copy_(
