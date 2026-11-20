@@ -345,18 +345,33 @@ def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dt
     return obj
 
 
+# Device types whose device-to-host copies are staged through a pinned host
+# buffer. CUDA is the only backend this offload path stages today; CPU, MPS and
+# the other accelerators already copy to pageable host storage directly, and a
+# second host copy would only slow their offload down.
+_PINNED_STAGING_DEVICE_TYPES = frozenset({"cuda"})
+
+
 def move_module_to_cpu_pinned(
     module: nn.Module,
     *,
     pin_min_bytes: int = 8 * 1024 * 1024,
     chunk_bytes: int = 64 * 1024 * 1024,
 ) -> nn.Module:
-    """Move a module to CPU with pinned staging for large accelerator tensors.
+    """Move a module to CPU through a bounded, reused pinned staging buffer.
 
-    Pageable D2H copies synchronously fault each output page and dominated
-    layer offload. Large tensors keep pinned CPU storage so the device transfer
-    needs no second staging copy. Small tensors stay pageable to avoid pinning
-    allocator metadata and scalar state.
+    Pageable device-to-host copies synchronously fault each destination page and
+    dominated layer offload, so large tensors are copied through pinned host
+    memory. Pinning the *destination* made that copy fast, but the destination
+    becomes the module's parameter: a dense module that is never packed kept its
+    weights in non-swappable pinned memory for the rest of the process (#5729),
+    and the pinned allocator rounds every live block up to a power of two.
+
+    Copy each chunk through one reused pinned buffer into pageable CPU storage
+    instead. The pinned footprint stays bounded by ``chunk_bytes``, the returned
+    parameters are pageable, and the device copy still avoids pageable
+    destination faults. Small tensors keep the direct copy because pinning them
+    would cost allocator metadata for no transfer benefit.
     """
 
     if pin_min_bytes < 0:
@@ -365,12 +380,13 @@ def move_module_to_cpu_pinned(
         raise ValueError("chunk_bytes must be positive")
 
     streams: dict[torch.device, torch.cuda.Stream] = {}
+    staging: dict[torch.dtype, torch.Tensor] = {}
 
     def to_cpu(tensor: torch.Tensor) -> torch.Tensor:
         if tensor.device.type == "meta":
             # Meta tensors carry no storage; copying them raises.
             return tensor
-        if tensor.device.type != "cuda":
+        if tensor.device.type not in _PINNED_STAGING_DEVICE_TYPES:
             # XPU, MPS, NPU, XLA and CPU all take the ordinary path. Returning
             # the accelerator tensor unchanged would defeat layer offload.
             return tensor.to(device=CPU)
@@ -378,29 +394,45 @@ def move_module_to_cpu_pinned(
             return tensor.to(device=CPU)
 
         source = tensor if tensor.is_contiguous() else tensor.contiguous()
+        if source.numel() == 0:
+            return torch.empty(source.shape, dtype=source.dtype, device=CPU)
+
+        chunk_elements = max(1, chunk_bytes // source.element_size())
+        staging_elements = min(chunk_elements, source.numel())
+        buffer = staging.get(source.dtype)
         try:
-            result = torch.empty(
-                source.shape,
-                dtype=source.dtype,
-                device=CPU,
-                pin_memory=True,
-            )
+            if buffer is None or buffer.numel() < staging_elements:
+                buffer = torch.empty(
+                    staging_elements,
+                    dtype=source.dtype,
+                    device=CPU,
+                    pin_memory=True,
+                )
+                staging[source.dtype] = buffer
         except RuntimeError:
+            # Pinned allocation can be unavailable (no CUDA driver context,
+            # restricted container). A pageable copy is still correct.
             return source.to(device=CPU)
 
+        result = torch.empty(source.shape, dtype=source.dtype, device=CPU)
         source_flat = source.view(-1)
         result_flat = result.view(-1)
-        chunk_elements = max(1, chunk_bytes // source.element_size())
-        streams.setdefault(
-            source.device,
-            torch.cuda.current_stream(source.device),
-        )
+        stream = None
+        if source.device.type == "cuda":
+            stream = streams.setdefault(
+                source.device,
+                torch.cuda.current_stream(source.device),
+            )
         for start in range(0, source.numel(), chunk_elements):
             end = min(start + chunk_elements, source.numel())
-            result_flat[start:end].copy_(
+            count = end - start
+            buffer[:count].copy_(
                 source_flat[start:end],
                 non_blocking=True,
             )
+            if stream is not None:
+                stream.synchronize()
+            result_flat[start:end].copy_(buffer[:count])
         return result
 
     moved = module._apply(to_cpu)
