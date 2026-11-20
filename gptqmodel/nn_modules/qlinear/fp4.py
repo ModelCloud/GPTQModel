@@ -94,6 +94,13 @@ class TorchFP4Linear(nn.Module):
         # CPU forwards re-derive it from the live buffer on every call.
         self._narrow_decode_scale_key: Optional[tuple[torch.dtype, int, str]] = None
         self._narrow_decode_at_load = self._narrow_decode_decidable(orig_dtype)
+        # A traced/captured CPU forward replays this load-time answer, exactly
+        # like `_narrow_decode_at_load` above. Eager CPU forwards re-derive it.
+        self._cpu_narrow_decode_at_load = (
+            self._cpu_narrow_decode_decidable(orig_dtype)
+            if self.weight.device.type == "cpu" and self.weight_scale.device.type == "cpu"
+            else self._narrow_decode_at_load
+        )
         if isinstance(bias, torch.Tensor):
             self.register_buffer("bias", bias)
         else:
@@ -139,6 +146,11 @@ class TorchFP4Linear(nn.Module):
         scale = self.weight_scale
         if scale.numel() == 0 or scale.dtype in _BOUNDED_SCALE_DTYPES:
             return True
+        return self._scale_grid_in_range(scale, dtype)
+
+    def _scale_grid_in_range(self, scale: torch.Tensor, dtype: torch.dtype) -> bool:
+        """Whether ``[0.5, 6] * scale`` stays inside ``dtype``'s finite range."""
+
         info = torch.finfo(dtype)
         # Smallest sub-normal: a non-zero weight below it decodes to zero.
         smallest = info.tiny * info.eps
@@ -157,6 +169,95 @@ class TorchFP4Linear(nn.Module):
             float(high) * _E2M1_MAX_CODE <= info.max
             and low * _E2M1_MIN_CODE >= smallest
         )
+
+    def _scale_grid_exact(self, scale: torch.Tensor, dtype: torch.dtype) -> bool:
+        """Whether every ``code * |scale|`` is exactly representable in ``dtype``.
+
+        The narrow decode rounds the effective weight to ``dtype`` before the
+        reduction, so an inexact product is lost even when the final, biased
+        projection is representable (#5696). The wide path multiplies exact
+        BF16 codes by the FP32 scale, so the FP32 product is the value the
+        narrow path must reproduce. Only ``0.5``, ``1``, ``1.5`` and ``3``
+        need checking: ``2``, ``4`` and ``6`` are exponent shifts of those
+        (the range gate keeps ``6 * scale`` finite) and the other codes are
+        their negatives.
+        """
+
+        if not dtype.is_floating_point or dtype in (torch.float32, torch.float64):
+            return True
+        magnitudes = scale.to(torch.float32).abs()
+        nonzero = magnitudes[magnitudes > 0]
+        if nonzero.numel() == 0:
+            return True
+        for code in (0.5, 1.0, 1.5, 3.0):
+            product = nonzero * code
+            if not torch.equal(product.to(dtype).to(torch.float32), product):
+                return False
+        return True
+
+    def _active_block_scales(self) -> Optional[torch.Tensor]:
+        """Scales of blocks holding at least one non-zero E2M1 code.
+
+        A block whose packed bytes are all zero decodes to zeros whatever its
+        stored scale is, so that scale must not influence the decode-precision
+        decision (#5696). Returns ``None`` when the packed layout cannot be
+        mapped onto the scale grid; callers then treat every scale as active.
+        """
+
+        packed = self.weight
+        scale = self.weight_scale
+        block_size = self.weight_block_size
+        if (
+            not self._block_scaled_tiles()
+            or block_size % 2
+            or packed.device != scale.device
+            or not packed.is_contiguous()
+        ):
+            return None
+        if packed.dtype is torch.int8:
+            packed = packed.view(torch.uint8)
+        elif packed.dtype is not torch.uint8:
+            if packed.dtype != getattr(torch, "float4_e2m1fn_x2", None):
+                return None
+            packed = packed.view(torch.uint8)
+        blocks = packed.reshape(packed.shape[0], scale.shape[1], block_size // 2)
+        active = blocks.any(dim=-1).bool()
+        if bool(active.all()):
+            return scale
+        return scale[active]
+
+    def _cpu_narrow_decode_decidable(self, dtype: torch.dtype) -> bool:
+        """Whether decoding straight to ``dtype`` is lossless for a CPU forward.
+
+        Extends the range gate with the two conditions the CPU decode needs:
+
+        * a block whose codes are all zero decodes to zeros, so its scale is
+          ignored by both checks;
+        * every ``code * scale`` must be exactly representable in ``dtype``.
+          An in-range but inexact scale (``64.03125`` in FP16) used to round
+          the active weight before a cancelling bias could recover the exact
+          projection (#5696).
+
+        The full grid is checked first, so the common exact pack pays no extra
+        reduction. Only a pack that fails that check inspects the packed bytes
+        to find the blocks whose scale actually binds.
+        """
+
+        if not dtype.is_floating_point or dtype in (torch.float32, torch.float64):
+            return True
+        scale = self.weight_scale
+        if scale.numel() == 0 or scale.dtype in _BOUNDED_SCALE_DTYPES:
+            return True
+        if self._scale_grid_in_range(scale, dtype) and self._scale_grid_exact(scale, dtype):
+            return True
+        active = self._active_block_scales()
+        if active is None:
+            return False
+        if active.numel() == 0:
+            return True
+        if active is scale:
+            return False
+        return self._scale_grid_in_range(active, dtype) and self._scale_grid_exact(active, dtype)
 
     def _narrow_decode_in_range(self, dtype: torch.dtype) -> bool:
         """Whether decoding the weight directly to ``dtype`` is lossless in range.
@@ -304,7 +405,12 @@ class TorchFP4Linear(nn.Module):
     def _cpu_forward(self, x: torch.Tensor, bias: Optional[torch.Tensor]) -> torch.Tensor:
         """Decode live FP4 buffers on CPU and round only the visible output."""
 
-        if not self._narrow_decode_in_range(x.dtype):
+        narrow = (
+            self._cpu_narrow_decode_at_load
+            if dynamo_is_compiling()
+            else self._cpu_narrow_decode_decidable(x.dtype)
+        )
+        if not narrow:
             return self._wide_forward(x, bias)
         weight = dequantize_f4_e2m1(
             self.weight,
