@@ -431,6 +431,51 @@ def test_gguf_torch_linear_forward(alias):
     assert err <= max(0.02, _forward_rel_bound(alias) * ref.abs().mean())
 
 
+@pytest.mark.parametrize("alias", ["q1_0", "q1_0_g128"])
+def test_sign_only_padding_keeps_tail_block_scale(alias):
+    """Zero padding must not shrink the final partial block's scale (#5842).
+
+    The sign-only encoder stores one scale per block: the mean magnitude over
+    its 128 columns. Padding the source with synthetic zeros therefore diluted
+    the tail block by the real/padded ratio, even though the forward path
+    always zero-pads activations and the wire format can hold the real mean.
+    """
+    qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
+    info = _GGUF_TYPE_INFO[qtype]
+    block = info["block_size"]
+    in_features = block + 8
+    out_features = 4
+    lin = torch.nn.Linear(in_features, out_features, bias=False)
+    with torch.no_grad():
+        lin.weight.fill_(1.0)
+
+    module = GGUFTorchLinear(
+        bits=alias,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        register_buffers=False,
+    )
+    module.pack_original(linear=lin, scales=None, zeros=None, g_idx=None)
+    module.post_init()
+    assert module.padded_in_features == 2 * block
+
+    for row in range(out_features):
+        scales = [
+            module.qweight[row, start:start + 2].contiguous().view(torch.float16).item()
+            for start in (0, info["type_size"])
+        ]
+        assert scales == [1.0, 1.0]
+
+    # Consumer: the last real column of the partial block still decodes to the
+    # source magnitude, and padded activations contribute nothing.
+    x = torch.eye(in_features)[[block - 1, in_features - 1]]
+    torch.testing.assert_close(module(x)[:, 0], torch.ones(2), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("alias", ALL_ALIASES)
 def test_gguf_cpp_kernel_forward(alias):
     """GGUFCppKernel agrees with the torch path on the same packed weight."""
