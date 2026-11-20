@@ -415,10 +415,9 @@ class ExllamaV3Linear(nn.Module):
         Rows already inside the safe range keep a scale of 1 and stay bit-exact.
 
         Returns ``(fp16_input, output_scale)``, where ``output_scale`` is
-        ``None`` only for an empty batch. Otherwise the kernel result must have
-        the bias removed, be multiplied by ``output_scale``, and have the bias
-        restored. Rows that need no scaling carry a scale of exactly 1, so the
-        rescale is the identity for them. Returns ``None`` for non-finite
+        ``None`` only for an empty batch. Multiply the unbiased kernel result
+        by ``output_scale`` before adding the checkpoint bias. Rows that need
+        no scaling carry a scale of exactly 1. Returns ``None`` for non-finite
         activations so they keep the FP32 Torch reconstruction path.
 
         The whole decision is computed on the device: there is no
@@ -496,11 +495,11 @@ class ExllamaV3Linear(nn.Module):
         The fused path writes BF16 directly; this returns FP32.
         """
         bias = getattr(self, "bias", None)
-        output = result.to(torch.float32)
+        output = result.float() * output_scale.reshape(*result.shape[:-1], 1)
         if bias is None:
-            return output * output_scale
+            return output
         bias = bias[:self.out_features].to(torch.float32)
-        return (output - bias) * output_scale + bias
+        return output + bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
@@ -537,7 +536,7 @@ class ExllamaV3Linear(nn.Module):
                 # (#5331). Keep the result in FP32 until the BF16 re-scale.
                 native_result = inner.forward(
                     native_input,
-                    {},
+                    {"include_bias": False},
                     out_dtype=torch.float32,
                 )
                 if output_scale is not None:
@@ -546,6 +545,7 @@ class ExllamaV3Linear(nn.Module):
                         output_scale,
                         getattr(self, "bias", None),
                         self.out_features,
+                        result_has_bias=False,
                     )
                     if fused is not None:
                         # Already BF16: the trailing ``.to`` is a no-op.

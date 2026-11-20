@@ -352,6 +352,21 @@ void exl3_moe_coop_run
     }
     else
         p.sh_gate_w = nullptr;
+
+    // Gate/up scratch holds unrotated partials. They can exceed FP16 even
+    // when the Hadamard, output scale and bias yield a small activation.
+    // The allocator keeps these call-local buffers alive on this stream,
+    // including across capture and replay. Caller-owned FP32 scratch is reused.
+    at::Tensor wide_gu;
+    if (cb == EXL3_Q4NX_CODEBOOK && !p.gu_f32 && slots)
+    {
+        wide_gu = at::empty({p.gated ? 2 : 1, p.slots_max, p.I}, x.options().dtype(at::kFloat));
+        auto* tmp = wide_gu.data_ptr<float>();
+        p.gu_u = tmp;
+        if (p.gated)
+            p.gu_g = tmp + static_cast<size_t>(p.slots_max) * p.I;
+        p.gu_f32 = true;
+    }
     exl3_moe_coop_launch(p, K_gu, K_d, cb, device, stream);
 }
 

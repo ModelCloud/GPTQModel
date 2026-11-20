@@ -16,15 +16,15 @@ each half in one launch:
 * ``bf16_prescale`` reduces the row ``amax``, derives the power-of-two scale
   from ``frexp(amax / bound)``, divides and casts to FP16, and writes the FP32
   per-row scale.  It never reads a value back to the host (#4955).
-* ``bf16_rescale`` applies ``(out - bias) * scale + bias`` in FP32 and writes
-  BF16. It accepts an FP16 result (the FP16-input path) or an FP32 result (the
-  BF16-input path, which keeps the GEMM output out of FP16's range).
+* ``bf16_rescale.raw`` applies ``out * scale + bias`` in FP32 and writes BF16.
+  The original ``bf16_rescale`` overload accepts a result that includes bias
+  and removes it before multiplying by the row scale.
 
 Every floating-point step uses explicit round-to-nearest operations, so the
 result is bit-identical to the eager torch sequence: the division by a power of
-two is exact, the FP16 cast is RTNE, and the bias subtract/multiply/add are
-three separate FP32 roundings (never a fused multiply-add).  Rows that do not
-need scaling keep a scale of exactly 1.0.
+two is exact, the FP16 cast is RTNE, and the rescale multiply and bias add
+round separately in FP32. Rows that do not need scaling keep a scale of exactly
+1.0.
 
 Both entry points return ``None`` when the fused path cannot run; the caller
 then uses the eager reference.  The fallbacks are a non-CUDA device, an
@@ -115,7 +115,7 @@ def _can_rescale(
             return False
         if bias.dim() != 1 or not bias.is_contiguous() or bias.numel() < out_features:
             return False
-        if not bias.is_floating_point():
+        if bias.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             return False
     return True
 
@@ -125,11 +125,15 @@ def try_rescale(
     scale: torch.Tensor,
     bias: Optional[torch.Tensor],
     out_features: int,
+    *,
+    result_has_bias: bool = True,
 ) -> Optional[torch.Tensor]:
     """Fused ``_rescale_native_output`` + BF16 cast; ``None`` means fallback."""
     if not _can_rescale(result, scale, bias, out_features):
         return None
     op = _op("bf16_rescale")
+    if bias is not None and not result_has_bias:
+        op = getattr(op, "raw", None)
     if op is None:
         return None
     return op(result, scale, bias, out_features)

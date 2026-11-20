@@ -21,7 +21,9 @@ Callers provide these tensors on the input device.
   `I` and `O`, allocate FP16 `had_gate[S,H]`, `had_up[S,H]` and
   `activated[S,I]`. Use two `[S,I]` matrices of the same FP16 or FP32 dtype
   for gate and up, and FP32 `down_out[S,O]`. All three padded widths are
-  positive multiples of 128.
+  positive multiples of 128. Q4NX keeps gate and up partial sums in FP32.
+  It uses caller-owned FP32 scratch directly and allocates per-call FP32
+  scratch when the caller supplies these buffers in FP16.
 - Zero-initialized INT32 counters with at least
   `S * (I // 128) + out.shape[0] * (O // 128) + 2 * S + 3` elements.
   The native stages reset completed counters before reuse. Allocate
