@@ -56,6 +56,7 @@ from .quantizer import (
     _floor_scale_for_storage,
     _neutralize_dead_columns,
     _replace_zero_scale,
+    narrowing_loses_codes,
 )
 
 
@@ -863,6 +864,29 @@ class GPTQ:
                 self.name,
             )
         return _replace_zero_scale(scale, zero, zero_mask=zero_mask)
+
+    def _narrow_reconstruction(self, Q: torch.Tensor) -> torch.Tensor:
+        """Narrow GPTQ's FP32 reconstruction to the module dtype for replay.
+
+        The packers never see the quantizer's integer codes: they recover
+        them from ``linear.weight`` with ``round(Q / scale) + zero``. That
+        round trip is exact only while half an ULP of the narrowed dtype is
+        narrower than half a quantization step, which BF16 fails for 8-bit
+        asymmetric codes. Keep the FP32 reconstruction for packing in that
+        case and let the caller move it into ``module.state`` before the
+        replay copy replaces the parameter (#5721).
+        """
+
+        if isinstance(self.module, transformers.Conv1D):
+            Q = Q.t()
+
+        if Q.shape != self.module.weight.shape:
+            Q = Q.reshape(self.module.weight.shape)
+
+        if narrowing_loses_codes(self.module.weight.dtype, self.qcfg.bits, self.qcfg.sym):
+            self.pack_weight = Q.detach()
+
+        return Q.to(self.module.weight.dtype)
 
     def clone_module(self, copy=True, device: torch.device = None):
         if not device:
@@ -2206,13 +2230,7 @@ class GPTQ:
         group_size = effective_group_size if effective_group_size != -1 else self.columns
         g_idx = torch.arange(valid_cols, device=Q.device, dtype=torch.int32) // group_size
 
-        if isinstance(self.module, transformers.Conv1D):
-            Q = Q.t()
-
-        if Q.shape != self.module.weight.shape:
-            Q = Q.reshape(self.module.weight.shape).to(self.module.weight.dtype)
-        else:
-            Q = Q.to(self.module.weight.dtype)
+        Q = self._narrow_reconstruction(Q)
 
         Q = safe_move_to(Q, self.module.weight.data.device)
         mean_abs_err = (Q - self.module.weight.data).abs().mean().item()
@@ -3334,13 +3352,7 @@ class GPTQ:
             Q = Q[:, :valid_cols]
             g_idx = g_idx[:valid_cols]
 
-        if isinstance(self.module, transformers.Conv1D):
-            Q = Q.t()
-
-        if Q.shape != self.module.weight.shape:
-            Q = Q.reshape(self.module.weight.shape).to(self.module.weight.dtype)
-        else:
-            Q = Q.to(self.module.weight.dtype)
+        Q = self._narrow_reconstruction(Q)
 
         if scale == []:
             scale.append(self.quantizer.scale)
