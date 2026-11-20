@@ -27,7 +27,14 @@ with up to eight rows. `fused_gemm` enables the upstream GEMM, which shares
 packed weight reads across rows and applies the output transform in shared
 memory. Existing integer checkpoints default to the original GEMM for its
 summation and rounding order. Half-bit checkpoints default to fused GEMM.
-The CUDA FP16 paths accumulate in FP32.
+Both GEMM variants use FP32 tensor-core accumulators. The small-batch QTIP
+kernel folds short FP16 accumulation intervals into FP32, as in upstream.
+Use the GEMM path for inputs that need FP32 range through the inner
+product. On a W3 `mul1` stress fixture with one row, K=512 and N=256,
+constant activations of 4,000 and 5,500 made all 256 QTIP outputs
+non-finite. Both GEMM paths stayed finite. At a constant activation of
+1,000, QTIP was finite with a 0.26938 maximum absolute projection difference
+against the original GEMM. These stress values describe the tested fixture.
 
 `int8_gemv=0` is the default. Mode `1` uses error-feedback residuals in
 eligible single-row `mul1` calls. Mode `2` uses plain INT8 activations in
@@ -72,3 +79,42 @@ Only immutable launch geometry and function attributes are cached across
 streams. CUDA graph allocations retain the pointer addresses of each graph's
 working buffers. Inference retains the packed trellis, scale and bias
 buffers. The kernels decode weights into temporary tiles.
+
+For gate, up and down projections in an expert layer, the extension also
+provides the [routed decode operator](exl3-routed-decode.md).
+
+## A100 validation
+
+The W3 `mcg` Llama 3.2 1B checkpoint produced 20 bit-identical logit
+tensors on the integer default path, against GPT-QModel `a54f05d4` with
+the same Transformers 5.23.0 and PyTorch 2.15.0 runtime. The opt-in FP16
+path had a maximum absolute final-logit difference of 0.07421875 in that
+probe. It selected a different next token at one exact baseline top-logit
+tie and changed two interior prefill argmax positions at margins of 0.015625.
+Those observations motivated retaining the original integer default.
+
+The projection benchmark used identical packed payloads, scales and FP16
+inputs on one A100, and rotated more than three times the 48 MiB L2 over
+41 warmed CUDA graph replays. Times are medians in microseconds per W3
+`mul1` projection. The INT8 columns include call-private workspace setup.
+
+| Projection | Rows | Original | Opt-in FP16 | Residual INT8 | Plain INT8 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Gate + up (5120 → 4608) | 1 | 73.67 | 31.35 | 28.50 | 26.40 |
+| Gate + up (5120 → 4608) | 2 | 73.96 | 31.52 | 31.80 | 34.70 |
+| Gate + up (5120 → 4608) | 6 | 64.51 | 32.14 | 32.37 | 32.37 |
+| Gate + up (5120 → 4608) | 24 | 123.96 | 80.84 | 80.95 | 80.84 |
+| Gate (5120 → 2304) | 1 | 44.06 | 23.44 | 25.20 | 22.39 |
+| Down (2304 → 5120) | 1 | 40.73 | 18.20 | 21.33 | 19.20 |
+
+These are projection timings on synthetic packed inputs. On the W2.5/W3/W4
+shape grid, versus upstream FP16 on the same fixtures, the worst relative
+RMS was 0.0612% for FP16, 0.0650% for residual INT8 and 0.7537% for plain
+INT8. The corresponding maximum absolute projection differences were
+0.0078125, 0.0078125 and 0.046875. INT8 dispatched only on eligible
+row counts, so some columns include the FP16 path.
+
+The packaged extension also passed 148 focused A100 tests, including changed
+inputs on graph replay, live graphs on independent streams, round trips for
+half-bit tiles, and grouped decode. ROCm, Turing, and newer NVIDIA
+architectures remain unmeasured for this port.

@@ -105,14 +105,15 @@ def _source_files() -> list[str]:
     ]
     if torch.version.hip is None:
         source_files += [
+            "moe_coop_bindings.cpp",
             "quant/exl3_gemv.cu",
             "quant/exl3_gemv_int8.cu",
+            "quant/exl3_moe_coop.cu",
             "quant/comp_units/exl3_gemv_half_inst.cu",
         ]
-        source_files += [
-            str(path.relative_to(sources_dir))
-            for path in sorted((sources_dir / "quant/comp_units").glob("exl3_gemv_int8_inst_*.cu"))
-        ]
+        units = sources_dir / "quant/comp_units"
+        for pattern in ("exl3_gemv_int8_inst_*.cu", "exl3_moe_coop_inst_*.cu"):
+            source_files += [str(path.relative_to(sources_dir)) for path in sorted(units.glob(pattern))]
     return [str((sources_dir / path).resolve()) for path in source_files]
 
 
@@ -186,7 +187,7 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "hgemm",
         "bc_linear_exl3_run",
         "bc_linear_exl3_run_configured",
-    ),
+    ) + (("exl3_moe_coop",) if torch.version.hip is None else ()),
     sources=_source_files,
     build_root_env="GPTQMODEL_EXLLAMAV3_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("exllamav3"),
@@ -364,6 +365,11 @@ class _ExllamaV3TorchOpsFacade:
 
     def hgemm(self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> None:
         _runtime_op("hgemm")(a, b, c)
+
+    def exl3_moe_coop(self, *args, **kwargs) -> None:
+        if torch.version.hip is not None:
+            raise NotImplementedError("EXL3 routed decode requires NVIDIA CUDA")
+        _runtime_op("exl3_moe_coop")(*args, **kwargs)
 
 
 exllamav3_ext = _ExllamaV3TorchOpsFacade()
