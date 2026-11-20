@@ -1,20 +1,31 @@
-# DeepSeek V4.1 Flash: checkpoint module inventory
+# DeepSeek V4.1 Flash inference and checkpoint layout
 
-This is a verified **checkpoint inventory and integration guide**, not a claim
-that GPT-QModel can already load or quantize DeepSeek V4.1 Flash. The
-`deepseek_v41` type is absent from the registry at the module-plan implementation
-revision `7d03a349`; the installed Transformers 5.22.1 also lacks that config.
-The upstream Transformers model directory checked on 2026-11-07 lists
-`deepseek_v4`, but not `deepseek_v41`.
+`GPTQModel.load()` accepts the published block-32 FP8 and FP4 checkpoints for
+DeepSeek V4.1 Flash and Flash-1017. GPT-QModel runs the text backbone, vision
+tower, and aligner with its own Torch implementation. Loading omits the
+Engram tables and dSpark/MTP layers. GPTQ, AWQ, and other weight quantization
+methods are outside this inference path.
 
-The checkpoint now includes reference inference Python code. Its config does
-not provide an `auto_map` that makes that code a Transformers AutoModel
-implementation. A dedicated integration is still required. The existing
-`DeepSeekV4QModel` is for V4, and must not be relabeled as V4.1.
+```python
+from gptqmodel import GPTQModel
 
-Start with the [module-plan guide](module-plan-guide.md) for APIs, tags, and
-new-model tests. This page explains the actual V4.1 weight paths, including
-weights outside the decoder and tensors that should not be mistaken for weights.
+model = GPTQModel.load(
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    device_map="auto",
+)
+```
+
+Use a local checkpoint directory or a Hugging Face repository ID.
+`device_map="auto"` places whole decoder layers, and an explicit device map can
+pin those layers. The devices must have room for the packed weights and
+execution workspace. The Torch runtime decodes one projection at a time and
+stores cache entries in BF16.
+
+Text inputs use unpadded sequences. For images, pass flattened RGB patches as
+`pixel_values`, one `[1, patch_rows, patch_columns]` entry per image as
+`image_grid_thw`, and the checkpoint's image placeholder tokens in
+`input_ids`. Each image requires a start token, an aligned grid with a newline
+after each row, and an end token.
 
 ## Pinned evidence
 
@@ -78,11 +89,8 @@ checkpoint
    └─ confidence_head.proj                     weight
 ```
 
-The module-plan implementation currently compiles decoder-relative owners.
-That does not automatically include `vision`, `aligner`, `mtp`, embeddings,
-heads, or direct model-root parameters. A full V4.1 integration must give these
-weights explicit ownership and preservation tests, and extend the public
-inventory if it is to expose a whole-checkpoint view.
+The module plan covers decoder owners. The checkpoint loader also validates
+the vision tower, aligner, token embedding, head, and image delimiter keys.
 
 ## One backbone decoder layer
 
@@ -140,77 +148,40 @@ layers.N
 This makes a layer-zero-only test insufficient. It misses compression, indexing,
 and Engram even if all its attention and expert projections resolve.
 
-## Translating evidence into definition tags
+## Loading and decoder state
 
-Use the post-conversion runtime shell as the canonical module namespace, with
-explicit checkpoint mappings. For example, **if an integration preserves the
-reference `ffn` namespace**, its expert branch can be represented as follows:
-
-```python
-from gptqmodel import ModulePlan
-
-# Partial authoring example only: not a complete or registered V4.1 definition.
-# Groups illustrate expert processing order; they do not enable a backend.
-expert_tree = [
-    "layers", "#",
-    {
-        "ffn:moe": {
-            "gate": ("gate:!",),
-            "experts": {
-                "#": ("w1:0:gate", "w3:0:up", "w2:1:down"),
-            },
-            "shared_experts": ("w1:0:gate", "w3:0:up", "w2:1:down"),
-        },
-    },
-]
-plan = ModulePlan.from_tree(expert_tree)
-assert plan.roles("ffn.experts.3.w1") == ("gate",)
-assert plan.expert_root("ffn.experts.3.w2") == "ffn.experts.3"
-assert plan.shared_expert_containers() == ("ffn.shared_experts",)
-assert not plan.find("ffn.gate").quantize
-assert plan.find("ffn.experts.3.unknown") is None
-plan.print(color=False, show_summary=False)
-```
-
-The reference forward computes the MLP gate with `w1`, the up branch with `w3`,
-and the down projection with `w2`. The router named `gate` is a different
-operation and must not receive the MLP `:gate` role. The illustration deliberately
-does not opt into shared-input reuse; that requires a real-forward test.
-
-Attention needs a separate policy. Both query factors contribute to query
-construction; `wkv` supplies a shared latent; output is factorized too. Explicit
-roles can represent those facts, but a consumer requiring one projection per
-role may reject them. Tags cannot make a Llama-specific rotation valid for this
-architecture. Check the actual forward and consumer contract before selecting
-quantization subsets or assigning combined roles.
-
-For non-quantized ownership, `attn:!` can account for the direct `attn_sink`
-while child projections retain their own policies. Engram's `q_weight` and
-`k_weight` belong to the `engram` owner. The six `hc_*` tensors belong directly
-to the decoder layer itself: **they are parameters, not child modules**.
-An integration must explicitly support those owners or declare its structural
-conversion. Creating fictitious `hc_attn_fn` modules just to pass a lookup is not
-valid coverage.
+| Stage | Before this integration | Current path |
+| --- | --- | --- |
+| Dispatch | `deepseek_v41` failed config detection on Transformers releases without V4.1. | GPT-QModel recognizes the config and selects `DeepSeekV41FlashQModel`. |
+| Load | `V41Source` provided an explicit calibration API. | `load_checkpoint` validates the inference keys and opens only the shards needed by the backbone and vision tower. |
+| Forward | The public loader had no V4.1 inference runtime. | `V41DecoderLayer` carries the hyper-connection mix forward, and `V41AttentionState` shares compressed KV and selections between blocks. |
 
 ```mermaid
 flowchart TD
-    INDEX["V4.1 checkpoint index<br/>96,085 saved tensor keys"] --> MAP["Document source-to-runtime conversion"]
-    MAP --> DEC["Decoder owners: attention / MoE / Engram / direct parameters"]
-    MAP --> OTHER["Vision / aligner / embeddings / head / MTP / image parameters"]
-    DEC --> DEF["Explicit model definition + tags"]
-    DEF --> PLAN["Compiled ModulePlan"]
-    PLAN --> REAL["Real implementation tests for every branch"]
-    OTHER --> AUDIT["Separate full-checkpoint ownership and preservation tests"]
-    REAL --> GATE{"Loader, conversion, consumers and tests implemented?"}
-    AUDIT --> GATE
-    GATE -->|"not yet"| NO["Not registered as supported deepseek_v41"]
-    GATE -->|"required future work complete"| YES["Eligible for a dedicated model-support PR"]
-    style NO fill:#ffa39e,stroke:#a8071a
-    style YES fill:#e6f7ff,stroke:#096dd9
+    LOAD["GPTQModel.load"] --> DEF["DeepSeekV41FlashQModel"]
+    DEF --> IDX["load_checkpoint reads the index"]
+    IDX --> FILTER["Skip dSpark and Engram entries"]
+    FILTER --> MATCH{"Checkpoint matches the model?"}
+    MATCH -->|"Yes"| PACK["Load packed weights and dense parameters"]
+    MATCH -->|"No"| ERROR["Raise with the missing or unexpected tensor"]
+    PACK --> STATE["DeepSeekV41FlashCache owns per-request history"]
+    STATE --> LAYER["V41DecoderLayer runs attention and MoE"]
+    LAYER --> KV["Pass source banks and index selections to later layers"]
+    KV --> OUT["Commit cache and return logits"]
+    style ERROR fill:#fee,stroke:#b22
 ```
 
-This diagram describes the **remaining integration requirements**, not an
-implemented loading path.
+Source names map directly to runtime paths except for the six `hc_*`
+parameters. The loader attaches them to `attn_hc` and `ffn_hc` so the
+module plan can name their owners. The plan marks every loaded decoder
+weight owner with `:!`. The router owns the text and image correction biases
+and the attention module owns the sink.
+
+The focused tests use six reduced decoder blocks patterned on published
+layers 1, 14, 15, 20, 21, and 24. Together they exercise sliding-window
+attention, pooled and unpooled compressors, both kinds of shared KV
+consumers, and candidate pruning. One vision block exercises the aligner and
+image routing.
 
 ## Saved scales versus runtime memory
 
@@ -253,10 +224,5 @@ assert counts["mtp"] == 2401
 print(dict(sorted(counts.items())))
 ```
 
-Index inspection verifies saved names, not tensor contents, shapes, loader
-compatibility, quantization accuracy, or a successful inference run. Before
-claiming support, add the registry contract and a real V4.1 module-plan test,
-exercise every optional branch and non-decoder family, and validate conversion
-plus quantize/save/reload against the actual implementation. The current
-conditional V4.1 test only activates when the upstream config becomes available;
-it is not evidence that V4.1 already passes.
+Use index inspection to audit saved names. The layer tests exercise storage
+shapes, weights, and forward execution separately.

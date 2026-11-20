@@ -482,6 +482,10 @@
       "definition": "DeepSeekV4QModel",
       "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
     },
+    "deepseek_v41": {
+      "definition": "DeepSeekV41FlashQModel",
+      "reason": "The inference-only runtime executes the published FP8 and FP4 weights with its own projection modules."
+    },
     "deepseek_vl": {
       "definition": "DeepSeekVLQModel",
       "profiles": {

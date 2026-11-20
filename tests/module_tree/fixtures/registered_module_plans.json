@@ -26,6 +26,7 @@
     "deepseek_v3": "DeepSeekV3QModel",
     "deepseek_v32": "DeepSeekV32QModel",
     "deepseek_v4": "DeepSeekV4QModel",
+    "deepseek_v41": "DeepSeekV41FlashQModel",
     "deepseek_vl": "DeepSeekVLQModel",
     "deepseek_vl_v2": "DeepSeekVLV2QModel",
     "diffusion_gemma": "DiffusionGemmaQModel",
@@ -507,6 +508,22 @@
         ["mlp.experts.{expert_index}.down_proj"],
         ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
         ["mlp.shared_experts.down_proj"]
+      ]
+    },
+    "DeepSeekV41FlashQModel/gptq": {
+      "layers": ["layers"],
+      "blocks": [
+        ["attn_hc:!"],
+        ["attn_norm:!"],
+        ["attn:!"],
+        ["attn.wq_a:!", "attn.q_norm:!", "attn.wq_b:!", "attn.wkv:!", "attn.kv_norm:!", "attn.wo_a:!", "attn.wo_b:!"],
+        ["attn.compressor.wkv:!", "attn.compressor.wgate:!", "attn.compressor.norm:!"],
+        ["attn.indexer.wq_b:!", "attn.indexer.weights_proj:!", "attn.indexer.wk:!", "attn.indexer.k_norm:!"],
+        ["ffn_hc:!"],
+        ["ffn_norm:!"],
+        ["ffn.gate:!"],
+        ["ffn.experts.{expert_index}.w1:!", "ffn.experts.{expert_index}.w3:!", "ffn.experts.{expert_index}.w2:!"],
+        ["ffn.shared_experts.w1:!", "ffn.shared_experts.w3:!", "ffn.shared_experts.w2:!"]
       ]
     },
     "DeepSeekV4QModel/gptq": {

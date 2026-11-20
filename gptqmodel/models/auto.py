@@ -111,6 +111,7 @@ from .definitions.raon1_mini import Raon1MiniQModel  # noqa: E402
 from .definitions.flint import FlintQModel  # noqa: E402
 from .definitions.ricursive import RicursiveQModel  # noqa: E402
 from .definitions.deepseek_v4 import DeepSeekV4QModel  # noqa: E402
+from .definitions.deepseek_v41_flash import DeepSeekV41FlashQModel  # noqa: E402
 from .definitions.deepseek_ocr2 import DeepSeekOCR2QModel  # noqa: E402
 from .definitions.deepseek_vl import DeepSeekVLQModel  # noqa: E402
 from .definitions.deepseek_vl_v2 import DeepSeekVLV2QModel  # noqa: E402
@@ -399,6 +400,7 @@ MODEL_MAP = {
     "flint": FlintQModel,
     "ricursive": RicursiveQModel,
     "deepseek_v4": DeepSeekV4QModel,
+    "deepseek_v41": DeepSeekV41FlashQModel,
     "deepseek_ocr2": DeepSeekOCR2QModel,
     "deepseek_vl": DeepSeekVLQModel,
     "deepseek_vl_v2": DeepSeekVLV2QModel,
