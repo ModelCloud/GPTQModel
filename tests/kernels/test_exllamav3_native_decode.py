@@ -68,6 +68,7 @@ def _q4nx_reference(weights, x, bias, start=0, end=None):
     (1, 512, 256, 90),
     (8, 512, 256, 90),
     (9, 512, 256, None),
+    (16, 5120, 4608, 2),
     (64, 2304, 5120, 92),
 ))
 @torch.inference_mode()

@@ -86,6 +86,9 @@ packed GEMM.
 Set `EXL3CUDAConfig(fused_gemm=True, fp16_gemv=False)` to pin Q4NX to packed
 GEMM. With `fused_gemm=True` and `fp16_gemv=True`, Q4NX can select GEMV while
 prefill uses packed GEMM. INT8 GEMV remains a `mul1` policy.
+The FP32 packed GEMM variants also tune the launch grid on Ampere for the
+5120 → 2304, 5120 → 4608, and 2304 → 5120 expert projections. The selected
+row ranges use 128-column tiles and distribute work across all available SMs.
 Q4NX weights also work with the explicit [routed decode operator](exl3-routed-decode.md).
 The saved quantization config keeps the default `codebook` and the
 `dynamic` recipe. Its `tensor_storage` entry lists each projection's

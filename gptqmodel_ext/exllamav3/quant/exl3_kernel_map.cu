@@ -268,6 +268,17 @@ TResult* select_exl3_gemm_kernel_tuned
         int tuned_num_sms = packed & 0xff;
         TORCH_CHECK(shape_idx, "Failed to find valid kernel for shape");
 
+        // The shared tuning table predates Q4NX. On these Ampere expert
+        // projections, the FP32 Q4NX kernels benefit from distributing the
+        // narrower column tiles across all available SMs.
+        const bool q4nx_expert_grid = cb == EXL3_Q4NX_CODEBOOK && c_fp32 &&
+            cc == CC_AMPERE && fused_gemm &&
+            ((size_k == 5120 && size_n == 2304 && row_shape == 0) ||
+             (size_k == 5120 && size_n == 4608 && row_shape <= 6) ||
+             (size_k == 2304 && size_n == 5120 && row_shape <= 5));
+        if (q4nx_expert_grid && row_shape == 0)
+            shape_idx = 2;
+
         if (row_shape && compatible(row_shape, size_k, size_n, K, half_k, smem_max))
         {
             shape_idx = row_shape;
@@ -282,7 +293,7 @@ TResult* select_exl3_gemm_kernel_tuned
         int tilesize_k = exl3_gemm_tilesize_k[shape_idx];
         int tilesize_n = exl3_gemm_tilesize_n[shape_idx];
         int max_slices = size_k / tilesize_k * size_n / tilesize_n;
-        int num_sms = MAX(MIN(max_slices, tuned_num_sms), 1);
+        int num_sms = q4nx_expert_grid ? max_slices : MAX(MIN(max_slices, tuned_num_sms), 1);
 
         lookup = tuning_cache.emplace(key, TResult {
             get_gemm_kernel_ptr(K, shape_idx, c_fp32, cb, half_k, fused_gemm),
