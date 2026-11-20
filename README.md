@@ -33,6 +33,15 @@
 
 ## Latest News 🗞️🚀
 
+**7.12.2**
+
+- **Quantization:** GPTQ, GPTAQ, FOEM, and QQQ now fit per-channel grids after masking dead columns. GPTAQ and FOEM honor low-sample fallback thresholds and use exact reconstructions when packing asymmetric BF16 weights. AWQ excludes padding from routed-expert calibration and honors per-module fallback settings.
+- **Quantization memory:** GPTQ [releases the FP32 Hessian before the block solve](docs/gptq-hessian-accumulation.md#hessian-release-before-the-block-pass) and uses block-sized loss buffers. AWQ bounds scale-search scratch by processing weights in chunks. Set `CalibrationConfig(batch_size="auto")` to choose a calibration batch size from the dataset and available GPU memory.
+- **EXL3:** Native half-bit rates and [Q4NX at 2.5, 3.0, and 3.5 bits per weight](docs/exl3-native-decode.md#q4nx), with faster Q4NX encoding and tuned decode and prefill on NVIDIA Ada. On [AMD RDNA4 (gfx1200/gfx1201)](docs/exl3-native-decode.md#rdna4-hip-dispatch), AUTO can select native HIP GEMV and WMMA GEMM; EXL3 also adds the R4NX codebook and optional INT8-activation GEMV.
+- **Models:** Added DeepSeek V4.1 Flash checkpoint support, including packed MX inference on NVIDIA and [fused routed-expert decode for EXL3 Q4NX](docs/exl3-routed-decode.md#deepseek-v41-flash-q4nx).
+- **Inference:** Marlin can now run [asymmetric 4- and 8-bit GPTQ checkpoints](docs/gptq-marlin-asymmetric-selection.md) without activation order. Multiple backends preserve checkpoint bias precision and accumulate before rounding to the output dtype. `model.budget()` reports packed weight memory and estimates which context lengths and batch sizes fit within the memory budget and model limits.
+- **Compat:** Fixed loading with CPU-only and mixed CPU/MPS device maps and checkpoints in a Transformers subfolder. On Python 3.11+, Transformers 5.23 or newer is required. The [engine extras](docs/engine-extras.md) now advertise vLLM only on Python 3.10 and no longer advertise SGLang.
+
 **7.11.4**
 
 - **Quantization:** SmoothMSE weights its shrink search by input saliency (the Hessian diagonal for GPTQ/QQQ fallbacks, weight magnitude for calibration-free RTN) and keeps the unclipped range when clipping would increase that weighted error; QQQ's GSQ calibration now uses the same FP32 activation scales as inference. AWQ samples routed-expert activations uniformly across the calibration set instead of favoring later batches. Paro retains mixed-shape batches, and SenseNova-Loop calibrates on every pass through its repeated layers.
