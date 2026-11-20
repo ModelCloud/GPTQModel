@@ -31,7 +31,10 @@ from ...utils.machete import (
 )
 from ...utils.marlin import replace_parameter
 from ...utils.marlin_scalar_type import scalar_types
-from ...utils.packing_math import scaled_zero_offset
+from ...utils.packing_math import (
+    validate_narrow_affine_products,
+    zero_points_in_scale_dtype,
+)
 from ...utils.rocm import IS_ROCM
 from ._compile_support import COMPILE_LEVEL
 
@@ -242,13 +245,31 @@ class MacheteLinear(GPTQQuantLinear):
             qzeros_unpacked = unpack_quantized_values_into_int32(
                 self.qzeros.data, self.weight_type, packed_dim=1,
             )
-            # Validate before overwriting the checkpoint's weight layout.
-            qzeros_fp = scaled_zero_offset(self.scales, qzeros_unpacked)
+            # Keep the logical zero point: the native mainloop subtracts it
+            # from the upcast integer code before scaling, so the dequantized
+            # weight rounds once from `(code - zero) * scale` instead of adding
+            # a pre-rounded `-zero * scale` offset. Validate before overwriting
+            # the checkpoint's weight layout.
+            qzeros_runtime = zero_points_in_scale_dtype(self.scales, qzeros_unpacked)
 
         perm = None
         if self.desc_act:
             perm = torch.argsort(self.g_idx).to(torch.int32)
             sorted_g_idx = self.g_idx[perm]
+
+        qweight_unpacked = unpack_quantized_values_into_int32(
+            self.qweight.data, self.weight_type, packed_dim=0)
+        if perm is not None:
+            qweight_unpacked = qweight_unpacked[perm, :]
+
+        # Reject an out-of-range affine product before any registered tensor is
+        # rewritten, so a failed load leaves the checkpoint layout intact.
+        if not self.sym:
+            validate_narrow_affine_products(
+                qweight_unpacked, qzeros_unpacked, self.scales, self.group_size
+            )
+
+        if self.desc_act:
             replace_parameter(
                 self,
                 "g_idx",
@@ -257,11 +278,6 @@ class MacheteLinear(GPTQQuantLinear):
             self.input_perm = perm.to(device=device)
         else:
             self.input_perm = torch.empty(0, dtype=torch.int32, device=device)
-
-        qweight_unpacked = unpack_quantized_values_into_int32(
-            self.qweight.data, self.weight_type, packed_dim=0)
-        if perm is not None:
-            qweight_unpacked = qweight_unpacked[perm, :]
 
         qweight_packed = pack_quantized_values_into_int32(
             qweight_unpacked, self.weight_type, packed_dim=0)
@@ -299,7 +315,7 @@ class MacheteLinear(GPTQQuantLinear):
             replace_parameter(
                 self,
                 "qzeros",
-                torch.nn.Parameter(qzeros_fp, requires_grad=False),
+                torch.nn.Parameter(qzeros_runtime, requires_grad=False),
             )
             self.has_zero_points = True
 
@@ -307,8 +323,9 @@ class MacheteLinear(GPTQQuantLinear):
             self.bias = self.bias.to(device=device)
 
         super().post_init()
-        # ``qweight`` is now Machete-prepacked and ``qzeros`` is a float offset
-        # table (or empty); neither can be inverted back to checkpoint words.
+        # ``qweight`` is now Machete-prepacked and ``qzeros`` is a logical
+        # zero-point table in the scale dtype (or empty); neither can be
+        # inverted back to checkpoint words.
         self._native_shuffled = True
 
     def list_buffers(self) -> List:
@@ -332,15 +349,22 @@ class MacheteLinear(GPTQQuantLinear):
                 perm = perm.to(device=input_2d.device)
             input_2d = input_2d[:, perm]
 
+        # The generated asymmetric kernels require the activation, group scale
+        # and group zero-point operands to share one dtype; the native
+        # dispatcher rejects any other signature. Derive both launch operands
+        # from the locked activation dtype and leave checkpoint storage as is.
+        activation_dtype = input_2d.dtype
         group_scales = self.scales
-        if group_scales.dtype != input_2d.dtype:
-            group_scales = group_scales.to(dtype=input_2d.dtype)
+        if group_scales.dtype != activation_dtype:
+            group_scales = group_scales.to(dtype=activation_dtype)
 
         if self.has_zero_points:
             assert self.qzeros is not None and self.qzeros.numel() > 0, (
                 "Asymmetric MacheteLinear requires non-empty qzeros after post_init()."
             )
             group_zeros = self.qzeros
+            if group_zeros.dtype != activation_dtype:
+                group_zeros = group_zeros.to(dtype=activation_dtype)
         else:
             group_zeros = None
 
