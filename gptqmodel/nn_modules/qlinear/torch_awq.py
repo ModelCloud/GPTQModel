@@ -177,11 +177,9 @@ class AwqTorchLinear(AwqDecodeRangeMixin, AWQuantLinear):
     def _scales_for_compute(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         """Return the stored scales converted for this computation only.
 
-        ``self.scales`` keeps the checkpoint dtype. Rewriting it in place to
-        the activation dtype (the previous behavior) permanently rounded the
-        stored precision, so a later forward with another dtype, or a re-saved
-        checkpoint, could no longer recover the original scale. A BF16 scale
-        below the FP16 subnormal range became zero this way.
+        ``self.scales`` keeps the checkpoint dtype so a re-saved checkpoint
+        recovers the original scale bit-exactly. The activation dtype is locked
+        for the run (contracts/kernel/forward-dtype.md).
         """
         scales = self.scales
         if scales.device != device or scales.dtype != dtype or not scales.is_contiguous():

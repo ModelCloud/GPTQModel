@@ -435,6 +435,53 @@ def checkpoint_qzeros_layout(format_code) -> int | None:
     return None
 
 
+FORWARD_DTYPE_CONTRACT = "contracts/kernel/forward-dtype.md"
+
+
+def _forward_activation(args, kwargs) -> Optional[t.Tensor]:
+    for value in args:
+        if isinstance(value, t.Tensor):
+            return value
+    for key in ("x", "input", "hidden_states"):
+        value = kwargs.get(key)
+        if isinstance(value, t.Tensor):
+            return value
+    return None
+
+
+def _check_forward_dtype(module: "BaseQuantLinear", args, kwargs) -> None:
+    """Enforce the forward dtype contract (contracts/kernel/forward-dtype.md).
+
+    The first forward fixes the module's activation dtype. A later forward with
+    a different dtype is a caller bug, so raise rather than adapt to it.
+    """
+    x = _forward_activation(args, kwargs)
+    if x is None:
+        return
+    locked = module._forward_dtype_lock
+    if locked is None:
+        module._forward_dtype_lock = x.dtype
+    elif x.dtype != locked:
+        raise RuntimeError(
+            f"{module.__class__.__name__}({module.name}): forward received {x.dtype} "
+            f"after the module was first called with {locked}. A module never switches "
+            f"activation dtype during a run; see {FORWARD_DTYPE_CONTRACT}."
+        )
+
+
+def _lock_forward_dtype(forward):
+    if getattr(forward, "_forward_dtype_locked", False):
+        return forward
+
+    @wraps(forward)
+    def locked_forward(self, *args, **kwargs):
+        _check_forward_dtype(self, args, kwargs)
+        return forward(self, *args, **kwargs)
+
+    locked_forward._forward_dtype_locked = True
+    return locked_forward
+
+
 class BaseQuantLinear(nn.Module):
     # CPU int4pack kernels rewrite checkpoint buffers into their runtime layout
     # on the first forward. Serialize that cold check-and-transform so a
@@ -442,6 +489,16 @@ class BaseQuantLinear(nn.Module):
     # already-packed words (issue #4565). One process-wide lock is enough: the
     # transform runs once per module and avoids per-instance lock pickling.
     _cpu_transform_lock = threading.RLock()
+
+    # Forward dtype contract (contracts/kernel/forward-dtype.md): the dtype of
+    # the first forward input. Every subclass ``forward`` is wrapped to check it.
+    _forward_dtype_lock: Optional[t.dtype] = None
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        forward = cls.__dict__.get("forward")
+        if callable(forward):
+            cls.forward = _lock_forward_dtype(forward)
 
     SUPPORTS_BACKENDS: List[BACKEND] = None
     # False for role-specific modules that are instantiated explicitly and
