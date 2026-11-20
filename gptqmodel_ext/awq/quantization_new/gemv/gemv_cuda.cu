@@ -44,14 +44,16 @@ static inline __device__ float to_float(float src)
     return src;
 }
 
-static inline __device__ half to_half(float src)
+// The kernels accumulate in FP32. A caller with a bias to add requests FP32
+// output so the bias joins the complete reduction before the single rounding.
+static inline __device__ void store_gemv_output(half* ptr, float value)
 {
-    return __float2half(src);
+    *ptr = __float2half(value);
 }
 
-static inline __device__ half to_half(half src)
+static inline __device__ void store_gemv_output(float* ptr, float value)
 {
-    return src;
+    *ptr = value;
 }
 
 // Reduce sum within the warp using the tree reduction algorithm.
@@ -91,9 +93,9 @@ __device__ __forceinline__ int make_divisible(int c, int divisor){
   return (c + divisor - 1) / divisor;
 }
 
-template <int NPerBlock, int Batch, int BlockSize, int GroupSize>
+template <int NPerBlock, int Batch, int BlockSize, int GroupSize, typename output_t>
 __global__ void gemv_kernel(
-  const half* inputs, const uint32_t* weight, const half* scales, const half* zeros, half* outputs, 
+  const half* inputs, const uint32_t* weight, const half* scales, const half* zeros, output_t* outputs, 
   const int IC, const int OC)
 {
     const int kStride = 64;
@@ -222,7 +224,7 @@ __global__ void gemv_kernel(
         {
             acc += out_smem[j][i];
         }
-        outputs[batch_idx * OC + blk_row_offset + oc_idx] = to_half(acc);
+        store_gemv_output(outputs + batch_idx * OC + blk_row_offset + oc_idx, acc);
     }
 }
 
@@ -240,6 +242,65 @@ Args:
 Returns:
   out_feats: tensor of shape [B, OC];
 */
+template <typename output_t>
+static void launch_gemv_forward_decode(
+    int m,
+    int n,
+    int k,
+    dim3 num_blocks,
+    dim3 num_threads,
+    size_t smem_size,
+    const half* in_feats,
+    const uint32_t* kernel,
+    const half* scaling_factors,
+    const half* zeros,
+    output_t* out_feats)
+{
+    static constexpr int N_PER_BLOCK = 2;
+    static constexpr int BLOCK_SIZE = 256;
+
+    switch (m)
+    {
+    case 1:
+      gemv_kernel<N_PER_BLOCK, 1, BLOCK_SIZE, 128, output_t><<<num_blocks, num_threads, smem_size>>>(
+        in_feats, kernel, scaling_factors, zeros, out_feats, k, n
+      );
+      break;
+    case 2:
+      gemv_kernel<N_PER_BLOCK, 2, BLOCK_SIZE, 128, output_t><<<num_blocks, num_threads, smem_size>>>(
+        in_feats, kernel, scaling_factors, zeros, out_feats, k, n
+      );
+      break;
+    case 3:
+      gemv_kernel<N_PER_BLOCK, 3, BLOCK_SIZE, 128, output_t><<<num_blocks, num_threads, smem_size>>>(
+        in_feats, kernel, scaling_factors, zeros, out_feats, k, n
+      );
+      break;
+    case 4:
+      gemv_kernel<N_PER_BLOCK, 4, BLOCK_SIZE, 128, output_t><<<num_blocks, num_threads, smem_size>>>(
+        in_feats, kernel, scaling_factors, zeros, out_feats, k, n
+      );
+      break;
+    case 5:
+      gemv_kernel<N_PER_BLOCK, 5, BLOCK_SIZE, 128, output_t><<<num_blocks, num_threads, smem_size>>>(
+        in_feats, kernel, scaling_factors, zeros, out_feats, k, n
+      );
+      break;
+    case 6:
+      gemv_kernel<N_PER_BLOCK, 6, BLOCK_SIZE, 128, output_t><<<num_blocks, num_threads, smem_size>>>(
+        in_feats, kernel, scaling_factors, zeros, out_feats, k, n
+      );
+      break;
+    case 7:
+      gemv_kernel<N_PER_BLOCK, 7, BLOCK_SIZE, 128, output_t><<<num_blocks, num_threads, smem_size>>>(
+        in_feats, kernel, scaling_factors, zeros, out_feats, k, n
+      );
+      break;
+    default:
+      throw std::runtime_error("Unsupported batch size for gemv kernel.\n");
+    }
+}
+
 torch::Tensor gemv_forward_cuda_decode(
     torch::Tensor _in_feats,
     torch::Tensor _kernel,
@@ -248,9 +309,9 @@ torch::Tensor gemv_forward_cuda_decode(
     int m,
     int n,
     int k,
-    int group_size)
+    int group_size,
+    bool fp32_output)
 {
-
     std::vector<int64_t> output_shape = _in_feats.sizes().vec();
     output_shape.back() = n;
 
@@ -259,10 +320,18 @@ torch::Tensor gemv_forward_cuda_decode(
     auto zeros = reinterpret_cast<half*>(_zeros.data_ptr<at::Half>());
     auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
 
-    auto options = torch::TensorOptions().dtype(_in_feats.dtype()).device(_in_feats.device());
+    if (group_size != 128)
+    {
+      throw std::runtime_error("Unsupported group size for gemv kernel.\n");
+    }
+
+    // A caller with a bias to add asks for FP32 output so the bias joins the
+    // complete FP32 reduction and the result is rounded exactly once.
+    auto options = torch::TensorOptions()
+        .dtype(fp32_output ? at::kFloat : _in_feats.scalar_type())
+        .device(_in_feats.device());
     at::Tensor _out_feats = torch::empty(output_shape, options);
-    half * out_feats = reinterpret_cast<half *>(_out_feats.data_ptr());
-    
+
     static constexpr int N_PER_BLOCK = 2;
     static constexpr int K_INTERLEAVE = 4;
     static constexpr int BLOCK_SIZE = 256;
@@ -273,61 +342,20 @@ torch::Tensor gemv_forward_cuda_decode(
     // warp_reduce() writes one float accumulator tile per warp into extern shared memory
     size_t smem_size = sizeof(float) * NUM_WARPS * N_PER_BLOCK * m * K_INTERLEAVE;
 
-    // if (group_size == 64)
-    // {
-    //   gemv_kernel_g64<<<num_blocks, num_threads>>>(
-    //     // pointers
-    //     in_feats, kernel, zeros, scaling_factors, out_feats,
-    //     // constants
-    //     num_in_channels, num_out_channels
-    //   );
-    // }
-    if (group_size == 128)
+    if (fp32_output)
     {
-      switch (m)
-      {
-      case 1:
-        gemv_kernel<N_PER_BLOCK, 1, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
-          in_feats, kernel, scaling_factors, zeros, out_feats, k, n
-        );
-        break;
-      case 2:
-        gemv_kernel<N_PER_BLOCK, 2, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
-          in_feats, kernel, scaling_factors, zeros, out_feats, k, n
-        );
-        break;
-      case 3:
-        gemv_kernel<N_PER_BLOCK, 3, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
-          in_feats, kernel, scaling_factors, zeros, out_feats, k, n
-        );
-        break;
-      case 4:
-        gemv_kernel<N_PER_BLOCK, 4, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
-          in_feats, kernel, scaling_factors, zeros, out_feats, k, n
-        );
-        break;
-      case 5:
-        gemv_kernel<N_PER_BLOCK, 5, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
-          in_feats, kernel, scaling_factors, zeros, out_feats, k, n
-        );
-        break;
-      case 6:
-        gemv_kernel<N_PER_BLOCK, 6, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
-          in_feats, kernel, scaling_factors, zeros, out_feats, k, n
-        );
-        break;
-      case 7:
-        gemv_kernel<N_PER_BLOCK, 7, BLOCK_SIZE, 128><<<num_blocks, num_threads, smem_size>>>(
-          in_feats, kernel, scaling_factors, zeros, out_feats, k, n
-        );
-        break;
-      default:
-        throw std::runtime_error("Unsupported batch size for gemv kernel.\n");
-      }
+      launch_gemv_forward_decode<float>(
+        m, n, k, num_blocks, num_threads, smem_size,
+        in_feats, kernel, scaling_factors, zeros, _out_feats.data_ptr<float>()
+      );
     }
     else
     {
-      throw std::runtime_error("Unsupported group size for gemv kernel.\n");
+      launch_gemv_forward_decode<half>(
+        m, n, k, num_blocks, num_threads, smem_size,
+        in_feats, kernel, scaling_factors, zeros,
+        reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>())
+      );
     }
     return _out_feats;
 }
