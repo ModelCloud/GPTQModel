@@ -91,6 +91,14 @@ void reconstruct_frac_wrapper(torch::Tensor& unpacked, torch::Tensor packed, int
     reconstruct_frac(unpacked, packed, checked_half_rate(K));
 }
 
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
+void reconstruct_q4nx_wrapper(torch::Tensor& unpacked, torch::Tensor packed, int64_t K, bool half_k)
+{
+    TORCH_CHECK(K >= 2 && K <= 3, "Q4NX reconstruction requires K in 2..3");
+    reconstruct_q4nx(unpacked, packed, static_cast<int>(K), half_k);
+}
+#endif
+
 void had_r_128_wrapper(
     torch::Tensor input,
     torch::Tensor& output,
@@ -133,6 +141,15 @@ int64_t bc_linear_exl3_run_configured_wrapper(
     return bc_linear_exl3_run_configured(trellis, suh, svh, K, bias, mcg, mul1, x, y, fp16_gemv, int8_gemv, fused_gemm, q4nx);
 }
 
+int64_t bc_linear_exl3_run_hip_gemv_wrapper(
+    torch::Tensor trellis, torch::Tensor suh, torch::Tensor svh, double K,
+    std::optional<torch::Tensor> bias, bool mcg, bool mul1, torch::Tensor x, torch::Tensor& y,
+    bool q4nx)
+{
+    const c10::optional<at::Tensor> bias_tensor = bias.has_value() ? c10::optional<at::Tensor>(bias.value()) : c10::nullopt;
+    return bc_linear_exl3_run_hip_gemv(trellis, suh, svh, K, bias_tensor, mcg, mul1, x, y, q4nx);
+}
+
 std::tuple<torch::Tensor, torch::Tensor> bf16_prescale_wrapper(torch::Tensor x, double bound)
 {
     return bf16_prescale(x, bound);
@@ -161,6 +178,9 @@ TORCH_LIBRARY(gptqmodel_exllamav3, m)
     m.def("pack_signs(Tensor(a!) packed, Tensor unpacked) -> ()");
     m.def("reconstruct(Tensor(a!) unpacked, Tensor packed, int K, bool mcg, bool mul1) -> ()");
     m.def("reconstruct_frac(Tensor(a!) unpacked, Tensor packed, int K) -> ()");
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
+    m.def("reconstruct_q4nx(Tensor(a!) unpacked, Tensor packed, int K, bool half_k) -> ()");
+#endif
     m.def("quantize_tiles_frac(Tensor input_tiles, Tensor(a!) output_tiles, Tensor(b!) output_indices, Tensor(c!) temp_costs, Tensor(d!) temp_edges, int K, int mask) -> ()");
     m.def("pack_trellis_frac(Tensor(a!) packed, Tensor unpacked, int K, int mask) -> ()");
     m.def("unpack_trellis_frac(Tensor(a!) unpacked, Tensor packed, int K, int mask) -> ()");
@@ -168,6 +188,7 @@ TORCH_LIBRARY(gptqmodel_exllamav3, m)
     m.def("hgemm(Tensor a, Tensor b, Tensor(a!) c) -> ()");
     m.def("bc_linear_exl3_run(Tensor trellis, Tensor suh, Tensor svh, int K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y) -> ()");
     m.def("bc_linear_exl3_run_configured(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(a!) y, bool fp16_gemv, int int8_gemv, bool fused_gemm=False, bool q4nx=False) -> int");
+    m.def("bc_linear_exl3_run_hip_gemv(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y, bool q4nx=False) -> int");
     m.def("bf16_prescale(Tensor x, float bound) -> (Tensor, Tensor)");
     m.def("bf16_rescale(Tensor result, Tensor scale, Tensor? bias, int n_cols) -> Tensor");
     m.def("bf16_rescale.raw(Tensor result, Tensor scale, Tensor? bias, int n_cols) -> Tensor");
@@ -187,6 +208,9 @@ TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m)
     m.impl("pack_signs", &pack_signs_wrapper);
     m.impl("reconstruct", &reconstruct_wrapper);
     m.impl("reconstruct_frac", &reconstruct_frac_wrapper);
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
+    m.impl("reconstruct_q4nx", &reconstruct_q4nx_wrapper);
+#endif
     m.impl("quantize_tiles_frac", &quantize_tiles_frac_wrapper);
     m.impl("pack_trellis_frac", &pack_trellis_frac_wrapper);
     m.impl("unpack_trellis_frac", &unpack_trellis_frac_wrapper);
@@ -194,6 +218,7 @@ TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m)
     m.impl("hgemm", &hgemm_wrapper);
     m.impl("bc_linear_exl3_run", &bc_linear_exl3_run_wrapper);
     m.impl("bc_linear_exl3_run_configured", &bc_linear_exl3_run_configured_wrapper);
+    m.impl("bc_linear_exl3_run_hip_gemv", &bc_linear_exl3_run_hip_gemv_wrapper);
     m.impl("bf16_prescale", &bf16_prescale_wrapper);
     m.impl("bf16_rescale", &bf16_rescale_wrapper<true>);
     m.impl("bf16_rescale.raw", &bf16_rescale_wrapper<false>);

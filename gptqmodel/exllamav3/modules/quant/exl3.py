@@ -127,14 +127,15 @@ class LinearEXL3:
                 return ovr[self.key].forward(x, params, out_dtype)
 
         bsz = x.numel() // x.shape[-1]
+        # The small-batch tensor-core GEMM (`bc.run`) is NVIDIA-only. On ROCm the
+        # native HIP GEMV handles decode-sized batches when it accepts the shape,
+        # codebook and device, and the native RDNA4 GEMM (`exl3_gemm_hip.cu`)
+        # handles the rest of the shapes it covers. Both fall back to reconstruct
+        # + hgemm (hipBLAS) internally.
         if torch.version.hip is not None:
-            # ROCm has its own fused GEMM (`quant/exl3_gemm_hip.cu`): on RDNA4
-            # it decodes the trellis into the wave32 WMMA operands, and
-            # `exl3_gemm_hip()` itself falls back to reconstruct + hgemm for
-            # the shapes it does not cover (wide batches, other devices), so
-            # `bc.run` is always safe. Q4NX's decoder only exists in the
-            # portable build, so that codebook keeps the torch path.
-            torch_mode = self.q4nx or bool(params.get("reconstruct", False))
+            # Q4NX has no fused GEMM decoder on ROCm, so above the GEMV's batch
+            # size it keeps the portable torch path.
+            torch_mode = bool(params.get("reconstruct", False)) or (self.q4nx and bsz > 8)
         else:
             torch_mode = params.get("reconstruct", bsz > 32 and not self.q4nx)
 
@@ -151,6 +152,27 @@ class LinearEXL3:
         # then produced silently wrong rows, so pack before the kernels.
         x = x.reshape(-1, self.in_features).contiguous()
         include_bias = params.get("include_bias", True)
+
+        if torch.version.hip is not None and not torch_mode and bsz <= 8:
+            y = torch.empty(out_shape, dtype=result_dtype, device=x.device)
+            if ext.bc_linear_exl3_run_hip_gemv(
+                self.trellis,
+                self.suh,
+                self.svh,
+                float(self.K),
+                self.bias if include_bias else None,
+                self.mcg,
+                self.mul1,
+                x,
+                y,
+                self.q4nx,
+            ):
+                return y
+            # Shape, device or codebook not eligible: Q4NX has no fused GEMM
+            # decoder on ROCm and reconstructs; every other codebook lets
+            # `bc.run` pick the fused GEMM (which reconstructs internally when
+            # the shape is out of its range).
+            torch_mode = self.q4nx
 
         if torch_mode:
             y = torch.empty((x.shape[0], self.out_features), dtype=torch.float32, device=x.device)

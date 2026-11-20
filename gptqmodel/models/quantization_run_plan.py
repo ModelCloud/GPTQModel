@@ -15,6 +15,7 @@ from ..quantization.config import (
     METHOD,
     QUANTIZE_BLACK_LIST,
     BaseQuantizeConfig,
+    native_correction_requested,
 )
 from ..utils.backend import BACKEND, normalize_backend
 
@@ -149,7 +150,7 @@ class QuantizationRunPlan:
                 raise ValueError(f"No calibrated processor for {config.method}") from exc
 
             steps_list = []
-            if has_gptaq or (has_foem and config.foem.alpha > 0):
+            if native_correction_requested(config):
                 steps_list.append(ProcessorStep.NATIVE)
             if getattr(config, "preprocessors", None):
                 steps_list.append(ProcessorStep.PREPROCESSOR)

@@ -264,6 +264,12 @@ class FOEM(GPTQ):
         # [columns, tokens] here, so ``shape[1]`` is the calibration token count,
         # not the number of forward requests.
         token_count = inp.shape[1]
+        if token_count == 0:
+            # A routed expert can receive only padding rows. There is nothing
+            # to accumulate, and the per-device normalization below would
+            # divide by zero. Plain GPTQ already treats this as a zero-sample
+            # contribution and later falls back to RTN (#5768).
+            return 0, None, inp.device
 
         self._accumulate_device_batch(inp, native_inp, token_count)
         self.nsamples += token_count

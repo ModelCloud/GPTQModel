@@ -166,8 +166,17 @@ def _int4pack_mm_cast_op(
     separate graph-computed Pointwise layout (#4068).
     """
 
+    x_compute = x.to(compute_dtype)
+    if not x_compute.is_contiguous():
+        # ``Tensor.to(dtype)`` preserves non-dense strides (for example a
+        # transposed view), and the native CPU op rejects them. Normalize
+        # inside the custom op as well so a direct caller is safe (#5770).
+        x_compute = x_compute.contiguous()
+    scales_compute = scales_and_zeros.to(compute_dtype)
+    if not scales_compute.is_contiguous():
+        scales_compute = scales_compute.contiguous()
     out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-        x.to(compute_dtype), qweight, group_size, scales_and_zeros.to(compute_dtype)
+        x_compute, qweight, group_size, scales_compute
     )
     return out.to(output_dtype)
 
@@ -201,6 +210,13 @@ def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros, out_dtype=None):
     directly (measured on torch 2.16.0.dev CPU). The casting case goes through
     :func:`_int4pack_mm_cast_op`, a custom op, so it traces as well (#5110).
     """
+    if not x.is_contiguous():
+        # Row-gap views such as ``x[:, 1, :]`` and column strides such as
+        # ``x[:, ::2]`` are accepted by the Python wrappers, but the native
+        # CPU op requires a contiguous activation. Normalize at this shared
+        # boundary so ATen/Fused GPTQ and AWQ callers all get the same
+        # contract; a contiguous input passes through without an allocation.
+        x = x.contiguous()
     compute_dtype = (
         torch.float32
         if x.dtype in (torch.float32, torch.bfloat16) or out_dtype == torch.float32

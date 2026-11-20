@@ -116,9 +116,11 @@ def _source_files() -> list[str]:
         for pattern in ("exl3_gemv_int8_inst_*.cu", "exl3_moe_coop_inst_*.cu"):
             source_files += [str(path.relative_to(sources_dir)) for path in sorted(units.glob(pattern))]
     else:
-        # RDNA4 (gfx120x) wave32 WMMA GEMM: the ROCm replacement for the
-        # NVIDIA-only `exl3_gemm_kernel.cuh` path.
-        source_files += ["quant/exl3_gemm_hip.cu"]
+        # RDNA4 (gfx120x) wave32 kernels: the native GEMM replaces the
+        # NVIDIA-only `exl3_gemm_kernel.cuh` path and the small-batch GEMV
+        # handles decode-sized batches. The int8, MoE and Q4NX quantizer
+        # kernels in this directory are CUDA-only for now.
+        source_files += ["quant/exl3_gemm_hip.cu", "quant/exl3_gemv.cu"]
     return [str((sources_dir / path).resolve()) for path in source_files]
 
 
@@ -192,6 +194,7 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "hgemm",
         "bc_linear_exl3_run",
         "bc_linear_exl3_run_configured",
+        "bc_linear_exl3_run_hip_gemv",
     ) + (("exl3_moe_coop", "quantize_tiles_q4nx", "pack_trellis_q4nx") if torch.version.hip is None else ()),
     sources=_source_files,
     build_root_env="GPTQMODEL_EXLLAMAV3_BUILD_ROOT",
@@ -400,6 +403,23 @@ class _ExllamaV3TorchOpsFacade:
 
     def hgemm(self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> None:
         _runtime_op("hgemm")(a, b, c)
+
+    def bc_linear_exl3_run_hip_gemv(
+        self,
+        trellis: torch.Tensor,
+        suh: torch.Tensor,
+        svh: torch.Tensor,
+        K: int | float,
+        bias: Optional[torch.Tensor],
+        mcg: bool,
+        mul1: bool,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        q4nx: bool = False,
+    ) -> int:
+        return _runtime_op("bc_linear_exl3_run_hip_gemv")(
+            trellis, suh, svh, float(K), bias, bool(mcg), bool(mul1), x, y, bool(q4nx)
+        )
 
     def exl3_moe_coop(self, *args, **kwargs) -> None:
         if torch.version.hip is not None:
