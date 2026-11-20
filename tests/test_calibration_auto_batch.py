@@ -251,3 +251,119 @@ def test_materialisation_keeps_a_bound_preparer():
 
     assert bound.prepare_dataset is preparer
     assert isinstance(bound.dataset, list)
+
+
+class _CompositeTextConfig:
+    def __init__(self, hidden_size, num_hidden_layers):
+        self.hidden_size = hidden_size
+        self.num_hidden_layers = num_hidden_layers
+
+
+class _CompositeConfig:
+    """A VLM/omni config: decoder dims live on ``text_config``, top-level is None."""
+
+    hidden_size = None
+    num_hidden_layers = None
+
+    def __init__(self, text_config):
+        self.text_config = text_config
+
+    def get_text_config(self, *args, **kwargs):
+        return self.text_config
+
+
+def _composite_qmodel(text_config, *, device="cuda:0"):
+    parameters = [torch.zeros(1, dtype=torch.bfloat16)]
+    model = types.SimpleNamespace(
+        config=_CompositeConfig(text_config),
+        parameters=lambda: iter(parameters),
+    )
+    return types.SimpleNamespace(model=model, quantize_config=types.SimpleNamespace(device=device))
+
+
+def test_composite_config_reads_the_text_config_dims(monkeypatch):
+    """The guard must use the decoder dims a composite config hides (#5568)."""
+
+    free = 40 * 1024 ** 3
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *args, **kwargs: (free, 80 * 1024 ** 3))
+    stub = _composite_qmodel(_CompositeTextConfig(2048, 28))
+    calibration = CalibrationConfig(dataset=["x"] * 64, batch_size="auto", concat_size=8192)
+
+    batch = BaseQModel._auto_calibration_batch_size(stub, calibration)
+    expected = auto_batch_size(
+        rows=64,
+        tokens_per_row=8192,
+        hidden_size=2048,
+        num_layers=28,
+        dtype_bytes=2,
+        free_bytes=free,
+    )
+
+    assert batch == expected
+    assert batch < AUTO_BATCH_MAX_ROWS
+
+
+def test_missing_config_dims_fall_back_to_one_row(monkeypatch):
+    free = 40 * 1024 ** 3
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *args, **kwargs: (free, 80 * 1024 ** 3))
+    stub = _composite_qmodel(_CompositeTextConfig(None, None))
+    calibration = CalibrationConfig(dataset=["x"] * 64, batch_size="auto", concat_size=8192)
+
+    assert BaseQModel._auto_calibration_batch_size(stub, calibration) == 1
+
+
+class _ChatTokenizer:
+    """A tokenizer whose template renders the conversation text."""
+
+    chat_template = "chat"
+
+    def apply_chat_template(
+        self, messages, tokenize=False, add_generation_prompt=False, tools=None, **kwargs
+    ):
+        text = " ".join(message["content"] for message in messages)
+        if tools:
+            text += " " + " ".join(["schema"] * (10 * len(tools)))
+        return text
+
+    def __call__(self, text):
+        return {"input_ids": list(range(len(text.split())))}
+
+
+def test_messages_rows_are_measured_through_the_chat_template():
+    """Chat rows used to keep the 512 default whatever their real length (#5568)."""
+
+    row = {"messages": [{"role": "user", "content": " ".join(["w"] * 900)}]}
+    calibration = CalibrationConfig(dataset=[row], batch_size="auto")
+    qmodel = types.SimpleNamespace(tokenizer=_ChatTokenizer())
+
+    assert _calibration_tokens_per_row(qmodel, calibration) == 900
+
+
+def test_messages_rows_keep_the_tools_block_the_template_renders():
+    messages = [{"role": "user", "content": "hi"}]
+    tools = [{"type": "function", "function": {"name": "f"}}]
+    plain = {"messages": messages}
+    with_tools = {"messages": messages, "tools": tools}
+    qmodel = types.SimpleNamespace(tokenizer=_ChatTokenizer())
+
+    plain_len = _calibration_tokens_per_row(
+        qmodel, CalibrationConfig(dataset=[plain], batch_size="auto")
+    )
+    with_tools_len = _calibration_tokens_per_row(
+        qmodel, CalibrationConfig(dataset=[plain, with_tools], batch_size="auto")
+    )
+
+    assert with_tools_len > plain_len
+
+
+def test_messages_rows_without_a_template_fall_back_to_the_text_column():
+    row = {"messages": [{"role": "user", "content": "x"}], "text": " ".join(["w"] * 40)}
+    calibration = CalibrationConfig(dataset=[row], batch_size="auto")
+
+    class _NoTemplate:
+        def __call__(self, text):
+            return {"input_ids": list(range(len(text.split())))}
+
+    qmodel = types.SimpleNamespace(tokenizer=_NoTemplate())
+
+    assert _calibration_tokens_per_row(qmodel, calibration) == 40

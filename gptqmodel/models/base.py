@@ -97,10 +97,13 @@ from ..utils.backend import (
 from ..utils.backend_config import Backend, resolve_quantize_backend
 from ..utils.calibration import (
     AUTO_BATCH_SIZE,
+    _chat_calibration_row_tokens,
     _columnar_mapping_examples,
     _frame_columns,
     _hf_dataset_rows,
     _is_columnar_mapping,
+    _message_template,
+    _messages_char_count,
     auto_batch_size,
     prepare_calibration_dataset,
 )
@@ -609,19 +612,35 @@ def _calibration_tokens_per_row(qmodel, calibration) -> int:
     except Exception:
         return 512
 
+    # A `messages` row only yields tokens after the chat template runs, so the
+    # estimator could not measure it and kept the 512 default (#5568). Render
+    # the longest few through the same path preparation uses.
+    chat_template = _message_template(getattr(qmodel, "tokenizer", None))[0] is not None
+
     longest = 0
     texts: List[str] = []
+    chat_rows: List[Any] = []
     for row in rows:
         ids = row.get("input_ids") if isinstance(row, Mapping) else row
         length = _sequence_length(ids) if ids is not None else 0
         if length:
             longest = max(longest, length)
             continue
+        messages = row.get("messages") if isinstance(row, Mapping) else None
+        if messages is not None and chat_template:
+            chat_rows.append(row)
+            continue
         text = row if isinstance(row, str) else (
             row.get("text") if isinstance(row, Mapping) else None
         )
         if isinstance(text, str):
             texts.append(text)
+    if chat_rows:
+        chat_rows.sort(key=_messages_char_count, reverse=True)
+        longest = max(
+            longest,
+            max((_chat_calibration_row_tokens(qmodel, row) for row in chat_rows[:4]), default=0),
+        )
     if texts:
         # Tokenizing every row would repeat the whole calibration pass. The
         # longest few by character count bound the padded row far better than
@@ -2647,8 +2666,24 @@ class BaseQModel(nn.Module):
         """Pick a calibration batch that fits, or 1 when the device is unmeasurable."""
 
         config = getattr(getattr(self, "model", None), "config", None)
-        hidden_size = int(getattr(config, "hidden_size", 0) or 0)
-        num_layers = int(getattr(config, "num_hidden_layers", 0) or 0)
+        # Composite configs (VLM / omni / Qwen3.5) keep the decoder dims on
+        # `text_config` and leave the top-level fields unset. Reading them as 0
+        # shrank the per-row estimate by `hidden * layers` and silently
+        # disabled the memory guard (#5568).
+        text_config = config
+        get_text_config = getattr(config, "get_text_config", None)
+        if callable(get_text_config):
+            try:
+                text_config = get_text_config() or config
+            except Exception:  # pragma: no cover - exotic configs
+                text_config = config
+        hidden_size = int(getattr(text_config, "hidden_size", 0) or 0)
+        num_layers = int(getattr(text_config, "num_hidden_layers", 0) or 0)
+        if hidden_size <= 0 or num_layers <= 0:
+            log.warn(
+                "Calibrate: batch_size=auto -> 1 (the model config exposes no hidden_size/num_hidden_layers)"
+            )
+            return 1
 
         dtype_bytes = 2
         inner = getattr(self, "model", None)
