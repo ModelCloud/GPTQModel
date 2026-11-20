@@ -58,12 +58,33 @@ flowchart TD
 | Mechanism | Before | After |
 | --- | --- | --- |
 | Runtime numerics | Per-output-channel symmetric requantization of the decoded matrix (`_requantize_to_int8`) | The checkpoint's own `code` and per-group `scales`, repacked without re-quantizing |
-| Buffer names | `int8_weight_nk` `[N, K]`, `int8_channel_scale` `[N]` | `int8_weight_gnk` `[G, N, W]`, `int8_group_scale` `[G, N]`, optional `int8_group_offset` `[G, N]`, `int8_input_perm` `[K]` |
+| Buffer names | `int8_weight_nk` `[N, K]`, `int8_channel_scale` `[N]` | `int8_weight_gnk` (dense `[G, N, W]` when every group shares one aligned width, else one flat buffer with per-group panels), `int8_group_offsets` `[G+1]` for the flat layout, `int8_group_scale` `[G, N]`, optional `int8_group_offset` `[G, N]`, `int8_input_perm` `[K]` |
 | Zero points | Folded into the per-channel scale by construction | Stored as the signed residual `code - 128`; an asymmetric checkpoint keeps a per-group additive offset, symmetric checkpoints store none |
 | Activation order | Input order | Channels are sorted into group order once (`int8_input_perm`); the executor permutes activations, which is exact for integer-coded dot products |
-| Ragged last group | Not representable | Padded to the widest group and executed with zero pad columns |
+| Ragged groups | Not representable | Each group is padded only to its own kernel-aligned width and executed with zero pad columns; an empty group stores no panel and launches no kernel |
 | Matmul | One `aten::_weight_int8pack_mm` call | One call per group for symmetric sources; asymmetric groups apply the zero point before the reduction (bounded decode), then FP32 accumulation, one output rounding and one bias epilogue |
-| Fusion | Concatenated `[N, K]` codes on the output axis | Concatenated `[G, N, W]` codes and `[G, N]` metadata on the output axis; sources must share `int8_input_perm` |
+| Fusion | Concatenated `[N, K]` codes on the output axis | Concatenated dense `[G, N, W]` codes and `[G, N]` metadata on the output axis; sources must share `int8_input_perm`, and a source using the flat per-group-width layout is not fused |
+
+### Group layout selection
+
+```mermaid
+flowchart TD
+    A["transform_cpu: _group_layout(g_idx)"] --> B["_group_panel_widths: align each group; empty group width 0"]
+    B --> C{"one aligned width for every group?"}
+    C -->|yes| D["dense int8_weight_gnk [G, N, W]"]
+    C -->|no| E["flat int8_weight_gnk + int8_group_offsets [G+1]"]
+    D --> F["Int8PackedModule: one dense panel per group"]
+    E --> G["Int8PackedModule: one flat panel per nonempty group"]
+    F --> I["aten::_weight_int8pack_mm per nonempty group"]
+    G --> I
+    G -.-> H["width 0 group: no panel, no kernel launch"]
+```
+
+Before #5824 every group was padded to
+`_align_int8_group_width(max(group_lengths))`, so a short or empty group owned
+the widest group's panel. The flat layout stores `sum(out_features *
+align(length_g))` bytes instead, and `Int8PackedModule` reads each panel
+through `int8_group_offsets`; a group whose width is 0 is skipped entirely.
 
 The runtime is still **8-bit codes plus group scales**, not an expanded
 lower-bit weight cache: nothing denser than the checkpoint is retained.
