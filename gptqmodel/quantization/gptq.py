@@ -497,6 +497,11 @@ def _uniform_column_group(count: int, device: torch.device) -> torch.Tensor:
 
 _BLOCK_ERROR_PRODUCT_BYTES = 256 * 1024 * 1024
 
+# Upper bound on the additive damping candidates materialized during recovery.
+# The default increment needs ~667 entries; a smaller increment would otherwise
+# grow the Python list in proportion to 1 / increment (#5790).
+_DAMP_GRID_WORK_BUDGET = 1 << 16
+
 
 def _propagate_block_error(
     trailing_weight: torch.Tensor,
@@ -2370,6 +2375,7 @@ class GPTQ:
                 max_floor_attempts = 6
                 last_error = None
                 damp_candidates = None
+                damp_grid_skipped = False
                 floor_base = None
 
                 def try_damp(current_diag: torch.Tensor, mean: torch.Tensor, damp: float):
@@ -2433,8 +2439,13 @@ class GPTQ:
                         last_error = exc
                         return None
 
-                def legacy_damp_candidates() -> list[float]:
-                    """Materialize the old additive grid without changing float rounding."""
+                def legacy_damp_candidates() -> Optional[list[float]]:
+                    """Materialize the old additive grid without changing float rounding.
+
+                    Returns ``None`` when the increment needs more candidates than the
+                    work budget allows, so a misconfigured increment cannot allocate an
+                    unbounded list before the first probe.
+                    """
 
                     # Repeated addition (not one multiply-add) keeps the selected damp
                     # bit-identical to the former linear walk.
@@ -2448,6 +2459,8 @@ class GPTQ:
                         # terminate instead of spinning forever.
                         if not (values[-1] < next_damp < 1.0):
                             return values
+                        if len(values) >= _DAMP_GRID_WORK_BUDGET:
+                            return None
                         values.append(next_damp)
 
                 def finish_damped_candidate(first_success: int, first_cholesky: torch.Tensor):
@@ -2535,14 +2548,46 @@ class GPTQ:
                             f"`damp_percent={initial_damp:.5f}` and no auto increment configured."
                         )
                     else:
-                        if damp_candidates is None:
-                            damp_candidates = legacy_damp_candidates()
-
+                        increment = float(self.qcfg.damp_auto_increment)
                         log.warn(
                             f"Quantization: Module `{self.name}` -> Starting compatible damp recovery at "
                             f"`damp_percent={initial_damp:.5f}`, increment step "
                             f"`{self.qcfg.damp_auto_increment:.5f}`."
                         )
+
+                        # Recovery normally succeeds on the very next candidate, so
+                        # probe it before materializing the additive grid (#5790).
+                        next_damp = initial_damp + increment
+                        if initial_damp < next_damp < 1.0:
+                            next_factor = try_factor(current_diag, mean, next_damp)
+                            if next_factor is not None:
+                                log.warn(
+                                    f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
+                                    f"`damp_percent={next_damp:.5f}` (started at {initial_damp:.5f})."
+                                )
+                                return next_factor, next_damp
+
+                        if damp_candidates is None and not damp_grid_skipped:
+                            damp_candidates = legacy_damp_candidates()
+                            if damp_candidates is None:
+                                # The grid depends only on the configured damp and
+                                # increment, so decide once instead of re-walking and
+                                # re-logging for every diagonal-floor attempt.
+                                damp_grid_skipped = True
+                                minimum_increment = (1.0 - initial_damp) / (
+                                    _DAMP_GRID_WORK_BUDGET - 1
+                                )
+                                log.error(
+                                    f"Quantization: Module `{self.name}` -> Skipping damp recovery: "
+                                    f"`damp_auto_increment={increment:g}` needs more than "
+                                    f"{_DAMP_GRID_WORK_BUDGET} candidates before reaching 1.0. "
+                                    f"Use an increment of at least {minimum_increment:.3e} or a larger "
+                                    f"`damp_percent`."
+                                )
+
+                        if damp_grid_skipped:
+                            attempt += 1
+                            continue
 
                         if len(damp_candidates) > 1:
                             # Cholesky success is monotone on this grid when the
