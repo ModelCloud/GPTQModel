@@ -693,6 +693,9 @@ class FOEM(GPTQ):
             self.H = None
             self.dXXT = None
             return self._rtn_fallback_after_hessian_failure(blocksize)
+        # The block pass reads only Hinv/P. Rebinding the cell releases the
+        # full fp32 Hessian captured by the inverse closures (#5717).
+        H = None
         if self.gptaq:
             del self.dXXT
 
