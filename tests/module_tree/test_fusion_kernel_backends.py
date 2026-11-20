@@ -170,6 +170,9 @@ def _projection(cls, linear, dtype, device, *, uniform_scales=False, return_chec
             input_perm=module.int8_input_perm,
             group_lengths=module._int8_group_lengths,
             in_features=module.in_features,
+            group_offsets=module.int8_group_offsets,
+            group_widths=module._int8_group_widths,
+            out_features=module.out_features,
         )
     return module, weight.to(device), linear.bias.detach().to(device).clone(), checkpoint
 

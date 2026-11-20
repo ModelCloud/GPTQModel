@@ -194,8 +194,12 @@ class FusionKernelSpec:
         elif self.layout == "int8":
             weight = getattr(module, "int8_weight_gnk", None)
             scale = getattr(module, "int8_group_scale", None)
-            if (not isinstance(weight, torch.Tensor) or weight.dim() != 3
-                    or int(weight.shape[1]) != n
+            if not isinstance(weight, torch.Tensor) or weight.dim() != 3:
+                return (
+                    "CPU INT8 fusion requires the dense group-by-output-by-width layout; "
+                    "a source with per-group widths stays unfused"
+                )
+            if (int(weight.shape[1]) != n
                     or not isinstance(scale, torch.Tensor)
                     or tuple(scale.shape) != (int(weight.shape[0]), n)):
                 return "CPU INT8 fusion requires native group-by-output-by-width codes and per-group scales"
