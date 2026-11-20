@@ -411,3 +411,34 @@ def linear_fp32_reduce(x, weight, bias=None):
         # addition; keep both in a single epilogue.
         return _fused_addmm(x, weight, bias)
     return torch.nn.functional.linear(x, weight, bias)
+
+
+def codebook_rounding_dtype(
+    activation_dtype: torch.dtype, codebook_dtype: torch.dtype
+) -> torch.dtype:
+    """Dtype a wide codebook reconstruction should be rounded to for a matmul.
+
+    A decoder sums its codebooks in FP32 and rounds once. The historical target
+    was the codebook storage dtype, and that stays bitwise identical whenever
+    the activation dtype can hold every value the codebook dtype can (a
+    matching dtype, or an FP32/FP64 activation over an FP16 checkpoint).
+
+    When the activation dtype has a wider range but a coarser mantissa -- BF16
+    activations over an FP16 checkpoint -- rounding to the codebook dtype can
+    turn a finite sum into ``inf`` even though the activation dtype represents
+    it exactly. Round once to the activation dtype there instead (#5609).
+    """
+
+    if (
+        not activation_dtype.is_floating_point
+        or not codebook_dtype.is_floating_point
+        or activation_dtype == codebook_dtype
+    ):
+        return codebook_dtype
+    activation = torch.finfo(activation_dtype)
+    codebook = torch.finfo(codebook_dtype)
+    if activation.max >= codebook.max and activation.eps <= codebook.eps:
+        return codebook_dtype
+    if activation.max > codebook.max:
+        return activation_dtype
+    return codebook_dtype
