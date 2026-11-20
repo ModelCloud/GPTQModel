@@ -37,7 +37,9 @@ when you close them.
   ([contract](contracts/kernel/forward-dtype.md)): the first `forward` sets the
   activation dtype; every later call uses the same dtype, and the output dtype
   equals the input dtype. A different dtype on a later call is a caller bug
-  and must raise. No per-activation-dtype caches, dtype-change invalidation,
+  and must raise. Weights may be transformed at post-init or on the first
+  forward. After that, nothing (modeling code or higher-level APIs, including
+  `module.to(dtype)`) may change weight or buffer dtypes. No per-activation-dtype caches, dtype-change invalidation,
   or "call-local" re-casts kept only to survive a dtype switch.
 
 ## Working on a change

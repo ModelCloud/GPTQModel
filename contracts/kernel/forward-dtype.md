@@ -23,8 +23,19 @@ that loads weights and then serves `forward`.
    not something the kernel should handle. The kernel must raise an error. It
    must not silently cast, rebuild, re-convert, or keep a second variant.
 
+4. **Weight dtypes are frozen after the first forward.** A module may
+   transform its weights, scales, zeros and bias to suit its kernel. It may do
+   this in `post_init`, or on its first forward. Once a forward has run,
+   nothing may change the dtype of the module's parameters or buffers. This
+   applies to the module itself, to modeling code, and to any higher-level
+   API. Examples: `module.to(other_dtype)`, `.half()`, `.bfloat16()`,
+   `.float()`, `model.to(dtype)`, or reassigning a weight in another dtype.
+   Any of these is a bug in the caller, and `BaseQuantLinear` raises. Moving
+   a module to another device keeps the dtype, so it is still allowed.
+
 To change dtype, start a new run: reload the model, or build a new module.
-Changing the dtype of a live module is not supported.
+Changing the dtype of a module that has already run a forward is not
+supported. Choose the dtype at load time, or cast before the first forward.
 
 ## Violations: code that must not exist
 
@@ -33,11 +44,16 @@ Changing the dtype of a live module is not supported.
   entries.
 - Logic that detects `x.dtype` differing from an earlier call and then
   invalidates, rebuilds or re-derives state.
+- Logic that re-derives a kernel layout after a post-forward weight dtype
+  change, for example `_apply` restoring a snapshot after `layer.to(bf16)`.
+  The dtype change itself is the bug. Device-move handling stays.
 - Converting stored tensors on every call for the sole reason of keeping a
   later call in a different dtype correct. These are often called
   "call-local" or `_*_for_compute` copies.
 - Tests that call one module instance with two activation dtypes and
   expect both calls to succeed, match, or leave storage unchanged.
+- Tests that run a forward, change the module's dtype, and expect the module
+  to keep working.
 - Issues and PRs whose reproduction requires such a switch, for example
   "after a BF16 forward, a later FP16 forward drifts". These are closed as
   invalid.
@@ -51,6 +67,10 @@ Changing the dtype of a live module is not supported.
   stored operand to the activation dtype once, at `post_init` or on the first
   forward, and reuse that conversion afterwards, for example Marlin's scale
   cast.
+- **Dtype casts before the first forward.** Loading at a dtype, or calling
+  `model.to(dtype)` before any forward, is fine.
+- **Device moves at any time**, for example CPU → XPU. A kernel may need to
+  re-derive a device-specific layout after a move.
 - **Keeping wide storage for single-dtype reasons.** A module may keep an
   operand wider than the activation dtype, but only for a reason that holds
   within a single-dtype run, such as:
@@ -64,11 +84,17 @@ Changing the dtype of a live module is not supported.
 
 ## Enforcement
 
-`BaseQuantLinear` records the dtype of the first `forward` input and raises a
-`RuntimeError` when a later call passes a different dtype (the
-"forward dtype lock"). Kernels must not bypass or reset the lock. Kernel code
-may assume the locked dtype, so it needs no per-dtype branching after the
-first call.
+`BaseQuantLinear` records the dtype of the first `forward` input (the
+"forward dtype lock"). It raises a `RuntimeError` in two cases:
+
+- a later call passes a different input dtype;
+- after the lock is set, a `Module._apply` (`to`, `half`, `float`, and so on)
+  would change the dtype of any of its parameters or buffers. The check runs
+  before anything is modified.
+
+Kernels must not bypass or reset the lock. Kernel code may assume the locked
+dtype and frozen weight dtypes, so it needs no per-dtype branching or
+dtype-move invalidation after the first call.
 
 ## Testing
 
@@ -77,8 +103,10 @@ first call.
 - Assert `output.dtype == input.dtype`, or the declared output dtype for the
   documented wide-output modules.
 - Test storage stability across repeated forwards in the **same** dtype.
-- The only allowed cross-dtype test on one instance asserts that the second
-  dtype raises the forward-dtype-lock error.
+- Test storage stability after a device move or a same-dtype `to()`.
+- The only allowed cross-dtype test on one instance asserts that the error is
+  raised. That covers both a second input dtype and a dtype change after the
+  first forward.
 
 ## History
 
