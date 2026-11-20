@@ -174,6 +174,17 @@ class TritonV2Linear(TorchLinear):
                 self, x2, x.shape[:-1] + (self.out_features,)
             )
 
+        # ``QuantLinearFunction`` decodes the packed weight into the activation
+        # dtype before the matmul, so a decoded weight outside that dtype's
+        # finite range becomes ``inf`` and ``0 * inf`` becomes ``NaN`` (#5738).
+        # The fused gates above already reject that case; this covers the
+        # whole-weight decode. Keep the #5606 range-safe decode: the parent
+        # widens the decode and reduction when the reconstructed weight does
+        # not fit the activation dtype. Checking here keeps the hot fused path
+        # on its single existing range check.
+        if not self._decoded_weight_fits(x.dtype):
+            return super().forward(x)
+
         x = self._apply_rotation_to_input(x)
 
         # if in_features is padded, we need to pad the input as well
