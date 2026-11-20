@@ -257,16 +257,19 @@ def refine_gptq_scalar(
             )
             refined_weights.append(result.weight)
             refined_scales.append(result.scales)
-            normalizer = energy if energy > torch.finfo(torch.float32).eps else 1.0
-            before_sum += result.before * normalizer
-            after_sum += result.after * normalizer
-            energy_sum += normalizer
+            before_sum += result.before
+            after_sum += result.after
+            energy_sum += energy
             for step, score in enumerate(result.history):
-                weighted_history[step] += score * normalizer
+                weighted_history[step] += score
+        # Apply the near-zero convention to the layer total, not to each
+        # chunk: a zero-energy row must not add a fictitious unit of teacher
+        # energy to whichever chunk happens to hold it (#5693).
+        normalizer = energy_sum if energy_sum > torch.finfo(torch.float32).eps else 1.0
         return ScalarGSQResult(
             torch.cat(refined_weights), torch.cat(refined_scales), zeros.detach().clone(),
-            g_idx.detach().clone(), before_sum / energy_sum, after_sum / energy_sum,
-            [score / energy_sum for score in weighted_history],
+            g_idx.detach().clone(), before_sum / normalizer, after_sum / normalizer,
+            [score / normalizer for score in weighted_history],
         )
 
 
@@ -339,19 +342,18 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
     zero = zeros.detach().float().clone()
     teacher_projected = teacher @ factor
     teacher_energy = teacher_projected.square().sum()
-    if not bool(torch.isfinite(teacher_energy)) or float(teacher_energy) <= torch.finfo(torch.float32).eps:
-        # A near-zero teacher is not a useful normalization. Score the
-        # unnormalized quadratic, which keeps the ordering and the sign.
-        teacher_energy = torch.ones_like(teacher_energy)
+    if not bool(torch.isfinite(teacher_energy)):
+        raise ValueError("non-finite GSQ teacher energy")
 
     def loss(matrix):
-        return ((matrix.float() - teacher) @ factor).square().sum() / teacher_energy
+        # Raw Gram quadratic. The caller normalizes the layer total once, so a
+        # zero-energy chunk cannot add a fictitious unit of teacher energy.
+        return ((matrix.float() - teacher) @ factor).square().sum()
 
     def row_loss(matrix):
-        # One raw projection score per output row. Summing these and dividing
-        # by the shared teacher energy reproduces ``loss`` exactly, so a
-        # per-row acceptance decision is the same objective the checkpoint is
-        # reported against.
+        # One raw projection score per output row. Summing these reproduces
+        # ``loss`` exactly, so a per-row acceptance decision is the same
+        # objective the checkpoint is reported against.
         error = matrix.float() - teacher
         return (error @ factor).square().sum(dim=1)
 
@@ -423,7 +425,7 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
         # never feeds its worse codes or scales into the next candidate family.
         current_codes = best_codes
         current_scales = best_scales
-        history.append(float(best_rows.sum() / teacher_energy))
+        history.append(float(best_rows.sum()))
         if not config.learn_scales:
             break
         # Candidate 2: refit the scale table under those codes. Scales move the
@@ -441,7 +443,7 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
         best_scales = torch.where(accepts.unsqueeze(-1), scaled, best_scales)
         best_rows = torch.where(accepts, scale_rows, best_rows)
         current_scales = best_scales
-        history.append(float(best_rows.sum() / teacher_energy))
+        history.append(float(best_rows.sum()))
 
     # Final per-row acceptance against the initializer, so a row that got worse
     # somewhere in the loop keeps its GPTQ export.
