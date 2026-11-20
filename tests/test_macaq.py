@@ -896,9 +896,10 @@ def _reference_weight_mxfp4(weight, bh, offset=0):
     out_features, in_features = weight.shape
     rotated = _reference_rotate(weight.to(torch.float32), bh.float())
     grouped = rotated.reshape(out_features, in_features // 32, 32)
-    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-12)
+    amax = grouped.abs().amax(dim=-1, keepdim=True)
+    amax = torch.where(amax == 0, torch.full_like(amax, 1e-12), amax)
     exponent = (torch.floor(torch.log2(amax)) - 2.0 + offset).clamp(-127.0, 127.0)
-    scale = torch.exp2(exponent)
+    scale = torch.pow(2.0, exponent)
     normalized = (grouped / scale).abs()
     code = torch.zeros_like(grouped, dtype=torch.long)
     for threshold, level in _E2M1_THRESHOLDS:
@@ -950,9 +951,10 @@ def _reference_activation_mxfp4(values):
 
     rows, k = values.shape
     grouped = values.to(torch.float32).reshape(rows, k // 32, 32)
-    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-20)
+    amax = grouped.abs().amax(dim=-1, keepdim=True)
+    amax = torch.where(amax == 0, torch.full_like(amax, 1e-20), amax)
     exponent = (torch.floor(torch.log2(amax)) - 2.0).clamp(-127.0, 127.0)
-    scale = torch.exp2(exponent)
+    scale = torch.pow(2.0, exponent)
     normalized = (grouped / scale).abs()
     code = torch.zeros_like(grouped, dtype=torch.long)
     for threshold, level in _E2M1_THRESHOLDS:
