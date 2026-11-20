@@ -161,18 +161,6 @@ def test_concurrent_streams_do_not_overwrite_tile_workspace(device):
         list(pool.map(quantize, range(4)))
 
 
-def _reset_quant_stream_cache():
-    """Clear whichever stream cache the implementation keeps."""
-
-    streams = getattr(implementation, "_quant_streams", None)
-    if streams is not None:
-        with implementation._quant_streams_lock:
-            streams.clear()
-    tls = getattr(implementation, "_quant_stream_tls", None)
-    if tls is not None:
-        tls.__dict__.clear()
-
-
 def test_quant_stream_is_shared_per_device_across_threads(monkeypatch):
     """Every worker thread must reuse one quantization stream per device.
 
@@ -190,7 +178,8 @@ def test_quant_stream_is_shared_per_device_across_threads(monkeypatch):
 
     fake_torch = SimpleNamespace(device=torch.device, cuda=FakeCuda())
     monkeypatch.setattr(implementation, "torch", fake_torch)
-    _reset_quant_stream_cache()
+    # Keep the synthetic stream objects out of subsequent native launches.
+    monkeypatch.setattr(implementation, "_quant_streams", {})
 
     barrier = threading.Barrier(8)
     results = []
