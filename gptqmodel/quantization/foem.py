@@ -584,7 +584,16 @@ class FOEM(GPTQ):
 
         W_raw = W.detach().clone()
 
-        Losses = torch.zeros_like(W)
+        # The block loss is only consumed as one scalar, so keep a block-sized
+        # fp32 scratch plus a device scalar instead of a full rows x columns
+        # buffer (issue #5734). Every scratch column is written before it is
+        # read.
+        loss_scratch = torch.empty(
+            (W.shape[0], min(blocksize, self.columns)),
+            dtype=torch.float32,
+            device=W.device,
+        )
+        loss_total = torch.zeros((), dtype=torch.float32, device=W.device)
         Q = torch.zeros_like(W)
 
         def _inverse_and_delta():
@@ -602,15 +611,20 @@ class FOEM(GPTQ):
             )
 
         def _prepare_cpu(cdu_device):
-            nonlocal H, W, W_raw, Q, Losses, perm, invperm, final_perm, global_perm
+            nonlocal H, W, W_raw, Q, loss_scratch, loss_total, perm, invperm, final_perm, global_perm
             nonlocal static_group_perm, scale, zero
             H = H.to(device=cdu_device)
             W = W.to(device=cdu_device)
             # FOEM's beta correction reads the pre-pass weight, and
-            # ``Q``/``Losses`` were sized from the accelerator weight.
+            # ``Q``/``loss_scratch`` were sized from the accelerator weight.
             W_raw = W_raw.to(device=cdu_device)
             Q = torch.zeros_like(W)
-            Losses = torch.zeros_like(W)
+            loss_scratch = torch.empty(
+                (W.shape[0], min(blocksize, self.columns)),
+                dtype=torch.float32,
+                device=cdu_device,
+            )
+            loss_total = torch.zeros((), dtype=torch.float32, device=cdu_device)
             if self.gptaq:
                 self.dXXT = self.dXXT.to(device=cdu_device)
             if self.qcfg.desc_act:
@@ -701,7 +715,7 @@ class FOEM(GPTQ):
             W1_raw = W_raw[:, i1:i2].clone()
             Q1 = torch.zeros_like(W1)
             Err1 = torch.zeros_like(W1)
-            Losses1 = torch.zeros_like(W1)
+            Losses1 = loss_scratch[:, :count]
             Hinv1 = Hinv[i1:i2, i1:i2]
             if self.gptaq:
                 P1 = P[i1:i2, i1:i2]
@@ -750,7 +764,8 @@ class FOEM(GPTQ):
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
-            Losses[:, i1:i2] = Losses1 / 2
+            Losses1.div_(2)
+            loss_total.add_(Losses1.sum())
 
             if self.gptaq:
                 W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1_pre.matmul(P[i1:i2, i2:])
@@ -772,13 +787,11 @@ class FOEM(GPTQ):
 
         torch_sync()
 
-        avg_loss = torch.sum(Losses).item() / self.nsamples
+        avg_loss = loss_total.item() / self.nsamples
 
         if math.isnan(avg_loss):
-            print("Losses sum item:", torch.sum(Losses).item())
+            print("Losses sum item:", loss_total.item())
             raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
-
-        del Losses
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 

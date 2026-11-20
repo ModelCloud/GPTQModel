@@ -2992,7 +2992,20 @@ class GPTQ:
                 now_idx = 1
 
             try:
-                Losses = torch.zeros_like(W)
+                # The block loss is only consumed as one scalar, so keep a
+                # block-sized fp32 scratch plus a device scalar instead of a
+                # full rows x columns buffer (issue #5734). The eager loop and
+                # the fused kernel both overwrite every scratch column before
+                # it is read.
+                loss_scratch = None
+                loss_total = None
+                if Hinv is not None:
+                    loss_scratch = torch.empty(
+                        (W.shape[0], min(blocksize, self.columns)),
+                        dtype=torch.float32,
+                        device=W.device,
+                    )
+                    loss_total = torch.zeros((), dtype=torch.float32, device=W.device)
                 Q = torch.zeros_like(W)
 
                 fused_block_update = None
@@ -3113,7 +3126,7 @@ class GPTQ:
                         # ``torch.sub(..., out=delta)`` in the eager loop) before it is read,
                         # so skip the redundant zero-fill of a 128-column block.
                         Err1 = torch.empty_like(W1) if Hinv is not None else None
-                        Losses1 = Losses[:, i1:i2] if Hinv is not None else None
+                        Losses1 = loss_scratch[:, :count] if Hinv is not None else None
 
                         if Hinv is not None:
                             Hinv1 = Hinv[i1:i2, i1:i2]
@@ -3231,6 +3244,7 @@ class GPTQ:
 
                         if Hinv is not None:
                             Losses1.div_(2)
+                            loss_total.add_(Losses1.sum())
                             _propagate_block_error(W[:, i2:], Err1, Hinv[i1:i2, i2:])
 
                         del W1, Q1, Err1, Losses1
@@ -3251,13 +3265,13 @@ class GPTQ:
         if Hinv is not None:
             del Hinv
             if self.nsamples != 0:
-                avg_loss = torch.sum(Losses).item() / self.nsamples
+                avg_loss = loss_total.item() / self.nsamples
 
                 if math.isnan(avg_loss):
-                    print("Losses sum item:", torch.sum(Losses).item())
+                    print("Losses sum item:", loss_total.item())
                     if fallback_configured:
                         log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
-                        del Losses, Q, W
+                        del loss_total, loss_scratch, Q, W
                         if retry_hessian_diag is not None:
                             self.H = torch.diag(retry_hessian_diag)
                         self.qcfg.mock_quantization = True
@@ -3273,7 +3287,6 @@ class GPTQ:
         else:
             avg_loss = f"{resolved_strategy.value} fallback" if fallback_configured else 999999999
 
-        del Losses
         del self.H
         del W
 
