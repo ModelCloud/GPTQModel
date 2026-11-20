@@ -237,4 +237,4 @@ timing was taken here.
 Introduced in [PR #3999](https://github.com/ModelCloud/GPTQModel/pull/3999) for
 [issue #3982](https://github.com/ModelCloud/GPTQModel/issues/3982). The
 range-safe decode gate was added for
-[issue #5738](https://github.com/ModelCloud/GPTQModel/issues/5738) in PR #5738-FIX.
+[issue #5738](https://github.com/ModelCloud/GPTQModel/issues/5738) in PR #5920.
