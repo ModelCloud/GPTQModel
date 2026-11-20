@@ -328,6 +328,19 @@ class FOEM(GPTQ):
             if use_native:
                 dxxT.mul_(ratio)
 
+        # ``inp`` is [columns, tokens], so the sink-row cap must reduce over the
+        # column axis and scale each token. Plain GPTQ applies the same cap to
+        # its [tokens, columns] batch in ``compute_hessian_xtx``; without this
+        # the correction path ignored ``HessianConfig.sink_row_cap_median_multiple``
+        # (#5769). The native delta uses the same factors so ``dXXT`` stays the
+        # cross product of the capped rows.
+        cap_scale = self.resolve_sink_row_cap_scale(inp, None, feature_dim=0)
+        if cap_scale is not None:
+            cap_scale = cap_scale.unsqueeze(0)
+            inp = inp * cap_scale
+            if use_native:
+                native_inp = native_inp * cap_scale
+
         device_count += token_count
         scale = math.sqrt(2 / device_count)
         scaled_inp = scale * inp.float()

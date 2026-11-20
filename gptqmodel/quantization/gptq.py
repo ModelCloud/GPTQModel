@@ -1187,24 +1187,44 @@ class GPTQ:
             return None
         return multiple
 
-    def _sink_row_norms(self, matrix: torch.Tensor, chunk_size: Optional[int]) -> torch.Tensor:
-        """Return per-row fp32 L2 norms, staged chunk-by-chunk (device-only)."""
+    def _sink_row_norms(
+        self,
+        matrix: torch.Tensor,
+        chunk_size: Optional[int],
+        *,
+        feature_dim: int = 1,
+    ) -> torch.Tensor:
+        """Return per-row fp32 L2 norms, staged chunk-by-chunk (device-only).
 
-        rows = matrix.shape[0]
+        ``feature_dim`` is the axis the norm reduces over; the other axis holds
+        the rows. ``compute_hessian_xtx`` receives ``[rows, columns]``
+        (``feature_dim=1``), while the GPTAQ/FOEM accumulators hold
+        ``[columns, rows]`` (``feature_dim=0``) so both paths cap the same
+        calibration tokens (#5769).
+        """
+
+        row_dim = 1 - feature_dim
+        rows = matrix.shape[row_dim]
+        features = matrix.shape[feature_dim]
         norms = torch.empty(rows, dtype=torch.float32, device=matrix.device)
         # Keep the fp32 staging bounded even when the caller accumulates the
         # Hessian in one chunk.
-        step = chunk_size if chunk_size is not None else max(1, (1 << 20) // max(1, matrix.shape[1]))
+        step = chunk_size if chunk_size is not None else max(1, (1 << 20) // max(1, features))
         step = min(step, rows)
         for start in range(0, rows, step):
             stop = min(start + step, rows)
+            block = matrix[start:stop] if row_dim == 0 else matrix[:, start:stop]
             norms[start:stop] = torch.linalg.vector_norm(
-                matrix[start:stop], ord=2, dim=1, dtype=torch.float32
+                block, ord=2, dim=feature_dim, dtype=torch.float32
             )
         return norms
 
     def resolve_sink_row_cap_threshold(
-        self, matrix: torch.Tensor, chunk_size: Optional[int]
+        self,
+        matrix: torch.Tensor,
+        chunk_size: Optional[int],
+        *,
+        feature_dim: int = 1,
     ) -> Optional[torch.Tensor]:
         """Return the scalar sink-row norm cap threshold, or ``None``.
 
@@ -1231,11 +1251,11 @@ class GPTQ:
         if multiple is None:
             return None
 
-        rows = matrix.shape[0]
+        rows = matrix.shape[1 - feature_dim]
         if rows == 0:
             return None
 
-        norms = self._sink_row_norms(matrix, chunk_size)
+        norms = self._sink_row_norms(matrix, chunk_size, feature_dim=feature_dim)
         # One device sort serves both quantiles: two ``kthvalue`` calls cost
         # ~1.5x more and are the only per-batch work the cap still adds.
         ordered = torch.sort(norms).values
@@ -1258,10 +1278,12 @@ class GPTQ:
         matrix: torch.Tensor,
         threshold: torch.Tensor,
         chunk_size: Optional[int],
+        *,
+        feature_dim: int = 1,
     ) -> torch.Tensor:
         """Turn a scalar cap threshold into a per-row clamp scale (device-only)."""
 
-        norms = self._sink_row_norms(matrix, chunk_size)
+        norms = self._sink_row_norms(matrix, chunk_size, feature_dim=feature_dim)
         usable_rows = torch.isfinite(norms) & (norms > 0.0)
         ratio = torch.clamp(
             threshold / norms.clamp_min(torch.finfo(torch.float32).tiny),
@@ -1269,18 +1291,32 @@ class GPTQ:
         )
         return torch.where(usable_rows, ratio, torch.ones_like(norms))
 
-    def resolve_sink_row_cap_scale(self, matrix: torch.Tensor, chunk_size: Optional[int]) -> Optional[torch.Tensor]:
+    def resolve_sink_row_cap_scale(
+        self,
+        matrix: torch.Tensor,
+        chunk_size: Optional[int],
+        *,
+        feature_dim: int = 1,
+    ) -> Optional[torch.Tensor]:
         """Return a per-row clamp scale that caps sink-row norms, or ``None``.
 
         This is a pure function of ``matrix`` (used by the #4742 regression
         tests). ``compute_hessian_xtx`` resolves the threshold and the scale
         separately so the threshold never depends on the chunk layout.
+
+        ``feature_dim=0`` serves the ``[columns, rows]`` activation layout the
+        GPTAQ/FOEM accumulators use; the returned scale has one entry per row
+        (calibration token or conv patch).
         """
 
-        threshold = self.resolve_sink_row_cap_threshold(matrix, chunk_size)
+        threshold = self.resolve_sink_row_cap_threshold(
+            matrix, chunk_size, feature_dim=feature_dim
+        )
         if threshold is None:
             return None
-        return self._sink_row_cap_scale_from_threshold(matrix, threshold, chunk_size)
+        return self._sink_row_cap_scale_from_threshold(
+            matrix, threshold, chunk_size, feature_dim=feature_dim
+        )
 
     def compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
         rows = matrix.shape[0]
