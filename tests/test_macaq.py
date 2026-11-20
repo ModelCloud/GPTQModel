@@ -30,6 +30,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from gptqmodel.nn_modules.qlinear._numerics import linear_fp32_reduce
 from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear, MacaqTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD, MacaqConfig, QuantizeConfig
 from gptqmodel.quantization import macaq as macaq
@@ -726,9 +727,9 @@ def test_macaq_linear_torch_matches_reference():
         result.W_packed, result.W_scales, 128, dtype=torch.bfloat16
     )
     reference_input = macaq.macaq_quantize_activations(x, result.pre_scale, result.BH).to(torch.bfloat16)
-    expected = torch.nn.functional.linear(
-        reference_input, reference_weight, layer.bias.to(torch.bfloat16)
-    )
+    # The packed bias keeps its FP32 dtype (#5632), so the reference adds it
+    # after the FP32 reduction instead of narrowing it to BF16 first.
+    expected = linear_fp32_reduce(reference_input, reference_weight, layer.bias)
 
     assert output.dtype == torch.bfloat16
     assert torch.equal(output, expected)
@@ -1472,7 +1473,9 @@ def test_plain_mxfp4_layer_stores_only_mxfp4_tensors(activation_precision):
 
     if activation_precision == "w4a16":
         weight = macaq.dequantize_mxfp4(result.W_packed, result.W_scales, 128, dtype=torch.bfloat16)
-        expected = torch.nn.functional.linear(x, weight, bias.to(torch.bfloat16))
+        # The packed bias keeps its FP32 dtype (#5632), so the reference adds
+        # it after the FP32 reduction instead of narrowing it to BF16 first.
+        expected = linear_fp32_reduce(x, weight, bias)
         assert torch.equal(fast, expected)
 
 
