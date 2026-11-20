@@ -82,8 +82,15 @@ class WeightOnlyProcessor(LoopProcessor):
         tokenizer,
         qcfg: RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
         forward: Optional[ForwardConfig] = None,
+        *,
+        measure_weight_error: bool = False,
     ):
-        """Initializes a weight-only processor for RTN, GGUF, BitsAndBytes, or NF12."""
+        """Initializes a weight-only processor for RTN, GGUF, BitsAndBytes, or NF12.
+
+        ``measure_weight_error`` opts into the direct-pack weight-error MAE
+        diagnostic. It reconstructs every dense weight, so it is off by
+        default and never changes the packed payload.
+        """
 
         super().__init__(
             tokenizer=tokenizer,
@@ -92,6 +99,7 @@ class WeightOnlyProcessor(LoopProcessor):
             forward=forward,
         )
         self.lock = threading.Lock()
+        self.measure_weight_error = bool(measure_weight_error)
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Report whether dynamic configuration excludes this module."""
@@ -106,13 +114,13 @@ class WeightOnlyProcessor(LoopProcessor):
 
         return qcfg.method in {METHOD.GGUF, METHOD.BITSANDBYTES, METHOD.NF12}
 
-    def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
-        """Backfills the logged loss field after late dequant-error measurement."""
+    def _update_logged_stat(self, module: NamedModule, **fields: str) -> None:
+        """Backfills fields the direct packer measures after the row is logged."""
 
         with self.lock:
             for entry in reversed(self.log):
                 if entry.get(PROCESS_LOG_LAYER) == module.layer_index and entry.get(PROCESS_LOG_MODULE) == module.name:
-                    entry[QUANT_LOG_LOSS] = avg_loss
+                    entry.update(fields)
                     return
 
     def quantize_module(
@@ -134,9 +142,12 @@ class WeightOnlyProcessor(LoopProcessor):
             qcfg_clone.device = device
 
         if self._uses_direct_pack(qcfg_clone):
-            start_time = time.time()
-            duration = time.time() - start_time
-            avg_loss = f"{qcfg_clone.method.value}: pending"
+            # The direct packers do no work here: they pack from the original
+            # dense weight during finalization. Report that measured duration
+            # and backfill it below; a 0.000 placeholder here was the only
+            # timing ever written to quant_log.csv (issue #5748).
+            duration = 0.0
+            avg_loss = "n/a"
             damp_percent = 0.0
             nsamples = 0
         else:
@@ -306,7 +317,7 @@ class WeightOnlyProcessor(LoopProcessor):
         )
 
         if self._uses_direct_pack(active_qcfg):
-            pack_start = time.perf_counter() if timer is not None else None
+            pack_start = time.perf_counter()
             with log_time_block("module.pack_original", logger=log, module_name=module_label):
                 with parent_module_lock(parent_key):
                     qmodule = qmodules[module.full_name]
@@ -317,21 +328,34 @@ class WeightOnlyProcessor(LoopProcessor):
                         g_idx=None,
                         smooth=active_qcfg.smooth,
                     )
-            if timer is not None and pack_start is not None:
+            pack_elapsed = time.perf_counter() - pack_start
+            if timer is not None:
                 timer.record(
                     "submodule_finalize_pack",
-                    time.perf_counter() - pack_start,
+                    pack_elapsed,
                     source=f"{module_label} [module.pack_original]",
                 )
+            # This row was logged before the packer ran, so publish the measured
+            # pack duration where the writer reads it (issue #5748).
+            self._update_logged_stat(module, **{PROCESS_LOG_TIME: f"{pack_elapsed:.3f}"})
 
-            reference_weight = qmodule._weight_to_matrix(original_layer).detach()
-            dequant_weight = qmodule.dequantize_weight()
-            # BNB and NF12 expose native [out, in] weights; GGUF exposes
-            # [in, out].
-            if active_qcfg.method == METHOD.GGUF:
-                dequant_weight = dequant_weight.T
-            mean_abs_err = _mean_abs_error(reference_weight, dequant_weight)
-            self._update_logged_loss(module, f"{active_qcfg.method.value}: {mean_abs_err:.7f}")
+            if self.measure_weight_error:
+                diagnostic_start = time.perf_counter()
+                reference_weight = qmodule._weight_to_matrix(original_layer).detach()
+                dequant_weight = qmodule.dequantize_weight()
+                # BNB and NF12 expose native [out, in] weights; GGUF exposes
+                # [in, out].
+                if active_qcfg.method == METHOD.GGUF:
+                    dequant_weight = dequant_weight.T
+                mean_abs_err = _mean_abs_error(reference_weight, dequant_weight)
+                del reference_weight, dequant_weight
+                if timer is not None:
+                    timer.record(
+                        "submodule_finalize_weight_error",
+                        time.perf_counter() - diagnostic_start,
+                        source=f"{module_label} [weight_error]",
+                    )
+                self._update_logged_stat(module, **{QUANT_LOG_LOSS: f"{active_qcfg.method.value}: {mean_abs_err:.7f}"})
             module.state.pop("tp_pad_info", None)
             module.state.pop("quant_source_module", None)
             with parent_module_lock(parent_key):
