@@ -53,14 +53,17 @@ from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.resource_budget import DeviceAllocation, RuntimeAllocationUnavailable
 from ...utils.tt_packing import dequantize_tt_packed_4bit, repack_gptq_for_tt
 from ...utils.ttnn_runtime import (
     TTNNMesh,
     TTNNUnavailable,
     close_mesh,
     current_mesh,
+    dram_allocated_bytes,
     hold_mesh_lease,
     import_ttnn,
+    mesh_device_ids,
     open_mesh,
     release_mesh_lease,
     to_host_replica,
@@ -162,6 +165,14 @@ class _TTNNBlockFloatMixin:
                 f"{count} TTNN devices in the mesh"
             )
 
+        # Measure the allocator before the upload so the budget can report the
+        # exact per-chip storage this weight adds, including tile padding and
+        # page rounding. An unreadable view is reported as unknown, not zero.
+        try:
+            allocated_before = dram_allocated_bytes(dev)
+        except Exception:
+            allocated_before = None
+
         host = ttnn.from_torch(
             weights,
             dtype=device_dtype,
@@ -186,11 +197,26 @@ class _TTNNBlockFloatMixin:
                 dev,
             )
 
+        device_bytes = None
+        if allocated_before is not None:
+            try:
+                allocated_after = dram_allocated_bytes(dev)
+            except Exception:
+                allocated_after = None
+            if allocated_after is not None and allocated_after > allocated_before:
+                device_bytes = allocated_after - allocated_before
+        try:
+            device_ids = mesh_device_ids(mesh)
+        except Exception:
+            device_ids = ()
+
         old_weight = getattr(self, "_ttnn_weight", None)
         old_bias = getattr(self, "_ttnn_bias", None)
         self._ttnn_weight = weight
         self._ttnn_bias = bias
         self._ttnn_devices = count
+        self._ttnn_device_ids = device_ids
+        self._ttnn_device_bytes = device_bytes
         self._ttnn_key = self._weight_key(mesh)
         # Publish first, then release the replaced tensors: a rebuild that fails
         # above must leave the previous, still-valid weight in place.
@@ -267,6 +293,8 @@ class _TTNNBlockFloatMixin:
         bias, self._ttnn_bias = getattr(self, "_ttnn_bias", None), None
         self._ttnn_compute_config = None
         self._ttnn_key = None
+        self._ttnn_device_ids = ()
+        self._ttnn_device_bytes = None
         if weight is None and bias is None:
             return
         ttnn = import_ttnn()
@@ -280,6 +308,25 @@ class _TTNNBlockFloatMixin:
                     # caller is mid-lifecycle and the device teardown that
                     # follows will reclaim it. Record it instead of hiding it.
                     log.debug(f"TTNN: block-float weight deallocate failed: {exc}")
+
+    def iter_runtime_device_allocations(self):
+        """Report the block-float device tensors this layer owns (#5810).
+
+        The bytes are the per-chip DRAM delta measured when the weight was
+        uploaded, so tile padding, allocator page rounding and replicated
+        operands are included exactly as the device holds them. A layer that
+        was never built owns no device storage; a built layer whose allocator
+        could not be read reports its backend as unmeasured instead of zero.
+        """
+
+        if getattr(self, "_ttnn_weight", None) is None:
+            return
+        if self._ttnn_device_bytes is None or not self._ttnn_device_ids:
+            raise RuntimeAllocationUnavailable("ttnn")
+        for index in self._ttnn_device_ids:
+            yield DeviceAllocation(
+                backend="ttnn", index=index, weights_bytes=self._ttnn_device_bytes
+            )
 
     def release_device(self) -> bool:
         """Drop this layer's mesh lease, closing the mesh only when last."""
@@ -460,6 +507,10 @@ class TTNNBlockFloat8Linear(_TTNNBlockFloatMixin, GPTQQuantLinear):
         self._ttnn_weight = None
         self._ttnn_bias = None
         self._ttnn_devices = 1
+        # Per-chip storage measured when the block-float weight was uploaded,
+        # and the chip ordinals those bytes live on (#5810).
+        self._ttnn_device_ids = ()
+        self._ttnn_device_bytes: Optional[int] = None
 
     @classmethod
     def validate_device(cls, device):

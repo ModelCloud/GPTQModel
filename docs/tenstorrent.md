@@ -365,6 +365,30 @@ packed words occupy 294,912 bytes versus 1,179,648 bytes for a dense BF16 copy,
 a 4x reduction. Retained `scales` and `bias` are the checkpoint's native
 metadata, which the storage rule permits.
 
+### Device weight accounting
+
+`model.budget()` reports the packed device tensors, not only the host
+checkpoint copy. A `TTNNLinear` uploads its five packed operands as
+`ttnn.Tensor` objects on the mesh allocator, which Torch's parameter and buffer
+registry never sees (#5810). Each kernel measures the DRAM allocator around its
+upload, so the reported bytes include tile padding, per-page rounding and
+replicated operands exactly as the chip holds them.
+
+The budget names the backend explicitly: a TTNN chip keeps its own ordinal
+under `backend="ttnn"`, separate from CUDA devices and the host. For a
+`768x768` OPT `q_proj` on one Blackhole chip:
+
+| Number | Bytes |
+| --- | --- |
+| host checkpoint staging | 311,048 |
+| TTNN chip 0 device tensors | 524,288 |
+| reported `weights_bytes` | 835,336 |
+
+Clearing the cache (`clear_weight_cache()` / `release_device()`) removes the
+chip entry; reopening on another chip reports the new ordinal. If the allocator
+cannot be read, the backend is listed in `budget.unmeasured_backends` and
+`budget.weights_coverage` is `partial` instead of silently reporting zero.
+
 ### GPTQ v1 zero-point correction
 
 `_repack_zero_words` in `gptqmodel/utils/tt_packing.py` normalizes GPTQ v1's
