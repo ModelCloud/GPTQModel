@@ -35,10 +35,16 @@ class NemotronHPuzzleQModel(NemotronHQModel):
                 ),
                 "fc1_latent_proj:2": ("fc1_latent_proj:0",),
                 "experts": {
-                    "#": ("up_proj:0", "down_proj:1"),
+                    # The expert MLP is `down_proj(relu2(up_proj(x)))`. `relu2`
+                    # is not positively homogeneous, so `up_proj` is not a
+                    # `down_proj` scale source; the parent Nemotron-H tree marks
+                    # it `:nosrc` and this subclass must keep that declaration
+                    # (issue #5739).
+                    "#": ("up_proj:0:nosrc", "down_proj:1"),
                 },
                 "fc2_latent_proj:3": ("fc2_latent_proj:0",),
-                "shared_experts": ("up_proj:0", "down_proj:1"),
+                # Shared experts are the same `relu2` MLP.
+                "shared_experts": ("up_proj:0:nosrc", "down_proj:1"),
             },
         },
     ]

@@ -5194,7 +5194,19 @@ class AWQProcessor(LoopProcessor):
         n_group, group_w = w_all.shape[2], w_all.shape[3]
         n_tokens = input_feat.shape[1]
         steps = int(max_shrink * n_grid)
-        input_feat = input_feat.to(device)
+        # Score in FP32 for a half-precision checkpoint. The dot product, the
+        # residual, the square and the mean all happen before the comparison,
+        # and in FP16 several distinct positive losses round to the same value
+        # (usually zero), so the first-minimum tie break keeps an arbitrarily
+        # early grid step (#5752). Only the score is widened: the clamped
+        # weights, the quantized candidates and the stored bounds keep the
+        # checkpoint dtype.
+        score_dtype = (
+            torch.float32
+            if w_all.dtype in (torch.float16, torch.bfloat16)
+            else w_all.dtype
+        )
+        input_feat = input_feat.to(device=device, dtype=score_dtype)
 
         # Batch the shrink candidates so each grid step no longer launches its
         # own clamp/quantize/error kernel chain. Candidate order and the
@@ -5307,7 +5319,13 @@ class AWQProcessor(LoopProcessor):
             # an all-NaN/all-infinite grid retained `org_max_val`. Stacking the
             # errors and selecting once preserves that behavior while replacing two
             # `where` launches per grid step with one `argmin` per output batch.
-            err_chunks = [torch.full_like(org_max_val, float("inf")).unsqueeze(0)]
+            # The sentinel follows the score dtype, not the weight dtype: an
+            # FP16 ``inf`` beside FP32 candidate errors would fail the concat.
+            err_chunks = [
+                torch.full(
+                    org_max_val.shape, float("inf"), dtype=out_dtype, device=device
+                ).unsqueeze(0)
+            ]
             max_val_chunks = [org_max_val.unsqueeze(0)]
 
             for t0 in range(0, n_tokens, token_chunk):

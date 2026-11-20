@@ -1031,7 +1031,10 @@ def test_layer_train_mode_uses_differentiable_dequant_path():
     assert layer.training
     assert layer.linear_mode is None
 
-    weight = _layer_dequantize_oracle(codes, zeros, scales, g_idx).to(scales.dtype).to(torch.bfloat16)
+    # The training fallback decodes the live layout in FP32, reduces in FP32,
+    # and rounds once. A BF16 weight or a BF16 matmul would add a rounding
+    # step the path does not take, so keep the reference wide (#5759).
+    weight = _layer_dequantize_oracle(codes, zeros, scales, g_idx)
     x = torch.randn(5, in_features, dtype=torch.bfloat16, requires_grad=True)
     output = layer(x)
     output.float().sum().backward()
@@ -1039,8 +1042,18 @@ def test_layer_train_mode_uses_differentiable_dequant_path():
     assert layer.linear_mode == "train"
     assert layer._cpu_transformed is True
     assert output.dtype == torch.bfloat16
-    torch.testing.assert_close(output, x.detach() @ weight, atol=2e-3, rtol=2e-3)
-    expected_grad = torch.ones(5, out_features, dtype=torch.bfloat16) @ weight.t()
+    reference = (x.detach().float() @ weight).to(torch.bfloat16)
+    visible_ulp = (
+        torch.nextafter(reference, torch.full_like(reference, float("inf"))).float()
+        - reference.float()
+    ).abs().max().item()
+    torch.testing.assert_close(
+        output.float(),
+        reference.float(),
+        rtol=0,
+        atol=max(visible_ulp, torch.finfo(torch.bfloat16).tiny),
+    )
+    expected_grad = (torch.ones(5, out_features) @ weight.t()).to(torch.bfloat16)
     torch.testing.assert_close(x.grad, expected_grad, atol=2e-3, rtol=2e-3)
 
 
