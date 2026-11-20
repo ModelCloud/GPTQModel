@@ -333,8 +333,15 @@ def _replay_layer_outputs(
     region_timer,
     replay_plan: Optional[SubsetPlan] = None,
     force_serial: Optional[bool] = None,
+    consume_inputs: Optional[bool] = None,
 ) -> List[List[torch.Tensor]]:
     """Replay one layer forward to materialize outputs for the next layer.
+
+    ``consume_inputs`` releases each cached batch as soon as its output exists.
+    It defaults to the processor's ``forward.replay_after_process`` policy:
+    that replay feeds ``receive_layer_inputs``, so it is the last reader of the
+    activations. A replay into a separate pristine/clean cache must pass
+    ``False`` because its inputs may alias the live layer cache.
 
     ``force_serial`` overrides data-parallel forward dispatch. Resume replay
     passes this: running several batches through torch's dynamo-instrumented
@@ -344,6 +351,11 @@ def _replay_layer_outputs(
     concurrent entry entirely; the cost is bounded to the handful of already-
     quantized layers being fast-forwarded, not the run's main quant loop.
     """
+
+    if consume_inputs is None:
+        consume_inputs = bool(
+            getattr(getattr(processor, "forward", None), "replay_after_process", False)
+        )
 
     if replay_plan is None:
         replay_batch_count, replay_row_counts, replay_total_rows = _collect_layer_forward_progress(
@@ -428,6 +440,7 @@ def _replay_layer_outputs(
             # Replay should emit next-layer activations under the model's native router.
             # And reduce the execution time of `forward()`.
             apply_moe_config=False,
+            consume_inputs=consume_inputs,
         )
     finally:
         if (
@@ -508,6 +521,7 @@ def _capture_pristine_group_context(
         log=log,
         region_timer=region_timer,
         replay_plan=None,
+        consume_inputs=False,
     )
     receive_clean_layer_inputs = getattr(processor, "receive_clean_layer_inputs", None)
     if callable(receive_clean_layer_inputs):
