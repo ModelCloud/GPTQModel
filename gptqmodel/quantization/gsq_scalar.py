@@ -414,7 +414,11 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
             metric=factor,
             teacher=teacher,
             decode=lambda codes: decode(codes, current_scales),
-            row_loss=lambda codes: score_rows(codes, current_scales),
+            # ``hard_code_sweep`` passes a decoded *weight* to ``row_loss``, so
+            # hand it the weight-based scorer. Passing the codes-based
+            # ``score_rows`` decoded a weight as if it were codes, and the
+            # inflated ``best_rows`` made the sweep accept unconditionally.
+            row_loss=row_loss,
             bits=bits,
             offsets=offsets,
         )

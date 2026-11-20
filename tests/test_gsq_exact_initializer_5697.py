@@ -21,6 +21,7 @@ from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import GSQConfig
 from gptqmodel.quantization.gsq_scalar import refine_gptq_scalar
 
+
 COLUMNS = 8
 SCALE = 8192.0
 ZERO = 8
