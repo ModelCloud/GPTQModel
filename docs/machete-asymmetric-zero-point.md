@@ -103,4 +103,4 @@ on non-SM90 hosts; the SM90 real-model comparison remains
 `tests/kernels/test_asymmetric_real_models.py` (skipped off SM90). Treat the
 native numeric delta as unmeasured until that test runs on Hopper hardware.
 
-Introduced in PR #5800-fix.
+Introduced in [PR #5914](https://github.com/ModelCloud/GPTQModel/pull/5914) for issue #5800.
