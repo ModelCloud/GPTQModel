@@ -486,14 +486,6 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         self._decoded_weight_bound = None
         self._scale_inv_min = None
 
-        if self.weight_scale_method == "block" and self.weight_block_size is not None:
-            block_rows, block_cols = self.weight_block_size
-            if out_features % block_rows != 0 or in_features % block_cols != 0:
-                raise ValueError(
-                    f"TorchFP8Linear block scaling requires out_features/in_features "
-                    f"to be divisible by `weight_block_size={self.weight_block_size}`."
-                )
-
         super().__init__(
             bits=bits,
             in_features=in_features,
@@ -568,9 +560,12 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         if self.weight_block_size is None:
             raise ValueError("TorchFP8Linear block scaling requires `weight_block_size`.")
         block_rows, block_cols = self.weight_block_size
+        # A checkpoint may use ceil blocking, where the last block covers only
+        # the remainder of the axis. Store that compact grid instead of
+        # expanding it to the dense weight shape (#5593).
         return (
-            self.out_features // block_rows,
-            self.in_features // block_cols,
+            (self.out_features + block_rows - 1) // block_rows,
+            (self.in_features + block_cols - 1) // block_cols,
         )
 
     def _allocate_buffers(self, *, bias: bool) -> None:
@@ -691,6 +686,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             return scale_inv.view(-1, 1)
         if self.weight_block_size is None:
             raise ValueError("TorchFP8Linear block scaling requires `weight_block_size`.")
+        if scale_inv.shape == (self.out_features, self.in_features):
+            # An element-wise scale is already dense; repeating it as a block
+            # grid would apply only its first row/column.
+            return scale_inv
 
         block_rows, block_cols = self.weight_block_size
         expanded = scale_inv.repeat_interleave(block_rows, dim=0)
@@ -790,9 +789,21 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         # inverse scale is divided out directly. Recreating its reciprocal
         # first overflows FP32 for a finite scale below 2**-128 and turns an
         # exact decode into ``inf``/``NaN`` (#5654).
+        scale_inv = self.weight_scale_inv
+        if self.weight_scale_method == "block" and self.weight_block_size is not None:
+            block_rows, block_cols = self.weight_block_size
+            rows, cols = self.weight.shape
+            if rows % block_rows or cols % block_cols:
+                # The shared decoder infers one uniform repeat from the scale
+                # shape, which cannot express a ceil-blocked grid's partial
+                # last block. Expand for this call only; nothing is retained
+                # (#5593).
+                scale_inv = self._expanded_scale_inv(
+                    target_device=torch.device("cpu"), target_dtype=torch.float32
+                )
         weight = dequantize_fp8(
             self.weight.to(device="cpu"),
-            scale_inv=self.weight_scale_inv.to(device="cpu", dtype=torch.float32),
+            scale_inv=scale_inv.to(device="cpu", dtype=torch.float32),
             scale_semantics=self.weight_scale_semantics,
             axis=None if self.weight_scale_method == "block" else (0 if self.weight_scale_method == "row" else 0),
             target_dtype=target_dtype,
