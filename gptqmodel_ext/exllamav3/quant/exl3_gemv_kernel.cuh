@@ -220,6 +220,47 @@ __device__ __forceinline__ void dq8_regs_half(uint32_t a7, uint32_t b7, int s7, 
 // The integer wide instances take a two-block minimum in their only form: unbounded, 3 bpw with the mcg codebook
 // goes past the register count that lets two 256-thread blocks share an SM, and a wide grid is always larger
 // than one block per SM. The other wide instances already fit two blocks and compile the same either way
+
+// Output scales and Hadamard transform, same semantics as the inner GEMM
+// epilogue. This is a separate launch because the cooperative kernel's C tiles
+// span groups written by different blocks: reading them after grid.sync() was
+// not coherent on Blackwell (#5873). A following launch in the same stream
+// observes the cooperative kernel's stores without a device-scope barrier.
+template <bool c_fp32, bool Q4NX>
+__global__ __launch_bounds__(256)
+void exl3_gemv_epilogue_kernel
+(
+    void* __restrict__ C,
+    const int size_m,
+    const int size_n,
+    const half* __restrict__ svh
+)
+{
+    int total_warps = size_m * size_n / 128;
+    int warps_grid = gridDim.x * blockDim.x / 32;
+    int this_warp = threadIdx.x / 32 + blockDim.x / 32 * blockIdx.x;
+
+    for(; this_warp < total_warps; this_warp += warps_grid)
+    {
+        if constexpr (c_fp32)
+            had_ff_r_128_inner<false, true>
+            (
+                ((const float*) C) + this_warp * 128,
+                ((float*) C) + this_warp * 128,
+                svh + (this_warp * 128) % size_n,
+                0.088388347648f * (Q4NX ? EXL3_Q4NX_ALPHA : 1.0f)
+            );
+        else
+            had_hf_r_128_inner<false, true>
+            (
+                ((const half*) C) + this_warp * 128,
+                ((half*) C) + this_warp * 128,
+                svh + (this_warp * 128) % size_n,
+                0.088388347648f
+            );
+    }
+}
+
 template <int bits, bool c_fp32, int cb, int MMODE, int CFG, bool SMEM_STAGE, bool HALF = false, bool BOUND = HALF>
 __global__ __launch_bounds__(CFG == 0 ? 512 : 256, CFG == 0 ? (BOUND ? 2 : 1) : (HALF ? 1 : 2))
 void exl3_gemv_kernel(EXL3_GEMM_ARGS)
@@ -517,35 +558,6 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
     }
 
     #undef XP
-
-    // Output scales and Hadamard transform, same semantics as the inner GEMM epilogue
-    {
-        grid.sync();
-
-        int total_warps = size_m * size_n / 128;
-        int warps_grid = gridDim.x * blockDim.x / 32;
-        int this_warp = threadIdx.x / 32 + blockDim.x / 32 * blockIdx.x;
-
-        for(; this_warp < total_warps; this_warp += warps_grid)
-        {
-            if constexpr (c_fp32)
-                had_ff_r_128_inner<false, true>
-                (
-                    ((const float*) C) + this_warp * 128,
-                    ((float*) C) + this_warp * 128,
-                    svh + (this_warp * 128) % size_n,
-                    0.088388347648f * (Q4NX ? EXL3_Q4NX_ALPHA : 1.0f)
-                );
-            else
-                had_hf_r_128_inner<false, true>
-                (
-                    ((const half*) C) + this_warp * 128,
-                    ((half*) C) + this_warp * 128,
-                    svh + (this_warp * 128) % size_n,
-                    0.088388347648f  // 1/sqrt(128)
-                );
-        }
-    }
 }
 
 #else  // __HIP_PLATFORM_AMD__ || USE_ROCM

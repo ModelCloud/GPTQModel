@@ -115,30 +115,28 @@ projection, adds the canonical bias in FP32, and writes BF16. [Activation dispat
 ### Blackwell (sm_120)
 
 Blackwell was unmeasured when the Ada band landed, so `exl3_gemv_try_launch`
-declined Q4NX there. The same sweep on an RTX 5090 (170 SMs, 96 MiB L2) shows
-the packed GEMV is not numerically correct on sm_120: in all 180 cells it
-disagrees with the reconstructed FP32 weight by 0.16 to 0.82 relative, while
-the block-pipelined kernel stays within 3.3e-4. The defect is not specific to
-Q4NX — `mul1` W3 and `mcg` W2/W4 miss by 0.26 to 0.43 on the same device — so
-it belongs to the GEMV kernel on sm_120, not to the Q4NX decoder. Enabling it
-would be a poor trade even if the kernel were correct: the geometric mean is
-1.06x cold and 1.18x warm, and 61 of the 180 cells regress (0.77x warm at the
-worst). Blackwell keeps the block-pipelined kernel, and
-`tests/kernels/test_exllamav3_q4nx_gemv_blackwell.py` pins the decline so the
-gate is not opened without a working kernel and a new sweep.
+declines Q4NX there. The pre-#5873 sweep on an RTX 5090 (170 SMs, 96 MiB L2)
+measured the Q4NX GEMV with the broken output epilogue: in all 180 cells it
+disagreed with the reconstructed FP32 weight by 0.16 to 0.82 relative, while
+the block-pipelined kernel stayed within 3.3e-4. #5873 fixes that epilogue for
+the non-Q4NX FP16 GEMV (below). Q4NX still keeps the packed kernel because the
+same sweep measured only a 1.06x cold and 1.18x warm geometric-mean speedup,
+with 61 of the 180 cells regressing (0.77x warm at the worst).
+`tests/kernels/test_exllamav3_q4nx_gemv_blackwell.py` pins the decline until a
+fresh sweep justifies enabling Q4NX.
 
-| bpw | Cells | GEMV vs FP32 reference | Packed vs reference | Cold geomean | Warm geomean | Regressions |
+| bpw | Cells | GEMV vs FP32 reference (broken epilogue) | Packed vs reference | Cold geomean | Warm geomean | Regressions |
 | --- | ---: | --- | --- | ---: | ---: | ---: |
 | 2.5 | 60 | 0.16–0.74, median 0.37 | ≤ 3.2e-4 | 1.04x | 1.18x | 24/60 |
 | 3.0 | 60 | 0.17–0.82, median 0.37 | ≤ 3.1e-4 | 1.05x | 1.17x | 20/60 |
 | 3.5 | 60 | 0.16–0.68, median 0.36 | ≤ 3.2e-4 | 1.07x | 1.18x | 17/60 |
 
-The GEMV rows need the gate opened for the duration of the measurement; the
-committed tree declines every cell, so the table below is the kernel Blackwell
-actually runs. Times are medians in microseconds per projection: `cold`
-flushes 160 MiB of L2 before each of 20 launches, `warm` is a 100-launch batch
-after five warmups. `GB/s` is the packed trellis, `k * n * bits / 8` bytes over
-the measured time.
+The timing rows are the pre-#5873 Q4NX measurement, taken with the gate opened
+for the duration of the sweep; the committed tree declines every Q4NX cell, so
+the table below is the Q4NX kernel Blackwell actually runs. Times are medians
+in microseconds per projection: `cold` flushes 160 MiB of L2 before each of 20
+launches, `warm` is a 100-launch batch after five warmups. `GB/s` is the packed
+trellis, `k * n * bits / 8` bytes over the measured time.
 
 | bpw | k | n | m | Cold | GB/s | Warm | GB/s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -168,6 +166,48 @@ Run the sweep with:
 PYTHONPATH=. CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=2 \
     /root/venv/bin/python tests/benchmark_exl3_q4nx_gemv_blackwell.py --check
 ```
+
+### FP16 GEMV epilogue on Blackwell
+
+The non-Q4NX FP16 GEMV (`exl3_gemv_kernel`) writes one C tile per group. A
+128-column output tile spans groups written by different blocks, so the output
+Hadamard transform could not run safely inside the cooperative kernel after
+`grid.sync()` on Blackwell: the post-barrier reads returned whole raw tiles.
+#5873 moves the transform to `exl3_gemv_epilogue_kernel`, launched next in the
+same stream after the cooperative kernel completes. Stream ordering makes the
+C stores visible without a device-scope barrier, and the kernel applies the
+same `had_ff_r_128_inner` / `had_hf_r_128_inner` scaling per 128-column tile.
+The FP16 GEMV dispatch (90) now serves eligible non-Q4NX shapes on sm_120 and
+sm_121.
+
+Before:
+
+```mermaid
+flowchart TD
+    A["exl3_gemv_try_launch"] --> B["exl3_gemv_kernel"]
+    B --> C["grid.sync()"]
+    C --> D["in-kernel had_ff_r_128_inner reads C"]
+    D --> E["Blackwell: stale 128-column tiles"]
+    classDef error fill:#f9d5d5,stroke:#af3b3b,color:#222
+    class E error
+```
+
+After:
+
+```mermaid
+flowchart TD
+    A["exl3_gemv_try_launch"] --> B["cudaLaunchCooperativeKernel exl3_gemv_kernel"]
+    B --> C["stream order: cooperative kernel completes"]
+    C --> D["exl3_gemv_epilogue_kernel"]
+    D --> E["had_ff_r_128_inner per 128-column tile"]
+    E --> F["Projection output"]
+```
+
+On the 48-SM GB10 test host, the fixed GEMV matched the FP64 oracle within
+6.7e-4 across 80 eligible cells (m 1/2/4/8, k and n 2048/4096/8192). The
+separate launch measured 1.05x cold and 1.00x warm geometric-mean speedup over
+the packed kernel; the 170-SM RTX 5090 warm result in #5873 was not
+re-measured on this host.
 
 ## Runtime policy
 
