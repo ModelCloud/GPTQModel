@@ -742,13 +742,7 @@ class GPTAQ(GPTQ):
             Q = Q[:, :valid_cols]
             g_idx = g_idx[:valid_cols]
 
-        if isinstance(self.module, transformers.Conv1D):
-            Q = Q.t()
-
-        if Q.shape != self.module.weight.shape:
-            Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
-        else:
-            Q = Q.type_as(self.module.weight.data)
+        Q = self._narrow_reconstruction(Q)
 
         # Q = Q.to(device=DEVICE_1)
 
