@@ -4968,15 +4968,33 @@ class BaseQModel(nn.Module):
 
         Returns ``True`` when a Tenstorrent device was actually released, and
         ``False`` for every other backend so the call is safe to make
-        unconditionally.
+        unconditionally.  The mesh is process-wide and may serve several
+        wrappers, so this releases only the leases held by this wrapper's own
+        native kernels and closes the shared handle once none remain.
         """
 
-        from ..utils.ttnn_runtime import close_mesh, current_mesh
-
-        if current_mesh() is None:
+        native_backends = {BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_BF8}
+        model = getattr(self, "model", None)
+        modules = getattr(model, "modules", None)
+        if modules is None:
             return False
-        close_mesh()
-        return True
+        owned = [
+            module
+            for module in modules()
+            if native_backends.intersection(
+                getattr(module, "SUPPORTS_BACKENDS", ()) or ()
+            )
+        ]
+        if not owned:
+            # A CPU (or any non-native) wrapper must not tear down a mesh that
+            # another model in this process is still using.
+            return False
+        released = False
+        for module in owned:
+            release = getattr(module, "release_device", None)
+            if release is not None:
+                released = bool(release()) or released
+        return released
 
     def pre_quantize_generate_hook_start(self):
         pass
