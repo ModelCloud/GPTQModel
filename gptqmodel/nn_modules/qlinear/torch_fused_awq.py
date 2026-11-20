@@ -460,25 +460,19 @@ class TorchFusedAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         self._fused_zero_key = tensor_cache_key(self.qzeros)
 
     def _apply(self, fn, recurse: bool = True):
-        """Re-finalize the checkpoint layout after an invalidating move.
+        """Re-finalize the checkpoint layout after a device move.
 
-        The runtime int4pack layout is device- and scale-dtype-coupled, so a
-        cross-device or low-precision move restores the checkpoint snapshot
-        instead of reinterpreting it in place. A same-device move to FP32 keeps
-        the live layout because it only widens the offsets.
+        The runtime int4pack layout is device-specific, so a cross-device move
+        restores the checkpoint snapshot and the next forward transforms for
+        the new device. Weight dtypes are frozen after the first forward
+        (contracts/kernel/forward-dtype.md).
         """
 
         scales = getattr(self, "scales", None)
         transformed = self.linear_mode == LinearMode.INFERENCE and isinstance(scales, torch.Tensor)
-        # The packed layout is keyed by the activation dtype it was built for,
-        # not by ``scales.dtype``: the checkpoint scale buffer now keeps its
-        # loaded dtype while the affine metadata follows the activation dtype.
-        runtime_dtype = getattr(self, "_cpu_transform_dtype", None) if transformed else None
-        if runtime_dtype is None and transformed:
-            runtime_dtype = scales.dtype
         device = scales.device if transformed else None
         result = super()._apply(fn, recurse=recurse)
-        refinalize_fused_state_after_apply(self, runtime_dtype, device)
+        refinalize_fused_state_after_apply(self, device)
         return result
 
     def train(self, mode: bool = True):

@@ -3,9 +3,10 @@
 `AwqTorchLinear` and `AwqGEMMLinear` store `scales` and `bias` at the precision
 they were loaded with. The activation dtype is a *compute* dtype: `forward`
 converts temporary operands for the current call and never writes the converted
-values back into the module buffers. This keeps repeated forwards with
-different activation dtypes, and a re-saved checkpoint, at the original
-precision.
+values back into the module buffers. A re-saved checkpoint therefore keeps
+the original precision. The activation dtype itself is fixed for the run by
+the [forward dtype contract](../contracts/kernel/forward-dtype.md); a later
+forward with another dtype raises.
 
 The model loader restores Torch AWQ scales and bias from the checkpoint after
 Accelerate's model-dtype cast. When packing a dense layer, `pack()` keeps the
@@ -17,7 +18,7 @@ The previous flow rewrote the buffers in place in `post_init` and
 change). That permanently rounded the stored value. Two failures followed:
 
 * A BF16 scale below the FP16 subnormal range became zero on an FP16 forward,
-  and the zero survived a later BF16 forward.
+  and the zero was written into any re-saved checkpoint.
 * A wide checkpoint bias was narrowed before the reduction, so a finite
   cancellation result became `-inf`, `NaN`, or a rounded `0`.
 
@@ -108,8 +109,9 @@ FP16 compute dtype.
 ## Validation
 
 `tests/kernels/test_awq_runtime_dtype_storage.py` pins the storage contract: an
-FP16 checkpoint stays bit-identical through one BF16 and a later FP16 forward
-for both `AwqGEMMLinear` and `AwqTorchLinear`, and a symmetric BF16 CPU
+FP16 checkpoint stays bit-identical through repeated FP16 forwards for both
+`AwqGEMMLinear` and `AwqTorchLinear`, a BF16 forward on the same module raises
+the forward-dtype-lock error, and a symmetric BF16 CPU
 int4pack forward keeps its FP16 scales while staying within `2e-3` of the FP64
 oracle.
 

@@ -184,34 +184,3 @@ def test_state_dict_load_refreshes_the_decode_range():
 
     assert torch.isfinite(out).all()
     assert out[0, 0].item() == 16384.0
-
-
-def test_fp16_autocast_keeps_the_wide_decode_finite():
-    """Ambient FP16 autocast must not narrow the FP32 decode back to `inf` (#5771)."""
-
-    layer, linear = _pack(OVERFLOWING_WEIGHT, torch.float16)
-    x = _input(0.25, torch.float16)
-    reference = linear(x.float()).to(torch.float16)
-
-    with torch.inference_mode():
-        eager = layer(x)
-        with torch.autocast("cpu", dtype=torch.float16):
-            actual = layer(x)
-            # The wide reduction disables autocast only for itself.
-            assert torch.is_autocast_enabled("cpu")
-
-    assert torch.equal(eager, reference)
-    assert torch.equal(actual, reference)
-    assert actual[0, 0].item() == 16384.0
-
-
-def test_fp16_autocast_keeps_the_wide_underflow_decode_finite():
-    layer, linear = _pack(UNDERFLOWING_WEIGHT, torch.float16)
-    x = _input(65504.0, torch.float16)
-    reference = linear(x.float()).to(torch.float16)
-
-    with torch.inference_mode(), torch.autocast("cpu", dtype=torch.float16):
-        actual = layer(x)
-
-    assert torch.equal(actual, reference)
-    assert actual[0, 0].item() > 0

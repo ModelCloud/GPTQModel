@@ -35,6 +35,12 @@ from ...utils.planar_packing import (
 from ...utils.safe import threadpool_limits
 from ...utils.torch import dynamo_is_compiling
 from ..compiled_state import compiled_module_getstate
+from ..forward_dtype_lock import (  # noqa: F401 - re-exported
+    FORWARD_DTYPE_CONTRACT,
+    ForwardDtypeLockMixin,
+    _check_forward_dtype,
+    require_no_forward,
+)
 from ._compile_support import COMPILE_LEVEL
 from ._decode_dtype import decode_dtype_for_scales
 from ._fused_train_state import QZEROS_FORMAT_BUFFER, _materialize_snapshot_entry
@@ -435,7 +441,7 @@ def checkpoint_qzeros_layout(format_code) -> int | None:
     return None
 
 
-class BaseQuantLinear(nn.Module):
+class BaseQuantLinear(ForwardDtypeLockMixin, nn.Module):
     # CPU int4pack kernels rewrite checkpoint buffers into their runtime layout
     # on the first forward. Serialize that cold check-and-transform so a
     # concurrent first forward cannot observe half-converted tensors or repack
@@ -555,6 +561,8 @@ class BaseQuantLinear(nn.Module):
                  validate_kwargs: Optional[Dict[str, Any]] = None,
                  **kwargs):
         super().__init__()
+        # Forward dtype contract: set by the first eager forward.
+        self._forward_dtype_lock = None
         if name is None:
             name = f"{self.__class__.__module__}.{self.__class__.__qualname__}"
         self.name = name # full path module name in model weights

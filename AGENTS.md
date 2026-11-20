@@ -34,11 +34,16 @@ issues and PRs whose reproduction requires a violation, and link the contract
 when you close them.
 
 - **Kernel/module forward dtype**
-  ([contract](contracts/kernel/forward-dtype.md)): the first `forward` sets the
-  activation dtype; every later call uses the same dtype, and the output dtype
-  equals the input dtype. A different dtype on a later call is a caller bug
-  and must raise. No per-activation-dtype caches, dtype-change invalidation,
-  or "call-local" re-casts kept only to survive a dtype switch.
+  ([contract](contracts/kernel/forward-dtype.md)):
+  - **Kernel modules:** one input dtype per module, set by the first forward;
+    output dtype equals input dtype; weight and buffer dtypes are frozen after
+    the first forward (no `.to(dtype)`, re-pack or re-register); different
+    weights or dtype means a new module.
+  - **Quantization:** source weight values may be rewritten between forwards
+    in their existing dtype, but live modules are never cast. FP32 or autocast
+    training runs on copies. Packing builds new, unlocked kernels.
+  - **Never add:** per-activation-dtype caches, dtype-change invalidation, or
+    "call-local" re-casts kept only to survive a dtype switch.
 
 ## Working on a change
 

@@ -40,6 +40,9 @@ def main():
                     aten_scales = torch.zeros(in_features // 128, out_features, 2)
                     aten_scales[:, :, 0] = 16
                 for dtype in (torch.float16, torch.bfloat16):
+                    # One activation dtype per module (contracts/kernel/forward-dtype.md);
+                    # ``_build_qqq`` is seeded, so the rebuilt module is identical.
+                    module, _ = _build_qqq(in_features, out_features, group_size)
                     for tokens in map(int, args.tokens.split(",")):
                         torch.manual_seed(800 + tokens)
                         activation = torch.randn(tokens, in_features, dtype=dtype)

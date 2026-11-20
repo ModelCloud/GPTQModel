@@ -507,9 +507,10 @@ def test_cpu_awq_fallback_decodes_overflowing_fp16_scale(cls_name):
     """The dense fallback must decode in a dtype that holds the real weight."""
 
     out_features = 32 if cls_name == "TorchCpuAvx512AwqLinear" else 16
-    module = _awq_overflow_fixture(_cpu_awq_class(cls_name), out_features=out_features)
 
+    # One module per activation dtype (contracts/kernel/forward-dtype.md).
     for dtype in _AWQ_OVERFLOW_ACTIVATION_DTYPES[cls_name]:
+        module = _awq_overflow_fixture(_cpu_awq_class(cls_name), out_features=out_features)
         x = _awq_overflow_input(dtype)
         out = module(x)
         assert out.dtype is dtype
@@ -624,12 +625,13 @@ def test_cpu_awq_fallback_after_warmup_decodes_overflowing_fp16_scale(cls_name):
 def test_cpu_gptq_fallback_decodes_overflowing_fp16_scale(cls_name, warm):
     """The GPTQ dense and runtime decodes must hold the real FP16 weight."""
 
-    module = _gptq_overflow_fixture(_gptq_overflow_class(cls_name))
-    if warm:
-        with torch.no_grad():
-            module(torch.zeros(1, 32, dtype=torch.float16))
-
+    # One module per activation dtype (contracts/kernel/forward-dtype.md);
+    # ``warm`` runs a no-grad forward in the same dtype first.
     for dtype in (torch.float32, torch.float16):
+        module = _gptq_overflow_fixture(_gptq_overflow_class(cls_name))
+        if warm:
+            with torch.no_grad():
+                module(torch.zeros(1, 32, dtype=dtype))
         x = _awq_overflow_input(dtype)
         out = module(x)
         assert out.requires_grad

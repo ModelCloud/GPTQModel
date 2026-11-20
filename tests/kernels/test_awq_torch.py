@@ -243,8 +243,8 @@ def test_awq_torch_pack_keeps_fp32_source_scales():
     module.post_init()
     stored_scales = module.scales.clone()
 
-    module(torch.ones((1, 16), dtype=torch.float16))
     x_bf16 = torch.ones((1, 16), dtype=torch.bfloat16)
+    module(x_bf16)
     actual = module(x_bf16)
     expected = _awq_oracle(module=module, x=x_bf16, scales=scales.t(), bias=None)
     torch.testing.assert_close(actual, expected.to(torch.bfloat16), rtol=0, atol=0)
@@ -254,11 +254,11 @@ def test_awq_torch_pack_keeps_fp32_source_scales():
 
 
 def test_awq_torch_forward_preserves_checkpoint_scales_and_bias():
-    """Forward must not rewrite stored BF16 precision with the activation dtype.
+    """Repeated forwards keep the stored BF16 scales and bias bit-exact.
 
-    ``1e-40`` is representable in BF16 but underflows to zero in FP16, so an
-    in-place conversion permanently zeroes the scale and every later BF16
-    forward returns zero as well.
+    ``1e-40`` is representable in BF16 but underflows to zero in FP16. One
+    module serves one activation dtype (contracts/kernel/forward-dtype.md), so
+    this checks storage across repeated same-dtype forwards.
     """
 
     tiny = torch.tensor([[1e-40] * 8], dtype=torch.bfloat16)
@@ -267,11 +267,10 @@ def test_awq_torch_forward_preserves_checkpoint_scales_and_bias():
     module.post_init()
     stored_scales = module.scales.clone()
     stored_bias = module.bias.clone()
-    x_fp16 = torch.ones((1, 16), dtype=torch.float16, device=_AWQ_TEST_DEVICE)
     x_bf16 = torch.ones((1, 16), dtype=torch.bfloat16, device=_AWQ_TEST_DEVICE)
     expected = _awq_oracle(module=module, x=x_bf16, scales=tiny, bias=bias)
 
-    module(x_fp16)
+    module(x_bf16)
 
     actual = module(x_bf16)
 

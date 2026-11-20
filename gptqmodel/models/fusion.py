@@ -23,6 +23,7 @@ from types import FunctionType, MethodType
 
 import torch
 
+from ..nn_modules.qlinear import _check_forward_dtype
 from ..nn_modules.qlinear._runtime_cache import tensor_cache_key
 from ..nn_modules.qlinear.marlin import MarlinLinear
 from ..nn_modules.qlinear.marlin_awq import AwqMarlinLinear
@@ -746,6 +747,11 @@ class _FusionGroup:
                 or torch.nn.modules.module._global_forward_pre_hooks
                 or torch.nn.modules.module._global_forward_hooks):
             return None
+        # The fused executor stands in for the source projections, so it
+        # carries their forward dtype lock (contracts/kernel/forward-dtype.md).
+        # Check before any refresh: a second dtype must raise, not rebuild.
+        for module in self.modules:
+            _check_forward_dtype(module, (x,), {})
         # Lease one coherent record. A cache clear or refresh can retire it at
         # any point, but retirement is deferred until this caller releases it,
         # so the local forward and its operand storage stay valid.

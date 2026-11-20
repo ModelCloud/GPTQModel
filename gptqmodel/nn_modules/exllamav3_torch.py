@@ -23,6 +23,7 @@ from ..utils.logger import setup_logger
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from .compiled_state import compiled_module_getstate
 from .exllamav3 import _EXL3_BUFFER_NAMES, _EXL3_REQUIRED_BUFFERS, _torch_dtype
+from .forward_dtype_lock import ForwardDtypeLockMixin
 from .qlinear._numerics import fp32_epilogue_context
 
 
@@ -298,7 +299,7 @@ def _apply_hadamard_right(x: torch.Tensor) -> torch.Tensor:
     return (x.view(x.shape[0], -1, 128) @ had).view_as(x)
 
 
-class ExllamaV3TorchLinear(nn.Module):
+class ExllamaV3TorchLinear(ForwardDtypeLockMixin, nn.Module):
     QUANT_TYPE = "exl3"
     CHECKPOINT_REQUIRED_BUFFERS = _EXL3_REQUIRED_BUFFERS
     # Every floating EXL3 buffer (the fp16 `suh`/`svh` sign vectors and the
@@ -321,6 +322,8 @@ class ExllamaV3TorchLinear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.name = name
+        # Forward dtype contract: set by the first eager forward.
+        self._forward_dtype_lock = None
         self.out_dtype = out_dtype
         self.tensor_storage = tensor_storage or {}
         self.optimized = False
