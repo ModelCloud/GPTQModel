@@ -114,38 +114,9 @@ def _tiny_diffusion_gemma_config():
     )
 
 
-@pytest.mark.cpu
-def test_quantized_checkpoint_reloads_with_tied_decoder(tmp_path, monkeypatch):
-    """Issue #5514: a saved checkpoint must reload with the decoder reattached."""
-
-    torch.manual_seed(0)
-    source = tmp_path / "source"
-    saved = tmp_path / "quantized"
-    source.mkdir()
-
-    model = AutoModelForMultimodalLM.from_config(
-        _tiny_diffusion_gemma_config(), dtype=torch.bfloat16
-    )
-    model.save_pretrained(source)
-
-    # A config-only fixture has no image/audio processor assets; the processor
-    # is unrelated to the quantized reload path under test.
-    monkeypatch.setattr(DiffusionGemmaQModel, "require_load_processor", False)
-
-    rows = [
-        {"input_ids": list(range(1 + i, 49 + i)), "attention_mask": [1] * 48}
-        for i in range(8)
-    ]
-    quantized = GPTQModel.load(
-        str(source), GPTQConfig(bits=4, group_size=32), dtype=torch.bfloat16
-    )
-    quantized.quantize(CalibrationConfig(dataset=rows, batch_size=1))
-    quantized.save(str(saved))
-
-    loaded = GPTQModel.load(str(saved), device="cpu")
-
-    encoder_layers = loaded.model.model.encoder.language_model.layers
-    decoder_layers = loaded.model.model.decoder.layers
+def _assert_tied_decoder_is_quantized(model):
+    encoder_layers = model.model.model.encoder.language_model.layers
+    decoder_layers = model.model.model.decoder.layers
     shared_leaves = 0
     for encoder_layer, decoder_layer in zip(encoder_layers, decoder_layers):
         for name, module in encoder_layer.named_modules():
@@ -155,9 +126,53 @@ def test_quantized_checkpoint_reloads_with_tied_decoder(tmp_path, monkeypatch):
             shared_leaves += 1
     assert shared_leaves > 0
 
+
+@pytest.mark.cpu
+def test_quantized_checkpoint_reloads_with_tied_decoder(tmp_path, monkeypatch):
+    """Issues #5514/#5716: load and re-save must reattach the tied decoder."""
+
+    torch.manual_seed(0)
+    source = tmp_path / "source"
+    saved = tmp_path / "quantized"
+    resaved = tmp_path / "resaved"
+    source.mkdir()
+
+    model = AutoModelForMultimodalLM.from_config(_tiny_diffusion_gemma_config(), dtype=torch.bfloat16)
+    model.save_pretrained(source)
+
+    # A config-only fixture has no image/audio processor assets; the processor
+    # is unrelated to the quantized reload path under test.
+    monkeypatch.setattr(DiffusionGemmaQModel, "require_load_processor", False)
+
+    rows = [{"input_ids": list(range(1 + i, 49 + i)), "attention_mask": [1] * 48} for i in range(8)]
+    quantized = GPTQModel.load(
+        str(source),
+        GPTQConfig(bits=4, group_size=32, device="cpu"),
+        dtype=torch.bfloat16,
+    )
+    quantized.quantize(CalibrationConfig(dataset=rows, batch_size=1))
+    quantized.save(str(saved))
+
+    loaded = GPTQModel.load(str(saved), device="cpu")
+    _assert_tied_decoder_is_quantized(loaded)
+
     output = loaded.model(
         input_ids=torch.tensor([[1, 2, 3, 4]]),
         attention_mask=torch.ones(1, 4, dtype=torch.long),
     )
     assert output.logits is not None
     assert torch.isfinite(output.logits).all()
+
+    # Issue #5716: the export shell rebuilds the same quantized model and runs
+    # the same unmaterialized-parameter guard as the loader. Without the
+    # definition's ``after_make_quant`` hook this save raises before writing.
+    loaded.save(str(resaved))
+
+    reloaded = GPTQModel.load(str(resaved), device="cpu")
+    _assert_tied_decoder_is_quantized(reloaded)
+    reloaded_output = reloaded.model(
+        input_ids=torch.tensor([[1, 2, 3, 4]]),
+        attention_mask=torch.ones(1, 4, dtype=torch.long),
+    )
+    assert reloaded_output.logits is not None
+    assert torch.isfinite(reloaded_output.logits).all()
