@@ -1783,6 +1783,10 @@ class SmoothMSE(SmoothMethod):
     """
     steps: int = 32
     maxshrink: float = 0.8
+    # The dict/JSON parser reads the dataclass field default, not the
+    # constructor signature, so this override must match ``__init__`` or
+    # ``smooth="mse"`` keeps the clipping smoothers' 128 default (#5572).
+    group_size_threshold: int = 0
 
     def __init__(self, steps: int = 32, maxshrink: float = 0.8, group_size_threshold: int = 0):
         """Configure search granularity for MSE-based shrinking.

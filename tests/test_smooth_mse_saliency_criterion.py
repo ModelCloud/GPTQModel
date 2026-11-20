@@ -550,3 +550,40 @@ def test_default_smooth_mse_reaches_the_gptq_fallback_at_group_size_64(monkeypat
 
     _gptq_fallback_grid(block, SmoothMSE(), group_size=64)
     assert captured, "the default SmoothMSE search was skipped at group_size=64"
+
+
+SMOOTH_CONFIG_FORMS = [SmoothMSE(), "mse", {"type": "mse"}]
+
+
+@pytest.mark.parametrize("smooth", SMOOTH_CONFIG_FORMS, ids=["object", "string", "dict"])
+def test_default_smooth_mse_threshold_agrees_across_config_forms(smooth):
+    """Every way of asking for the MSE smoother must resolve threshold 0 (#5572).
+
+    #5541 only changed the ``SmoothMSE.__init__`` default. The dict/string
+    builder reads the dataclass field default, which stayed at the clipping
+    smoothers' 128, so saved JSON/YAML and CLI configs silently skipped the
+    search at g32/g64.
+    """
+
+    assert smooth_applies(smooth, 32)
+    assert smooth_applies(smooth, 64)
+
+    config = RTNConfig(bits=4, group_size=64, smooth=smooth)
+    assert config.smooth.group_size_threshold == 0
+    assert smooth_applies(config.smooth, 32)
+    assert smooth_applies(config.smooth, 64)
+
+    fallback = Fallback(strategy=FallbackStrategy.RTN, smooth=smooth)
+    assert fallback.smooth.group_size_threshold == 0
+
+
+@pytest.mark.parametrize("smooth", SMOOTH_CONFIG_FORMS, ids=["object", "string", "dict"])
+def test_default_smooth_mse_from_every_config_form_reaches_the_rtn_search_at_g64(monkeypatch, smooth):
+    """The parsed forms must actually run the RTN search at g64 (#5572)."""
+
+    captured = _spy_mse_weights(monkeypatch, rtn_module)
+    torch.manual_seed(5572)
+    block = torch.randn(16, 64)
+
+    _rtn_grid(block, smooth, group_size=64)
+    assert captured, "the default SmoothMSE search was skipped at group_size=64"
