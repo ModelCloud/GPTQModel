@@ -339,12 +339,10 @@ class AwqGEMMLinear(AWQuantLinear):
     def _scales_for_compute(self, dtype: torch.dtype) -> torch.Tensor:
         """Return the stored scales converted for this computation only.
 
-        ``self.scales`` keeps the checkpoint dtype. The native kernel needs a
-        half-precision operand matching the activation, but rewriting the
-        registered buffer in place (the previous ``_ensure_runtime_dtype``
-        behavior) permanently narrowed the stored precision: one BF16 forward
-        on an FP16 checkpoint changed 87% of the scales, so every later FP16
-        forward and any re-saved checkpoint used the rounded values.
+        ``self.scales`` keeps the checkpoint dtype so a re-saved checkpoint is
+        bit-exact. The native kernel needs a half-precision operand matching
+        the activation dtype, which is locked for the run
+        (contracts/kernel/forward-dtype.md).
         """
 
         scales = self.scales

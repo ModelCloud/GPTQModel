@@ -6,13 +6,18 @@ required for both dispatch and correctness: Tenstorrent's current PJRT lowering
 does not provide the exact packed-word integer operations used by the portable
 Torch GPTQ kernel.
 
-There are two Tenstorrent backends, both validated on four Blackhole p300c
+There are three Tenstorrent backends, all validated on four Blackhole p300c
 cards:
 
 | Backend | Kernel | Execution path | Reaches TTNN |
 | --- | --- | --- | --- |
 | `BACKEND.GPTQ_TT_XLA` | `XLALinear` | Python -> Torch/XLA -> StableHLO -> PJRT TT -> TT-MLIR | indirectly, bundled in the PJRT plugin |
 | `BACKEND.GPTQ_TTNN` | `TTNNLinear` | Python -> `ttnn.MeshDevice` | directly, no StableHLO or PJRT |
+| `BACKEND.GPTQ_TT_BF8` | `TTNNBlockFloat8Linear` | Python -> `ttnn.MeshDevice`, weights converted to `bf8_b` | directly, no StableHLO or PJRT |
+
+The two `ttnn.MeshDevice` backends are grouped by
+`gptqmodel/utils/backend.py:NATIVE_TTNN_BACKENDS`; device selection, host
+staging, device counting and the thermal gate all branch on that one set.
 
 `AUTO` still resolves to `XLALinear` so an existing model load never changes
 execution backend silently; the native kernel must be requested explicitly.
@@ -400,6 +405,14 @@ which measured no latency difference at row counts 6, 64 and 128. The residual
 is the Tensix FMA floor: storing inputs as `float32` instead of BF16 does not
 reduce it (`max abs 0.00164` against float64 with FP32 storage).
 
+`TTNNBlockFloat8Linear` uses the same configuration. On a `768x768` BF8
+projection whose weights are exactly representable and 16 BF16 activation rows,
+the default LoFi path measured relative L2 drift `6.9e-3` (4654 of 6144 values
+outside `atol=rtol=2e-3`) versus `8.4e-4` (602 outside) with HiFi4. The added
+fidelity cost 14 % of forward latency on one chip and 5 % on four chips at
+batch 8. LoFi also rounded the exact cancellation `258 + (-256)` to zero; HiFi4
+keeps the two.
+
 ## GDDR thermal pacing
 
 A Blackhole p300c throttles GDDR at 90 C and shuts the card down at 110 C.
@@ -512,13 +525,20 @@ sequenceDiagram
     P->>R: open_mesh device_count 4 fabric FABRIC_1D
     R->>R: set_fabric_config FABRIC_1D
     R->>M: open_mesh_device MeshShape 1 4
-    P->>M: weights shard dim 0, zeros and scales shard dim 1
+    P->>M: weights shard dim 0, zeros repacked per shard, scales shard dim 1
     P->>M: activations replicated
     M->>C: per-chip dequant and GEMM on out_features slice
     C-->>M: local output rows by 192 columns
     M->>M: all_gather dim 1
     M-->>P: 768 output features
 ```
+
+The checkpoint packs zero points along the full output width, so a word can
+straddle a shard boundary: `out_features=40` on four chips packs into five
+global words, while each ten-column shard needs two padded words.
+`_shard_zero_words` decodes the logical nibbles, splits by output column, and
+repacks every shard before the dim-1 mapper runs; slicing the global words by
+column instead fails the mesh shard-shape check at `post_init`.
 
 Operational requirements and measured behavior:
 
@@ -581,7 +601,7 @@ names the family. The distinction lives in `backend`:
 
 | `backend` | Runtime that owns the chips | Where activations live |
 | --- | --- | --- |
-| `GPTQ_TTNN` | TT-Metal mesh opened by `ttnn_runtime` | host between layers, device inside a resident chain |
+| `GPTQ_TTNN`, `GPTQ_TT_BF8` | TT-Metal mesh opened by `ttnn_runtime` | host between layers, device inside a resident chain |
 | `GPTQ_TT_XLA` | PJRT plugin (which wraps its own `MeshDevice`) | `xla:N` tensors |
 
 **Rule: decide with `backend`, never with `device`.** Resolving the *device*
@@ -594,11 +614,21 @@ which now take `backend` and count over PCIe for the native path.
 The native kernel uploads a layer's packed weights on demand in `forward`, so
 its parameters belong on the **host**. A layer-wise `xla:N` device map would
 send them through PJRT instead, which claims every chip and then collides with
-the mesh `post_init` opens. For `GPTQ_TTNN` the loader therefore pins
-`device_map = {"": "cpu"}`.
+the mesh `post_init` opens. For every backend in `NATIVE_TTNN_BACKENDS` the
+loader therefore pins `device_map = {"": "cpu"}`.
 
 This is also why `{"": "xla"}` is **not** a substitute: `simple_dispatch_model`
 would call `.to("xla")` and initialize PJRT anyway.
+
+An indexed request is therefore read as the **chip**, not as checkpoint
+placement. `device="xla:1"` stages the checkpoint on CPU and passes ordinal 1
+to every native kernel, which forwards it to
+`open_mesh(device_count=1, device_id=1, ...)`. A request that names more than
+one chip — a layer-wise `xla:N` map or a `device=(...)` pool — is rejected,
+because the kernel owns one mesh per process and the mesh size is chosen per
+layer, not by the checkpoint map. `xla:0` pins chip 0; a bare `xla` names no
+chip, so the kernel keeps its default of chip 0 and the loader sets no
+`ttnn_device_id` at all.
 
 ### 3. Context ownership is one owner per chip, per process
 

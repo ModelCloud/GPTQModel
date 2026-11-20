@@ -46,7 +46,12 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.tt_packing import TT_GPTQ_PACK_FACTOR, _repack_zero_words, _require_4bit_gptq
+from ...utils.tt_packing import (
+    TT_GPTQ_PACK_BITS,
+    TT_GPTQ_PACK_FACTOR,
+    _repack_zero_words,
+    _require_4bit_gptq,
+)
 from ...utils.ttnn_runtime import (
     TTNNMesh,
     TTNNUnavailable,
@@ -85,6 +90,38 @@ class TTNNPackedLayer:
 
 def _ceil_div(value: int, divisor: int) -> int:
     return (value + divisor - 1) // divisor
+
+
+def _shard_zero_words(
+    zero_words: torch.Tensor, *, out_features: int, device_count: int
+) -> torch.Tensor:
+    """Repack the global zero table into one padded word row per mesh shard.
+
+    A checkpoint packs zero points along the full output width, so a word can
+    straddle a shard boundary: with ``out_features=40`` and four chips each
+    shard owns ten columns but needs two whole words, while the global table has
+    only five. Sharding those words by column gives a shard neither the whole
+    word nor the right bit lane. Decode the logical nibbles, split by output
+    column, and pack each shard separately so the column mapper receives
+    ``device_count * ceil(shard_out / 8)`` words.
+    """
+
+    if device_count == 1:
+        return zero_words
+    groups = zero_words.shape[0]
+    lane_shifts = torch.arange(0, 32, TT_GPTQ_PACK_BITS, dtype=torch.int64).view(1, 1, -1)
+    nibbles = (zero_words.to(torch.int64).unsqueeze(-1) >> lane_shifts) & 0xF
+    logical = nibbles.reshape(groups, -1)[:, :out_features]
+    shard_out = out_features // device_count
+    shifts = torch.arange(0, 32, TT_GPTQ_PACK_BITS, dtype=torch.int64)
+    packed = []
+    for shard in logical.split(shard_out, dim=1):
+        pad = (-shard_out) % TT_GPTQ_PACK_FACTOR
+        if pad:
+            shard = torch.nn.functional.pad(shard, (0, pad))
+        words = (shard.reshape(groups, -1, TT_GPTQ_PACK_FACTOR) << shifts).sum(-1)
+        packed.append(words.to(torch.uint32))
+    return torch.cat(packed, dim=1).contiguous()
 
 
 def _ttnn_arch(ttnn):
@@ -220,6 +257,7 @@ class TTNNLinear(GPTQQuantLinear):
         return open_mesh(
             device_count=self._requested_device_count(),
             fabric=self._fabric_config(),
+            device_id=self._requested_device_id(),
         )
 
     def _requested_device_count(self) -> int:
@@ -227,6 +265,12 @@ class TTNNLinear(GPTQQuantLinear):
         if requested is None:
             return 1
         return int(requested)
+
+    def _requested_device_id(self) -> int:
+        # The loader resolves an explicit `xla:N` request to this ordinal; a
+        # bare `xla` or an unplaced load keeps the historical chip 0.
+        requested = getattr(self, "ttnn_device_id", None)
+        return 0 if requested is None else int(requested)
 
     def _fabric_config(self) -> str:
         # Collectives are only used when more than one chip participates.
@@ -246,6 +290,7 @@ class TTNNLinear(GPTQQuantLinear):
             tuple(tensor_cache_key(t) for t in tensors),
             self.qzero_format(),
             self._requested_device_count(),
+            self._requested_device_id(),
         )
 
     def _build_layer(self) -> TTNNPackedLayer:
@@ -295,6 +340,11 @@ class TTNNLinear(GPTQQuantLinear):
         shard_out = self.out_features // device_count
         out_words_per_device = _ceil_div(shard_out, TT_GPTQ_PACK_FACTOR)
         zero_words_per_group = _ceil_div(self.out_features, TT_GPTQ_PACK_FACTOR)
+        # Repack per shard before the column mapper: a globally packed word may
+        # straddle two shards and cannot be sliced at a column boundary.
+        zero_words = _shard_zero_words(
+            zero_words, out_features=self.out_features, device_count=device_count
+        )
 
         def _upload(tensor, dtype, mesh_mapper=None):
             host = ttnn.from_torch(

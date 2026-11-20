@@ -184,15 +184,20 @@ def test_q4nx_packed_cuda_decode_matches_oracle_for_decode_and_prefill(bits, mon
     packed_cpu = _packed(outputs, bits=bits, codebook="q4nx")
     dense = _oracle_weight(packed_cpu)[:, :outputs].cuda().double()
     packed = {name: tensor.cuda() for name, tensor in packed_cpu.items()}
-    layer = ExllamaV3Linear.from_tensors(in_features=128, out_features=outputs, name="kv_a", tensors=packed)
-    inner = layer._ensure_inner()
 
     def forbidden_fallback(*unused, **kwargs):
         pytest.fail("Q4NX forward should decode inside the packed CUDA GEMM")
 
-    monkeypatch.setattr(inner, "get_inner_weight_tensor", forbidden_fallback)
-    monkeypatch.setattr(layer, "_ensure_torch_inner", forbidden_fallback)
+    layers = {}
     for rows, dtype in ((1, torch.float16), (17, torch.bfloat16), (65, torch.float16)):
+        # One activation dtype per module (contracts/kernel/forward-dtype.md).
+        if dtype not in layers:
+            layer = ExllamaV3Linear.from_tensors(in_features=128, out_features=outputs, name="kv_a", tensors=packed)
+            inner = layer._ensure_inner()
+            monkeypatch.setattr(inner, "get_inner_weight_tensor", forbidden_fallback)
+            monkeypatch.setattr(layer, "_ensure_torch_inner", forbidden_fallback)
+            layers[dtype] = (layer, inner)
+        layer, inner = layers[dtype]
         x = torch.linspace(-0.5, 0.5, rows * 128, device="cuda").reshape(rows, 128).to(dtype)
         expected = (x.double() @ dense + packed["bias"].double()).float()
         raw = inner.forward(x.half(), {}, out_dtype=torch.float32)[..., :outputs]
@@ -429,21 +434,18 @@ def test_native_wide_fallback_preserves_checkpoint_and_packed_buffer_lifecycle(d
     torch.testing.assert_close(module(x), first_output, rtol=0, atol=0)
     check_packed_state()
 
-    pre_move_helper = module._torch_inner
-    module.to(dtype=torch.float32)
-    assert module._torch_inner is None
-    moved_output = module(x)
-    assert module._torch_inner is not pre_move_helper
-    torch.testing.assert_close(moved_output.float(), reference, rtol=2e-3, atol=2e-3)
-    moved_bytes = checkpoint_bytes + module.bias.numel() * 2  # FP16 bias becomes FP32.
-    check_packed_state(moved_bytes)
+    # Weight dtypes are frozen after the first forward
+    # (contracts/kernel/forward-dtype.md).
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        module.to(dtype=torch.float32)
+    check_packed_state()
 
     pre_clear_helper = module._torch_inner
     module.clear_weight_cache()
     assert module._torch_inner is None
-    torch.testing.assert_close(module(x), moved_output, rtol=0, atol=0)
+    torch.testing.assert_close(module(x), first_output, rtol=0, atol=0)
     assert module._torch_inner is not pre_clear_helper
-    check_packed_state(moved_bytes)
+    check_packed_state()
 
 
 @pytest.mark.cpu

@@ -4644,8 +4644,16 @@ class AWQProcessor(LoopProcessor):
             module: nn.Module,
             module2inspect: Optional[nn.Module] = None,
             replay_targets=(),
+            all_experts: bool = True,
     ):
-        """Run a replay with the same MoE routing that captured its features."""
+        """Run a replay with the same MoE routing that captured its features.
+
+        ``all_experts`` re-enters the bypass lifecycle so the reference pass can
+        observe every member of a routed scale group (#4223). Candidate scale
+        replays do not read that observation and discard the wrapper's output,
+        so they pass ``False`` and keep native routing plus the top-k override
+        instead of running every expert on all tokens for every candidate.
+        """
 
         with ExitStack() as stack:
             override = self._replay_moe_routing_override()
@@ -4653,14 +4661,15 @@ class AWQProcessor(LoopProcessor):
                 state = set_moe_topk(module, override)
                 stack.callback(restore_moe_topk, state)
 
-            bypass = self._moe_bypass_replay(module, module2inspect)
-            if bypass is not None:
-                hooks, moe_block, experts_module = bypass
-                stack.enter_context(
-                    self._all_experts_replay_forward(
-                        hooks, moe_block, experts_module, replay_targets,
+            if all_experts:
+                bypass = self._moe_bypass_replay(module, module2inspect)
+                if bypass is not None:
+                    hooks, moe_block, experts_module = bypass
+                    stack.enter_context(
+                        self._all_experts_replay_forward(
+                            hooks, moe_block, experts_module, replay_targets,
+                        )
                     )
-                )
             yield
 
     def _moe_bypass_replay(self, module: nn.Module, module2inspect: Optional[nn.Module]):
@@ -5014,33 +5023,38 @@ class AWQProcessor(LoopProcessor):
                 member_names, resolved_cfgs, group_sizes, formats = resolve_members(layers)
                 w_mean = _compute_awq_weight_mean(layers, group_sizes)
 
-            # [STEP 4]: Compute loss
-            best_scale_kwargs = {
-                "replay_batch_size": replay_batch_size,
-                "prepared_forward": prepared_forward,
-                "bits": (
-                    [
-                        self._module_bits(name, resolved_cfg=cfg)
-                        for name, cfg in zip(member_names, resolved_cfgs)
-                    ]
-                    if bits is None
-                    else bits
-                ),
-                "group_sizes": group_sizes,
-                "syms": [
-                    self._module_sym(name, resolved_cfg=cfg)
+        # [STEP 4]: Compute loss
+        best_scale_kwargs = {
+            "replay_batch_size": replay_batch_size,
+            "prepared_forward": prepared_forward,
+            "bits": (
+                [
+                    self._module_bits(name, resolved_cfg=cfg)
                     for name, cfg in zip(member_names, resolved_cfgs)
-                ],
-            }
-            if any(module_format != default_format for module_format in formats):
-                best_scale_kwargs["formats"] = formats
+                ]
+                if bits is None
+                else bits
+            ),
+            "group_sizes": group_sizes,
+            "syms": [
+                self._module_sym(name, resolved_cfg=cfg)
+                for name, cfg in zip(member_names, resolved_cfgs)
+            ],
+        }
+        if any(module_format != default_format for module_format in formats):
+            best_scale_kwargs["formats"] = formats
 
-            consumer_modules = None
-            if scale_consumers:
-                consumer_modules = [get_op_by_name(module, name) for name in scale_consumers]
-            if consumer_modules:
-                best_scale_kwargs["scale_consumers"] = consumer_modules
+        consumer_modules = None
+        if scale_consumers:
+            consumer_modules = [get_op_by_name(module, name) for name in scale_consumers]
+        if consumer_modules:
+            best_scale_kwargs["scale_consumers"] = consumer_modules
 
+        # The candidate grid only reads the native routed output, so skip the
+        # all-experts observation wrapper and keep the top-k override.
+        with self._moe_replay_routing(
+                module, module2inspect, replay_targets, all_experts=False,
+        ):
             best_scales, loss = self._compute_best_scale(
                 inp,
                 w_mean,

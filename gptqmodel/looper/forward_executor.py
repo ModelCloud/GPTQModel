@@ -95,6 +95,20 @@ class ForwardExecutor:
             collection[index] = value
 
     @staticmethod
+    def _release_consumed_input(layer_inputs, batch_idx: int) -> None:
+        """Drop one replayed batch from a mutable input cache at its last use.
+
+        A post-quant replay that feeds ``receive_layer_inputs`` is the final
+        reader of the cached activations. Emptying each slot as its output is
+        stored keeps the previous activation set from staying resident until
+        the whole replay ends. Disk-backed caches are immutable and hold no
+        resident activations, so only list-backed caches are cleared.
+        """
+
+        if isinstance(layer_inputs, list):
+            layer_inputs[batch_idx] = []
+
+    @staticmethod
     def _store_missing_output(collection, index: int) -> None:
         """Keep the batch's slot when its forward legitimately produced nothing."""
 
@@ -248,6 +262,7 @@ class ForwardExecutor:
         force_serial: bool = False,
         preserve_module_devices: bool = False,
         apply_moe_config: bool = True,
+        consume_inputs: bool = False,
         select_forward_devices_fn: Callable[[Optional[torch.device]], List[torch.device]] = select_forward_devices,
     ) -> List[List[torch.Tensor]]:
         """Dispatch the cached batches through the most appropriate forward path."""
@@ -280,6 +295,7 @@ class ForwardExecutor:
                 progress_total_rows=progress_total_rows,
                 preserve_module_devices=preserve_module_devices,
                 apply_moe_config=apply_moe_config,
+                consume_inputs=consume_inputs,
             )
 
         devices = select_forward_devices_fn(cur_layer_device)
@@ -316,6 +332,7 @@ class ForwardExecutor:
                 progress_total_rows=progress_total_rows,
                 preserve_module_devices=preserve_module_devices,
                 apply_moe_config=apply_moe_config,
+                consume_inputs=consume_inputs,
             )
 
         return self.run_parallel(
@@ -341,6 +358,7 @@ class ForwardExecutor:
             progress_rows_per_batch=progress_rows_per_batch,
             progress_total_rows=progress_total_rows,
             apply_moe_config=apply_moe_config,
+            consume_inputs=consume_inputs,
         )
 
     def run_single(
@@ -367,6 +385,7 @@ class ForwardExecutor:
         progress_total_rows: Optional[int] = None,
         preserve_module_devices: bool = False,
         apply_moe_config: bool = True,
+        consume_inputs: bool = False,
     ) -> List[List[torch.Tensor]]:
         """Run the forward pass sequentially on the current device."""
 
@@ -593,6 +612,10 @@ class ForwardExecutor:
                         progress_pb.title(progress_title)
                     progress_pb.current_iter_step = processed_rows
                     progress_pb.subtitle(f"{stage_label} rows {processed_rows}/{total_rows}").draw()
+                if consume_inputs:
+                    # This replay is the last reader of the cached activations.
+                    self._release_consumed_input(layer_inputs, batch_idx)
+                    cached_layer_inputs = []
             finally:
                 processor._set_current_batch_index(None)
 
@@ -624,6 +647,7 @@ class ForwardExecutor:
         progress_rows_per_batch: Optional[List[int]] = None,
         progress_total_rows: Optional[int] = None,
         apply_moe_config: bool = True,
+        consume_inputs: bool = False,
         clone_module_for_devices_fn=clone_module_for_devices,
         forward_batch_worker_fn=forward_batch_worker,
         device_thread_pool=DEVICE_THREAD_POOL,
@@ -907,6 +931,11 @@ class ForwardExecutor:
                             progress_pb.title(progress_title)
                         progress_pb.current_iter_step = processed_rows
                         progress_pb.subtitle(f"{stage_label} rows {processed_rows}/{total_rows}").draw()
+
+                    if consume_inputs:
+                        # Every worker for this batch has resolved, so the
+                        # cached activation is no longer read.
+                        self._release_consumed_input(layer_inputs, batch_idx)
         finally:
             for ctx in moe_contexts:
                 try:

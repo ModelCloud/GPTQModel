@@ -240,6 +240,45 @@ The regression coverage is
 `tests/test_hessian_fallback_contracts.py`; every case fails on the parent
 commit and passes after this change.
 
+### 4.1 Damping recovery inside the Hessian solve
+
+`GPTQ.hessian_inverse` and `QQQ._quantize_impl` both call
+`recover_damped_hessian_factor` (`gptqmodel/quantization/gptq.py`). The helper
+probes `damp_percent` on the untouched diagonal, then the additive
+`damp_auto_increment` grid, then a diagonal floor; `damp_auto_increment=0` is
+the explicit no-recovery control. QQQ keeps its own inverse-factor convention
+(lower Cholesky factor, then the inverse's upper factor), so only the damping
+decision is shared.
+
+```mermaid
+flowchart TD
+    A["QQQ._quantize_impl / GPTQ.hessian_inverse"] --> B["recover_damped_hessian_factor(H)"]
+    B --> C{"try_factor at damp_percent"}
+    C -- success --> S["return factor, damp_percent"]
+    C -- failure --> D{"damp_auto_increment == 0"}
+    D -- yes --> E["try diagonal floor"]
+    D -- no --> F["probe damp_percent + increment"]
+    F -- success --> S2["return factor, candidate damp"]
+    F -- failure --> G["walk additive grid, endpoint first"]
+    G -- success --> S2
+    G -- failure --> E
+    E -- success --> S3["return factor, floor candidate"]
+    E -- failure --> N["return None, 1.0"]
+    N --> R["QQQ: configured fallback or LinAlgError;<br/>GPTQ: existing no-Hessian fallback"]
+    style S fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+    style S2 fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+    style S3 fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+    style N fill:#f9d5d5,stroke:#af3b3b,color:#222
+    style R fill:#f9d5d5,stroke:#af3b3b,color:#222
+```
+
+A CUDA allocation failure during the solve is not a numerical failure: QQQ
+restores the original diagonal, moves `H`/`W` to the host, and re-runs the same
+recovery there. A matrix that stays non-positive-definite through every
+candidate returns `None`; QQQ then applies its configured sample-count fallback
+or raises `torch._C._LinAlgError`, and GPTQ uses its existing fallback. The
+regression coverage is `tests/test_qqq_damp_recovery_5858.py`.
+
 ## 5. Uncovered-module prune with `fallback=None`
 
 With `fallback=None`, a module that never received calibration input (usually

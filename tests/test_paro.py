@@ -5912,7 +5912,11 @@ def test_paro_processor_compute_block_scope_strips_hooked_linear_wrappers():
 
 
 def test_paro_processor_layer_scope_strips_hooked_linear_wrappers():
-    """Layer-scope live optimization must unwrap HookedLinear so training does not re-enter inference mode."""
+    """Layer scope trains on an unwrapped FP32 copy and leaves the live layer alone.
+
+    The copy drops HookedLinear so training does not re-enter inference mode;
+    the live layer keeps its wrappers and dtypes (contracts/kernel/forward-dtype.md).
+    """
 
     class _ToyNorm(torch.nn.Module):
         def __init__(self):
@@ -6008,13 +6012,12 @@ def test_paro_processor_layer_scope_strips_hooked_linear_wrappers():
 
     assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
     assert val_loss >= 0.0
-    assert hooked_layer.self_attn.o_proj.__class__ is torch.nn.Linear
+    hooked_cls = type(hooked_layer.self_attn.o_proj)
+    assert hooked_cls is not torch.nn.Linear
     assert q_proj.module is hooked_layer.self_attn.q_proj
     assert k_proj.module is hooked_layer.self_attn.k_proj
     assert v_proj.module is hooked_layer.self_attn.v_proj
-    assert q_proj.module.__class__ is torch.nn.Linear
-    assert k_proj.module.__class__ is torch.nn.Linear
-    assert v_proj.module.__class__ is torch.nn.Linear
+    assert type(q_proj.module) is hooked_cls
 
     q_proj_result = results["self_attn.q_proj"]
     original_weight = processor._module_weight_matrix(q_proj).detach().clone()
@@ -6080,6 +6083,9 @@ def test_paro_processor_layer_scope_restores_live_layer_dtype_after_fp32_trainin
         return default
 
     layer = _ToyLayer()
+    # A tensor the live layer keeps wider than the projections must not be
+    # narrowed by layer-scope training.
+    layer.post_attention_layernorm.register_buffer("wide", torch.full((8,), 1 + 2**-20, dtype=torch.float32))
     x = torch.randn(1, 2, 8, dtype=torch.bfloat16)
     y = layer(x).detach()
 
@@ -6140,6 +6146,9 @@ def test_paro_processor_layer_scope_restores_live_layer_dtype_after_fp32_trainin
     assert layer.self_attn.v_proj.weight.dtype == torch.bfloat16
     assert layer.self_attn.o_proj.weight.dtype == torch.bfloat16
     assert layer.post_attention_layernorm.weight.dtype == torch.bfloat16
+    assert layer.post_attention_layernorm.wide.dtype == torch.float32
+    assert torch.all(layer.post_attention_layernorm.wide == 1 + 2**-20)
+    assert layer.config._attn_implementation == "flash_attention_2"
     assert layer(x).dtype == torch.bfloat16
 
 

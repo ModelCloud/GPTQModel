@@ -15,7 +15,7 @@ the text, or close the issue or PR.
 
 | Area | Contract | Rule in one line |
 | --- | --- | --- |
-| Kernel / module | [Forward dtype](kernel/forward-dtype.md) | The first forward sets the activation dtype. Every later forward uses the same dtype, and the output dtype matches the input dtype. A different dtype is a caller bug and must raise. |
+| Kernel / module | [Forward dtype](kernel/forward-dtype.md) | Kernel modules use one input dtype (output dtype = input dtype), and their weight dtypes are frozen after the first forward. Quantization may rewrite source weight values in their existing dtype, but never casts live modules. A violation is a caller bug and must raise. |
 
 ## Rules for agents and contributors
 

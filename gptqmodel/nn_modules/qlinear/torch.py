@@ -21,6 +21,7 @@ from ...nn_modules.qlinear import (
     BaseQuantLinear,
     PackableQuantLinear,
     _device_family,
+    require_no_forward,
     resolve_dequantize_dtype,
 )
 from ...quantization import FORMAT, METHOD
@@ -36,7 +37,7 @@ from ...utils.planar_packing import planar_decode_rows
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import dynamo_is_compiling, model_execution_device_scope, model_global_state_lock, torch_compile
 from ._compile_support import COMPILE_LEVEL
-from ._decode_dtype import decode_dtype_for_scales, scales_fit_dtype
+from ._decode_dtype import _HALF_DTYPES, decode_dtype_for_scales, scales_fit_dtype
 from ._g_idx import validate_g_idx_bounds
 from ._numerics import (
     _wants_fp32_reduce,
@@ -138,6 +139,31 @@ def _log_fallback_once(reason: str, message: str) -> None:
         return
     _LOGGED_FALLBACKS.add(reason)
     log.debug(message)
+
+
+def fused_scale_pair_supported(
+    scale_dtype: torch.dtype, activation_dtype: torch.dtype
+) -> bool:
+    """Whether the fused GPTQ kernels may read ``scale_dtype`` for this activation.
+
+    ``gptq_gemv``/``gptq_gemm`` load every scale, widen it to FP32, form the
+    decoded weight and round that product once to the activation dtype.  The
+    stored scale operand therefore does not have to be the activation dtype: it
+    only has to be one of the half dtypes the kernels were measured with.
+
+    GPTQ checkpoints store FP16 scales (``_scales_for_storage``) while a BF16
+    model runs BF16 activations, so that mixed pair is the one this admits
+    (#5740); before it, every BF16 model missed the fused kernels and paid the
+    dense dequantize + matmul fallback.  An equal pair keeps its previous
+    behaviour, and any other pair (for example FP32 scales with BF16
+    activations) keeps the dense path because the fused kernels are not
+    measured for it.  Range safety is a separate check
+    (``TorchLinear._decoded_weight_fits``), not part of this pair rule.
+    """
+
+    if scale_dtype == activation_dtype:
+        return True
+    return scale_dtype in _HALF_DTYPES and activation_dtype in _HALF_DTYPES
 
 
 def _right_shift_unpack(values: torch.Tensor, shifts: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -427,7 +453,13 @@ class TorchLinear(PackableQuantLinear):
             metadata = self._weight_metadata = _LinearWeightMetadata(self)
         return metadata
 
-    def dequantize_weight(self, num_itr: int = 1):
+    def dequantize_weight(self, num_itr: int = 1, dtype: torch.dtype | None = None):
+        """Reconstruct the packed weight, preferably in ``dtype``.
+
+        ``dtype`` is the caller's requested decode dtype (the base class takes
+        the same argument).  It is honoured only when every decoded weight fits
+        it; otherwise the range-safe decode keeps the reduction wide (#5606).
+        """
         # Triton dequant currently handles the common single-iteration layout.
         # Multi-iteration requests (num_itr > 1) are routed to the torch path below.
         if (
@@ -435,14 +467,14 @@ class TorchLinear(PackableQuantLinear):
             and self._triton_dequant_enabled
             and self._can_use_triton_dequant()
         ):
-            return self._dequantize_weight_triton()
+            return self._dequantize_weight_triton(dtype=dtype)
 
         # Eval-time fast path for 2/4/8-bit torch dequant.
         # This is also the fallback when Triton is enabled but not eligible.
         if not self.training and self.bits in (2, 4, 8):
-            return self._dequantize_weight_cached_248(num_itr=num_itr)
+            return self._dequantize_weight_cached_248(num_itr=num_itr, dtype=dtype)
 
-        return super().dequantize_weight(num_itr=num_itr)
+        return super().dequantize_weight(num_itr=num_itr, dtype=dtype)
 
     def optimize(self, backend: str = None, mode: str = None, fullgraph: bool = False):
         if self.optimized:
@@ -583,7 +615,12 @@ class TorchLinear(PackableQuantLinear):
             return out
 
         num_itr = self.g_idx.shape[0] // x.shape[-1]
-        weights = self.dequantize_weight(num_itr=num_itr)
+        # Decode into the forward's activation dtype when every weight fits it:
+        # the fallback narrows the weight to that dtype anyway, and decoding in
+        # a different half dtype first rounds it twice (#5740).
+        weights = self.dequantize_weight(
+            num_itr=num_itr, dtype=self._forward_decode_dtype(x.dtype)
+        )
         bias = self.bias
         if weights.dtype != x.dtype and not self._decoded_weight_fits(x.dtype):
             # The reconstructed weight is outside the activation dtype's finite
@@ -718,6 +755,13 @@ class TorchLinear(PackableQuantLinear):
         (RTX 4090 / SM 8.9), whose launch entries and gates are measured in the
         `gptq_gemv`/`gptq_gemm` tables.  Every other CUDA family keeps the
         portable dequantize + matmul path.
+
+        The scale dtype does not have to equal the activation dtype: the
+        kernels widen every scale to FP32 before the product, so
+        :func:`fused_scale_pair_supported` admits the FP16-scale/BF16-activation
+        pair a GPTQ checkpoint produces for a BF16 model (#5740).  The range
+        guard below still keeps a decode that would overflow the activation
+        dtype on the dense path.
         """
         return (
             (IS_ROCM or _arch_is_cuda_fused(x.device))
@@ -733,7 +777,7 @@ class TorchLinear(PackableQuantLinear):
             and self.g_idx.numel() == self.in_features
             and x.is_contiguous()
             and not x.requires_grad
-            and self.scales.dtype == x.dtype
+            and fused_scale_pair_supported(self.scales.dtype, x.dtype)
             # The fused kernels stage the decoded weight in the activation
             # dtype, so they are only range-safe when every decoded weight fits
             # it; otherwise the dense path keeps the reduction wide (#5606).
@@ -1159,11 +1203,11 @@ class TorchLinear(PackableQuantLinear):
             return False
         return True
 
-    def _dequantize_weight_triton(self) -> torch.Tensor:
+    def _dequantize_weight_triton(self, dtype: torch.dtype | None = None) -> torch.Tensor:
         # Use the Triton helper to decode weights directly on device. The
         # kernel accumulates in FP32 but stores the requested dtype, so a half
         # scale that overflows must ask for the range-safe decode (#5606).
-        dtype = self._decode_dtype()
+        dtype = self._resolve_decode_dtype(dtype)
         weights = triton_dequant(
             dtype,
             self.qweight,
@@ -1226,6 +1270,40 @@ class TorchLinear(PackableQuantLinear):
             return cached
         return decode_dtype_for_scales(self.scales, self.bits)
 
+    def _resolve_decode_dtype(self, dtype: torch.dtype | None) -> torch.dtype:
+        """Pick the decode dtype for a caller-requested ``dtype``.
+
+        A caller may ask for a dtype narrower than the range-safe decode; the
+        dense forward asks for its activation dtype.  Honour the request only
+        when every decoded weight fits it, and keep the range-safe decode
+        (#5606) otherwise.
+        """
+        safe = self._decode_dtype()
+        if dtype is None or dtype == safe:
+            return safe
+        if not self._decoded_weight_fits(dtype):
+            return safe
+        return dtype
+
+    def _forward_decode_dtype(self, activation_dtype: torch.dtype) -> torch.dtype:
+        """Decode dtype for the dense fallback of one forward.
+
+        The fallback narrows the reconstructed weight to ``activation_dtype``
+        anyway.  Decoding in a different half dtype first rounds every weight
+        twice and then copies the whole matrix: a GPTQ checkpoint stores FP16
+        scales, so a BF16 model decoded FP16 and narrowed to BF16, one bf16 ulp
+        away from the single rounding the fused kernels perform (#5740).  Ask
+        for the activation dtype when every decoded weight fits it; a decode
+        that does not fit keeps the range-safe dtype.
+        """
+        if (
+            activation_dtype in _HALF_DTYPES
+            and self.scales.dtype != activation_dtype
+            and self._decoded_weight_fits(activation_dtype)
+        ):
+            return activation_dtype
+        return self._decode_dtype()
+
     def _decoded_weight_fits(self, activation_dtype: torch.dtype) -> bool:
         """Whether every decoded weight is representable in ``activation_dtype``.
 
@@ -1241,7 +1319,9 @@ class TorchLinear(PackableQuantLinear):
                 return resolved
         return scales_fit_dtype(self.scales, self.bits, activation_dtype)
 
-    def _dequantize_weight_cached_248(self, num_itr: int = 1) -> torch.Tensor:
+    def _dequantize_weight_cached_248(
+        self, num_itr: int = 1, dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
         self._init_wf_unsqueeze_buffers()
         zeros = self._stream_decode_qzeros()
         g_idx_long = self._stream_g_idx_long(target_device=self.qweight.device)
@@ -1252,7 +1332,7 @@ class TorchLinear(PackableQuantLinear):
         # result, so the eval fast path used to return `inf`/`NaN` (#5606).
         # The scale dtype is kept whenever it is safe, so a finite fast path is
         # bitwise unchanged.
-        decode_dtype = self._decode_dtype()
+        decode_dtype = self._resolve_decode_dtype(dtype)
         wide = decode_dtype != self.scales.dtype
         if wide:
             zeros = zeros.to(decode_dtype)
@@ -1429,6 +1509,11 @@ class TorchQuantEmbeddings(TorchLinear):
 
         name = self._EMBEDDING_OUTPUT_DTYPE_BUFFER
         anchor = self._buffers.get(name)
+        # Only a module that already ran a forward is frozen; before that
+        # (including construction, before ``scales`` exists) any dtype is fine.
+        if (dtype is not None and getattr(self, "_forward_dtype_lock", None) is not None
+                and dtype != self.embedding_output_dtype()):
+            require_no_forward(self, f"change the embedding output dtype to {dtype}")
         if dtype is None:
             # Reset to the scale dtype, which is the historical fallback and
             # keeps following later module casts.

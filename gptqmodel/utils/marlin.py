@@ -620,23 +620,48 @@ def marlin_pad_awq_qweight(qweight: torch.Tensor, size_n: int, size_k: int,
     )
 
 
-def marlin_pad_awq_qzeros(qzeros: torch.Tensor, size_n: int, size_k: int,
-                          padded_n: int, padded_k: int, group_size: int,
-                          num_bits: int) -> torch.Tensor:
-    """Zero-pad AWQ packed zero-points to the padded group and N extents."""
+def marlin_pad_packed_qzeros(qzeros: torch.Tensor, size_n: int, size_k: int,
+                             padded_n: int, padded_k: int, group_size: int,
+                             num_bits: int, *,
+                             layout: str = "Packed") -> torch.Tensor:
+    """Zero-pad packed zero-point words to the padded group and N extents.
+
+    GPTQ and AWQ both store ``pack_factor`` consecutive output lanes per int32
+    word along N, so one helper pads either checkpoint layout before the Marlin
+    zero-point permutation. ``size_k`` is the logical input width and the group
+    count follows ``group_size`` (``-1`` is one channelwise group). Zero
+    padding keeps padded columns and groups inert once the matching weights and
+    scales are also zero.
+    """
     pack_factor = 32 // num_bits
     groups = size_k // group_size if group_size > 0 else 1
     padded_groups = padded_k // group_size if group_size > 0 else 1
     expected_shape = (groups, size_n // pack_factor)
     if tuple(qzeros.shape) != expected_shape:
         raise ValueError(
-            f"AWQ qzeros shape must be {expected_shape}, got {tuple(qzeros.shape)}."
+            f"{layout} qzeros shape must be {expected_shape}, got {tuple(qzeros.shape)}."
         )
     if (padded_n, padded_k) == (size_n, size_k):
         return qzeros
     return torch.nn.functional.pad(
         qzeros,
         (0, (padded_n - size_n) // pack_factor, 0, padded_groups - groups),
+    )
+
+
+def marlin_pad_awq_qzeros(qzeros: torch.Tensor, size_n: int, size_k: int,
+                          padded_n: int, padded_k: int, group_size: int,
+                          num_bits: int) -> torch.Tensor:
+    """Zero-pad AWQ packed zero-points to the padded group and N extents."""
+    return marlin_pad_packed_qzeros(
+        qzeros,
+        size_n,
+        size_k,
+        padded_n,
+        padded_k,
+        group_size,
+        num_bits,
+        layout="AWQ",
     )
 
 

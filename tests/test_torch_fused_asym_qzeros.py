@@ -137,9 +137,12 @@ def test_fused_cpu_asymmetric_qzeros_survive_eval_train_and_cache_clear():
     train_output.sum().backward()
     assert x_train.grad is not None and torch.isfinite(x_train.grad).all()
 
-    layer.to(dtype=torch.float32)
+    # Weight dtypes are frozen after the first forward
+    # (contracts/kernel/forward-dtype.md).
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        layer.to(dtype=torch.float32)
     assert torch.equal(layer.qzeros, checkpoint["qzeros"])
-    assert layer.scales.dtype == torch.float32
+    assert layer.scales.dtype == checkpoint["scales"].dtype
     layer.load_state_dict(checkpoint, strict=True)
     assert torch.equal(layer.qzeros, checkpoint["qzeros"])
 

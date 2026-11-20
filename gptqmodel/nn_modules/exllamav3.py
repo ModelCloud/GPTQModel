@@ -18,6 +18,7 @@ from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, trellis_rate
 from ..models._const import DEVICE, normalize_device
 from ..utils.kernel import KernelConfig, snapshot_kernel_config
 from . import exllamav3_bf16_kernels as _bf16_kernels
+from .forward_dtype_lock import ForwardDtypeLockMixin
 
 
 # Module-level names so a test (or a caller) can swap the fused ops for the
@@ -54,7 +55,7 @@ def _torch_dtype(value: Any) -> torch.dtype:
     raise TypeError(f"Unsupported torch dtype value: {value!r}")
 
 
-class ExllamaV3Linear(nn.Module):
+class ExllamaV3Linear(ForwardDtypeLockMixin, nn.Module):
     QUANT_TYPE = "exl3"
     # The trellis codes and sign vectors are the EXL3 payload. The sign
     # vectors are stored either unpacked (`suh`/`svh`) or packed (`su`/`sv`),
@@ -132,6 +133,8 @@ class ExllamaV3Linear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.name = name
+        # Forward dtype contract: set by the first eager forward.
+        self._forward_dtype_lock = None
         self.out_dtype = out_dtype
         self.kernel = snapshot_kernel_config(kernel)
         self.tensor_storage = tensor_storage or {}

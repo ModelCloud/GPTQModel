@@ -195,79 +195,87 @@ class TestAwqKernelOutput(unittest.TestCase):
         cls.in_features = qweight_cpu.shape[0]
         cls.out_features = qweight_cpu.shape[1] * (32 // cls.BITS)
 
-        cls.modules: Dict[BACKEND, Optional[torch.nn.Module]] = {}
+        # One module set per activation dtype: a module serves a single
+        # activation dtype (contracts/kernel/forward-dtype.md).
+        def build_modules() -> Dict[BACKEND, Optional[torch.nn.Module]]:
+            modules: Dict[BACKEND, Optional[torch.nn.Module]] = {}
 
-        cls.modules[cls.baseline_backend] = cls._build_torch_awq_module(
-            qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
-        )
-
-        cls.modules[BACKEND.GEMM] = (
-            cls._build_gemm_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
-            if cls.cuda_available and BACKEND.GEMM not in cls.backend_skip_reason
-            else None
-        )
-
-        try:
-            cls.modules[BACKEND.BITBLAS_AWQ] = (
-                cls._build_bitblas_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
-                if BACKEND.BITBLAS_AWQ not in cls.backend_skip_reason
-                else None
-            )
-        except Exception as exc:
-            cls.backend_skip_reason[BACKEND.BITBLAS_AWQ] = f"AWQ BitBLAS kernel unavailable: {exc}"
-            cls.modules[BACKEND.BITBLAS_AWQ] = None
-
-        try:
-            cls.modules[BACKEND.MACHETE] = (
-                cls._build_machete_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
-                if BACKEND.MACHETE not in cls.backend_skip_reason
-                else None
-            )
-        except Exception as exc:
-            cls.backend_skip_reason[BACKEND.MACHETE] = f"AWQ Machete kernel unavailable: {exc}"
-            cls.modules[BACKEND.MACHETE] = None
-
-        try:
-            cls.modules[BACKEND.TRITON] = (
-                cls._build_gemm_triton_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
-                if cls.cuda_available and BACKEND.TRITON not in cls.backend_skip_reason
-                else None
-            )
-        except Exception as exc:
-            cls.backend_skip_reason[BACKEND.TRITON] = f"AWQ Triton kernel unavailable: {exc}"
-            cls.modules[BACKEND.TRITON] = None
-
-        cls.modules[BACKEND.MARLIN] = (
-            cls._build_marlin_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
-            if cls.cuda_available and BACKEND.MARLIN not in cls.backend_skip_reason
-            else None
-        )
-
-        cls.modules[BACKEND.EXLLAMA_V2] = (
-            cls._build_exllama_v2_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
-            if cls.cuda_available and BACKEND.EXLLAMA_V2 not in cls.backend_skip_reason
-            else None
-        )
-
-        try:
-            cls.modules[BACKEND.SWORDFISH] = (
-                cls._build_swordfish_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
-                if BACKEND.SWORDFISH not in cls.backend_skip_reason
-                else None
-            )
-        except Exception as exc:
-            cls.backend_skip_reason[BACKEND.SWORDFISH] = f"AWQ Swordfish kernel unavailable: {exc}"
-            cls.modules[BACKEND.SWORDFISH] = None
-
-        try:
-            cls.modules[BACKEND.TORCH_FUSED_AWQ] = cls._build_torch_fused_awq_module(
+            modules[cls.baseline_backend] = cls._build_torch_awq_module(
                 qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
             )
-        except Exception as exc:
-            cls.backend_skip_reason[BACKEND.TORCH_FUSED_AWQ] = (
-                f"Torch fused AWQ kernel unavailable: {exc}"
+
+            modules[BACKEND.GEMM] = (
+                cls._build_gemm_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+                if cls.cuda_available and BACKEND.GEMM not in cls.backend_skip_reason
+                else None
             )
-            cls.modules[BACKEND.TORCH_FUSED_AWQ] = None
+
+            try:
+                modules[BACKEND.BITBLAS_AWQ] = (
+                    cls._build_bitblas_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+                    if BACKEND.BITBLAS_AWQ not in cls.backend_skip_reason
+                    else None
+                )
+            except Exception as exc:
+                cls.backend_skip_reason[BACKEND.BITBLAS_AWQ] = f"AWQ BitBLAS kernel unavailable: {exc}"
+                modules[BACKEND.BITBLAS_AWQ] = None
+
+            try:
+                modules[BACKEND.MACHETE] = (
+                    cls._build_machete_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+                    if BACKEND.MACHETE not in cls.backend_skip_reason
+                    else None
+                )
+            except Exception as exc:
+                cls.backend_skip_reason[BACKEND.MACHETE] = f"AWQ Machete kernel unavailable: {exc}"
+                modules[BACKEND.MACHETE] = None
+
+            try:
+                modules[BACKEND.TRITON] = (
+                    cls._build_gemm_triton_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+                    if cls.cuda_available and BACKEND.TRITON not in cls.backend_skip_reason
+                    else None
+                )
+            except Exception as exc:
+                cls.backend_skip_reason[BACKEND.TRITON] = f"AWQ Triton kernel unavailable: {exc}"
+                modules[BACKEND.TRITON] = None
+
+            modules[BACKEND.MARLIN] = (
+                cls._build_marlin_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+                if cls.cuda_available and BACKEND.MARLIN not in cls.backend_skip_reason
+                else None
+            )
+
+            modules[BACKEND.EXLLAMA_V2] = (
+                cls._build_exllama_v2_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+                if cls.cuda_available and BACKEND.EXLLAMA_V2 not in cls.backend_skip_reason
+                else None
+            )
+
+            try:
+                modules[BACKEND.SWORDFISH] = (
+                    cls._build_swordfish_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+                    if BACKEND.SWORDFISH not in cls.backend_skip_reason
+                    else None
+                )
+            except Exception as exc:
+                cls.backend_skip_reason[BACKEND.SWORDFISH] = f"AWQ Swordfish kernel unavailable: {exc}"
+                modules[BACKEND.SWORDFISH] = None
+
+            try:
+                modules[BACKEND.TORCH_FUSED_AWQ] = cls._build_torch_fused_awq_module(
+                    qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
+                )
+            except Exception as exc:
+                cls.backend_skip_reason[BACKEND.TORCH_FUSED_AWQ] = (
+                    f"Torch fused AWQ kernel unavailable: {exc}"
+                )
+                modules[BACKEND.TORCH_FUSED_AWQ] = None
+            return modules
+
+        cls.modules_by_dtype: Dict[torch.dtype, Dict[BACKEND, Optional[torch.nn.Module]]] = {
+            dtype: build_modules() for dtype in cls.SUPPORTED_DTYPES
+        }
 
         base_inputs = cls._generate_inputs()
         cls.inputs: Dict[torch.dtype, List[torch.Tensor]] = {}
@@ -279,7 +287,7 @@ class TestAwqKernelOutput(unittest.TestCase):
                 for tensor in base_inputs
             ]
             cls.inputs[dtype] = converted_inputs
-            torch_module = cls.modules.get(cls.baseline_backend)
+            torch_module = cls.modules_by_dtype[dtype].get(cls.baseline_backend)
             if torch_module is None:
                 raise unittest.SkipTest("Torch AWQ kernel unavailable for baseline.")
 
@@ -290,9 +298,8 @@ class TestAwqKernelOutput(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        for module in getattr(cls, "modules", {}).values():
-            if module is not None:
-                del module
+        for modules in getattr(cls, "modules_by_dtype", {}).values():
+            modules.clear()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -796,7 +803,7 @@ class TestAwqKernelOutput(unittest.TestCase):
     def test_awq_kernel_outputs(self, backend: BACKEND, dtype: torch.dtype, atol: float) -> None:
         self._maybe_skip_backend(backend)
 
-        module = self.modules.get(backend)
+        module = self.modules_by_dtype[dtype].get(backend)
         if module is None:
             self.skipTest(f"Backend `{backend}` module unavailable.")
 

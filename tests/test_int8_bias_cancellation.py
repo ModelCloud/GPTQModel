@@ -7,6 +7,7 @@ import torch
 
 from gptqmodel.nn_modules.qlinear.torch_int8 import (
     INT8_GROUP_OFFSET_BUFFER_NAME,
+    INT8_GROUP_OFFSETS_BUFFER_NAME,
     INT8_GROUP_SCALE_BUFFER_NAME,
     INT8_INPUT_PERM_BUFFER_NAME,
     INT8_WEIGHT_BUFFER_NAME,
@@ -159,6 +160,7 @@ def test_asymmetric_forward_keeps_quantized_storage_only():
         INT8_WEIGHT_BUFFER_NAME,
         INT8_GROUP_SCALE_BUFFER_NAME,
         INT8_GROUP_OFFSET_BUFFER_NAME,
+        INT8_GROUP_OFFSETS_BUFFER_NAME,
         INT8_INPUT_PERM_BUFFER_NAME,
     }
     assert module.int8_weight_gnk.dtype == torch.int8

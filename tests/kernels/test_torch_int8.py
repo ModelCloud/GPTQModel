@@ -175,7 +175,9 @@ def test_native_int8_group_layout_output_and_storage_oracle(group_size, dtype, m
     assert candidate.int8_group_scale.shape == checkpoint["scales"].shape
     torch.testing.assert_close(candidate.int8_group_scale, checkpoint["scales"].float(), rtol=0, atol=0)
 
-    for current_dtype in (dtype, torch.bfloat16, torch.float32, dtype):
+    # One activation dtype per module (contracts/kernel/forward-dtype.md);
+    # repeat it to check the layout and storage stay stable across calls.
+    for current_dtype in (dtype, dtype):
         activation = torch.arange(7 * source.in_features).reshape(7, -1).remainder(9).sub(4).to(current_dtype) / 16
         arithmetic = activation.double() @ weight
         expected = arithmetic.to(current_dtype)
@@ -482,7 +484,7 @@ def test_native_int8_checkpoint_save_strict_reload_and_oracle(tmp_path, group_si
     )
 
 
-@pytest.mark.parametrize("change", ["load", "load_assign", "inplace", "replace", "move", "clear"])
+@pytest.mark.parametrize("change", ["load", "load_assign", "inplace", "replace", "device", "clear"])
 def test_native_int8_runtime_refreshes_after_checkpoint_change(change):
     source, _ = build_case(bits=8, group_size=32)
     constructor = {"bits": 8, "group_size": 32, "sym": False, "desc_act": True,
@@ -502,8 +504,8 @@ def test_native_int8_runtime_refreshes_after_checkpoint_change(change):
         candidate.scales.mul_(2)
     elif change == "replace":
         candidate.scales = candidate.scales.clone() * 2
-    elif change == "move":
-        candidate.to(torch.float32)
+    elif change == "device":
+        candidate.to(candidate.scales.device)
     else:
         candidate.scales.mul_(2)
         candidate.clear_weight_cache()
@@ -514,8 +516,25 @@ def test_native_int8_runtime_refreshes_after_checkpoint_change(change):
         actual = candidate(activation)
     torch.testing.assert_close(actual.double(), expected, rtol=2e-3, atol=2e-3)
     assert candidate.int8_module.int8_weight_gnk.data_ptr() == candidate.int8_weight_gnk.data_ptr()
-    if change != "move":
+    if change != "device":
         assert not torch.equal(before, actual)
+
+
+def test_native_int8_rejects_a_post_forward_dtype_move():
+    """A dtype cast after a forward is a caller bug, not a runtime refresh (#5897)."""
+
+    source, _ = build_case(bits=8, group_size=32)
+    candidate = TorchInt8Linear(bits=8, group_size=32, sym=False, desc_act=True,
+                                in_features=source.in_features, out_features=source.out_features)
+    candidate.load_state_dict(source.state_dict(), strict=True)
+    candidate.post_init()
+    candidate.eval()
+    with torch.inference_mode():
+        candidate(torch.ones(3, source.in_features) / 8)
+
+    with pytest.raises(RuntimeError, match="Weight dtypes are frozen after the first forward"):
+        candidate.to(torch.float32)
+    assert candidate.scales.dtype is torch.float16
 
 
 def test_native_int8_inference_tensor_edit_requires_explicit_clear():

@@ -170,6 +170,9 @@ def _projection(cls, linear, dtype, device, *, uniform_scales=False, return_chec
             input_perm=module.int8_input_perm,
             group_lengths=module._int8_group_lengths,
             in_features=module.in_features,
+            group_offsets=module.int8_group_offsets,
+            group_widths=module._int8_group_widths,
+            out_features=module.out_features,
         )
     return module, weight.to(device), linear.bias.detach().to(device).clone(), checkpoint
 
@@ -231,10 +234,12 @@ def test_exllamav2_rebinds_shuffled_words_without_changing_output(cls, dtype):
     check(x, weight, bias)
     module.to(device)  # QuantLinear._apply clears a descriptor even for the same device.
     check(x, weight, bias)
-    module.to(dtype=torch.bfloat16)
-    check(x, weight, module.bias)
-    module.to(dtype=torch.float16)
-    check(x, weight, module.bias)
+    # Weight dtypes are frozen after the first forward
+    # (contracts/kernel/forward-dtype.md).
+    other = torch.float16 if dtype is torch.bfloat16 else torch.bfloat16
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        module.to(dtype=other)
+    check(x, weight, bias)
     module.post_init(None)
     check(x, weight, bias)
     if torch.cuda.device_count() > 1:
@@ -338,7 +343,7 @@ def test_exllamav2_fused_checkpoint_reload(cls):
     baseline = parent(x)
     decision = FusionDecision("gate_up", "mlp", ("mlp.gate_proj", "mlp.up_proj"))
     group = _FusionGroup(decision, parent, modules, activation_dtype=dtype)
-    bf16_output = None
+    fused_output = None
     try:
         group.install()
         torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
@@ -353,14 +358,15 @@ def test_exllamav2_fused_checkpoint_reload(cls):
                 torch.testing.assert_close(parent(moved), baseline.to("cuda:1"), rtol=2e-3, atol=2e-3)
             parent.to(device)
             torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
-        parent.to(dtype=torch.bfloat16)
-        x_bf16 = x.to(torch.bfloat16)
-        parent(x_bf16)
-        bf16_output = parent(x_bf16)
+        # Weight dtypes are frozen after the first forward
+        # (contracts/kernel/forward-dtype.md).
+        with pytest.raises(RuntimeError, match="frozen after the first forward"):
+            modules[0].to(dtype=torch.bfloat16)
+        fused_output = parent(x)
         assert group.packed is not None
     finally:
         group.remove()
-    torch.testing.assert_close(parent(x_bf16), bf16_output, rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(parent(x), fused_output, rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

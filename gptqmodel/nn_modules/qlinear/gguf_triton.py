@@ -2137,8 +2137,11 @@ class GGUFTritonKernel(GGUFTorchLinear):
             error_msgs,
         )
 
-    def _triton_cache_key(self, device: torch.device, wide_dot: bool = False) -> tuple[int, str, bool]:
-        return (device.index if device.index is not None else -1, self.gguf_tensor_qtype, wide_dot)
+    def _triton_cache_key(self, device: torch.device, wide_dot: bool = False) -> tuple[int, str]:
+        # ``wide_dot`` is fixed by the module's locked activation dtype
+        # (contracts/kernel/forward-dtype.md), so one entry per device suffices.
+        del wide_dot
+        return (device.index if device.index is not None else -1, self.gguf_tensor_qtype)
 
     def _build_triton_cache(self, device: torch.device, wide_dot: bool = False) -> dict[str, Any]:
         self._permute_packed_weight()
@@ -2304,10 +2307,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
         else:
             x_work = x_flat.contiguous()
 
-        cache = (
-            self._get_triton_cache(x_work.device, wide_dot=True)
-            if wide_dot else self._get_triton_cache(x_work.device)
-        )
+        cache = self._get_triton_cache(x_work.device, wide_dot=wide_dot)
         output_kwargs = {} if output_dtype is None else {"output_dtype": output_dtype}
 
         if self.gguf_tensor_qtype in {"Q1_0", "Q1_0_g128"}:
