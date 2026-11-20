@@ -56,6 +56,7 @@ from ..utils.disk import estimate_disk_io_speed
 from ..utils.kernel import configure_kernel, resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
+    bind_processor_masks,
     clone_module_for_devices,
     find_last_quantized_layer_index,
     forward_batch_worker,
@@ -924,27 +925,7 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
 
         if padding_mask is _SAME_MASK:
             padding_mask = mask
-        tls = self._processor_mask_tls(processor)
-        tls.value = mask
-        tls.padding_value = padding_mask
-        # ``mask`` is [batch, seq] on the execution device. Derive the
-        # per-sample emptiness flags once per batch here; every module's
-        # forward hook would otherwise synchronize once per sample.
-        tls.sample_has_tokens = (
-            mask.any(dim=1).tolist()
-            if torch.is_tensor(mask) and mask.ndim == 2
-            else None
-        )
-        # Routed-expert hooks need to know whether this batch contains padding
-        # before they scan a `[routed_rows, H]` activation for all-zero rows.
-        # Resolve it here, once per batch, instead of synchronizing per expert.
-        if torch.is_tensor(padding_mask) and padding_mask.ndim == 2:
-            tls.mask_has_padding = not bool(padding_mask.all())
-        elif padding_mask is None and torch.is_tensor(mask):
-            # Only sink tokens are masked; there is no padding to scan for.
-            tls.mask_has_padding = False
-        else:
-            tls.mask_has_padding = None
+        bind_processor_masks(processor, mask, padding_mask=padding_mask)
 
     def _get_processor_mask(self, processor: LoopProcessor):
         """Return the sequence mask bound to the current worker thread."""
