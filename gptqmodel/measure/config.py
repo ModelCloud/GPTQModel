@@ -21,7 +21,7 @@ __all__ = [
     "GradedThresholdConfig",
     "PPLConfig",
     "KLDConfig",
-    "TOP_NConfig",
+    "TOPKConfig",
     "RMSEConfig",
     "MeasureConfig",
 ]
@@ -32,7 +32,7 @@ class Metric(str, Enum):
 
     PPL = "PPL"
     KLD = "KLD"
-    TOP_N = "TOP_N"
+    TOP_K = "TOP_K"
     RMSE = "RMSE"
 
 
@@ -168,10 +168,10 @@ class KLDConfig:
 
 
 @dataclass(frozen=True)
-class TOP_NConfig:
-    """Top-k set agreement; ``top_k`` may name several widths at once."""
+class TOPKConfig:
+    """Top-k set agreement; ``k`` may name several widths at once."""
 
-    top_k: Tuple[int, ...] = (1,)
+    k: Tuple[int, ...] = (1,)
     threshold: Optional[GradedThresholdConfig] = None
 
     capture_needs: FrozenSet[str] = field(
@@ -179,12 +179,12 @@ class TOP_NConfig:
     )
 
     def __post_init__(self):
-        widths = tuple(int(k) for k in self.top_k)
+        widths = tuple(int(k) for k in self.k)
         if not widths:
-            raise ValueError("TOP_NConfig.top_k must name at least one width")
+            raise ValueError("TOPKConfig.k must name at least one width")
         if any(k <= 0 for k in widths):
-            raise ValueError(f"TOP_NConfig.top_k must be positive, got {widths}")
-        object.__setattr__(self, "top_k", widths)
+            raise ValueError(f"TOPKConfig.k must be positive, got {widths}")
+        object.__setattr__(self, "k", widths)
 
 
 @dataclass(frozen=True)
@@ -202,11 +202,11 @@ class RMSEConfig:
 _DEFAULT_CONFIGS = {
     Metric.PPL: PPLConfig,
     Metric.KLD: KLDConfig,
-    Metric.TOP_N: TOP_NConfig,
+    Metric.TOP_K: TOPKConfig,
     Metric.RMSE: RMSEConfig,
 }
 
-MetricSpec = Union[Metric, str, PPLConfig, KLDConfig, TOP_NConfig, RMSEConfig]
+MetricSpec = Union[Metric, str, PPLConfig, KLDConfig, TOPKConfig, RMSEConfig]
 MetricSpecs = Union[MetricSpec, Sequence[MetricSpec]]
 
 
@@ -223,7 +223,7 @@ class MeasureConfig:
     metrics: MetricSpecs = (
         PPLConfig(),
         KLDConfig(),
-        TOP_NConfig(top_k=(1, 5)),
+        TOPKConfig(k=(1, 5)),
         RMSEConfig(),
     )
     dataset: Any = None
@@ -236,7 +236,7 @@ class MeasureConfig:
 
     def __post_init__(self):
         specs = self.metrics
-        if isinstance(specs, (PPLConfig, KLDConfig, TOP_NConfig, RMSEConfig)):
+        if isinstance(specs, (PPLConfig, KLDConfig, TOPKConfig, RMSEConfig)):
             specs = (specs,)
         elif isinstance(specs, (Metric, str)):
             specs = (specs,)
@@ -263,7 +263,7 @@ class MeasureConfig:
 
     @staticmethod
     def _resolve(spec: MetricSpec):
-        if isinstance(spec, (PPLConfig, KLDConfig, TOP_NConfig, RMSEConfig)):
+        if isinstance(spec, (PPLConfig, KLDConfig, TOPKConfig, RMSEConfig)):
             return spec
         if isinstance(spec, Metric):
             return _DEFAULT_CONFIGS[spec]()
@@ -297,8 +297,8 @@ def metric_of(config) -> Metric:
         return Metric.PPL
     if isinstance(config, KLDConfig):
         return Metric.KLD
-    if isinstance(config, TOP_NConfig):
-        return Metric.TOP_N
+    if isinstance(config, TOPKConfig):
+        return Metric.TOP_K
     if isinstance(config, RMSEConfig):
         return Metric.RMSE
     raise TypeError(f"not a metric config: {type(config).__name__}")
@@ -309,7 +309,7 @@ def fuse(configs: Sequence[Any]) -> Tuple[Tuple[Tuple[str, ...], Tuple[Any, ...]
 
     Two metrics fuse when their captures come from the same pass: the NLL sum and
     the sampled logits are both produced by one forward over a batch, so PPL,
-    KLD, TOP_N and RMSE share a single pass. A metric that needs a capture from a
+    KLD, TOP_K and RMSE share a single pass. A metric that needs a capture from a
     different source (a weight-space metric, say) maps to a different pass kind
     and gets its own group.
     """

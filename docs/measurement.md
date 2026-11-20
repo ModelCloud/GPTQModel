@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM
 from gptqmodel import GPTQModel
 from gptqmodel.measure import (
     GradedThresholdConfig, KLDConfig, MeasureConfig, MetricGrades,
-    PPLConfig, RMSEConfig, TOP_NConfig,
+    PPLConfig, RMSEConfig, TOPKConfig,
 )
 
 quantized = GPTQModel.load("ModelCloud/Qwen2.5-0.5B-gptq-4bit")
@@ -27,7 +27,7 @@ report = quantized.measure(MeasureConfig(
         KLDConfig(positions=64, threshold=GradedThresholdConfig(
             grades={MetricGrades.PASS: "<=0.05", MetricGrades.WARN: "<=0.15"},
         )),
-        TOP_NConfig(top_k=(1, 5), threshold=GradedThresholdConfig(
+        TOPKConfig(k=(1, 5), threshold=GradedThresholdConfig(
             grades={MetricGrades.PASS: ">=0.95", MetricGrades.WARN: ">=0.90"},
         )),
         RMSEConfig(),
@@ -48,8 +48,8 @@ metric   value   reference  grade
 PPL      22.85   22.22      -
 KLD      0.1183  -          WARN
 RMSE     0.6487  -          -
-TOP_N@1  0.8242  -          FAIL
-TOP_N@5  0.8352  -          FAIL
+TOP_K@1  0.8242  -          FAIL
+TOP_K@5  0.8352  -          FAIL
 
 measured on 4 batch(es), 64 position(s)
 result: fail
@@ -65,8 +65,8 @@ GitHub-rendered table - docs, a PR comment - use `report.markdown()`:
 | PPL | 22.85 | 22.22 | - |
 | KLD | 0.1183 | - | WARN |
 | RMSE | 0.6487 | - | - |
-| TOP_N@1 | 0.8242 | - | FAIL |
-| TOP_N@5 | 0.8352 | - | FAIL |
+| TOP_K@1 | 0.8242 | - | FAIL |
+| TOP_K@5 | 0.8352 | - | FAIL |
 result: fail
 ```
 
@@ -79,13 +79,13 @@ names (`metrics=Metric.PPL`), or a mix.
 | --- | --- | --- |
 | `PPL` | perplexity | `exp(mean NLL)` over the token stream, both models |
 | `KLD` | mean KL divergence | `mean_pos KL(reference ‖ quantized)` on the next-token distribution |
-| `TOP_N` | top-k agreement | `|top_k(reference) ∩ top_k(quantized)| / k`, averaged over positions |
+| `TOP_K` | top-k agreement | `|topk(reference) ∩ topk(quantized)| / k`, averaged over positions |
 | `RMSE` | logit RMS error | root-mean-square logit difference at sampled positions |
 
-- **`KLD` and `TOP_N` are blind to a constant logit shift.** The softmax and the
+- **`KLD` and `TOP_K` are blind to a constant logit shift.** The softmax and the
   argmax do not move, so `RMSE` exists for exactly that case: a report where
-  `TOP_N` is perfect and `RMSE` grew is not a contradiction.
-- **`TOP_N` uses set overlap**, not ordered equality; for `k=1` it is plain
+  `TOP_K` is perfect and `RMSE` grew is not a contradiction.
+- **`TOP_K` uses set overlap**, not ordered equality; for `k=1` it is plain
   top-1 accuracy. A metric with several widths is graded on its worst width.
 - **One forward per batch serves all four.** They declare which captures they
   read (`nll`, `sampled_logits`), both produced by one forward, so the runner
@@ -134,7 +134,7 @@ kernel.
 ## Guarantees
 
 - **Identity is exact.** A model compared with itself reports `KLD 0`, `RMSE 0`,
-  `TOP_N {1: 1.0}` - not "close to zero". A harness that cannot do that is
+  `TOP_K {1: 1.0}` - not "close to zero". A harness that cannot do that is
   measuring drifted positions rather than models.
 - **One forward per batch** for any number of fused metrics (asserted by a
   counting test).

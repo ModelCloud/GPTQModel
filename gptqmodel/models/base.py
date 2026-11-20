@@ -2665,7 +2665,7 @@ class BaseQModel(nn.Module):
     def measure(self, config: "MeasureConfig") -> "MeasurementReport":
         """Compare this model against a reference on the same token stream.
 
-        This is the fast divergence check (PPL/KLD/TOP_N/RMSE), not an
+        This is the fast divergence check (PPL/KLD/TOP_K/RMSE), not an
         end-to-end quality score: it answers whether quantization changed the
         computation, which is what a kernel or packing change would silently do.
         """

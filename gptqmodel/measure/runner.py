@@ -3,7 +3,7 @@
 """Measure a quantized model against its reference on the same token stream.
 
 Metrics declare which captures they read, so the runner can fuse the ones that
-agree: PPL needs the NLL sum, KLD/TOP_N/RMSE need sampled logits, and a single
+agree: PPL needs the NLL sum, KLD/TOP_K/RMSE need sampled logits, and a single
 forward per batch produces both - one pass for all four. A metric that needs a
 capture no other metric produces would form its own pass; that path exists so
 adding a weight-space metric later does not require rewriting the loop.
@@ -264,10 +264,10 @@ def _evaluate(
             logit_rmse(reference.float(), candidate.float(), normalize=member.normalize)
             for reference, candidate in pairs
         )
-    if name is Metric.TOP_N:
+    if name is Metric.TOP_K:
         return {
             k: _mean(topk_overlap(reference.float(), candidate.float(), k=k) for reference, candidate in pairs)
-            for k in member.top_k
+            for k in member.k
         }
     raise TypeError(f"unknown metric config {type(member).__name__}")
 

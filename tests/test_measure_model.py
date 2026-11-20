@@ -27,7 +27,7 @@ from gptqmodel.measure import (
     MetricGrades,
     PPLConfig,
     RMSEConfig,
-    TOP_NConfig,
+    TOPKConfig,
 )
 from gptqmodel.measure.runner import measure_models
 
@@ -59,7 +59,7 @@ def tiny_model(tmp_path_factory):
 def _config(reference, **overrides):
     base = {
         "metrics": (PPLConfig(window=8, stride=4), KLDConfig(positions=4),
-                    TOP_NConfig(top_k=(1, 5)), RMSEConfig()),
+                    TOPKConfig(k=(1, 5)), RMSEConfig()),
         "dataset": ROWS,
         "reference": reference,
         "max_batches": 2,
@@ -97,7 +97,7 @@ def test_identity_is_exact_through_the_model_api(tiny_model):
 
     assert report.values["KLD"] == pytest.approx(0.0, abs=1e-6)
     assert report.values["RMSE"] == pytest.approx(0.0, abs=1e-6)
-    for width, value in report.values["TOP_N"].items():
+    for width, value in report.values["TOP_K"].items():
         assert value == 1.0, width
     assert report.values["PPL"] == pytest.approx(report.reference["PPL"], rel=1e-6)
     assert report.overall is None  # no grades configured
@@ -114,7 +114,7 @@ def test_all_four_metrics_share_one_forward_per_batch(tiny_model):
 
     assert reference.calls == 2      # one per batch, not one per metric
     assert candidate.calls == 2
-    assert set(report.values) == {"PPL", "KLD", "TOP_N", "RMSE"}
+    assert set(report.values) == {"PPL", "KLD", "TOP_K", "RMSE"}
 
 
 def test_perturbed_weights_move_the_metrics(tiny_model):
@@ -124,7 +124,7 @@ def test_perturbed_weights_move_the_metrics(tiny_model):
 
     assert report.values["KLD"] > 0
     assert report.values["RMSE"] > 0
-    assert report.values["TOP_N"][1] < 1.0
+    assert report.values["TOP_K"][1] < 1.0
 
 
 def test_grades_come_from_the_metric_configs(tiny_model):

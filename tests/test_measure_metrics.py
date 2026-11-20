@@ -8,7 +8,7 @@ measuring something other than their difference. These tests pin that case first
 then the behaviours each metric exists for:
 
 - a constant logit shift keeps every argmax and must still be visible (RMSE),
-- more noise must move KLD, TOP_N and RMSE in one direction,
+- more noise must move KLD, TOP_K and RMSE in one direction,
 - grades are evaluated in order, so a value can satisfy only one.
 """
 
@@ -27,7 +27,7 @@ from gptqmodel.measure import (
     MetricGrades,
     PPLConfig,
     RMSEConfig,
-    TOP_NConfig,
+    TOPKConfig,
     fuse,
     kl_divergence,
     logit_rmse,
@@ -89,7 +89,7 @@ def test_more_noise_moves_every_metric_the_same_way():
     assert logit_rmse(reference, small) < logit_rmse(reference, large)
 
 
-def test_a_constant_shift_is_invisible_to_top_n_but_not_to_rmse():
+def test_a_constant_shift_is_invisible_to_topk_but_not_to_rmse():
     reference = _logits(seed=6)
     shifted = reference + 5.0
 
@@ -132,13 +132,13 @@ def test_measure_config_takes_one_metric_or_many():
     single = MeasureConfig(metrics=KLDConfig(positions=8))
     assert [type(item).__name__ for item in single.metrics] == ["KLDConfig"]
 
-    many = MeasureConfig(metrics=(Metric.PPL, TOP_NConfig(top_k=(1, 5)), "KLD"))
+    many = MeasureConfig(metrics=(Metric.PPL, TOPKConfig(k=(1, 5)), "KLD"))
     assert [type(item).__name__ for item in many.metrics] == [
         "PPLConfig",
-        "TOP_NConfig",
+        "TOPKConfig",
         "KLDConfig",
     ]
-    assert many.config_for(Metric.TOP_N).top_k == (1, 5)
+    assert many.config_for(Metric.TOP_K).k == (1, 5)
     assert many.config_for(Metric.RMSE) is None
 
 
@@ -160,9 +160,9 @@ def test_measure_config_rejects_ambiguous_runs():
     with pytest.raises(ValueError, match="positions"):
         KLDConfig(positions=0)
     with pytest.raises(ValueError, match="positive"):
-        TOP_NConfig(top_k=(1, 0))
+        TOPKConfig(k=(1, 0))
     with pytest.raises(ValueError, match="at least one width"):
-        TOP_NConfig(top_k=())
+        TOPKConfig(k=())
 
 
 def test_grades_are_ordered_and_first_match_wins():
@@ -206,7 +206,7 @@ def test_thresholds_live_on_the_metric_configs():
 
 
 def test_metrics_sharing_a_pass_are_fused():
-    groups = fuse([PPLConfig(), KLDConfig(), TOP_NConfig(top_k=(1, 5)), RMSEConfig()])
+    groups = fuse([PPLConfig(), KLDConfig(), TOPKConfig(k=(1, 5)), RMSEConfig()])
     assert len(groups) == 1
     kinds, members = groups[0]
     assert kinds == ("forward",)
@@ -254,8 +254,8 @@ def test_report_without_grades_is_not_a_pass():
 
 def test_str_renders_aligned_logbar_columns():
     report = MeasurementReport(
-        values={"PPL": 22.85, "KLD": 0.1183, "RMSE": 0.6487, "TOP_N": {1: 0.8242, 5: 0.8352}},
-        grades={"KLD": MetricGrades.WARN, "TOP_N": MetricGrades.FAIL},
+        values={"PPL": 22.85, "KLD": 0.1183, "RMSE": 0.6487, "TOP_K": {1: 0.8242, 5: 0.8352}},
+        grades={"KLD": MetricGrades.WARN, "TOP_K": MetricGrades.FAIL},
         reference={"PPL": 22.22},
         batches=4,
         positions=64,
@@ -276,15 +276,15 @@ def test_str_renders_aligned_logbar_columns():
         ["PPL", "22.85", "22.22", "-"],
         ["KLD", "0.1183", "-", "WARN"],
         ["RMSE", "0.6487", "-", "-"],
-        ["TOP_N@1", "0.8242", "-", "FAIL"],
-        ["TOP_N@5", "0.8352", "-", "FAIL"],
+        ["TOP_K@1", "0.8242", "-", "FAIL"],
+        ["TOP_K@5", "0.8352", "-", "FAIL"],
     ]
 
 
 def test_markdown_stays_a_github_table():
     report = MeasurementReport(
-        values={"PPL": 22.85, "TOP_N": {1: 0.8242}},
-        grades={"TOP_N": MetricGrades.FAIL},
+        values={"PPL": 22.85, "TOP_K": {1: 0.8242}},
+        grades={"TOP_K": MetricGrades.FAIL},
         reference={"PPL": 22.22},
     )
 
@@ -292,5 +292,5 @@ def test_markdown_stays_a_github_table():
     assert markdown[0] == "| metric | value | reference | grade |"
     assert markdown[1] == "| --- | --- | --- | --- |"
     assert markdown[2] == "| PPL | 22.85 | 22.22 | - |"
-    assert markdown[3] == "| TOP_N@1 | 0.8242 | - | FAIL |"
+    assert markdown[3] == "| TOP_K@1 | 0.8242 | - | FAIL |"
     assert markdown[-1] == "result: fail"

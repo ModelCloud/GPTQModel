@@ -16,7 +16,7 @@ from .config import (
     MetricGrades,
     PPLConfig,
     RMSEConfig,
-    TOP_NConfig,
+    TOPKConfig,
     fuse,
 )
 from .metrics import (
@@ -39,7 +39,7 @@ __all__ = [
     "MetricGrades",
     "PPLConfig",
     "RMSEConfig",
-    "TOP_NConfig",
+    "TOPKConfig",
     "build_token_rows",
     "fuse",
     "kl_divergence",

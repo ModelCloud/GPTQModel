@@ -115,7 +115,7 @@ def topk_overlap(
     *,
     k: int,
 ) -> float:
-    """Mean ``|top_k(reference) ∩ top_k(candidate)| / k`` over positions.
+    """Mean ``|topk(reference) ∩ topk(candidate)| / k`` over positions.
 
     Set overlap rather than ordered equality: near-tied logits flip ordering
     under a rounding change that does not move the model, and for ``k=1`` this
