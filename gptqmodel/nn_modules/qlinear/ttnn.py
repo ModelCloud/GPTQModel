@@ -92,6 +92,9 @@ class TTNNPackedLayer:
     # A checkpoint bias that BF16 cannot represent is uploaded as FP32 and
     # added to the FP32 accumulator after the GEMM (#5808).
     wide_bias: bool = False
+    # BF16 residual of a checkpoint scale that BF16 cannot represent. When it
+    # is present the dequantized weight is kept in FP32 (#5822).
+    scale_residual: Optional[object] = None
 
 
 def _ceil_div(value: int, divisor: int) -> int:
@@ -107,6 +110,24 @@ def _bias_fits_bf16(bias: torch.Tensor) -> bool:
     """
 
     return bool(torch.equal(bias.to(torch.bfloat16).to(bias.dtype), bias))
+
+
+def _scales_fit_bf16(scales: torch.Tensor) -> bool:
+    """Whether every checkpoint scale survives a BF16 round trip exactly."""
+
+    return bool(torch.equal(scales.to(torch.bfloat16).to(scales.dtype), scales))
+
+
+def _split_bf16_residual(values: torch.Tensor):
+    """Return BF16 high and BF16 residual tables whose FP32 sum is exact.
+
+    ``ttnn.embedding`` only accepts BF16 tables, so a wider checkpoint scale
+    is carried as two BF16 operands and recombined in FP32 (#5822).
+    """
+
+    high = values.to(torch.bfloat16)
+    residual = (values.to(torch.float32) - high.to(torch.float32)).to(torch.bfloat16)
+    return high, residual
 
 
 def _shard_zero_words(
@@ -403,10 +424,22 @@ class TTNNLinear(GPTQQuantLinear):
                 bias_dtype = ttnn.bfloat16
                 bias_cpu = bias_cpu.to(torch.bfloat16)
 
+        scales_cpu = self.scales.detach().to("cpu").contiguous()
+        if _scales_fit_bf16(scales_cpu):
+            scales_high = scales_cpu.to(torch.bfloat16).contiguous()
+            scales_residual = None
+        else:
+            scales_high, scales_residual = _split_bf16_residual(scales_cpu)
+            scales_high = scales_high.contiguous()
+            scales_residual = scales_residual.contiguous()
+
         if device_count == 1:
             weight = _upload(weight_words, ttnn.uint32)
             zeros = _upload(zero_words, ttnn.uint32)
-            scales = _upload(self.scales.detach().to("cpu", torch.bfloat16).contiguous(), ttnn.bfloat16)
+            scales = _upload(scales_high, ttnn.bfloat16)
+            scale_residual = (
+                None if scales_residual is None else _upload(scales_residual, ttnn.bfloat16)
+            )
             indices = _upload(
                 g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(),
                 ttnn.uint32,
@@ -421,9 +454,11 @@ class TTNNLinear(GPTQQuantLinear):
             replicate = ttnn.replicate_tensor_to_mesh_mapper(dev)
             weight = _upload(weight_words, ttnn.uint32, shard_rows)
             zeros = _upload(zero_words, ttnn.uint32, shard_cols)
-            scales = _upload(
-                self.scales.detach().to("cpu", torch.bfloat16).contiguous(),
-                ttnn.bfloat16, shard_cols,
+            scales = _upload(scales_high, ttnn.bfloat16, shard_cols)
+            scale_residual = (
+                None
+                if scales_residual is None
+                else _upload(scales_residual, ttnn.bfloat16, shard_cols)
             )
             indices = _upload(
                 g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(),
@@ -486,6 +521,7 @@ class TTNNLinear(GPTQQuantLinear):
             device_count=device_count,
             compute_config=compute_config,
             wide_bias=wide_bias,
+            scale_residual=scale_residual,
         )
         self._ttnn_key = key
         self._ttnn_device_ids = device_ids
@@ -507,7 +543,7 @@ class TTNNLinear(GPTQQuantLinear):
         ttnn = import_ttnn()
         for tensor in (
             layer.weight_words, layer.zero_words, layer.scales,
-            layer.g_idx, layer.bias,
+            layer.g_idx, layer.bias, getattr(layer, "scale_residual", None),
         ):
             if tensor is not None:
                 try:
@@ -597,8 +633,10 @@ class TTNNLinear(GPTQQuantLinear):
         return ttnn.typecast(stacked, ttnn.bfloat16)
 
     def _dequantize(self, ttnn, layer: TTNNPackedLayer):
-        """Build the transient BF16 weight tile ``[in, shard_out]`` on device."""
+        """Build the transient weight tile ``[in, shard_out]`` on device."""
 
+        if layer.scale_residual is not None:
+            return self._dequantize_wide(ttnn, layer)
         codes = ttnn.typecast(
             self._extract_codes(ttnn, layer.weight_words, layer.shard_out_features), ttnn.bfloat16
         )
@@ -614,6 +652,36 @@ class TTNNLinear(GPTQQuantLinear):
         weights = ttnn.multiply(ttnn.subtract(codes, group_zeros), group_scales)
         return ttnn.typecast(weights, ttnn.bfloat16)
 
+    def _dequantize_wide(self, ttnn, layer: TTNNPackedLayer):
+        """Build the transient FP32 weight tile ``[in, shard_out]`` (#5822).
+
+        ``ttnn.embedding`` only accepts BF16 tables, so the scale is gathered
+        from its BF16 high and residual tables and recombined in FP32. The
+        decoded weight is then kept in FP32 all the way into the GEMM: a BF16
+        weight tile would round a value such as ``1.00390625`` back to ``1``
+        and erase a finite cancellation even when the scale itself was exact.
+        """
+
+        # Codes and zero points are small integers, so their difference is
+        # exact in BF16; only the scale multiply needs FP32 (#5822).
+        codes = ttnn.typecast(
+            self._extract_codes(ttnn, layer.weight_words, layer.shard_out_features), ttnn.bfloat16
+        )
+        codes = ttnn.transpose(codes, 0, 1)
+        zeros = self._logical_zeros(
+            ttnn, layer.zero_words, int(self.scales.shape[0]), layer.shard_out_features
+        )
+        high = ttnn.embedding(layer.g_idx, layer.scales, layout=ttnn.TILE_LAYOUT)
+        residual = ttnn.embedding(layer.g_idx, layer.scale_residual, layout=ttnn.TILE_LAYOUT)
+        # ``dtype=float32`` makes the binary op read BF16 and write FP32, so
+        # the recombined scale is exact without a separate typecast tile.
+        group_scales = ttnn.add(high, residual, dtype=ttnn.float32)
+        group_scales = ttnn.reshape(group_scales, (self.in_features, layer.shard_out_features))
+        group_zeros = ttnn.embedding(layer.g_idx, zeros, layout=ttnn.TILE_LAYOUT)
+        group_zeros = ttnn.reshape(group_zeros, (self.in_features, layer.shard_out_features))
+        codes = ttnn.subtract(codes, group_zeros, dtype=ttnn.float32)
+        return ttnn.multiply(codes, group_scales, dtype=ttnn.float32)
+
     def _compute_on_device(self, ttnn, layer: TTNNPackedLayer, activation):
         """Run dequant + GEMM (+ all_gather) on a resident activation.
 
@@ -623,20 +691,39 @@ class TTNNLinear(GPTQQuantLinear):
 
         weights = self._dequantize(ttnn, layer)
         try:
-            if layer.wide_bias:
-                # The checkpoint bias needs more bits than BF16 carries. Add it
-                # to the FP32 GEMM result and round the public output once, so
-                # the fused BF16 operand cannot erase a finite residual.
-                wide = ttnn.linear(
-                    activation, weights, dtype=ttnn.float32,
-                    compute_kernel_config=layer.compute_config,
-                )
-                biased = ttnn.add(wide, layer.bias)
-                ttnn.deallocate(wide)
+            if layer.wide_bias or layer.scale_residual is not None:
+                # A checkpoint bias or scale needs more bits than BF16 carries.
+                # Run the dot wide and round the public output once, after the
+                # FP32 bias add, so the fused BF16 operands cannot erase a
+                # finite residual (#5808, #5822).
+                if layer.scale_residual is not None:
+                    dot_activation = ttnn.typecast(activation, ttnn.float32)
+                    try:
+                        wide = ttnn.linear(
+                            dot_activation, weights, dtype=ttnn.float32,
+                            compute_kernel_config=layer.compute_config,
+                        )
+                    finally:
+                        ttnn.deallocate(dot_activation)
+                else:
+                    wide = ttnn.linear(
+                        activation, weights, dtype=ttnn.float32,
+                        compute_kernel_config=layer.compute_config,
+                    )
                 try:
-                    output = ttnn.typecast(biased, ttnn.bfloat16)
+                    if layer.bias is not None:
+                        bias = layer.bias
+                        cast_bias = bias.dtype != ttnn.float32
+                        if cast_bias:
+                            bias = ttnn.typecast(layer.bias, ttnn.float32)
+                        biased = ttnn.add(wide, bias)
+                        if cast_bias:
+                            ttnn.deallocate(bias)
+                        ttnn.deallocate(wide)
+                        wide = biased
+                    output = ttnn.typecast(wide, ttnn.bfloat16)
                 finally:
-                    ttnn.deallocate(biased)
+                    ttnn.deallocate(wide)
             else:
                 output = ttnn.linear(
                     activation, weights, bias=layer.bias,
