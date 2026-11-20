@@ -12,6 +12,11 @@ import torch
 
 FP8_E4M3_MAX = 448.0
 FP4_E2M1_MAX = 6.0
+# The least positive FP32 subnormal, `torch.finfo(torch.float32).smallest_normal
+# * 2**-23`. A positive activation maximum can be small enough that the
+# `amax / (448 * E2M1 maximum)` global-scale quotient rounds to zero even
+# though the E4M3 local scale and E2M1 code can still carry the block (#5652).
+FP32_MIN_SUBNORMAL = 2.0**-149
 NVFP4_E4M3_SEARCH_RADIUS = 8
 NVFP4_RECIPES = {
     "nvidia", "nvidia_headroom", "four_six", "least_squares", "least_squares_headroom", "least_squares_grid"
@@ -182,6 +187,13 @@ def nvfp4_global_scale(amax: torch.Tensor | float, *, grid_dtype: torch.dtype | 
 
     Retain a positive FP32 scale when source-grid rounding would underflow it
     to zero, as can happen for small but representable FP16 activations.
+
+    The same underflow can happen before any grid rounding: a positive maximum
+    below `448 * E2M1 maximum * 2**-149` divides to zero in FP32, yet the block
+    is still encodable because the global scale may be a subnormal. Such a
+    quotient is floored at the least positive FP32 subnormal instead of
+    returning a zero scale that every consumer rejects (#5652). A zero maximum
+    keeps the existing `1.0` convention.
     """
     value = torch.as_tensor(amax, dtype=torch.float32)
     if not bool(torch.isfinite(value).all()) or bool((value < 0).any()):
@@ -195,6 +207,15 @@ def nvfp4_global_scale(amax: torch.Tensor | float, *, grid_dtype: torch.dtype | 
         else 4.0
     )
     scale = torch.where(value > 0, value / (FP8_E4M3_MAX * denominator), torch.ones_like(value))
+    # `2**-140` is exact with global `2**-149`, E4M3 local `128` and E2M1 code
+    # `4`, so an underflowing quotient is a scale-representation limit, not a
+    # block-range limit. Keep the block encodable with the smallest positive
+    # scale instead of emitting zero.
+    scale = torch.where(
+        (value > 0) & (scale == 0),
+        torch.full_like(scale, FP32_MIN_SUBNORMAL),
+        scale,
+    )
     if grid_dtype is not None:
         if grid_dtype not in (torch.float16, torch.bfloat16, torch.float32):
             raise ValueError("NVFP4 global-scale grid must be FP16, BF16, or FP32.")
