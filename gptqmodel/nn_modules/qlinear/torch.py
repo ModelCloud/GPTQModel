@@ -21,6 +21,7 @@ from ...nn_modules.qlinear import (
     BaseQuantLinear,
     PackableQuantLinear,
     _device_family,
+    require_no_forward,
     resolve_dequantize_dtype,
 )
 from ...quantization import FORMAT, METHOD
@@ -1508,6 +1509,8 @@ class TorchQuantEmbeddings(TorchLinear):
 
         name = self._EMBEDDING_OUTPUT_DTYPE_BUFFER
         anchor = self._buffers.get(name)
+        if dtype is not None and dtype != self.embedding_output_dtype():
+            require_no_forward(self, f"change the embedding output dtype to {dtype}")
         if dtype is None:
             # Reset to the scale dtype, which is the historical fallback and
             # keeps following later module casts.

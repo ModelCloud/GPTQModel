@@ -747,6 +747,11 @@ class _FusionGroup:
                 or torch.nn.modules.module._global_forward_pre_hooks
                 or torch.nn.modules.module._global_forward_hooks):
             return None
+        # The fused executor stands in for the source projections, so it
+        # carries their forward dtype lock (contracts/kernel/forward-dtype.md).
+        # Check before any refresh: a second dtype must raise, not rebuild.
+        for module in self.modules:
+            _check_forward_dtype(module, (x,), {})
         # Lease one coherent record. A cache clear or refresh can retire it at
         # any point, but retirement is deferred until this caller releases it,
         # so the local forward and its operand storage stay valid.
@@ -769,10 +774,6 @@ class _FusionGroup:
                     return None
             if x.dtype != state.input_dtype or x.device != state.input_device:
                 return None
-            # The fused executor stands in for the source projections, so it
-            # carries their forward dtype lock (contracts/kernel/forward-dtype.md).
-            for module in self.modules:
-                _check_forward_dtype(module, (x,), {})
             output = state.forward(x)
             self.calls += 1
             return output.split(state.widths, dim=-1)

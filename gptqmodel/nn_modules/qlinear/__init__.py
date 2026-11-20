@@ -35,6 +35,12 @@ from ...utils.planar_packing import (
 from ...utils.safe import threadpool_limits
 from ...utils.torch import dynamo_is_compiling
 from ..compiled_state import compiled_module_getstate
+from ..forward_dtype_lock import (  # noqa: F401 - re-exported
+    FORWARD_DTYPE_CONTRACT,
+    ForwardDtypeLockMixin,
+    _check_forward_dtype,
+    require_no_forward,
+)
 from ._compile_support import COMPILE_LEVEL
 from ._decode_dtype import decode_dtype_for_scales
 from ._fused_train_state import QZEROS_FORMAT_BUFFER, _materialize_snapshot_entry
@@ -435,122 +441,13 @@ def checkpoint_qzeros_layout(format_code) -> int | None:
     return None
 
 
-FORWARD_DTYPE_CONTRACT = "contracts/kernel/forward-dtype.md"
-
-
-def _forward_activation(args, kwargs) -> Optional[t.Tensor]:
-    for value in args:
-        if isinstance(value, t.Tensor):
-            return value
-    for key in ("x", "input", "hidden_states"):
-        value = kwargs.get(key)
-        if isinstance(value, t.Tensor):
-            return value
-    return None
-
-
-def _check_forward_dtype(module: "BaseQuantLinear", args, kwargs) -> None:
-    """Enforce the forward dtype contract (contracts/kernel/forward-dtype.md).
-
-    The first forward fixes the module's activation dtype. A later forward with
-    a different dtype is a caller bug, so raise rather than adapt to it.
-    """
-    x = _forward_activation(args, kwargs)
-    if x is None:
-        return
-    locked = getattr(module, "_forward_dtype_lock", None)
-    if locked is None:
-        # Never record from inside a dynamo trace: the write would make the
-        # compiled graph guard on ``lock is None`` and force a recompile on
-        # the next call. Eager calls record; traces only check an existing lock.
-        if not dynamo_is_compiling():
-            module._forward_dtype_lock = x.dtype
-    elif x.dtype != locked:
-        raise RuntimeError(
-            f"{module.__class__.__name__}({module.name}): forward received {x.dtype} "
-            f"after the module was first called with {locked}. A module never switches "
-            f"activation dtype during a run; see {FORWARD_DTYPE_CONTRACT}."
-        )
-
-
-def _lock_forward_dtype(forward):
-    if getattr(forward, "_forward_dtype_locked", False):
-        return forward
-
-    @wraps(forward)
-    def locked_forward(self, *args, **kwargs):
-        _check_forward_dtype(self, args, kwargs)
-        return forward(self, *args, **kwargs)
-
-    locked_forward._forward_dtype_locked = True
-    return locked_forward
-
-
-def _check_apply_keeps_dtypes(module: "BaseQuantLinear", fn) -> None:
-    """Reject a post-forward ``_apply`` that would change a tensor dtype.
-
-    After the first forward, weight and buffer dtypes are frozen
-    (contracts/kernel/forward-dtype.md). ``fn`` is probed on an empty tensor
-    of each dtype/device so the check runs before any tensor changes dtype.
-    """
-    locked = getattr(module, "_forward_dtype_lock", None)
-    if locked is None:
-        return
-    probed = {}
-    # Check the whole subtree up front so a rejected cast leaves every child
-    # untouched, not only this module's own tensors.
-    for kind, tensors in (
-        ("parameter", module.named_parameters(remove_duplicate=False)),
-        ("buffer", module.named_buffers(remove_duplicate=False)),
-    ):
-        for name, tensor in tensors:
-            if not isinstance(tensor, t.Tensor):
-                continue
-            key = (tensor.dtype, tensor.device)
-            if key not in probed:
-                probe = fn(t.empty(0, dtype=tensor.dtype, device=tensor.device))
-                probed[key] = probe.dtype if isinstance(probe, t.Tensor) else tensor.dtype
-            if probed[key] != tensor.dtype:
-                raise RuntimeError(
-                    f"{module.__class__.__name__}({module.name}): cannot change {kind} `{name}` "
-                    f"from {tensor.dtype} to {probed[key]} after the module's first forward (input dtype {locked}). "
-                    f"Weight dtypes are frozen after the first forward; see {FORWARD_DTYPE_CONTRACT}."
-                )
-
-
-def _lock_apply_dtypes(apply):
-    if getattr(apply, "_forward_dtype_locked", False):
-        return apply
-
-    @wraps(apply)
-    def locked_apply(self, fn, *args, **kwargs):
-        _check_apply_keeps_dtypes(self, fn)
-        return apply(self, fn, *args, **kwargs)
-
-    locked_apply._forward_dtype_locked = True
-    return locked_apply
-
-
-class BaseQuantLinear(nn.Module):
+class BaseQuantLinear(ForwardDtypeLockMixin, nn.Module):
     # CPU int4pack kernels rewrite checkpoint buffers into their runtime layout
     # on the first forward. Serialize that cold check-and-transform so a
     # concurrent first forward cannot observe half-converted tensors or repack
     # already-packed words (issue #4565). One process-wide lock is enough: the
     # transform runs once per module and avoids per-instance lock pickling.
     _cpu_transform_lock = threading.RLock()
-
-    # Forward dtype contract (contracts/kernel/forward-dtype.md): the dtype of
-    # the first forward input. Every subclass ``forward`` is wrapped to check it.
-    _forward_dtype_lock: Optional[t.dtype] = None
-
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        forward = cls.__dict__.get("forward")
-        if callable(forward):
-            cls.forward = _lock_forward_dtype(forward)
-        apply = cls.__dict__.get("_apply")
-        if callable(apply):
-            cls._apply = _lock_apply_dtypes(apply)
 
     SUPPORTS_BACKENDS: List[BACKEND] = None
     # False for role-specific modules that are instantiated explicitly and
@@ -973,7 +870,6 @@ class BaseQuantLinear(nn.Module):
         elif layout != "empty":
             self._clear_runtime_weight_cache()
 
-    @_lock_apply_dtypes
     def _apply(self, fn, recurse=True):
         result = super()._apply(fn, recurse=recurse)
         self._clear_runtime_weight_cache()

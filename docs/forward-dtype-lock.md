@@ -17,13 +17,18 @@ module does not adapt.
 
 ```mermaid
 flowchart TD
-    S["subclass defines forward / _apply"] --> W["BaseQuantLinear.__init_subclass__<br/>wraps them: _lock_forward_dtype, _lock_apply_dtypes"]
+    S["subclass of ForwardDtypeLockMixin<br/>(BaseQuantLinear, ExllamaV3Linear, ExllamaV3TorchLinear)<br/>defines forward / _apply / pack*"] --> W["ForwardDtypeLockMixin.__init_subclass__<br/>wraps them: _lock_forward_dtype, _lock_apply_dtypes, _reject_after_forward"]
+    PK["pack / pack_block / pack_gpu / pack_original / hf_pack<br/>set_embedding_output_dtype"] --> RN{"lock set?"}
+    RN -- "no" --> PKR["rewrite allowed"]
+    RN -- "yes" --> X3["RuntimeError: build a replacement module"]
 
     C["module(x)"] --> K["_check_forward_dtype"]
     K --> T{"tensor input found?"}
     T -- "no" --> F["kernel forward<br/>(post_init / first-forward transforms allowed)"]
     T -- "yes" --> L{"_forward_dtype_lock set?"}
-    L -- "no: first call" --> R["record x.dtype"] --> F
+    L -- "no: first call" --> TR{"dynamo tracing?"}
+    TR -- "no" --> R["record x.dtype"] --> F
+    TR -- "yes" --> F
     L -- "yes, same dtype" --> F
     L -- "yes, different dtype" --> X1["RuntimeError: forward received ..."]
 
@@ -34,10 +39,10 @@ flowchart TD
     D -- "no: device move or same dtype" --> P
     D -- "yes" --> X2["RuntimeError: weight dtypes are frozen<br/>no tensor dtype changes"]
 
-    FU["_FusionGroup.execute"] --> K2["_check_forward_dtype on each source module"] --> PF["packed fused forward"]
+    FU["_FusionGroup.execute"] --> K2["_check_forward_dtype on each source module<br/>(before any refresh)"] --> PF["packed fused forward"]
 
     classDef failure fill:#fce8e6,stroke:#a33,color:#111
-    class X1,X2 failure
+    class X1,X2,X3 failure
 ```
 
 - The lock is a plain attribute on the module, so `copy.deepcopy` and pickling
@@ -84,3 +89,13 @@ flowchart TD
 | `tests/test_macaq_triton_forward_dtype_4315.py`, `tests/test_torch_cpu_avx512_awq.py` | Second `.to()`, or a `.half()`/`.float()` loop after a forward | Changing casts raise; no-op casts pass |
 | `tests/module_tree/test_llama_fusion.py`, `tests/module_tree/test_fusion_kernel_backends.py` (2 tests) | `model.to(bf16)` after fused forwards | The cast raises |
 | `tests/benchmark/benchmark_qqq_cpu.py` | One QQQ module timed in FP16 and BF16 | Seeded rebuild per dtype |
+
+## Quantization pipeline fixes
+
+| Before | Mechanism | Now |
+| --- | --- | --- |
+| `gsq_training_model.py` `prepare_llama_gsq_export` | Called `model.half()` after packed `TorchLinear` blocks had run forwards to advance the next layer's captures. A BF16 model was converted to FP16, so BF16 values beyond FP16's range became `inf`. It then had to rebuild the FP32 RoPE frequencies that the cast had broken. | The model keeps its dtype; no RoPE rebuild is needed. |
+| `paro_processor.py` `_optimize_live_layer` | Cast the live decoder layer to FP32, unwrapped its `HookedLinear`s in place, trained, then cast the whole layer back to the first linear's dtype. That narrowed any FP32-kept tensor and left `NamedModule.module_dtype` at FP32. | Trains on an FP32 deep copy, the same as the grouped and compute-block scopes. The live layer and its wrappers are untouched. `_sync_named_modules_to_live_layer` is removed. |
+| `ExllamaV3Linear`, `ExllamaV3TorchLinear` | Served forwards during quantization (resume catch-up) and at runtime without a lock. | Inherit `ForwardDtypeLockMixin`. |
+| `hf_pack` / `pack*`, `TorchQuantEmbeddings.set_embedding_output_dtype` | Could re-register buffers in another dtype without going through `_apply`. | Refuse once the lock is set. |
+| `_FusionGroup.execute` | A second input dtype rebuilt the packed executor before the lock check. | Lock check first. |

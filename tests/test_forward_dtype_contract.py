@@ -128,3 +128,25 @@ def test_parent_model_cast_after_forward_raises():
     parent(torch.zeros(2, dtype=torch.float16))
     with pytest.raises(RuntimeError, match="frozen after the first forward"):
         parent.to(torch.bfloat16)
+
+
+class _Packable(_Weighted):
+    def pack(self, *args, **kwargs):
+        return "packed"
+
+
+def test_repack_after_forward_raises():
+    module = _Packable()
+    assert module.pack() == "packed"  # before the first forward: allowed
+    module(torch.zeros(2, dtype=torch.float16))
+    with pytest.raises(RuntimeError, match="build a replacement module"):
+        module.pack()
+
+
+def test_exllamav3_modules_carry_the_lock():
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+    from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
+
+    for cls in (ExllamaV3Linear, ExllamaV3TorchLinear):
+        assert cls.forward._forward_dtype_locked
+        assert cls._apply._forward_dtype_locked
