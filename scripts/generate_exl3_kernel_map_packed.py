@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlopen
 
 import pcre
+
 
 BLOCK_RE = pcre.compile(
     r"struct TSample samples_(\d+)\[\]\s*=\s*\{(.*?)\n\};",
@@ -16,6 +18,11 @@ BLOCK_RE = pcre.compile(
 ROW_RE = pcre.compile(
     r"\{\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*\}"
 )
+# Q4NX (cb = 3) decodes three trellis widths instead of one bitrate per row.
+# ``step_bits`` is 4 * K + 2 * half_k, matching q4nx_supports_step_bits().
+Q4NX_STEP_BITS = (10, 12, 14)
+CC_ADA = 3
+DEFAULT_Q4NX_SAMPLES = Path(__file__).resolve().parent / "exl3_kernel_map_q4nx_ada.json"
 EXLLAMAV3_ORIGINAL_COMMIT = "ba1ad9ac66670785c0ca95b0f1ab3ad044fda7c6"
 EXLLAMAV3_ORIGINAL_LEGACY_HEADER_URL = (
     "https://raw.githubusercontent.com/turboderp-org/exllamav3/"
@@ -251,6 +258,161 @@ def validate_lookup_equivalence(legacy: dict[int, list[LegacyRow]], packed: dict
                             )
 
 
+def q4nx_bits_index(step_bits: int) -> int:
+    """Return the legacy ``bits`` row Q4NX falls back to: bits = K + half_k."""
+    return step_bits // 4 + int(step_bits % 4 == 2)
+
+
+def parse_q4nx_cell(text: str) -> tuple[int, int, int]:
+    """Parse a ``"<rate>:<k>,<n>"`` fallback marker."""
+    rate_text, _, key = text.partition(":")
+    size_k, _, size_n = key.partition(",")
+    return int(rate_text), int(size_k), int(size_n)
+
+
+def load_q4nx_samples(
+    path: Path,
+) -> tuple[dict[int, dict[tuple[int, int], tuple[int, int]]], set[tuple[int, int, int]]]:
+    """Read the measured Ada cells plus the explicitly declared fallbacks.
+
+    A missing cell is only allowed when the sweep listed it under ``fallback``,
+    so an incomplete measurement run cannot be mistaken for a tuned table.
+    """
+
+    payload = json.loads(path.read_text())
+    capability = tuple(payload.get("capability", ()))
+    device = str(payload.get("device", ""))
+    if capability != (8, 9) or "4090" not in device:
+        raise ValueError(
+            f"{path} was measured on {device!r} {capability}, not an Ada RTX 4090 (sm_89); "
+            "the Ada Q4NX grid must come from the 4090 sweep"
+        )
+
+    overrides: dict[int, dict[tuple[int, int], tuple[int, int]]] = {}
+    for rate_text, cells in payload.get("rates", {}).items():
+        rate = int(rate_text)
+        if rate not in Q4NX_STEP_BITS:
+            raise ValueError(f"unexpected Q4NX step_bits {rate}")
+        for key, value in cells.items():
+            size_k, size_n = (int(part) for part in key.split(","))
+            if len(value) != 2:
+                raise ValueError(f"Q4NX cell {rate}:{size_k},{size_n} must be [shape_idx, num_sms], got {value!r}")
+            shape_idx, num_sms = (int(item) for item in value)
+            if not 1 <= shape_idx <= 7:
+                raise ValueError(f"Q4NX cell {rate}:{size_k},{size_n} has out-of-range shape {shape_idx}")
+            if not 1 <= num_sms <= 255:
+                raise ValueError(f"Q4NX cell {rate}:{size_k},{size_n} has out-of-range num_sms {num_sms}")
+            overrides.setdefault(rate, {})[(size_k, size_n)] = (shape_idx, num_sms)
+
+    fallbacks = {parse_q4nx_cell(item) for item in payload.get("fallback", [])}
+    for rate, size_k, size_n in fallbacks:
+        if rate not in Q4NX_STEP_BITS:
+            raise ValueError(f"unexpected Q4NX fallback rate {rate}")
+        if (size_k, size_n) in overrides.get(rate, {}):
+            raise ValueError(f"Q4NX cell {rate}:{size_k},{size_n} is both measured and declared a fallback")
+    return overrides, fallbacks
+
+
+def q4nx_grid(blocks: dict[int, PackedBlock]) -> set[tuple[int, int, int]]:
+    """Distinct (rate, k, n) cells; a cell feeds every block whose axes hold it."""
+
+    return {
+        (rate, size_k, size_n)
+        for block in blocks.values()
+        for rate in Q4NX_STEP_BITS
+        for size_k in block.k_axis
+        for size_n in block.n_axis
+    }
+
+
+def validate_q4nx_coverage(
+    blocks: dict[int, PackedBlock],
+    overrides: dict[int, dict[tuple[int, int], tuple[int, int]]],
+    fallbacks: set[tuple[int, int, int]],
+) -> None:
+    grid = q4nx_grid(blocks)
+    measured = {(rate, size_k, size_n) for rate, cells in overrides.items() for size_k, size_n in cells}
+    unknown = (measured | fallbacks) - grid
+    if unknown:
+        raise ValueError(f"Q4NX cells are not on the packed grid: {sorted(unknown)}")
+    missing = grid - measured - fallbacks
+    if missing:
+        raise ValueError(
+            f"{len(missing)} Ada Q4NX cells are neither measured nor declared fallback: {sorted(missing)}"
+        )
+
+
+def packed_entry(block: PackedBlock, cc: int, bits: int, size_k: int, size_n: int) -> int:
+    cc_idx = block.cc_values.index(cc)
+    bit_idx = block.bit_values.index(bits)
+    k_idx = block.k_axis.index(size_k)
+    n_idx = block.n_axis.index(size_n)
+    flat_idx = ((((cc_idx * len(block.bit_values)) + bit_idx) * len(block.k_axis)) + k_idx) * len(block.n_axis) + n_idx
+    return block.payload[flat_idx]
+
+
+def q4nx_ada_entry(
+    block: PackedBlock,
+    step_bits: int,
+    size_k: int,
+    size_n: int,
+    ada_overrides: dict[int, dict[tuple[int, int], tuple[int, int]]],
+    fallbacks: set[tuple[int, int, int]],
+) -> int:
+    measured = ada_overrides.get(step_bits, {}).get((size_k, size_n))
+    if measured is not None:
+        return pack_row(*measured)
+    if (step_bits, size_k, size_n) not in fallbacks:
+        raise ValueError(f"Ada Q4NX cell {step_bits}:{size_k},{size_n} is not measured or declared fallback")
+    return packed_entry(block, CC_ADA, q4nx_bits_index(step_bits), size_k, size_n)
+
+
+def build_q4nx_block(
+    block: PackedBlock,
+    ada_overrides: dict[int, dict[tuple[int, int], tuple[int, int]]],
+    fallbacks: set[tuple[int, int, int]],
+) -> tuple[int, ...]:
+    """Pack [cc][q4nx rate][k][n]; only the Ada rows are re-measured."""
+
+    payload: list[int] = []
+    for cc in block.cc_values:
+        for step_bits in Q4NX_STEP_BITS:
+            bits = q4nx_bits_index(step_bits)
+            for size_k in block.k_axis:
+                for size_n in block.n_axis:
+                    if cc == CC_ADA:
+                        payload.append(q4nx_ada_entry(block, step_bits, size_k, size_n, ada_overrides, fallbacks))
+                    else:
+                        payload.append(packed_entry(block, cc, bits, size_k, size_n))
+    return tuple(payload)
+
+
+def validate_q4nx_block(
+    block: PackedBlock,
+    q4nx: tuple[int, ...],
+    ada_overrides: dict[int, dict[tuple[int, int], tuple[int, int]]],
+    fallbacks: set[tuple[int, int, int]],
+) -> None:
+    """Non-Ada rows must stay byte-identical to the three-instruction samples."""
+
+    index = 0
+    for cc in block.cc_values:
+        for step_bits in Q4NX_STEP_BITS:
+            bits = q4nx_bits_index(step_bits)
+            for size_k in block.k_axis:
+                for size_n in block.n_axis:
+                    if cc == CC_ADA:
+                        expected = q4nx_ada_entry(block, step_bits, size_k, size_n, ada_overrides, fallbacks)
+                    else:
+                        expected = packed_entry(block, cc, bits, size_k, size_n)
+                    if q4nx[index] != expected:
+                        raise ValueError(
+                            f"q4nx row mismatch for samples_{block.mod} cc={cc} step_bits={step_bits} "
+                            f"k={size_k} n={size_n}: {q4nx[index]:#06x} != {expected:#06x}"
+                        )
+                    index += 1
+
+
 def format_int_array(name: str, values: tuple[int, ...], values_per_line: int = 8) -> str:
     lines = [f"constexpr int {name}[] = {{"]
     for idx in range(0, len(values), values_per_line):
@@ -269,7 +431,33 @@ def format_u16_array(name: str, values: tuple[int, ...], values_per_line: int = 
     return "\n".join(lines)
 
 
-def render_header(blocks: dict[int, PackedBlock]) -> str:
+def format_fallback_comment(fallbacks: set[tuple[int, int, int]]) -> list[str]:
+    """Render the declared fallbacks so the header itself states what was not measured."""
+
+    if not fallbacks:
+        return ["// Q4NX Ada coverage: every (rate, k, n) cell below is a measured sample."]
+    tokens = [f"{rate}:{size_k},{size_n}" for rate, size_k, size_n in sorted(fallbacks)]
+    lines = [
+        f"// Q4NX Ada coverage: {len(fallbacks)} (rate, k, n) cells were not measured and keep the",
+        "// pre-Q4NX bitrate-row sample:",
+    ]
+    current = "//   "
+    for token in tokens:
+        if len(current) + len(token) + 1 > 100:
+            lines.append(current.rstrip())
+            current = "//   "
+        current += token + " "
+    lines.append(current.rstrip())
+    return lines
+
+
+def render_header(
+    blocks: dict[int, PackedBlock],
+    q4nx_blocks: dict[int, tuple[int, ...]],
+    q4nx_fallbacks: set[tuple[int, int, int]],
+    q4nx_measured: int,
+    q4nx_cells: int,
+) -> str:
     block128 = blocks[128]
     block256 = blocks[256]
     block512 = blocks[512]
@@ -280,7 +468,12 @@ def render_header(blocks: dict[int, PackedBlock]) -> str:
         "#include <cstdint>",
         "",
         "// Generated by scripts/generate_exl3_kernel_map_packed.py.",
-        "// Encodes the EXL3 tuning samples as dense [cc][bits][k][n] grids.",
+        "// Encodes the EXL3 tuning samples as dense [cc][bits][k][n] grids, plus a",
+        "// [cc][q4nx rate][k][n] grid for the Q4NX codebook (cb = 3), whose three",
+        "// trellis widths do not line up with the bitrate rows above.",
+        "//",
+        f"// Q4NX Ada cells measured on an RTX 4090 (sm_89): {q4nx_measured}/{q4nx_cells}.",
+        *format_fallback_comment(q4nx_fallbacks),
         "",
         "namespace exl3_packed {",
         "",
@@ -290,6 +483,7 @@ def render_header(blocks: dict[int, PackedBlock]) -> str:
         f"constexpr int n_axis_len_128 = {len(block128.n_axis)};",
         f"constexpr int n_axis_len_256 = {len(block256.n_axis)};",
         f"constexpr int n_axis_len_512 = {len(block512.n_axis)};",
+        f"constexpr int q4nx_rate_count = {len(Q4NX_STEP_BITS)};",
         "",
         format_int_array("cc_values", block128.cc_values),
         "",
@@ -303,11 +497,19 @@ def render_header(blocks: dict[int, PackedBlock]) -> str:
         "",
         format_int_array("n_axis_512", block512.n_axis),
         "",
+        format_int_array("q4nx_rate_step_bits", Q4NX_STEP_BITS),
+        "",
         format_u16_array("samples_128", block128.payload),
         "",
         format_u16_array("samples_256", block256.payload),
         "",
         format_u16_array("samples_512", block512.payload),
+        "",
+        format_u16_array("samples_128_q4nx", q4nx_blocks[128]),
+        "",
+        format_u16_array("samples_256_q4nx", q4nx_blocks[256]),
+        "",
+        format_u16_array("samples_512_q4nx", q4nx_blocks[512]),
         "",
         "}  // namespace exl3_packed",
         "",
@@ -328,6 +530,12 @@ def main() -> None:
         help="Raw URL for the original ExLlamaV3 legacy row-wise samples header.",
     )
     parser.add_argument(
+        "--q4nx-samples",
+        type=Path,
+        default=DEFAULT_Q4NX_SAMPLES,
+        help="Ada Q4NX measurements; a missing cell must be declared fallback and then inherits the legacy row.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("gptqmodel_ext/exllamav3/quant/exl3_kernel_map_packed.cuh"),
@@ -345,13 +553,25 @@ def main() -> None:
     packed = {mod: build_packed_block(mod, rows) for mod, rows in sorted(legacy.items())}
     validate_row_exactness(legacy, packed)
     validate_lookup_equivalence(legacy, packed)
-    args.output.write_text(render_header(packed))
+    q4nx_overrides, q4nx_fallbacks = load_q4nx_samples(args.q4nx_samples)
+    validate_q4nx_coverage(packed, q4nx_overrides, q4nx_fallbacks)
+    q4nx_blocks = {
+        mod: build_q4nx_block(block, q4nx_overrides, q4nx_fallbacks) for mod, block in packed.items()
+    }
+    for mod, block in packed.items():
+        validate_q4nx_block(block, q4nx_blocks[mod], q4nx_overrides, q4nx_fallbacks)
+    q4nx_cells = len(q4nx_grid(packed))
+    q4nx_measured = q4nx_cells - len(q4nx_fallbacks)
+    args.output.write_text(
+        render_header(packed, q4nx_blocks, q4nx_fallbacks, q4nx_measured, q4nx_cells)
+    )
 
     payload_entries = sum(len(block.payload) for block in packed.values())
     print(
         f"validated legacy lookup from {source} and wrote {args.output} "
         f"({payload_entries} packed entries across {len(packed)} blocks)"
     )
+    print(f"Q4NX Ada cells: {q4nx_measured} measured, {len(q4nx_fallbacks)} declared fallback, {q4nx_cells} total")
 
 
 if __name__ == "__main__":
