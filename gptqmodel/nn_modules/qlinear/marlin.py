@@ -50,7 +50,6 @@ from ...utils.marlin import (
     marlin_sort_g_idx,
     marlin_stream_workspace,
     marlin_validate_runtime_device,
-    replace_parameter,
 )
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
@@ -520,15 +519,30 @@ class MarlinLinear(GPTQQuantLinear):
             bias = bias.reshape(-1)
         return marlin_permute_bias(marlin_pad_dim(bias, source, padded))
 
+    def _scales_for_compute(self, dtype: torch.dtype) -> torch.Tensor:
+        """Return the stored scales converted for this call only.
+
+        ``self.scales`` keeps the precision it was packed with. The kernel needs
+        a scale operand that matches the activation dtype, but rewriting the
+        registered parameter in place (the previous behavior) permanently
+        narrowed it: one BF16 forward on an FP16 checkpoint rounded most of the
+        scales, so every later FP16 forward ran on different quantized weights
+        (#5793). The conversion is a temporary operand; nothing is written back
+        and no state is retained across calls.
+        """
+
+        scales = self.scales
+        if scales.dtype != dtype:
+            scales = scales.to(dtype=dtype)
+        return scales
+
     def forward(self, x: torch.Tensor):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
 
-        # make sure scales is synced with x/input
-        if x.dtype != self.scales.dtype:
-            replace_parameter(self, "scales", self.scales.to(dtype=x.dtype))
+        weight_scale = self._scales_for_compute(x.dtype)
         bias = self._kernel_bias(x)
         workspace = marlin_stream_workspace(self)
 
@@ -537,7 +551,7 @@ class MarlinLinear(GPTQQuantLinear):
             out = apply_gptq_marlin_linear(
                 input=x.contiguous() if self.is_lm_head else x,
                 weight=self.qweight,
-                weight_scale=self.scales,
+                weight_scale=weight_scale,
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
@@ -555,7 +569,7 @@ class MarlinLinear(GPTQQuantLinear):
                 tile_padding=self._marlin_tile_padding,
                 input=x.contiguous() if self.is_lm_head else x,
                 weight=self.qweight,
-                weight_scale=self.scales,
+                weight_scale=weight_scale,
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,

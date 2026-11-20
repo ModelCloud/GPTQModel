@@ -411,6 +411,22 @@ class AwqMarlinLinear(AWQuantLinear):
             bias = bias.reshape(-1)
         return marlin_permute_bias(marlin_pad_dim(bias, source, padded))
 
+    def _scales_for_compute(self, dtype: torch.dtype) -> torch.Tensor:
+        """Return the stored scales converted for this call only.
+
+        ``self.scales`` keeps the precision it was packed with. Assigning the
+        activation-dtype cast to ``self.scales.data`` (the previous behavior)
+        permanently narrowed the registered buffer: one BF16 forward on an FP16
+        checkpoint rounded most of the scales, so every later FP16 forward ran
+        on different quantized weights (#5793). The conversion is a temporary
+        operand; nothing is written back and no state is retained across calls.
+        """
+
+        scales = self.scales
+        if scales.dtype != dtype:
+            scales = scales.to(dtype=dtype)
+        return scales
+
     def forward(self, x: torch.Tensor):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
@@ -421,8 +437,7 @@ class AwqMarlinLinear(AWQuantLinear):
 
         x = x.contiguous() if self.is_lm_head else x
 
-        if self.scales.dtype != x.dtype:
-            self.scales.data = self.scales.data.to(x.dtype)
+        weight_scale = self._scales_for_compute(x.dtype)
 
         bias = self._kernel_bias(x)
         workspace = marlin_stream_workspace(self)
@@ -432,7 +447,7 @@ class AwqMarlinLinear(AWQuantLinear):
             out = apply_awq_marlin_linear(
                 input=x,
                 weight=self.qweight,
-                weight_scale=self.scales,
+                weight_scale=weight_scale,
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
@@ -448,7 +463,7 @@ class AwqMarlinLinear(AWQuantLinear):
                 tile_padding=self._marlin_tile_padding,
                 input=x,
                 weight=self.qweight,
-                weight_scale=self.scales,
+                weight_scale=weight_scale,
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
