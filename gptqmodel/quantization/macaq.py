@@ -50,6 +50,7 @@ from ..looper.named_module import NamedModule
 from ..utils.arch import rocm_arch
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
+from ..utils.quant_metrics import relative_error_from_energies
 from ..utils.rocm import IS_ROCM
 
 
@@ -958,4 +959,8 @@ class Macaq:
         metric = hessian.to(torch.float64)
         error = (delta @ metric * delta).sum()
         denominator = (weight.to(torch.float64) @ metric * weight.to(torch.float64)).sum()
-        return float((error / denominator.clamp_min(1e-12)).item())
+        # Divide by the reference energy itself: an absolute floor turned
+        # total signal loss on a small reference into a near-zero error (#5635).
+        return relative_error_from_energies(
+            float(error.item()), float(denominator.item())
+        )
