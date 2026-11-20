@@ -35,6 +35,30 @@ def _transient_overflow_fixture(rows=4, hidden=128):
     return x, pairs, theta
 
 
+def _pad_rotation_stages(pairs, theta, stages=8):
+    """Append identity stages so the fused kernel is eligible.
+
+    The overflow fixture only needs two stages to trigger the bug, but
+    ``_rotation_kernel_ready`` accepts just ``krot in {1, 8}``.  An unpadded
+    two-stage fixture therefore takes the reference path, which made the fused
+    comparison below pass without ever running the kernel (issue #5690).
+    """
+
+    half_group = theta.shape[1]
+    extra = stages - pairs.shape[0]
+    assert extra >= 0
+    if extra == 0:
+        return pairs, theta
+    identity_pairs = (
+        torch.stack([torch.arange(half_group), torch.arange(half_group) + half_group], dim=-1)
+        .reshape(1, -1)
+        .repeat(extra, 1)
+        .to(pairs.dtype)
+    )
+    identity_theta = torch.zeros((extra, half_group), dtype=theta.dtype)
+    return torch.cat([pairs, identity_pairs]), torch.cat([theta, identity_theta])
+
+
 def _rotate_per_stage(x, pairs, theta, group_size=128):
     """Emulate the old per-stage fp16 workspace that overflows."""
 
@@ -126,14 +150,23 @@ def _fused_ready():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Paro fused rotation requires CUDA.")
-def test_fused_fp16_matches_reference():
+def test_fused_fp16_matches_reference(monkeypatch):
     x, pairs, theta = _transient_overflow_fixture()
+    pairs, theta = _pad_rotation_stages(pairs, theta)
     device = torch.device("cuda", torch.cuda.current_device())
     x, pairs, theta = x.to(device), pairs.to(device), theta.to(device)
     if not _fused_ready():
         pytest.skip("fused Paro rotation extension is unavailable on this device")
+    # Guard the fixture itself: without an eligible stage count the call below
+    # silently degrades to the reference path and the comparison is vacuous.
+    assert paro_module._rotation_kernel_ready(x, pairs, theta, None, 128)
 
     expected = apply_paro_rotation_reference(x, pairs, theta, group_size=128)
+
+    def _no_reference_fallback(*args, **kwargs):
+        raise AssertionError("apply_paro_rotation fell back to the reference path")
+
+    monkeypatch.setattr(paro_module, "apply_paro_rotation_reference", _no_reference_fallback)
     actual = apply_paro_rotation(x, pairs, theta, group_size=128)
     assert actual.dtype == torch.float16
     assert torch.isfinite(actual).all()
