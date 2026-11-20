@@ -36,6 +36,7 @@ from ..utils.attn_mask import (
     align_single_head_capture,
     bos_token_positions,
     exclude_attention_sinks,
+    tokenizer_bos_token_id,
 )
 from ..utils.calibration import calibration_input_row_count
 from ..utils.colors import ANSIColor, color_text
@@ -773,14 +774,7 @@ class LoopProcessor:
     def _attention_sink_bos_token_id(self) -> Optional[int]:
         """Return the tokenizer's BOS id, or ``None`` when it defines none."""
 
-        tokenizer = self.tokenizer
-        for candidate in (tokenizer, getattr(tokenizer, "tokenizer", None)):
-            if candidate is None:
-                continue
-            bos_token_id = getattr(candidate, "bos_token_id", None)
-            if isinstance(bos_token_id, int) and not isinstance(bos_token_id, bool):
-                return bos_token_id
-        return None
+        return tokenizer_bos_token_id(self.tokenizer)
 
     def _compute_attention_sink_positions(
         self, calibration_dataset, bos_token_id: int

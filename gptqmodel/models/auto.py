@@ -512,6 +512,8 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     quantization_config = getattr(config, "quantization_config", None)
     if not isinstance(quantization_config, dict):
         return False
+    if quantization_config.get("quant_method") == "solver_format":
+        return True
 
     # Fail fast before model selection so checkpoints that expect activation or
     # KV-cache quantization do not proceed down a weight-only loader path.
@@ -990,6 +992,8 @@ class GPTQModel:
     ):
         if type(fuse) is not bool:
             raise TypeError("Fusion enabled must be bool")
+        if hasattr(quantize_config, "solver") or (isinstance(quantize_config, dict) and "solver" in quantize_config):
+            raise ValueError("Pass solver/format configuration to model.quantize(config=...), not load()")
         kwargs["fuse"] = fuse
         if isinstance(quantize_config, Dict):
             quantize_config = QuantizeConfig(**quantize_config)

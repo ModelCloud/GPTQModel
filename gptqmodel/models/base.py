@@ -1778,6 +1778,14 @@ class BaseQModel(nn.Module):
             )
         return plan
 
+    def plan(self, *, config):
+        """Print and return the compatibility-checked solver/format target plan."""
+        from ..quantization.targeting import resolve_plan
+
+        plan = resolve_plan(self, config)
+        print(plan.summary())
+        return plan
+
     def fuse(self, enabled: bool = True, *, overrides: Optional[Dict[str, bool]] = None) -> Optional[FusionPlanner]:
         """Apply optional QKV/gate-up fusion and return its FusionPlanner.
 
@@ -2796,6 +2804,7 @@ class BaseQModel(nn.Module):
         embed_quant_mode: Optional[QuantizeEmbed] = None,
         checkpoint: Optional["CheckpointConfig"] = None,
         fuse: Optional[bool] = None,
+        config=None,
         # Weight-only direct-pack methods (GGUF, BitsAndBytes, NF12) skip the
         # logging-only weight-error MAE by default; requesting it reconstructs
         # every dense weight. It never changes the packed payload.
@@ -2819,6 +2828,26 @@ class BaseQModel(nn.Module):
             raise ValueError(
                 "quantize() binds the model's dataset preparer; pass an unbound CalibrationConfig."
             )
+        if config is not None:
+            plan = self.plan(config=config)
+            if not plan.success:
+                raise ValueError("Unsupported quantization plan: " + "; ".join(plan.errors))
+            if (adapter is not None or calibration.adapter_dataset is not None
+                    or embed_quant_config is not None or embed_quant_mode is not None
+                    or checkpoint is not None or fuse not in (None, False)
+                    or backend not in (None, BACKEND.AUTO)):
+                raise ValueError("Solver/format quantization does not support these quantize options")
+            if tokenizer is not None:
+                if not isinstance(tokenizer, PreTrainedTokenizerBase):
+                    raise ValueError("Unsupported `tokenizer` type: expected PreTrainedTokenizerBase")
+                self.tokenizer = Tokenicer.load(
+                    tokenizer,
+                    trust_remote_code=self.trust_remote_code,
+                    model_config=getattr(self.model, "config", None),
+                )
+            from ..quantization.solver_format import quantize_model
+
+            return quantize_model(self, calibration.bind(self.prepare_dataset), plan)
         if self.quantize_config.is_load_only():
             raise ValueError(
                 "FP8 is load-only: GPT-QModel no longer quantizes or exports FP8 "
@@ -4496,6 +4525,14 @@ class BaseQModel(nn.Module):
             split_by: Optional[str] = None,
             **kwargs,
     ):
+        if getattr(self, "_solver_format_partial", False):
+            raise ValueError("Cannot save an incomplete solver/format run; reload the dense source")
+        if getattr(self, "_format_solutions", None):
+            if kwargs or eora_path is not None or split_by is not None or meta_quantizer is not None:
+                raise TypeError("Unsupported save options for a solver/format checkpoint")
+            from .solver_format_checkpoint import save_checkpoint
+
+            return save_checkpoint(self, save_dir, max_shard_size=max_shard_size, metadata=safetensors_metadata)
         timer = getattr(self, "quant_region_timer", None)
         start_time = time.perf_counter() if timer else None
 
