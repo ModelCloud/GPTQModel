@@ -262,6 +262,53 @@ Measured on a 16x32 Gaussian weight and a well-conditioned Hessian (seed 0,
 The independent oracle in `tests/test_vptq.py` performs its own arithmetic and
 matches the quantizer's codes exactly for the `norm` and `all` variants.
 
+## 7. Derived wf shift tables after checkpoint assignment
+
+`PackableQuantLinear` derives `wf_unsqueeze_zero` / `wf_unsqueeze_neg_one`
+from `bits` and `pack_dtype`; they are non-persistent runtime metadata and
+never appear in a checkpoint. `post_init` used to trust any existing slot, so
+a slot materialized with `empty_like` (or rebuilt on a meta placeholder by an
+older `_apply`) stayed garbage and the CPU repack/decode read wrong shifts.
+#5788 stopped `_apply` from rebuilding the tables on meta; #5843 makes
+`post_init` rebuild them from the assigned operands and keeps the meta guard
+so a disk-offloaded module never gets tables on meta.
+
+Before:
+
+```mermaid
+flowchart TD
+    A["Transformers assigns checkpoint tensors"] --> B["post_init"]
+    B --> C{"both wf slots present?"}
+    C -- "yes" --> D["keep existing bytes<br/>uninitialized or meta"]
+    C -- "no" --> E["_init_wf_unsqueeze_buffers"]
+    D --> F["CPU repack and decode read wrong shifts"]
+    classDef error fill:#f9d5d5,stroke:#af3b3b,color:#222
+    class F error
+```
+
+After:
+
+```mermaid
+flowchart TD
+    A["Transformers assigns checkpoint tensors"] --> B["post_init"]
+    B --> C["_init_wf_unsqueeze_buffers(force=True)"]
+    C --> D{"packed operands on meta?"}
+    D -- "yes" --> E["keep live tables<br/>disk offload, #5788"]
+    D -- "no" --> F["rebuild from bits and pack_dtype"]
+    F --> G["CPU repack and decode read canonical shifts"]
+    E --> G
+    classDef good fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+    class G good
+```
+
+- `post_init` always regenerates the tables for materialized operands; the
+  meta guard only skips the rebuild while `qweight`/`g_idx` are offload
+  placeholders.
+- `_init_wf_unsqueeze_buffers()` without `force` keeps the historical lazy
+  behavior for callers that build the tables on demand.
+- `tests/test_hf_post_init_unpack_shift_5843.py` covers the 2/4/8-bit and
+  continuous 3-bit tables, packed-forward parity, and the meta transition.
+
 ## Not in scope
 
 Auto-detected module trees still require calibration data that exercises every
