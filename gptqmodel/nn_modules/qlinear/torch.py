@@ -1509,7 +1509,10 @@ class TorchQuantEmbeddings(TorchLinear):
 
         name = self._EMBEDDING_OUTPUT_DTYPE_BUFFER
         anchor = self._buffers.get(name)
-        if dtype is not None and dtype != self.embedding_output_dtype():
+        # Only a module that already ran a forward is frozen; before that
+        # (including construction, before ``scales`` exists) any dtype is fine.
+        if (dtype is not None and getattr(self, "_forward_dtype_lock", None) is not None
+                and dtype != self.embedding_output_dtype()):
             require_no_forward(self, f"change the embedding output dtype to {dtype}")
         if dtype is None:
             # Reset to the scale dtype, which is the historical fallback and

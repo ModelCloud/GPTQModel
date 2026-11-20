@@ -58,13 +58,20 @@ def test_embedding_forward_returns_the_recorded_output_dtype(force_row_decode):
     """The embedding emits the model dtype, not the checkpoint scale dtype."""
 
     module = _packed_embedding(force_row_decode=force_row_decode)
+    # One output dtype per module (contracts/kernel/forward-dtype.md): record
+    # BF16 on a second module before its first forward.
+    converted_module = _packed_embedding(force_row_decode=force_row_decode)
+    converted_module.set_embedding_output_dtype(torch.bfloat16)
     ids = torch.randint(0, IN_FEATURES, (2, 8), dtype=torch.int64)
 
     with torch.inference_mode():
         default = module(ids)
-        module.set_embedding_output_dtype(torch.bfloat16)
-        converted = module(ids)
-        empty = module(torch.empty((0, 4), dtype=torch.int64))
+        converted = converted_module(ids)
+        empty = converted_module(torch.empty((0, 4), dtype=torch.int64))
+    module = converted_module
+
+    with pytest.raises(RuntimeError, match="build a replacement module"):
+        converted_module.set_embedding_output_dtype(torch.float16)
 
     assert default.dtype == torch.float16
     assert module.embedding_output_dtype() is torch.bfloat16
