@@ -316,9 +316,11 @@ class QQQLinear(GroupedQuantLinear):
             )
         # Quantization builds this module with `register_buffers=False`, so the
         # bias attribute must be initialized outside the buffer preallocation
-        # block or `pack()` cannot tell whether a bias is expected.
+        # block or `pack()` cannot tell whether a bias is expected. A caller
+        # that already knows the checkpoint width (the kernel rebuild path)
+        # passes ``bias_dtype``; the packer adopts the source width otherwise.
         if bias:
-            self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
+            self.register_buffer("bias", torch.zeros((self.out_features), dtype=self.bias_dtype))
         else:
             self.bias = None
 
@@ -613,11 +615,19 @@ class QQQLinear(GroupedQuantLinear):
                 persistent=False,
             )
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device=packed_weight.device, dtype=torch.float16)
+            # A bias is model-dtype storage, not quantization state: narrowing
+            # a finite BF16 bias into the FP16 placeholder turns e.g. 65536
+            # into +inf before any kernel runs (#5603). Keep the source width
+            # and let each forward promote it at the accumulation epilogue.
+            bias = linear.bias.detach().to(device=packed_weight.device)
             if "bias" in self._buffers:
-                self.bias.copy_(bias)
+                if self.bias.dtype != bias.dtype:
+                    self.register_buffer("bias", bias)
+                else:
+                    self.bias.copy_(bias)
             else:
                 self.register_buffer("bias", bias)
+            self.bias_dtype = bias.dtype
         elif not hasattr(self, "bias"):
             self.bias = None
         # A repack replaces ``B``/scales, so any derived CPU cache (and the
@@ -625,6 +635,45 @@ class QQQLinear(GroupedQuantLinear):
         clear = getattr(self, "clear_weight_cache", None)
         if callable(clear):
             clear()
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        """Adopt the checkpoint bias width before the generic buffer copy.
+
+        ``nn.Module.load_state_dict`` copies into the preallocated FP16
+        placeholder, so a BF16 checkpoint bias would be narrowed - and can
+        become +inf - before the kernel ever runs (#5603). Replacing the
+        buffer with the checkpoint width makes the generic ``copy_`` exact.
+        """
+        key = prefix + "bias"
+        incoming = state_dict.get(key)
+        current = getattr(self, "bias", None)
+        if (
+            isinstance(incoming, torch.Tensor)
+            and isinstance(current, torch.Tensor)
+            and current.device.type != "meta"
+            and incoming.dtype != current.dtype
+            and incoming.shape == current.shape
+        ):
+            self.bias = incoming.to(device=current.device)
+            self.bias_dtype = self.bias.dtype
+        return super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
