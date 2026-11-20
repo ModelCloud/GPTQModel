@@ -958,7 +958,16 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         """Whether the range-bound cache still describes the current scale payload."""
 
         cache = self._decoded_weight_cache
-        return cache is not None and cache[0] == self._scale_payload_key()
+        if cache is None:
+            return False
+        if _probe_must_wait():
+            # Comparing the payload key calls ``data_ptr()``, which dynamo
+            # rejects inside a graph ("Data pointer comparison"). The eager
+            # warm-up (``post_init``/``_apply``) publishes the facts for the
+            # current payload before a capture or trace, so the cached entry is
+            # that payload's answer.
+            return True
+        return cache[0] == self._scale_payload_key()
 
     def _decoded_weight_absmax_bound(self) -> Optional[float]:
         """Upper bound on ``|decoded weight|`` without materialising it.
@@ -968,9 +977,14 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         needed. ``None`` means no bound could be established, and callers keep
         the wide path.
         """
+        cache = self._decoded_weight_cache
+        if _probe_must_wait():
+            # Establishing the bound copies the scale to the host, which a
+            # capture or trace forbids. Use what the eager warm-up published;
+            # a cold cache keeps the exact wide path (#5195).
+            return None if cache is None else cache[1]
         scale = self.weight_scale_inv
         key = self._scale_payload_key()
-        cache = self._decoded_weight_cache
         if cache is not None and cache[0] == key:
             return cache[1]
         bound: Optional[float] = None
