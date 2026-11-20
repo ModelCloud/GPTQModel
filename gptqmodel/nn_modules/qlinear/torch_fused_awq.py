@@ -523,6 +523,11 @@ class TorchFusedAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
             # inside the trace. Decode the live runtime operands instead
             # (#5369).
             runtime_dense = x_flat.device.type == "cpu" and fused_autograd_needs_dense(self, x_flat)
+            if runtime_dense:
+                # The eager refresh below cannot run inside a trace, so decode
+                # the offsets from the checkpoint zero codes and the current
+                # scales instead of the installed stale pair (#5571).
+                dense_weight = runtime_int4pack_dense_weight(self, use_zero_codes=True)
             if (
                 not runtime_dense
                 and self.linear_mode is None
@@ -547,6 +552,11 @@ class TorchFusedAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
                         # rewrites the packed buffers a concurrent no-grad
                         # forward is reading, so alternating grad/no-grad calls
                         # raced (#5509).
+                        # Refresh first: a scale-only change leaves the
+                        # installed ``qzeros`` offsets derived from the old
+                        # scales, which a no-grad forward rebuilds but this
+                        # decode used to read stale (#5571).
+                        self._refresh_fused_op()
                         runtime_dense = True
                         dense_weight = self._runtime_dense_weight()
                     else:
