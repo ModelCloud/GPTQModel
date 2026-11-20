@@ -87,6 +87,7 @@ class DeepSeekV41FlashQModel(BaseQModel):
 
         model_id_or_path = fspath(model_id_or_path)
         tokenizer_trust = kwargs.pop("tokenizer_trust_remote_code", trust_remote_code)
+        kwargs.pop("code_revision", None)
         normalize_torch_dtype_kwarg(kwargs, api_name="DeepSeekV41FlashQModel.from_quantized")
         dtype = kwargs.pop("dtype", "auto")
         selection = get_config_selection_kwargs(kwargs)

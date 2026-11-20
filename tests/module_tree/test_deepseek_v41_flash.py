@@ -16,6 +16,7 @@ from transformers import PreTrainedTokenizerFast
 from gptqmodel import GPTQModel
 from gptqmodel.models.definitions.deepseek_v41_flash import DeepSeekV41FlashQModel
 from gptqmodel.models.ports.deepseek_v41_flash.attention import V41AttentionState
+from gptqmodel.models.ports.deepseek_v41_flash.modeling import DeepSeekV41FlashForCausalLM
 
 
 @pytest.fixture
@@ -170,6 +171,20 @@ def v41_checkpoint(tmp_path, request):
 @pytest.fixture
 def model(v41_checkpoint):
     return GPTQModel.load(v41_checkpoint, device="cpu")
+
+
+def test_v41_public_load_uses_package_classes(v41_checkpoint, monkeypatch):
+    config_path = v41_checkpoint / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["auto_map"] = {"AutoConfig": "checkpoint.Config", "AutoModelForCausalLM": "checkpoint.Model"}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+
+    model = GPTQModel.load(v41_checkpoint, device="cpu", trust_remote_code=True, code_revision="unused")
+
+    assert isinstance(model, DeepSeekV41FlashQModel)
+    assert type(model.model) is DeepSeekV41FlashForCausalLM
+    assert type(model.model.config) is DeepSeekV41FlashForCausalLM.config_class
 
 
 def test_v41_module_plan_accounts_for_loaded_decoder_weights(model):
