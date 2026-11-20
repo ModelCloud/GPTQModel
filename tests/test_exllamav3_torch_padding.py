@@ -199,12 +199,16 @@ def test_q4nx_packed_cuda_decode_matches_oracle_for_decode_and_prefill(bits, mon
         torch.testing.assert_close(raw, expected, rtol=2e-3, atol=2e-4)
         visible = layer(x)
         assert visible.dtype == dtype
+        rounded = expected.to(dtype)
         if dtype == torch.bfloat16:
             assert torch.equal(visible, raw.bfloat16())
-        # Near a rounding boundary the FP32 error can move the final BF16
-        # result by one representable step (0.0009766 on the W3.5 fixture).
-        visible_atol = 1e-3 if dtype == torch.bfloat16 else 5e-4
-        torch.testing.assert_close(visible, expected.to(dtype), rtol=2e-3, atol=visible_atol)
+            # The FP32 check above bounds arithmetic error. A value that
+            # crosses a BF16 rounding boundary may differ by one BF16 step.
+            outside = ~torch.isclose(visible, rounded, rtol=2e-3, atol=5e-4)
+            nearest = torch.nextafter(rounded[outside], visible[outside])
+            torch.testing.assert_close(visible[outside], nearest, rtol=0, atol=0)
+        else:
+            torch.testing.assert_close(visible, rounded, rtol=2e-3, atol=5e-4)
 
 
 @pytest.mark.cpu
