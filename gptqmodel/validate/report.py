@@ -22,6 +22,7 @@ class ValidationReport:
     batches: int = 0
     positions: int = 0
     thresholds: Mapping[str, float] = field(default_factory=dict)
+    reference: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def violations(self) -> Dict[str, float]:
@@ -63,6 +64,7 @@ class ValidationReport:
             "batches": self.batches,
             "positions": self.positions,
             "thresholds": dict(self.thresholds),
+            "reference": dict(self.reference),
             "violations": dict(self.violations),
             "passed": self.passed,
         }
@@ -70,22 +72,36 @@ class ValidationReport:
     def markdown(self) -> str:
         """A table a user can paste into a report or a PR."""
 
-        lines = ["| metric | value | threshold | ok |", "| --- | --- | --- | --- |"]
+        has_reference = bool(self.reference)
+        header = "| metric | value | reference | threshold | ok |" if has_reference else (
+            "| metric | value | threshold | ok |"
+        )
+        rule = "| --- | --- | --- | --- | --- |" if has_reference else "| --- | --- | --- | --- |"
+        lines = [header, rule]
         for name, value in self.values.items():
             threshold = self.thresholds.get(name)
             if isinstance(value, dict):
                 for width, width_value in value.items():
-                    lines.append(
-                        f"| {name}@{width} | {_format(width_value)} | "
+                    columns = f"| {name}@{width} | {_format(width_value)} | "
+                    if has_reference:
+                        # Agreement is measured against the reference's own
+                        # top-k set, so its value would always be 1.
+                        columns += "- | "
+                    columns += (
                         f"{_format(threshold) if threshold is not None else '-'} | "
                         f"{_ok(name, width_value, threshold)} |"
                     )
+                    lines.append(columns)
                 continue
-            lines.append(
-                f"| {name} | {_format(value)} | "
+            reference = self.reference.get(name)
+            columns = f"| {name} | {_format(value)} | "
+            if has_reference:
+                columns += f"{_format(reference) if reference is not None else '-'} | "
+            columns += (
                 f"{_format(threshold) if threshold is not None else '-'} | "
                 f"{_ok(name, value, threshold)} |"
             )
+            lines.append(columns)
         if self.batches or self.positions:
             lines.append("")
             lines.append(f"measured on {self.batches} batch(es), {self.positions} position(s)")

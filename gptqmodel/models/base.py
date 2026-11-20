@@ -172,6 +172,8 @@ from .writer import ModelWriter
 
 if TYPE_CHECKING:
     from ..looper.checkpoint_store import CheckpointConfig
+    from ..validate.config import ValidateConfig
+    from ..validate.report import ValidationReport
     from .fusion import FusionPlanner
 
     try:
@@ -2659,6 +2661,51 @@ class BaseQModel(nn.Module):
             batch, rows, tokens, where,
         )
         return batch
+
+    def validate(self, config: "ValidateConfig") -> "ValidationReport":
+        """Compare this model against a reference on the same token stream.
+
+        This is the fast divergence check (PPL/KLD/TOP_N/RMSE), not an
+        end-to-end quality score: it answers whether quantization changed the
+        computation, which is what a kernel or packing change would silently do.
+        """
+
+        from ..validate.config import Metric, PPLConfig
+        from ..validate.runner import build_token_rows, validate_models
+
+        if config.dataset is None:
+            raise ValueError("validate() needs `dataset` (texts or token-id rows)")
+
+        reference = self._validation_reference(config)
+        ppl_config = config.config_for(Metric.PPL)
+        window = ppl_config.window if isinstance(ppl_config, PPLConfig) else 512
+        stride = ppl_config.stride if isinstance(ppl_config, PPLConfig) else 0
+        rows = build_token_rows(
+            getattr(self, "tokenizer", None),
+            config.dataset,
+            window=window,
+            stride=stride,
+            max_rows=config.max_batches,
+        )
+        return validate_models(self.model, reference, rows, config)
+
+    def _validation_reference(self, config: "ValidateConfig"):
+        """Resolve the reference model: a module, or a checkpoint path to load."""
+
+        reference = config.reference
+        if reference is None:
+            raise ValueError(
+                "validate() needs `reference` (a model or a checkpoint path): a quantized "
+                "checkpoint no longer holds the fp16 weights it diverged from"
+            )
+        if not isinstance(reference, str):
+            return reference
+
+        from transformers import AutoModelForCausalLM
+
+        target = config.device or getattr(self.model, "device", None) or "cpu"
+        model = AutoModelForCausalLM.from_pretrained(reference, torch_dtype=torch.bfloat16)
+        return model.to(target)
 
     @with_quantization_device_telemetry
     def quantize(

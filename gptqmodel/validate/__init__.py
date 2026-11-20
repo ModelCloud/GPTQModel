@@ -23,6 +23,7 @@ from .metrics import (
     topk_overlap,
 )
 from .report import ValidationReport
+from .runner import ValidationError, validate_models
 
 
 __all__ = [
@@ -32,9 +33,11 @@ __all__ = [
     "RMSEConfig",
     "TOP_NConfig",
     "ValidateConfig",
+    "ValidationError",
     "ValidationReport",
     "kl_divergence",
     "logit_rmse",
     "mean_negative_log_likelihood",
     "topk_overlap",
+    "validate_models",
 ]
