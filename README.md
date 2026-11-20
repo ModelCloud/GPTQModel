@@ -212,6 +212,10 @@ Start with the [quantization guide](https://github.com/ModelCloud/GPTQModel/blob
 External runtimes support only specific method/format combinations; check the
 [integration and backend tables](https://github.com/ModelCloud/GPTQModel/blob/main/docs/support-matrix.md) before exporting.
 
+For proposed API changes, see the **[component quantization design](docs/component-quantization-design.md)**
+and **[typed configuration proposal](docs/quantization-config-design.md)**. These are design documents;
+the proposed interfaces are not implemented.
+
 ## Platform and HW Support 🖥️
 
 | Platform | Hardware | Runtime overview |
