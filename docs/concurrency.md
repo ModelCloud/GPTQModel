@@ -98,6 +98,26 @@ mid-window (issue #5390). The writer is held for the switch only, never for the
 whole quantization. A caller that is already inside a compiled call holds the
 shared side and skips it instead of deadlocking.
 
+A *raw* ``torch.compile`` call is the residual case: only the package's
+``torch_compile()`` wrapper takes the reader, so a trace started by a caller's
+own ``torch.compile`` runs outside it. When such a trace started before the
+guard, its exit writes the pre-guard precision back while the guard is still
+active:
+
+```
+ieee        # inside the guard, after the switch
+tf32        # the raw trace ended; the guard is still inside
+```
+
+The writer cannot exclude a trace that never takes the lock, and dynamo
+exposes no in-flight-trace signal to wait on, so the guard cannot close this
+window itself. Coordinate instead: let the raw trace finish before
+``quantize()``, or compile through
+``gptqmodel/utils/torch.py:torch_compile()``, whose calls hold the reader for
+the whole call including the trace. Serial and package-compiled runs stay
+IEEE; only a raw trace straddling the guard entry can restore the caller's
+precision (issue #5612).
+
 The lock cannot fix the other half of that hazard: "am I being traced" itself.
 `torch.compiler.is_compiling()` reads a module-level flag that the compile
 session sets for the whole process, so every eager thread in the process sees
