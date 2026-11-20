@@ -73,9 +73,10 @@ _INT8_NATIVE_EPILOGUE_MAX_ELEMENTS = 2**31 - 1
 # context down with it (#5205). The quantizer is row-local, so above this limit
 # it is run over bounded row chunks instead of one launch.
 _INT8_NATIVE_QUANT_MAX_ELEMENTS = 2**31 - 1
-# Rows per FP32 epilogue chunk: bounds the transient scratch at roughly one
-# 2**26-element tile regardless of the output width.
-_INT8_EPILOGUE_CHUNK_ELEMENTS = 1 << 26
+# Elements per FP32 epilogue chunk: bounds the transient scratch at roughly two
+# 2**25-element tiles (the FP32 chunk and its INT32 exponent) regardless of the
+# output width.
+_INT8_EPILOGUE_CHUNK_ELEMENTS = 1 << 25
 
 
 def _is_bitsandbytes_available() -> bool:
@@ -394,6 +395,33 @@ def _int8_vectorwise_quant_fp32(
     return codes, row_absmax, None
 
 
+def _int8_fp32_epilogue_scale(
+    mm_out: torch.Tensor,
+    x_stats: torch.Tensor,
+    weight_scb: torch.Tensor,
+) -> torch.Tensor:
+    """Scale an exact INT32 INT8 dot product by both absmaxes in FP32.
+
+    The epilogue value is ``mm_out * row_absmax * col_absmax / 127**2``, a
+    single product of finite FP32 values. Evaluating it left to right can
+    overflow an intermediate even though the product is representable: an
+    activation absmax of ``2**120`` times a weight absmax of ``2**-120``
+    overflows at ``16129 * 2**120`` before the decreasing weight absmax is
+    applied (#5694). Split both absmaxes into a mantissa in ``[0.5, 1)`` and a
+    binary exponent, multiply the integer dot by the sub-unit mantissas, and
+    restore the summed exponent with ``ldexp``. ``frexp``/``ldexp`` are exact,
+    so the power-of-two rescaling adds no rounding and saturates only where
+    the exact product itself leaves the FP32 range.
+    """
+
+    row_mant, row_exp = torch.frexp(x_stats.to(torch.float32).reshape(-1, 1))
+    col_mant, col_exp = torch.frexp(weight_scb.to(torch.float32).reshape(1, -1))
+    # The ``/ 127**2`` rides on the sub-unit mantissas so the integer dot is
+    # multiplied by values below one: no intermediate can overflow.
+    scaled = mm_out.to(torch.float32) * (row_mant / 127.0) * (col_mant / 127.0)
+    return torch.ldexp(scaled, row_exp + col_exp)
+
+
 def _int8_chunked_fp32_epilogue(
     mm_out: torch.Tensor,
     x_stats: torch.Tensor,
@@ -412,17 +440,18 @@ def _int8_chunked_fp32_epilogue(
     """
 
     rows, cols = mm_out.shape
-    row_scale = x_stats.to(torch.float32).reshape(-1, 1)
-    col_scale = weight_scb.to(torch.float32).reshape(1, -1)
     chunk_rows = max(1, _INT8_EPILOGUE_CHUNK_ELEMENTS // max(cols, 1))
 
     out = torch.empty((rows, cols), dtype=out_dtype, device=mm_out.device)
     for start in range(0, rows, chunk_rows):
         end = min(start + chunk_rows, rows)
-        # Same operation order as the unchunked FP32 epilogue, so a chunked
-        # result is bitwise identical to the single-expression form.
-        chunk = mm_out[start:end].to(torch.float32) * row_scale[start:end]
-        chunk = chunk * col_scale / (127.0 * 127.0)
+        # The same exponent-safe scaling as the unchunked FP32 epilogue, so a
+        # chunked result is bitwise identical to the single-expression form.
+        chunk = _int8_fp32_epilogue_scale(
+            mm_out[start:end],
+            x_stats[start:end],
+            weight_scb,
+        )
         if bias is not None:
             chunk = chunk + bias.to(torch.float32)
         out[start:end] = chunk.to(out_dtype)
@@ -1237,12 +1266,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             # ``int8_mm_dequant`` runs its epilogue in FP16, which rounds (or
             # overflows) the partial sum before a cancelling bias is added. Keep
             # the row/column scales and the bias in FP32 and round once.
-            out = (
-                mm_out.to(torch.float32)
-                * x_stats.to(torch.float32).reshape(-1, 1)
-                * self.weight_scb.to(torch.float32).reshape(1, -1)
-                / (127.0 * 127.0)
-            )
+            out = _int8_fp32_epilogue_scale(mm_out, x_stats, self.weight_scb)
             if bias is not None:
                 out = out + bias.to(torch.float32)
         else:
