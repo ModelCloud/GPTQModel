@@ -38,7 +38,7 @@ from .fallback_smooth import (
     mse_optimal_quant,
     smooth_applies,
     smooth_block,
-    symmetric_range,
+    symmetric_range_from_bounds,
 )
 from .gar import (
     compose_final_perm,
@@ -2082,9 +2082,10 @@ class GPTQ:
 
             if self.qcfg.sym:
                 # Every symmetric kernel assumes zero = 2 ** (bits - 1);
-                # Marlin does not even read the stored qzeros. Fit the common
-                # symmetric range so all strategies store that fixed zero.
-                lo, hi = symmetric_range(block_mod)
+                # Marlin does not even read the stored qzeros. Zero-center the
+                # interval the strategy selected so STDCLIP/MEAN/MEDIAN keep
+                # their clipping decision instead of remeasuring the block.
+                lo, hi = symmetric_range_from_bounds(lo, hi)
             else:
                 lo, hi = affine_range_with_zero(lo, hi)
             scale = _floor_scale_for_storage(

@@ -48,20 +48,38 @@ def affine_range_with_zero(
     return torch.minimum(lo, zero), torch.maximum(hi, zero)
 
 
-def symmetric_range(block: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Return the zero-centered range every symmetric kernel expects.
+def symmetric_range_from_bounds(
+    lo: torch.Tensor, hi: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Zero-center a strategy-selected interval for a symmetric grid.
 
     Symmetric GPTQ stores a fixed zero point of ``2 ** (bits - 1)`` and the
     kernels that ignore ``qzeros`` (Marlin) assume it. The fallback strategies
     therefore cannot fit their own midpoint/mean/median/STDCLIP endpoints under
-    ``sym=True``: they must all use ``[-max|x|, max|x|]`` so the derived zero
-    point is that fixed value. An all-zero group gets the same ``+-1`` sentinel
-    as ``Quantizer.find_params`` so the scale stays finite.
+    ``sym=True``. Keep the selected interval's clipping decision and fit the
+    smallest zero-centered interval that contains it, ``[-max(|lo|, |hi|),
+    max(|lo|, |hi|)]``, instead of remeasuring the raw block. An all-zero
+    selection gets the same ``+-1`` sentinel as ``Quantizer.find_params`` so
+    the scale stays finite.
     """
 
-    max_abs = block.abs().amax(dim=1, keepdim=True)
+    max_abs = torch.maximum(lo.abs(), hi.abs())
     max_abs = torch.where(max_abs == 0, torch.ones_like(max_abs), max_abs)
     return -max_abs, max_abs
+
+
+def symmetric_range(block: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return the zero-centered range every symmetric kernel expects.
+
+    This is ``symmetric_range_from_bounds`` applied to the raw block bounds.
+    Callers that already selected a clipped interval must pass that interval
+    to ``symmetric_range_from_bounds`` instead of the raw block.
+    """
+
+    return symmetric_range_from_bounds(
+        block.min(dim=1, keepdim=True).values,
+        block.max(dim=1, keepdim=True).values,
+    )
 
 
 def _quantile(block: torch.Tensor, percentile: float) -> torch.Tensor:
