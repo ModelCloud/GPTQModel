@@ -104,6 +104,84 @@ def test_reload_after_release_keeps_the_runtime_layout_current():
     torch.testing.assert_close(output.double(), activation.double() @ weight.double(), rtol=2e-3, atol=2e-3)
 
 
+def _build_resident(in_features=1024, out_features=4096, group_size=128):
+    """Build a module with the checkpoint words still resident before release."""
+    source, weight = build_case(
+        bits=8,
+        group_size=group_size,
+        in_features=in_features,
+        out_features=out_features,
+    )
+    checkpoint = {name: tensor.clone() for name, tensor in source.state_dict().items()}
+    module = TorchInt8Linear(
+        bits=8,
+        group_size=group_size,
+        sym=False,
+        desc_act=True,
+        in_features=in_features,
+        out_features=out_features,
+    )
+    module.load_state_dict(checkpoint, strict=True)
+    module._maybe_drop_checkpoint_qweight = lambda: False
+    module.post_init()
+    module.__dict__.pop("_maybe_drop_checkpoint_qweight")
+    module.eval()
+    assert module._checkpoint_qweight() is not None
+    return module, checkpoint
+
+
+def test_release_verification_avoids_the_full_width_inverse(monkeypatch):
+    """Release verification must compare slices, not rebuild the whole layer (#5835)."""
+
+    module, checkpoint = _build_resident()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("release verification materialized the full-width inverse")
+
+    monkeypatch.setattr(TorchInt8Linear, "_rebuild_checkpoint_qweight", forbidden)
+    assert module._maybe_drop_checkpoint_qweight() is True
+    # The export path legitimately rebuilds the full words; only the release
+    # verification must avoid them.
+    monkeypatch.undo()
+    assert module._checkpoint_qweight() is None
+    torch.testing.assert_close(
+        module.state_dict()["qweight"], checkpoint["qweight"], rtol=0, atol=0
+    )
+
+
+def test_release_verification_walks_bounded_output_column_tiles(monkeypatch):
+    """Every output column is compared, and each tile stays inside the budget."""
+
+    from gptqmodel.nn_modules.qlinear.torch_int8 import _INT8_REBUILD_TILE_BYTES
+
+    module, _ = _build_resident()
+    calls = []
+    original = TorchInt8Linear._rebuild_qweight_columns
+
+    def record(self, start, stop, **kwargs):
+        calls.append((start, stop))
+        return original(self, start, stop, **kwargs)
+
+    monkeypatch.setattr(TorchInt8Linear, "_rebuild_qweight_columns", record)
+    assert module._maybe_drop_checkpoint_qweight() is True
+    assert len(calls) >= 2, calls
+    assert calls[0][0] == 0
+    assert calls[-1][1] == module.out_features
+    for start, stop in calls:
+        assert stop > start
+        assert (stop - start) * module.in_features * 4 <= _INT8_REBUILD_TILE_BYTES
+
+
+def test_release_verification_checks_the_last_output_column_tile():
+    """A mismatch in the final tile keeps the checkpoint words resident."""
+
+    module, _ = _build_resident()
+    with torch.no_grad():
+        module.int8_weight_gnk[:, -1, :] ^= 1
+    assert module._maybe_drop_checkpoint_qweight() is False
+    assert module._checkpoint_qweight() is not None
+
+
 def test_unreconstructable_padding_keeps_the_checkpoint_source():
     """Fail closed: a padded tail the layout cannot reproduce stays resident."""
 

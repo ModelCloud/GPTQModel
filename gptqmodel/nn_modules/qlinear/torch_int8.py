@@ -36,6 +36,10 @@ _INT8_REBUILD_LOCK = threading.Lock()
 # Output channels decoded at once on the asymmetric path. The decoded tile is
 # transient scratch: it is released before the next tile or group is processed.
 _INT8_ASYMMETRIC_DECODE_TILE = 256
+# Transient budget for one output-column slice of the checkpoint release
+# verification. The inverse widens every stored code to INT32; slicing keeps
+# that scratch bounded instead of materializing the whole layer at once.
+_INT8_REBUILD_TILE_BYTES = 8 * 1024 * 1024
 
 # `aten::_weight_int8pack_mm` reduces the contraction axis in 8-wide chunks and
 # is only defined for `K % 8 == 0`: with a narrower or misaligned width it reads
@@ -515,21 +519,8 @@ class TorchInt8Linear(GPTQQuantLinear):
         weight = self._buffers.get("qweight")
         return weight if isinstance(weight, torch.Tensor) else None
 
-    def _rebuild_checkpoint_qweight(self, descriptor=None) -> torch.Tensor:
-        """Rebuild the checkpoint ``qweight`` words from the INT8 runtime layout.
-
-        The group layout is a pure storage repack: each stored byte is the
-        checkpoint's own code minus 128, permuted into group order and padded
-        to the kernel's contraction alignment. Inverting it therefore
-        reproduces the checkpoint words exactly. ``_maybe_drop_checkpoint_qweight``
-        verifies that against the live tensor before releasing it, so an
-        unexpected layout keeps its resident copy instead of exporting garbage.
-        """
-        descriptor = descriptor or getattr(self, "_int8_dropped_qweight", None)
-        if descriptor is None:
-            raise RuntimeError(
-                "TorchInt8Linear has no released qweight and no INT8 layout to rebuild it from."
-            )
+    def _int8_rebuild_plan(self) -> dict:
+        """Validate the runtime INT8 layout and return shared inverse metadata."""
         int8_weight = getattr(self, INT8_WEIGHT_BUFFER_NAME, None)
         group_scale = getattr(self, INT8_GROUP_SCALE_BUFFER_NAME, None)
         if int8_weight is None or group_scale is None:
@@ -545,39 +536,69 @@ class TorchInt8Linear(GPTQQuantLinear):
             raise RuntimeError(
                 f"Group length metadata has {len(lengths)} entries for {num_groups} groups"
             )
-
-        # Stored codes are ``code - 128``; add the residual zero back so the
-        # words hold the checkpoint's unsigned 8-bit values.
-        codes = int8_weight.to(torch.int32).add(128)
-        rows = codes.permute(0, 2, 1).reshape(num_groups * width, self.out_features)
+        row_index = None
         if any(length != width for length in lengths[:-1]):
             # A short/empty non-trailing group leaves padding rows inside the
             # flat layout; gather each group's exact rows before un-permuting.
-            index = torch.cat([
-                torch.arange(group * width, group * width + length, device=rows.device)
+            row_index = torch.cat([
+                torch.arange(group * width, group * width + length, device=int8_weight.device)
                 for group, length in enumerate(lengths)
             ])
-            rows = rows.index_select(0, index)
         keep = sum(lengths)
         if self.in_features is not None:
             keep = min(keep, self.in_features)
-        rows = rows[:keep]
         input_perm = getattr(self, INT8_INPUT_PERM_BUFFER_NAME, None)
-        if input_perm is not None:
-            rows = rows.index_select(0, torch.argsort(input_perm.long()))
+        inverse_input_perm = None if input_perm is None else torch.argsort(input_perm.long())
+        return {
+            "num_groups": num_groups,
+            "width": width,
+            "row_index": row_index,
+            "keep": keep,
+            "inverse_input_perm": inverse_input_perm,
+        }
 
+    def _rebuild_qweight_columns(
+        self,
+        column_start: int,
+        column_stop: int,
+        *,
+        plan: dict,
+        descriptor,
+    ) -> torch.Tensor:
+        """Rebuild one output-column slice of the checkpoint ``qweight`` words.
+
+        The slice is a pure storage inverse, so every packed byte is compared
+        exactly. Widening only this slice's codes bounds the transient memory
+        of the release verification (#5835).
+        """
+        int8_weight = getattr(self, INT8_WEIGHT_BUFFER_NAME, None)
         shape, dtype = descriptor
         word_rows, out_features = int(shape[0]), int(shape[1])
-        if tuple(rows.shape[1:]) != (out_features,):
+        if int(int8_weight.shape[1]) != out_features:
             raise RuntimeError(
-                f"INT8 layout has {rows.shape[1]} output features, qweight expects {out_features}"
+                f"INT8 layout has {int8_weight.shape[1]} output features, qweight expects {out_features}"
             )
-        words = torch.zeros((word_rows, out_features), dtype=dtype, device=rows.device)
+
+        num_groups, width = plan["num_groups"], plan["width"]
+        column_count = column_stop - column_start
+        # Stored codes are ``code - 128``; add the residual zero back so the
+        # words hold the checkpoint's unsigned 8-bit values.
+        # The stored layout is ``[group, output, contraction]``, so the
+        # checkpoint's output-column axis is the middle dimension.
+        codes = int8_weight[:, column_start:column_stop, :].to(torch.int32).add(128)
+        rows = codes.permute(0, 2, 1).reshape(num_groups * width, column_count)
+        if plan["row_index"] is not None:
+            rows = rows.index_select(0, plan["row_index"])
+        rows = rows[: plan["keep"]]
+        if plan["inverse_input_perm"] is not None:
+            rows = rows.index_select(0, plan["inverse_input_perm"])
+
+        words = torch.zeros((word_rows, column_count), dtype=dtype, device=rows.device)
         pack_factor = int(self.pack_factor)
         full_words = min(rows.shape[0] // pack_factor, word_rows)
         if full_words:
             grouped = rows[: full_words * pack_factor].reshape(
-                full_words, pack_factor, out_features
+                full_words, pack_factor, column_count
             )
             for lane in range(pack_factor):
                 words[:full_words].bitwise_or_(grouped[:, lane, :] << (self.bits * lane))
@@ -587,10 +608,45 @@ class TorchInt8Linear(GPTQQuantLinear):
                 raise RuntimeError(
                     "INT8 layout has more input channels than the checkpoint qweight can hold"
                 )
-            packed_tail = torch.zeros(out_features, dtype=dtype, device=rows.device)
+            packed_tail = torch.zeros(column_count, dtype=dtype, device=rows.device)
             for lane in range(tail.shape[0]):
                 packed_tail.bitwise_or_(tail[lane] << (self.bits * lane))
             words[full_words] = packed_tail
+        return words
+
+    def _rebuild_tile_columns(self, plan: dict, out_features: int) -> int:
+        """Output columns to rebuild at once under the transient-memory budget."""
+        rows = max(1, int(plan["keep"]))
+        columns = _INT8_REBUILD_TILE_BYTES // (rows * 4)
+        return max(1, min(int(out_features), columns))
+
+    def _rebuild_checkpoint_qweight(self, descriptor=None) -> torch.Tensor:
+        """Rebuild the checkpoint ``qweight`` words from the INT8 runtime layout.
+
+        The group layout is a pure storage repack: each stored byte is the
+        checkpoint's own code minus 128, permuted into group order and padded
+        to the kernel's contraction alignment. Inverting it therefore
+        reproduces the checkpoint words exactly. ``_maybe_drop_checkpoint_qweight``
+        verifies that against the live tensor before releasing it, so an
+        unexpected layout keeps its resident copy instead of exporting garbage.
+        The inverse is assembled one bounded output-column slice at a time.
+        """
+        descriptor = descriptor or getattr(self, "_int8_dropped_qweight", None)
+        if descriptor is None:
+            raise RuntimeError(
+                "TorchInt8Linear has no released qweight and no INT8 layout to rebuild it from."
+            )
+        plan = self._int8_rebuild_plan()
+        int8_weight = getattr(self, INT8_WEIGHT_BUFFER_NAME, None)
+        shape, dtype = descriptor
+        word_rows, out_features = int(shape[0]), int(shape[1])
+        words = torch.zeros((word_rows, out_features), dtype=dtype, device=int8_weight.device)
+        tile = self._rebuild_tile_columns(plan, out_features)
+        for start in range(0, out_features, tile):
+            stop = min(start + tile, out_features)
+            words[:, start:stop] = self._rebuild_qweight_columns(
+                start, stop, plan=plan, descriptor=descriptor
+            )
         return words
 
     def _materialize_checkpoint_qweight(self) -> bool:
@@ -609,17 +665,25 @@ class TorchInt8Linear(GPTQQuantLinear):
         """Release the checkpoint words once the INT8 layout rebuilds them exactly.
 
         Fails closed: any shape/value mismatch keeps both copies, so a layout
-        this build cannot invert is never what a save emits.
+        this build cannot invert is never what a save emits. Verification walks
+        bounded output-column slices so a wide layer never needs the whole
+        widened inverse resident at once (#5835).
         """
         weight = self._checkpoint_qweight()
         if weight is None:
             return False
         descriptor = (tuple(weight.shape), weight.dtype)
         try:
-            rebuilt = self._rebuild_checkpoint_qweight(descriptor=descriptor)
+            plan = self._int8_rebuild_plan()
+            tile = self._rebuild_tile_columns(plan, weight.shape[1])
+            for start in range(0, weight.shape[1], tile):
+                stop = min(start + tile, weight.shape[1])
+                rebuilt = self._rebuild_qweight_columns(
+                    start, stop, plan=plan, descriptor=descriptor
+                )
+                if not torch.equal(rebuilt, weight[:, start:stop]):
+                    return False
         except Exception:
-            return False
-        if not torch.equal(rebuilt, weight):
             return False
         # Publish the descriptor before dropping the buffer so a concurrent
         # reader never sees a missing tensor without a rebuild recipe.
@@ -825,6 +889,7 @@ class TorchInt8Linear(GPTQQuantLinear):
         # Pad the widest group up to the INT8 kernel's contraction alignment so
         # the runtime module never has to copy the codes again.
         kernel_width = _align_int8_group_width(max(group_lengths))
+        pieces = None
         if all(length == kernel_width for length in group_lengths):
             # [K, N] -> [G, W, N] -> [G, N, W]
             grouped_codes = ordered_codes.reshape(num_groups, kernel_width, self.out_features).permute(0, 2, 1)
@@ -861,6 +926,9 @@ class TorchInt8Linear(GPTQQuantLinear):
             dtype=dtype,
         )
         self._drop_unpack_buffers()
+        # The grouping scratch is dead once the group buffers are written;
+        # release it before the inverse verification allocates its own tiles.
+        del codes, ordered_codes, grouped_codes, pieces
         # Release the full-size checkpoint copy only after its inverse has been
         # proven against the live bytes (#5718). ``_bind_int8_runtime`` records
         # the post-release source signature so steady-state forwards hit.
