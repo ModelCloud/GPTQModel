@@ -1,10 +1,10 @@
-# DeepSeek V4.1 Flash inference and checkpoint layout
+# DeepSeek V4.1 Flash checkpoint layout and loading
 
 `GPTQModel.load()` accepts the published block-32 FP8 and FP4 checkpoints for
 DeepSeek V4.1 Flash and Flash-1017. GPT-QModel runs the text backbone, vision
-tower, and aligner with its own Torch implementation. Loading omits the
-Engram tables and dSpark/MTP layers. GPTQ, AWQ, and other weight quantization
-methods are outside this inference path.
+tower, and aligner with its own Torch implementation. The loader uses the
+checkpoint's quantization settings and omits the Engram tables and dSpark/MTP
+layers.
 
 ```python
 from gptqmodel import GPTQModel
@@ -165,8 +165,8 @@ and Engram even if all its attention and expert projections resolve.
 | Stage | Before this integration | Current path |
 | --- | --- | --- |
 | Dispatch | `deepseek_v41` failed config detection on Transformers releases without V4.1. | GPT-QModel recognizes the config and selects `DeepSeekV41FlashQModel`. |
-| Load | `V41Source` provided an explicit calibration API. | `load_checkpoint` validates the inference keys and opens only the shards needed by the backbone and vision tower. |
-| Forward | The public loader had no V4.1 inference runtime. | `V41DecoderLayer` carries the hyper-connection mix forward, and `V41AttentionState` shares compressed KV and selections between blocks. |
+| Load | `V41Source` provided an explicit calibration API. | `load_checkpoint` validates the required checkpoint keys and opens only the shards needed by the backbone and vision tower. |
+| Forward | The public loader had no V4.1 runtime. | `V41DecoderLayer` carries the hyper-connection mix forward, and `V41AttentionState` shares compressed KV and selections between blocks. |
 | Packed projections | The initial V4.1 runtime decoded each FP4 or FP8 projection into a temporary BF16 matrix. | `V41MarlinLinear` uses packed CUDA GEMM. `V41PackedLinear` provides the Torch path. |
 
 ```mermaid
@@ -205,7 +205,7 @@ image routing.
 
 | Example | Checkpoint-owned? | Treatment |
 | --- | --- | --- |
-| `layers.0.attn.wq_a.scale` | Yes | Saved inference metadata associated with `wq_a`; include in source ownership/conversion audit. |
+| `layers.0.attn.wq_a.scale` | Yes | Saved quantization metadata for `wq_a` that belongs in the source ownership and conversion audit. |
 | `layers.0.ffn.gate.bias_vl` | Yes | Saved routing parameter, even if a text-only run does not exercise image routing. |
 | `layers.14.engram.q_weight` | Yes | Direct parameter on `engram`; absence from a linear-module list is irrelevant. |
 | `layers.0.hc_attn_fn` | Yes | Direct decoder-layer parameter; cannot be dropped from coverage. |

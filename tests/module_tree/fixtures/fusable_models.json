@@ -484,7 +484,7 @@
     },
     "deepseek_v41": {
       "definition": "DeepSeekV41FlashQModel",
-      "reason": "The inference-only runtime executes the published FP8 and FP4 weights with its own projection modules."
+      "reason": "The published FP8 and FP4 weights use dedicated projection modules."
     },
     "deepseek_vl": {
       "definition": "DeepSeekVLQModel",

@@ -20,7 +20,9 @@ if "deepseek_v41" not in CONFIG_MAPPING:
     AutoConfig.register("deepseek_v41", DeepSeekV41FlashConfig)
 
 
-_INFERENCE_ONLY = "DeepSeek V4.1 Flash support is inference-only. Load the published FP8 / FP4 checkpoint."
+_PUBLISHED_CHECKPOINT_REQUIRED = (
+    "Load the published DeepSeek V4.1 Flash FP8/FP4 checkpoint with GPTQModel.load() without a quantization config."
+)
 
 
 class DeepSeekV41FlashQModel(BaseQModel):
@@ -51,7 +53,7 @@ class DeepSeekV41FlashQModel(BaseQModel):
     @classmethod
     def from_pretrained(cls, pretrained_model_id_or_path, quantize_config=None, profile=PROFILE.AUTO, **kwargs):
         if quantize_config is not None:
-            raise NotImplementedError(_INFERENCE_ONLY)
+            raise NotImplementedError(_PUBLISHED_CHECKPOINT_REQUIRED)
         if profile != PROFILE.AUTO:
             raise ValueError("DeepSeek V4.1 Flash supports the default load profile")
         return cls.from_quantized(pretrained_model_id_or_path, **kwargs)
@@ -105,4 +107,4 @@ class DeepSeekV41FlashQModel(BaseQModel):
         ).eval()
 
     def quantize(self, *args, **kwargs):
-        raise NotImplementedError(_INFERENCE_ONLY)
+        raise NotImplementedError(_PUBLISHED_CHECKPOINT_REQUIRED)

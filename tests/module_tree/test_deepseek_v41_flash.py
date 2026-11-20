@@ -167,7 +167,7 @@ def test_v41_module_plan_accounts_for_loaded_decoder_weights(model):
     assert plan.find("attn.compressor_extra.wkv") is None
     assert model.model.layers[0].ffn.experts[0].w1.weight.dtype == torch.int8
     assert model.model.layers[0].attn.wq_a.weight.dtype == torch.float8_e4m3fn
-    with pytest.raises(NotImplementedError, match="inference-only"):
+    with pytest.raises(NotImplementedError, match="published DeepSeek V4.1 Flash FP8/FP4 checkpoint"):
         model.quantize(None)
 
 
@@ -383,7 +383,7 @@ def test_v41_candidate_order_does_not_depend_on_masked_tail():
 
 
 def test_v41_public_load_rejects_quantization(v41_checkpoint):
-    with pytest.raises(NotImplementedError, match="inference-only"):
+    with pytest.raises(NotImplementedError, match="published DeepSeek V4.1 Flash FP8/FP4 checkpoint"):
         GPTQModel.load(v41_checkpoint, device="cpu", quantize_config={"bits": 4, "group_size": 32})
 
 
