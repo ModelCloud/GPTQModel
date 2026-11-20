@@ -35,7 +35,7 @@ from ...utils.macaq_triton import (
 from ...utils.torch import dynamo_is_compiling
 from . import WeightOnlyQuantLinear
 from ._compile_support import COMPILE_LEVEL
-from ._numerics import linear_fp32_reduce
+from ._numerics import fp32_epilogue_context, linear_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
 
@@ -474,8 +474,12 @@ class MacaqLinear(WeightOnlyQuantLinear):
                 xb = macaq_core.rotate_blocks(xb, bh)
         if wide:
             # The activation transform above stays at the activation dtype;
-            # only the dot's operands widen.
+            # only the dot's operands widen. Ambient autocast would narrow the
+            # FP32 decode back to the activation dtype (turning a finite value
+            # into `inf`), so keep the consuming reduction out of it (#5771).
             xb = xb.to(torch.float32)
+            with fp32_epilogue_context(xb.device.type):
+                return linear_fp32_reduce(xb, weight, self.bias)
         # Pass the stored bias unchanged; `linear_fp32_reduce` keeps a wider
         # bias out of the low-precision operands and adds it in FP32 (#5632).
         return linear_fp32_reduce(xb, weight, self.bias)
