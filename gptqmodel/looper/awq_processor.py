@@ -4389,6 +4389,7 @@ class AWQProcessor(LoopProcessor):
             try:
                 scales_list.append(self._search_best_scale(
                     layer_module_ref,
+                    named_childs=named_childs,
                     scale_consumers=scale_consumers,
                     allow_partial_replay=allow_partial_replay,
                     allow_outside_fold=allow_outside_fold,
@@ -4476,7 +4477,7 @@ class AWQProcessor(LoopProcessor):
         if self.apply_clip:
             clip_list = self._search_best_clip(
                 layer_module_ref,
-                {name: named.module for name, named in named_childs.items() if name not in fallback_names},
+                {name: named for name, named in named_childs.items() if name not in fallback_names},
                 input_feat,
             )
             apply_clip(layer_module_ref, clip_list)
@@ -4808,6 +4809,7 @@ class AWQProcessor(LoopProcessor):
             fold_layers: Optional[List[nn.Linear]] = None,
             allow_partial_replay: bool = False,
             allow_outside_fold: bool = False,
+            named_childs: Optional[Dict[str, NamedModule]] = None,
     ):
         """Searches the best per-channel AWQ scale for a module group.
 
@@ -4855,11 +4857,39 @@ class AWQProcessor(LoopProcessor):
         # previous cat()+view pipeline while keeping peak memory low: for every group we normalise
         # |w| by its per-group max so the values land on a [0, 1] scale, then accumulate the totals
         # per output channel so the mean can be computed without allocating the combined tensor.
-        group_sizes = [
-            self._group_size_for(module, layer) for layer in layers
-        ]
+        #
+        # The layer's named-child map already carries every member's model-level
+        # name. Resolve one snapshot per member here instead of asking the
+        # identity lookup for the name four times; that lookup walked the whole
+        # model tree and the layer subtree for each option (#5792).
+        full_names = {
+            id(named.module if isinstance(named, NamedModule) else named): (
+                getattr(named, "full_name", None) or name
+            )
+            for name, named in (named_childs or {}).items()
+        }
+
+        def member_name(member):
+            return full_names.get(id(member)) or self._full_module_name(module, member)
+
+        def resolve_members(members):
+            names = [member_name(member) for member in members]
+            resolved = [
+                self.qcfg.resolve_module_config(name) if name is not None else None
+                for name in names
+            ]
+            sizes = [
+                self._module_group_size(name, resolved_cfg=cfg)
+                for name, cfg in zip(names, resolved)
+            ]
+            member_formats = [
+                self._module_format(name, resolved_cfg=cfg)
+                for name, cfg in zip(names, resolved)
+            ]
+            return names, resolved, sizes, member_formats
+
+        member_names, resolved_cfgs, group_sizes, formats = resolve_members(layers)
         default_format = self._module_format(None)
-        formats = [self._format_for(module, layer) for layer in layers]
         w_mean = _compute_awq_weight_mean(layers, group_sizes)
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
@@ -4975,17 +5005,26 @@ class AWQProcessor(LoopProcessor):
                     unobserved[:6],
                 )
                 layers = executed_layers
-                group_sizes = [self._group_size_for(module, layer) for layer in layers]
-                formats = [self._format_for(module, layer) for layer in layers]
+                member_names, resolved_cfgs, group_sizes, formats = resolve_members(layers)
                 w_mean = _compute_awq_weight_mean(layers, group_sizes)
 
             # [STEP 4]: Compute loss
             best_scale_kwargs = {
                 "replay_batch_size": replay_batch_size,
                 "prepared_forward": prepared_forward,
-                "bits": [self._bits_for(module, layer) for layer in layers] if bits is None else bits,
+                "bits": (
+                    [
+                        self._module_bits(name, resolved_cfg=cfg)
+                        for name, cfg in zip(member_names, resolved_cfgs)
+                    ]
+                    if bits is None
+                    else bits
+                ),
                 "group_sizes": group_sizes,
-                "syms": [self._sym_for(module, layer) for layer in layers],
+                "syms": [
+                    self._module_sym(name, resolved_cfg=cfg)
+                    for name, cfg in zip(member_names, resolved_cfgs)
+                ],
             }
             if any(module_format != default_format for module_format in formats):
                 best_scale_kwargs["formats"] = formats
@@ -5038,10 +5077,23 @@ class AWQProcessor(LoopProcessor):
                 )
                 continue
 
-            linear = named_linears[name]
+            named = named_linears[name]
+            linear = named.module if isinstance(named, NamedModule) else named
             original_device = get_device(linear)
             target_device = _resolve_module_exec_device(linear)
             move_to(linear, device=target_device)
+
+            # The caller already knows each projection's model-level name
+            # (``NamedModule.full_name``). Resolving it again walked the whole
+            # model tree and the layer subtree for every option (#5792). Only
+            # an unnamed caller falls back to the identity lookup.
+            module_name = (
+                getattr(named, "full_name", None)
+                if isinstance(named, NamedModule)
+                else None
+            )
+            if module_name is None:
+                module_name = self._full_module_name(layer, linear)
 
             # The clip grid is sized from the resolved projection's MSE
             # snapshot, not the top-level default: a dynamic rule may lower
@@ -5049,7 +5101,6 @@ class AWQProcessor(LoopProcessor):
             # where larger tiles are faster). ``_normalize_mse`` keeps the
             # inherited top-level budget when the rule omits it and preserves
             # an explicit zero override (#5791).
-            module_name = self._full_module_name(layer, linear)
             resolved_cfg = (
                 self.qcfg.resolve_module_config(module_name)
                 if module_name is not None
@@ -5060,13 +5111,16 @@ class AWQProcessor(LoopProcessor):
                 base=self.qcfg.mse,
             )
 
+            # One resolved snapshot feeds every option so a dynamic rule cannot
+            # be matched at a different time for bits, group size, format, or
+            # symmetry.
             max_val = self._compute_best_clip(
                 linear.weight,
                 features,
-                bits=self._bits_for(layer, linear),
-                group_size=self._group_size_for(layer, linear),
-                format=self._format_for(layer, linear),
-                sym=self._sym_for(layer, linear),
+                bits=self._module_bits(module_name, resolved_cfg=resolved_cfg),
+                group_size=self._module_group_size(module_name, resolved_cfg=resolved_cfg),
+                format=self._module_format(module_name, resolved_cfg=resolved_cfg),
+                sym=self._module_sym(module_name, resolved_cfg=resolved_cfg),
                 clip_grid_budget=mse.clip_grid_budget,
             )
             clip_list.append((name, max_val))
