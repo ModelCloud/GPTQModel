@@ -127,6 +127,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Low-precision bias epilogues](low-precision-bias-epilogue.md)
 - [Marlin bias epilogue and storage](marlin-bias-epilogue.md)
 - [Marlin hybrid work schedule](marlin-hybrid-schedule.md)
+- [Machete asymmetric zero points: one dtype, one rounding step](machete-asymmetric-zero-point.md)
 - [MLX runtime generation and conversion flow](mlx-runtime.md)
 - [NF12 fallback epilogue](nf12-bias-epilogue.md)
 - [NF12 CUDA dispatch and weight readiness](nf12-cuda-dispatch.md)
