@@ -1,9 +1,10 @@
 # Native EXL3 CUDA dispatch
 
 GPT-QModel runs EXL3 projections directly from their packed trellis. The CUDA
-GEMV and GEMM kernels come from ExLlamaV3 v1.6.7, with the GPT-QModel Torch
-operator boundary, packed launch-selection table, and per-call scratch.
-The source revision is [8c593e4](https://github.com/turboderp-org/exllamav3/tree/8c593e4e5c88da76a4aaf8f1b1838bb7c1fce4e0).
+GEMV and GEMM kernels come from ExLlamaV3 v1.6.7 by TurboDerp and contributors.
+GPT-QModel supplies the Torch operator boundary, packed launch-selection
+table, and per-call scratch. Its EXL3 port also adapts AlexBrandes's Q4NX
+codebook, beam encoder, and CUDA fragment decoder. [ExLlamaV3 v1.6.7 source](https://github.com/turboderp-org/exllamav3/tree/8c593e4e5c88da76a4aaf8f1b1838bb7c1fce4e0) · [EXL3 source credits](../gptqmodel/exllamav3/CREDITS.md)
 
 The `3inst`, `mcg` and `mul1` codebooks handle integer
 rates from 1 to 8 bits per weight. The `mul1` codebook also handles
@@ -13,12 +14,8 @@ values as their integer relatives.
 
 ## Q4NX
 
-AlexBrandes (Alex Brandes) developed Q4NX for routed MoE experts. GPT-QModel
-adapts his beam search from ExLlamaV3 and the fragment decoder from his vLLM
-fork. [Q4NX format specification](https://github.com/AlexBrandes/exllamav3/blob/41ef7819945fe421626da3c40c678053d240d051/doc/q4nx.md) · [CUDA fragment decoder](https://github.com/AlexBrandes/vllm/blob/ff413b2df19718342e02d9763f161d69afce7b4a/csrc/exl3/codec_q4n.cuh)
-
-The original implementation supports 2.5 and 3.0 bits per weight. GPT-QModel
-extends the same layout to 3.5 bits per weight.
+Q4NX was designed for routed MoE experts at 2.5 and 3.0 bits per weight.
+GPT-QModel extends the same layout to 3.5 bits per weight. [Original Q4NX format specification](https://github.com/AlexBrandes/exllamav3/blob/41ef7819945fe421626da3c40c678053d240d051/doc/q4nx.md)
 
 Set `EXL3Config(bits=2.5, codebook="q4nx")` for all selected projections,
 or assign both the rate and codebook to a subset through `dynamic`.

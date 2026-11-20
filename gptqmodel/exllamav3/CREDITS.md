@@ -1,7 +1,10 @@
-This directory vendors the EXL3 kernel and quantizer pieces adapted from `turboderp-org/exllamav3`.
+# EXL3 credits
 
-Primary upstream source:
-- https://github.com/turboderp-org/exllamav3
+GPT-QModel adapts the EXL3 kernels and quantizer from ExLlamaV3 by TurboDerp
+and contributors. The EXL3 port includes the Q4NX codebook, beam Viterbi
+encoder, and tensor-core fragment decoder developed by AlexBrandes
+(Alex Brandes). The encoder comes from his MIT-licensed ExLlamaV3 fork and
+the decoder from his Apache-2.0 vLLM fork. [ExLlamaV3](https://github.com/turboderp-org/exllamav3) · [Q4NX encoder](https://github.com/AlexBrandes/exllamav3/commit/0674697c45e2450ffd4538eb5ade0cf8e6a78f6d) · [Q4NX decoder](https://github.com/AlexBrandes/vllm/blob/ff413b2df19718342e02d9763f161d69afce7b4a/csrc/exl3/codec_q4n.cuh)
 
 Ported components in this repo:
 - `gptqmodel/exllamav3/ext.py`
@@ -9,10 +12,5 @@ Ported components in this repo:
 - `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py`
 - `gptqmodel/exllamav3/util/*`
 - `gptqmodel_ext/exllamav3/*`
-
-AlexBrandes (Alex Brandes) developed the Q4NX codebook and beam Viterbi
-encoder. GPT-QModel adapted the encoder from his ExLlamaV3 fork (MIT) and
-the tensor-core fragment decoder from his vLLM fork (Apache-2.0).
-[Encoder source](https://github.com/AlexBrandes/exllamav3/commit/0674697c45e2450ffd4538eb5ade0cf8e6a78f6d) · [Decoder source](https://github.com/AlexBrandes/vllm/blob/ff413b2df19718342e02d9763f161d69afce7b4a/csrc/exl3/codec_q4n.cuh)
 
 The code remains self-contained inside GPT-QModel and does not depend on the external `exllamav3` Python package.

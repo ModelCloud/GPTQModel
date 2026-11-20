@@ -1,7 +1,6 @@
 # Credits
 
 * [Qubitium](https://x.com/Qubitium) and [ModelCloud](https://x.com/ModelCloudAI) team for maintaining and improving GPT-QModel
-* AlexBrandes (Alex Brandes) for the Q4NX EXL3 codebook, beam encoder, and CUDA fragment decoder. [Source and adaptation credits](gptqmodel/exllamav3/CREDITS.md).
 * [AlpinDale](https://x.com/AlpinDale) for creating the [Swordfish GPTQ/AWQ](https://blog.alpindale.net/posts/swordfish/) Blackwell (>= sm100/sm110) w4a16/w8a16 GEMM kernel family.
 * [AlpinDale](https://x.com/AlpinDale) for the [NF12](https://github.com/dphnAI/nf12) lossless 12-bit BF16 codec and CUDA decode/GEMM kernels, vendored as the `nf12` method and format (internal symbols keep the `nf12` suffix) with the original Apache-2.0 attribution headers. The AMD RDNA4 port in `gptqmodel_ext/nf12_hip/` is a GPT-QModel contribution by ModelCloud.ai that reimplements the same NF12 byte stream for gfx1200/gfx1201/gfx1250, derived from AlpinDale's CUDA tiling and decode expressions.
 * [Together AI](https://www.together.ai/) and the NyoomFloat12 authors (Liberman, Fang, Zhang, Dao, and Fu) for the NF12 lossless 12-bit BF16 format, from *"NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit Weight Compression"* (2026).
@@ -9,7 +8,7 @@
 * **PanQiWei**: for creation of [AutoGPTQ](https://github.com/autogptq/AutoGPTQ) which this project code is based upon.
 * **FXMarty**: for maintaining and support of [AutoGPTQ](https://github.com/autogptq/AutoGPTQ).
 * **Qwopqwop200**: for quantization code used in this project adapted from [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda).
-* **Turboderp**: for releasing [Exllama v1](https://github.com/turboderp/exllama) and [Exllama v2](https://github.com/turboderp/exllamav2) kernels adapted for use in this project.
+* **Turboderp and contributors** for the ExLlama and EXL3 kernels adapted for this project. The EXL3 port includes the Q4NX codebook, beam encoder, and CUDA fragment decoder by **AlexBrandes (Alex Brandes)**. [ExLlama v1](https://github.com/turboderp/exllama) · [ExLlama v2](https://github.com/turboderp/exllamav2) · [ExLlamaV3 / EXL3](https://github.com/turboderp-org/exllamav3) · [EXL3 source credits](gptqmodel/exllamav3/CREDITS.md)
 * **FpgaMiner**: for [GPTQ-Triton](https://github.com/fpgaminer/GPTQ-triton) kernels used in [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda) which is adapted into this project.
 * **Casper Hansen**: for maintaining and support of [AutoAWQ](https://github.com/casper-hansen/AutoAWQ) for which the early version of the awq integration code was adapted from.
 * **Microsoft** and the [VPTQ](https://github.com/microsoft/VPTQ) authors: for the VPTQ algorithm and the reference codebook/index checkpoint layout, ported here under the MIT license.
