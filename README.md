@@ -99,7 +99,7 @@ compatible deployment engine.
 
 Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kernel scratch, one quantization stream and one tile-scratch pair per device, per-device plan lifetimes and the single GGUF CUDA weight copy are documented in [kernel scratch lifecycle](docs/kernel-scratch-lifecycle.md). CPU layer packing quantizes and packs each bounded input block in one shift/reduce pass; see [CPU block packing](docs/cpu-block-packing.md). Compiled CPU int4pack forwards decode the live runtime layout for grad-requiring calls; see [compiled CPU int4pack gradient fallback](docs/cpu-int4pack-compiled-grad.md).
 
-EXL3 supports 1.5, 2.5, and 3.5 bits per weight with `mul1` and 2.5, 3.0, and 3.5 with `q4nx`. [Native half-bit EXL3 rates](docs/exl3-runtime-weights.md#native-mul1-half-bit-rates) · [Q4NX layout and CUDA dispatch](docs/exl3-native-decode.md#q4nx) · [DeepSeek V4.1 Flash Q4NX](docs/deepseek-v41-module-inventory.md#selected-projection-q4nx-exl3)
+EXL3 supports 1.5, 2.5, and 3.5 bits per weight with `mul1` and 2.5, 3.0, and 3.5 with `q4nx`. [Native half-bit EXL3 rates](docs/exl3-runtime-weights.md#native-mul1-half-bit-rates) · [Q4NX layout and CUDA dispatch](docs/exl3-native-decode.md#q4nx) · [Q4NX Ada launch table](docs/exl3-native-decode.md#q4nx-launch-table-on-ada) · [DeepSeek V4.1 Flash Q4NX](docs/deepseek-v41-module-inventory.md#selected-projection-q4nx-exl3)
 
 ### Control, scale, and quality ⚙️
 
