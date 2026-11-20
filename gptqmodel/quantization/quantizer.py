@@ -75,19 +75,28 @@ def _neutralize_dead_columns(
     """Neutralize calibration-dead input channels in place.
 
     A channel with a zero Hessian diagonal carries no calibration signal. Its
-    diagonal entry is replaced with one so the Cholesky inverse stays
-    well-defined, and the matching weight (and optional auxiliary) columns are
-    zeroed. Returns the boolean dead-column mask so a caller can rebuild the
-    neutralized weight from its source without keeping a copy.
+    diagonal entry is replaced with the mean of the live diagonal entries so
+    the Cholesky inverse stays well-defined without changing the damping mean
+    the caller derives from ``mean(diag(H))`` (#5727). The matching weight
+    (and optional auxiliary) columns are zeroed. Returns the boolean
+    dead-column mask so a caller can rebuild the neutralized weight from its
+    source without keeping a copy.
 
-    Boolean-mask assignment (``H[dead, dead] = 1`` / ``W[:, dead] = 0``)
+    Boolean-mask assignment (``H[dead, dead] = <mean>`` / ``W[:, dead] = 0``)
     performs a ``nonzero`` scan and a device-to-host synchronization per
     module. The ``masked_fill_`` forms below are equivalent and stay on the
     device.
     """
 
-    dead = torch.diagonal(hessian) == 0
-    hessian.diagonal().masked_fill_(dead, 1.0)
+    diag = torch.diagonal(hessian)
+    dead = diag == 0
+    live = ~dead
+    live_count = live.sum()
+    live_mean = (diag * live).sum() / live_count.clamp_min(1)
+    # An all-dead module is routed to the RTN fallback before this point; keep
+    # a finite, positive placeholder for direct callers anyway.
+    placeholder = torch.where(live_count > 0, live_mean, torch.ones_like(live_mean))
+    diag.masked_fill_(dead, placeholder)
     weight.masked_fill_(dead.unsqueeze(0), 0.0)
     for tensor in column_tensors:
         tensor.masked_fill_(dead.unsqueeze(0), 0.0)
