@@ -767,6 +767,19 @@ class BaseQuantLinear(ForwardDtypeLockMixin, nn.Module):
 
         return ()
 
+    def iter_runtime_device_allocations(self):
+        """Yield accelerator weight storage kept outside Torch's registry.
+
+        A native runtime can hold packed weights in its own allocator: TTNN
+        keeps them as device tensors on the mesh, where neither ``parameters()``
+        nor ``iter_runtime_weight_tensors`` can see them (#5810). Each entry is
+        a :class:`~gptqmodel.utils.resource_budget.DeviceAllocation` naming its
+        backend and that backend's device ordinal. Backends that own such
+        storage override this; the default owns nothing extra.
+        """
+
+        return ()
+
     def materialize_checkpoint_layout_for_export(self) -> bool:
         """Restore checkpoint buffers a derived cache replaced; True if restored.
 

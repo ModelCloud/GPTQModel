@@ -46,6 +46,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.resource_budget import DeviceAllocation, RuntimeAllocationUnavailable
 from ...utils.tt_packing import (
     TT_GPTQ_PACK_BITS,
     TT_GPTQ_PACK_FACTOR,
@@ -57,9 +58,11 @@ from ...utils.ttnn_runtime import (
     TTNNUnavailable,
     close_mesh,
     current_mesh,
+    dram_allocated_bytes,
     hold_mesh_lease,
     import_ttnn,
     is_ttnn_available,
+    mesh_device_ids,
     open_mesh,
     release_mesh_lease,
     ttnn_device_count,
@@ -205,6 +208,10 @@ class TTNNLinear(GPTQQuantLinear):
         )
         self._ttnn_layer: Optional[TTNNPackedLayer] = None
         self._ttnn_key = None
+        # Per-chip storage measured when this layer uploaded its tensors, and
+        # the chip ordinals those bytes live on (#5810).
+        self._ttnn_device_ids = ()
+        self._ttnn_device_bytes: Optional[int] = None
 
     # -- capability -------------------------------------------------------
 
@@ -330,6 +337,13 @@ class TTNNLinear(GPTQQuantLinear):
         hold_mesh_lease(self)
         dev = mesh.device
         device_count = mesh.num_devices
+        # Measure the allocator before the upload so the budget can report the
+        # exact per-chip storage these tensors add, including tile padding and
+        # page rounding. An unreadable view is reported as unknown, not zero.
+        try:
+            allocated_before = dram_allocated_bytes(dev)
+        except Exception:
+            allocated_before = None
 
         # Tensor parallel: every chip owns a contiguous slice of out_features.
         if self.out_features % device_count:
@@ -388,6 +402,19 @@ class TTNNLinear(GPTQQuantLinear):
                     ttnn.bfloat16, shard_cols,
                 )
 
+        device_bytes = None
+        if allocated_before is not None:
+            try:
+                allocated_after = dram_allocated_bytes(dev)
+            except Exception:
+                allocated_after = None
+            if allocated_after is not None and allocated_after > allocated_before:
+                device_bytes = allocated_after - allocated_before
+        try:
+            device_ids = mesh_device_ids(mesh)
+        except Exception:
+            device_ids = ()
+
         # Validate the sharded packed shapes once, here, so a checkpoint whose
         # layout cannot serve this mesh fails at load rather than mid-forward.
         if device_count > 1:
@@ -427,6 +454,8 @@ class TTNNLinear(GPTQQuantLinear):
             compute_config=compute_config,
         )
         self._ttnn_key = key
+        self._ttnn_device_ids = device_ids
+        self._ttnn_device_bytes = device_bytes
         return self._ttnn_layer
 
     # -- lifecycle --------------------------------------------------------
@@ -437,6 +466,8 @@ class TTNNLinear(GPTQQuantLinear):
     def clear_weight_cache(self) -> None:
         layer, self._ttnn_layer = self._ttnn_layer, None
         self._ttnn_key = None
+        self._ttnn_device_ids = ()
+        self._ttnn_device_bytes = None
         if layer is None:
             return
         ttnn = import_ttnn()
@@ -449,6 +480,25 @@ class TTNNLinear(GPTQQuantLinear):
                     ttnn.deallocate(tensor)
                 except Exception:  # pragma: no cover - best-effort release
                     pass
+
+    def iter_runtime_device_allocations(self):
+        """Report the packed device tensors this layer owns (#5810).
+
+        The bytes are the per-chip DRAM delta measured when the tensors were
+        uploaded, so tile padding, allocator page rounding and replicated
+        operands are included exactly as the device holds them. A layer that
+        was never built owns no device storage; a built layer whose allocator
+        could not be read reports its backend as unmeasured instead of zero.
+        """
+
+        if self._ttnn_layer is None:
+            return
+        if self._ttnn_device_bytes is None or not self._ttnn_device_ids:
+            raise RuntimeAllocationUnavailable("ttnn")
+        for index in self._ttnn_device_ids:
+            yield DeviceAllocation(
+                backend="ttnn", index=index, weights_bytes=self._ttnn_device_bytes
+            )
 
     def release_device(self) -> bool:
         """Drop this layer's mesh lease and close the mesh when it is last.

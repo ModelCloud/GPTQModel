@@ -131,7 +131,12 @@ from ..utils.model import (
 from ..utils.model_dequant import infer_block_shape
 from ..utils.p2p import safe_module_to
 from ..utils.quant_metadata import UnsupportedMetadata, describe_unsupported_metadata, find_unsupported_metadata
-from ..utils.resource_budget import DeviceBudget, ResourceBudget, device_memory_bytes
+from ..utils.resource_budget import (
+    DeviceBudget,
+    ResourceBudget,
+    RuntimeAllocationUnavailable,
+    device_memory_bytes,
+)
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
@@ -446,6 +451,59 @@ def _runtime_weight_tensors(inner: object):
             continue
 
 
+def _runtime_device_allocations(inner: object) -> Tuple[Dict[Tuple[str, int], int], Tuple[str, ...]]:
+    """(measured) Accelerator weight storage a backend keeps outside Torch.
+
+    A native runtime can hold packed weights in its own allocator: TTNN keeps
+    them as ``ttnn.Tensor`` device tensors, which neither ``parameters()`` nor
+    ``iter_runtime_weight_tensors`` can see (#5810). Each module publishes them
+    through ``iter_runtime_device_allocations``; the entry names the backend and
+    that backend's own device ordinal, so TTNN chips never collide with CUDA
+    devices or the host.
+
+    A backend that owns storage but cannot measure it is returned as unmeasured,
+    never as zero: an unreadable allocator is unknown memory, not free memory.
+    """
+
+    allocations: Dict[Tuple[str, int], int] = {}
+    unmeasured = []
+    modules = getattr(inner, "modules", None)
+    if not callable(modules):
+        return allocations, ()
+    try:
+        walker = modules()
+    except Exception:  # pragma: no cover - exotic module trees
+        return allocations, ()
+    for module in walker:
+        hook = getattr(type(module), "iter_runtime_device_allocations", None)
+        if hook is None:
+            continue
+        try:
+            entries = tuple(hook(module))
+        except RuntimeAllocationUnavailable as exc:
+            unmeasured.append(exc.backend)
+            continue
+        except Exception:  # pragma: no cover - backend bookkeeping
+            unmeasured.append("unknown")
+            continue
+        for entry in entries:
+            backend = getattr(entry, "backend", None)
+            index = getattr(entry, "index", None)
+            nbytes = getattr(entry, "weights_bytes", None)
+            if (
+                not isinstance(backend, str) or not backend
+                or not isinstance(index, int) or index < 0
+                or not isinstance(nbytes, int) or nbytes < 0
+            ):
+                # A malformed entry is coverage we cannot trust; say so rather
+                # than silently dropping the storage it was meant to describe.
+                unmeasured.append(backend if isinstance(backend, str) and backend else "unknown")
+                continue
+            key = (backend, index)
+            allocations[key] = allocations.get(key, 0) + nbytes
+    return allocations, tuple(dict.fromkeys(unmeasured))
+
+
 def _parameter_devices(inner: object) -> Dict[int, int]:
     """(measured) Weight bytes per device index, meta tensors skipped.
 
@@ -570,16 +628,23 @@ def _budget_for(inner: object, *, wrapper: object = None, reserve: float = 0.1,
     """Resource budget for a decoder module: measured per-device numbers + estimates."""
 
     per_device = _parameter_devices(inner)
+    allocations, unmeasured_backends = _runtime_device_allocations(inner)
     estimate = _kv_cache_estimate_for(inner, dtype=dtype)
     layer_devices = None
     if estimate is not None:
         layer_devices = _layer_device_indices(wrapper if wrapper is not None else inner,
                                               inner, len(estimate.layers))
+    devices = list(_device_budgets(per_device))
+    for (backend, index), weights in sorted(allocations.items()):
+        devices.append(
+            DeviceBudget(index=index, weights_bytes=weights, backend=backend)
+        )
     return ResourceBudget(
-        devices=_device_budgets(per_device),
+        devices=tuple(devices),
         kv_cache=estimate,
         layer_devices=layer_devices,
         reserve_fraction=reserve,
+        unmeasured_backends=unmeasured_backends,
     )
 
 
