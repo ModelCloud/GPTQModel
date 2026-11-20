@@ -406,6 +406,8 @@ class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
             # graph must not do. The transform runs on the first eager forward
             # and in ``optimize()``'s warmup, so the graph only reads the
             # resolved ``linear_mode``.
+            # A grad call must not take the fused op; decode instead (#5369, #5569).
+            dense_override = fused_autograd_needs_dense(self, x_flat)
             if (
                 self.linear_mode is None
                 and not self.training
