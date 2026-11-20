@@ -48,6 +48,7 @@ from ..quantization.config import (
     QuantizeEmbedConfig,
     RTNConfig,
     VramStrategy,
+    encoder_stages_on_host,
 )
 from ..utils import has_gil_disabled
 from ..utils.device import get_device
@@ -433,6 +434,18 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
             )
             return device
 
+    def _encoder_stages_on_host(self) -> bool:
+        """Report whether this run's encoder consumes a host-resident source.
+
+        GGUF and BitsAndBytes encode on the host and NF12 stages an eligible
+        host source itself, so staging their dense layer on the accelerator is
+        a wasted round trip of the whole tensor (#5757). The assigned device
+        still selects the backend and owns the packed checkpoint handoff.
+        """
+
+        qcfg = getattr(self.processor, "qcfg", None)
+        return bool(qcfg is not None and encoder_stages_on_host(qcfg))
+
     def _prepare_named_module_for_quantization(self, named: NamedModule, target_device: torch.device) -> None:
         """Move a weight-only module to the assigned quantization device."""
 
@@ -440,12 +453,14 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
             previous_device = get_device(named.module)
         except Exception:
             previous_device = None
+        host_encoder = self._encoder_stages_on_host()
         with device_ctx(target_device):
-            move_module_to_device(
-                named.module,
-                target_device,
-                root_module=getattr(self.gptq_model, "model", None),
-            )
+            if not host_encoder:
+                move_module_to_device(
+                    named.module,
+                    target_device,
+                    root_module=getattr(self.gptq_model, "model", None),
+                )
             # Keep the quantization device for the final pack step.
             named.state["quant_device"] = target_device
             named.target_device = target_device
@@ -455,6 +470,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
             module=getattr(named, "full_name", named.name),
             previous_device=previous_device,
             target_device=target_device,
+            host_encoder=host_encoder,
         )
 
     def _move_named_module_to_cpu(self, named: NamedModule) -> None:
