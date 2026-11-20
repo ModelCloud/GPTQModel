@@ -4976,14 +4976,41 @@ _DYNAMIC_NUMERIC_BOUNDS: Dict[str, Tuple[float, Optional[float], bool, bool, str
     "opt_quantizer_lr": (0.0, None, False, True, "positive"),
     "opt_pair_ratio": (0.0, 0.5, False, True, "in the interval (0, 0.5]"),
     "opt_weight_decay": (0.0, None, True, True, "non-negative"),
-    "opt_eps": (0.0, None, True, True, "non-negative"),
+    "opt_eps": (0.0, None, False, True, "positive"),
     "opt_sgd_momentum": (0.0, None, True, True, "non-negative"),
     "opt_sgd_dampening": (0.0, None, True, True, "non-negative"),
-    "opt_channel_scale_clamp_min": (0.0, None, True, True, "non-negative"),
-    "opt_channel_scale_clamp_max": (0.0, None, True, True, "non-negative"),
+    "opt_channel_scale_clamp_min": (0.0, None, False, True, "positive"),
+    "opt_channel_scale_clamp_max": (0.0, None, False, True, "positive"),
     "ridge": (0.0, None, True, True, "non-negative"),
     "pre_alpha": (0.0, 1.0, True, True, "between 0 and 1"),
 }
+
+# Integer per-module options whose top-level ``__post_init__`` coerces with
+# ``int()`` and then applies bounds. A dynamic rule was merged verbatim, so
+# ``krot=0`` or ``had_block=True`` reached the processor as-is (#5574).
+_DYNAMIC_INTEGER_BOUNDS: Dict[str, Tuple[int, Optional[int], bool, bool, str]] = {
+    "krot": (1, None, True, True, "a positive integer"),
+    "opt_rotation_epochs": (0, None, True, True, "a non-negative integer"),
+    "opt_finetune_epochs": (0, None, True, True, "a non-negative integer"),
+    "opt_train_samples": (1, None, True, True, "a positive integer"),
+    "opt_validation_samples": (1, None, True, True, "a positive integer"),
+    "opt_batch_size": (1, None, True, True, "a positive integer"),
+    "n_flip_iters": (0, None, True, True, "a non-negative integer"),
+}
+
+
+def _coerce_dynamic_integer(owner_name: str, label: str, value: Any, range_text: str) -> int:
+    """Coerce one dynamic integer the way the top-level ``int()`` path does."""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.") from None
+    if isinstance(value, float) and (not math.isfinite(value) or value != number):
+        raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
+    return number
 
 
 def _validate_dynamic_numeric_overrides(owner, layer_name: str, layer_dict: Mapping) -> None:
@@ -5003,11 +5030,28 @@ def _validate_dynamic_numeric_overrides(owner, layer_name: str, layer_dict: Mapp
 
     owner_name = owner.__class__.__name__
     numeric_fields = _numeric_annotated_fields(type(owner))
+    # Method payloads are normalized into their dataclasses at the top level,
+    # where their own ``__post_init__`` checks run. The dynamic merge used to
+    # copy the raw dict, so a NaN nested value reached the checkpoint JSON and
+    # failed only when the first matching module was quantized (#5574).
+    nested_normalizers = {
+        "mse": _normalize_mse,
+        "gptaq": _normalize_gptaq,
+        "foem": _normalize_foem,
+        "hessian": _normalize_hessian,
+    }
     for key, value in layer_dict.items():
         if value is None:
             continue
         canonical = QUANT_CONFIG_ARG_SYNONYMS.get(key, key)
         label = f"dynamic['{layer_name}'].{key}"
+        normalizer = nested_normalizers.get(canonical)
+        if normalizer is not None:
+            try:
+                normalizer(value)
+            except (TypeError, ValueError) as exc:
+                raise type(exc)(f"{owner_name}: `{label}` is not a valid {canonical}: {exc}") from exc
+            continue
         if canonical == "group_size":
             group_size = _validate_group_size(owner_name, value)
             if group_size != -1 and group_size <= 0:
@@ -5017,7 +5061,39 @@ def _validate_dynamic_numeric_overrides(owner, layer_name: str, layer_dict: Mapp
             if not isinstance(value, (list, tuple)) or len(value) != 2:
                 raise ValueError(f"{owner_name}: `{label}` must be a 2-tuple/list of floats.")
             for index, beta in enumerate(value):
-                _validate_finite_float(owner_name, f"{label}[{index}]", beta, minimum=0.0)
+                beta = _validate_finite_float(owner_name, f"{label}[{index}]", beta, minimum=0.0)
+                if beta >= 1.0:
+                    raise ValueError(
+                        f"{owner_name}: `{label}[{index}]` must be in the interval [0, 1), got {beta!r}."
+                    )
+            continue
+        if canonical == "had_block":
+            number = _coerce_dynamic_integer(
+                owner_name, label, value, "a positive power of two at least 32"
+            )
+            if number < 32 or number & (number - 1):
+                raise ValueError(
+                    f"{owner_name}: `{label}` must be a positive power of two at least 32, got {value!r}."
+                )
+            continue
+        if canonical == "block":
+            number = _coerce_dynamic_integer(owner_name, label, value, "16")
+            if number != 16:
+                raise ValueError(f"{owner_name}: `{label}` must be 16, got {value!r}.")
+            continue
+        if canonical == "embed_bits":
+            number = _coerce_dynamic_integer(owner_name, label, value, "4 or 8")
+            if number not in (4, 8):
+                raise ValueError(f"{owner_name}: `{label}` must be 4 or 8, got {value!r}.")
+            continue
+        integer_bounds = _DYNAMIC_INTEGER_BOUNDS.get(canonical)
+        if integer_bounds is not None:
+            minimum, maximum, include_minimum, include_maximum, range_text = integer_bounds
+            number = _coerce_dynamic_integer(owner_name, label, value, range_text)
+            if minimum is not None and (number < minimum or (not include_minimum and number == minimum)):
+                raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
+            if maximum is not None and (number > maximum or (not include_maximum and number == maximum)):
+                raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
             continue
         # ``NaN``/``inf`` compares false against every bound below, so a value
         # that reaches one of those checks is already rejected; this covers the
@@ -5033,6 +5109,24 @@ def _validate_dynamic_numeric_overrides(owner, layer_name: str, layer_dict: Mapp
             raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
         if maximum is not None and (number > maximum or (not include_maximum and number == maximum)):
             raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
+
+    # Paro's scale-clamp bounds are a pair: a dynamic min above the global max
+    # (or a max below the global min) is rejected by the top-level config.
+    clamp_min = layer_dict.get("opt_channel_scale_clamp_min")
+    clamp_max = layer_dict.get("opt_channel_scale_clamp_max")
+    effective_min = getattr(owner, "opt_channel_scale_clamp_min", None) if clamp_min is None else clamp_min
+    effective_max = getattr(owner, "opt_channel_scale_clamp_max", None) if clamp_max is None else clamp_max
+    if (
+        isinstance(effective_min, (int, float))
+        and not isinstance(effective_min, bool)
+        and isinstance(effective_max, (int, float))
+        and not isinstance(effective_max, bool)
+        and effective_min >= effective_max
+    ):
+        raise ValueError(
+            f"{owner_name}: `dynamic['{layer_name}'].opt_channel_scale_clamp_min` must be "
+            "smaller than `opt_channel_scale_clamp_max`."
+        )
 
 
 def _default_damp_percent(method: METHOD) -> float:

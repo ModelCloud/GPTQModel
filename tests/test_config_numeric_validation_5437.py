@@ -181,3 +181,99 @@ def test_dynamic_numeric_overrides_keep_valid_values():
     )
 
     assert config.dynamic["+:.*"] == override
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("config_cls", _config_classes())
+@pytest.mark.parametrize(
+    "method,field",
+    [
+        ("mse", "norm"),
+        ("gptaq", "alpha"),
+        ("foem", "alpha"),
+        ("hessian", "sink_row_cap_median_multiple"),
+    ],
+)
+def test_nested_method_options_reject_non_finite_values_through_dynamic(config_cls, method, field):
+    """Nested method dicts are normalized and validated at construction (#5574).
+
+    The top-level ``mse``/``gptaq``/``foem``/``hessian`` values build their
+    dataclass and run its ``__post_init__``. A dynamic rule used to keep the
+    raw dict, so a NaN nested value was written to ``quantize_config.json``
+    and failed only when the first matching module was quantized.
+    """
+
+    for bad in NON_FINITE:
+        with pytest.raises(REJECTED):
+            config_cls(
+                offload_to_disk=False,
+                dynamic={"+:.*": {method: {field: bad}}},
+            )
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize(
+    "config_cls,override",
+    [
+        (config_module.ParoConfig, {"krot": 0}),
+        (config_module.ParoConfig, {"krot": -1}),
+        (config_module.ParoConfig, {"opt_batch_size": 0}),
+        (config_module.ParoConfig, {"opt_train_samples": 0}),
+        (config_module.ParoConfig, {"opt_validation_samples": -1}),
+        (config_module.ParoConfig, {"opt_rotation_epochs": -1}),
+        (config_module.ParoConfig, {"opt_finetune_epochs": -1}),
+        (config_module.ParoConfig, {"opt_eps": 0}),
+        (config_module.ParoConfig, {"opt_betas": [0.9, 1.0]}),
+        (config_module.ParoConfig, {"opt_channel_scale_clamp_min": 0}),
+        (config_module.ParoConfig, {"opt_channel_scale_clamp_min": 200.0}),
+        (
+            config_module.ParoConfig,
+            {"opt_channel_scale_clamp_min": 2.0, "opt_channel_scale_clamp_max": 1.0},
+        ),
+        (config_module.MacaqConfig, {"had_block": 0}),
+        (config_module.MacaqConfig, {"had_block": 48}),
+        (config_module.MacaqConfig, {"had_block": True}),
+        (config_module.MacaqConfig, {"n_flip_iters": -1}),
+        (config_module.TTBlockfloatConfig, {"block": 8}),
+        (config_module.TTBlockfloatConfig, {"embed_bits": 6}),
+    ],
+)
+def test_dynamic_integer_and_range_overrides_are_rejected(config_cls, override):
+    """Integer/range options the top-level ``__post_init__`` checks (#5574)."""
+
+    with pytest.raises((ValueError, TypeError)):
+        config_cls(offload_to_disk=False, dynamic={"+:.*": override})
+
+
+@pytest.mark.cpu
+def test_dynamic_integer_and_nested_overrides_keep_valid_values():
+    """Valid integer and nested rules still construct and are not rewritten."""
+
+    paro = config_module.ParoConfig(
+        offload_to_disk=False,
+        dynamic={
+            "+:.*": {
+                "krot": 4,
+                "opt_batch_size": 32,
+                "opt_rotation_epochs": 0,
+                "opt_eps": 1e-8,
+                "opt_betas": [0.9, 0.95],
+                "opt_channel_scale_clamp_min": 0.5,
+                "opt_channel_scale_clamp_max": 2.0,
+            }
+        },
+    )
+    assert paro.dynamic["+:.*"]["krot"] == 4
+
+    gptq = config_module.GPTQConfig(
+        offload_to_disk=False,
+        dynamic={
+            "+:.*": {
+                "mse": {"norm": 2.0},
+                "gptaq": {"alpha": 0.2},
+                "foem": {"alpha": 0.1, "beta": 0.2},
+                "hessian": {"sink_row_cap_median_multiple": 4.0},
+            }
+        },
+    )
+    assert gptq.dynamic["+:.*"]["mse"] == {"norm": 2.0}
