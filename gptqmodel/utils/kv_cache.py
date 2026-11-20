@@ -300,8 +300,16 @@ class KVCacheEstimate:
         """
 
         budget = max(0, int(kv_budget_bytes)) // max(1, int(batch_size))
-        if budget <= 0 or not self.growing_layers:
+        if budget <= 0:
             return 0
+        # Recurrent state is constant per live sequence, so every sequence
+        # spends it before its first token. A device that owns only recurrent
+        # layers never grows its cache but still binds the batch size (#5658).
+        if self.state_bytes_per_sequence > budget:
+            return 0
+        if not self.growing_layers:
+            # Nothing per-token to count: only the model's own limit caps it.
+            return self.context_limit or (1 << 20)
         low, high = 0, self.context_limit or (1 << 20)
         while low < high:
             mid = (low + high + 1) // 2
@@ -729,7 +737,8 @@ def _state_bytes(source: Any, layer_cfg: Any, dtype: torch.dtype) -> Optional[in
         source, layer_cfg, "mamba_n_heads", "mamba_num_heads", "n_mamba_heads", "num_heads")
     head_dim = _first_positive_int(
         source, layer_cfg, "mamba_d_head", "mamba_head_dim", "mamba_headdim", "head_dim")
-    groups = _first_positive_int(source, layer_cfg, "mamba_n_groups", "n_groups")
+    groups = _first_positive_int(
+        source, layer_cfg, "mamba_n_groups", "mamba_ngroups", "n_groups")
     d_state = _first_positive_int(
         source, layer_cfg, "mamba_d_state", "state_size", "ssm_state_size")
     d_conv = _first_positive_int(source, layer_cfg, "mamba_d_conv", "conv_kernel")

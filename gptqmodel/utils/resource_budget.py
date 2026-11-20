@@ -161,16 +161,19 @@ class ResourceBudget:
             return None
         return replace(self.kv_cache, layers=tuple(self.kv_cache.layers[i] for i in indices))
 
-    def _growing_device_subsets(
+    def _cache_device_subsets(
         self,
     ) -> Optional[Tuple[Tuple[DeviceBudget, KVCacheEstimate], ...]]:
-        """The per-device layer slices that hold a growing KV cache.
+        """The per-device layer slices that hold KV-cache memory.
 
-        ``None`` when the layer-to-device map is unknown. A device whose layers
-        hold no growing cache (linear attention, KV-shared or non-attention
-        blocks) is omitted: it cannot constrain a cache it does not hold, and
-        its own limit is 0 by construction. Both planners read this one
-        enumeration, so they cannot disagree about which devices bind.
+        ``None`` when the layer-to-device map is unknown. A device is kept when
+        its layers hold a growing cache *or* a recurrent state: the state is
+        constant per sequence, so a shard made only of Mamba/linear-attention
+        layers still runs out of memory as the batch grows (#5658). A device
+        whose layers cache nothing (KV-shared or non-attention blocks) is
+        omitted: it cannot constrain a cache it does not hold. Both planners
+        read this one enumeration, so they cannot disagree about which devices
+        bind.
         """
 
         if self.kv_cache is None or self.layer_devices is None:
@@ -184,7 +187,7 @@ class ResourceBudget:
             if not owned:
                 continue
             subset = self._layer_subset(owned)
-            if subset is None or not subset.growing_layers:
+            if subset is None or not (subset.growing_layers or subset.state_layers):
                 continue
             subsets.append((device, subset))
         return tuple(subsets)
@@ -193,14 +196,16 @@ class ResourceBudget:
                            kv_budget_bytes: Optional[int]) -> Optional[Dict[int, int]]:
         """Per-device maximum context, or None when the mapping is unknown.
 
-        A device whose layers hold no growing cache does not constrain the
-        context: counting its own 0 would report "no usable context" for a model
-        whose other device has plenty. An unmeasured device that *does* own a
-        growing layer leaves the answer unknown: planning around it would assume
-        room the snapshot never reported.
+        A device whose layers cache nothing does not constrain the context:
+        counting its own 0 would report "no usable context" for a model whose
+        other device has plenty. A device that owns only recurrent layers
+        constrains the batch (its state is constant per sequence) but not the
+        context length. An unmeasured device that owns cache memory leaves the
+        answer unknown: planning around it would assume room the snapshot never
+        reported.
         """
 
-        subsets = self._growing_device_subsets()
+        subsets = self._cache_device_subsets()
         if subsets is None:
             return None
 
@@ -251,7 +256,7 @@ class ResourceBudget:
             budget = devices[0].kv_budget_bytes(self.reserve_fraction) if devices else None
             return None if budget is None else self.kv_cache.max_sequences(budget, context_tokens)
 
-        subsets = self._growing_device_subsets()
+        subsets = self._cache_device_subsets()
         if subsets is None:
             return None
         limits = []
