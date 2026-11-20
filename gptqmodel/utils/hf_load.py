@@ -468,6 +468,21 @@ def _checkpoint_tensor_keys(checkpoint_path: str, checkpoint_files) -> set:
     return keys
 
 
+def _checkpoint_dtypes(checkpoint_path: str, checkpoint_files) -> Dict[str, torch.dtype]:
+    """Read each checkpoint tensor's stored dtype from the safetensors headers."""
+
+    from .model import _checkpoint_tensor_dtypes
+
+    dtypes: Dict[str, torch.dtype] = {}
+    for checkpoint_file in _checkpoint_files(checkpoint_files):
+        if checkpoint_file.endswith(".safetensors") and os.path.isfile(checkpoint_file):
+            dtypes.update(_checkpoint_tensor_dtypes(checkpoint_file))
+    # The caller's file list may be relative or partial, so the resolved
+    # checkpoint directory is authoritative and fills any gap.
+    dtypes.update(_checkpoint_tensor_dtypes(checkpoint_path))
+    return dtypes
+
+
 # Backends the normal loader allows for rotated (QuaRot/SpinQuant) checkpoints.
 # Kept in sync with `BaseQModel.from_quantized` in `gptqmodel/models/loader.py`.
 _ROTATION_BACKENDS = (
@@ -563,6 +578,7 @@ def hf_gptqmodel_prepare_model_for_load(
     from ..models.base import BaseQModel
     from .importer import auto_cpu_offload, hf_normalize_device_device_map
     from .model import (
+        _load_narrowed,
         _module_has_meta_tensors,
         _prepare_variable_quant_buffers,
         find_modules,
@@ -646,6 +662,37 @@ def hf_gptqmodel_prepare_model_for_load(
         # offload weights map.
         cpu_offload=auto_cpu_offload(backend, device_map),
     )
+
+    # Transformers materializes each checkpoint tensor at the dtype of the
+    # shell slot it is assigned into. The bridge's shell allocates a bias at
+    # the kernel's default width, so a checkpoint-owned bias (one the kernel
+    # does not list in `MODEL_DTYPE_BUFFERS`, for example AWQ) would be
+    # narrowed before the kernel can add it at its stored precision. Widen
+    # those slots to the checkpoint dtype whenever the assignment would
+    # round, and leave activation-side bias slots at the requested dtype.
+    # This mirrors the native loader's post-load buffer rule.
+    checkpoint_dtypes = None
+    for module_name in quantized_module_names:
+        module = model.get_submodule(module_name)
+        bias = module._buffers.get("bias")
+        if bias is None:
+            continue
+        if "bias" in (getattr(module, "MODEL_DTYPE_BUFFERS", None) or ()):
+            continue
+        if not isinstance(dtype, torch.dtype):
+            continue
+        if checkpoint_dtypes is None:
+            checkpoint_dtypes = _checkpoint_dtypes(checkpoint_path, checkpoint_files)
+            if callable(key_converter):
+                checkpoint_dtypes = {
+                    key_converter(name): tensor_dtype
+                    for name, tensor_dtype in checkpoint_dtypes.items()
+                }
+        checkpoint_dtype = checkpoint_dtypes.get(f"{module_name}.bias")
+        if checkpoint_dtype is None or not _load_narrowed(checkpoint_dtype, dtype):
+            continue
+        if bias.dtype != checkpoint_dtype:
+            module.bias = bias.to(dtype=checkpoint_dtype)
     if packed_suffix == ".nf12_packed":
         # The escape row count depends on the encoded weights, so resize the
         # placeholder buffers before Transformers assigns checkpoint tensors.
