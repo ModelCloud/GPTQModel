@@ -234,11 +234,9 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         super().optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def _fused_input_dtype(self, x: torch.Tensor) -> bool:
-        if x.dtype not in (torch.float16, torch.bfloat16):
-            return False
-        if self._cpu_transform_dtype is not None:
-            return x.dtype == self._cpu_transform_dtype
-        return True
+        # One activation dtype per module (contracts/kernel/forward-dtype.md),
+        # so a transformed layout always matches ``x.dtype``.
+        return x.dtype in (torch.float16, torch.bfloat16)
 
     def transform_cpu(self, dtype: torch.dtype | None = None):
         if self._cpu_transformed:
@@ -359,36 +357,19 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         self._refresh_fused_state()
 
     def _apply(self, fn, recurse: bool = True):
-        """Re-finalize the checkpoint layout after an invalidating move.
+        """Re-finalize the checkpoint layout after a device move.
 
-        The AWQ affine offsets are scale-dtype coupled and the int4pack layout
-        is device-specific, so a cross-device or low-precision move must restore
-        the checkpoint snapshot instead of reinterpreting it in place. A
-        same-device move to FP32 keeps the live layout.
+        The runtime int4pack layout is device-specific, so a cross-device move
+        restores the checkpoint snapshot and the next forward transforms for
+        the new device. Weight dtypes are frozen after the first forward
+        (contracts/kernel/forward-dtype.md).
         """
 
         scales = getattr(self, "scales", None)
         transformed = getattr(self, "_cpu_transformed", False) and isinstance(scales, torch.Tensor)
-        # The packed layout is keyed by the activation dtype it was built for,
-        # not by ``scales.dtype``: the checkpoint scale buffer now keeps its
-        # loaded dtype while the affine metadata follows the activation dtype.
-        runtime_dtype = getattr(self, "_cpu_transform_dtype", None) if transformed else None
-        if runtime_dtype is None and transformed:
-            runtime_dtype = scales.dtype
         device = scales.device if transformed else None
         result = super()._apply(fn, recurse=recurse)
-        if refinalize_fused_state_after_apply(self, runtime_dtype, device):
-            return result
-        scales = getattr(self, "scales", None)
-        if (
-            transformed
-            and isinstance(scales, torch.Tensor)
-            and scales.dtype != runtime_dtype
-            and scales.dtype in (torch.float16, torch.bfloat16)
-        ):
-            # No exportable snapshot: keep the live layout usable at the new
-            # activation dtype. A later checkpoint load can re-finalize it.
-            self._cpu_transform_dtype = scales.dtype
+        refinalize_fused_state_after_apply(self, device)
         return result
 
     def train(self, mode: bool = True):
@@ -527,11 +508,6 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
                 # in FP32, add the stored bias there, and round once at output.
                 out = linear_wide_bias(x, dense_weight.t(), self.bias).reshape(out_shape)
         elif linear_mode == "inference":
-            if not self._fused_input_dtype(x):
-                raise RuntimeError(
-                    f"{self.__class__.__name__} was transformed for {self._cpu_transform_dtype} "
-                    f"but received {x.dtype} activations. Keep one activation dtype per layer."
-                )
             out = self._fused_op_forward(x)
             if self.bias is not None:
                 out = (out.float() + self.bias.to(out.device, torch.float32)).to(x.dtype)

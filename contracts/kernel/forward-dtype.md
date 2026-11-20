@@ -90,7 +90,9 @@ supported. Choose the dtype at load time, or cast before the first forward.
 - a later call passes a different input dtype;
 - after the lock is set, a `Module._apply` (`to`, `half`, `float`, and so on)
   would change the dtype of any of its parameters or buffers. The check runs
-  before anything is modified.
+  before that module is modified. On a whole-model cast, modules that come
+  earlier in the traversal may already have been cast. The model is invalid
+  after this error.
 
 Kernels must not bypass or reset the lock. Kernel code may assume the locked
 dtype and frozen weight dtypes, so it needs no per-dtype branching or

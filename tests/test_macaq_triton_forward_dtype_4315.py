@@ -137,11 +137,11 @@ def test_macaq_triton_w4a4_identity_bh_uses_forward_dtype(monkeypatch, target_dt
     assert seen == [(target_dtype, x.device)]
     assert out.dtype == target_dtype
 
-    # A second `.to()` must invalidate the cached identity, not reuse the old dtype.
+    # Weight dtypes are frozen after the first forward
+    # (contracts/kernel/forward-dtype.md).
     other = torch.float32 if target_dtype is torch.float16 else torch.float16
-    layer.to(other)
-    layer(torch.randn(3, IN_FEATURES, dtype=other))
-    assert seen[-1] == (other, x.device)
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        layer.to(other)
 
 
 def test_macaq_triton_w4a4_identity_bh_stays_bf16(monkeypatch):

@@ -232,59 +232,21 @@ class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         finalize_fused_train_state(self)
 
     def _apply(self, fn, recurse: bool = True):
-        """Keep the FP32 affine operands exact across dtype/device moves.
+        """Re-finalize the checkpoint layout after a device move.
 
-        ``transform_cpu`` packs the weight once and promotes ``scales``/``bias``
-        to FP32 because the shared AVX512 kernel requires an FP32 ``absmax`` and
-        accumulates in FP32. ``nn.Module._apply`` applies ``fn`` to every
-        registered floating buffer, so ``model.to(torch.bfloat16)``/``.float()``/
-        ``.half()`` used to round those operands through BF16 before restoring
-        the dtype. BF16 keeps 8 explicit mantissa bits against the checkpoint's
-        10, so the round trip lost scale precision permanently and the next
-        forward raised ``absmax must be float32`` once the dtype was restored.
-
-        Hold the exact tensors across ``super()._apply`` and reinstall them at
-        the resulting device. Scales and zero points are quantization metadata,
-        not expanded weights, so retaining them is allowed; the packed integer
-        codes are untouched by a move and are never repacked here.
-
-        A device or low-precision move invalidates the packed runtime layout
-        itself. In that case the checkpoint snapshot (whose buffers ``fn``
-        moved as well) is restored and the next forward re-transforms. This
-        also keeps a ``meta`` move from retaining meta scales that
-        ``to_empty`` cannot copy.
+        ``transform_cpu`` packs the weight for this device and keeps
+        ``scales``/``bias`` in FP32 for the AVX512 kernel. A device move
+        (including ``meta``) invalidates the packed layout, so the checkpoint
+        snapshot is restored and the next forward re-transforms. Weight dtypes
+        are frozen after the first forward (contracts/kernel/forward-dtype.md),
+        so no dtype-move handling is needed.
         """
 
         if not getattr(self, "_cpu_transformed", False):
             return super()._apply(fn, recurse=recurse)
-
-        scales = getattr(self, "scales", None)
-        previous_dtype = getattr(self, "_dequant_scales_dtype", None)
-        if previous_dtype is None and isinstance(scales, torch.Tensor):
-            previous_dtype = scales.dtype
-        previous_device = scales.device if isinstance(scales, torch.Tensor) else None
-
-        kept = {
-            name: getattr(self, name)
-            for name in ("scales", "bias")
-            if isinstance(getattr(self, name, None), torch.Tensor)
-        }
+        previous_device = self.scales.device if isinstance(getattr(self, "scales", None), torch.Tensor) else None
         result = super()._apply(fn, recurse=recurse)
-        if refinalize_fused_state_after_apply(self, previous_dtype, previous_device):
-            # A device or low-precision move invalidated the runtime layout.
-            # The snapshot buffers moved with ``fn``, so the module is back on
-            # the checkpoint layout and the next forward re-transforms. Never
-            # reinstall the pre-move meta tensors: ``to_empty`` would try to
-            # copy out of them.
-            self._refresh_decode_range_fits()
-            return result
-        for name, value in kept.items():
-            current = getattr(self, name, None)
-            device = current.device if isinstance(current, torch.Tensor) else value.device
-            restored = value.to(device=device, dtype=torch.float32).contiguous()
-            if name in self._parameters:
-                restored = torch.nn.Parameter(restored, requires_grad=False)
-            setattr(self, name, restored)
+        refinalize_fused_state_after_apply(self, previous_device)
         self._refresh_decode_range_fits()
         return result
 

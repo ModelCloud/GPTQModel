@@ -65,3 +65,50 @@ def test_compiled_dtype_switch_raises():
     compiled(torch.zeros(2, dtype=torch.float16))
     with pytest.raises(Exception, match="forward-dtype.md"):
         compiled(torch.zeros(2, dtype=torch.bfloat16))
+
+
+class _Weighted(_Echo):
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("scales", torch.ones(4, dtype=torch.float16))
+        self.register_buffer("qweight", torch.zeros(4, dtype=torch.int32))
+
+
+@pytest.mark.parametrize(
+    "cast",
+    [
+        lambda m: m.to(dtype=torch.bfloat16),
+        lambda m: m.bfloat16(),
+        lambda m: m.float(),
+        lambda m: m.half() and m.to(torch.float32),
+    ],
+)
+def test_weight_dtype_change_after_forward_raises_before_mutation(cast):
+    module = _Weighted()
+    module(torch.zeros(2, dtype=torch.float16))
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        cast(module)
+    assert module.scales.dtype == torch.float16
+    assert module.qweight.dtype == torch.int32
+
+
+def test_weight_dtype_change_before_forward_is_allowed():
+    module = _Weighted().to(dtype=torch.bfloat16)
+    assert module.scales.dtype == torch.bfloat16
+    assert module(torch.zeros(2, dtype=torch.bfloat16)).dtype == torch.bfloat16
+
+
+def test_same_dtype_apply_after_forward_is_allowed():
+    module = _Weighted()
+    module(torch.zeros(2, dtype=torch.float16))
+    module.to(dtype=torch.float16)
+    module.to("cpu")
+    module.half()
+    assert module.scales.dtype == torch.float16
+
+
+def test_parent_model_cast_after_forward_raises():
+    parent = torch.nn.Sequential(_Weighted())
+    parent(torch.zeros(2, dtype=torch.float16))
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        parent.to(torch.bfloat16)

@@ -458,7 +458,7 @@ def _check_forward_dtype(module: "BaseQuantLinear", args, kwargs) -> None:
     x = _forward_activation(args, kwargs)
     if x is None:
         return
-    locked = module._forward_dtype_lock
+    locked = getattr(module, "_forward_dtype_lock", None)
     if locked is None:
         module._forward_dtype_lock = x.dtype
     elif x.dtype != locked:
@@ -482,6 +482,46 @@ def _lock_forward_dtype(forward):
     return locked_forward
 
 
+def _check_apply_keeps_dtypes(module: "BaseQuantLinear", fn) -> None:
+    """Reject a post-forward ``_apply`` that would change a tensor dtype.
+
+    After the first forward, weight and buffer dtypes are frozen
+    (contracts/kernel/forward-dtype.md). ``fn`` is probed on an empty tensor
+    of each dtype/device so the check runs before anything is modified.
+    """
+    locked = getattr(module, "_forward_dtype_lock", None)
+    if locked is None:
+        return
+    probed = {}
+    for kind, tensors in (("parameter", module._parameters), ("buffer", module._buffers)):
+        for name, tensor in tensors.items():
+            if not isinstance(tensor, t.Tensor):
+                continue
+            key = (tensor.dtype, tensor.device)
+            if key not in probed:
+                probe = fn(t.empty(0, dtype=tensor.dtype, device=tensor.device))
+                probed[key] = probe.dtype if isinstance(probe, t.Tensor) else tensor.dtype
+            if probed[key] != tensor.dtype:
+                raise RuntimeError(
+                    f"{module.__class__.__name__}({module.name}): cannot change {kind} `{name}` "
+                    f"from {tensor.dtype} to {probed[key]} after the module ran a forward in {locked}. "
+                    f"Weight dtypes are frozen after the first forward; see {FORWARD_DTYPE_CONTRACT}."
+                )
+
+
+def _lock_apply_dtypes(apply):
+    if getattr(apply, "_forward_dtype_locked", False):
+        return apply
+
+    @wraps(apply)
+    def locked_apply(self, fn, *args, **kwargs):
+        _check_apply_keeps_dtypes(self, fn)
+        return apply(self, fn, *args, **kwargs)
+
+    locked_apply._forward_dtype_locked = True
+    return locked_apply
+
+
 class BaseQuantLinear(nn.Module):
     # CPU int4pack kernels rewrite checkpoint buffers into their runtime layout
     # on the first forward. Serialize that cold check-and-transform so a
@@ -499,6 +539,9 @@ class BaseQuantLinear(nn.Module):
         forward = cls.__dict__.get("forward")
         if callable(forward):
             cls.forward = _lock_forward_dtype(forward)
+        apply = cls.__dict__.get("_apply")
+        if callable(apply):
+            cls._apply = _lock_apply_dtypes(apply)
 
     SUPPORTS_BACKENDS: List[BACKEND] = None
     # False for role-specific modules that are instantiated explicitly and
@@ -919,6 +962,7 @@ class BaseQuantLinear(nn.Module):
         elif layout != "empty":
             self._clear_runtime_weight_cache()
 
+    @_lock_apply_dtypes
     def _apply(self, fn, recurse=True):
         result = super()._apply(fn, recurse=recurse)
         self._clear_runtime_weight_cache()

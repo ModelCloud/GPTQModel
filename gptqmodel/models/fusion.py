@@ -23,6 +23,7 @@ from types import FunctionType, MethodType
 
 import torch
 
+from ..nn_modules.qlinear import _check_forward_dtype
 from ..nn_modules.qlinear._runtime_cache import tensor_cache_key
 from ..nn_modules.qlinear.marlin import MarlinLinear
 from ..nn_modules.qlinear.marlin_awq import AwqMarlinLinear
@@ -768,6 +769,10 @@ class _FusionGroup:
                     return None
             if x.dtype != state.input_dtype or x.device != state.input_device:
                 return None
+            # The fused executor stands in for the source projections, so it
+            # carries their forward dtype lock (contracts/kernel/forward-dtype.md).
+            for module in self.modules:
+                _check_forward_dtype(module, (x,), {})
             output = state.forward(x)
             self.calls += 1
             return output.split(state.widths, dim=-1)

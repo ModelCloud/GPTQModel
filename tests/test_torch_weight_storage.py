@@ -164,8 +164,9 @@ def test_metadata_lifecycle_with_inference_tensors(operation):
             state["qzeros"].zero_()
             module.load_state_dict(state)
         elif operation == "move":
-            module.to(torch.bfloat16)
-            activation = activation.bfloat16()
+            # Device move; dtype casts after a forward are rejected
+            # (contracts/kernel/forward-dtype.md).
+            module.to("cpu")
         else:
             module.qzeros.zero_()
             module.g_idx.zero_()

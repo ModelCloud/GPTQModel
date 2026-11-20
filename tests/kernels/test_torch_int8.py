@@ -175,7 +175,9 @@ def test_native_int8_group_layout_output_and_storage_oracle(group_size, dtype, m
     assert candidate.int8_group_scale.shape == checkpoint["scales"].shape
     torch.testing.assert_close(candidate.int8_group_scale, checkpoint["scales"].float(), rtol=0, atol=0)
 
-    for current_dtype in (dtype, torch.bfloat16, torch.float32, dtype):
+    # One activation dtype per module (contracts/kernel/forward-dtype.md);
+    # repeat it to check the layout and storage stay stable across calls.
+    for current_dtype in (dtype, dtype):
         activation = torch.arange(7 * source.in_features).reshape(7, -1).remainder(9).sub(4).to(current_dtype) / 16
         arithmetic = activation.double() @ weight
         expected = arithmetic.to(current_dtype)

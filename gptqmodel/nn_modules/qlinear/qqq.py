@@ -1250,9 +1250,10 @@ class QQQTorchLinear(QQQLinear):
         return kernel(quant_A.contiguous(), packed, s_group, self.group_size), s_channel
 
     def _apply(self, fn, recurse=True):
-        # A move changes the device/dtype the cache was built for, so restore
-        # the checkpoint layout before it is transformed. ``super()._apply``
-        # then clears the derived cache.
+        # A device move invalidates the cache's placement, so restore the
+        # checkpoint layout before it is moved. ``super()._apply`` then clears
+        # the derived cache. Post-forward dtype casts are rejected before this
+        # runs (contracts/kernel/forward-dtype.md).
         self._materialize_dropped_checkpoint()
         return super()._apply(fn, recurse=recurse)
 

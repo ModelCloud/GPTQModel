@@ -145,19 +145,23 @@ def test_qqq_cpu_load_and_move_restore_the_checkpoint_layout(packed_kernel):
     for name in ("B", "s_group", "s_channel"):
         assert torch.equal(module._buffers[name], original[name]), name
 
-    # Drop again, then move: the move must restore the checkpoint layout before
-    # the dtype conversion and discard the cache built for the old dtype.
+    # Drop again, then move: a device move must restore the checkpoint layout
+    # and discard the cache built for the old placement. A dtype cast after the
+    # first forward is rejected (contracts/kernel/forward-dtype.md).
     with torch.inference_mode():
         module(activation)
     assert module._buffers["B"] is None
-    moved = module.to(dtype=torch.bfloat16)
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        module.to(dtype=torch.bfloat16)
+    assert module._buffers["B"] is None
+    moved = module.to("cpu")
     assert moved is module
     assert module._torch_dropped_checkpoint is None
     assert module._torch_packed_cache is None
     assert module._buffers["B"] is not None
     with torch.inference_mode():
-        output = module(torch.randn(2, module.in_features, dtype=torch.bfloat16))
-    assert output.dtype == torch.bfloat16
+        output = module(activation)
+    assert output.dtype == torch.float16
     assert output.shape == (2, module.out_features)
 
 
