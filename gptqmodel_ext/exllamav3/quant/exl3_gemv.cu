@@ -97,7 +97,11 @@ bool exl3_gemv_try_launch
     if (size_k % 128 || size_n % 128) return false;
 
     int cc = DevCtx::instance().get_cc(device);
-    if (q4nx && cc != CC_AMPERE) return false;
+    // Q4NX small-batch decode measured on the RTX 4090 (sm_89, 128 SMs, m 1..8 x k 2048..8192 x
+    // n 2048..16384 x 2.5 / 3.0 / 3.5 bpw, tests/benchmark_exl3_q4nx_gemv_ada.py): the GEMV is
+    // 1.03-1.72x the block-pipelined kernel cold and 1.00-1.72x warm (geomean 1.19x / 1.30x), so
+    // Ada joins Ampere. Blackwell is unmeasured.
+    if (q4nx && cc != CC_AMPERE && cc != CC_ADA) return false;
     int mmode = size_m == 1 ? 0 : 1;
     int num_sms = DevCtx::instance().get_num_sms(device);
 
@@ -132,8 +136,30 @@ bool exl3_gemv_try_launch
 
     // Shape heuristic: a half-integer rate K + 0.5 is handled like the integer rate above it (its tile is
     // between the two in bytes; unmeasured, so it inherits the K + 1 envelope)
-    int cfg = q4nx ? (size_n / 32 <= narrow_coresident ? 0 : 1)
-                   : exl3_gemv_cfg(cc, size_m, size_k, size_n, half_k ? K + 1 : K, cb, narrow_coresident);
+    // Q4NX envelope on Ada, from the same sweep. The narrow config (one block per 32 output
+    // columns) wins at every measured shape whose grid fits one co-resident wave, including the
+    // single-wave n <= 2048 grids where it still fills only half the SMs. Two measured exceptions
+    // shape the envelope:
+    // - a 3.0 bpw tile of >= 64 Mi elements (k = n = 8192) is 1.03-1.06x cold but 0.87-0.90x warm:
+    //   at that size the packed kernel keeps the trellis in L2 and wins, so Ada falls back;
+    // - past the narrow grid (n > 8192) the wide config only wins for small k, where its 64-column
+    //   tiles still cover the SMs: 1.05-1.20x for 2.5 / 3.5 bpw at k <= 2048, but 0.73-1.06x
+    //   elsewhere, and 3.0 bpw is 0.98x warm there. Ada enables it for 2.5 / 3.5 bpw with
+    //   k <= 2048 / n >= 12288 only; Ampere keeps the unconditional wide-config fallback.
+    int cfg;
+    if (q4nx)
+    {
+        const int step_bits = 4 * K + 2 * half_k;
+        const bool narrow_fits = size_n / 32 <= narrow_coresident;
+        const bool ada_packed_l2_win =
+            cc == CC_ADA && step_bits == 12 && (int64_t) size_k * size_n >= 64 * 1024 * 1024;
+        const bool ada_wide = cc == CC_ADA && step_bits != 12 && size_k <= 2048 && size_n >= 12288;
+        if (narrow_fits && !ada_packed_l2_win) cfg = 0;
+        else if (cc == CC_ADA) cfg = ada_wide ? 1 : -1;
+        else cfg = 1;
+    }
+    else
+        cfg = exl3_gemv_cfg(cc, size_m, size_k, size_n, half_k ? K + 1 : K, cb, narrow_coresident);
     if (cfg < 0) return false;
 
     void* kernel = cfg == 0 ? narrow_kernel : select(cfg, false);
