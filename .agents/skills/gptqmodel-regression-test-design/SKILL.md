@@ -7,6 +7,12 @@ description: Construct regression tests for GPT-QModel bug fixes and behavior-ch
 
 # GPT-QModel regression-test design
 
+> **Contracts first.** Read and honour [`contracts/`](../../../contracts/README.md)
+> before acting. In particular, read the
+> [kernel forward dtype contract](../../../contracts/kernel/forward-dtype.md):
+> one activation dtype per module, and output dtype equals input dtype. A
+> different dtype on a later call is a bug. Contracts outrank this skill.
+
 ## At a glance
 
 For each bug fix or behaviour-changing refactor, add a red/green regression
