@@ -9,6 +9,7 @@ import mmap
 import struct
 import sys
 import threading
+import weakref
 from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -231,6 +232,7 @@ class _GGMLSharedWeight:
         shape: tuple[int, ...],
         device: torch.device,
         lock: threading.RLock | None,
+        on_release=None,
     ) -> None:
         self.ctx = ctx
         self.buffer = buffer
@@ -243,6 +245,9 @@ class _GGMLSharedWeight:
         self._exported = False
         self._backend_buffer_free = backend_buffer_free
         self._ctx_free = ctx_free
+        # The owning bridge uses this to drop the weight from its per-device
+        # arena owner set and free the shared scratch arena once it is idle.
+        self._on_release = on_release
 
     def as_tensor(self) -> torch.Tensor:
         """Return a zero-copy Torch ``uint8`` tensor over the ggml weight bytes."""
@@ -292,6 +297,10 @@ class _GGMLSharedWeight:
             self._ctx_free(self.ctx)
             self.ctx = None
         self.tensor = None
+        on_release = self._on_release
+        self._on_release = None
+        if on_release is not None:
+            on_release(self)
 
     def __del__(self) -> None:  # pragma: no cover - best effort cleanup
         try:
@@ -313,6 +322,11 @@ class _GGMLCudaScratch:
     cannot be moved to a grown arena.  Growth therefore frees the old buffer and
     bumps ``generation``; ``GGUFCudaKernel`` closes any plan whose generation is
     stale before it is used again.
+
+    ``generation`` is also monotonic across reclamation (issue #5811): when the
+    last weight on the device is released, :meth:`close` frees the buffer and
+    bumps the generation instead of deleting this object, so a plan bound to
+    the freed buffer can never compare equal to a later allocation.
     """
 
     def __init__(
@@ -334,14 +348,24 @@ class _GGMLCudaScratch:
         self._buffer_get_base = buffer_get_base
         self._buffer_get_size = buffer_get_size
 
+    def _free_buffer(self) -> bool:
+        """Free the backend buffer without touching ``generation``."""
+
+        if not self.buffer:
+            return False
+        self._buffer_free(self.buffer)
+        self.buffer = None
+        self.base = None
+        self.size = 0
+        return True
+
     def ensure(self, nbytes: int) -> "_GGMLCudaScratch":
         if self.buffer is not None and self.size >= nbytes:
             return self
-        if self.buffer is not None:
-            self._buffer_free(self.buffer)
-            self.buffer = None
-            self.base = None
-            self.size = 0
+        # Growth is one generation step: the old buffer is freed and the new
+        # allocation is the only bump, so plans bound to the old one are
+        # invalidated exactly once.
+        self._free_buffer()
         buffer = self._alloc_buffer(self.backend, max(int(nbytes), 1))
         if not buffer:
             raise RuntimeError(
@@ -354,9 +378,14 @@ class _GGMLCudaScratch:
         return self
 
     def close(self) -> None:
-        if self.buffer:
-            self._buffer_free(self.buffer)
-            self.buffer = None
+        """Release the arena; ``size`` returns to zero and plans go stale."""
+
+        if self._free_buffer():
+            # Plans bound to the freed buffer must never be reused, and a
+            # later allocation must not reuse this generation. Keep this
+            # object in ``_GGMLBridge._cuda_scratch`` so the counter is
+            # monotonic for the life of the process.
+            self.generation += 1
         self.base = None
         self.size = 0
 
@@ -495,6 +524,11 @@ class _GGMLBridge:
         self._cuda_backends: Dict[int, int] = {}
         # One scratch arena per device; see _GGMLCudaScratch.
         self._cuda_scratch: Dict[int, _GGMLCudaScratch] = {}
+        # Live ggml CUDA weights per device. Every plan holds its weight, so a
+        # device with no live weight has no live plan and its arena is idle
+        # (issue #5811). Weak references: tracking must never keep a weight
+        # (or the model that owns it) alive.
+        self._cuda_weights: Dict[int, "weakref.WeakSet[_GGMLSharedWeight]"] = {}
         # ggml-cuda keeps process-global state (cuBLAS handles, memory pools)
         # that is shared across devices, so entry must serialize process-wide,
         # not per device (#4378). One re-entrant lock covers every device.
@@ -1093,7 +1127,7 @@ class _GGMLBridge:
                     0,
                     weight_nbytes,
                 )
-                return _GGMLSharedWeight(
+                weight = _GGMLSharedWeight(
                     ctx=ctx,
                     buffer=buffer,
                     tensor=weight_tensor,
@@ -1104,7 +1138,10 @@ class _GGMLBridge:
                     shape=tuple(qweight_device.shape),
                     device=qweight_device.device,
                     lock=self.cuda_backend_lock(device_index),
+                    on_release=self._on_cuda_weight_released,
                 )
+                self._track_cuda_weight(weight)
+                return weight
             except Exception:
                 if buffer:
                     self._ggml_base.ggml_backend_buffer_free(buffer)
@@ -1121,13 +1158,52 @@ class _GGMLBridge:
         scratch = self._cuda_scratch.get(device_index)
         return 0 if scratch is None else scratch.generation
 
+    def _track_cuda_weight(self, weight: _GGMLSharedWeight) -> None:
+        """Record ``weight`` as a live user of its device's scratch arena."""
+
+        device_index = 0 if weight.device.index is None else weight.device.index
+        with self.cuda_backend_lock(device_index):
+            weights = self._cuda_weights.get(device_index)
+            if weights is None:
+                weights = weakref.WeakSet()
+                self._cuda_weights[device_index] = weights
+            weights.add(weight)
+
+    def _on_cuda_weight_released(self, weight: _GGMLSharedWeight) -> None:
+        """Forget a freed weight and reclaim its arena when nothing uses it.
+
+        Called from :meth:`_GGMLSharedWeight._close` under the weight's
+        process-wide ggml-cuda lock. Re-entering that lock here is safe (it is
+        an ``RLock``) and keeps reclamation serialized with every forward.
+        """
+
+        device_index = 0 if weight.device.index is None else weight.device.index
+        with self.cuda_backend_lock(device_index):
+            weights = self._cuda_weights.get(device_index)
+            if weights is not None:
+                weights.discard(weight)
+            self._release_idle_cuda_scratch(device_index)
+
+    def _release_idle_cuda_scratch(self, device_index: int) -> None:
+        """Free the device arena when no live weight (and so no plan) uses it.
+
+        The caller must hold :meth:`cuda_backend_lock`. The arena object stays
+        in ``_cuda_scratch`` so its generation keeps increasing; the next
+        forward re-allocates it through :meth:`_cuda_scratch_for`.
+        """
+
+        weights = self._cuda_weights.get(device_index)
+        if weights:
+            return
+        scratch = self._cuda_scratch.get(device_index)
+        if scratch is not None:
+            scratch.close()
+
     def _cuda_scratch_for(
         self, device_index: int, backend: int, nbytes: int
     ) -> _GGMLCudaScratch:
         scratch = self._cuda_scratch.get(device_index)
-        if scratch is None or scratch.backend != backend:
-            if scratch is not None:
-                scratch.close()
+        if scratch is None:
             scratch = _GGMLCudaScratch(
                 backend=backend,
                 alloc_buffer=self._ggml_base.ggml_backend_alloc_buffer,
@@ -1136,6 +1212,11 @@ class _GGMLBridge:
                 buffer_get_size=self._ggml_base.ggml_backend_buffer_get_size,
             )
             self._cuda_scratch[device_index] = scratch
+        elif scratch.backend != backend:
+            # A different backend cannot reuse the old buffer type. Keep the
+            # object so its generation stays monotonic across the swap.
+            scratch.close()
+            scratch.backend = backend
         return scratch.ensure(nbytes)
 
     def _bind_cuda_plan(self, plan: _GGMLMatmulPlan) -> _GGMLCudaScratch:
