@@ -118,9 +118,14 @@ def _source_files() -> list[str]:
     else:
         # RDNA4 (gfx120x) wave32 kernels: the native GEMM replaces the
         # NVIDIA-only `exl3_gemm_kernel.cuh` path and the small-batch GEMV
-        # handles decode-sized batches. The int8, MoE and Q4NX quantizer
-        # kernels in this directory are CUDA-only for now.
-        source_files += ["quant/exl3_gemm_hip.cu", "quant/exl3_gemv.cu"]
+        # handles decode-sized batches, in both the fp16 and the int8-activation
+        # variants. The MoE and Q4NX quantizer kernels in this directory are
+        # CUDA-only for now.
+        source_files += [
+            "quant/exl3_gemm_hip.cu",
+            "quant/exl3_gemv.cu",
+            "quant/exl3_gemv_int8.cu",
+        ]
     return [str((sources_dir / path).resolve()) for path in source_files]
 
 
@@ -441,9 +446,11 @@ class _ExllamaV3TorchOpsFacade:
         x: torch.Tensor,
         y: torch.Tensor,
         q4nx: bool = False,
+        int8_gemv: int = 0,
     ) -> int:
         return _runtime_op("bc_linear_exl3_run_hip_gemv")(
-            trellis, suh, svh, float(K), bias, bool(mcg), bool(mul1), x, y, bool(q4nx)
+            trellis, suh, svh, float(K), bias, bool(mcg), bool(mul1), x, y, bool(q4nx),
+            int(int8_gemv),
         )
 
     def exl3_moe_coop(self, *args, **kwargs) -> None:

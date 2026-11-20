@@ -189,6 +189,7 @@ class LinearEXL3:
                 x,
                 y,
                 self.q4nx,
+                self.bc.int8_gemv,
             ):
                 return y
             # Shape, device or codebook not eligible: Q4NX has no fused GEMM
