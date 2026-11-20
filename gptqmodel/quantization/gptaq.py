@@ -535,7 +535,16 @@ class GPTAQ(GPTQ):
             raise ValueError("GPTAQ requires `gptaq` configuration.")
         result_device = torch.device(self.module.weight.data.device)
 
-        Losses = torch.zeros_like(W)
+        # The block loss is only consumed as one scalar, so keep a block-sized
+        # fp32 scratch plus a device scalar instead of a full rows x columns
+        # buffer (issue #5734). Every scratch column is written before it is
+        # read.
+        loss_scratch = torch.empty(
+            (W.shape[0], min(blocksize, self.columns)),
+            dtype=torch.float32,
+            device=W.device,
+        )
+        loss_total = torch.zeros((), dtype=torch.float32, device=W.device)
         Q = torch.zeros_like(W)
 
         def _inverse_and_delta():
@@ -553,14 +562,19 @@ class GPTAQ(GPTQ):
             )
 
         def _prepare_cpu(cdu_device):
-            nonlocal H, W, Q, Losses, perm, invperm, final_perm, global_perm
+            nonlocal H, W, Q, loss_scratch, loss_total, perm, invperm, final_perm, global_perm
             nonlocal static_group_perm, scale, zero
             H = H.to(device=cdu_device)
             W = W.to(device=cdu_device)
-            # ``Q``/``Losses`` were sized from the accelerator weight, but the
-            # block pass now writes host tensors.
+            # ``Q``/``loss_scratch`` were sized from the accelerator weight,
+            # but the block pass now writes host tensors.
             Q = torch.zeros_like(W)
-            Losses = torch.zeros_like(W)
+            loss_scratch = torch.empty(
+                (W.shape[0], min(blocksize, self.columns)),
+                dtype=torch.float32,
+                device=cdu_device,
+            )
+            loss_total = torch.zeros((), dtype=torch.float32, device=cdu_device)
             if self._use_native_delta:
                 self.dXXT = self.dXXT.to(device=cdu_device)
             if self.qcfg.desc_act:
@@ -611,7 +625,7 @@ class GPTAQ(GPTQ):
             W1 = W[:, i1:i2].clone()
             Q1 = torch.zeros_like(W1)
             Err1 = torch.zeros_like(W1)
-            Losses1 = torch.zeros_like(W1)
+            Losses1 = loss_scratch[:, :count]
             Hinv1 = Hinv[i1:i2, i1:i2]
             P1 = P[i1:i2, i1:i2] if P is not None else None
             # The in-block updates below mutate ``W1``. The deferred native
@@ -656,7 +670,8 @@ class GPTAQ(GPTQ):
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
-            Losses[:, i1:i2] = Losses1 / 2
+            Losses1.div_(2)
+            loss_total.add_(Losses1.sum())
 
             if P is None:
                 W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
@@ -669,16 +684,14 @@ class GPTAQ(GPTQ):
         torch_sync()
 
         avg_loss = self._token_normalized_avg_loss(
-            torch.sum(Losses).item(),
+            loss_total.item(),
             self._gptaq_batch_request_count,
             self.nsamples,
         )
 
         if math.isnan(avg_loss):
-            print("Losses sum item:", torch.sum(Losses).item())
+            print("Losses sum item:", loss_total.item())
             raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
-
-        del Losses
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
