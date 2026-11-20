@@ -98,7 +98,9 @@ class MacaqLinear(WeightOnlyQuantLinear):
     QUANT_TYPE = "macaq"
     # The Hadamard block and the smoothing pre-scale are built in
     # `compute_dtype` and multiply the activations at the activation dtype.
-    MODEL_DTYPE_BUFFERS = ("bias", "BH", "pre_scale")
+    # The bias is not: it is added after the FP32 reduction, so a checkpoint
+    # FP32 bias must survive a BF16 load instead of being rounded (#5632).
+    MODEL_DTYPE_BUFFERS = ("BH", "pre_scale")
 
     def __init__(
         self,
@@ -298,7 +300,17 @@ class MacaqLinear(WeightOnlyQuantLinear):
         if self.BH is not None:
             self.BH.data.copy_(result.BH.to(device=device, dtype=self.compute_dtype))
         if bias is not None and self.bias is not None:
-            self.bias.data.copy_(bias.to(device=device, dtype=self.compute_dtype))
+            # Keep the source dtype: an FP32 bias such as -257 is -256 in
+            # BF16, and the rounded value no longer cancels the product
+            # (#5632). `linear_fp32_reduce` adds a wider bias in FP32 and
+            # rounds only the final output. A dtype change replaces the
+            # buffer outside inference mode, like `_allocate_buffers`.
+            stored = bias.detach().to(device=device)
+            if stored.dtype == self.bias.dtype:
+                self.bias.data.copy_(stored)
+            else:
+                with torch.inference_mode(False):
+                    self.bias = stored.clone()
 
     # ------------------------------------------------------------------
     # forward
@@ -341,8 +353,9 @@ class MacaqLinear(WeightOnlyQuantLinear):
                 xb = xb * pre_scale.to(dtype)
             if bh is not None:
                 xb = macaq_core.rotate_blocks(xb, bh)
-        bias = None if self.bias is None else self.bias.to(dtype)
-        return linear_fp32_reduce(xb, weight, bias)
+        # Pass the stored bias unchanged; `linear_fp32_reduce` keeps a wider
+        # bias out of the low-precision operands and adds it in FP32 (#5632).
+        return linear_fp32_reduce(xb, weight, self.bias)
 
     def _forward_triton(self, x_flat: torch.Tensor) -> torch.Tensor:
         # Like `_forward_torch`, the Triton path must not trust the build-time
