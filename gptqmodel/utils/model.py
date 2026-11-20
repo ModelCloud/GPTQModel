@@ -52,6 +52,7 @@ from ..nn_modules.qlinear import (
     QZEROS_FORMAT_BUFFER,
     BaseQuantLinear,
     GPTQQuantLinear,
+    checkpoint_qzeros_layout,
 )
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
@@ -1004,7 +1005,7 @@ def hf_convert_gptq_v1_to_v2_format(
     except (TypeError, ValueError):
         source_format = None
     converted = False
-    if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+    if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GPTQ_P):
         # Optimum calls this before `save_pretrained()` can run. Record the
         # on-disk layout here so the state-dict hook emits the checkpoint
         # convention instead of the kernel's runtime one.
@@ -1012,13 +1013,14 @@ def hf_convert_gptq_v1_to_v2_format(
             if not isinstance(module, GPTQQuantLinear):
                 continue
             module._checkpoint_format_on_disk = source_format
-            if source_format == FORMAT.GPTQ_V2:
-                # A v2 file already stores logical zero points and the kernel
-                # decodes v2, so no word conversion runs. Mark the runtime
-                # layout anyway: without it the module keeps the constructor's
-                # v1 placeholder, `checkpoint_layout_qzeros` mistakes the live
-                # v2 words for v1, and the next save adds one to every zero
-                # point (issue #4952). The call also initializes the persistent
+            if checkpoint_qzeros_layout(source_format) == 2:
+                # A v2 or planar gptq_p file already stores logical zero points
+                # and the kernel decodes logical words, so no word conversion
+                # runs. Mark the runtime layout anyway: without it the module
+                # keeps the constructor's v1 placeholder,
+                # `checkpoint_layout_qzeros` mistakes the live logical words
+                # for v1, and the next save adds one to every zero point
+                # (issue #4952). The call also initializes the persistent
                 # `qzeros_format` marker, which an HF-loaded module otherwise
                 # leaves as uninitialized memory.
                 module.qzero_format(format=2)
@@ -1875,14 +1877,33 @@ def has_cpu_offload_hooks(model: nn.Module) -> bool:
     return False
 
 
+def _cpu_or_mps_placement(device) -> Optional[Tuple[str, int]]:
+    """Canonicalise one CPU/MPS device-map entry for the single-device shortcut.
+
+    ``mps`` and ``mps:0`` name the same accelerator, and a map may hold strings,
+    integers or ``torch.device`` values. Entries that name another device (or a
+    non-device value such as ``"disk"``) return ``None``.
+    """
+
+    try:
+        resolved = torch.device(device)
+    except (TypeError, RuntimeError):
+        return None
+    if resolved.type not in ("cpu", "mps"):
+        return None
+    return resolved.type, resolved.index if resolved.index is not None else 0
+
+
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
     device_map = dict(device_map)
     single_root = "" in device_map and len(device_map) == 1
-    all_single_cpu_or_mps = all(
-        d in ("cpu", "mps") for d in device_map.values()
-    )
+    # The shortcut is only valid when every entry resolves to the same CPU/MPS
+    # device. A mixed cpu/mps map must reach the per-entry hook path below, or
+    # the first entry silently overrides every other placement (#5713).
+    placements = {_cpu_or_mps_placement(d) for d in device_map.values()}
+    all_single_cpu_or_mps = len(placements) == 1 and None not in placements
     # CPU offload is unnecessary for all-CPU/MPS device maps and must be skipped.
     if single_root or all_single_cpu_or_mps:
         d = next(iter(device_map.values()))

@@ -128,10 +128,11 @@ class LinearEXL3:
 
         bsz = x.numel() // x.shape[-1]
         # The small-batch tensor-core GEMM (`bc.run`) is NVIDIA-only. On ROCm the
-        # extension exports null kernel tables for it, so always take the
-        # reconstruct + hgemm (hipBLAS) path there.
+        # native HIP GEMV handles decode-sized batches when it accepts the shape,
+        # codebook and device; larger batches (and anything it declines) take the
+        # reconstruct + hgemm (hipBLAS) path.
         if torch.version.hip is not None:
-            torch_mode = True
+            torch_mode = params.get("reconstruct", bsz > 8)
         else:
             torch_mode = params.get("reconstruct", bsz > 32 and not self.q4nx)
 
@@ -148,6 +149,24 @@ class LinearEXL3:
         # then produced silently wrong rows, so pack before the kernels.
         x = x.reshape(-1, self.in_features).contiguous()
         include_bias = params.get("include_bias", True)
+
+        if torch.version.hip is not None and not torch_mode:
+            y = torch.empty(out_shape, dtype=result_dtype, device=x.device)
+            if ext.bc_linear_exl3_run_hip_gemv(
+                self.trellis,
+                self.suh,
+                self.svh,
+                float(self.K),
+                self.bias if include_bias else None,
+                self.mcg,
+                self.mul1,
+                x,
+                y,
+                self.q4nx,
+            ):
+                return y
+            # Shape, device or codebook not eligible: reconstruct + hgemm.
+            torch_mode = True
 
         if torch_mode:
             y = torch.empty((x.shape[0], self.out_features), dtype=torch.float32, device=x.device)

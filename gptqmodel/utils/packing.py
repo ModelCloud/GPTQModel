@@ -106,6 +106,11 @@ def _auto_pack_impl(module: BaseQuantLinear, linear: Optional[nn.Module] = None)
     """
     if isinstance(linear, nn.Embedding):
         return "original"
+    # Both accelerated packers emit 32-bit storage words only, so narrow words
+    # (int8/int16 continuous layouts) must stay on the original packer instead
+    # of raising from the packer after a speculative device copy (#5806).
+    if int(getattr(module, "pack_dtype_bits", 32)) != 32:
+        return "original"
     if (
         torch.cuda.is_available()
         and hasattr(module, "pack_gpu")

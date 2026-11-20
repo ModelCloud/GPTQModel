@@ -69,9 +69,13 @@ flowchart LR
 
 Quantization requires NVIDIA CUDA. Inference uses native CUDA kernels for
 FP16 and BF16 on NVIDIA, or `BACKEND.EXL3_TORCH` for portable reconstruction.
-Q4NX CUDA dispatch on Ampere selects a packed GEMV for one to eight rows when
-the column groups fit in a co-resident wave. Each warp unpacks AlexBrandes's
-zero-prefixed windows, including Qubitium's W3.5 extension, from registers.
+Q4NX CUDA dispatch on Ampere and Ada (sm_89) selects a packed GEMV for one to
+eight rows when the column groups fit in a co-resident wave. On Ada the wide
+config is limited to the measured small-k, large-n band (2.5 and 3.5 bpw,
+`k <= 2048`, `n >= 12288`), and a 3.0 bpw tile of 64 Mi elements or more keeps
+the packed kernel, which reads the trellis from L2 there. Each warp unpacks
+AlexBrandes's zero-prefixed windows, including Qubitium's W3.5 extension, from
+registers.
 The kernel accumulates in FP32 and applies normalization with the output
 Hadamard transform.
 
@@ -107,6 +111,63 @@ that codebook.
 Packed FP16 forward uses FP32 for split-K partials, the output Hadamard
 transform, scales and bias, then casts once. The BF16 bridge rescales the raw
 projection, adds the canonical bias in FP32, and writes BF16. [Activation dispatch](exl3-wide-activation-dispatch.md)
+
+### Blackwell (sm_120)
+
+Blackwell was unmeasured when the Ada band landed, so `exl3_gemv_try_launch`
+declined Q4NX there. The same sweep on an RTX 5090 (170 SMs, 96 MiB L2) shows
+the packed GEMV is not numerically correct on sm_120: in all 180 cells it
+disagrees with the reconstructed FP32 weight by 0.16 to 0.82 relative, while
+the block-pipelined kernel stays within 3.3e-4. The defect is not specific to
+Q4NX — `mul1` W3 and `mcg` W2/W4 miss by 0.26 to 0.43 on the same device — so
+it belongs to the GEMV kernel on sm_120, not to the Q4NX decoder. Enabling it
+would be a poor trade even if the kernel were correct: the geometric mean is
+1.06x cold and 1.18x warm, and 61 of the 180 cells regress (0.77x warm at the
+worst). Blackwell keeps the block-pipelined kernel, and
+`tests/kernels/test_exllamav3_q4nx_gemv_blackwell.py` pins the decline so the
+gate is not opened without a working kernel and a new sweep.
+
+| bpw | Cells | GEMV vs FP32 reference | Packed vs reference | Cold geomean | Warm geomean | Regressions |
+| --- | ---: | --- | --- | ---: | ---: | ---: |
+| 2.5 | 60 | 0.16–0.74, median 0.37 | ≤ 3.2e-4 | 1.04x | 1.18x | 24/60 |
+| 3.0 | 60 | 0.17–0.82, median 0.37 | ≤ 3.1e-4 | 1.05x | 1.17x | 20/60 |
+| 3.5 | 60 | 0.16–0.68, median 0.36 | ≤ 3.2e-4 | 1.07x | 1.18x | 17/60 |
+
+The GEMV rows need the gate opened for the duration of the measurement; the
+committed tree declines every cell, so the table below is the kernel Blackwell
+actually runs. Times are medians in microseconds per projection: `cold`
+flushes 160 MiB of L2 before each of 20 launches, `warm` is a 100-launch batch
+after five warmups. `GB/s` is the packed trellis, `k * n * bits / 8` bytes over
+the measured time.
+
+| bpw | k | n | m | Cold | GB/s | Warm | GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2.5 | 2048 | 2048 | 1 | 15.70 | 83.5 | 14.40 | 91.1 |
+| 2.5 | 4096 | 4096 | 1 | 19.46 | 269.5 | 16.75 | 312.9 |
+| 2.5 | 8192 | 8192 | 1 | 35.82 | 585.4 | 32.28 | 649.7 |
+| 2.5 | 2048 | 16384 | 8 | 23.55 | 445.2 | 20.22 | 518.6 |
+| 3.0 | 2048 | 2048 | 1 | 16.37 | 96.1 | 13.52 | 116.4 |
+| 3.0 | 4096 | 4096 | 1 | 19.44 | 323.6 | 16.46 | 382.2 |
+| 3.0 | 8192 | 8192 | 1 | 37.89 | 664.2 | 32.22 | 781.0 |
+| 3.0 | 2048 | 16384 | 8 | 25.54 | 492.8 | 20.09 | 626.3 |
+| 3.5 | 2048 | 2048 | 1 | 15.36 | 119.5 | 13.32 | 137.7 |
+| 3.5 | 4096 | 4096 | 1 | 21.09 | 348.1 | 16.48 | 445.5 |
+| 3.5 | 8192 | 8192 | 1 | 39.94 | 735.2 | 32.27 | 909.9 |
+| 3.5 | 2048 | 16384 | 8 | 25.55 | 574.5 | 20.08 | 731.1 |
+
+The packed Q4NX GEMM tuning grid (`exl3_packed::samples_*` and
+`map_cc_to_index`) has no Blackwell row: `cc_values` covers Ampere, Ada and
+Hopper. `CC_BLACKWELL` is defined as `CC_HOPPER`, so sm_120 indexes the Hopper
+row and prefill is a tuned launch, not a generic fallback. At 3.0 bpw and 64
+rows the 5090 takes 45.49 us for 5120 → 4608 and 76.77 us for 8192 → 8192 cold
+(42.54 and 73.26 us warm, dispatch shape 7); 128 rows doubles that.
+
+Run the sweep with:
+
+```bash
+PYTHONPATH=. CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=2 \
+    /root/venv/bin/python tests/benchmark_exl3_q4nx_gemv_blackwell.py --check
+```
 
 ## Runtime policy
 

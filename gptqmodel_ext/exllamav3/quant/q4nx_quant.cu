@@ -21,21 +21,36 @@ constexpr int slot_bits = 7;  // Up to 128 live beam states.
 constexpr int slot_mask = (1 << slot_bits) - 1;
 constexpr Key empty_key = ~Key{0};
 
-template <bool lookup = false>
-__device__ __forceinline__ Key candidate_key(uint32_t state, int previous, float prior, const float* target)
+// Convert a value in [0, 30] to float without the quarter-rate I2F unit.
+// 2^23 + q is exact in FP32 and (2^23 + q) - (2^23 + 15) is an exact integer
+// subtraction, so the result rounds exactly like ``int(q) - 15``.
+__device__ __forceinline__ float byte_error(uint32_t bits, float target)
+{
+    return (__int_as_float(0x4b000000u | bits) - 8388623.0f) - target;
+}
+
+// ``path`` only needs the low 32 bits, and state << 7 has seven zero low bits,
+// so one IMAD replaces the shift and the OR.
+__device__ __forceinline__ Key candidate_key_math(uint32_t state, uint32_t previous, float prior, float4 target)
 {
     const uint32_t sums = q4nx_nibble_sums(state);
-    const int q0 = sums & 255;
-    const int q1 = (sums >> 8) & 255;
-    const int q2 = (sums >> 16) & 255;
-    const int q3 = sums >> 24;
-    const float e0 = lookup ? target[q0] : q0 - 15 - target[0];
-    const float e1 = lookup ? target[error_levels + q1] : q1 - 15 - target[1];
-    const float e2 = lookup ? target[2 * error_levels + q2] : q2 - 15 - target[2];
-    const float e3 = lookup ? target[3 * error_levels + q3] : q3 - 15 - target[3];
+    const float e0 = byte_error(sums & 0x1f, target.x);
+    const float e1 = byte_error((sums >> 8) & 0x1f, target.y);
+    const float e2 = byte_error((sums >> 16) & 0x1f, target.z);
+    const float e3 = byte_error(sums >> 24, target.w);
     const float cost = prior + (e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3);
-    const uint32_t path = (state << slot_bits) | previous;
-    return (Key{__float_as_uint(cost)} << 32) | path;
+    return (Key{__float_as_uint(cost)} << 32) | (state * (1u << slot_bits) + previous);
+}
+
+__device__ __forceinline__ Key candidate_key_lookup(uint32_t state, uint32_t previous, float prior, const float* target)
+{
+    const uint32_t sums = q4nx_nibble_sums(state);
+    const float e0 = target[sums & 0x1f];
+    const float e1 = target[error_levels + ((sums >> 8) & 0x1f)];
+    const float e2 = target[2 * error_levels + ((sums >> 16) & 0x1f)];
+    const float e3 = target[3 * error_levels + (sums >> 24)];
+    const float cost = prior + (e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3);
+    return (Key{__float_as_uint(cost)} << 32) | (state * (1u << slot_bits) + previous);
 }
 
 // Select a cutoff by cost and state so equal-cost candidates are retained
@@ -90,7 +105,8 @@ __global__ void __launch_bounds__(tile_weights) quantize_kernel(
     constexpr int class_count = 1 << (32 - 2 * KV);
     constexpr int suffix_count = 1 << KV;
     constexpr bool exact = beam == class_count;
-    __shared__ float targets[tile_weights];
+    // 16-byte aligned so each step's four targets load as one LDS.128.
+    __shared__ __align__(16) float targets[tile_weights];
     __shared__ float errors[exact ? 4 * error_levels : 1];
     __shared__ Key candidates[class_count];
     __shared__ float costs[beam];
@@ -112,6 +128,7 @@ __global__ void __launch_bounds__(tile_weights) quantize_kernel(
     for (int step = 0; step < steps; ++step)
     {
         const float* target = targets + 4 * step;
+        const float4 target4 = *reinterpret_cast<const float4*>(target);
         const int live = step == 0 ? 1 : beam;
         if constexpr (!exact)
         {
@@ -138,7 +155,7 @@ __global__ void __launch_bounds__(tile_weights) quantize_kernel(
                 for (int suffix = lane * class_count + successor; suffix < suffix_count; suffix += lanes * class_count)
                 {
                     const uint32_t state = (previous << KV) | suffix;
-                    best = min(best, candidate_key<true>(state, previous, prior, errors));
+                    best = min(best, candidate_key_lookup(state, previous, prior, errors));
                 }
             }
             for (int offset = lanes / 2; offset > 0; offset /= 2)
@@ -148,21 +165,34 @@ __global__ void __launch_bounds__(tile_weights) quantize_kernel(
         }
         else if constexpr (KV == 12)
         {
-            // W3.0's successor class is the low eight suffix bits.
+            // W3.0's successor class is the low eight suffix bits. Each thread
+            // owns one successor class and covers its sixteen suffixes, so the
+            // predecessor's prior cost and class are loaded once per predecessor
+            // instead of once per candidate. Four accumulators keep the serial
+            // min dependency chain short.
             static_assert(class_count == tile_weights);
-            Key best = empty_key;
-            for (int i = threadIdx.x; i < live * suffix_count; i += tile_weights)
+            constexpr int suffixes_per_thread = suffix_count / tile_weights;
+            Key best[4] = {empty_key, empty_key, empty_key, empty_key};
+            for (int previous = 0; previous < live; ++previous)
             {
-                const int previous = i >> KV;
-                const uint32_t state = (classes[previous] << KV) | (i & (suffix_count - 1));
-                best = min(best, candidate_key(state, previous, costs[previous], target));
+                const float prior = costs[previous];
+                const uint32_t state = (classes[previous] << KV) | threadIdx.x;
+                #pragma unroll
+                for (int j = 0; j < suffixes_per_thread; ++j)
+                {
+                    const Key key = candidate_key_math(state + j * tile_weights, previous, prior, target4);
+                    best[j & 3] = min(best[j & 3], key);
+                }
             }
-            candidates[threadIdx.x] = best;
+            candidates[threadIdx.x] = min(min(best[0], best[1]), min(best[2], best[3]));
         }
         else
         {
             // W2.5 shares the low eight bits with the owning thread. The next
             // two suffix bits and low two predecessor bits choose its register.
+            // The four suffix values set bits 8 and 9, disjoint from the low
+            // eight bits the thread owns, so ``+`` builds the same state as
+            // ``|``.
             static_assert(KV == 10 && suffix_count == 4 * tile_weights && class_count == 16 * tile_weights);
             Key best[16];
             #pragma unroll
@@ -173,10 +203,10 @@ __global__ void __launch_bounds__(tile_weights) quantize_kernel(
                 const int previous_class = classes[previous];
                 const float prior = costs[previous];
                 const uint32_t state = (previous_class << KV) | threadIdx.x;
-                const Key key0 = candidate_key(state, previous, prior, target);
-                const Key key1 = candidate_key(state | tile_weights, previous, prior, target);
-                const Key key2 = candidate_key(state | (2 * tile_weights), previous, prior, target);
-                const Key key3 = candidate_key(state | (3 * tile_weights), previous, prior, target);
+                const Key key0 = candidate_key_math(state, previous, prior, target4);
+                const Key key1 = candidate_key_math(state + tile_weights, previous, prior, target4);
+                const Key key2 = candidate_key_math(state + 2 * tile_weights, previous, prior, target4);
+                const Key key3 = candidate_key_math(state + 3 * tile_weights, previous, prior, target4);
                 // The switch uses constant register indices and is uniform
                 // across all threads visiting this predecessor.
                 switch (previous_class & 3)

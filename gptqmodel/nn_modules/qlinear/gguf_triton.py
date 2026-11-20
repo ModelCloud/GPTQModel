@@ -1901,6 +1901,18 @@ class GGUFTritonKernel(GGUFTorchLinear):
     # bit width is not enough to identify one (Q4_0 and Q4_K are both 4-bit),
     # so AUTO selection must consult the resolved qtype.
     SUPPORTS_GGUF_QTYPES = frozenset({"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"})
+
+    #: GGUF tensor types whose fused Triton forward is safe under an explicit
+    #: ``torch.cuda.CUDAGraph`` capture (#5591). The fused kernels are pure
+    #: device work (``tl.load``/``tl.dot``) with no host copy, so every layout
+    #: the constructor accepts is capturable. The inherited
+    #: ``GGUFTorchLinear.GRAPH_CAPTURE_QTYPES`` is *not* this kernel's answer: it
+    #: lists Q4_0/Q8_0, which this constructor rejects, and omits the 1-bit
+    #: formats it does build, so the per-instance answer under-claimed them.
+    #: Measured on sm_120 (RTX 5090, torch 2.15.0+cu132, triton 3.9.0): capture,
+    #: replay and a changed-input replay are bitwise identical to eager for all
+    #: five layouts, including the Q6_K wide-scale path.
+    GRAPH_CAPTURE_QTYPES = frozenset({"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"})
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True

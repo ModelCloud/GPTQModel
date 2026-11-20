@@ -74,9 +74,12 @@ def test_keep_mask_preserves_samples_across_devices(
         captured, [(0, [0, 2]), (1, [1])]
     ):
         torch.testing.assert_close(inp, inputs[row : row + 1, positions, :])
-        torch.testing.assert_close(out, outputs[row : row + 1, positions, :])
+        # GPTQ accumulates only `X^T X` from the input, so the hook no longer
+        # slices the output per sample (#5724). The keep-mask row selection
+        # this test is about is unchanged.
+        assert out is None
         assert batch_index == 7
-        assert inp.is_contiguous() and out.is_contiguous()
+        assert inp.is_contiguous()
     kept = torch.stack([inputs[0, 0], inputs[0, 2], inputs[1, 1]])
     torch.testing.assert_close(task.finalize_hessian(), 2.0 * kept.T @ kept / 3)
     assert task.nsamples == 3
