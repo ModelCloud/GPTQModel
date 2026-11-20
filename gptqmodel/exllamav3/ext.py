@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -266,6 +267,49 @@ def exl3_native_hip_gemm_available(device: torch.device | str | int | None = Non
     return arch is not None and arch.startswith("gfx120")
 
 
+def _rocm_jit_build_available() -> bool:
+    """Whether torch's JIT can build the EXL3 extension on this HIP host.
+
+    Mirrors ``TorchOpsJitExtension.cuda_source_build_available`` for the ROCm
+    toolchain: torch shells out to ``hipcc`` (reported through ``ROCM_HOME`` or
+    found on ``PATH``) and needs ``ninja``. A ROCm runtime wheel without the
+    development toolkit cannot build, so callers must keep the portable path.
+    """
+
+    if torch.version.hip is None or shutil.which("ninja") is None:
+        return False
+    try:
+        from torch.utils.cpp_extension import ROCM_HOME
+    except Exception:  # pragma: no cover - older torch without the symbol
+        ROCM_HOME = None
+    if ROCM_HOME:
+        hipcc = Path(ROCM_HOME) / "bin" / "hipcc"
+        if hipcc.is_file() and os.access(hipcc, os.X_OK):
+            return True
+    return shutil.which("hipcc") is not None
+
+
+def exl3_native_hip_gemm_usable(device: torch.device | str | int | None = None) -> bool:
+    """Whether the native HIP EXL3 GEMV/GEMM can run on ``device`` now.
+
+    Extends :func:`exl3_native_hip_gemm_available` (architecture metadata) with
+    the extension's loadability: already-registered ops, a cached or configured
+    prebuilt binary, or a HIP JIT toolchain that can build the extension on
+    first use. ``backend=AUTO`` uses this so a build without the HIP ops keeps
+    the portable ``EXL3_TORCH`` path instead of selecting a kernel that cannot
+    load. This is a capability probe; it never compiles.
+    """
+
+    if not exl3_native_hip_gemm_available(device):
+        return False
+    extension = _EXLLAMAV3_TORCH_OPS_EXTENSION
+    if extension.loadable_without_build():
+        return True
+    if extension.configured_prebuilt_library() is not None:
+        return False
+    return _rocm_jit_build_available()
+
+
 def _runtime_op(name: str):
     _prepare_build_env()
     return _extension_api().op("exllamav3", name)
@@ -464,6 +508,8 @@ exllamav3_ext = _ExllamaV3TorchOpsFacade()
 
 __all__ = [
     "exllamav3_ext",
+    "exl3_native_hip_gemm_available",
+    "exl3_native_hip_gemm_usable",
     "exllamav3_runtime_available",
     "exllamav3_runtime_error",
     "prewarm_exllamav3_extension",
