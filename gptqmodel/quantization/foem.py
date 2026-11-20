@@ -15,7 +15,6 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import transformers
 
 from ..looper.named_module import NamedModule
@@ -24,7 +23,6 @@ from ..utils.fallback import resolve_fallback_strategy, should_use_fallback
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
 from ..utils.torch import torch_sync
-from .conv_padding import conv_padding_pairs, pad_mode
 from .gar import (
     compose_final_perm,
     compute_global_perm,
@@ -32,7 +30,13 @@ from .gar import (
     extend_perm_with_tail,
     invert_perm,
 )
-from .gptq import GPTQ, _device_reduction_key, _move_static_groups
+from .gptq import (
+    GPTQ,
+    _device_reduction_key,
+    _move_static_groups,
+    _static_group_of_column,
+    conv_patch_matrix,
+)
 from .quantizer import _neutralize_dead_columns
 
 
@@ -239,26 +243,15 @@ class FOEM(GPTQ):
             if self.gptaq:
                 native_inp = native_inp.t()
 
-        if isinstance(self.module, nn.Conv2d):
-            # `nn.Unfold` only accepts integer zero padding, so apply the
-            # layer's own padding (including its mode) and unfold the
-            # already-padded input. This keeps the Hessian on the operator
-            # that will actually run, matching GPTQ's capture (#3917, #5646).
-            (top, bottom), (left, right) = conv_padding_pairs(self.module)
-            pad = (left, right, top, bottom)
-            mode = pad_mode(self.module.padding_mode)
-            unfold = nn.Unfold(
-                self.module.kernel_size,
-                dilation=self.module.dilation,
-                padding=0,
-                stride=self.module.stride,
-            )
-            inp = unfold(F.pad(inp, pad, mode=mode))
-            inp = inp.permute([1, 0, 2])
-            inp = inp.flatten(1)
+        if isinstance(self.module, (nn.Conv1d, nn.Conv2d)):
+            # Share GPTQ's grouped im2col geometry: it applies the layer's own
+            # padding mode and folds groups the same way for every solver
+            # (#3917, #5646, #5763).
+            inp = conv_patch_matrix(self.module, inp, columns_first=True)
             if self.gptaq:
-                native_inp = unfold(F.pad(native_inp, pad, mode=mode))
-                native_inp = native_inp.permute([1, 0, 2]).flatten(1)
+                native_inp = conv_patch_matrix(
+                    self.module, native_inp, columns_first=True
+                )
 
         # FOEM reports the same token-normalized loss as GPTQ/GPTAQ. ``inp`` is
         # [columns, tokens] here, so ``shape[1]`` is the calibration token count,
@@ -327,6 +320,19 @@ class FOEM(GPTQ):
             hessian.mul_(ratio)
             if use_native:
                 dxxT.mul_(ratio)
+
+        # ``inp`` is [columns, tokens], so the sink-row cap must reduce over the
+        # column axis and scale each token. Plain GPTQ applies the same cap to
+        # its [tokens, columns] batch in ``compute_hessian_xtx``; without this
+        # the correction path ignored ``HessianConfig.sink_row_cap_median_multiple``
+        # (#5769). The native delta uses the same factors so ``dXXT`` stays the
+        # cross product of the capped rows.
+        cap_scale = self.resolve_sink_row_cap_scale(inp, None, feature_dim=0)
+        if cap_scale is not None:
+            cap_scale = cap_scale.unsqueeze(0)
+            inp = inp * cap_scale
+            if use_native:
+                native_inp = native_inp * cap_scale
 
         device_count += token_count
         scale = math.sqrt(2 / device_count)
@@ -588,6 +594,8 @@ class FOEM(GPTQ):
                 static_group_perm = perm
             elif self.qcfg.act_group_aware:
                 static_group_perm = final_perm
+        # One host read for the module instead of one per column (#5720).
+        static_group_of_column = _static_group_of_column(static_group_perm, self.qcfg.group_size)
 
         if self.qcfg.foem is None:
             raise ValueError("FOEM requires `foem` configuration.")
@@ -623,7 +631,7 @@ class FOEM(GPTQ):
 
         def _prepare_cpu(cdu_device):
             nonlocal H, W, W_raw, Q, loss_scratch, loss_total, perm, invperm, final_perm, global_perm
-            nonlocal static_group_perm, scale, zero
+            nonlocal static_group_perm, static_group_of_column, scale, zero
             H = H.to(device=cdu_device)
             W = W.to(device=cdu_device)
             # FOEM's beta correction reads the pre-pass weight, and
@@ -653,6 +661,9 @@ class FOEM(GPTQ):
                     static_group_perm = perm
                 elif self.qcfg.act_group_aware:
                     static_group_perm = final_perm
+                # Only the device changed; rebuild so the map matches it.
+                static_group_of_column = _static_group_of_column(
+                    static_group_perm, self.qcfg.group_size)
             if self.qcfg.group_size == -1 and self.qcfg.desc_act:
                 # An ungrouped ``desc_act`` module never refits the quantizer in
                 # the block loop, so rebuild the pre-reorder measurement from
@@ -755,10 +766,10 @@ class FOEM(GPTQ):
                             now_idx += 1
                     else:
                         idx = i1 + i
-                        if static_group_perm is not None:
-                            idx = static_group_perm[idx]
-
-                        self.quantizer = groups[idx // self.qcfg.group_size]
+                        if static_group_of_column is not None:
+                            self.quantizer = groups[static_group_of_column[idx]]
+                        else:
+                            self.quantizer = groups[idx // self.qcfg.group_size]
 
                 q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                 Q1[:, i] = q

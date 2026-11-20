@@ -174,6 +174,14 @@ class WeightOnlyProcessor(LoopProcessor):
         self.log_new_row(stat)
 
         if not self._uses_direct_pack(qcfg_clone):
+            # The packers recover integer codes from `linear.weight`. When the
+            # replay copy is too narrow to hold them (8-bit asymmetric BF16),
+            # keep the exact FP32 reconstruction for packing (#5721).
+            pack_wq = getattr(task, "pack_weight", None)
+            if pack_wq is not None:
+                del task.pack_weight
+                module.stream_state_payload_to_cpu({"pack_wq": pack_wq})
+                del pack_wq
             module.weight.data = wq
         return qcfg_clone
 
@@ -235,6 +243,9 @@ class WeightOnlyProcessor(LoopProcessor):
             assert q_g_idx.device == CPU
 
         layers = {module.full_name: model.model.get_submodule(module.full_name)}
+        # Exact FP32 reconstruction kept by the quantizer when the replay copy
+        # cannot round-trip the packing codes (#5721).
+        pack_wq = module.state.pop("pack_wq", None)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
         original_layer = layers.get(module.full_name)
@@ -332,6 +343,10 @@ class WeightOnlyProcessor(LoopProcessor):
         pack_start = time.perf_counter() if timer is not None else None
         with log_time_block("pack", logger=log, module_name=module_label):
             with parent_module_lock(parent_key):
+                if pack_wq is not None:
+                    # Pack from the exact reconstruction, not the narrowed
+                    # replay copy, so the stored codes match the quantizer's.
+                    layers[module.full_name].weight.data = pack_wq
                 packer_label = pack_module(
                     name=module.full_name,
                     qModules=qmodules,

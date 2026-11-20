@@ -402,7 +402,12 @@ class GPTQProcessor(LoopProcessor):
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
             tmp.fallback = qcfg_clone.fallback
-            tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
+
+        # Percentage fallback thresholds resolve against the calibration token
+        # count for every selector. GPTAQ and FOEM inherited the GPTQ default
+        # ``None`` here, so ``"50%"`` was resolved against a base of one and a
+        # sparsely routed expert never fell back (#5755).
+        tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         tmp.quantizer.configure(
             perchannel=True,
@@ -1035,6 +1040,15 @@ class GPTQProcessor(LoopProcessor):
                     "wq": snapshot_eora_reconstructed_weight(wq),
                 })
 
+        # The packers recover integer codes from `linear.weight`. When the
+        # replay copy is too narrow to hold them (8-bit asymmetric BF16),
+        # keep the exact FP32 reconstruction for packing (#5721).
+        pack_wq = getattr(g, "pack_weight", None)
+        if pack_wq is not None:
+            del g.pack_weight
+            module.stream_state_payload_to_cpu({"pack_wq": pack_wq})
+            del pack_wq
+
         # single largest deallocation of vram happens here
         module.weight.data = wq
         if self.qcfg.activation_mode == "w4afp8":
@@ -1107,6 +1121,9 @@ class GPTQProcessor(LoopProcessor):
         assert q_g_idx.device == CPU
 
         layers = {module.full_name: model.model.get_submodule(module.full_name)}
+        # Exact FP32 reconstruction kept by the quantizer when the replay copy
+        # cannot round-trip the packing codes (#5721).
+        pack_wq = module.state.pop("pack_wq", None)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
 
@@ -1169,6 +1186,10 @@ class GPTQProcessor(LoopProcessor):
             module_name=module_label,
         ):
             with parent_module_lock(parent_key):
+                if pack_wq is not None:
+                    # Pack from the exact reconstruction, not the narrowed
+                    # replay copy, so the stored codes match the quantizer's.
+                    layers[module.full_name].weight.data = pack_wq
                 packer_label = pack_module(
                     name=module.full_name,
                     qModules=qModules,
