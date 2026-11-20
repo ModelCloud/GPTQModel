@@ -49,7 +49,10 @@ def test_q8_k_fp16_keeps_tiny_weights(bias: bool) -> None:
     expected = src(x.float()).item()
 
     assert module(x).item() == pytest.approx(expected, rel=1e-6)
-    assert module(x.float()).item() == pytest.approx(expected, rel=1e-6)
+    # One activation dtype per module (contracts/kernel/forward-dtype.md):
+    # check FP32 activations on a separately built module.
+    fp32_module, _ = _build(2.0**-26, bias=bias)
+    assert fp32_module(x.float()).item() == pytest.approx(expected, rel=1e-6)
 
 
 def test_q8_k_fp16_guard_widens_only_for_tiny_nonzero_blocks() -> None:

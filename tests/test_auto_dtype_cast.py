@@ -1145,7 +1145,9 @@ def test_registered_hook_removal_survives_cast_and_restore(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_pinned_cpu_offload_preserves_bits_and_pins_large_tensors():
+def test_pinned_cpu_offload_preserves_bits_without_pinning_parameters():
+    """Offload stages through pinned memory but installs pageable parameters (#5729)."""
+
     module = nn.Module()
     module.large = nn.Linear(2048, 2048, bias=False, device="cuda", dtype=torch.bfloat16)
     module.small = nn.Linear(64, 64, bias=False, device="cuda", dtype=torch.bfloat16)
@@ -1160,7 +1162,9 @@ def test_pinned_cpu_offload_preserves_bits_and_pins_large_tensors():
     assert moved is module
     assert module.large.weight.device.type == "cpu"
     assert module.small.weight.device.type == "cpu"
-    assert module.large.weight.is_pinned()
+    # A dense module that is never packed keeps this parameter for the rest of
+    # the process, so it must not be pinned host memory.
+    assert not module.large.weight.is_pinned()
     assert not module.small.weight.is_pinned()
     assert _bits_equal(module.large.weight, expected_large)
     assert _bits_equal(module.small.weight, expected_small)

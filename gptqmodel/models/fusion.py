@@ -15,6 +15,7 @@ import gc
 import inspect
 import math
 import textwrap
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
@@ -22,6 +23,7 @@ from types import FunctionType, MethodType
 
 import torch
 
+from ..nn_modules.qlinear import _check_forward_dtype
 from ..nn_modules.qlinear._runtime_cache import tensor_cache_key
 from ..nn_modules.qlinear.marlin import MarlinLinear
 from ..nn_modules.qlinear.marlin_awq import AwqMarlinLinear
@@ -53,6 +55,32 @@ def _set_operand(module, name, tensor):
 
 def _retired_guard():
     return False
+
+
+class _Published:
+    """One coherent fusion publication plus its live reader lease count.
+
+    ``_FusionGroup`` swaps this record atomically and only mutates the record's
+    fields through the compatibility properties. A retired record keeps its
+    operands and guard intact until the last caller that leased it finishes.
+    """
+
+    __slots__ = ("guard", "forward", "packed", "key", "input_dtype", "input_device",
+                 "widths", "activation_dtype", "users", "retired", "released")
+
+    def __init__(self, *, guard, forward, packed, key, input_dtype, input_device,
+                 widths, activation_dtype):
+        self.guard = guard
+        self.forward = forward
+        self.packed = packed
+        self.key = key
+        self.input_dtype = input_dtype
+        self.input_device = input_device
+        self.widths = widths
+        self.activation_dtype = activation_dtype
+        self.users = 0
+        self.retired = False
+        self.released = False
 
 
 @lru_cache(maxsize=32)
@@ -423,14 +451,66 @@ class _FusionGroup:
         self.native_forward = self.parent_forward
         self.names = tuple(path.rsplit(".", 1)[-1] for path in decision.paths)
         self.widths = tuple(module.out_features for module in modules)
-        self.guard = None
-        self.packed_forward = None
+        self._lock = threading.RLock()
+        self._published = None
         self.parent_state = vars(parent)
         self.active = False
         self.installed_clears = []
-        self.packed = None
-        self.packed_key = None
         self.calls = 0
+
+    # The published record is the execution contract. These properties keep the
+    # historical attribute surface for tests, benchmarks and callers that read
+    # or (in cold-path tooling) rebind the current guard/forward.
+    @property
+    def guard(self):
+        state = self._published
+        return None if state is None else state.guard
+
+    @guard.setter
+    def guard(self, value):
+        state = self._published
+        if state is None:
+            raise AttributeError("guard is only assignable while a fusion state is published")
+        state.guard = value
+
+    @property
+    def packed_forward(self):
+        state = self._published
+        return None if state is None else state.forward
+
+    @packed_forward.setter
+    def packed_forward(self, value):
+        state = self._published
+        if state is None:
+            raise AttributeError("packed_forward is only assignable while a fusion state is published")
+        state.forward = value
+
+    @property
+    def packed(self):
+        state = self._published
+        return None if state is None else state.packed
+
+    @property
+    def packed_key(self):
+        state = self._published
+        return None if state is None else state.key
+
+    @packed_key.setter
+    def packed_key(self, value):
+        state = self._published
+        if state is None:
+            raise AttributeError("packed_key is only assignable while a fusion state is published")
+        state.key = value
+
+    @property
+    def input_dtype(self):
+        state = self._published
+        return None if state is None else state.input_dtype
+
+    @property
+    def input_device(self):
+        state = self._published
+        return None if state is None else state.input_device
 
     def _key(self):
         return (id(getattr(self.parent, "_hf_hook", None)), tuple(
@@ -477,17 +557,16 @@ class _FusionGroup:
         # descriptor's per-call operand snapshot would still own the replaced
         # standalone allocations; keep the descriptors, release the snapshots.
         self.kernel.release_operand_snapshots((*self.modules, fused))
-        self.invalidate()
-        self.packed = fused
-        self.packed_key = self._key()
+        return fused
 
     @torch.inference_mode(False)
     @torch.no_grad()
     def _operand(self, key):
         # Inference tensors use the kernels' explicit clear_weight_cache contract
         # for writes without version counters (installed on every source below).
-        if self.packed is not None and key == self.packed_key:
-            return self.packed
+        state = self._published
+        if state is not None and key == state.key:
+            return state.packed
         first = self.modules[0]
         if self.kernel.layout not in ("marlin", "gptq", "awq") or type(first) not in (TorchLinear, AwqTorchLinear, MarlinLinear, AwqMarlinLinear):
             fused = self.kernel.combine(self.modules)
@@ -553,61 +632,114 @@ class _FusionGroup:
         self._share_operands(fused)
         return fused
 
-    def invalidate(self):
-        if self.guard is not None:
+    def _retire(self, state):
+        """Release a record's storage; caller holds ``self._lock`` and ``users == 0``."""
+        if state.released:
+            return
+        state.released = True
+        if state.guard is not None:
             # Free-threaded Python may defer destroying a function even after
             # its final reference is dropped. Release generated operand bindings
             # explicitly; retained callers see a safely retired guard.
-            self.guard.__code__ = _retired_guard.__code__
-            self.guard.__globals__.clear()
-        self.guard = self.packed_forward = None
+            state.guard.__code__ = _retired_guard.__code__
+            state.guard.__globals__.clear()
+        state.guard = None
+        state.forward = None
+        packed = state.packed
+        state.packed = None
+        if packed is not None:
+            clear = getattr(packed, "clear_weight_cache", None)
+            if clear is not None:
+                clear()
+            # nn.Module hooks can form cycles. Drop storage bindings eagerly
+            # rather than waiting for cyclic GC to release a retired executor.
+            packed._parameters.clear()
+            packed._buffers.clear()
+            packed._modules.clear()
+            packed.__dict__.pop("workspace", None)
+            self.kernel.release(packed)
         # Completed Dynamo traces can leave unreachable LazyCache cycles with
         # borrowed packed inputs. Collect at this cold storage-lifecycle boundary
         # so retired allocations do not wait for the next automatic GC cycle.
         if any(hasattr(getattr(module, "dequantize_weight", None), "_torchdynamo_orig_callable")
                for module in self.modules):
             gc.collect()
-        if self.packed is not None:
-            clear = getattr(self.packed, "clear_weight_cache", None)
-            if clear is not None:
-                clear()
-            # nn.Module hooks can form cycles. Drop storage bindings eagerly
-            # rather than waiting for cyclic GC to release a retired executor.
-            self.packed._parameters.clear()
-            self.packed._buffers.clear()
-            self.packed._modules.clear()
-            self.packed.__dict__.pop("workspace", None)
-            self.kernel.release(self.packed)
-        self.packed = self.packed_key = None
+
+    def _invalidate_locked(self):
+        state = self._published
+        if state is None:
+            return
+        self._published = None
+        state.retired = True
+        if state.users == 0:
+            self._retire(state)
+
+    def invalidate(self):
+        """Retire the published record without mutating storage in flight."""
+        with self._lock:
+            self._invalidate_locked()
+
+    def _lease(self):
+        with self._lock:
+            state = self._published
+            if state is not None:
+                state.users += 1
+            return state
+
+    def _release(self, state):
+        with self._lock:
+            state.users -= 1
+            if state.retired and state.users == 0:
+                self._retire(state)
 
     def _refresh(self, activation_dtype=None):
         """Cold path: validate the live owners, rebuild operands and descriptors."""
-        if (any(self.parent._modules.get(name) is not module for name, module in zip(self.names, self.modules))
-                or any(module.training for module in self.modules) or hasattr(self.parent, "_hf_hook")
-                or _incompatible(self.modules)):
-            self.invalidate()
-            return False
-        activation_dtype = activation_dtype or self.activation_dtype
-        self.kernel.prepare(self.modules, activation_dtype)
-        if _incompatible(self.modules):
-            self.invalidate()
-            return False
-        if self.kernel.combined_shape_error(self.modules, activation_dtype):
-            self.invalidate()
-            return False
-        # A failed guard may concern executor-owned scratch rather than source
-        # tensors. Rebuild even when the checkpoint key itself did not change.
-        self.invalidate()
-        self._operand(self._key())
-        self.packed_forward = self.packed.forward
-        self.activation_dtype = activation_dtype
-        self.input_dtype = activation_dtype or self.kernel.input_dtype(self.modules[0])
-        self.input_device = getattr(self.modules[0], self.kernel.scale_name).device
-        self.widths = tuple(module.out_features for module in self.modules)
-        self.guard = _mutation_guard(self.parent, self.modules, self.names, self.packed,
-                                     fields=self.fields, tensors=self.tensors, axes=self.axes,
-                                     mappings=self.kernel.private_mappings)
-        return True
+        with self._lock:
+            if not self.active:
+                self._invalidate_locked()
+                return False
+            if (any(self.parent._modules.get(name) is not module for name, module in zip(self.names, self.modules))
+                    or any(module.training for module in self.modules) or hasattr(self.parent, "_hf_hook")
+                    or _incompatible(self.modules)):
+                self._invalidate_locked()
+                return False
+            activation_dtype = activation_dtype or self.activation_dtype
+            # A sibling cold path may have published the record this caller
+            # needs while it waited for the lock. Reuse it instead of rebuilding
+            # the same operands and rebinding every source leaf again.
+            state = self._published
+            if (state is not None and state.activation_dtype == activation_dtype
+                    and state.guard is not None and state.guard()):
+                return True
+            self.kernel.prepare(self.modules, activation_dtype)
+            if _incompatible(self.modules):
+                self._invalidate_locked()
+                return False
+            if self.kernel.combined_shape_error(self.modules, activation_dtype):
+                self._invalidate_locked()
+                return False
+            # A failed guard may concern executor-owned scratch rather than
+            # source tensors. Rebuild even when the checkpoint key itself did
+            # not change.
+            self._invalidate_locked()
+            key = self._key()
+            packed = self._operand(key)
+            guard = _mutation_guard(self.parent, self.modules, self.names, packed,
+                                    fields=self.fields, tensors=self.tensors, axes=self.axes,
+                                    mappings=self.kernel.private_mappings)
+            self.activation_dtype = activation_dtype
+            self.widths = tuple(module.out_features for module in self.modules)
+            self._published = _Published(
+                guard=guard,
+                forward=packed.forward,
+                packed=packed,
+                key=key,
+                input_dtype=activation_dtype or self.kernel.input_dtype(self.modules[0]),
+                input_device=getattr(self.modules[0], self.kernel.scale_name).device,
+                widths=self.widths,
+                activation_dtype=activation_dtype,
+            )
+            return True
 
     def execute(self, x):
         if (not self.active or self.parent_state["training"] or x.requires_grad or dynamo_is_compiling()
@@ -615,14 +747,39 @@ class _FusionGroup:
                 or torch.nn.modules.module._global_forward_pre_hooks
                 or torch.nn.modules.module._global_forward_hooks):
             return None
-        if self.guard is None or not self.guard():
+        # The fused executor stands in for the source projections, so it
+        # carries their forward dtype lock (contracts/kernel/forward-dtype.md).
+        # Check before any refresh: a second dtype must raise, not rebuild.
+        for module in self.modules:
+            _check_forward_dtype(module, (x,), {})
+        # Lease one coherent record. A cache clear or refresh can retire it at
+        # any point, but retirement is deferred until this caller releases it,
+        # so the local forward and its operand storage stay valid.
+        state = self._lease()
+        if state is None:
             if not self._refresh(x.dtype):
                 return None
-        if x.dtype != self.input_dtype or x.device != self.input_device:
-            return None
-        output = self.packed_forward(x)
-        self.calls += 1
-        return output.split(self.widths, dim=-1)
+            state = self._lease()
+            if state is None:
+                return None
+        try:
+            guard = state.guard
+            if guard is None or not guard():
+                self._release(state)
+                state = None
+                if not self._refresh(x.dtype):
+                    return None
+                state = self._lease()
+                if state is None or state.guard is None or not state.guard():
+                    return None
+            if x.dtype != state.input_dtype or x.device != state.input_device:
+                return None
+            output = state.forward(x)
+            self.calls += 1
+            return output.split(state.widths, dim=-1)
+        finally:
+            if state is not None:
+                self._release(state)
 
     def _fallback(self, *args, **kwargs):
         return self.parent_forward(*args, **kwargs)
@@ -672,6 +829,10 @@ class _FusionGroup:
         self._refresh()
 
     def remove(self):
+        with self._lock:
+            self._remove_locked()
+
+    def _remove_locked(self):
         self.active = False
         if self.parent.forward is self.installed_forward:
             self.parent.forward = self.native_forward
@@ -706,7 +867,7 @@ class _FusionGroup:
                 for clear in self.original_clears:
                     if clear is not None:
                         clear()
-        self.invalidate()
+        self._invalidate_locked()
 
 
 class FusionPlanner:

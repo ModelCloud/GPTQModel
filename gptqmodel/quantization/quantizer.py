@@ -38,6 +38,28 @@ def _floor_scale_for_storage(
     return torch.where((scale >= 0) & (scale < minimum), minimum, scale)
 
 
+def _affine_scale(
+    xmin: torch.Tensor,
+    xmax: torch.Tensor,
+    maxq: torch.Tensor,
+) -> torch.Tensor:
+    """Fit the affine grid step without overflowing the endpoint subtraction.
+
+    ``(xmax - xmin) / maxq`` is the shortest form and stays bitwise-identical
+    for every ordinary group. A finite group whose endpoints straddle the
+    dtype's maximum (BF16 ``+/-2**127`` is the canonical case) overflows that
+    subtraction to ``inf`` even though the fitted step is representable.
+    Dividing each endpoint first keeps only those lanes finite; the true span
+    is at most twice the dtype maximum, so the two half-steps cannot overflow.
+    Non-finite endpoints keep the unmodified result so validation still sees
+    them.
+    """
+
+    span = xmax - xmin
+    wide_span = torch.isfinite(xmax) & torch.isfinite(xmin) & torch.isinf(span)
+    return torch.where(wide_span, xmax / maxq - xmin / maxq, span / maxq)
+
+
 def _replace_zero_scale(
     scale: torch.Tensor,
     zero: torch.Tensor | None = None,
@@ -399,7 +421,7 @@ class Quantizer(nn.Module):
                     self.scale = _floor_scale_for_storage(self.scale, scale_min)
                 self.zero = torch.zeros_like(self.scale)
             else:
-                self.scale = (xmax - xmin) / self.maxq
+                self.scale = _affine_scale(xmin, xmax, self.maxq)
                 if weight:
                     self.scale = _floor_scale_for_storage(self.scale, scale_min)
                 if self.qcfg.sym:

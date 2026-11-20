@@ -6,6 +6,7 @@
 import torch
 
 from ...utils.torch import dynamo_is_compiling
+from ._numerics import needs_wide_bias_epilogue, scales_narrowed_by
 from ._runtime_cache import tensor_cache_key
 
 
@@ -122,12 +123,41 @@ class AwqDecodeRangeMixin:
             for dtype in _DECODE_RANGE_DTYPES
         }
 
+    def _checkpoint_scale_dtype(self) -> torch.dtype | None:
+        """The stored scale dtype, ignoring a runtime in-place widening.
+
+        ``TorchCpuAvx512AwqLinear`` widens its scales to FP32 in place when it
+        installs the fused layout, so the live buffer no longer describes the
+        checkpoint precision. That class records it separately and overrides
+        this hook.
+        """
+
+        scales = getattr(self, "scales", None)
+        return None if not isinstance(scales, torch.Tensor) else scales.dtype
+
+    def _wide_bias_needs_stored_scales(self, activation_dtype: torch.dtype) -> bool:
+        """Whether a wide bias epilogue needs the checkpoint scale precision.
+
+        A bias stored wider than the activation is added to the FP32 product
+        before the single output cast (``linear_wide_bias``), so the decoder is
+        the last place a scale can be rounded. Narrowing an FP32 checkpoint
+        scale to a half dtype there loses bits that no later epilogue can
+        recover: an exactly representable FP16 output comes back as zero when
+        the bias cancels the product (#5764). The test is dtype-only so a
+        compiled graph or a CUDA-graph capture keeps a plain Python constant.
+        """
+
+        return needs_wide_bias_epilogue(
+            getattr(self, "bias", None), activation_dtype
+        ) and scales_narrowed_by(self._checkpoint_scale_dtype(), activation_dtype)
+
     def _decode_dtype_for_activation(self, activation_dtype: torch.dtype) -> torch.dtype:
-        """Return the dtype that decodes the checkpoint without range loss.
+        """Return the dtype that decodes the checkpoint without precision loss.
 
         FP32 and wider activations already decode at their own precision.
         FP16/BF16 activations decode in their own dtype only while the stored
-        scales keep every decoded weight finite and nonzero-representable;
+        scales keep every decoded weight finite and nonzero-representable, and
+        only when the activation dtype can hold those scale values exactly;
         otherwise the decode uses FP32 and the product accumulates wide, so a
         stored scale is never rounded away inside the decoder. The decision is
         keyed by the live scale tensor, so a checkpoint load, a device/dtype
@@ -137,7 +167,8 @@ class AwqDecodeRangeMixin:
 
         if activation_dtype not in (torch.float16, torch.bfloat16):
             return activation_dtype
-        if self._stored_decode_range_fits(activation_dtype):
+        scale_is_lossy = self._wide_bias_needs_stored_scales(activation_dtype)
+        if self._stored_decode_range_fits(activation_dtype) and not scale_is_lossy:
             return activation_dtype
         # FP32 holds every FP16 checkpoint scale exactly and covers the whole
         # BF16 scale range in every ordinary case. Only a checkpoint whose

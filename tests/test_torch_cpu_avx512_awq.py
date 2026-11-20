@@ -718,14 +718,14 @@ def test_awq_auto_selection_prefers_shared_avx512_kernel():
 
 
 @pytest.mark.parametrize("dtype", (torch.float32, torch.float16, torch.bfloat16))
-def test_fused_layer_keeps_fp32_affine_abi_across_dtype_moves(dtype):
-    """A dtype move must not narrow the FP32 affine operands the kernel requires.
+def test_fused_layer_keeps_fp32_affine_abi_after_forward(dtype):
+    """Post-forward dtype moves are rejected; the FP32 affine ABI stays intact.
 
     ``transform_cpu`` packs the weight once and keeps ``scales``/``bias`` in
     FP32 because the shared AVX512 kernel rejects any other ``absmax`` dtype.
-    ``nn.Module._apply`` casts registered floating buffers, so a plain
-    ``model.float()``/``.half()``/``.to(dtype)`` used to leave a BF16 absmax
-    behind and the next forward raised ``absmax must be float32``.
+    Weight dtypes are frozen after the first forward
+    (contracts/kernel/forward-dtype.md), so a cast that would change any tensor
+    raises before touching the layer. A cast that changes nothing is a no-op.
     """
 
     _skip_unless_avx512_bf16()
@@ -760,15 +760,20 @@ def test_fused_layer_keeps_fp32_affine_abi_across_dtype_moves(dtype):
         expected.reshape(-1, out_features), oracle.to(torch.bfloat16), rtol=2e-2, atol=2e-2
     )
 
-    for move in ("to", "float", "half"):
+    targets = {"to": dtype, "float": torch.float32, "half": torch.float16}
+    for move, target in targets.items():
         moved = layer
-        if move == "to":
-            moved.to(dtype)
-        elif move == "float":
-            moved.float()
+        changes = any(
+            tensor.is_floating_point() and tensor.dtype != target
+            for tensor in (*layer.parameters(), *layer.buffers())
+        )
+        cast = {"to": lambda: moved.to(dtype), "float": moved.float, "half": moved.half}[move]
+        if changes:
+            with pytest.raises(RuntimeError, match="frozen after the first forward"):
+                cast()
         else:
-            moved.half()
-        # Whatever dtype the module reports, the kernel operands stay FP32.
+            cast()
+        # The kernel operands stay FP32 either way.
         assert moved.scales.dtype == torch.float32, move
         assert moved.bias is None or moved.bias.dtype == torch.float32, move
         with torch.inference_mode():

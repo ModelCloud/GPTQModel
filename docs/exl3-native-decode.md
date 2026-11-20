@@ -236,8 +236,10 @@ flowchart TD
 The original integer Torch operator and default Python call remain available.
 The configured operator accepts a float bitrate and returns the selected path
 for diagnostics. NVIDIA CUDA serves the native tensor-core paths. The EXL3
-Torch backend provides the CPU and ROCm inference paths. NVIDIA CUDA also
-serves the new half-bit Viterbi quantizer.
+Torch backend provides the CPU inference path; on ROCm, RDNA4 (gfx120x) also
+has native HIP GEMV and WMMA GEMM paths (see [RDNA4 HIP dispatch](#rdna4-hip-dispatch)),
+while CDNA keeps reconstruct + hipBLAS. NVIDIA CUDA also serves the new
+half-bit Viterbi quantizer.
 
 Only immutable launch geometry and function attributes are cached across
 streams. CUDA graph allocations retain the pointer addresses of each graph's
@@ -305,6 +307,93 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4 \
 cp /tmp/q4nx_ada.json scripts/exl3_kernel_map_q4nx_ada.json
 python scripts/generate_exl3_kernel_map_packed.py
 ```
+
+## RDNA4 HIP dispatch
+
+ROCm builds compile `quant/exl3_gemm_hip.cu` instead of the CUDA tensor-core
+tables. The HIP entry point owns the whole decision: it runs the fused
+trellis -> WMMA kernel when the device and geometry are covered, and otherwise
+reconstructs the weight and calls hipBLAS, so `bc_linear_exl3_run_configured`
+never raises for a supported geometry. `EXL3_HIP_DISPATCH_NATIVE` (93) and
+`EXL3_HIP_DISPATCH_FALLBACK` (94) report which path ran.
+
+```mermaid
+flowchart TD
+    A["LinearEXL3.forward (ROCm)"] --> B{"reconstruct flag, R4NX, or (Q4NX and bsz > 8)?"}
+    B -->|yes| T["EXL3_TORCH reconstruct + hgemm"]
+    B -->|no| C{"bsz <= 8?"}
+    C -->|yes| D["bc_linear_exl3_run_hip_gemv"]
+    D -->|accepted| J["Projection output"]
+    D -->|declined| Q{"Q4NX?"}
+    C -->|no| Q
+    Q -->|yes| T
+    Q -->|no| E["bc.run -> bc_linear_exl3_run_configured -> exl3_gemm"]
+    E --> F["exl3_gemm_hip: had_r_128, then validate K and N % 128"]
+    F --> G{"c_fp32 and 0 < m <= 512 and gfx120x?"}
+    G -->|yes| H["exl3_hip_gemm_kernel WMMA decode, FP32 accumulate, output Hadamard"]
+    G -->|no| I["reconstruct, hgemm, output Hadamard"]
+    H --> J
+    I --> J
+    T --> J
+```
+
+The native GEMM covers integer rates 1-8 bpw for the `3inst`, `mcg` and
+`mul1` codebooks and the 1.5/2.5/3.5 bpw `mul1` half rates, with K and N
+multiples of 128 and at most 512 rows. Q4NX has no fused ROCm decoder, so it
+keeps the Torch path above the GEMV's batch size. R4NX always reconstructs
+(there is no R4NX GEMM kernel on any backend). CDNA and every non-gfx120x ROCm
+target fall back to reconstruct + hipBLAS.
+
+### AUTO selection on RDNA4
+
+Before #5836, `ExllamaV3Linear.SUPPORTS_DEVICES` was `[DEVICE.CUDA]`, so
+`_resolve_exl3_auto_backend` (`gptqmodel/models/loader.py:2184`) always fell
+through to `EXL3_TORCH` on ROCm even though `validate_device` already accepted
+gfx120x. The native HIP GEMV and WMMA GEMM were reachable only by passing
+`BACKEND.EXL3_EXLLAMA_V3` explicitly.
+
+```mermaid
+flowchart TD
+    subgraph before["Before #5836"]
+        B1["backend=AUTO<br/>_resolve_exl3_auto_backend"] --> B2{"family in<br/>ExllamaV3Linear.SUPPORTS_DEVICES?"}
+        B2 -->|"CUDA"| B3["EXL3_EXLLAMA_V3"]
+        B2 -->|"ROCm: list is [DEVICE.CUDA]"| B4["EXL3_TORCH<br/>packed HIP GEMV unreachable"]
+    end
+    subgraph after["After #5836"]
+        A1["backend=AUTO<br/>_resolve_exl3_auto_backend"] --> A2{"cuda_available?"}
+        A2 -->|no| A6["EXL3_TORCH"]
+        A2 -->|yes| A3{"selector_device_family"}
+        A3 -->|CUDA| A5["EXL3_EXLLAMA_V3"]
+        A3 -->|ROCm| A4{"all selected ordinals<br/>supports_device()?"}
+        A4 -->|"gfx120x and extension usable"| A5
+        A4 -->|"CDNA, other gfx, no HIP ops"| A6
+    end
+```
+
+`ExllamaV3Linear.SUPPORTS_DEVICES` is now the static family list
+`[DEVICE.CUDA, DEVICE.ROCM]` (`gptqmodel/nn_modules/exllamav3.py:71`).
+`supports_device` (`exllamav3.py:82`) keeps the per-architecture gate: NVIDIA
+CUDA is always eligible, and ROCm is eligible only when
+`exl3_native_hip_gemm_usable` (`gptqmodel/exllamav3/ext.py:287`) returns true.
+That probe extends the `gfx120*` metadata check with loadability: already
+registered ops, a cached or configured prebuilt library, or a HIP JIT
+toolchain (`ninja` plus `hipcc` through `ROCM_HOME` or `PATH`). A ROCm runtime
+wheel without the development toolkit therefore stays on `EXL3_TORCH` instead
+of selecting a kernel that cannot load; the probe never compiles.
+
+The explicit path now calls `ExllamaV3Linear.validate_device(device)`
+(`loader.py:3079`) with the real selector, so every selected ordinal is probed
+instead of the abstract `DEVICE.ROCM` family (which converted to `cuda:0` and
+validated GPU 0 only). `validate_device` keeps the cheap architecture metadata
+probe because the load itself will build the extension.
+
+`tests/test_rocm_exl3_auto.py` covers the AUTO matrix (CUDA native yes/no,
+ROCm native yes/no, no CUDA, CPU) and the all-ordinals requirement.
+`tests/kernels/test_exl3_public_load_hip_5836.py` is the gfx1201 end-to-end
+regression: it quantizes a 256->512 EXL3 3.0 bpw `mul1` projection, reloads it
+through `GPTQModel.load` with AUTO, asserts `ExllamaV3Linear`, spies on
+`bc_linear_exl3_run_hip_gemv` for M=1/8 (and its absence at M=9), and matches
+an independent FP64 decode at `rtol=atol=2e-3`.
 
 ## A100 validation
 

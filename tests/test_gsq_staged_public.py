@@ -511,3 +511,38 @@ def test_staged_llama_checkpoint_roundtrip(tmp_path, monkeypatch, method, bits, 
     with torch.no_grad():
         after = loaded.model(ids, use_cache=False).logits
     torch.testing.assert_close(after, before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_staged_export_keeps_the_model_dtype(dtype):
+    """Export must not cast a model whose packed blocks already ran forwards.
+
+    A BF16 value outside the FP16 range (70000) used to become ``inf`` when
+    export forced the whole model to FP16.
+    """
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.looper import gsq_training_model as staged
+
+    torch.manual_seed(7)
+    config = LlamaConfig(vocab_size=128, hidden_size=64, intermediate_size=128,
+                         num_attention_heads=4, num_key_value_heads=4, num_hidden_layers=2)
+    config._attn_implementation = "eager"
+    model = LlamaForCausalLM(config).to(dtype=dtype).eval()
+    if dtype is torch.bfloat16:
+        with torch.no_grad():
+            model.model.embed_tokens.weight[0, 0] = 70000.0
+    stored = model.model.embed_tokens.weight[0, 0].item()
+    run = staged.quantize_llama_gsq_model(model, [{"input_ids": list(range(1, 17))}], bits=4, group_size=32)
+    ids = torch.tensor([[1, 2, 3]])
+    with torch.no_grad():
+        before = model(ids, use_cache=False).logits
+
+    staged.prepare_llama_gsq_export(model, run)
+
+    assert {p.dtype for p in model.parameters()} == {dtype}
+    assert model.model.embed_tokens.weight[0, 0].item() == stored
+    with torch.no_grad():
+        after = model(ids, use_cache=False).logits
+    assert after.dtype == dtype
+    torch.testing.assert_close(after, before, rtol=0, atol=0)

@@ -7,6 +7,12 @@ description: Validate quantization math, packed formats, and inference kernels a
 
 # Torch oracle for numerical changes
 
+> **Contracts first.** Read and honour [`contracts/`](../../../contracts/README.md)
+> before acting. In particular, read the
+> [kernel forward dtype contract](../../../contracts/kernel/forward-dtype.md):
+> one activation dtype per module, and output dtype equals input dtype. A
+> different dtype on a later call is a bug. Contracts outrank this skill.
+
 ## At a glance
 
 For changes or audits of quantizers, packers, inference kernels, dispatch,
@@ -55,7 +61,9 @@ For changed inference/storage paths:
   that demonstrates no dense/expanded weight is retained; do not only check a
   cache's name or serialization behavior.
 - Verify allowed packed caches invalidate on weight/scale mutation or
-  replacement, checkpoint loading, and device/dtype moves. Exercise the shared
+  replacement, checkpoint loading, device moves, and dtype casts made before
+  the first forward. A dtype cast after a forward must raise
+  ([forward dtype contract](../../../contracts/kernel/forward-dtype.md)). Exercise the shared
   explicit-clear contract for inference tensors without version counters.
 - Report retained weight/cache bytes and temporary dequantization storage
   alongside accuracy and speed. Distinguish unchanged checkpoint storage,

@@ -2073,14 +2073,22 @@ def test_auto_bf16_prefers_a_native_kernel_over_exllamav2_dense_fallback():
             multi_select=True,
         )
 
+    # Asymmetric GPTQ now selects Marlin first for both dtypes. #4213 remains
+    # pinned: BF16 must rank the native Triton kernel ahead of ExLlamaV2's
+    # dense fallback instead of selecting it outright.
+    for dtype in (torch.bfloat16, torch.float16):
+        candidates = _candidates(dtype)
+        assert candidates[0] is MarlinLinear
+        assert ExllamaV2Linear in candidates
+
     candidates = _candidates(torch.bfloat16)
-    assert ExllamaV2Linear in candidates
-    assert candidates[0] is not ExllamaV2Linear
     if TritonV2Linear in candidates:
         assert candidates.index(TritonV2Linear) < candidates.index(ExllamaV2Linear)
 
-    # FP16 keeps the native ExLlamaV2 kernel first.
-    assert _candidates(torch.float16)[0] is ExllamaV2Linear
+    # FP16 keeps ExLlamaV2 ahead of Triton behind the higher-priority Marlin.
+    candidates = _candidates(torch.float16)
+    if TritonV2Linear in candidates:
+        assert candidates.index(ExllamaV2Linear) < candidates.index(TritonV2Linear)
 
 
 def test_cuda_auto_select_prioritizes_vptq_cuda_over_torch(monkeypatch, nvidia_runtime):

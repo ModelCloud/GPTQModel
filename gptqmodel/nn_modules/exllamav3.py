@@ -18,6 +18,7 @@ from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, trellis_rate
 from ..models._const import DEVICE, normalize_device
 from ..utils.kernel import KernelConfig, snapshot_kernel_config
 from . import exllamav3_bf16_kernels as _bf16_kernels
+from .forward_dtype_lock import ForwardDtypeLockMixin
 
 
 # Module-level names so a test (or a caller) can swap the fused ops for the
@@ -54,7 +55,7 @@ def _torch_dtype(value: Any) -> torch.dtype:
     raise TypeError(f"Unsupported torch dtype value: {value!r}")
 
 
-class ExllamaV3Linear(nn.Module):
+class ExllamaV3Linear(ForwardDtypeLockMixin, nn.Module):
     QUANT_TYPE = "exl3"
     # The trellis codes and sign vectors are the EXL3 payload. The sign
     # vectors are stored either unpacked (`suh`/`svh`) or packed (`su`/`sv`),
@@ -65,17 +66,57 @@ class ExllamaV3Linear(nn.Module):
     # bias) loads at its checkpoint dtype; the Hadamard kernels require fp16.
     MODEL_DTYPE_BUFFERS = ()
     SUPPORTS_SHARDS = True
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    # NVIDIA CUDA runs the tensor-core kernels; ROCm runs the native HIP GEMV
+    # and WMMA GEMM on the RDNA4 family (gfx120x). The family declaration is
+    # static; `validate_device`/`supports_device` own the per-architecture gate.
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+
+    @classmethod
+    def _native_hip_available(cls, device) -> bool:
+        """Whether the HIP kernels cover ``device``'s ROCm architecture."""
+        from ..exllamav3.ext import exl3_native_hip_gemm_available
+
+        probe = device.to_torch_device() if isinstance(device, DEVICE) else device
+        return exl3_native_hip_gemm_available(probe)
+
+    @classmethod
+    def supports_device(cls, device) -> bool:
+        """Whether the native EXL3 kernel can run on ``device``.
+
+        NVIDIA CUDA is always eligible. ROCm is eligible only on the RDNA4
+        (gfx120x) family the HIP kernels are compiled for and only when the
+        EXL3 extension is loadable or buildable on this host. This is the
+        selection-time gate ``backend=AUTO`` uses; it never compiles. Use
+        :meth:`validate_device` for the architecture-only check on the explicit
+        backend path.
+        """
+        family = normalize_device(device)
+        if family == DEVICE.CUDA:
+            return True
+        if family != DEVICE.ROCM:
+            return False
+        from ..exllamav3.ext import exl3_native_hip_gemm_usable
+
+        probe = device.to_torch_device() if isinstance(device, DEVICE) else device
+        return exl3_native_hip_gemm_usable(probe)
 
     @classmethod
     def validate_device(cls, device) -> None:
+        if isinstance(device, (tuple, list)):
+            for target in device:
+                cls.validate_device(target)
+            return
         family = normalize_device(device)
-        if family not in cls.SUPPORTS_DEVICES:
-            raise NotImplementedError(
-                "EXL3_EXLLAMA_V3 inference requires NVIDIA CUDA, but the module is on "
-                f"`{getattr(family, 'value', family)}`; move the model to a CUDA device "
-                "(or use EXL3_TORCH on ROCm or CPU)."
-            )
+        if family == DEVICE.CUDA:
+            return
+        if family == DEVICE.ROCM and cls._native_hip_available(device):
+            return
+        raise NotImplementedError(
+            "EXL3_EXLLAMA_V3 inference requires NVIDIA CUDA or an RDNA4 "
+            "(gfx120x) device on ROCm, but the module is on "
+            f"`{getattr(family, 'value', family)}`; move the model to a CUDA device "
+            "(or an RDNA4 device on ROCm, or use EXL3_TORCH on CPU)."
+        )
 
     def __init__(
         self,
@@ -92,6 +133,8 @@ class ExllamaV3Linear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.name = name
+        # Forward dtype contract: set by the first eager forward.
+        self._forward_dtype_lock = None
         self.out_dtype = out_dtype
         self.kernel = snapshot_kernel_config(kernel)
         self.tensor_storage = tensor_storage or {}
@@ -328,9 +371,9 @@ class ExllamaV3Linear(nn.Module):
     def _needs_torch_fallback(self) -> bool:
         """Whether this module must reconstruct through the portable kernel.
 
-        The native EXL3 kernels are compiled for CUDA only
-        (``SUPPORTS_DEVICES``). A materialized trellis on any other device
-        cannot run them, so the forward uses the same bounded FP32
+        The native EXL3 kernels run on NVIDIA CUDA and on ROCm's ``cuda``
+        namespace for RDNA4 (gfx120x). A materialized trellis on any other
+        device cannot run them, so the forward uses the same bounded FP32
         reconstruction that FP32 and off-CUDA BF16 already use. An absent or
         meta trellis is left to the native path, which reports that state with
         its existing message.

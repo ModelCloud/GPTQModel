@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set,
 
 import torch
 import torch.nn.functional as F
+import transformers
 from torch import nn
 from torch.nn import Module
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
@@ -63,6 +64,7 @@ from ..nn_modules.hooked_linear import (
     unwrap_hooked_linears,
 )
 from ..nn_modules.qlinear.paro import ParoLinear
+from ..quantization.awq.utils.packing_utils import source_weight_out_in
 from ..quantization.config import (
     FORMAT,
     METHOD,
@@ -100,7 +102,6 @@ from ..utils.model import (
     move_to,
     nested_move_to,
     pack_module,
-    recurse_getattr,
     recurse_setattr,
 )
 from ..utils.module_locks import parent_module_lock
@@ -568,19 +569,43 @@ class ParoProcessor(LoopProcessor):
 
     @staticmethod
     def _module_weight_matrix(module: NamedModule) -> torch.Tensor:
-        """Return the 2D weight matrix expected by the Paro optimizer."""
-        weight = module.weight.data
+        """Return the module weight in the optimizer's ``[out, in]`` layout.
+
+        ``transformers.Conv1D`` (GPT-2 and friends) stores ``[in, out]``, so
+        handing it to the optimizer unchanged failed with
+        ``addmm: mat1 and mat2 shapes cannot be multiplied`` whenever the two
+        axes differed (#5856). Presenting the canonical matrix here keeps one
+        orientation contract for the optimizer, the loss, and the write-back.
+        """
+        weight = source_weight_out_in(ParoProcessor._wrapped_module(module))
         if weight.dim() != 2:
             raise ValueError(
                 f"Paro currently expects rank-2 module weights, got {tuple(weight.shape)} for `{module.full_name}`."
             )
+        # A Conv1D transpose is a strided view; the optimizer reshapes it.
+        return weight if weight.is_contiguous() else weight.contiguous()
+
+    @staticmethod
+    def _wrapped_module(module: NamedModule) -> nn.Module:
+        """Return the module behind a ``NamedModule`` (or the object itself)."""
+        return getattr(module, "module", module)
+
+    @staticmethod
+    def _storage_weight_matrix(module: NamedModule, weight: torch.Tensor) -> torch.Tensor:
+        """Return an ``[out, in]`` matrix in the module's own storage layout."""
+        if isinstance(ParoProcessor._wrapped_module(module), transformers.pytorch_utils.Conv1D):
+            return weight.t().contiguous()
         return weight
 
     def _apply_optimization_result(self, module: NamedModule, result, original_weight: torch.Tensor) -> None:
         """Store one optimization result into the wrapped module and its scratch state."""
         weight = self._module_weight_matrix(module)
         pseudo_weight = result.pseudo_weight.to(device=weight.device, dtype=weight.dtype)
-        pack_weight = result.pack_weight.to(dtype=weight.dtype).cpu()
+        # ``pack_weight`` replaces the module weight before packing, so it must
+        # use the module's own layout; the AWQ packer transposes a Conv1D itself.
+        pack_weight = self._storage_weight_matrix(
+            module, result.pack_weight.to(device=weight.device, dtype=weight.dtype)
+        ).cpu()
         q_scales = result.q_scales.to(dtype=weight.dtype).cpu()
         q_zeros = result.q_zeros.cpu()
         pairs = result.pairs.to(dtype=torch.int16).cpu()
@@ -599,16 +624,21 @@ class ParoProcessor(LoopProcessor):
                 }
             )
 
+        # ``pseudo_weight`` is canonical ``[out, in]``. A Conv1D module stores
+        # ``[in, out]``, and both the packed AWQ entry point and the checkpoint
+        # writer read the module's own layout, so restore it exactly once here.
+        storage_weight = self._storage_weight_matrix(module, pseudo_weight)
         if self.calculate_w_wq_diff:
-            if original_weight.dtype == torch.float16:
-                w_wq_diff = original_weight - pseudo_weight
+            original_storage = self._storage_weight_matrix(module, original_weight)
+            if original_storage.dtype == torch.float16:
+                w_wq_diff = original_storage - storage_weight
             else:
-                w_wq_diff = original_weight.to(dtype=torch.float32) - pseudo_weight.to(dtype=torch.float32)
+                w_wq_diff = original_storage.to(dtype=torch.float32) - storage_weight.to(dtype=torch.float32)
             with self.lock:
                 module.state["w_wq_diff"] = w_wq_diff
-                module.state["wq"] = pseudo_weight.detach().to(device=CPU, copy=True)
+                module.state["wq"] = storage_weight.detach().to(device=CPU, copy=True)
 
-        module.weight.data = pseudo_weight
+        module.weight.data = storage_weight
 
     def _log_quant_result(self, module: NamedModule, feat: torch.Tensor, val_loss: float, duration: float) -> None:
         """Append one quantization log row using the same format as other processors."""
@@ -979,27 +1009,6 @@ class ParoProcessor(LoopProcessor):
     def _strip_hooked_linear_wrappers(self, module: torch.nn.Module) -> int:
         """Layer-scope training must not run through HookedLinear, which always forwards in inference mode."""
         return unwrap_hooked_linears(module)
-
-    @staticmethod
-    def _sync_named_modules_to_live_layer(
-        layer: torch.nn.Module,
-        named_modules: list[NamedModule],
-    ) -> None:
-        """Retarget NamedModule handles after live-layer wrapper surgery.
-
-        Layer scope temporarily unwraps HookedLinear modules into plain
-        ``nn.Linear`` so autograd can flow through the real decoder layer. The
-        corresponding ``NamedModule`` wrappers must follow those in-place
-        replacements; otherwise later result application and packing will update
-        detached wrapper objects instead of the real live layer modules.
-        """
-        for named_module in named_modules:
-            live_module = recurse_getattr(layer, named_module.name)
-            named_module.module = live_module
-            try:
-                named_module.module_dtype = next(live_module.parameters()).dtype
-            except (StopIteration, AttributeError):
-                pass
 
     @staticmethod
     def _force_layer_eager_attention(layer: torch.nn.Module) -> list[tuple[object, str, object]]:
@@ -2472,23 +2481,26 @@ class ParoProcessor(LoopProcessor):
         state: _ParoLayerState,
         group_modules: list[NamedModule],
     ) -> tuple[dict[str, object], float]:
-        """Optimize the live layer in place for full-layer Paro scope."""
+        """Optimize full-layer Paro scope on an FP32 copy of the live layer.
+
+        Training runs in FP32 with gradients, so it uses a deep copy: the live
+        layer keeps every tensor's dtype and its HookedLinear wrappers, and is
+        never forwarded in another dtype (contracts/kernel/forward-dtype.md,
+        quantization stage). The trained values come out of the optimizer
+        modules; the caller writes them back in the live weight's dtype.
+        """
         if not group_modules:
             raise ValueError("ParoProcessor grouped optimization requires at least one module.")
         if state.layer_module is None:
             raise RuntimeError("ParoProcessor layer-scope optimization requires the live layer module.")
 
-        layer = state.layer_module
         target_device = group_modules[0].weight.device
-        original_layer_dtype = group_modules[0].weight.dtype
-        layer = layer.to(device=target_device, dtype=torch.float32)
+        layer = copy.deepcopy(state.layer_module).to(device=target_device, dtype=torch.float32)
         self._strip_hooked_linear_wrappers(layer)
-        self._sync_named_modules_to_live_layer(layer, group_modules)
         attn_impl_overrides = self._force_layer_eager_attention(layer)
         replay_batches_train, replay_batches_val = self._replay_batches_from_state(state)
         metadata_cache: dict[tuple[int, str], torch.Tensor] = {}
         optim_modules: dict[str, _ParoOptimLinear] = {}
-        original_modules: dict[str, torch.nn.Module] = {}
         optimizer_group_kwargs = self._optimizer_param_group_kwargs()
         rotation_lr, weight_lr, quantizer_lr = self._stage_learning_rates()
         try:
@@ -2496,7 +2508,6 @@ class ParoProcessor(LoopProcessor):
                 param.requires_grad_(False)
 
             for named_module in group_modules:
-                original_modules[named_module.name] = recurse_getattr(layer, named_module.name)
                 optim_module = self._build_group_optim_linear(named_module)
                 recurse_setattr(layer, named_module.name, optim_module)
                 optim_modules[named_module.name] = optim_module
@@ -2552,15 +2563,8 @@ class ParoProcessor(LoopProcessor):
                 )
             return results, val_loss
         finally:
-            for named_module in reversed(group_modules):
-                original_module = original_modules.get(named_module.name)
-                if original_module is not None:
-                    recurse_setattr(layer, named_module.name, original_module)
-            # Live-layer training happens in fp32, but replay and inference should
-            # return to the layer's native dtype so flash-attn and downstream
-            # kernels see the original half/bfloat activations again.
-            layer.to(device=target_device, dtype=original_layer_dtype)
             self._restore_layer_attention_impl(attn_impl_overrides)
+            del layer
 
     @staticmethod
     def _supports_live_layer_scope(group_modules: list[NamedModule]) -> bool:

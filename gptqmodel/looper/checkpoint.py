@@ -107,8 +107,8 @@ class CheckpointExtension:
                 continuation=manifest["continuation"],
             )
             try:
-                continuation = ContinuationCodec.loads(
-                    self.store.get(manifest["continuation"])
+                continuation = ContinuationCodec.load_file(
+                    self.store.continuation_path(manifest["continuation"])
                 )
                 artifacts = {
                     name: self.store.object_path(ref)
@@ -148,7 +148,9 @@ class CheckpointExtension:
             boundary.quiesce()
             emit_device_telemetry("checkpoint_capture_begin", cursor=cursor)
             continuation, artifacts = self.adapter.capture()
-            continuation_ref = self.store.put(ContinuationCodec.dumps(continuation))
+            with self.store.stage() as staged:
+                ContinuationCodec.dump_file(continuation, staged)
+                continuation_ref = self.store.put_file(staged)
             artifact_refs = {
                 name: self.store.put_file(data)
                 if isinstance(data, Path)

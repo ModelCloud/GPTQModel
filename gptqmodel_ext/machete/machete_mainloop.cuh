@@ -1379,6 +1379,29 @@ struct MacheteCollectiveMma {
 
       // First, we upcast the inputs to the scale type
       convert_tensor<IlvdBlkLayout>(in, converted_inputs, vec_A);
+
+      // Apply zeros if required. The zero table holds the logical zero point,
+      // so subtract it from the upcast code *before* scaling. Both operands are
+      // small integers, so the difference is exact in the scale type and the
+      // following scale multiply is the only rounding step. This matches the
+      // checkpoint formula `round((code - zero) * scale)`; adding a pre-rounded
+      // `-zero * scale` offset after the multiply distorted the weight.
+      if constexpr (KernelConversionMode ==
+                    ConversionMode::ConvertAndScaleWithZero) {
+        auto tCrZ = cute::get<3>(partitioned_extra_info);
+        auto converted_zeros = make_fragment_like<ElementScale>(tCrZ)(_, _, 0);
+
+        convert_tensor<void>(tCrZ(_, _, 0), converted_zeros);
+        if constexpr (std::is_same_v<ElementScale, cutlass::bfloat16_t>) {
+          cute::transform(recast<nv_bfloat16>(converted_inputs),
+                          recast<nv_bfloat16>(converted_zeros),
+                          recast<nv_bfloat16>(converted_inputs), cute::minus{});
+        } else {
+          cute::transform(converted_inputs, converted_zeros, converted_inputs,
+                          cute::minus{});
+        }
+      }
+
       // Apply scales and broadcast across inputs, store in converted_inputs
 
       // We need to cast to nv_bfloat16 for the multiply since
@@ -1392,23 +1415,6 @@ struct MacheteCollectiveMma {
       } else {
         cute::transform(converted_inputs, scales, converted_inputs,
                         cute::multiplies{});
-      }
-
-      // Apply zeros if required
-      if constexpr (KernelConversionMode ==
-                    ConversionMode::ConvertAndScaleWithZero) {
-        auto tCrZ = cute::get<3>(partitioned_extra_info);
-        auto converted_zeros = make_fragment_like<ElementScale>(tCrZ)(_, _, 0);
-
-        convert_tensor<void>(tCrZ(_, _, 0), converted_zeros);
-        if constexpr (std::is_same_v<ElementScale, cutlass::bfloat16_t>) {
-          cute::transform(recast<nv_bfloat16>(converted_inputs),
-                          recast<nv_bfloat16>(converted_zeros),
-                          recast<nv_bfloat16>(converted_inputs), cute::plus{});
-        } else {
-          cute::transform(converted_inputs, converted_zeros, converted_inputs,
-                          cute::plus{});
-        }
       }
 
       // Finally, we convert the scaled inputs to the mma type.

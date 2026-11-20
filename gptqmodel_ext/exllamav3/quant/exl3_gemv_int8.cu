@@ -310,4 +310,84 @@ bool exl3_gemv_int8
     C10_CUDA_CHECK(err);
     return true;
 }
+
+#else  // __HIP_PLATFORM_AMD__ || USE_ROCM
+
+#include <cuda_fp16.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
+#include <ATen/ops/empty.h>
+#include <cstdint>
+
+#include "exl3_gemv.cuh"
+#include "exl3_gemv_int8_kernel.cuh"
+#include "../util.h"
+#include "../util.cuh"
+
+// ROCm int8-activation GEMV for mul1 (cb 2) trellises. The CUDA kernel is one cooperative
+// launch; HIP has no grid barrier, so the header's HIP entry point runs the same phases as four
+// launches on the caller's stream, exactly like the fp16 HIP GEMV. Every decline returns false
+// before the first launch, so the caller can fall through to the fp16 HIP GEMV (and from there
+// to reconstruct + hgemm) without any buffer having been touched.
+bool exl3_gemv_int8
+(
+    const at::Tensor& A,
+    const at::Tensor& B,
+    at::Tensor& C,
+    const at::Tensor& suh,
+    const at::Tensor& A_had,
+    const at::Tensor& svh,
+    int mode,
+    cudaStream_t stream
+)
+{
+    // 16 * K uint16 per tile; the half-integer rates have no int8 instantiation
+    const int64_t tile_u16 = B.size(2);
+    if (tile_u16 % 16 != 0) return false;
+    const int bits = int(tile_u16 / 16);
+    if (bits < 2 || bits > 4) return false;
+    if (mode != 1 && mode != 2) return false;
+    const bool residual = mode == 1;
+
+    const int size_k = int(A.size(-1));
+    const int size_n = int(B.size(1) * 16);
+    if (size_k <= 0 || size_n <= 0) return false;
+    const int size_m = int(A.numel() / size_k);
+    // Same gate as the CUDA path: residual mode is m == 1, plain int8 mode m <= 2
+    if (size_m < 1 || size_m > (residual ? 1 : 2)) return false;
+    if (size_k % 128 || size_n % 128) return false;
+    if (C.dtype() != at::kFloat) return false;
+
+    const int device = A.get_device();
+    if (!exl3_gemv_int8_hip_host::arch_ok(device)) return false;
+    // A_had is the CUDA kernel's scratch; the HIP pipeline stages the input Hadamard in shared
+    // memory instead, so the caller's buffer is left untouched.
+    (void) A_had;
+
+    const auto quant_options = A.options().dtype(at::kChar);
+    at::Tensor qa = at::empty({(int64_t) size_m * size_k}, quant_options);
+    at::Tensor qb = at::empty({(int64_t) size_m * size_k}, quant_options);
+    at::Tensor qscale = at::empty({size_m}, A.options().dtype(at::kFloat));
+    at::Tensor qsum = at::empty({size_m}, A.options().dtype(at::kInt));
+    at::Tensor qsum2 = at::empty({size_m}, A.options().dtype(at::kInt));
+
+    const int status = exl3_gemv_int8_hip_launch
+    (
+        reinterpret_cast<const half*>(A.const_data_ptr()),
+        reinterpret_cast<const uint16_t*>(B.const_data_ptr()),
+        C.data_ptr(),
+        reinterpret_cast<const half*>(suh.const_data_ptr()),
+        reinterpret_cast<const half*>(svh.const_data_ptr()),
+        reinterpret_cast<int8_t*>(qa.data_ptr()),
+        reinterpret_cast<int8_t*>(qb.data_ptr()),
+        reinterpret_cast<float*>(qscale.data_ptr()),
+        reinterpret_cast<int*>(qsum.data_ptr()),
+        reinterpret_cast<int*>(qsum2.data_ptr()),
+        size_m, size_k, size_n, bits, residual, device, stream
+    );
+    if (status < 0) C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return status > 0;
+}
+
 #endif

@@ -7,6 +7,12 @@ description: Use when starting or delegating GPT-QModel work, submitting fixes o
 
 # Agent workspaces and pull requests
 
+> **Contracts first.** Read and honour [`contracts/`](../../../contracts/README.md)
+> before acting. In particular, read the
+> [kernel forward dtype contract](../../../contracts/kernel/forward-dtype.md):
+> one activation dtype per module, and output dtype equals input dtype. A
+> different dtype on a later call is a bug. Contracts outrank this skill.
+
 ## At a glance
 
 Work in a fresh clone; publish as a draft and promote the same PR only after

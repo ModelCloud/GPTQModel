@@ -461,9 +461,9 @@ class ParoLinear(AwqTorchLinear):
         still emits the checkpoint layout (issue #4814).
         """
 
-        if layout == self._live_cpu_layout() and (
-            layout != "aten" or self._cpu_runtime_dtype == dtype
-        ):
+        if layout == self._live_cpu_layout():
+            # The forward dtype lock (contracts/kernel/forward-dtype.md) keeps
+            # ``dtype`` equal to the one this layout was packed for.
             return True
         if self._live_cpu_layout() is not None:
             if not self._restore_cpu_checkpoint_layout():
@@ -1192,10 +1192,7 @@ class ParoLinear(AwqTorchLinear):
             # layout. A biased layer asks for the FP32 product and adds the
             # bias afterwards, and the #4068 operand cast is a registered
             # custom op since #5110, so it traces as well.
-            if (
-                self._live_cpu_layout() != "aten"
-                or self._cpu_runtime_dtype != x_flat.dtype
-            ):
+            if self._live_cpu_layout() != "aten":
                 return None
             int4pack_mm = getattr(self, "_paro_int4pack_mm", None)
             if int4pack_mm is None:

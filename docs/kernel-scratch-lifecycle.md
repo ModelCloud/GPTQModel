@@ -231,6 +231,95 @@ backend (Q8_0, `in_features=896`, `out_features=4864`, four layers, M in
 MiB arena.  The real GGML CUDA backend was not built in the validation
 container, so CUDA graph execution itself was not run.
 
+### Arena reclamation on the last unload
+
+The arena is process-global scratch, not a weight cache, so it must not
+outlive its last user.  Before #5811 the bridge kept it allocated for the life
+of the process: closing a layer's plans, clearing its weight cache and
+deleting the final layer freed the plan contexts and the weight, while
+`_GGMLBridge._cuda_scratch` still referenced the buffer
+(`gptqmodel/nn_modules/qlinear/gguf_cpp.py:497` on `43763a8e7`).  ggml
+allocates that buffer outside the Torch allocator, so
+`torch.cuda.empty_cache()` cannot return it.
+
+```mermaid
+flowchart TD
+    subgraph OLD["Old: arena held by the process singleton"]
+        L1["layer forward"] --> P1["_GGMLMatmulPlan<br/>graph metadata"]
+        P1 -->|"tensor_alloc offsets"| A["_GGMLCudaScratch<br/>one per device"]
+        A --> B["_GGMLBridge._cuda_scratch<br/>process lifetime"]
+        L1 -->|"unload: plans closed,<br/>weight freed"| X["layer gone"]
+        B -.->|"no owner left,<br/>never freed"| LEAK["288 MiB reserved<br/>after the last unload"]
+    end
+    classDef fail fill:#ffe5e5,stroke:#b00020,color:#111;
+    class LEAK fail;
+```
+
+Every plan holds its `_GGMLSharedWeight`, and every weight now registers
+itself in a per-device `weakref.WeakSet` on the bridge.  When the last weight
+on a device is finalized, the bridge frees that device's arena under the same
+process-wide lock that serializes ggml-cuda entry.  A live model keeps its
+weights (the zero-copy `qweight` view included), so active inference reuses
+the arena; an unloaded model leaves no owner, so the arena is returned to the
+driver.  The `_GGMLCudaScratch` object itself stays in `_cuda_scratch` and its
+`generation` keeps increasing, so a plan bound to the freed buffer can never
+match a later allocation.
+
+```mermaid
+flowchart TD
+    F["GGUFCudaKernel.forward"] --> W["_cuda_weight<br/>build_cuda_weight"]
+    W --> T["_track_cuda_weight<br/>WeakSet per device"]
+    W --> P["plan binds offsets<br/>into the arena"]
+    P --> A["_GGMLCudaScratch"]
+    U["last weight released<br/>_GGMLSharedWeight._close"] --> C["_on_cuda_weight_released<br/>under cuda_backend_lock"]
+    C --> E{"live weight left<br/>on the device?"}
+    E -- "yes" --> K["keep the arena<br/>active inference reuses it"]
+    E -- "no" --> R["scratch.close<br/>free buffer, size 0,<br/>generation plus one"]
+    R --> N["next forward: ensure<br/>allocates a fresh arena"]
+    N --> S{"plan generation<br/>matches?"}
+    S -- "no" --> RB["close stale plans,<br/>rebuild before use"]
+    S -- "yes" --> RUN["graph compute"]
+    classDef fail fill:#ffe5e5,stroke:#b00020,color:#111;
+    class RB fail;
+```
+
+The release is fail-closed.  `_on_cuda_weight_released` only frees the arena
+when the device's owner set is empty, so a second live layer keeps it
+reserved.  Reclamation bumps `generation` before the next allocation; a
+surviving plan that still points at the freed buffer is rejected by
+`_bind_cuda_plan` ("stale ggml CUDA plan") and rebuilt by
+`GGUFCudaKernel.forward`.  A backend swap now reuses the same scratch object
+instead of replacing it, so the generation cannot restart at a value a stale
+plan already recorded.
+
+| Event | Before (`43763a8e7`) | After |
+| --- | --- | --- |
+| Arena owner | `_GGMLBridge._cuda_scratch`, process lifetime (`:497`) | Same dict, but reclaimed when its device has no live weight (`:1187`) |
+| Release trigger | None; `ensure` only frees on growth (`:337`) | `_GGMLSharedWeight._close` calls the bridge hook (`:289`-`:303`) |
+| Generation | Bumped only by growth (`:337`) | Bumped by growth and by reclamation (`:380`) |
+| Backend swap | Replaces the scratch object (`:1124`) | Keeps the object and its generation (`:1202`) |
+| Layer teardown | Plans and weight freed; arena stays (`:1852`-`:1884`) | Plans and weight freed; last weight frees the arena (`:1933`-`:1965`) |
+
+Measured on an RTX 4090 (SM89, torch 2.15.0+cu132, llama-cpp-python with
+ggml-cuda) in one process, Q4_K_M, `M=4096`, `K=14336`, `N=4096`, two full
+load/forward/unload cycles.  "Reserved" is `_GGMLCudaScratch.size`; "free" is
+`torch.cuda.mem_get_info()` after `torch.cuda.synchronize()` and
+`empty_cache()`:
+
+| Metric | Before | After |
+| --- | --- | --- |
+| Arena reserved after forward | 288.00 MiB | 288.00 MiB |
+| Arena reserved after unload | 288.00 MiB | 0.00 MiB |
+| Driver free after unload vs with arena | +32.00 MiB (weight only) | +320.00 MiB (arena + weight) |
+| Arena reserved after the next load's forward | 288.00 MiB (never freed) | 288.00 MiB (re-allocated) |
+| Arena generation across two cycles | 1 | 4 (release and allocation each bump) |
+
+`tests/kernels/test_gguf_cuda_arena_release_5811.py` pins the zero reserved
+bytes after the last unload, the re-allocation on the next load, the
+multi-owner case, and the stale-plan rejection.  Its CPU half runs on the
+repository's recording allocator double; the native half requires the ggml
+CUDA backend.
+
 ## GGUF CUDA weight storage
 
 The first `GGUFCudaKernel.forward` on a device uploads `qweight` into a ggml
@@ -410,6 +499,10 @@ parity.
   reuse it in stream order, and a different stream never sees it.
 - A GGUF plan owns graph metadata only.  Its backend memory belongs to the
   device arena, and a generation mismatch is a hard rebuild, not a silent reuse.
+- A GGUF CUDA scratch arena is owned by the device's live weights.  The last
+  weight release frees it and bumps its generation; the generation never
+  restarts, so a stale plan cannot be reused.  A device with a live weight
+  keeps its arena.
 - A GGUF CUDA layer has one device copy of its packed weight.  Once uploaded
   from a same-device `qweight`, the ggml buffer is `qweight`'s storage and is
   freed only when no kernel, plan, or Torch tensor references it.
