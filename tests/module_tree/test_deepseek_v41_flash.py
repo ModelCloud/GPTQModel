@@ -542,6 +542,101 @@ def test_v41_gptq_export_preserves_engram_and_mtp(v41_checkpoint, tmp_path):
     torch.testing.assert_close(reloaded(tokens).logits, wrapped(tokens).logits, atol=0, rtol=0)
 
 
+def test_v41_q4nx_rejects_shared_expert_projection(v41_checkpoint):
+    from gptqmodel.quantization.config import CalibrationConfig, EXL3Config
+
+    config = EXL3Config(bits=3, codebook="q4nx", offload_to_disk=False)
+    wrapped = GPTQModel.load(v41_checkpoint, device="cpu", quantize_config=config)
+    path = "layers.0.ffn.shared_experts.w1"
+    source = wrapped.model.get_submodule(path)
+    calibration = CalibrationConfig(dataset=[[4, 7, 8]], min_length=0)
+    with pytest.raises(ValueError, match=r"Q4NX supports routed expert projections"):
+        wrapped.quantize(calibration, projections=[path])
+    assert not wrapped.quantized
+    assert wrapped.model.get_submodule(path) is source
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("v41_checkpoint", [128], indirect=True)
+def test_v41_q4nx_selected_projection_quantization(v41_checkpoint, tmp_path, monkeypatch):
+    from gptqmodel.exllamav3.modules.quant.exl3_lib import quantize
+    from gptqmodel.quantization.config import CalibrationConfig, EXL3Config
+    from tests.accelerator_gates import requires_nvidia_cuda
+    from tests.test_exllamav3_torch_padding import _oracle_weight
+
+    if not requires_nvidia_cuda():
+        pytest.skip("Q4NX encoding requires NVIDIA CUDA")
+
+    paths = {f"layers.1.ffn.experts.0.w{projection}": bits for projection, bits in ((1, 2.5), (2, 3), (3, 3.5))}
+    config = EXL3Config(
+        bits=3.5, codebook="q4nx", device="cuda:0", offload_to_disk=False,
+        dynamic={path: {"bits": bits} for path, bits in paths.items()},
+    )
+    wrapped = GPTQModel.load(v41_checkpoint, device="cpu", quantize_config=config)
+    tokens = torch.tensor([[4, 11, 9]])
+    assert torch.isfinite(wrapped(tokens).logits).all()
+    untouched = wrapped.model.layers[1].ffn.experts[1].w1
+    original = {path: wrapped.model.get_submodule(path) for path in paths}
+    observed = {path: [] for path in paths}
+
+    def observe(_module, args, *, path):
+        observed[path].append(args[0].detach().cpu().double())
+
+    captured = []
+    encode = quantize.quantize_exl3
+
+    def record(weight, hessian, args, **kwargs):
+        captured.append((hessian["count"], hessian["H"].detach().cpu().double(), args["K"]))
+        assert weight.is_cuda and hessian["H"].is_cuda and args["q4nx"] is True
+        return encode(weight, hessian, args, **kwargs)
+
+    monkeypatch.setattr(quantize, "quantize_exl3", record)
+    handles = [
+        module.register_forward_pre_hook(lambda module, args, path=path: observe(module, args, path=path))
+        for path, module in original.items()
+    ]
+    rows = [[4, 7, 8, 9, 11, 12], [21, 20, 16, 15, 10, 13]]
+    try:
+        report = wrapped.quantize(CalibrationConfig(dataset=rows, min_length=0), projections=list(paths))
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert wrapped.quantized and len(report["exl3"]) == len(paths)
+    assert wrapped.model.layers[1].ffn.experts[1].w1 is untouched
+    assert wrapped.model.config.gptqmodel_v41_projections == {
+        path: {"bits": bits, "codebook": "q4nx"} for path, bits in paths.items()
+    }
+    assert [entry["module"] for entry in report["exl3"]] == list(paths)
+    for (path, bits), (count, hessian, rate), result in zip(paths.items(), captured, report["exl3"], strict=True):
+        raw = torch.cat(observed[path], dim=0)
+        assert rate == bits and count == result["samples"] == raw.shape[0] > 0
+        assert result["error_metrics"]["quantizer_path"] == "hessian_ldlq"
+        torch.testing.assert_close(hessian, raw.T @ raw, rtol=2e-6, atol=1e-6)
+        layer = wrapped.model.get_submodule(path)
+        assert layer is not original[path]
+        assert not list(layer.parameters())
+        packed = layer.state_dict()
+        assert set(packed) == {"trellis", "suh", "svh", "q4nx"}
+        assert packed["trellis"].shape == (8, 8, int(16 * bits))
+        x = raw[:3].bfloat16()
+        expected = (x.double() @ _oracle_weight(packed).double()).bfloat16()
+        torch.testing.assert_close(layer(x), expected, atol=2e-3, rtol=2e-3)
+
+    output = tmp_path / "exl3"
+    wrapped.save(output, max_shard_size=30000)
+    serialized = json.loads((output / "model.safetensors.index.json").read_text(encoding="utf-8"))["weight_map"]
+    reloaded = GPTQModel.load(output, device="cpu")
+    assert reloaded.quantized and reloaded.quantize_config.codebook == "q4nx"
+    for path in paths:
+        packed = wrapped.model.get_submodule(path).state_dict()
+        assert {key.removeprefix(f"{path}.") for key in serialized if key.startswith(f"{path}.")} == set(packed)
+        restored = reloaded.model.get_submodule(path).state_dict()
+        for name, tensor in packed.items():
+            assert torch.equal(restored[name], tensor)
+    torch.testing.assert_close(reloaded(tokens).logits, wrapped(tokens).logits, atol=0, rtol=0)
+
+
 def test_v41_marlin_backend_requires_cuda(v41_checkpoint):
     with pytest.raises(ValueError, match="Marlin requires NVIDIA CUDA"):
         GPTQModel.load(v41_checkpoint, device="cpu", backend="marlin")
