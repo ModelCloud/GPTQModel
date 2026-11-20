@@ -10,8 +10,9 @@ every direct kernel helper shares it. Sharing is only safe when the handle is
 the placement the caller asked for, and when every device-resident cache entry
 belongs to the device that consumes it.
 
-This page describes the two mechanisms that enforce that contract. Introduced
-by PR #4521 for issue #4484.
+This page describes the three mechanisms that enforce that contract. Sections
+1 and 2 were introduced by PR #4521 for issue #4484; section 3 by the fix for
+issue #5846.
 
 ## 1. Reuse is a placement match, not "a handle exists"
 
@@ -106,6 +107,52 @@ hits, which preserves the ~57 ms packing amortisation the cache exists for.
 `close_mesh` now calls `clear_grid_weight_cache()`, so buffers that died with a
 closed device cannot be matched by a recycled object id.
 
+## 3. Release is a lease, not a global close
+
+`BaseQModel.release_device()` used to close whatever mesh existed in the
+process. A CPU wrapper calling it therefore tore down a native model's device:
+the next forward raised `TTNNLinear has no open device`.
+
+Every kernel that uploads device tensors now takes a lease on the live mesh
+(`hold_mesh_lease(self)`), and `release_device()` clears only that wrapper's own
+kernels and drops their leases. The last lease closes the handle, which keeps
+the cooldown path intact without letting an unrelated wrapper trigger it.
+
+### Old flow
+
+```mermaid
+flowchart TD
+    A["CPU wrapper.release_device()"] --> B{"current_mesh() is not None"}
+    B -- yes --> C["close_mesh()<br/>native model's device closed"]
+    C --> D["next native forward:<br/>no open device"]
+    B -- no --> E["return False"]
+
+    classDef bad fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d;
+    class C,D bad;
+```
+
+### New flow
+
+```mermaid
+flowchart TD
+    A["wrapper.release_device()"] --> B["scan wrapper.model.modules()<br/>for native TTNN backends"]
+    B --> C{"wrapper owns native kernels"}
+    C -- no --> D["return False<br/>mesh untouched"]
+    C -- yes --> E["each kernel: clear_weight_cache()<br/>release_mesh_lease(self)"]
+    E --> F{"last live lease"}
+    F -- no --> G["return False<br/>another model still owns the mesh"]
+    F -- yes --> H["close_mesh(owner=mesh.owner)<br/>park idle clock"]
+    H --> I["return True"]
+
+    classDef bad fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d;
+    classDef good fill:#dcfce7,stroke:#15803d,color:#14532d;
+    class D,G good;
+```
+
+The lease registry is a `weakref.WeakSet`, so a layer that is garbage
+collected cannot pin the device open. `close_mesh` clears the registry with the
+handle; a later release of a layer that never leased returns `False`.
+
 ## Failure and ambiguity contract
 
 | Situation | Before | After |
@@ -119,6 +166,9 @@ closed device cannot be matched by a recycled object id.
 | Grid call on a second live device | Mixed-owner submission | Weights and LUT uploaded for that device |
 | Grid call after `close_mesh` | Stale entries possible | Cache cleared on close |
 | Same request repeated | Reused | Reused |
+| CPU wrapper calls `release_device()` | Closed the native model's mesh | `False`; mesh untouched |
+| One of two native models calls `release_device()` | Closed the shared mesh | `False`; the other model keeps it |
+| Last native model calls `release_device()` | Closed the mesh | Closed the mesh, `True` |
 
 Placement changes remain possible, but only explicitly: `close_mesh()` then a
 new `open_mesh`. Silent substitution is never a success path.

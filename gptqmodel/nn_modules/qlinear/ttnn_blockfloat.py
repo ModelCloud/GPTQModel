@@ -59,8 +59,10 @@ from ...utils.ttnn_runtime import (
     TTNNUnavailable,
     close_mesh,
     current_mesh,
+    hold_mesh_lease,
     import_ttnn,
     open_mesh,
+    release_mesh_lease,
     to_host_replica,
 )
 from ._compile_support import COMPILE_LEVEL
@@ -141,6 +143,9 @@ class _TTNNBlockFloatMixin:
         weights = self._host_weights().to(torch.bfloat16).contiguous()
 
         mesh = self._mesh()
+        # Lease the shared handle for this layer; the model wrapper releases
+        # only devices its own kernels hold.
+        hold_mesh_lease(self)
         dev = mesh.device
         count = mesh.num_devices
         if self.out_features % count:
@@ -205,11 +210,16 @@ class _TTNNBlockFloatMixin:
                     # follows will reclaim it. Record it instead of hiding it.
                     log.debug(f"TTNN: block-float weight deallocate failed: {exc}")
 
-    def release_device(self) -> None:
+    def release_device(self) -> bool:
+        """Drop this layer's mesh lease, closing the mesh only when last."""
+
         self.clear_weight_cache()
+        if not release_mesh_lease(self):
+            return False
         mesh = current_mesh()
         if mesh is not None:
             close_mesh(owner=mesh.owner)
+        return True
 
     def pack(self, linear, scales, zeros, g_idx, **kwargs):
         self.clear_weight_cache()
