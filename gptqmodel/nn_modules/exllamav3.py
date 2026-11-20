@@ -595,6 +595,17 @@ class ExllamaV3Linear(ForwardDtypeLockMixin, nn.Module):
             # BF16 off CUDA already used this path, so its behaviour is
             # unchanged.
             return self._ensure_torch_inner().forward(x)
+        # PERF FOLLOW-UP (maintainer request, #5898): the guard below costs
+        # every FP16/BF16 forward an extra prescale launch, an FP32 GEMM output
+        # and a separate rescale epilogue (FP64 for BF16 with ``suh``), for an
+        # overflow that is rare in practice. Measured on RTX 3090 (K=512, N=256):
+        # +34..76 us per eager forward, +1.3..2.4 us per CUDA Graph replay.
+        # Future kernel work must fold the bound into the input Hadamard
+        # (``had_r_128`` already reads ``x`` and ``suh``) and the rescale into
+        # the GEMM epilogue, so the common unscaled case costs about as much as
+        # the unguarded FP16 path. Keep the guarantees: finite output for a
+        # finite projection, no host read, graph safety, exact power-of-two
+        # scaling and a single final rounding.
         # FP16 and BF16 both need the input-range guard. Keep them on the
         # native kernels instead of the ~20-200x slower Torch reconstruction
         # (#4767); the pre-scale keeps #3731's wide-input guarantee.
