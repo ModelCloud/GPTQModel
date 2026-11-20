@@ -2661,6 +2661,14 @@ def ModelWriter(cls):
         max_shard_size_bytes = _parse_max_shard_size(max_shard_size)
         metadata_dict = _normalize_metadata(safetensors_metadata)
         metadata_dict["format"] = "pt"
+        if quant_method == METHOD.CPTC:
+            metadata_dict.update(
+                quant_method=METHOD.CPTC.value,
+                cptc_bits=str(quantize_config.bits),
+                cptc_depth=str(quantize_config.trellis_depth),
+                cptc_table_q=str(quantize_config.table_q),
+                cptc_block_size=str(quantize_config.block_size),
+            )
         split_by_mode = _parse_split_by(split_by)
 
         if split_by_mode == "layer":

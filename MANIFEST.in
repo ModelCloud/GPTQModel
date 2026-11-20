@@ -10,6 +10,7 @@ recursive-include gptqmodel_ext/machete *.h *.hpp *.cuh *.cu *.cpp *.py
 recursive-include gptqmodel_ext/cutlass_extensions *.h *.hpp *.cuh *.cu *.cpp *.py
 recursive-include gptqmodel_ext/paro *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/qqq *.h *.cuh *.cu *.cpp
+recursive-include gptqmodel_ext/cptc *.cu *.cpp
 recursive-include gptqmodel_ext/vptq *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/nf12 *.h *.cuh *.cu *.cpp *.txt *.map README.md NOTICE LICENSE
 include gptqmodel_ext/nf12/CMakeLists.txt

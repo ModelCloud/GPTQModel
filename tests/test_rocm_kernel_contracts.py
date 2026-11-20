@@ -31,7 +31,7 @@ ROCM_KERNELS = set("""
     AllSparkLinear AllSparkAwqLinear AwqGEMMTritonLinear AwqGEMVTritonLinear
     GGUFTritonKernel TorchFP8Linear BitsAndBytesLinear
     TorchLinear TorchQuantEmbeddings AwqTorchLinear QQQTorchLinear
-    GGUFTorchLinear ParoLinear ParoTritonLinear VPTQLinear NF12Linear
+    GGUFTorchLinear ParoLinear ParoTritonLinear VPTQLinear NF12Linear CPTCLinear
     MacaqLinear MacaqTritonLinear
     AwqGEMVFastTorchLinear LLMAwqTorchLinear
     TTBlockfloatLinear
@@ -258,6 +258,7 @@ _CUDA_KEYWORDS = frozenset("""
     __LINE__ __FILE__ __func__ __FUNCTION__ __PRETTY_FUNCTION__ __VA_ARGS__
     __VA_OPT__ __CUDA_ARCH__ __HIP_PLATFORM_AMD__ __HIP_DEVICE_COMPILE__
     __CUDACC__ __HIPCC__ __clang__ __GNUC__ __has_include __has_feature
+    __attribute__ __builtin_bit_cast
 """.split())
 
 # CUDA spellings that torch's hipify pass renames in the sources it copies, so
@@ -272,14 +273,15 @@ _HIPIFY_REWRITTEN_SYMBOLS = frozenset({"__nv_bfloat16", "__nv_bfloat162"})
 # `__floats2bfloat162_rn` and the scalar `__float2bfloat16_rn` are absent,
 # which is why rotation.cuh and bf16_scale.cu declare them.
 _HIP_NATIVE_SYMBOLS = frozenset("""
-    __syncthreads __activemask __shfl_down_sync __shfl_sync __shfl_up_sync __shfl_xor_sync
+    __syncthreads __activemask __shfl_down __shfl_down_sync __shfl_sync __shfl_up_sync __shfl_xor_sync
     __int_as_float __float_as_int __uint_as_float __float_as_uint __byte_perm
     __funnelshift_r __funnelshift_l __funnelshift_rc __funnelshift_lc
     __fadd_rn __fsub_rn __fmul_rn __fdiv_rn __frcp_rn __fsqrt_rn __fmaf_rn
     __fminf __fmaxf __min __max __sincosf __saturatef
     __half __half2 __half2float __float2half __float2half_rn __float2half_rz
     __halves2half2 __low2half __high2half __half22float2 __floats2half2_rn
-    __ushort_as_half __hmul __hadd __hsub __hlt __hgt __heq __hne __hle __hge
+    __ushort_as_half __half_as_ushort __hmul __hadd __hsub __hlt __hgt __heq __hne __hle __hge
+    __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12 __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12
     __hip_bfloat16 __hip_bfloat162 __bfloat162float __float2bfloat16
     __halves2bfloat162 __low2bfloat16 __high2bfloat16 __bfloat1622float2
     __float22bfloat162_rn __bfloat162bfloat162

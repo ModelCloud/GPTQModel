@@ -276,6 +276,16 @@ def _patch_transformers_gptqmodel_gguf_quantizer_compat():
         )
 
 
+def _register_transformers_cptc_quantizer():
+    from transformers.quantizers import auto as hf_quant_auto
+
+    from .utils.hf_cptc import HFCPTCConfig, HFCPTCQuantizer
+
+    with _MONKEY_PATCH_LOCK:
+        hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault("cptc", HFCPTCConfig)
+        hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault("cptc", HFCPTCQuantizer)
+
+
 def _patch_transformers_refusing_quantizers():
     """Make transformers refuse every GPT-QModel-only packed checkpoint format.
 
@@ -1300,6 +1310,7 @@ DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 _patch_transformers_gptq_device_map_compat()
 _patch_transformers_model_construction_global_state()
 _patch_transformers_gptqmodel_gguf_quantizer_compat()
+_register_transformers_cptc_quantizer()
 _patch_transformers_refusing_quantizers()
 _patch_transformers_save_pretrained_runtime_layout_guard()
 _patch_openvino_gptqmodel_compat()
@@ -1358,6 +1369,7 @@ from .quantization import (
     AWQConfig,
     BaseQuantizeConfig,
     CalibrationConfig,
+    CPTCConfig,
     FOEMConfig,
     GGUFConfig,
     GPTAQConfig,

@@ -1044,6 +1044,53 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError("concurrent NF12 prefill gate returned wrong values")
         return True
 
+    cptc_lock = threading.Lock()
+    cptc_thread = threading.local()
+    cptc_state = {}
+    cptc_next_device = 0
+
+    def cptc_ops() -> bool:
+        from gptqmodel.quantization.cptc import CPTCSpec, decode_weight, quantize_weight
+        from gptqmodel.utils.cptc import native_ops
+
+        nonlocal cptc_next_device
+        spec = CPTCSpec()
+
+        def pack(device):
+            rng = torch.Generator().manual_seed(230)
+            weight = torch.randn((16, 128), generator=rng)
+            return quantize_weight(weight, spec, device=device)
+
+        with cptc_lock:
+            if not hasattr(cptc_thread, "device"):
+                cptc_thread.device = torch.device("cuda", cptc_next_device % 2)
+                cptc_next_device += 1
+                cptc_thread.stream = torch.cuda.Stream(device=cptc_thread.device)
+            device = cptc_thread.device
+            torch.cuda.set_device(device)
+            ops = native_ops(device)
+            if ops is None:
+                raise AssertionError("CPTC native extension is unavailable")
+            if device not in cptc_state:
+                cptc_state[device] = pack(device)
+
+        with torch.cuda.stream(cptc_thread.stream):
+            result = pack(device)
+            expected = decode_weight(*result, spec, 128)
+            args = (*(tensor.to(device) for tensor in result), spec.bits, spec.trellis_depth, spec.shift)
+            decoded = ops.decode(*args, 128)
+            x = torch.zeros((1, 128), dtype=torch.bfloat16, device=device)
+            x[0, 0] = 1
+            output = ops.mma(x, *args)
+            decoded = decoded.cpu()
+            output = output.cpu()
+        cptc_thread.stream.synchronize()
+        if not all(torch.equal(a, b) for a, b in zip(result, cptc_state[device])):
+            raise AssertionError("concurrent CPTC encoder changed checkpoint bytes or scales")
+        if not torch.equal(decoded, expected) or not torch.equal(output.flatten(), expected[:, 0]):
+            raise AssertionError("concurrent CPTC decoder or MMA changed output")
+        return True
+
     probes: Dict[str, Callable[[], Any]] = {
         "torch.cuda.is_available": torch.cuda.is_available,
         "torch.cuda.device_count": torch.cuda.device_count,
@@ -1054,6 +1101,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "gptqmodel.p2p.allocator_guard": p2p_allocator_guard,
         "torch.cuda.set_device": set_device_isolation,
         "gptqmodel_nf12.ops": nf12_ops,
+        "CPTC native ops": cptc_ops,
         "gptqmodel_nf12_hip.embedding": nf12_hip_embedding,
         "MACaQ Triton W4A4": macaq_triton_w4a4,
         "MACaQ compiled flips ROCm": macaq_compiled_flips_rocm,
@@ -1163,6 +1211,7 @@ def _requires_two_gpus(name: str) -> bool:
             or name.endswith("can_device_access_peer") or name.startswith("gptqmodel_nf12.")
             or name in (
                 "gptqmodel_nf12_hip.embedding",
+                "CPTC native ops",
                 "MACaQ Triton W4A4",
                 "MACaQ compiled flips ROCm",
                 "AWQ FP32 dequantize_gemm",

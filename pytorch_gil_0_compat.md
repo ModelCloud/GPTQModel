@@ -139,6 +139,12 @@ results below for that build.
 | Tensor `_version`, `data_ptr`, `device`, `dtype`, `shape`, `is_inference` | SAFE (concurrent), NVIDIA CUDA in measured build | NF12 prepared-view revision key | `scripts/gil0_api_probe.py --only 'Tensor cache revision metadata'` passed three child processes on 2026-11-12, each 8 threads × 4 iterations, on the same free-threaded Python 3.14.10, PyTorch 2.16.0.dev20261102+cu130, two RTX 4090s. The probe checks that ordinary `copy_` increments `_version` while identity/metadata stay stable, and that inference tensors report no version counter. It does not test concurrent mutation of one shared source tensor. |
 | `gptqmodel_nf12.linear_fp32` Ampere prefill gate | SAFE (concurrent), NVIDIA CUDA | 384x5120 FP32 router prefill from NF12 weights | `scripts/gil0_api_probe.py --only gptqmodel_nf12.prefill_gate` passed three separate processes on 2026-11-11, each 8 threads × 4 iterations on two NVIDIA PG506 SM80 GPUs with Python 3.14.7 GIL disabled and PyTorch 2.15.0+cu132. The probe prewarms the Triton kernel, gives each worker a device and input, checks the FP32 output and bias, and synchronizes its stream. It covers `torch.cuda.get_device_capability`, call-local `nf12.decode`, `torch.empty`, and the Triton launch. ROCm takes the existing fallback. |
 
+## CPTC native operators
+
+| API | Result | Where we use it | Evidence and limit |
+|---|---|---|---|
+| `gptqmodel_cptc.encode`, `decode`, `mma` | SAFE (concurrent) on CUDA and ROCm RDNA4 | CPTC weight-only finalize and inference | `scripts/gil0_api_probe.py --only 'CPTC native ops'` passed three processes on each backend with Python 3.14.10t and `PYTHON_GIL=0`. Each process used eight threads and four calls per thread across two RTX 4090s with PyTorch `2.16.0.dev20261102+cu130` or two Radeon AI PRO R9700s with `2.16.0.dev20261025+rocm10.1`. Workers select their own device and stream. The test compares packed bytes and scales with the serial run and compares native decoding and a one-hot BF16 forward with Torch decoding. Inputs and scratch are worker-owned. |
+
 ## MACaQ compiled quantization
 
 | API | Result | Where we use it | Evidence and limit |

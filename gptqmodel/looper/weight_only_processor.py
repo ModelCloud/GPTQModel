@@ -40,6 +40,7 @@ from ..quantization.config import (
     METHOD,
     BitsAndBytesConfig,
     CalibrationConfig,
+    CPTCConfig,
     GGUFConfig,
     NF12Config,
     RTNConfig,
@@ -55,6 +56,8 @@ from ..utils.module_locks import parent_module_lock
 
 
 log = setup_logger()
+
+WeightOnlyProcessorConfig = RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config | CPTCConfig
 
 
 def _mean_abs_error(reference: torch.Tensor, dequantized: torch.Tensor) -> float:
@@ -80,12 +83,12 @@ class WeightOnlyProcessor(LoopProcessor):
     def __init__(
         self,
         tokenizer,
-        qcfg: RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
+        qcfg: WeightOnlyProcessorConfig,
         forward: Optional[ForwardConfig] = None,
         *,
         measure_weight_error: bool = False,
     ):
-        """Initializes a weight-only processor for RTN, GGUF, BitsAndBytes, or NF12.
+        """Initialize the processor for weight-only quantization.
 
         ``measure_weight_error`` opts into the direct-pack weight-error MAE
         diagnostic. It reconstructs every dense weight, so it is off by
@@ -108,11 +111,11 @@ class WeightOnlyProcessor(LoopProcessor):
 
     @staticmethod
     def _uses_direct_pack(
-        qcfg: RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
+        qcfg: WeightOnlyProcessorConfig,
     ) -> bool:
         """Returns whether the method packs directly from the original dense weights."""
 
-        return qcfg.method in {METHOD.GGUF, METHOD.BITSANDBYTES, METHOD.NF12}
+        return qcfg.method in {METHOD.GGUF, METHOD.BITSANDBYTES, METHOD.NF12, METHOD.CPTC}
 
     def _update_logged_stat(self, module: NamedModule, **fields: str) -> None:
         """Backfills fields the direct packer measures after the row is logged."""
@@ -128,7 +131,7 @@ class WeightOnlyProcessor(LoopProcessor):
         module: NamedModule,
         *,
         device: Optional[torch.device] = None,
-    ) -> Optional[RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config]:
+    ) -> Optional[WeightOnlyProcessorConfig]:
         """Clones per-module config, quantizes weights, and logs the result."""
 
         resolved_cfg = get_resolved_module_config(module) or self.qcfg.resolve_module_config(module.full_name)
@@ -234,9 +237,7 @@ class WeightOnlyProcessor(LoopProcessor):
         module: NamedModule,
         model: BaseQModel,
         *,
-        qcfg: Optional[
-            RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config
-        ] = None,
+        qcfg: Optional[WeightOnlyProcessorConfig] = None,
         **kwargs,
     ):
         """Creates and packs the final quantized module into the model graph."""
@@ -318,6 +319,9 @@ class WeightOnlyProcessor(LoopProcessor):
 
         if self._uses_direct_pack(active_qcfg):
             pack_start = time.perf_counter()
+            # Finalization keeps the checkpoint on CPU while CPTC encodes on
+            # the concrete device assigned to this module.
+            pack_kwargs = {"device": active_qcfg.device} if active_qcfg.method == METHOD.CPTC else {}
             with log_time_block("module.pack_original", logger=log, module_name=module_label):
                 with parent_module_lock(parent_key):
                     qmodule = qmodules[module.full_name]
@@ -327,6 +331,7 @@ class WeightOnlyProcessor(LoopProcessor):
                         zeros=None,
                         g_idx=None,
                         smooth=active_qcfg.smooth,
+                        **pack_kwargs,
                     )
             pack_elapsed = time.perf_counter() - pack_start
             if timer is not None:
@@ -343,8 +348,7 @@ class WeightOnlyProcessor(LoopProcessor):
                 diagnostic_start = time.perf_counter()
                 reference_weight = qmodule._weight_to_matrix(original_layer).detach()
                 dequant_weight = qmodule.dequantize_weight()
-                # BNB and NF12 expose native [out, in] weights; GGUF exposes
-                # [in, out].
+                # GGUF exposes [in, out]. The other direct packers use [out, in].
                 if active_qcfg.method == METHOD.GGUF:
                     dequant_weight = dequant_weight.T
                 mean_abs_err = _mean_abs_error(reference_weight, dequant_weight)
@@ -413,6 +417,8 @@ class WeightOnlyProcessor(LoopProcessor):
             return "weight_only_bitsandbytes"
         if self.qcfg.method == METHOD.NF12:
             return "weight_only_nf12"
+        if self.qcfg.method == METHOD.CPTC:
+            return "weight_only_cptc"
         return "weight_only_rtn"
 
 __all__ = ["WeightOnlyProcessor"]
