@@ -229,3 +229,88 @@ def test_offload_bundle_round_trips_through_gptqmodel_load(tmp_path):
     assert torch.equal(reloaded_module.qzeros, live_qzeros[QPROJ]), (
         "the checkpoint built from the offload bundle did not decode to the live zeros"
     )
+
+
+def _state_dict_snapshot(module):
+    return {name: value.detach().clone() for name, value in module.state_dict().items()}
+
+
+def _assert_state_dict_equal(actual, expected):
+    assert set(actual) == set(expected)
+    for name, tensor in expected.items():
+        assert torch.equal(actual[name], tensor), f"state-dict tensor drifted: {name}"
+
+
+def test_forced_offload_converts_qzeros_once(tmp_path, monkeypatch):
+    """A forced offload must not build the unused size-preflight state dict (#5850).
+
+    ``force=True`` bypasses the 4 KiB size check, so the preflight state dict is
+    discarded. Each state dict runs the v2 -> v1 qzero conversion; building two
+    doubles the conversion work and leaves both converted copies live at once.
+    """
+
+    from gptqmodel.utils import model_dequant
+
+    module = _torchlinear(HIDDEN, HIDDEN, seed=0)
+    assert module.qzero_format() == 2
+    checkpoint_before = _state_dict_snapshot(module)
+    inputs = torch.randn(3, HIDDEN, dtype=torch.float16)
+    reference = module(inputs).clone()
+
+    calls = []
+    original = model_dequant._revert_gptq_v1_qzeros_correction
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(model_dequant, "_revert_gptq_v1_qzeros_correction", counting)
+
+    model = _Container(module)
+    offload_to_disk(module=module, model=model, disk_path=str(tmp_path), force=True)
+
+    assert len(calls) == 1, (
+        "forced disk offload built a second state dict for the unused size "
+        f"preflight ({len(calls)} v2 -> v1 conversions)"
+    )
+
+    bundle = _bundle(tmp_path)
+    _assert_state_dict_equal(bundle, checkpoint_before)
+    assert int(bundle["qzeros_format"]) == 1
+    assert torch.equal(module(inputs), reference), "disk-offloaded forward drifted"
+
+    undo_offload_to_disk(module, device=torch.device("cpu"))
+    assert module.qzero_format() == 2
+    _assert_state_dict_equal(_state_dict_snapshot(module), checkpoint_before)
+    assert torch.equal(module(inputs), reference), "restored forward drifted"
+
+
+def test_non_forced_offload_still_enforces_size_threshold(tmp_path):
+    """Without ``force`` the 4 KiB size preflight must still skip small modules."""
+
+    small = _torchlinear(64, 64, seed=1)
+    small_inputs = torch.randn(2, 64, dtype=torch.float16)
+    small_reference = small(small_inputs).clone()
+    small_model = _Container(small)
+
+    offload_to_disk(module=small, model=small_model, disk_path=str(tmp_path / "small"))
+
+    assert not (tmp_path / "small" / "q_proj").exists(), (
+        "a below-threshold module was offloaded without force"
+    )
+    assert not small.qweight.is_meta
+    assert torch.equal(small(small_inputs), small_reference)
+
+    large = _torchlinear(256, 256, seed=2)
+    checkpoint_before = _state_dict_snapshot(large)
+    inputs = torch.randn(2, 256, dtype=torch.float16)
+    reference = large(inputs).clone()
+    large_model = _Container(large)
+
+    offload_to_disk(module=large, model=large_model, disk_path=str(tmp_path / "large"))
+
+    bundle = load_file(str(tmp_path / "large" / "q_proj" / "module.safetensors"))
+    _assert_state_dict_equal(bundle, checkpoint_before)
+    assert int(bundle["qzeros_format"]) == 1
+    assert large.qweight.is_meta
+    assert torch.equal(large(inputs), reference), "disk-offloaded forward drifted"
