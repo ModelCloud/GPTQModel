@@ -15,18 +15,24 @@ These tests pin the sharing contract:
 * one ``torch.cat`` per identical capture list;
 * one in-place scale division per tensor, even though several module names
   reference it, with an independent closed-form oracle for the expected value;
-* the chunked FP reference stays on the device the replay produced it on.
+* the chunked FP reference stays on the device the replay produced it on;
+* the activation magnitude is materialized per chunk, so the reference and every
+  candidate replay run without an activation-sized ``abs()`` alive (#5765).
 """
 
 import threading
 import types
+import weakref
 
 import pytest
 import torch
 from torch import nn
+from torch.utils._python_dispatch import TorchDispatchMode
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.quantization.awq.quantize.scale import apply_scale
+from gptqmodel.quantization.config import AWQConfig
 
 
 def _processor():
@@ -304,3 +310,201 @@ def test_chunked_reference_outputs_stay_on_the_replay_device():
         # No host round-trip: the scale grid receives device-resident chunks.
         assert chunk.device == expected.device
         assert torch.equal(chunk, expected)
+
+
+ACTIVATION_SHAPE = (32, 64, 512)
+CHUNK_BYTES = 64 << 10
+
+
+def _search_fixture(x):
+    """A real processor over one norm + linear group."""
+
+    width = x.shape[-1]
+    layer = nn.Sequential(
+        nn.LayerNorm(width, dtype=x.dtype),
+        nn.Linear(width, 32, bias=False, dtype=x.dtype),
+    ).eval()
+    processor = AWQProcessor(
+        tokenizer=None,
+        qcfg=AWQConfig(device="cpu", group_size=32, sym=True),
+        calibration=CalibrationConfig(),
+        gptq_model=types.SimpleNamespace(model=layer, rotary_embedding=None),
+        model=layer,
+    )
+    processor.max_chunk_memory = CHUNK_BYTES
+    processor._quant_batch_size = 1
+    return processor, layer
+
+
+def _search(processor, layer, x, captured=None, x_mean_override=None):
+    """Run the production scale search, optionally scoring with a given mean."""
+
+    original = processor._compute_best_scale
+
+    def scoring(x_arg, w_mean, x_mean, *args, **kwargs):
+        if captured is not None:
+            captured["x_mean"] = x_mean.detach().clone()
+        if x_mean_override is not None:
+            x_mean = x_mean_override
+        return original(x_arg, w_mean, x_mean, *args, **kwargs)
+
+    processor._compute_best_scale = scoring
+    try:
+        return processor._search_best_scale(layer, layer[0], [layer[1]], x)
+    finally:
+        del processor._compute_best_scale
+
+
+def _full_magnitude_mean(x, chunk_bytes):
+    """The pre-fix reduction: flatten the whole ``|x|``, then reduce it in chunks."""
+
+    flat = x.abs().view(-1, x.shape[-1])
+    num_elements, num_channels = flat.shape
+    chunk_size = max(1, min(chunk_bytes // (4 * num_channels), num_elements))
+    total = torch.zeros(num_channels, dtype=torch.float32, device=x.device)
+    for start in range(0, num_elements, chunk_size):
+        total += flat[start : start + chunk_size].to(torch.float32).sum(dim=0)
+    return (total / num_elements).to(x.dtype)
+
+
+class _MagnitudeProbe(TorchDispatchMode):
+    """Track the live magnitude storage of the source without retaining it.
+
+    The probe weak-references the storage of every ``|x|`` result, so an alias
+    such as ``inp.abs().view(...)`` keeps it observably alive while the probe
+    never extends its lifetime. The old implementation kept the whole ``|x|``
+    alive through the grid, and a strong reference here would hide that (#5765).
+    """
+
+    def __init__(self, source):
+        super().__init__()
+        self._source_ptr = source.untyped_storage().data_ptr()
+        self._refs = {}
+        self.peak_bytes = 0
+
+    def live_bytes(self):
+        total = 0
+        dead = []
+        for ptr, (ref, nbytes) in self._refs.items():
+            if ref() is None:
+                dead.append(ptr)
+            else:
+                total += nbytes
+        for ptr in dead:
+            del self._refs[ptr]
+        return total
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        result = func(*args, **(kwargs or {}))
+        if func is torch.ops.aten.abs.default:
+            operand = args[0]
+            if operand.untyped_storage().data_ptr() == self._source_ptr:
+                storage = result.untyped_storage()
+                self._refs[storage.data_ptr()] = (weakref.ref(storage), storage.nbytes())
+        self.peak_bytes = max(self.peak_bytes, self.live_bytes())
+        return result
+
+
+def test_scale_search_does_not_retain_the_activation_magnitude_5765():
+    """The whole ``|x|`` must not outlive the chunk reduction.
+
+    ``_search_best_scale`` used to bind ``inp.abs().view(...)`` for the chunked
+    mean and then keep it referenced by the frame through the FP reference and
+    all 20 candidate replays. Only the FP32 conversion was chunked, so a
+    ``[32, 64, 512]`` BF16 capture left a 2 MiB buffer live for each of the 672
+    one-batch forwards. The magnitude is now built per chunk and released before
+    the replays; the selected scales must not move.
+    """
+
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        torch.manual_seed(11)
+        x = torch.randn(*ACTIVATION_SHAPE, dtype=torch.bfloat16)
+        processor, layer = _search_fixture(x)
+        captured = {}
+
+        probe = _MagnitudeProbe(x)
+        forward_rows = []
+        live_magnitude = []
+
+        def observe(_module, inputs):
+            forward_rows.append(inputs[0].shape[0])
+            live_magnitude.append(probe.live_bytes())
+
+        handle = layer[1].register_forward_pre_hook(observe)
+        try:
+            with probe:
+                result = _search(processor, layer, x, captured=captured)
+        finally:
+            handle.remove()
+
+        best_scales, loss = result[2:]
+
+        # 2048 token rows / one-row micro-batches * 20 ratios: the chunked grid
+        # still runs the same number of forwards as before the fix.
+        assert len(forward_rows) == 672
+        assert max(forward_rows) == 1
+        # No activation-sized magnitude is alive while any replay runs, and the
+        # reduction never holds more than one chunk.
+        assert max(live_magnitude) == 0
+        assert probe.peak_bytes <= CHUNK_BYTES
+
+        # The only value the fix changes is the mean the grid scores against.
+        oracle_mean = _full_magnitude_mean(x, CHUNK_BYTES)
+        assert torch.equal(captured["x_mean"], oracle_mean)
+        # Scoring the same grid with the independently computed pre-fix mean
+        # leaves the chosen scales and the loss bitwise unchanged.
+        reference_scales, reference_loss = _search(processor, layer, x, x_mean_override=oracle_mean)[2:]
+        assert torch.equal(best_scales, reference_scales)
+        assert loss == reference_loss
+        assert best_scales.isfinite().all()
+    finally:
+        torch.set_num_threads(previous_threads)
+
+
+SMALL_CASES = [
+    pytest.param((8, 16, 64), torch.bfloat16, False, id="bf16"),
+    pytest.param((8, 16, 64), torch.float16, False, id="fp16"),
+    pytest.param((8, 16, 64), torch.float32, False, id="fp32"),
+    pytest.param((100, 64), torch.bfloat16, False, id="2d-partial-final-chunk"),
+    pytest.param((8, 16, 64), torch.bfloat16, True, id="noncontiguous"),
+]
+
+
+@pytest.mark.parametrize("shape,dtype,noncontiguous", SMALL_CASES)
+def test_chunked_activation_mean_matches_the_full_magnitude_reduction_5765(shape, dtype, noncontiguous):
+    """Per-chunk ``abs()`` must reproduce the pre-fix reduction bit for bit.
+
+    Seven-row chunks over 128 (and 100) token rows leave a final partial chunk,
+    and the non-contiguous case cannot use the flattening view at all. Every
+    case must still match the whole-magnitude reduction exactly, so the chosen
+    scales stay bitwise identical.
+    """
+
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        generator = torch.Generator().manual_seed(5765)
+        if noncontiguous:
+            base = torch.randn(shape[0], shape[1] * 2, shape[2], dtype=dtype, generator=generator)
+            x = base[:, ::2]
+            assert not x.is_contiguous()
+        else:
+            x = torch.randn(*shape, dtype=dtype, generator=generator)
+
+        rows = x.numel() // x.shape[-1]
+        budget = 4 * x.shape[-1] * 7
+        chunk_rows = max(1, min(budget // (4 * x.shape[-1]), rows))
+        # The fixture must cross several chunks and end on a partial one.
+        assert chunk_rows < rows
+        assert rows % chunk_rows != 0
+
+        processor, layer = _search_fixture(x)
+        processor.max_chunk_memory = budget
+
+        captured = {}
+        _search(processor, layer, x, captured=captured)
+        assert torch.equal(captured["x_mean"], _full_magnitude_mean(x, budget))
+    finally:
+        torch.set_num_threads(previous_threads)
