@@ -124,6 +124,19 @@ def test_the_gate_target_installs_every_pinned_wheel(ci_deps, deps_manifest):
         ) == []
 
 
+@pytest.mark.parametrize(
+    ("lane", "abi", "foreign_abi"),
+    [("3.13", "cp313", "cp313t"), ("3.13t", "cp313t", "cp313")],
+    ids=["regular", "free-threaded"],
+)
+def test_the_target_abi_comes_from_the_requested_lane(ci_deps, lane, abi, foreign_abi):
+    """#5615: a free-threaded host must not leak its ``t`` ABI into another lane."""
+
+    tags = ci_deps.interpreter_tags(lane)
+    assert any(tag.startswith(f"cp313-{abi}-") for tag in tags), sorted(tags)
+    assert not any(tag.startswith(f"cp313-{foreign_abi}-") for tag in tags), sorted(tags)
+
+
 def test_planner_gates_the_three_off_the_314t_lane(planner):
     plan = _plan(planner, LANE)
     scheduled = _scheduled(plan)
