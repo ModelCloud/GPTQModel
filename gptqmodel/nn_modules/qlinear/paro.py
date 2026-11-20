@@ -791,12 +791,19 @@ class ParoLinear(AwqTorchLinear):
             return False
         return bool(x_flat.requires_grad or self._rotation_parameters_need_grad())
 
+    def _rotation_parameters_trainable(self) -> bool:
+        """Whether an optimizer can update the rotation operands in place."""
+
+        return bool(self.theta.requires_grad or self.channel_scales.requires_grad)
+
     def _rotate_inputs(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Apply the learned input transform before quantized matmul."""
-        if self._rotation_identity and not self._rotation_parameters_need_grad():
+        if self._rotation_identity and not self._rotation_parameters_trainable():
             # The identity is exact, so the shortcut is bit-identical for the
-            # activations; it may only run when the rotation parameters are
-            # frozen or the caller disabled grad (issue #5419).
+            # activations. Trainable operands must skip it even when grad is
+            # disabled: an optimizer step changes them without clearing the
+            # cached identity flag, and the no-grad forward has to observe the
+            # new values (#5636).
             return x_flat
         needs_autograd = self._rotation_needs_autograd(x_flat)
         if (
