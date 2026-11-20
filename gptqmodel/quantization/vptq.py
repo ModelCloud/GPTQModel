@@ -36,6 +36,7 @@ from ..quantization.config import VPTQConfig
 from ..utils.fallback import should_use_fallback
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
+from ..utils.quant_metrics import relative_error_from_energies
 from ..utils.vptq import (
     vptq_group_for_column,
     vptq_group_setting,
@@ -974,5 +975,8 @@ class VPTQ:
             error_sum.add_((error_block * delta[start:end]).sum())
             weight_sum.add_((weight_block * weight_original[start:end].to(torch.float64)).sum())
 
-        denominator = torch.clamp(weight_sum.abs(), min=_EPS)
-        return float((error_sum / denominator).item())
+        # Keep the reference energy as-is: an absolute floor turned total
+        # signal loss on a small reference into a near-zero error (#5635).
+        return relative_error_from_energies(
+            float(error_sum.item()), float(weight_sum.abs().item())
+        )

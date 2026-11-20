@@ -729,7 +729,7 @@ def _assert_percentile_smoother_matches_reference(device: str) -> None:
     log_mu = math.log1p(8.0)
     log_vals = torch.log1p(block.abs() * 8.0) / log_mu
     log_threshold = torch.quantile(log_vals, 0.99, dim=1, keepdim=True)
-    log_linear_threshold = (torch.exp(log_threshold * log_mu) - 1.0) / 8.0
+    log_linear_threshold = torch.expm1(log_threshold * log_mu) / 8.0
     log_ref = torch.clamp(block, -log_linear_threshold, log_linear_threshold)
     torch.testing.assert_close(log_out, log_ref, atol=1e-5, rtol=1e-5)
 

@@ -6209,6 +6209,34 @@ class BaseQModel(nn.Module):
             f"and scale shape={tuple(scale.shape)}."
         )
 
+    def _fp8_compact_block_size(
+        self,
+        *,
+        weight: torch.Tensor,
+        scale: Optional[torch.Tensor],
+    ) -> Optional[tuple[int, int]]:
+        """Return the checkpoint block size when ``scale`` is its compact grid.
+
+        Some FP8 checkpoints use ceil blocking, so the scale grid is
+        ``ceil(N / br) x ceil(K / bc)``. That compact grid is exactly the
+        per-block layout ``TorchFP8Linear`` stores, so the loader must keep it
+        instead of expanding it to ``N x K`` (an FP32 tensor four times the
+        size of the FP8 weight) for the module's lifetime (#5593).
+        """
+
+        if not isinstance(scale, torch.Tensor) or scale.ndim != 2 or weight.ndim != 2:
+            return None
+        block_size = self._decoder_block_size()
+        if block_size is None:
+            return None
+        block_rows, block_cols = block_size
+        rows, cols = weight.shape
+        compact = (
+            (rows + block_rows - 1) // block_rows,
+            (cols + block_cols - 1) // block_cols,
+        )
+        return block_size if tuple(scale.shape) == compact else None
+
     def _build_fp8_forward_module(
         self,
         *,
@@ -6229,22 +6257,34 @@ class BaseQModel(nn.Module):
         if not isinstance(weight, torch.Tensor):
             return None
 
-        scale_inv = self._decoder_scale_tensor(
-            scale_tensor=checkpoint_tensors.get("weight_scale_inv"),
-            result_shape=tuple(weight.shape),
-        )
-        if isinstance(scale_inv, torch.Tensor):
+        raw_scale_inv = checkpoint_tensors.get("weight_scale_inv")
+        # A compact ceil-blocked grid is already the wrapper's per-block layout;
+        # expanding it to N x K would keep an FP32 scale four times the size of
+        # the FP8 weight for the module's lifetime (#5593).
+        compact_block_size = self._fp8_compact_block_size(weight=weight, scale=raw_scale_inv)
+        if isinstance(raw_scale_inv, torch.Tensor):
             scale_semantics = self._decoder_fp8_scale_semantics()
+            if compact_block_size is not None:
+                scale_inv = raw_scale_inv
+            else:
+                scale_inv = self._decoder_scale_tensor(
+                    scale_tensor=raw_scale_inv,
+                    result_shape=tuple(weight.shape),
+                )
         else:
             # ModelOpt-style FP8 checkpoints store direct scales instead of inverse scales;
             # normalize them here so TorchFP8Linear can use one consistent metadata form.
             direct_scale = checkpoint_tensors.get("weight_scale")
             if not isinstance(direct_scale, torch.Tensor):
                 direct_scale = checkpoint_tensors.get("scale")
-            scale = self._decoder_scale_tensor(
-                scale_tensor=direct_scale,
-                result_shape=tuple(weight.shape),
-            )
+            compact_block_size = self._fp8_compact_block_size(weight=weight, scale=direct_scale)
+            if compact_block_size is not None:
+                scale = direct_scale
+            else:
+                scale = self._decoder_scale_tensor(
+                    scale_tensor=direct_scale,
+                    result_shape=tuple(weight.shape),
+                )
             if not isinstance(scale, torch.Tensor):
                 return None
             scale = scale.to(torch.float32)
@@ -6261,11 +6301,16 @@ class BaseQModel(nn.Module):
         format_name = str(weight.dtype).split(".")[-1]
         try:
             # Infer the wrapper layout from the normalized inverse-scale tensor so native
-            # FP8 execution works for either checkpoint convention.
-            weight_scale_method, weight_block_size = self._infer_fp8_forward_layout(
-                weight=weight,
-                scale_inv=scale_inv,
-            )
+            # FP8 execution works for either checkpoint convention. A compact
+            # ceil-blocked grid keeps the checkpoint block size, which its shape
+            # alone cannot express.
+            if compact_block_size is not None:
+                weight_scale_method, weight_block_size = "block", compact_block_size
+            else:
+                weight_scale_method, weight_block_size = self._infer_fp8_forward_layout(
+                    weight=weight,
+                    scale_inv=scale_inv,
+                )
             forward_module = TorchFP8Linear(
                 bits=8,
                 group_size=-1,
