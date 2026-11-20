@@ -2138,19 +2138,30 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         dequantizing a full layer.
 
         Q2_0 uses a signed code in [-1, 2] with an FP16 scale, while Q8_K
-        uses a signed int8 code with an FP32 scale. Their bounds are 2 and
-        128 times the absolute block scale.
+        uses a signed int8 code with an FP32 scale. Their overflow bounds are
+        2 and 128 times the absolute block scale. Q8_K additionally reports a
+        block whose FP32 scale would round its smallest nonzero code to zero
+        in FP16, because that erasure happens at decode time, not at pack time.
         """
         if not target_dtype.is_floating_point:
             return True
         if self.gguf_tensor_qtype in ("Q2_0", "Q8_K"):
             if self.gguf_tensor_qtype == "Q2_0":
                 d = blocks[..., :2].contiguous().view(torch.float16).float().abs()
-                code_max = 2
-            else:
-                d = blocks[..., :4].contiguous().view(torch.float32).abs()
-                code_max = 128
-            return bool(((d * code_max) > torch.finfo(target_dtype).max).any())
+                return bool(((d * 2) > torch.finfo(target_dtype).max).any())
+            d = blocks[..., :4].contiguous().view(torch.float32).abs()
+            if bool(((d * 128) > torch.finfo(target_dtype).max).any()):
+                return True
+            # Q8_K keeps an FP32 block scale, so a tiny nonzero block survives
+            # packing and is only erased when the decoded weights are narrowed
+            # to FP16. Inspect the codes only for blocks whose smallest
+            # possible magnitude (|d| * 1) rounds to zero; an all-zero block
+            # stays narrow.
+            tiny = d.reshape(-1) <= float(_FP16_MIN_SUBNORMAL) / 2.0
+            if not bool(tiny.any()):
+                return False
+            nonzero = blocks[..., 4:260].contiguous().view(torch.int8) != 0
+            return bool((tiny & nonzero.reshape(-1, 256).any(dim=-1)).any())
         if self.gguf_tensor_qtype in ("Q4_0", "Q8_0"):
             d = blocks[..., :2].contiguous().view(torch.float16).float().abs()
             # Signed codes reach -8 in Q4_0 and -128 in Q8_0.
