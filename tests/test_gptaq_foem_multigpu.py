@@ -170,18 +170,29 @@ def test_missing_batch_index_raises_instead_of_silently_mispairing(kind):
 def test_process_batch_contract_is_identical_across_gptq_gptaq_foem():
     """``add_batch`` calls ``process_batch(inp, batch_index=...)`` polymorphically.
 
-    The base must accept the same parameters and return the same annotation as
-    the GPTAQ/FOEM overrides, or a base-class call path drifts from them.
+    The base must accept the same call and return the same annotation as the
+    GPTAQ/FOEM overrides, or a base-class call path drifts from them. GPTQ adds
+    an optional trailing ``out`` accumulator for the in-place Hessian capture
+    (#5731); anything past the shared prefix must stay optional so the
+    polymorphic ``process_batch(inp, batch_index=...)`` call is unchanged.
     """
 
     signatures = {cls.__name__: inspect.signature(cls.process_batch) for cls in (GPTQ, GPTAQ, FOEM)}
     base = signatures["GPTQ"]
-    assert list(base.parameters) == ["self", "inp", "batch_index"]
+    shared = ["self", "inp", "batch_index"]
+    base_parameters = list(base.parameters.values())
+    assert [p.name for p in base_parameters[: len(shared)]] == shared
     assert base.parameters["batch_index"].default is None
     for name, signature in signatures.items():
+        parameters = list(signature.parameters.values())
         assert [
-            (p.name, p.kind, p.default, p.annotation) for p in signature.parameters.values()
-        ] == [(p.name, p.kind, p.default, p.annotation) for p in base.parameters.values()], name
+            (p.name, p.kind, p.default, p.annotation) for p in parameters[: len(shared)]
+        ] == [
+            (p.name, p.kind, p.default, p.annotation) for p in base_parameters[: len(shared)]
+        ], name
+        assert all(
+            p.default is not inspect.Parameter.empty for p in parameters[len(shared):]
+        ), name
         assert signature.return_annotation == base.return_annotation, name
 
 
