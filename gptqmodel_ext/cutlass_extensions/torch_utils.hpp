@@ -1,9 +1,9 @@
 #pragma once
 
-// This header is shared between stable-ABI extensions and legacy unstable-ABI
-// builds. TORCH_TARGET_VERSION is defined only for the stable target, so we
-// switch includes and types accordingly. TorchTensor (not Tensor) avoids
-// ambiguity with cute::Tensor.
+// This header is shared between _C (unstable ABI, used by machete) and
+// _C_stable_libtorch (stable ABI, used by W4A8/sparse). TORCH_TARGET_VERSION
+// is defined only for the stable target, so we switch includes and types
+// accordingly. TorchTensor (not Tensor) avoids ambiguity with cute::Tensor.
 #ifdef TORCH_TARGET_VERSION
   #include <torch/csrc/stable/tensor.h>
   #include <torch/headeronly/util/BFloat16.h>
