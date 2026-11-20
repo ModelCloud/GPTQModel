@@ -23,6 +23,7 @@ from ..utils.cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
 )
+from ..utils.kernel import KernelConfig, resolve_kernel_config
 from .util.arch_list import scoped_arch_list_env
 
 
@@ -91,15 +92,27 @@ def _source_files() -> list[str]:
         "quant/comp_units/exl3_comp_unit_6.cu",
         "quant/comp_units/exl3_comp_unit_7.cu",
         "quant/comp_units/exl3_comp_unit_8.cu",
+        "quant/comp_units/exl3_comp_unit_frac.cu",
         "quant/exl3_devctx.cu",
         "quant/exl3_gemm.cu",
         "quant/exl3_kernel_map.cu",
+        "quant/frac.cu",
         "quant/hadamard.cu",
         "quant/pack.cu",
         "quant/quantize.cu",
         "quant/reconstruct.cu",
         "quant/util.cu",
     ]
+    if torch.version.hip is None:
+        source_files += [
+            "quant/exl3_gemv.cu",
+            "quant/exl3_gemv_int8.cu",
+            "quant/comp_units/exl3_gemv_half_inst.cu",
+        ]
+        source_files += [
+            str(path.relative_to(sources_dir))
+            for path in sorted((sources_dir / "quant/comp_units").glob("exl3_gemv_int8_inst_*.cu"))
+        ]
     return [str((sources_dir / path).resolve()) for path in source_files]
 
 
@@ -165,9 +178,14 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "unpack_trellis",
         "pack_signs",
         "reconstruct",
+        "reconstruct_frac",
+        "quantize_tiles_frac",
+        "pack_trellis_frac",
+        "unpack_trellis_frac",
         "had_r_128",
         "hgemm",
         "bc_linear_exl3_run",
+        "bc_linear_exl3_run_configured",
     ),
     sources=_source_files,
     build_root_env="GPTQMODEL_EXLLAMAV3_BUILD_ROOT",
@@ -218,6 +236,15 @@ def _runtime_op(name: str):
     return _extension_api().op("exllamav3", name)
 
 
+def _linear_bitrate(value: int | float) -> int | float:
+    rate = float(value)
+    if rate.is_integer() and 1 <= rate <= 8:
+        return int(rate)
+    if rate in (1.5, 2.5, 3.5):
+        return rate
+    raise ValueError(f"Unsupported EXL3 bitrate {value!r}")
+
+
 class _BCLinearEXL3:
     """Preserve the old binding surface while dispatching through torch.ops."""
 
@@ -226,33 +253,34 @@ class _BCLinearEXL3:
         trellis: torch.Tensor,
         suh: torch.Tensor,
         svh: torch.Tensor,
-        K: int,
+        K: int | float,
         bias: Optional[torch.Tensor],
         mcg: bool,
         mul1: bool,
+        *,
+        kernel: KernelConfig | None = None,
     ):
         if not exllamav3_runtime_available():
             raise ModuleNotFoundError("ExLlamaV3 torch.ops kernels are not properly installed. Error: " + exllamav3_runtime_error())
         self.trellis = trellis
         self.suh = suh
         self.svh = svh
-        self.K = int(K)
+        self.K = _linear_bitrate(K)
         self.bias = bias
         self.mcg = bool(mcg)
         self.mul1 = bool(mul1)
+        policy = resolve_kernel_config(kernel)
+        self.fp16_gemv = policy.exl3_fp16_gemv
+        self.int8_gemv = policy.exl3_int8_gemv
+        self.fused_gemm = policy.exl3_fused_gemm
+        self._configured = not isinstance(self.K, int) or self.fp16_gemv or self.int8_gemv or self.fused_gemm
 
     def run(self, x: torch.Tensor, y: torch.Tensor) -> None:
-        _runtime_op("bc_linear_exl3_run")(
-            self.trellis,
-            self.suh,
-            self.svh,
-            self.K,
-            self.bias,
-            self.mcg,
-            self.mul1,
-            x,
-            y,
-        )
+        args = (self.trellis, self.suh, self.svh, self.K, self.bias, self.mcg, self.mul1, x, y)
+        if self._configured:
+            _runtime_op("bc_linear_exl3_run_configured")(*args, self.fp16_gemv, self.int8_gemv, self.fused_gemm)
+        else:
+            _runtime_op("bc_linear_exl3_run")(*args)
 
 
 class _ExllamaV3TorchOpsFacade:
@@ -294,11 +322,35 @@ class _ExllamaV3TorchOpsFacade:
     def unpack_trellis(self, unpacked: torch.Tensor, packed: torch.Tensor, K: int) -> None:
         _runtime_op("unpack_trellis")(unpacked, packed, int(K))
 
+    def pack_trellis_frac(self, packed: torch.Tensor, unpacked: torch.Tensor, KA: int, mask: int) -> None:
+        _runtime_op("pack_trellis_frac")(packed, unpacked, KA, mask)
+
+    def unpack_trellis_frac(self, unpacked: torch.Tensor, packed: torch.Tensor, KA: int, mask: int) -> None:
+        _runtime_op("unpack_trellis_frac")(unpacked, packed, KA, mask)
+
+    def quantize_tiles_frac(
+        self,
+        input_tiles: torch.Tensor,
+        output_tiles: torch.Tensor,
+        output_indices: torch.Tensor,
+        temp_costs: torch.Tensor,
+        temp_edges: torch.Tensor,
+        KA: int,
+        mask: int,
+    ) -> None:
+        _runtime_op("quantize_tiles_frac")(input_tiles, output_tiles, output_indices, temp_costs, temp_edges, KA, mask)
+
     def pack_signs(self, packed: torch.Tensor, unpacked: torch.Tensor) -> None:
         _runtime_op("pack_signs")(packed, unpacked)
 
-    def reconstruct(self, unpacked: torch.Tensor, packed: torch.Tensor, K: int, mcg: bool, mul1: bool) -> None:
-        _runtime_op("reconstruct")(unpacked, packed, int(K), bool(mcg), bool(mul1))
+    def reconstruct(self, unpacked: torch.Tensor, packed: torch.Tensor, K: int | float, mcg: bool, mul1: bool) -> None:
+        bitrate = _linear_bitrate(K)
+        if isinstance(bitrate, int):
+            _runtime_op("reconstruct")(unpacked, packed, bitrate, bool(mcg), bool(mul1))
+        else:
+            if mcg or not mul1:
+                raise ValueError("EXL3 half-integer bitrates require mul1")
+            _runtime_op("reconstruct_frac")(unpacked, packed, int(bitrate))
 
     def had_r_128(
         self,

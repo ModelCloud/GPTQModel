@@ -45,6 +45,35 @@ uint32_t exl3_vabsdiff4_sum(uint32_t a, uint32_t c)
         + ((a >> 24) & 0xffu);
 }
 
+// Adapted from ExLlamaV3 v1.6.7 (8c593e4), copyright TurboDerp and contributors, MIT.
+__device__ inline half2 decode_mul1_product_2(uint32_t x0, uint32_t x1)
+{
+    const uint32_t acc = 0x6400u;  // 0x6400 -> 1024.0 ..  0x67FF -> 2047.0
+    // uint32_t sum0;
+    // uint32_t sum1;
+    // asm ("vabsdiff4.u32.u32.u32.add %0, %1, %2, %3;" : "=r"(sum0) : "r"(x0), "r"(0), "r"(acc) : );
+    // asm ("vabsdiff4.u32.u32.u32.add %0, %1, %2, %3;" : "=r"(sum1) : "r"(x1), "r"(0), "r"(acc) : );
+    uint32_t sum0 = exl3_vabsdiff4_sum(x0, acc);
+    uint32_t sum1 = exl3_vabsdiff4_sum(x1, acc);
+    half2 k_inv_h2 = __half2half2(__ushort_as_half(0x1eee));  //  0.00677 = 1/147.7
+    half2 k_bias_h2 = __half2half2(__ushort_as_half(0xc931));  // -10.39 = (-1024.0 - 510.0) * k_inv_h
+    half_uint16 h0((uint16_t) sum0);
+    half_uint16 h1((uint16_t) sum1);
+    return __hfma2(__halves2half2(h0.as_half, h1.as_half), k_inv_h2, k_bias_h2);
+}
+
+// Ditto mcg (cb 1)
+__device__ inline half2 decode_mcg_product_2(uint32_t x0, uint32_t x1)
+{
+    x0 = exl3_lop3_6a(x0, 0x8fff8fffu, 0x3b603b60u);
+    x1 = exl3_lop3_6a(x1, 0x8fff8fffu, 0x3b603b60u);
+    half2_uint32 xu0(x0);
+    half2_uint32 xu1(x1);
+    half2 d0 = __lows2half2(xu0.as_half2, xu1.as_half2);
+    half2 d1 = __highs2half2(xu0.as_half2, xu1.as_half2);
+    return __hadd2(d0, d1);
+}
+
 template <int cb>
 __device__ inline half decode_3inst(uint32_t x)
 {

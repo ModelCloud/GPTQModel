@@ -9,6 +9,7 @@
 #include "bf16_scale.h"
 
 #include "quant/quantize.cuh"
+#include "quant/frac.cuh"
 #include "quant/pack.cuh"
 #include "quant/reconstruct.cuh"
 #include "quant/hadamard.cuh"
@@ -62,6 +63,34 @@ void reconstruct_wrapper(torch::Tensor& unpacked, torch::Tensor packed, int64_t 
     reconstruct(unpacked, packed, static_cast<int>(K), mcg, mul1);
 }
 
+int checked_half_rate(int64_t K)
+{
+    TORCH_CHECK(K >= 1 && K <= 3, "EXL3 half-bit integral part must be 1..3");
+    return static_cast<int>(K);
+}
+
+void quantize_tiles_frac_wrapper(
+    torch::Tensor input_tiles, torch::Tensor& output_tiles, torch::Tensor& output_indices,
+    torch::Tensor& temp_costs, torch::Tensor& temp_edges, int64_t K, int64_t mask)
+{
+    quantize_tiles_frac(input_tiles, output_tiles, output_indices, temp_costs, temp_edges, checked_half_rate(K), mask);
+}
+
+void pack_trellis_frac_wrapper(torch::Tensor& packed, torch::Tensor unpacked, int64_t K, int64_t mask)
+{
+    pack_trellis_frac(packed, unpacked, checked_half_rate(K), mask);
+}
+
+void unpack_trellis_frac_wrapper(torch::Tensor& unpacked, torch::Tensor packed, int64_t K, int64_t mask)
+{
+    unpack_trellis_frac(unpacked, packed, checked_half_rate(K), mask);
+}
+
+void reconstruct_frac_wrapper(torch::Tensor& unpacked, torch::Tensor packed, int64_t K)
+{
+    reconstruct_frac(unpacked, packed, checked_half_rate(K));
+}
+
 void had_r_128_wrapper(
     torch::Tensor input,
     torch::Tensor& output,
@@ -96,6 +125,14 @@ void bc_linear_exl3_run_wrapper(
     bc_linear_exl3_run(trellis, suh, svh, K, bias, mcg, mul1, x, y);
 }
 
+int64_t bc_linear_exl3_run_configured_wrapper(
+    torch::Tensor trellis, torch::Tensor suh, torch::Tensor svh, double K,
+    std::optional<torch::Tensor> bias, bool mcg, bool mul1, torch::Tensor x, torch::Tensor& y,
+    bool fp16_gemv, int64_t int8_gemv, bool fused_gemm)
+{
+    return bc_linear_exl3_run_configured(trellis, suh, svh, K, bias, mcg, mul1, x, y, fp16_gemv, int8_gemv, fused_gemm);
+}
+
 std::tuple<torch::Tensor, torch::Tensor> bf16_prescale_wrapper(torch::Tensor x, double bound)
 {
     return bf16_prescale(x, bound);
@@ -122,9 +159,14 @@ TORCH_LIBRARY(gptqmodel_exllamav3, m)
     m.def("unpack_trellis(Tensor(a!) unpacked, Tensor packed, int K) -> ()");
     m.def("pack_signs(Tensor(a!) packed, Tensor unpacked) -> ()");
     m.def("reconstruct(Tensor(a!) unpacked, Tensor packed, int K, bool mcg, bool mul1) -> ()");
+    m.def("reconstruct_frac(Tensor(a!) unpacked, Tensor packed, int K) -> ()");
+    m.def("quantize_tiles_frac(Tensor input_tiles, Tensor(a!) output_tiles, Tensor(b!) output_indices, Tensor(c!) temp_costs, Tensor(d!) temp_edges, int K, int mask) -> ()");
+    m.def("pack_trellis_frac(Tensor(a!) packed, Tensor unpacked, int K, int mask) -> ()");
+    m.def("unpack_trellis_frac(Tensor(a!) unpacked, Tensor packed, int K, int mask) -> ()");
     m.def("had_r_128(Tensor input, Tensor(a!) output, Tensor? pre_scale, Tensor? post_scale, float scale) -> ()");
     m.def("hgemm(Tensor a, Tensor b, Tensor(a!) c) -> ()");
     m.def("bc_linear_exl3_run(Tensor trellis, Tensor suh, Tensor svh, int K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y) -> ()");
+    m.def("bc_linear_exl3_run_configured(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(a!) y, bool fp16_gemv, int int8_gemv, bool fused_gemm=False) -> int");
     m.def("bf16_prescale(Tensor x, float bound) -> (Tensor, Tensor)");
     m.def("bf16_rescale(Tensor result, Tensor scale, Tensor? bias, int n_cols) -> Tensor");
 }
@@ -142,9 +184,14 @@ TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m)
     m.impl("unpack_trellis", &unpack_trellis_wrapper);
     m.impl("pack_signs", &pack_signs_wrapper);
     m.impl("reconstruct", &reconstruct_wrapper);
+    m.impl("reconstruct_frac", &reconstruct_frac_wrapper);
+    m.impl("quantize_tiles_frac", &quantize_tiles_frac_wrapper);
+    m.impl("pack_trellis_frac", &pack_trellis_frac_wrapper);
+    m.impl("unpack_trellis_frac", &unpack_trellis_frac_wrapper);
     m.impl("had_r_128", &had_r_128_wrapper);
     m.impl("hgemm", &hgemm_wrapper);
     m.impl("bc_linear_exl3_run", &bc_linear_exl3_run_wrapper);
+    m.impl("bc_linear_exl3_run_configured", &bc_linear_exl3_run_configured_wrapper);
     m.impl("bf16_prescale", &bf16_prescale_wrapper);
     m.impl("bf16_rescale", &bf16_rescale_wrapper);
 }
