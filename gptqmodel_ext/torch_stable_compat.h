@@ -39,6 +39,16 @@
 #include <torch/csrc/inductor/aoti_torch/generated/c_shim_cpu.h>
 
 // ---------------------------------------------------------------------------
+// Stable error check
+// ---------------------------------------------------------------------------
+// torch 2.15 exports STABLE_TORCH_ERROR_CODE_CHECK. The 2.10 ABI floor this
+// layer targets does not, but its stable headers already call the header-only
+// TORCH_ERROR_CODE_CHECK themselves, so fall back to that one.
+#ifndef STABLE_TORCH_ERROR_CODE_CHECK
+#define STABLE_TORCH_ERROR_CODE_CHECK TORCH_ERROR_CODE_CHECK
+#endif
+
+// ---------------------------------------------------------------------------
 // Device backend selection
 // ---------------------------------------------------------------------------
 // The stable device shims are the same C symbols on both backends: a ROCm

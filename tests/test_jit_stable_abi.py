@@ -272,3 +272,25 @@ def test_stable_abi_empty_uses_the_direct_allocation_shim():
     body = header[start:end]
     assert "aoti_torch_empty_strided(" in body
     assert "torch::stable::empty(" in body
+
+
+def test_stable_abi_error_check_falls_back_before_torch_2_15():
+    """The error-check macro must exist on the 2.10 floor.
+
+    torch 2.15 exports ``STABLE_TORCH_ERROR_CODE_CHECK``; the 2.10 release the
+    layer targets does not, so an unguarded use fails to compile on exactly the
+    versions this PR promises to support.  The compat header has to keep its
+    own fallback to the header-only ``TORCH_ERROR_CODE_CHECK`` that torch's
+    stable headers already call.
+    """
+
+    header = (
+        Path(__file__).resolve().parents[1]
+        / "gptqmodel_ext"
+        / "torch_stable_compat.h"
+    ).read_text(encoding="utf-8")
+    assert (
+        "#ifndef STABLE_TORCH_ERROR_CODE_CHECK\n"
+        "#define STABLE_TORCH_ERROR_CODE_CHECK TORCH_ERROR_CODE_CHECK\n"
+        "#endif"
+    ) in header
