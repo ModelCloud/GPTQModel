@@ -47,7 +47,6 @@ void reconstruct_kernel
     half2 n1 = __shfl_down_sync(__activemask(), frag[0][1], 4, 32);
     half2 n2 = __shfl_down_sync(__activemask(), frag[1][0], 4, 32);
     half2 n3 = __shfl_down_sync(__activemask(), frag[1][1], 4, 32);
-    __syncwarp();
 
     if (!(lane_id & 4))
     {
