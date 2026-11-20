@@ -2,8 +2,8 @@
 
 `gptqmodel.exllamav3.ext.exllamav3_ext.exl3_moe_coop` runs the gate and up
 projections, activation, down projection and weighted sum of already-routed
-experts on NVIDIA SM80 or newer. It accepts `3inst`, `mcg`, `mul1` and
-`q4nx` codebooks. The model's router supplies the expert IDs
+experts on NVIDIA SM80 or newer. It accepts `3inst`, `mcg`, `mul1`, `q4nx`
+and `r4nx` codebooks. The model's router supplies the expert IDs
 and coefficients. Integrations call the operator explicitly.
 
 Callers provide these tensors on the input device.
@@ -13,7 +13,8 @@ Callers provide these tensors on the input device.
 - INT64 pointer tables for packed trellis, SU, SV and optional bias. Each
   table is a one-dimensional device array with an entry per local expert.
   Gate and up share a bitrate. Down may use another bitrate with the same
-  codebook. Pass `q4nx=True` for Q4NX at 2.5, 3.0, or 3.5 bpw with
+  codebook. Pass `q4nx=True` for Q4NX at 2.5, 3.0, or 3.5 bpw, or `r4nx=True`
+  for R4NX at 2.5, 3.0, 3.5, or 4.0 bpw, with
   `mcg=False` and `mul1=False`. Keep the packed tensors and tables alive through
   execution and graph replay. Synchronize the publishing stream before consuming them.
 - Caller-owned scratch for `S` slots, where `rows * topk <= S <= 256`.

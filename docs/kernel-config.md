@@ -296,9 +296,9 @@ variables. Only the fields above select behaviour.
 | `exl3_capture_frontier` | `None` | Durable capture-frontier root |
 
 Automatic launch limits are 256 tiles for ordinary EXL3 integer encoding
-and 128 for ordinary fractional encoding. Q4NX uses up to 512 tiles for
-W2.5 and W3.0 final encoding and 1024 for scale search and W3.5 final
-encoding. These Q4NX limits bound the per-launch path history to 16 MiB
+and 128 for ordinary fractional encoding. Q4NX and R4NX use up to 512 tiles
+for W2.5 and W3.0 final encoding and 1024 for scale search and W3.5 final
+encoding. These NX limits bound the per-launch path history to 16 MiB
 and 4 MiB respectively. Set `exl3_tile_batch` to a smaller value to lower
 temporary memory use.
 

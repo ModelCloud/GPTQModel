@@ -169,6 +169,77 @@ PYTHONPATH=. CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=2 \
     /root/venv/bin/python tests/benchmark_exl3_q4nx_gemv_blackwell.py --check
 ```
 
+## R4NX
+
+R4NX is the third EXL3 codebook family. It reuses the Q4NX tile layout, the
+`kv`-bit states and the 64 zero-prefixed states byte for byte, and changes only
+the state-to-weight map:
+
+```
+product = state * 0x8095576D
+w[c]    = int8((product >> (8 * c)) & 0xFF) / sqrt(5461.25)
+```
+
+The multiplier is odd, so `state -> product` is a bijection on the 32-bit state
+space and the four-byte extraction is a bijection onto the codebook the
+quantizer searches. One decode step is one 32-bit multiply and one byte
+permute; Q4NX needs the same multiply plus a per-nibble
+`((x >> 4) & 15) + (x & 15)` add.
+
+Set `EXL3Config(bits=4.0, codebook="r4nx")` for all selected projections, or
+assign the rate and codebook to a subset through `dynamic`.
+
+| Tile property | `q4nx` | `r4nx` |
+| --- | --- | --- |
+| Rates | 2.5, 3.0, 3.5 bpw | 2.5, 3.0, 3.5, 4.0 bpw |
+| 16×16 payload | 40, 48, 56 int16 words | 40, 48, 56, 64 int16 words |
+| State | 22, 20 or 18 state bits | 22, 20, 18 or 16 state bits |
+| Level set | Four nibble sums in `[-15, 15]`, divided by `sqrt(42.5)` | Four signed bytes in `[-128, 127]`, divided by `sqrt(5461.25)` |
+| Checkpoint selection | Scalar int32 `.q4nx` marker with multiplier `0x83DCD12D` | Scalar int32 `.r4nx` marker with multiplier `0x8095576D` |
+
+The encoder is the same beam/exact Viterbi as Q4NX. W4.0 has a single overlap
+class, so each step is an exact 65536-way argmin. The retained candidates are
+ranked by key before their slots are stored, so the beam's predecessor
+tie-break does not depend on thread scheduling.
+
+NVIDIA dispatch adds packed GEMM instances for W2.5, W3.0, W3.5 and W4.0, a
+`reconstruct_r4nx` kernel, and the Ampere reconstruct-then-HGEMM fallback. R4NX
+has no packed-GEMV instances, so small-batch calls use the packed GEMM. The
+cooperative routed-decode operator accepts `r4nx=True`.
+
+```mermaid
+flowchart LR
+    C["EXL3Config and dynamic rules"] --> R{"Supported R4NX rate?"}
+    R -->|yes| V["quantize_tiles_r4nx"]
+    R -->|no| E["ValueError"]
+    V --> P["pack_trellis_r4nx"]
+    P --> S["Safetensors trellis, scales and r4nx marker"]
+    S --> G["Packed GEMM, reconstruct_r4nx or routed decode"]
+    classDef error fill:#f9d5d5,stroke:#af3b3b,color:#222
+    class E error
+```
+
+### Codebook quality
+
+A 4.0 bpw tile visits only 2^16 states, and the four bytes of
+`state * multiplier` trace a sparse lattice through the 256-level grid instead
+of filling it. Q4NX's 31-level nibble-sum grid is coarser, so the same number
+of states covers it better. Both rows below search the same 2^16 states on
+Blackwell GB10 (`sm_121`); the Q4NX row is a hypothetical W4.0 and is the
+best an encoder could do with that codebook:
+
+| 4.0 bpw codebook | Encoder MSE per weight (4 × 256 N(0,1) tiles) | Nearest-vector MSE, best loading in `[1.25, 1.85]` (512 Gaussian 4-vectors) |
+| --- | ---: | ---: |
+| `q4nx` | 0.0147 | 0.00797 |
+| `r4nx` | 0.0397 | 0.00963 |
+| `r4nx` ÷ `q4nx` | 2.70× | 1.21× |
+
+`tests/kernels/test_exl3_r4nx_codebook.py` pins the best-loading values and
+the roughly 21% gap. The issue target that R4NX reconstruct no worse than Q4NX
+at 4.0 bpw is not met by this codebook family under either measurement. The
+multiplier is the best of a 3000-multiplier sweep; the decode-cost trade-off
+is left to maintainers.
+
 ## Runtime policy
 
 ```python

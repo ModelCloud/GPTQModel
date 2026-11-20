@@ -362,6 +362,10 @@ backend = BACKEND.EXL3_EXLLAMA_V3
 Set `codebook="q4nx"` with `bits=2.5`, `3.0`, or `3.5` to use EXL3's Q4NX
 codebook on NVIDIA CUDA. [Q4NX checkpoint layout and per-projection recipe](exl3-native-decode.md#q4nx)
 
+Set `codebook="r4nx"` with `bits=2.5`, `3.0`, `3.5`, or `4.0` for the R4NX
+byte codebook, which decodes with one multiply and one byte permute. [R4NX
+layout, dispatch, and measured codebook error](exl3-native-decode.md#r4nx)
+
 `bits` is a target average bitrate, not a uniform integer field width.
 Quantization requires CUDA/HIP and the ExLlama V3 integration and its build
 dependencies, including the Python package `pydantic`. After saving,
