@@ -857,7 +857,10 @@ def test_checkpoint_module_config_roundtrips_macaq_kernel():
     assert restored.pre_alpha == 0.7
 
 
-@pytest.mark.skipif(not TRITON_AVAILABLE, reason="MacaqTritonLinear requires Triton")
+@pytest.mark.skipif(
+    not TRITON_AVAILABLE or not torch.cuda.is_available(),
+    reason="MacaqTritonLinear checkpoint restore requires Triton and a CUDA or ROCm device",
+)
 def test_checkpoint_restores_recorded_macaq_triton_kernel():
     from gptqmodel.looper.checkpoint_modules import packed_module_config, restore_packed_module
 
