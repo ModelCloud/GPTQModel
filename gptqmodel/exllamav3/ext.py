@@ -115,6 +115,12 @@ def _source_files() -> list[str]:
         units = sources_dir / "quant/comp_units"
         for pattern in ("exl3_gemv_int8_inst_*.cu", "exl3_moe_coop_inst_*.cu"):
             source_files += [str(path.relative_to(sources_dir)) for path in sorted(units.glob(pattern))]
+    else:
+        # RDNA4 (gfx120x) wave32 kernels: the native GEMM replaces the
+        # NVIDIA-only `exl3_gemm_kernel.cuh` path and the small-batch GEMV
+        # handles decode-sized batches. The int8, MoE and Q4NX quantizer
+        # kernels in this directory are CUDA-only for now.
+        source_files += ["quant/exl3_gemm_hip.cu", "quant/exl3_gemv.cu"]
     return [str((sources_dir / path).resolve()) for path in source_files]
 
 
@@ -181,6 +187,9 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "pack_signs",
         "reconstruct",
         "reconstruct_frac",
+        "reconstruct_r4nx",
+        "pack_trellis_r4nx",
+        "unpack_trellis_r4nx",
         "quantize_tiles_frac",
         "pack_trellis_frac",
         "unpack_trellis_frac",
@@ -188,6 +197,7 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "hgemm",
         "bc_linear_exl3_run",
         "bc_linear_exl3_run_configured",
+        "bc_linear_exl3_run_hip_gemv",
     ) + (("exl3_moe_coop", "quantize_tiles_q4nx", "pack_trellis_q4nx") if torch.version.hip is None else ()),
     sources=_source_files,
     build_root_env="GPTQMODEL_EXLLAMAV3_BUILD_ROOT",
@@ -233,6 +243,24 @@ def prewarm_exllamav3_extension() -> bool:
     return _extension_api().load(name="exllamav3")["exllamav3"]
 
 
+def exl3_native_hip_gemm_available(device: torch.device | str | int | None = None) -> bool:
+    """Whether the native RDNA4 EXL3 WMMA GEMM can run on ``device``.
+
+    Mirrors ``exl3_gemm_hip_available()`` in the C++ dispatcher: the fused
+    kernel is built for gfx1200/gfx1201, and every other ROCm target keeps the
+    portable reconstruct + hgemm path. Pure metadata lookup, so the answer is
+    available before the extension is loaded.
+    """
+
+    if torch.version.hip is None:
+        return False
+
+    from ..utils.arch import rocm_arch
+
+    arch = rocm_arch(device)
+    return arch is not None and arch.startswith("gfx120")
+
+
 def _runtime_op(name: str):
     _prepare_build_env()
     return _extension_api().op("exllamav3", name)
@@ -262,6 +290,7 @@ class _BCLinearEXL3:
         *,
         kernel: KernelConfig | None = None,
         q4nx: bool = False,
+        r4nx: bool = False,
     ):
         if not exllamav3_runtime_available():
             raise ModuleNotFoundError("ExLlamaV3 torch.ops kernels are not properly installed. Error: " + exllamav3_runtime_error())
@@ -273,6 +302,7 @@ class _BCLinearEXL3:
         self.mcg = bool(mcg)
         self.mul1 = bool(mul1)
         self.q4nx = q4nx
+        self.r4nx = bool(r4nx)
         policy = resolve_kernel_config(kernel)
         self.fp16_gemv = policy.exl3_fp16_gemv
         self.int8_gemv = policy.exl3_int8_gemv
@@ -285,6 +315,17 @@ class _BCLinearEXL3:
         if self.q4nx:
             gemv = self.fp16_gemv or not self.fused_gemm
             _runtime_op("bc_linear_exl3_run_configured")(*args, gemv, 0, self.fused_gemm, q4nx=True)
+        elif self.r4nx:
+            # No tensor-core R4NX kernel: the op validates the marker and rate
+            # and reports the reconstruct path (LinearEXL3 never runs this).
+            _runtime_op("bc_linear_exl3_run_configured")(
+                *args,
+                self.fp16_gemv,
+                0,
+                self.fused_gemm,
+                q4nx=False,
+                r4nx=True,
+            )
         elif self._configured:
             _runtime_op("bc_linear_exl3_run_configured")(*args, self.fp16_gemv, self.int8_gemv, self.fused_gemm)
         else:
@@ -333,6 +374,15 @@ class _ExllamaV3TorchOpsFacade:
     def pack_trellis_q4nx(self, packed: torch.Tensor, suffixes: torch.Tensor, kv: int) -> None:
         _runtime_op("pack_trellis_q4nx")(packed, suffixes, kv)
 
+    def pack_trellis_r4nx(self, packed: torch.Tensor, suffixes: torch.Tensor, kv: int) -> None:
+        _runtime_op("pack_trellis_r4nx")(packed, suffixes, int(kv))
+
+    def unpack_trellis_r4nx(self, states: torch.Tensor, packed: torch.Tensor, kv: int) -> None:
+        _runtime_op("unpack_trellis_r4nx")(states, packed, int(kv))
+
+    def reconstruct_r4nx(self, unpacked: torch.Tensor, packed: torch.Tensor, K: int | float) -> None:
+        _runtime_op("reconstruct_r4nx")(unpacked, packed, float(K))
+
     def unpack_trellis(self, unpacked: torch.Tensor, packed: torch.Tensor, K: int) -> None:
         _runtime_op("unpack_trellis")(unpacked, packed, int(K))
 
@@ -378,6 +428,23 @@ class _ExllamaV3TorchOpsFacade:
 
     def hgemm(self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> None:
         _runtime_op("hgemm")(a, b, c)
+
+    def bc_linear_exl3_run_hip_gemv(
+        self,
+        trellis: torch.Tensor,
+        suh: torch.Tensor,
+        svh: torch.Tensor,
+        K: int | float,
+        bias: Optional[torch.Tensor],
+        mcg: bool,
+        mul1: bool,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        q4nx: bool = False,
+    ) -> int:
+        return _runtime_op("bc_linear_exl3_run_hip_gemv")(
+            trellis, suh, svh, float(K), bias, bool(mcg), bool(mul1), x, y, bool(q4nx)
+        )
 
     def exl3_moe_coop(self, *args, **kwargs) -> None:
         if torch.version.hip is not None:

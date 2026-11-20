@@ -32,7 +32,7 @@ from .._quant_methods import (
     LEGACY_PARO_QUANT_METHOD,
 )
 from ..adapter.adapter import Lora, normalize_adapter
-from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, HALF_RATES, Q4NX_RATES
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, HALF_RATES, Q4NX_RATES, R4NX_RATES
 from ..utils.backend_config import RuntimeConfig
 from ..utils.hf import resolve_checkpoint_subfolder
 from ..utils.kernel import KernelConfig, resolve_kernel_config
@@ -1336,9 +1336,11 @@ def _normalize_exl3_bits(
         raise ValueError(f"EXL3Config: `{field}` must be between 1.0 and 8.0.")
     if codebook == "q4nx" and bits not in Q4NX_RATES:
         raise ValueError(f"EXL3Config: q4nx supports 2.5, 3.0, or 3.5 bpw, got `{field}={bits:g}`.")
+    if codebook == "r4nx" and bits not in R4NX_RATES:
+        raise ValueError(f"EXL3Config: r4nx supports 2.5, 3.0, 3.5, or 4.0 bpw, got `{field}={bits:g}`.")
     if bits.is_integer():
         return int(bits)
-    if bits in HALF_RATES and codebook in (None, "mul1", "q4nx"):
+    if bits in HALF_RATES and codebook in (None, "mul1", "q4nx", "r4nx"):
         return bits
     raise ValueError(
         f"EXL3Config: `{field}={bits:g}` is not an integer trellis width. "
@@ -4258,6 +4260,43 @@ class ResolvedModuleConfig:
             return default
         fields = dict(self._fields)
         return copy.deepcopy(_select_dynamic_value(fields, key, default, sub_key))
+
+
+def native_correction_requested(config: "BaseQuantizeConfig") -> bool:
+    """Report whether the run needs the native activation capture pass.
+
+    GPTAQ (any alpha) and FOEM with ``alpha > 0`` consume captured module
+    inputs. The global options decide most runs, but a ``dynamic`` rule can
+    enable the correction for only some projections; the capture pass runs for
+    the whole model, so one such rule is enough to require it (#5762).
+    """
+
+    if getattr(config, "gptaq", None) is not None:
+        return True
+    foem = getattr(config, "foem", None)
+    if foem is not None and getattr(foem, "alpha", 0.0) > 0:
+        return True
+
+    dynamic = getattr(config, "dynamic", None)
+    if not dynamic:
+        return False
+    for values in dynamic.values():
+        if not isinstance(values, dict):
+            continue
+        # GPTAQ always consumes a native entry, even when alpha is 0.
+        if values.get("gptaq") is not None:
+            return True
+        override = values.get("foem")
+        if override is None:
+            continue
+        alpha = (
+            override.get("alpha", 0.0)
+            if isinstance(override, dict)
+            else getattr(override, "alpha", 0.0)
+        )
+        if alpha is not None and float(alpha) > 0:
+            return True
+    return False
 
 
 def resolve_module_config_snapshot(config: "BaseQuantizeConfig", module_name: str) -> ResolvedModuleConfig:
@@ -9520,7 +9559,9 @@ class EXL3Config(PreProcessorConfig):
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
         self.codebook = str(self.codebook).strip().lower()
         if self.codebook not in (*EXL3_CODEBOOK_MARKERS, "3inst"):
-            raise ValueError("EXL3Config: `codebook` must be one of `mcg`, `mul1`, `q4nx`, or `3inst`.")
+            raise ValueError(
+                "EXL3Config: `codebook` must be one of `mcg`, `mul1`, `q4nx`, `r4nx`, or `3inst`."
+            )
 
         self.bits = _normalize_exl3_bits(self.bits, codebook=self.codebook, field="bits")
 

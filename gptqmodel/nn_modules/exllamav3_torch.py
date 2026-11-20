@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from ..exllamav3.q4nx import decode_q4nx_states, unpack_q4nx_states
+from ..exllamav3.r4nx import decode_r4nx_states, unpack_r4nx_states
 from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, trellis_rate
 from ..models._const import DEVICE
 from ..utils.cpu_features import cpu_bf16x3_scope, has_avx512_bf16, has_cpu_bf16x3_precision
@@ -22,6 +23,7 @@ from ..utils.logger import setup_logger
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from .compiled_state import compiled_module_getstate
 from .exllamav3 import _EXL3_BUFFER_NAMES, _EXL3_REQUIRED_BUFFERS, _torch_dtype
+from .qlinear._numerics import fp32_epilogue_context
 
 
 log = setup_logger()
@@ -381,6 +383,7 @@ class ExllamaV3TorchLinear(nn.Module):
                 getattr(self, "mcg", None) is not None,
                 getattr(self, "mul1", None) is not None,
                 q4nx=getattr(self, "q4nx", None) is not None,
+                r4nx=getattr(self, "r4nx", None) is not None,
                 max_integer_rate=16,
             )
         except ValueError as exc:
@@ -434,6 +437,8 @@ class ExllamaV3TorchLinear(nn.Module):
             )
 
         packed = trellis[:, tile_n_start:tile_n_end]
+        if getattr(self, "r4nx", None) is not None:
+            return unpack_r4nx_states(packed)
         if getattr(self, "q4nx", None) is not None:
             return unpack_q4nx_states(packed)
 
@@ -514,7 +519,11 @@ class ExllamaV3TorchLinear(nn.Module):
 
         encoded = self._unpack_indices(tile_n_start, tile_n_end)
         codebook = self._codebook_name()
-        if codebook == "q4nx":
+        if codebook == "r4nx":
+            # R4NX decoding keeps the four levels as a trailing dimension;
+            # flatten so the 256-entry tile permutation applies per weight.
+            decoded = decode_r4nx_states(encoded).flatten(-2)
+        elif codebook == "q4nx":
             decoded = decode_q4nx_states(encoded)
         else:
             lut = _codebook_lut(codebook, trellis.device.type, trellis.device.index)
@@ -582,24 +591,29 @@ class ExllamaV3TorchLinear(nn.Module):
     def _forward_eager(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
         compute_dtype = torch.float32
-        x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
-        if (
-            x.device.type == "cpu"
-            and _cpu_bf16x3_support()
-            and _cpu_bf16x3_should_use(
-                x_2d.shape[0],
-                self.in_features,
-                self.out_features,
-            )
-        ):
-            with cpu_bf16x3_scope():
+        # Both Hadamards and every tiled projection must run in the explicit
+        # FP32 contract; an ambient autocast context would otherwise round the
+        # Hadamard output before the packed-code projection and overflow it
+        # (#5837). The context restores the caller's autocast state on exit.
+        with fp32_epilogue_context(x.device.type):
+            x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
+            if (
+                x.device.type == "cpu"
+                and _cpu_bf16x3_support()
+                and _cpu_bf16x3_should_use(
+                    x_2d.shape[0],
+                    self.in_features,
+                    self.out_features,
+                )
+            ):
+                with cpu_bf16x3_scope():
+                    y = self._forward_chunked(x_2d, compute_dtype)
+            else:
                 y = self._forward_chunked(x_2d, compute_dtype)
-        else:
-            y = self._forward_chunked(x_2d, compute_dtype)
-        bias = getattr(self, "bias", None)
-        if bias is not None:
-            y = y + bias.to(dtype=compute_dtype)
-        y = y.view(*x.shape[:-1], self.out_features)
+            bias = getattr(self, "bias", None)
+            if bias is not None:
+                y = y + bias.to(dtype=compute_dtype)
+            y = y.view(*x.shape[:-1], self.out_features)
         return y.to(input_dtype)
 
     def optimize(

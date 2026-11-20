@@ -1447,15 +1447,17 @@ def _offload_disk_locked(
 
     module_offload_dir = os.path.join(disk_path, name)
 
-    total_bytes = 0
-
-    state_items = list(module.state_dict().values())
-
-    for tensor in state_items:
-        total_bytes += _tensor_nbytes(tensor)
-
-    if not force and total_bytes <= _SMALL_MODULE_OFFLOAD_BYTES:
-        return
+    # The size preflight only controls the non-forced small-module skip. With
+    # force=True it cannot change the decision, so building its state dict would
+    # run the checkpoint-layout hooks a second time for nothing -- each GPTQ
+    # v2 -> v1 qzeros conversion allocates and repacks the whole payload
+    # (#5850). The bundle writer builds the only state dict the offload needs.
+    if not force:
+        total_bytes = sum(
+            _tensor_nbytes(tensor) for tensor in module.state_dict().values()
+        )
+        if total_bytes <= _SMALL_MODULE_OFFLOAD_BYTES:
+            return
 
     # Write the new bundle into a sibling temp dir and swap it in with two
     # renames. The previous scheme (rmtree the live dir, then serialize into

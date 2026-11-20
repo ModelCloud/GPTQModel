@@ -14,7 +14,7 @@ import weakref
 from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, cast
 
 import torch
 import transformers
@@ -54,7 +54,18 @@ from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_by_name, get_op_name
 from ..quantization.awq.utils.packing_utils import source_weight_out_in
-from ..quantization.config import FORMAT, METHOD, CalibrationConfig, MSEConfig, QuantizeConfig, resolve_quant_format
+from ..quantization.config import (
+    FORMAT,
+    METHOD,
+    CalibrationConfig,
+    Fallback,
+    FallbackStrategy,
+    MSEConfig,
+    QuantizeConfig,
+    _normalize_mse,
+    resolve_quant_format,
+)
+from ..quantization.fallback_smooth import affine_range_with_zero, symmetric_range_from_bounds
 from ..utils.attn_mask import (
     align_single_head_capture,
     exclude_attention_sinks,
@@ -62,7 +73,7 @@ from ..utils.attn_mask import (
 )
 from ..utils.ctx import ctx
 from ..utils.device import get_device
-from ..utils.fallback import normalize_fallback
+from ..utils.fallback import normalize_fallback, resolve_fallback_strategy
 from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import (
@@ -269,16 +280,33 @@ def _compute_awq_weight_mean(
 
 
 def _awq_affine_qparams(
-    w: torch.Tensor, bits: int, *, scaled_zero_offset: bool = False
+    w: torch.Tensor,
+    bits: int,
+    *,
+    scaled_zero_offset: bool = False,
+    minimum: Optional[torch.Tensor] = None,
+    maximum: Optional[torch.Tensor] = None,
 ):
     """Choose affine metadata whose used codes can be decoded in the input dtype."""
 
     zero = torch.zeros_like(w[:, :1])
-    maximum = torch.maximum(w.amax(dim=1, keepdim=True), zero)
-    minimum = torch.minimum(w.amin(dim=1, keepdim=True), zero)
+    if maximum is None:
+        maximum = w.amax(dim=1, keepdim=True)
+    if minimum is None:
+        minimum = w.amin(dim=1, keepdim=True)
+    maximum = torch.maximum(maximum, zero)
+    minimum = torch.minimum(minimum, zero)
     max_code = (1 << bits) - 1
     limits = torch.finfo(w.dtype)
-    scales = (maximum - minimum).clamp(min=1e-5) / max_code
+    # Strategy bounds are selected in a wide dtype so a finite FP16 range can
+    # neither overflow `center + sigma * deviation` nor its subtraction. Narrow
+    # only the resulting scale: even STDCLIP's widest FP16 interval (6 * std,
+    # and std <= 65504) gives 393024 / 15 = 26202, which is representable. RTN
+    # bounds arrive in `w.dtype` and keep the original expression exactly.
+    wide = torch.promote_types(minimum.dtype, maximum.dtype)
+    scales = (maximum.to(wide) - minimum.to(wide)).clamp(min=1e-5) / max_code
+    if wide != w.dtype:
+        scales = scales.to(w.dtype)
 
     # A finite input range can overflow its low-precision subtraction. The
     # maximum code can also decode outside the dtype even when the scale itself
@@ -332,7 +360,64 @@ def _awq_affine_qparams(
         else:
             raise ValueError("AWQ scaled zero point cannot be represented")
 
-    return scales, zeros, repair
+    return scales.to(w.dtype), zeros.to(w.dtype), repair
+
+
+def _awq_strategy_bounds_typed(
+    values: torch.Tensor, strategy: FallbackStrategy, sigma: float
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Select a fallback strategy's per-row interval in ``values``' dtype."""
+
+    if strategy is FallbackStrategy.MIDPOINT:
+        return (
+            values.amin(dim=1, keepdim=True),
+            values.amax(dim=1, keepdim=True),
+        )
+    if strategy is FallbackStrategy.MEAN:
+        center = values.mean(dim=1, keepdim=True)
+        deviation = (values - center).abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
+        return center - deviation, center + deviation
+    if strategy is FallbackStrategy.MEDIAN:
+        center = values.median(dim=1, keepdim=True).values
+        deviation = (values - center).abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
+        return center - deviation, center + deviation
+    if strategy is FallbackStrategy.STDCLIP:
+        center = values.mean(dim=1, keepdim=True)
+        deviation = values.std(dim=1, keepdim=True, unbiased=False).clamp(min=1e-8)
+        return center - sigma * deviation, center + sigma * deviation
+    raise ValueError(f"Unsupported AWQ fallback strategy: {strategy}")
+
+
+def _awq_strategy_bounds(
+    w: torch.Tensor, strategy: FallbackStrategy, *, sigma: float = 3.0
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return the per-row weight range selected by a fallback strategy.
+
+    The ranges match the GPTQ fallback branches. AWQ maps them onto its own
+    packed code layout in :meth:`AWQProcessor.pseudo_quantize_tensor`; the
+    strategy only decides which values the grid must cover.
+
+    A finite FP16 group can have a population standard deviation of 60000, so
+    ``3 * std`` is 180000: forming that endpoint in FP16 overflows to infinity
+    even though the selected interval and its INT4 codes decode finitely
+    (#5821). MEAN/MEDIAN have the same problem when ``center +- deviation``
+    leaves the FP16 range. Keep the narrow arithmetic whenever it is finite so
+    ordinary ranges keep their exact previous grid, and recompute only an
+    overflowing interval in at least FP32.
+    """
+
+    minimum, maximum = _awq_strategy_bounds_typed(w, strategy, sigma)
+    if strategy is FallbackStrategy.MIDPOINT:
+        # The raw extrema of finite weights are finite, so nothing can overflow.
+        return minimum, maximum
+    if bool(torch.isfinite(minimum).all() & torch.isfinite(maximum).all()):
+        return minimum, maximum
+    wide = torch.promote_types(w.dtype, torch.float32)
+    if wide == w.dtype:
+        # The input itself is already wide or non-finite; there is no wider
+        # arithmetic left to try.
+        return minimum, maximum
+    return _awq_strategy_bounds_typed(w.to(wide), strategy, sigma)
 
 
 def _awq_bound_affine_codes(
@@ -345,6 +430,27 @@ def _awq_bound_affine_codes(
     codes = torch.where(decoded < -limit, codes + 1, codes)
     codes = torch.where(decoded > limit, codes - 1, codes)
     return codes.clamp_(0, max_code)
+
+
+def _awq_bound_symmetric_codes(
+    codes: torch.Tensor,
+    scales: torch.Tensor,
+    min_code: int,
+    max_code: int,
+) -> torch.Tensor:
+    """Cap a symmetric code at the largest magnitude that decodes finitely.
+
+    The selected amplitude can exceed the dtype's finite maximum (STDCLIP's
+    ``3 * std`` for alternating ``+-60000`` is 180000). The scale is still
+    finite, but the top codes would decode to infinity. Limit each code to
+    ``floor(limit / scale)``; ordinary ranges keep ``max_code`` and are
+    unchanged.
+    """
+
+    limits = torch.finfo(codes.dtype)
+    limit = limits.max * (1 - limits.eps)
+    safe = torch.floor(limit / scales.float()).clamp(max=max_code).to(codes.dtype)
+    return torch.maximum(torch.minimum(codes, safe), -safe).clamp_(min_code, max_code)
 
 
 #: Sentinel for "the root rotary has not been resolved yet". A resolved `None`
@@ -914,6 +1020,54 @@ class AWQProcessor(LoopProcessor):
         way around).
         """
         return _resolve_module_sym(self.qcfg, module_name, resolved_cfg)
+
+    def _fallback_for_module(self, resolved_cfg=None, module_name: Optional[str] = None) -> Optional[Fallback]:
+        """Resolve the fallback policy that applies to one module.
+
+        A ``dynamic`` fallback override outranks the processor-level fallback,
+        matching GPTQ's module-config resolution. Selection must read this
+        merged policy too: resolving it only when ``apply_quant`` already knows
+        the module falls back made a per-module threshold unreachable, because
+        the coverage and replay-error gates only saw the run-wide object
+        (#5820).
+        """
+
+        fallback = self.fallback or self.qcfg.fallback
+        override = resolved_cfg.get("fallback", None) if resolved_cfg is not None else None
+        if override is None and resolved_cfg is None and module_name:
+            override = self.qcfg.dynamic_get(module_name, "fallback", None)
+        if override is not None:
+            fallback = normalize_fallback(override, fallback)
+        return fallback
+
+    def _fallback_for_member(
+        self, name: str, named_childs: Optional[Dict[str, NamedModule]] = None
+    ) -> Optional[Fallback]:
+        """Resolve one scaling-group member's fallback from its bound config."""
+
+        named = (named_childs or {}).get(name)
+        if named is None:
+            return self._fallback_for_module()
+        return self._fallback_for_module(
+            get_resolved_module_config(named),
+            getattr(named, "full_name", None) or name,
+        )
+
+    def _group_has_fallback(
+        self, layer_names: List[str], named_childs: Optional[Dict[str, NamedModule]] = None
+    ) -> bool:
+        """Whether any member of a scaling group may fall back."""
+
+        return any(self._fallback_for_member(name, named_childs) is not None for name in layer_names)
+
+    def _fallback_strategy_for_module(self, resolved_cfg=None, module_name: Optional[str] = None) -> FallbackStrategy:
+        """Resolve the fallback strategy that applies to one fallback module.
+
+        The strategy is honoured on every plain-quantization path, including
+        AWQ's own failure fallbacks; an unset strategy still resolves to RTN.
+        """
+
+        return resolve_fallback_strategy(self._fallback_for_module(resolved_cfg, module_name))
 
     def _full_module_name(self, layer_module: Optional[nn.Module], module: nn.Module) -> Optional[str]:
         """Build a model-level module name from a layer and one of its children."""
@@ -3852,6 +4006,7 @@ class AWQProcessor(LoopProcessor):
         self,
         layer_names: List[str],
         input_feat: Dict[str, torch.Tensor],
+        named_childs: Optional[Dict[str, NamedModule]] = None,
     ) -> List[str]:
         """Returns the scaling-group members that lack enough activations.
 
@@ -3869,6 +4024,10 @@ class AWQProcessor(LoopProcessor):
         be multiplied by ``s``. Callers fold the scale into these members and
         quantize them with the fallback strategy while the well-covered
         members keep AWQ (#4675).
+
+        Each member's merged fallback policy (a ``dynamic`` override outranks
+        the processor-level one) decides its own coverage, so a per-module
+        threshold can select the fallback grid (#5820).
         """
 
         from ..utils.fallback import should_use_fallback
@@ -3881,7 +4040,8 @@ class AWQProcessor(LoopProcessor):
             if feat is None or feat.numel() == 0:
                 starved.append(name)
                 continue
-            if should_use_fallback(self.fallback, float(self._captured_tokens(name, feat)), expected):
+            fallback = self._fallback_for_member(name, named_childs)
+            if should_use_fallback(fallback, float(self._captured_tokens(name, feat)), expected):
                 starved.append(name)
 
         return starved
@@ -3908,6 +4068,7 @@ class AWQProcessor(LoopProcessor):
         self,
         layer_names: List[str],
         input_feat: Dict[str, torch.Tensor],
+        named_childs: Optional[Dict[str, NamedModule]] = None,
     ) -> bool:
         """Whether the group as a whole has enough routed rows to search with.
 
@@ -3929,12 +4090,17 @@ class AWQProcessor(LoopProcessor):
             total += float(self._captured_tokens(name, feat))
         if total <= 0:
             return False
-        return not should_use_fallback(self.fallback, total, expected)
+        # Every member's merged policy must accept the group total: a dynamic
+        # override that raises one member's threshold also raises this bar.
+        return not any(
+            should_use_fallback(self._fallback_for_member(name, named_childs), total, expected) for name in layer_names
+        )
 
     def _should_fallback_group(
         self,
         layer_names: List[str],
         input_feat: Dict[str, torch.Tensor],
+        named_childs: Optional[Dict[str, NamedModule]] = None,
     ) -> bool:
         """Returns whether any layer in a scaling group lacks enough activations.
 
@@ -3943,7 +4109,7 @@ class AWQProcessor(LoopProcessor):
         AWQ for its siblings use ``_starved_group_members`` instead (#4675).
         """
 
-        return bool(self._starved_group_members(layer_names, input_feat))
+        return bool(self._starved_group_members(layer_names, input_feat, named_childs))
 
     def _quantize_layer(self, layer_index: int, state: _AWQLayerState) -> None:
         """Runs the AWQ scaling, clipping, and quantization flow for one layer."""
@@ -3974,12 +4140,6 @@ class AWQProcessor(LoopProcessor):
 
         input_feat = self._layer_input_features(state)
         self._scale_feature_by_module = {}
-        missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
-        if missing and not self.fallback:
-            raise RuntimeError(
-                f"AWQProcessor error: missing activation features for modules {missing} "
-                f"with fallback disabled."
-            )
 
         # Filtering MLP modules like Qwen3MoeSparseMoeBlock
         def unwrap(m):
@@ -3992,6 +4152,18 @@ class AWQProcessor(LoopProcessor):
             for name, module in state.modules.items()
             if isinstance(unwrap(module), tuple(SUPPORTS_MODULE_TYPES))
         }
+
+        missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
+        if missing:
+            # A dynamic override may enable the fallback for exactly the module
+            # whose rows are missing; only a module with no fallback policy at
+            # all has to abort the layer (#5820).
+            unfallbackable = [name for name in missing if self._fallback_for_member(name, named_childs) is None]
+            if unfallbackable:
+                raise RuntimeError(
+                    f"AWQProcessor error: missing activation features for modules {unfallbackable} "
+                    f"with fallback disabled."
+                )
 
         module_kwargs_global = dict(self._module_forward_kwargs)
         module_kwargs_global["_awq_feature_kwargs"] = dict(
@@ -4049,8 +4221,10 @@ class AWQProcessor(LoopProcessor):
             shared_search_input = cfg.get("_input_feature_name") not in layer_names
             if shared_search_input:
                 cfg["_awq_allow_partial_replay"] = True
-            if self.fallback and self._should_fallback_group(layer_names, input_feat):
-                starved_names = self._starved_group_members(layer_names, input_feat)
+            if self._group_has_fallback(layer_names, named_childs) and self._should_fallback_group(
+                layer_names, input_feat, named_childs
+            ):
+                starved_names = self._starved_group_members(layer_names, input_feat, named_childs)
                 covered_names = [name for name in layer_names if name not in starved_names]
                 if not shared_search_input or not starved_names:
                     # A caller-level veto or a dense group: the whole group
@@ -4074,7 +4248,7 @@ class AWQProcessor(LoopProcessor):
                         len(starved_names),
                         starved_names[:6],
                     )
-                elif self._group_coverage_is_sufficient(layer_names, input_feat):
+                elif self._group_coverage_is_sufficient(layer_names, input_feat, named_childs):
                     # Every member is individually below the threshold, but the
                     # group as a whole has routed data: search the members that
                     # the replay executes and fold the rest.
@@ -4223,9 +4397,9 @@ class AWQProcessor(LoopProcessor):
                     **call_kwargs,
                 ))
             except _AWQScaleGroupError as exc:
-                if not self.fallback:
-                    raise
                 layer_names = [get_op_name(layer_module_ref, target) for target in layer["layers"]]
+                if not self._group_has_fallback(layer_names, named_childs):
+                    raise
                 fallback_names.update(layer_names)
                 log.warning(
                     "AWQProcessor: layer %s using configured plain-quantization fallback for %s: %s",
@@ -4871,6 +5045,23 @@ class AWQProcessor(LoopProcessor):
             target_device = _resolve_module_exec_device(linear)
             move_to(linear, device=target_device)
 
+            # The clip grid is sized from the resolved projection's MSE
+            # snapshot, not the top-level default: a dynamic rule may lower
+            # the workspace for one large projection (or raise it for a shape
+            # where larger tiles are faster). ``_normalize_mse`` keeps the
+            # inherited top-level budget when the rule omits it and preserves
+            # an explicit zero override (#5791).
+            module_name = self._full_module_name(layer, linear)
+            resolved_cfg = (
+                self.qcfg.resolve_module_config(module_name)
+                if module_name is not None
+                else None
+            )
+            mse = _normalize_mse(
+                resolved_cfg.get("mse", None) if resolved_cfg is not None else None,
+                base=self.qcfg.mse,
+            )
+
             max_val = self._compute_best_clip(
                 linear.weight,
                 features,
@@ -4878,6 +5069,7 @@ class AWQProcessor(LoopProcessor):
                 group_size=self._group_size_for(layer, linear),
                 format=self._format_for(layer, linear),
                 sym=self._sym_for(layer, linear),
+                clip_grid_budget=mse.clip_grid_budget,
             )
             clip_list.append((name, max_val))
             move_to(linear, device=original_device)
@@ -4896,6 +5088,7 @@ class AWQProcessor(LoopProcessor):
             group_size: Optional[int] = None,
             format: Optional[FORMAT] = None,
             sym: Optional[bool] = None,
+            clip_grid_budget: Optional[Union[int, str]] = None,
     ):
         """Finds the clipping bound that minimizes reconstruction error for a weight tensor.
 
@@ -4964,10 +5157,11 @@ class AWQProcessor(LoopProcessor):
         # sequential loop enjoyed, so the CPU default stays small; on GPU the
         # larger chunk amortizes launches and feeds the wide memory bus.
         mse_cfg = getattr(self.qcfg, "mse", None)
-        budget = MSEConfig.resolve_budget_bytes(
-            mse_cfg.clip_grid_budget if isinstance(mse_cfg, MSEConfig) else None,
-            device,
-        )
+        if clip_grid_budget is None and isinstance(mse_cfg, MSEConfig):
+            # Direct callers that do not resolve a per-module snapshot keep the
+            # previous top-level behavior.
+            clip_grid_budget = mse_cfg.clip_grid_budget
+        budget = MSEConfig.resolve_budget_bytes(clip_grid_budget, device)
         # The caching allocator refuses to serve a sub-cap request from a free
         # block at or above `max_split_size`, so a workspace sized just under
         # the cap (the 256 MiB GPU default) maps one new segment per module:
@@ -5153,6 +5347,7 @@ class AWQProcessor(LoopProcessor):
         group_size: Optional[int] = None,
         format: Optional[FORMAT] = None,
         sym: Optional[bool] = None,
+        strategy: Optional[FallbackStrategy] = None,
     ):
         """Simulates AWQ quantization and returns dequantized weights plus scales/zeros.
 
@@ -5160,6 +5355,9 @@ class AWQProcessor(LoopProcessor):
         config carries a ``dynamic`` override, so the staged codes match the
         container they are packed into. ``sym`` follows the same rule: the
         per-module mode must be the one the packed layer is labelled with.
+        ``strategy`` is set only for fallback modules; it selects the weight
+        range (midpoint/mean/median/stdclip) before AWQ's existing code layout
+        is applied. The default RTN path is unchanged.
         """
 
         org_w_shape = w.shape
@@ -5181,9 +5379,44 @@ class AWQProcessor(LoopProcessor):
                 f"got shape {tuple(w.shape)}"
             )
 
-        if not sym:
+        strategy = FallbackStrategy.RTN if strategy is None else FallbackStrategy(strategy)
+        effective_format = self.qcfg.format if format is None else format
+        if strategy is not FallbackStrategy.RTN:
+            minimum, maximum = _awq_strategy_bounds(w, strategy)
+            if sym:
+                minimum, maximum = symmetric_range_from_bounds(minimum, maximum)
+                maximum = maximum.clamp(min=1e-5)
+                max_int = 2 ** (bits - 1) - 1
+                min_int = -(2 ** (bits - 1))
+                # Divide the wide amplitude before narrowing; the scale always
+                # fits (STDCLIP's widest FP16 endpoint is |center| + 3 * std
+                # <= 4 * 65504, so its scale is at most 37431). A widened
+                # interval can still put a near-maximum weight on a code whose
+                # product overflows, so repair those codes. Narrow intervals
+                # keep the previous grid.
+                wide_bounds = maximum.dtype != input_dtype
+                scales = (maximum / max_int).to(input_dtype)
+                codes = torch.clamp(torch.round(w / scales), min_int, max_int)
+                if wide_bounds:
+                    codes = _awq_bound_symmetric_codes(codes, scales, min_int, max_int)
+                w = codes * scales
+            else:
+                minimum, maximum = affine_range_with_zero(minimum, maximum)
+                max_int = 2**bits - 1
+                scales, zeros, repair = _awq_affine_qparams(
+                    w,
+                    bits,
+                    scaled_zero_offset=effective_format in (FORMAT.GEMV_FAST, FORMAT.LLM_AWQ),
+                    minimum=minimum,
+                    maximum=maximum,
+                )
+                codes = torch.clamp(torch.round(w / scales) + zeros, 0, max_int)
+                if repair:
+                    codes = _awq_bound_affine_codes(codes, zeros, scales, max_int)
+                w = (codes - zeros) * scales
+                zeros = zeros.view(org_w_shape[0], -1)
+        elif not sym:
             max_int = 2**bits - 1
-            effective_format = self.qcfg.format if format is None else format
             scales, zeros, repair = _awq_affine_qparams(
                 w,
                 bits,
@@ -5202,10 +5435,11 @@ class AWQProcessor(LoopProcessor):
             scales = max_val / max_int
             w = torch.clamp(torch.round(w / scales), min_int, max_int) * scales
 
-        # A single reduction and host read covers both guards. NaN scales and
-        # NaN dequantized weights are independent failures, but each full-tensor
-        # scan previously synchronized the stream separately.
-        assert not bool(torch.isnan(scales).any() | torch.isnan(w).any())
+        # A single reduction and host read covers both guards. Non-finite
+        # scales and NaN dequantized weights are independent failures, but each
+        # full-tensor scan previously synchronized the stream separately. An
+        # infinite scale is as fatal as NaN: it turns every code into 0 * inf.
+        assert not bool((~torch.isfinite(scales) | torch.isnan(w)).any())
         if input_dtype.is_floating_point:
             limits = torch.finfo(input_dtype)
             w.clamp_(limits.min, limits.max)
@@ -6216,7 +6450,12 @@ class AWQProcessor(LoopProcessor):
             yield ref_chunk
 
     def apply_quant(self, named_linears: Dict[str, NamedModule], scales_list):
-        """Pseudo-quantizes selected linears and stages AWQ tensors for packing."""
+        """Pseudo-quantizes selected linears and stages AWQ tensors for packing.
+
+        An empty ``scales_list`` is the fallback path: no AWQ scale was folded
+        into these modules. Use the configured fallback strategy for that path
+        instead of silently staging min/max RTN regardless of the request.
+        """
 
         start_time = time.time()
         for name, named_module in named_linears.items():
@@ -6256,12 +6495,18 @@ class AWQProcessor(LoopProcessor):
                 weight_for_quant = torch.cat((weight_for_quant, pad), dim=1)
 
             module_sym = self._module_sym(named_module.full_name, resolved_cfg=resolved_cfg)
+            fallback_strategy = (
+                self._fallback_strategy_for_module(resolved_cfg, named_module.full_name)
+                if not scales_list
+                else None
+            )
             wq, scales, zeros = self.pseudo_quantize_tensor(
                 weight_for_quant,
                 bits=module_bits,
                 group_size=module_group_size,
                 format=module_format,
                 sym=module_sym,
+                strategy=fallback_strategy,
             )
 
             from ..quantization.gsq_scalar import gsq_enabled_for, refine_affine_scalar

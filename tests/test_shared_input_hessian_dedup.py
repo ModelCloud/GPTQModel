@@ -18,9 +18,17 @@ from gptqmodel.looper import stage_subset
 from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY
 from gptqmodel.models.shared_input import SharedInputPlan, build_shared_input_plan
 from gptqmodel.quantization import GPTQ
-from gptqmodel.quantization.config import METHOD, CalibrationConfig, HessianConfig, QuantizeConfig
+from gptqmodel.quantization.config import (
+    METHOD,
+    CalibrationConfig,
+    FOEMConfig,
+    GPTAQConfig,
+    HessianConfig,
+    QuantizeConfig,
+)
 
 
 _IN = 8
@@ -425,6 +433,124 @@ class TestProcessorLeaderElection:
         proc.begin_shared_input_capture(model, names)
         assert proc.begin_shared_input_capture(model, ["self_attn.o"]) == {}
         assert proc.shared_input_leader("self_attn.k") is None
+
+
+class TestSinkCapCaptureSignature:
+    """The effective sink-row cap is part of every GPTQ-family sharing key (#5855)."""
+
+    _NAMES = ["self_attn.q", "self_attn.k"]
+
+    @staticmethod
+    def _qcfg(kind: str, *, dedup: bool, desc_act: bool = True, dynamic=None) -> QuantizeConfig:
+        family = {
+            "GPTQ": {},
+            "GPTAQ": {"gptaq": GPTAQConfig(alpha=0.25)},
+            "FOEM": {"foem": FOEMConfig(alpha=0.25, beta=0.25)},
+        }[kind]
+        return QuantizeConfig(
+            method=METHOD.GPTQ,
+            bits=4,
+            group_size=4,
+            sym=False,
+            desc_act=desc_act,
+            act_group_aware=False,
+            hessian=HessianConfig(dedup_shared_inputs=dedup, sink_row_cap_median_multiple=4),
+            dynamic=dynamic,
+            **family,
+        )
+
+    @staticmethod
+    def _sink_batches(n: int = 3, tokens: int = 6, seed: int = 5):
+        g = torch.Generator().manual_seed(seed)
+        batches = [torch.randn(1, tokens, _IN, generator=g) for _ in range(n)]
+        # One massive-activation row makes the median-multiple cap bind, so a
+        # disabled or different cap changes the accumulated Hessian.
+        batches[0][0, 0] *= 100.0
+        return batches
+
+    @staticmethod
+    def _codes(task) -> torch.Tensor:
+        weight, scales, zeros, groups, _, _, _, _ = task.quantize()
+        return (weight.double() / scales[:, groups].double()).round() + zeros[:, groups].double()
+
+    def _run(self, kind: str, *, dedup: bool, desc_act: bool = True, dynamic=None):
+        batches = self._sink_batches()
+        qcfg = self._qcfg(kind, dedup=dedup, desc_act=desc_act, dynamic=dynamic)
+        proc = _processor(qcfg)
+        plan = build_shared_input_plan(_QKV_TREE, _LAYER_MODULES)
+        modules = {}
+        for i, name in enumerate(self._NAMES):
+            nm = _named_linear(name, seed=i)
+            if kind != "GPTQ":
+                nm.state[NATIVE_INPUTS_STATE_KEY] = [
+                    (batch_index, batch * 0.875) for batch_index, batch in enumerate(batches)
+                ]
+            proc.preprocess(nm)
+            modules[name] = nm
+
+        leaders = proc.begin_shared_input_capture(_fake_model(plan, proc.qcfg), self._NAMES)
+        _feed(proc, modules, self._NAMES, batches)
+        capture_counts = {name: proc.tasks[name].fwd_counter for name in self._NAMES}
+        proc.end_shared_input_capture(self._NAMES)
+        if kind == "GPTQ":
+            # GPTAQ/FOEM keep ``H`` as their live single-device buffer and
+            # finalize it through their own adoption path.
+            for task in proc.tasks.values():
+                task.materialize_global_hessian()
+        return proc, leaders, capture_counts
+
+    @pytest.mark.parametrize("kind", ["GPTQ", "GPTAQ", "FOEM"])
+    def test_dynamic_desc_act_policy_mismatch_is_not_shared(self, kind):
+        # Same configured cap (4) on both projections; only the follower enables
+        # desc_act, which switches the cap on (effective None vs 4).
+        dynamic = {r".*\.self_attn\.k$": {"desc_act": True}}
+        dedup, leaders, counts = self._run(kind, dedup=True, desc_act=False, dynamic=dynamic)
+        base, _, base_counts = self._run(kind, dedup=False, desc_act=False, dynamic=dynamic)
+
+        assert leaders == {}
+        assert counts == base_counts == {name: len(self._sink_batches()) for name in self._NAMES}
+        for name in self._NAMES:
+            task, control = dedup.tasks[name], base.tasks[name]
+            assert torch.equal(task.H, control.H), name
+            if kind != "GPTQ":
+                assert torch.equal(task.dXXT, control.dXXT), name
+            assert torch.equal(self._codes(task), self._codes(control)), name
+
+    @pytest.mark.parametrize("kind", ["GPTQ", "GPTAQ", "FOEM"])
+    def test_dynamic_effective_cap_mismatch_is_not_shared(self, kind):
+        # Both projections have desc_act=True but a different effective cap.
+        dynamic = {r".*\.self_attn\.k$": {"hessian": {"sink_row_cap_median_multiple": 2}}}
+        dedup, leaders, counts = self._run(kind, dedup=True, desc_act=True, dynamic=dynamic)
+        base, _, base_counts = self._run(kind, dedup=False, desc_act=True, dynamic=dynamic)
+
+        assert dedup.tasks["self_attn.q"].sink_row_cap_median_multiple() == 4
+        assert dedup.tasks["self_attn.k"].sink_row_cap_median_multiple() == 2
+        assert leaders == {}
+        assert counts == base_counts
+        for name in self._NAMES:
+            task, control = dedup.tasks[name], base.tasks[name]
+            assert torch.equal(task.H, control.H), name
+            if kind != "GPTQ":
+                assert torch.equal(task.dXXT, control.dXXT), name
+            assert torch.equal(self._codes(task), self._codes(control)), name
+
+    @pytest.mark.parametrize("kind", ["GPTQ", "GPTAQ", "FOEM"])
+    def test_matching_effective_cap_still_shares_and_matches_independent(self, kind):
+        dedup, leaders, counts = self._run(kind, dedup=True, desc_act=True)
+        base, _, base_counts = self._run(kind, dedup=False, desc_act=True)
+
+        assert leaders == {"self_attn.k": "self_attn.q"}
+        # The follower skipped capture entirely; only the leader accumulated.
+        assert counts == {"self_attn.q": len(self._sink_batches()), "self_attn.k": 0}
+        assert base_counts == {name: len(self._sink_batches()) for name in self._NAMES}
+        assert dedup.shared_input_dedup_count == 1
+        assert dedup.tasks["self_attn.k"].H.data_ptr() != dedup.tasks["self_attn.q"].H.data_ptr()
+        for name in self._NAMES:
+            task, control = dedup.tasks[name], base.tasks[name]
+            assert torch.equal(task.H, control.H), name
+            if kind != "GPTQ":
+                assert torch.equal(task.dXXT, control.dXXT), name
+            assert torch.equal(self._codes(task), self._codes(control)), name
 
 
 class TestProcessorCaptureAndAdopt:

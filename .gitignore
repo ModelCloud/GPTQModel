@@ -237,6 +237,10 @@ gptqmodel_ext/exllamav2/hip/
 !gptqmodel_ext/allspark_hip/allspark_hip.cu
 !gptqmodel_ext/allspark_hip/allspark_torch_hip.cpp
 !gptqmodel_ext/allspark_hip/allspark_utils_hip.cuh
+
+# EXL3 native GEMM for RDNA4 (gfx120x). Hand-written, not hipified from CUDA.
+!gptqmodel_ext/exllamav3/quant/exl3_gemm_hip.cu
+!gptqmodel_ext/exllamav3/quant/exl3_gemm_hip.cuh
 # NF12 HIP port (RDNA4). torch's hipify emits `nf12_decode_hip.hip`,
 # `nf12_encode_hip.hip` and `nf12_torch_hip.cpp` from these; only the
 # hand-written originals are tracked. Nothing is shipped precompiled.

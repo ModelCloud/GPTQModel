@@ -25,7 +25,7 @@ from .fallback_smooth import (
     smooth_block,
 )
 from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
-from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, Quantizer
+from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, Quantizer, narrowing_loses_codes
 
 
 _MLX_RTN_MIN_ELEMENTS = 256 * 1024
@@ -297,11 +297,15 @@ class RTN:
             quantized = quantized.t()
 
         if quantized.shape != self.module.weight.shape:
-            quantized = quantized.reshape(self.module.weight.shape).to(
-                self.module.weight.dtype
-            )
-        else:
-            quantized = quantized.to(self.module.weight.dtype)
+            quantized = quantized.reshape(self.module.weight.shape)
+
+        # The packers recover integer codes from ``linear.weight``; BF16 is
+        # too narrow for 8-bit asymmetric codes to round-trip. Keep the FP32
+        # reconstruction for packing and narrow only the replay copy (#5721).
+        if narrowing_loses_codes(self.module.weight.dtype, self.qcfg.bits, self.qcfg.sym):
+            self.pack_weight = quantized.detach()
+
+        quantized = quantized.to(self.module.weight.dtype)
 
         quantized = quantized.to(
             device=self.module.weight.data.device, non_blocking=False

@@ -56,6 +56,7 @@ from .quantizer import (
     _floor_scale_for_storage,
     _neutralize_dead_columns,
     _replace_zero_scale,
+    narrowing_loses_codes,
 )
 
 
@@ -415,6 +416,55 @@ def get_number_of_rows_and_cols(layer: nn.Module):
         return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
 
 
+def conv_patch_matrix(
+    module: _ConvNd, inp: torch.Tensor, *, columns_first: bool = False
+) -> torch.Tensor:
+    """Return ``[patches, columns]`` im2col activations for a conv module.
+
+    ``nn.Unfold`` only accepts integer zero padding, so the layer's own padding
+    (including its mode) is applied first and the already-padded input is
+    unfolded. That keeps the calibration on the operator that will actually
+    run (#5646). Groups are folded into the batch axis, matching the packed
+    weight layout ``(out_channels, in_channels // groups, *kernel)``; without
+    that fold a grouped Conv2d produced ``in_channels * kernel`` columns for a
+    weight that has ``in_channels // groups * kernel`` (#5763).
+
+    Every solver must use this helper: plain GPTQ, GPTAQ, and FOEM have to
+    calibrate the same patches or their Hessians describe different operators.
+    ``columns_first`` returns the contiguous ``[columns, patches]`` layout the
+    correction accumulators consume; transposing a ``[patches, columns]`` result
+    instead leaves a strided view that their GEMM has to copy.
+    """
+
+    groups = module.groups
+    if isinstance(module, nn.Conv1d):
+        batch, channels, length = inp.shape
+        padded = inp.reshape(batch * groups, channels // groups, length, 1)
+        (left, right), = conv_padding_pairs(module)
+        padded = F.pad(
+            padded, (0, 0, left, right), mode=pad_mode(module.padding_mode)
+        )
+        kernel = module.kernel_size + (1,)
+        dilation = module.dilation + (1,)
+        stride = module.stride + (1,)
+    else:
+        batch, channels, height, width = inp.shape
+        padded = inp.reshape(batch * groups, channels // groups, height, width)
+        # ``conv_padding_pairs`` reports pairs in the module's spatial order
+        # (height, width); ``F.pad`` wants the last dimension first.
+        (top, bottom), (left, right) = conv_padding_pairs(module)
+        padded = F.pad(
+            padded, (left, right, top, bottom), mode=pad_mode(module.padding_mode)
+        )
+        kernel, dilation, stride = module.kernel_size, module.dilation, module.stride
+    patches = F.unfold(padded, kernel, dilation=dilation, padding=0, stride=stride)
+    if columns_first:
+        # (batch_size, columns, num_patches) -> (columns, batch_size * num_patches)
+        return patches.permute(1, 0, 2).flatten(1)
+    # (batch_size, columns, num_patches) -> (batch_size * num_patches, columns)
+    return patches.transpose(1, 2).flatten(0, 1)
+
+
 def _uniform_column_group_stream(device: torch.device):
     """Identify the stream whose ordering makes a cached zero-fill visible.
 
@@ -447,6 +497,11 @@ def _uniform_column_group(count: int, device: torch.device) -> torch.Tensor:
 
 _BLOCK_ERROR_PRODUCT_BYTES = 256 * 1024 * 1024
 
+# Upper bound on the additive damping candidates materialized during recovery.
+# The default increment needs ~667 entries; a smaller increment would otherwise
+# grow the Python list in proportion to 1 / increment (#5790).
+_DAMP_GRID_WORK_BUDGET = 1 << 16
+
 
 def _propagate_block_error(
     trailing_weight: torch.Tensor,
@@ -468,6 +523,24 @@ def _propagate_block_error(
     for start in range(0, rows, rows_per_tile):
         end = start + rows_per_tile
         trailing_weight[start:end].sub_(block_error[start:end].matmul(trailing_factor))
+
+
+def _static_group_of_column(static_group_perm, group_size: int):
+    """Host map from a block-pass column to its static quantizer group.
+
+    ``static_group_perm`` lives on the compute device. Resolving one column per
+    iteration through ``perm[column].item()`` is an ``aten::_local_scalar_dense``
+    call, which on CUDA drains the stream and blocks the host once per column
+    (#5720). The permutation never changes after activation ordering, so the
+    integer map is built once per module with a single device read.
+
+    ``None`` means there is no permutation to apply: columns index the natural
+    group directly.
+    """
+
+    if static_group_perm is None or group_size <= 0:
+        return None
+    return [int(source_column) // group_size for source_column in static_group_perm.tolist()]
 
 
 def _move_static_groups(groups, device: torch.device):
@@ -864,6 +937,29 @@ class GPTQ:
             )
         return _replace_zero_scale(scale, zero, zero_mask=zero_mask)
 
+    def _narrow_reconstruction(self, Q: torch.Tensor) -> torch.Tensor:
+        """Narrow GPTQ's FP32 reconstruction to the module dtype for replay.
+
+        The packers never see the quantizer's integer codes: they recover
+        them from ``linear.weight`` with ``round(Q / scale) + zero``. That
+        round trip is exact only while half an ULP of the narrowed dtype is
+        narrower than half a quantization step, which BF16 fails for 8-bit
+        asymmetric codes. Keep the FP32 reconstruction for packing in that
+        case and let the caller move it into ``module.state`` before the
+        replay copy replaces the parameter (#5721).
+        """
+
+        if isinstance(self.module, transformers.Conv1D):
+            Q = Q.t()
+
+        if Q.shape != self.module.weight.shape:
+            Q = Q.reshape(self.module.weight.shape)
+
+        if narrowing_loses_codes(self.module.weight.dtype, self.qcfg.bits, self.qcfg.sym):
+            self.pack_weight = Q.detach()
+
+        return Q.to(self.module.weight.dtype)
+
     def clone_module(self, copy=True, device: torch.device = None):
         if not device:
             device = self.module.weight.data.device
@@ -901,6 +997,20 @@ class GPTQ:
             return tensor
 
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
+
+    def pad_tp_features(self, inp: torch.Tensor) -> torch.Tensor:
+        """Append the planned TP columns to a ``[features, tokens]`` batch.
+
+        Plain GPTQ pads the feature axis while reshaping ``[tokens, features]``.
+        GPTAQ and FOEM transpose first, so their accumulator receives
+        ``[features, tokens]``; pad dimension 0 there instead, otherwise the
+        batch cannot be added to the expanded ``self.columns`` Hessian (#5823).
+        """
+
+        if not self._tp_pad_cols:
+            return inp
+        pad = inp.new_zeros((self._tp_pad_cols, inp.shape[1]))
+        return torch.cat((inp, pad), dim=0)
 
     def add_batch(self, inp: torch.Tensor, out: Optional[torch.Tensor], batch_index: Optional[int] = None):
         if not self._hessian_capture_enabled:
@@ -1121,7 +1231,7 @@ class GPTQ:
                 stats["staging_misses"] += 1
 
             staging_view = staging_workspace[:rows, :]
-            staging_view.copy_(chunk.to(dtype=stage_dtype))
+            staging_view.copy_(chunk)
 
             if stage_dtype == torch.float32:
                 stats["materialized_requests"] += 1
@@ -1154,7 +1264,7 @@ class GPTQ:
 
                     try:
                         fp32_view = fp32_workspace[:rows, :]
-                        fp32_view.copy_(staging_view.to(torch.float32))
+                        fp32_view.copy_(staging_view)
                         yield fp32_view
                     finally:
                         pass
@@ -1187,24 +1297,44 @@ class GPTQ:
             return None
         return multiple
 
-    def _sink_row_norms(self, matrix: torch.Tensor, chunk_size: Optional[int]) -> torch.Tensor:
-        """Return per-row fp32 L2 norms, staged chunk-by-chunk (device-only)."""
+    def _sink_row_norms(
+        self,
+        matrix: torch.Tensor,
+        chunk_size: Optional[int],
+        *,
+        feature_dim: int = 1,
+    ) -> torch.Tensor:
+        """Return per-row fp32 L2 norms, staged chunk-by-chunk (device-only).
 
-        rows = matrix.shape[0]
+        ``feature_dim`` is the axis the norm reduces over; the other axis holds
+        the rows. ``compute_hessian_xtx`` receives ``[rows, columns]``
+        (``feature_dim=1``), while the GPTAQ/FOEM accumulators hold
+        ``[columns, rows]`` (``feature_dim=0``) so both paths cap the same
+        calibration tokens (#5769).
+        """
+
+        row_dim = 1 - feature_dim
+        rows = matrix.shape[row_dim]
+        features = matrix.shape[feature_dim]
         norms = torch.empty(rows, dtype=torch.float32, device=matrix.device)
         # Keep the fp32 staging bounded even when the caller accumulates the
         # Hessian in one chunk.
-        step = chunk_size if chunk_size is not None else max(1, (1 << 20) // max(1, matrix.shape[1]))
+        step = chunk_size if chunk_size is not None else max(1, (1 << 20) // max(1, features))
         step = min(step, rows)
         for start in range(0, rows, step):
             stop = min(start + step, rows)
+            block = matrix[start:stop] if row_dim == 0 else matrix[:, start:stop]
             norms[start:stop] = torch.linalg.vector_norm(
-                matrix[start:stop], ord=2, dim=1, dtype=torch.float32
+                block, ord=2, dim=feature_dim, dtype=torch.float32
             )
         return norms
 
     def resolve_sink_row_cap_threshold(
-        self, matrix: torch.Tensor, chunk_size: Optional[int]
+        self,
+        matrix: torch.Tensor,
+        chunk_size: Optional[int],
+        *,
+        feature_dim: int = 1,
     ) -> Optional[torch.Tensor]:
         """Return the scalar sink-row norm cap threshold, or ``None``.
 
@@ -1231,11 +1361,11 @@ class GPTQ:
         if multiple is None:
             return None
 
-        rows = matrix.shape[0]
+        rows = matrix.shape[1 - feature_dim]
         if rows == 0:
             return None
 
-        norms = self._sink_row_norms(matrix, chunk_size)
+        norms = self._sink_row_norms(matrix, chunk_size, feature_dim=feature_dim)
         # One device sort serves both quantiles: two ``kthvalue`` calls cost
         # ~1.5x more and are the only per-batch work the cap still adds.
         ordered = torch.sort(norms).values
@@ -1258,10 +1388,12 @@ class GPTQ:
         matrix: torch.Tensor,
         threshold: torch.Tensor,
         chunk_size: Optional[int],
+        *,
+        feature_dim: int = 1,
     ) -> torch.Tensor:
         """Turn a scalar cap threshold into a per-row clamp scale (device-only)."""
 
-        norms = self._sink_row_norms(matrix, chunk_size)
+        norms = self._sink_row_norms(matrix, chunk_size, feature_dim=feature_dim)
         usable_rows = torch.isfinite(norms) & (norms > 0.0)
         ratio = torch.clamp(
             threshold / norms.clamp_min(torch.finfo(torch.float32).tiny),
@@ -1269,18 +1401,32 @@ class GPTQ:
         )
         return torch.where(usable_rows, ratio, torch.ones_like(norms))
 
-    def resolve_sink_row_cap_scale(self, matrix: torch.Tensor, chunk_size: Optional[int]) -> Optional[torch.Tensor]:
+    def resolve_sink_row_cap_scale(
+        self,
+        matrix: torch.Tensor,
+        chunk_size: Optional[int],
+        *,
+        feature_dim: int = 1,
+    ) -> Optional[torch.Tensor]:
         """Return a per-row clamp scale that caps sink-row norms, or ``None``.
 
         This is a pure function of ``matrix`` (used by the #4742 regression
         tests). ``compute_hessian_xtx`` resolves the threshold and the scale
         separately so the threshold never depends on the chunk layout.
+
+        ``feature_dim=0`` serves the ``[columns, rows]`` activation layout the
+        GPTAQ/FOEM accumulators use; the returned scale has one entry per row
+        (calibration token or conv patch).
         """
 
-        threshold = self.resolve_sink_row_cap_threshold(matrix, chunk_size)
+        threshold = self.resolve_sink_row_cap_threshold(
+            matrix, chunk_size, feature_dim=feature_dim
+        )
         if threshold is None:
             return None
-        return self._sink_row_cap_scale_from_threshold(matrix, threshold, chunk_size)
+        return self._sink_row_cap_scale_from_threshold(
+            matrix, threshold, chunk_size, feature_dim=feature_dim
+        )
 
     def compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
         rows = matrix.shape[0]
@@ -1379,55 +1525,7 @@ class GPTQ:
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
             reshaped_inp = inp.reshape(-1, inp.shape[-1])
         else:
-            if isinstance(self.module, nn.Conv1d):
-                reshaped_inp = inp.reshape(
-                    inp.size(0) * self.module.groups,
-                    inp.size(1) // self.module.groups,
-                    inp.shape[2],
-                    1,
-                )
-                # `nn.Unfold` only accepts integer zero padding, so apply the
-                # layer's own padding (including its mode) and unfold the
-                # already-padded input. `padding="same"` is resolved to
-                # PyTorch's asymmetric split by `conv_padding_pairs`.
-                (left, right), = conv_padding_pairs(self.module)
-                reshaped_inp = F.pad(
-                    reshaped_inp,
-                    (0, 0, left, right),
-                    mode=pad_mode(self.module.padding_mode),
-                )
-                unfold = nn.Unfold(
-                    self.module.kernel_size + (1,),
-                    dilation=self.module.dilation + (1,),
-                    padding=0,
-                    stride=self.module.stride + (1,),
-                )
-                # output size (batch_size, channels * \prod kernel_size, num_patches)
-                reshaped_inp = unfold(reshaped_inp)
-            else:
-                reshaped_inp = inp.reshape(
-                    inp.size(0) * self.module.groups,
-                    inp.size(1) // self.module.groups,
-                    inp.shape[2],
-                    inp.shape[3],
-                )
-                # `conv_padding_pairs` reports pairs in the module's spatial
-                # order (height, width); `F.pad` wants the last dimension first.
-                (top, bottom), (left, right) = conv_padding_pairs(self.module)
-                reshaped_inp = F.pad(
-                    reshaped_inp,
-                    (left, right, top, bottom),
-                    mode=pad_mode(self.module.padding_mode),
-                )
-                unfold = nn.Unfold(
-                    self.module.kernel_size,
-                    dilation=self.module.dilation,
-                    padding=0,
-                    stride=self.module.stride,
-                )
-                # output size (batch_size, channels * \prod kernel_size, num_patches)
-                reshaped_inp = unfold(reshaped_inp)
-            reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
+            reshaped_inp = conv_patch_matrix(self.module, inp)
 
         # Delay dtype conversion until we materialize Hessian chunks to avoid unnecessary temporaries
         reshaped_inp = reshaped_inp.contiguous()
@@ -2060,12 +2158,13 @@ class GPTQ:
 
         if target_device is None:
             target_device = self.H.device if self.H is not None else self.module.weight.device
-        W = self.clone_module(device=target_device)
         # When the Hessian exists its diagonal is the exact input-channel
         # importance for the layer's output error, so weight the SmoothMSE
         # objective with it instead of averaging every channel equally. A
         # fallback without captured activations uses the weight-magnitude
-        # proxy instead of the harmful uniform mean.
+        # proxy instead of the harmful uniform mean. Resolve the diagonal
+        # before cloning so the full matrix is released before the weight
+        # clone and output buffers overlap it (#5778).
         col_weights = None
         if search_mse:
             col_weights = hessian_column_weights(
@@ -2075,6 +2174,8 @@ class GPTQ:
                 col_weights = hessian_column_weights(
                     self.H, self.columns, device=target_device
                 )
+        self.H = None
+        W = self.clone_module(device=target_device)
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
@@ -2206,13 +2307,7 @@ class GPTQ:
         group_size = effective_group_size if effective_group_size != -1 else self.columns
         g_idx = torch.arange(valid_cols, device=Q.device, dtype=torch.int32) // group_size
 
-        if isinstance(self.module, transformers.Conv1D):
-            Q = Q.t()
-
-        if Q.shape != self.module.weight.shape:
-            Q = Q.reshape(self.module.weight.shape).to(self.module.weight.dtype)
-        else:
-            Q = Q.to(self.module.weight.dtype)
+        Q = self._narrow_reconstruction(Q)
 
         Q = safe_move_to(Q, self.module.weight.data.device)
         mean_abs_err = (Q - self.module.weight.data).abs().mean().item()
@@ -2220,7 +2315,6 @@ class GPTQ:
         avg_loss = f"fallback({strategy.value}): {mean_abs_err:.7f}"
         damp = 0.0
 
-        self.H = None
         return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
 
     def _rtn_fallback_after_hessian_failure(self, blocksize: int):
@@ -2297,6 +2391,7 @@ class GPTQ:
                 max_floor_attempts = 6
                 last_error = None
                 damp_candidates = None
+                damp_grid_skipped = False
                 floor_base = None
 
                 def try_damp(current_diag: torch.Tensor, mean: torch.Tensor, damp: float):
@@ -2360,8 +2455,13 @@ class GPTQ:
                         last_error = exc
                         return None
 
-                def legacy_damp_candidates() -> list[float]:
-                    """Materialize the old additive grid without changing float rounding."""
+                def legacy_damp_candidates() -> Optional[list[float]]:
+                    """Materialize the old additive grid without changing float rounding.
+
+                    Returns ``None`` when the increment needs more candidates than the
+                    work budget allows, so a misconfigured increment cannot allocate an
+                    unbounded list before the first probe.
+                    """
 
                     # Repeated addition (not one multiply-add) keeps the selected damp
                     # bit-identical to the former linear walk.
@@ -2375,6 +2475,8 @@ class GPTQ:
                         # terminate instead of spinning forever.
                         if not (values[-1] < next_damp < 1.0):
                             return values
+                        if len(values) >= _DAMP_GRID_WORK_BUDGET:
+                            return None
                         values.append(next_damp)
 
                 def finish_damped_candidate(first_success: int, first_cholesky: torch.Tensor):
@@ -2462,14 +2564,46 @@ class GPTQ:
                             f"`damp_percent={initial_damp:.5f}` and no auto increment configured."
                         )
                     else:
-                        if damp_candidates is None:
-                            damp_candidates = legacy_damp_candidates()
-
+                        increment = float(self.qcfg.damp_auto_increment)
                         log.warn(
                             f"Quantization: Module `{self.name}` -> Starting compatible damp recovery at "
                             f"`damp_percent={initial_damp:.5f}`, increment step "
                             f"`{self.qcfg.damp_auto_increment:.5f}`."
                         )
+
+                        # Recovery normally succeeds on the very next candidate, so
+                        # probe it before materializing the additive grid (#5790).
+                        next_damp = initial_damp + increment
+                        if initial_damp < next_damp < 1.0:
+                            next_factor = try_factor(current_diag, mean, next_damp)
+                            if next_factor is not None:
+                                log.warn(
+                                    f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
+                                    f"`damp_percent={next_damp:.5f}` (started at {initial_damp:.5f})."
+                                )
+                                return next_factor, next_damp
+
+                        if damp_candidates is None and not damp_grid_skipped:
+                            damp_candidates = legacy_damp_candidates()
+                            if damp_candidates is None:
+                                # The grid depends only on the configured damp and
+                                # increment, so decide once instead of re-walking and
+                                # re-logging for every diagonal-floor attempt.
+                                damp_grid_skipped = True
+                                minimum_increment = (1.0 - initial_damp) / (
+                                    _DAMP_GRID_WORK_BUDGET - 1
+                                )
+                                log.error(
+                                    f"Quantization: Module `{self.name}` -> Skipping damp recovery: "
+                                    f"`damp_auto_increment={increment:g}` needs more than "
+                                    f"{_DAMP_GRID_WORK_BUDGET} candidates before reaching 1.0. "
+                                    f"Use an increment of at least {minimum_increment:.3e} or a larger "
+                                    f"`damp_percent`."
+                                )
+
+                        if damp_grid_skipped:
+                            attempt += 1
+                            continue
 
                         if len(damp_candidates) > 1:
                             # Cholesky success is monotone on this grid when the
@@ -2811,8 +2945,12 @@ class GPTQ:
         # Fit the whole-row grid after dead-column masking: a channel absent
         # from every calibration sample carries no signal, so its weight must
         # not set the per-channel scale that every live column is quantized
-        # with (#5611).
-        self.quantizer.find_params(W, weight=True)
+        # with (#5611). Only the ungrouped solve reads this grid: static
+        # groups fit every group on a deep-copied quantizer and dynamic groups
+        # refit at each group boundary, so a grouped whole-projection range
+        # search would be discarded after its shrink search ran (#5830).
+        if self.qcfg.group_size == -1:
+            self.quantizer.find_params(W, weight=True)
 
         # g_idx = []
         scale = []
@@ -2907,6 +3045,10 @@ class GPTQ:
             block_column_perm = final_perm
 
         static_group_perm = block_column_perm if self.qcfg.static_groups else None
+        # One host read for the whole module instead of one per column (#5720).
+        # The permutation is fixed once activation ordering is done, so the CPU
+        # retry reuses this map unchanged.
+        static_group_of_column = _static_group_of_column(static_group_perm, self.qcfg.group_size)
 
         if use_hessian:
             try:
@@ -3000,7 +3142,20 @@ class GPTQ:
                 now_idx = 1
 
             try:
-                Losses = torch.zeros_like(W)
+                # The block loss is only consumed as one scalar, so keep a
+                # block-sized fp32 scratch plus a device scalar instead of a
+                # full rows x columns buffer (issue #5734). The eager loop and
+                # the fused kernel both overwrite every scratch column before
+                # it is read.
+                loss_scratch = None
+                loss_total = None
+                if Hinv is not None:
+                    loss_scratch = torch.empty(
+                        (W.shape[0], min(blocksize, self.columns)),
+                        dtype=torch.float32,
+                        device=W.device,
+                    )
+                    loss_total = torch.zeros((), dtype=torch.float32, device=W.device)
                 Q = torch.zeros_like(W)
 
                 fused_block_update = None
@@ -3059,48 +3214,22 @@ class GPTQ:
                                 # A static block can cross several reordered groups.
                                 for i in range(count):
                                     column = i1 + i
-                                    idx = i1 + i
-                                    if self.qcfg.desc_act:
-                                        idx = perm[idx]
-                                    elif self.qcfg.act_group_aware and use_hessian:
-                                        idx = final_perm[idx]
-                                    self.quantizer = groups[idx // self.qcfg.group_size]
+                                    if static_group_of_column is not None:
+                                        self.quantizer = groups[static_group_of_column[column]]
+                                    else:
+                                        self.quantizer = groups[column // self.qcfg.group_size]
                                     q = self.quantizer.quantize(
                                         W[:, column : column + 1]
                                     ).flatten()
                                     Q1[:, column - i1] = q
                         else:
-                            # No grouping - vectorized quantization for entire block
-                            maxq_val = 2 ** self.qcfg.bits - 1
-                            if hasattr(self.quantizer, 'scale') and hasattr(self.quantizer, 'zero'):
-                                latest_scale, latest_zero = _replace_zero_scale(
-                                    self.quantizer.scale, self.quantizer.zero
-                                )
-
-                                if latest_scale.dim() == 1:
-                                    latest_scale = latest_scale.view(-1, 1)
-                                if latest_zero.dim() == 1:
-                                    latest_zero = latest_zero.view(-1, 1)
-
-                                if self.qcfg.sym:
-                                    Q1 = latest_scale * torch.clamp(
-                                        torch.round(W1 / latest_scale),
-                                        -(maxq_val // 2),
-                                        maxq_val // 2
-                                    )
-                                else:
-                                    quantized = torch.clamp(
-                                        torch.round(W1 / latest_scale) + latest_zero,
-                                        0,
-                                        maxq_val
-                                    )
-                                    Q1 = latest_scale * (quantized - latest_zero)
-                            else:
-                                # Fallback to individual quantization
-                                for i in range(count):
-                                    w = W1[:, i]
-                                    q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
-                                    Q1[:, i] = q
+                            # No grouping: let the fitted quantizer own the grid
+                            # bounds. A symmetric GPTQ grid stores zero point
+                            # ``2 ** (bits - 1)`` and encodes the full ``[-8, 7]``
+                            # range, while the old manual clamp to ``[-7, 7]``
+                            # dropped code 0 (issue #5756). QQQ keeps its signed
+                            # clamp through ``requires_groupwise_processing``.
+                            Q1 = self.quantizer.quantize(W1)
 
                         Q[:, i1:i2] = Q1
                 else:
@@ -3121,7 +3250,7 @@ class GPTQ:
                         # ``torch.sub(..., out=delta)`` in the eager loop) before it is read,
                         # so skip the redundant zero-fill of a 128-column block.
                         Err1 = torch.empty_like(W1) if Hinv is not None else None
-                        Losses1 = Losses[:, i1:i2] if Hinv is not None else None
+                        Losses1 = loss_scratch[:, :count] if Hinv is not None else None
 
                         if Hinv is not None:
                             Hinv1 = Hinv[i1:i2, i1:i2]
@@ -3131,12 +3260,27 @@ class GPTQ:
                             # loop does not modify until after the block. Thus every
                             # boundary inside this block can be prepared before launch.
                             block_group_size = self.qcfg.group_size
-                            uniform_group = block_group_size == -1 or (
-                                i1 // block_group_size == (i2 - 1) // block_group_size
-                                and (
-                                    not self.qcfg.static_groups
-                                    or static_group_perm is None
+                            # A permuted block can still resolve to one static
+                            # group. Detect that from the host map so the fused
+                            # kernel keeps its single-group fast path instead of
+                            # a per-column group map (#5720).
+                            block_static_group = None
+                            if block_group_size != -1 and static_group_of_column is not None:
+                                block_static_group = static_group_of_column[i1]
+                                for group_of_column in static_group_of_column[i1 + 1 : i2]:
+                                    if group_of_column != block_static_group:
+                                        block_static_group = None
+                                        break
+                            uniform_group = (
+                                block_group_size == -1
+                                or (
+                                    i1 // block_group_size == (i2 - 1) // block_group_size
+                                    and (
+                                        not self.qcfg.static_groups
+                                        or static_group_perm is None
+                                    )
                                 )
+                                or block_static_group is not None
                             )
                             if uniform_group:
                                 # Every column of this block resolves to the same
@@ -3153,7 +3297,11 @@ class GPTQ:
                                             zero.append(self.quantizer.zero)
                                             now_idx += 1
                                     else:
-                                        self.quantizer = groups[i1 // block_group_size]
+                                        self.quantizer = groups[
+                                            block_static_group
+                                            if block_static_group is not None
+                                            else i1 // block_group_size
+                                        ]
                                 block_scale, block_zero = _replace_zero_scale(
                                     self.quantizer.scale, self.quantizer.zero
                                 )
@@ -3177,14 +3325,11 @@ class GPTQ:
                                                 scale.append(self.quantizer.scale)
                                                 zero.append(self.quantizer.zero)
                                                 now_idx += 1
+                                        elif static_group_of_column is not None:
+                                            self.quantizer = groups[static_group_of_column[column]]
                                         else:
-                                            source_column = (
-                                                static_group_perm[column].item()
-                                                if static_group_perm is not None
-                                                else column
-                                            )
                                             self.quantizer = groups[
-                                                source_column // self.qcfg.group_size
+                                                column // self.qcfg.group_size
                                             ]
 
                                     key = id(self.quantizer.scale)
@@ -3223,10 +3368,10 @@ class GPTQ:
                                             now_idx += 1
                                     else:
                                         idx = i1 + i
-                                        if static_group_perm is not None:
-                                            idx = static_group_perm[idx].item()
-
-                                        self.quantizer = groups[idx // self.qcfg.group_size]
+                                        if static_group_of_column is not None:
+                                            self.quantizer = groups[static_group_of_column[idx]]
+                                        else:
+                                            self.quantizer = groups[idx // self.qcfg.group_size]
 
                                 q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                                 Q1[:, i] = q
@@ -3239,6 +3384,7 @@ class GPTQ:
 
                         if Hinv is not None:
                             Losses1.div_(2)
+                            loss_total.add_(Losses1.sum())
                             _propagate_block_error(W[:, i2:], Err1, Hinv[i1:i2, i2:])
 
                         del W1, Q1, Err1, Losses1
@@ -3259,13 +3405,13 @@ class GPTQ:
         if Hinv is not None:
             del Hinv
             if self.nsamples != 0:
-                avg_loss = torch.sum(Losses).item() / self.nsamples
+                avg_loss = loss_total.item() / self.nsamples
 
                 if math.isnan(avg_loss):
-                    print("Losses sum item:", torch.sum(Losses).item())
+                    print("Losses sum item:", loss_total.item())
                     if fallback_configured:
                         log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
-                        del Losses, Q, W
+                        del loss_total, loss_scratch, Q, W
                         if retry_hessian_diag is not None:
                             self.H = torch.diag(retry_hessian_diag)
                         self.qcfg.mock_quantization = True
@@ -3281,7 +3427,6 @@ class GPTQ:
         else:
             avg_loss = f"{resolved_strategy.value} fallback" if fallback_configured else 999999999
 
-        del Losses
         del self.H
         del W
 
@@ -3321,13 +3466,7 @@ class GPTQ:
             Q = Q[:, :valid_cols]
             g_idx = g_idx[:valid_cols]
 
-        if isinstance(self.module, transformers.Conv1D):
-            Q = Q.t()
-
-        if Q.shape != self.module.weight.shape:
-            Q = Q.reshape(self.module.weight.shape).to(self.module.weight.dtype)
-        else:
-            Q = Q.to(self.module.weight.dtype)
+        Q = self._narrow_reconstruction(Q)
 
         if scale == []:
             scale.append(self.quantizer.scale)

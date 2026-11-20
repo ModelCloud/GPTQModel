@@ -402,7 +402,12 @@ class GPTQProcessor(LoopProcessor):
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
             tmp.fallback = qcfg_clone.fallback
-            tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
+
+        # Percentage fallback thresholds resolve against the calibration token
+        # count for every selector. GPTAQ and FOEM inherited the GPTQ default
+        # ``None`` here, so ``"50%"`` was resolved against a base of one and a
+        # sparsely routed expert never fell back (#5755).
+        tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         tmp.quantizer.configure(
             perchannel=True,
@@ -453,7 +458,11 @@ class GPTQProcessor(LoopProcessor):
             hessian.chunk_size,
             hessian.chunk_bytes,
             # The sink-row cap rescales rows before `X^T X` (issue #4742).
-            getattr(hessian, "sink_row_cap_median_multiple", None),
+            # Compare the *effective* cap, not the configured one: `desc_act`
+            # and `act_group_aware` decide whether the cap applies at all, so
+            # equal configured caps can still accumulate different Hessians
+            # (#5855).
+            task.sink_row_cap_median_multiple(),
         )
 
     def _hessian_capture_signature(self, task: Any) -> Optional[Tuple[Any, ...]]:
@@ -462,15 +471,16 @@ class GPTQProcessor(LoopProcessor):
         GPTQ, GPTAQ and FOEM each accumulate ``H`` differently, so a group may
         only share within one quantizer kind.  GPTAQ/FOEM additionally require
         the same native-delta mode because ``dXXT`` must be adopted together
-        with ``H``.
+        with ``H``.  Every kind keys the effective sink-row cap because it
+        rescales the activations before both ``H`` and ``dXXT`` (#5855).
         """
 
         if type(task) is GPTQ:
             return ("gptq", task.columns, *self._hessian_accumulation_settings(task))
         if type(task) is GPTAQ:
-            return ("gptaq", task.columns, bool(task._use_native_delta))
+            return ("gptaq", task.columns, bool(task._use_native_delta), task.sink_row_cap_median_multiple())
         if type(task) is FOEM:
-            return ("foem", task.columns, bool(task.gptaq))
+            return ("foem", task.columns, bool(task.gptaq), task.sink_row_cap_median_multiple())
         return None
 
     def begin_shared_input_capture(
@@ -1035,6 +1045,15 @@ class GPTQProcessor(LoopProcessor):
                     "wq": snapshot_eora_reconstructed_weight(wq),
                 })
 
+        # The packers recover integer codes from `linear.weight`. When the
+        # replay copy is too narrow to hold them (8-bit asymmetric BF16),
+        # keep the exact FP32 reconstruction for packing (#5721).
+        pack_wq = getattr(g, "pack_weight", None)
+        if pack_wq is not None:
+            del g.pack_weight
+            module.stream_state_payload_to_cpu({"pack_wq": pack_wq})
+            del pack_wq
+
         # single largest deallocation of vram happens here
         module.weight.data = wq
         if self.qcfg.activation_mode == "w4afp8":
@@ -1107,6 +1126,9 @@ class GPTQProcessor(LoopProcessor):
         assert q_g_idx.device == CPU
 
         layers = {module.full_name: model.model.get_submodule(module.full_name)}
+        # Exact FP32 reconstruction kept by the quantizer when the replay copy
+        # cannot round-trip the packing codes (#5721).
+        pack_wq = module.state.pop("pack_wq", None)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
 
@@ -1169,6 +1191,10 @@ class GPTQProcessor(LoopProcessor):
             module_name=module_label,
         ):
             with parent_module_lock(parent_key):
+                if pack_wq is not None:
+                    # Pack from the exact reconstruction, not the narrowed
+                    # replay copy, so the stored codes match the quantizer's.
+                    layers[module.full_name].weight.data = pack_wq
                 packer_label = pack_module(
                     name=module.full_name,
                     qModules=qModules,

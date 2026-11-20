@@ -5,6 +5,8 @@
 
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -36,6 +38,28 @@ def _floor_scale_for_storage(
     return torch.where((scale >= 0) & (scale < minimum), minimum, scale)
 
 
+def _affine_scale(
+    xmin: torch.Tensor,
+    xmax: torch.Tensor,
+    maxq: torch.Tensor,
+) -> torch.Tensor:
+    """Fit the affine grid step without overflowing the endpoint subtraction.
+
+    ``(xmax - xmin) / maxq`` is the shortest form and stays bitwise-identical
+    for every ordinary group. A finite group whose endpoints straddle the
+    dtype's maximum (BF16 ``+/-2**127`` is the canonical case) overflows that
+    subtraction to ``inf`` even though the fitted step is representable.
+    Dividing each endpoint first keeps only those lanes finite; the true span
+    is at most twice the dtype maximum, so the two half-steps cannot overflow.
+    Non-finite endpoints keep the unmodified result so validation still sees
+    them.
+    """
+
+    span = xmax - xmin
+    wide_span = torch.isfinite(xmax) & torch.isfinite(xmin) & torch.isinf(span)
+    return torch.where(wide_span, xmax / maxq - xmin / maxq, span / maxq)
+
+
 def _replace_zero_scale(
     scale: torch.Tensor,
     zero: torch.Tensor | None = None,
@@ -65,6 +89,27 @@ def _replace_zero_scale(
     undefined_zero = zero_mask & ~torch.isfinite(zero)
     safe_zero = torch.where(undefined_zero, torch.zeros_like(zero), zero)
     return safe_scale, safe_zero
+
+
+def narrowing_loses_codes(weight_dtype: torch.dtype, bits: int, sym: bool) -> bool:
+    """Whether narrowing a reconstruction to ``weight_dtype`` can move a code.
+
+    Packing does not receive the quantizer's integer codes: it recovers them
+    from ``Q = (q - zero) * scale`` with ``round(Q / scale) + zero``. Casting
+    ``Q`` to ``weight_dtype`` moves it by at most half an ULP, which is at
+    most ``max_code * 2**-mantissa_bits`` code steps for the largest code.
+    Once that exceeds half a step the recovered code can land on its
+    neighbour. BF16's 8-bit mantissa is too narrow for 8-bit asymmetric codes
+    (``max_code = 255``), while 8-bit symmetric (``128``) and every narrower
+    bit width still round-trip (#5721).
+    """
+
+    if not weight_dtype.is_floating_point or weight_dtype == torch.float32:
+        return False
+    # ``eps`` is ``2**-(mantissa_bits - 1)`` for every IEEE-like float.
+    mantissa_bits = 1 - int(round(math.log2(torch.finfo(weight_dtype).eps)))
+    max_code = (1 << bits) - 1 if not sym else (1 << (bits - 1))
+    return max_code > (1 << (mantissa_bits - 1))
 
 
 def _neutralize_dead_columns(
@@ -376,7 +421,7 @@ class Quantizer(nn.Module):
                     self.scale = _floor_scale_for_storage(self.scale, scale_min)
                 self.zero = torch.zeros_like(self.scale)
             else:
-                self.scale = (xmax - xmin) / self.maxq
+                self.scale = _affine_scale(xmin, xmax, self.maxq)
                 if weight:
                     self.scale = _floor_scale_for_storage(self.scale, scale_min)
                 if self.qcfg.sym:

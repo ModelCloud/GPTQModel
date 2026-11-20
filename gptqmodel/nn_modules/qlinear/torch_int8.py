@@ -16,7 +16,7 @@ from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear, unpack_qzero_lanes
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.torch import dynamo_is_compiling
@@ -36,6 +36,10 @@ _INT8_REBUILD_LOCK = threading.Lock()
 # Output channels decoded at once on the asymmetric path. The decoded tile is
 # transient scratch: it is released before the next tile or group is processed.
 _INT8_ASYMMETRIC_DECODE_TILE = 256
+# Transient budget for one output-column slice of the checkpoint release
+# verification. The inverse widens every stored code to INT32; slicing keeps
+# that scratch bounded instead of materializing the whole layer at once.
+_INT8_REBUILD_TILE_BYTES = 8 * 1024 * 1024
 
 # `aten::_weight_int8pack_mm` reduces the contraction axis in 8-wide chunks and
 # is only defined for `K % 8 == 0`: with a narrower or misaligned width it reads
@@ -201,6 +205,36 @@ def _write_group_buffers(
     module._int8_transform_dtype = dtype
 
 
+def _live_group_affine(module: nn.Module) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Return the affine terms implied by the live checkpoint metadata.
+
+    ``transform_cpu`` copies the checkpoint's scales into a derived FP32 buffer
+    and folds the zero point into an offset. The eager refresh detects a
+    checkpoint edit through a versioned source signature, which a traced graph
+    cannot read. A compiled forward therefore recomputes the small
+    ``[groups, out_features]`` affine terms from the current checkpoint tensors
+    instead of the installed copy, so an in-place scale edit is visible without
+    a recompile. The INT8 codes stay in the derived layout.
+    """
+    scales = module.scales.float().contiguous()
+    if getattr(module, INT8_GROUP_OFFSET_BUFFER_NAME, None) is None:
+        return scales, None
+    shifts = torch.arange(
+        0, module.pack_dtype_bits, module.bits, dtype=torch.int32, device=module.qzeros.device
+    )
+    # Shared decode crops the padding lanes of a non-aligned output width, so
+    # the result always matches ``scales`` instead of ``ceil(n / pack) * pack``.
+    zeros = unpack_qzero_lanes(
+        module.qzeros,
+        shifts,
+        pack_factor=module.pack_factor,
+        maxq=module.maxq,
+        dtype=module.dequant_dtype,
+        out_features=module.out_features,
+    )
+    return scales, (128.0 - zeros.float()) * scales
+
+
 class Int8PackedModule(torch.nn.Module):
     """CPU grouped INT8 matmul around ``aten::_weight_int8pack_mm``.
 
@@ -272,7 +306,13 @@ class Int8PackedModule(torch.nn.Module):
             pieces.append(piece)
         return torch.stack(pieces, dim=-2)
 
-    def _asymmetric_group_output(self, flat: torch.Tensor, group: int) -> torch.Tensor:
+    def _asymmetric_group_output(
+        self,
+        flat: torch.Tensor,
+        group: int,
+        group_scale: torch.Tensor,
+        group_offset: torch.Tensor,
+    ) -> torch.Tensor:
         """Reduce one asymmetric group with its zero point applied first.
 
         The native INT8 op only accumulates ``scale * (code - 128)``; the
@@ -285,8 +325,8 @@ class Int8PackedModule(torch.nn.Module):
         and dropped before the next tile is built.
         """
         weight = self.int8_weight_gnk[group]
-        scale = self.int8_group_scale[group].float()
-        offset = self.int8_group_offset[group].float()
+        scale = group_scale[group].float()
+        offset = group_offset[group].float()
         activations = flat[:, group, :]
         output = torch.empty(
             activations.shape[0], weight.shape[0], dtype=torch.float32, device=activations.device
@@ -299,8 +339,15 @@ class Int8PackedModule(torch.nn.Module):
         return output
 
     def forward(
-        self, x: torch.Tensor, bias: torch.Tensor | None = None
+        self,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        group_scale: torch.Tensor | None = None,
+        group_offset: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # ``group_scale``/``group_offset`` let a traced caller pass the affine
+        # terms derived from the live checkpoint instead of the copy installed
+        # at bind time (see ``_live_group_affine``).
         # The op requires matching activation/scale dtypes and only accepts 2D
         # activations. FP32 preserves tiny group scales and delays output
         # rounding until after the group reduction and the bias epilogue. An
@@ -313,11 +360,12 @@ class Int8PackedModule(torch.nn.Module):
             width = activations.shape[-1]
             flat = activations.reshape(-1, groups, width)
             output = None
-            if self.int8_group_offset is None:
-                group_scale = self.int8_group_scale.float()
+            scale = self.int8_group_scale.float() if group_scale is None else group_scale.float()
+            offset = self.int8_group_offset if group_offset is None else group_offset
+            if offset is None:
                 for group in range(groups):
                     part = torch.ops.aten._weight_int8pack_mm(
-                        flat[:, group, :], self.int8_weight_gnk[group], group_scale[group]
+                        flat[:, group, :], self.int8_weight_gnk[group], scale[group]
                     )
                     output = part if output is None else output.add_(part)
             else:
@@ -325,7 +373,7 @@ class Int8PackedModule(torch.nn.Module):
                 # Splitting them into a residual reduction plus an offset reduction
                 # lets FP32 rounding survive the cancellation of two large terms.
                 for group in range(groups):
-                    part = self._asymmetric_group_output(flat, group)
+                    part = self._asymmetric_group_output(flat, group, scale, offset)
                     output = part if output is None else output.add_(part)
             output = output.reshape(activations.shape[:-2] + (self.out_features,))
             if bias is not None:
@@ -406,6 +454,10 @@ class TorchInt8Linear(GPTQQuantLinear):
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
         self.int8_module: Optional[Int8PackedModule] = None
         self._int8_source_signature = None
+        # ``(shape, dtype)`` of a checkpoint ``qweight`` released after
+        # ``transform_cpu`` proved the INT8 group layout rebuilds it exactly.
+        # ``None`` means the live buffer is authoritative (or still resident).
+        self._int8_dropped_qweight = None
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -424,12 +476,36 @@ class TorchInt8Linear(GPTQQuantLinear):
     def post_init(self):
         super().post_init()
         # The GPTQ tensors are the checkpoint. Native INT8 is a derived,
-        # non-persistent runtime layout and must never replace those tensors.
+        # non-persistent runtime layout; once it proves it can rebuild the
+        # checkpoint words exactly, the full-size ``qweight`` copy is released
+        # (#5718). It is rebuilt for ``state_dict()``/save and before a
+        # re-transform, so only one copy of the 8-bit codes stays resident.
         self.transform_cpu(dtype=torch.float32)
         self.optimize()
 
     def _source_signature(self):
-        return tuple(tensor_cache_key(getattr(self, name, None)) for name in self.GPTQ_BUFFER_NAMES)
+        if self._checkpoint_qweight() is not None:
+            return tuple(
+                tensor_cache_key(getattr(self, name, None)) for name in self.GPTQ_BUFFER_NAMES
+            )
+        # The INT8 layout is the only resident copy of the codes, so it is the
+        # source: an edit to the runtime buffers or to the small affine
+        # metadata must invalidate the binding exactly like a qweight edit.
+        return (
+            "int8",
+            tuple(
+                tensor_cache_key(getattr(self, name, None))
+                for name in (
+                    INT8_WEIGHT_BUFFER_NAME,
+                    INT8_GROUP_SCALE_BUFFER_NAME,
+                    INT8_GROUP_OFFSET_BUFFER_NAME,
+                    INT8_INPUT_PERM_BUFFER_NAME,
+                    "scales",
+                    "qzeros",
+                    "g_idx",
+                )
+            ),
+        )
 
     def clear_weight_cache(self):
         """Invalidate the derived INT8 binding after a source edit or load."""
@@ -460,18 +536,252 @@ class TorchInt8Linear(GPTQQuantLinear):
             signature = self._source_signature()
             if self.int8_module is not None and signature == self._int8_source_signature:
                 return self.int8_module
-            if not self._has_all_gptq_buffers():
-                raise RuntimeError("TorchInt8Linear missing GPTQ checkpoint buffers for native INT8 conversion.")
-            self.transform_cpu(dtype=torch.float32)
+            self._publish_int8_runtime()
             return self.int8_module
+
+    def _publish_int8_runtime(self):
+        """Repack the current checkpoint into the derived INT8 runtime.
+
+        Must run at an eager boundary: the caller holds ``_INT8_REBUILD_LOCK``
+        (or the re-entrant ``_cpu_transform_lock``) because a traced graph
+        cannot rewrite module state. Publishing here keeps the binding current
+        across load/move transitions so a compiled caller never observes the
+        empty ``clear_weight_cache()`` window.
+        """
+        if self._checkpoint_qweight() is None:
+            self._materialize_checkpoint_qweight()
+        if not self._has_all_gptq_buffers():
+            raise RuntimeError("TorchInt8Linear missing GPTQ checkpoint buffers for native INT8 conversion.")
+        self.transform_cpu(dtype=torch.float32)
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
             return
         super().optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
-    def _has_all_gptq_buffers(self) -> bool:
-        return all(getattr(self, name, None) is not None for name in self.GPTQ_BUFFER_NAMES)
+    def _has_all_gptq_buffers(self, qweight: Optional[torch.Tensor] = None) -> bool:
+        weight = self._checkpoint_qweight() if qweight is None else qweight
+        if weight is None:
+            return False
+        return all(
+            getattr(self, name, None) is not None
+            for name in self.GPTQ_BUFFER_NAMES
+            if name != "qweight"
+        )
+
+    def _checkpoint_qweight(self) -> Optional[torch.Tensor]:
+        """Return the resident checkpoint ``qweight``, if one is materialized."""
+        weight = self._buffers.get("qweight")
+        return weight if isinstance(weight, torch.Tensor) else None
+
+    def _int8_rebuild_plan(self) -> dict:
+        """Validate the runtime INT8 layout and return shared inverse metadata."""
+        int8_weight = getattr(self, INT8_WEIGHT_BUFFER_NAME, None)
+        group_scale = getattr(self, INT8_GROUP_SCALE_BUFFER_NAME, None)
+        if int8_weight is None or group_scale is None:
+            raise RuntimeError(
+                "TorchInt8Linear cannot rebuild qweight without its INT8 group layout."
+            )
+        if int8_weight.dim() != 3:
+            raise RuntimeError(f"Expected 3D group codes, got shape={tuple(int8_weight.shape)}")
+
+        num_groups, _, width = int8_weight.shape
+        lengths = tuple(getattr(self, "_int8_group_lengths", None) or (width,) * num_groups)
+        if len(lengths) != num_groups:
+            raise RuntimeError(
+                f"Group length metadata has {len(lengths)} entries for {num_groups} groups"
+            )
+        row_index = None
+        if any(length != width for length in lengths[:-1]):
+            # A short/empty non-trailing group leaves padding rows inside the
+            # flat layout; gather each group's exact rows before un-permuting.
+            row_index = torch.cat([
+                torch.arange(group * width, group * width + length, device=int8_weight.device)
+                for group, length in enumerate(lengths)
+            ])
+        keep = sum(lengths)
+        if self.in_features is not None:
+            keep = min(keep, self.in_features)
+        input_perm = getattr(self, INT8_INPUT_PERM_BUFFER_NAME, None)
+        inverse_input_perm = None if input_perm is None else torch.argsort(input_perm.long())
+        return {
+            "num_groups": num_groups,
+            "width": width,
+            "row_index": row_index,
+            "keep": keep,
+            "inverse_input_perm": inverse_input_perm,
+        }
+
+    def _rebuild_qweight_columns(
+        self,
+        column_start: int,
+        column_stop: int,
+        *,
+        plan: dict,
+        descriptor,
+    ) -> torch.Tensor:
+        """Rebuild one output-column slice of the checkpoint ``qweight`` words.
+
+        The slice is a pure storage inverse, so every packed byte is compared
+        exactly. Widening only this slice's codes bounds the transient memory
+        of the release verification (#5835).
+        """
+        int8_weight = getattr(self, INT8_WEIGHT_BUFFER_NAME, None)
+        shape, dtype = descriptor
+        word_rows, out_features = int(shape[0]), int(shape[1])
+        if int(int8_weight.shape[1]) != out_features:
+            raise RuntimeError(
+                f"INT8 layout has {int8_weight.shape[1]} output features, qweight expects {out_features}"
+            )
+
+        num_groups, width = plan["num_groups"], plan["width"]
+        column_count = column_stop - column_start
+        # Stored codes are ``code - 128``; add the residual zero back so the
+        # words hold the checkpoint's unsigned 8-bit values.
+        # The stored layout is ``[group, output, contraction]``, so the
+        # checkpoint's output-column axis is the middle dimension.
+        codes = int8_weight[:, column_start:column_stop, :].to(torch.int32).add(128)
+        rows = codes.permute(0, 2, 1).reshape(num_groups * width, column_count)
+        if plan["row_index"] is not None:
+            rows = rows.index_select(0, plan["row_index"])
+        rows = rows[: plan["keep"]]
+        if plan["inverse_input_perm"] is not None:
+            rows = rows.index_select(0, plan["inverse_input_perm"])
+
+        words = torch.zeros((word_rows, column_count), dtype=dtype, device=rows.device)
+        pack_factor = int(self.pack_factor)
+        full_words = min(rows.shape[0] // pack_factor, word_rows)
+        if full_words:
+            grouped = rows[: full_words * pack_factor].reshape(
+                full_words, pack_factor, column_count
+            )
+            for lane in range(pack_factor):
+                words[:full_words].bitwise_or_(grouped[:, lane, :] << (self.bits * lane))
+        tail = rows[full_words * pack_factor:]
+        if tail.shape[0]:
+            if full_words >= word_rows:
+                raise RuntimeError(
+                    "INT8 layout has more input channels than the checkpoint qweight can hold"
+                )
+            packed_tail = torch.zeros(column_count, dtype=dtype, device=rows.device)
+            for lane in range(tail.shape[0]):
+                packed_tail.bitwise_or_(tail[lane] << (self.bits * lane))
+            words[full_words] = packed_tail
+        return words
+
+    def _rebuild_tile_columns(self, plan: dict, out_features: int) -> int:
+        """Output columns to rebuild at once under the transient-memory budget."""
+        rows = max(1, int(plan["keep"]))
+        columns = _INT8_REBUILD_TILE_BYTES // (rows * 4)
+        return max(1, min(int(out_features), columns))
+
+    def _rebuild_checkpoint_qweight(self, descriptor=None) -> torch.Tensor:
+        """Rebuild the checkpoint ``qweight`` words from the INT8 runtime layout.
+
+        The group layout is a pure storage repack: each stored byte is the
+        checkpoint's own code minus 128, permuted into group order and padded
+        to the kernel's contraction alignment. Inverting it therefore
+        reproduces the checkpoint words exactly. ``_maybe_drop_checkpoint_qweight``
+        verifies that against the live tensor before releasing it, so an
+        unexpected layout keeps its resident copy instead of exporting garbage.
+        The inverse is assembled one bounded output-column slice at a time.
+        """
+        descriptor = descriptor or getattr(self, "_int8_dropped_qweight", None)
+        if descriptor is None:
+            raise RuntimeError(
+                "TorchInt8Linear has no released qweight and no INT8 layout to rebuild it from."
+            )
+        plan = self._int8_rebuild_plan()
+        int8_weight = getattr(self, INT8_WEIGHT_BUFFER_NAME, None)
+        shape, dtype = descriptor
+        word_rows, out_features = int(shape[0]), int(shape[1])
+        words = torch.zeros((word_rows, out_features), dtype=dtype, device=int8_weight.device)
+        tile = self._rebuild_tile_columns(plan, out_features)
+        for start in range(0, out_features, tile):
+            stop = min(start + tile, out_features)
+            words[:, start:stop] = self._rebuild_qweight_columns(
+                start, stop, plan=plan, descriptor=descriptor
+            )
+        return words
+
+    def _materialize_checkpoint_qweight(self) -> bool:
+        """Publish a released checkpoint ``qweight`` buffer again."""
+        descriptor = getattr(self, "_int8_dropped_qweight", None)
+        if descriptor is None:
+            return self._checkpoint_qweight() is not None
+        tensor = self._rebuild_checkpoint_qweight(descriptor=descriptor)
+        # Publish the tensor before clearing the descriptor so a reader never
+        # observes neither source.
+        self._buffers["qweight"] = tensor
+        self._int8_dropped_qweight = None
+        return True
+
+    def _maybe_drop_checkpoint_qweight(self) -> bool:
+        """Release the checkpoint words once the INT8 layout rebuilds them exactly.
+
+        Fails closed: any shape/value mismatch keeps both copies, so a layout
+        this build cannot invert is never what a save emits. Verification walks
+        bounded output-column slices so a wide layer never needs the whole
+        widened inverse resident at once (#5835).
+        """
+        weight = self._checkpoint_qweight()
+        if weight is None:
+            return False
+        descriptor = (tuple(weight.shape), weight.dtype)
+        try:
+            plan = self._int8_rebuild_plan()
+            tile = self._rebuild_tile_columns(plan, weight.shape[1])
+            for start in range(0, weight.shape[1], tile):
+                stop = min(start + tile, weight.shape[1])
+                rebuilt = self._rebuild_qweight_columns(
+                    start, stop, plan=plan, descriptor=descriptor
+                )
+                if not torch.equal(rebuilt, weight[:, start:stop]):
+                    return False
+        except Exception:
+            return False
+        # Publish the descriptor before dropping the buffer so a concurrent
+        # reader never sees a missing tensor without a rebuild recipe.
+        self._int8_dropped_qweight = descriptor
+        self._buffers["qweight"] = None
+        return True
+
+    def materialize_checkpoint_layout_for_export(self) -> bool:
+        """Publish a released checkpoint ``qweight`` so an export can see it."""
+        if getattr(self, "_int8_fusion_view", False):
+            # A fused executor concatenates several layers' codes; its copied
+            # descriptor only describes the first source, so it is not a
+            # checkpoint and has no single qweight to publish.
+            return False
+        if getattr(self, "_int8_dropped_qweight", None) is None:
+            return False
+        return self._materialize_checkpoint_qweight()
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        with self._cpu_transform_lock:
+            super()._save_to_state_dict(destination, prefix, keep_vars)
+            descriptor = getattr(self, "_int8_dropped_qweight", None)
+            if descriptor is None or getattr(self, "_int8_fusion_view", False):
+                return
+            tensor = self._rebuild_checkpoint_qweight(descriptor=descriptor)
+            destination[prefix + "qweight"] = tensor if keep_vars else tensor.detach()
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        # A strict load needs the checkpoint ``qweight`` slot to exist; rebuild
+        # it before the copy so loading still works after ``post_init``
+        # released it. The lock is re-entrant and the base hook clears the
+        # derived runtime cache after the copy.
+        with self._cpu_transform_lock:
+            self._materialize_checkpoint_qweight()
+            bound = self.int8_module is not None and not getattr(self, "_int8_fusion_view", False)
+            result = super()._load_from_state_dict(*args, **kwargs)
+            if bound:
+                # Republish at this eager boundary. A compiled forward cannot
+                # run the signature refresh, so leaving the binding empty would
+                # make the next compiled call raise after a strict reload.
+                with _INT8_REBUILD_LOCK:
+                    self._publish_int8_runtime()
+            return result
 
     def _delete_attr_if_exists(self, attr_name: str):
         if hasattr(self, attr_name):
@@ -490,7 +800,8 @@ class TorchInt8Linear(GPTQQuantLinear):
             raise NotImplementedError("TorchInt8Linear unpack only supports bits in [2, 4, 8].")
 
         wf = torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)
-        device = self.qweight.device
+        weight = self._checkpoint_qweight()
+        device = weight.device if weight is not None else self.scales.device
         wf_zero = wf.unsqueeze(0).to(device=device)
         wf_neg_one = wf.unsqueeze(-1).to(device=device)
 
@@ -520,20 +831,31 @@ class TorchInt8Linear(GPTQQuantLinear):
         return self._dequantize_gptq_source_weight()
 
     def _dequantize_gptq_source_weight(self):
-        if not self._has_all_gptq_buffers():
+        qweight = self._checkpoint_qweight()
+        if qweight is None:
+            # The checkpoint words are derived data now; rebuild them for this
+            # explicit decode instead of keeping a second full-size copy.
+            qweight = self._rebuild_checkpoint_qweight()
+        if not self._has_all_gptq_buffers(qweight=qweight):
             raise RuntimeError("TorchInt8Linear missing GPTQ buffers for dequantization.")
 
         self._ensure_unpack_buffers()
 
-        zeros = torch.bitwise_right_shift(
-            torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
+        # Shared with `PackableQuantLinear.unpack_zero_points`: the packed zero
+        # words hold ceil(out_features / pack_factor) lanes, so a non-aligned
+        # output width decodes padding lanes that must be cropped here.
+        zeros = unpack_qzero_lanes(
+            self.qzeros,
             self.wf_unsqueeze_zero,
-        ).to(self.dequant_dtype)
-        zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
+            pack_factor=self.pack_factor,
+            maxq=self.maxq,
+            dtype=self.dequant_dtype,
+            out_features=self.out_features,
+        )
 
         weight = torch.bitwise_and(
             torch.bitwise_right_shift(
-                torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
+                torch.unsqueeze(qweight, 1).expand(-1, self.pack_factor, -1),
                 self.wf_unsqueeze_neg_one,
             ).to(self.dequant_dtype),
             self.maxq,
@@ -583,15 +905,24 @@ class TorchInt8Linear(GPTQQuantLinear):
 
     def transform_cpu(self, dtype: torch.dtype):
         _require_native_int8(self.bits)
+        if self._checkpoint_qweight() is None:
+            # A cold refresh after the checkpoint copy was released rebuilds it
+            # from the current INT8 codes first; it is dropped again below.
+            self._materialize_checkpoint_qweight()
         if not self._has_all_gptq_buffers():
             raise RuntimeError("TorchInt8Linear missing GPTQ checkpoint buffers for native INT8 conversion.")
         self._ensure_unpack_buffers()
 
-        zeros = torch.bitwise_right_shift(
-            torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
+        # See `_dequantize_gptq_source_weight`: the shared decode drops the
+        # packed lanes that pad the output axis past `out_features`.
+        zeros = unpack_qzero_lanes(
+            self.qzeros,
             self.wf_unsqueeze_zero,
-        ).to(self.dequant_dtype)
-        zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
+            pack_factor=self.pack_factor,
+            maxq=self.maxq,
+            dtype=self.dequant_dtype,
+            out_features=self.out_features,
+        )
 
         codes = torch.bitwise_and(
             torch.bitwise_right_shift(
@@ -621,6 +952,7 @@ class TorchInt8Linear(GPTQQuantLinear):
         # Pad the widest group up to the INT8 kernel's contraction alignment so
         # the runtime module never has to copy the codes again.
         kernel_width = _align_int8_group_width(max(group_lengths))
+        pieces = None
         if all(length == kernel_width for length in group_lengths):
             # [K, N] -> [G, W, N] -> [G, N, W]
             grouped_codes = ordered_codes.reshape(num_groups, kernel_width, self.out_features).permute(0, 2, 1)
@@ -657,6 +989,13 @@ class TorchInt8Linear(GPTQQuantLinear):
             dtype=dtype,
         )
         self._drop_unpack_buffers()
+        # The grouping scratch is dead once the group buffers are written;
+        # release it before the inverse verification allocates its own tiles.
+        del codes, ordered_codes, grouped_codes, pieces
+        # Release the full-size checkpoint copy only after its inverse has been
+        # proven against the live bytes (#5718). ``_bind_int8_runtime`` records
+        # the post-release source signature so steady-state forwards hit.
+        self._maybe_drop_checkpoint_qweight()
         self._bind_int8_runtime()
 
     def _bind_int8_runtime(self):
@@ -705,6 +1044,16 @@ class TorchInt8Linear(GPTQQuantLinear):
         int8_module = self._refresh_int8_runtime()
         if int8_module is None:
             raise RuntimeError("TorchInt8Linear int8 module is not initialized.")
+        if dynamo_is_compiling() and not getattr(self, "_int8_fusion_view", False):
+            # The eager signature check cannot run in a traced graph. Use the
+            # live checkpoint affine terms so edited scales/zero points take
+            # effect without a rebuild, while the codes stay in the derived
+            # layout. A fusion view's copied checkpoint buffers describe only
+            # the first source leaf, so it keeps the bound operands.
+            group_scale, group_offset = _live_group_affine(self)
+            return int8_module(
+                x.contiguous(), bias=bias, group_scale=group_scale, group_offset=group_offset
+            )
         return int8_module(x.contiguous(), bias=bias)
 
 

@@ -47,7 +47,9 @@ the wrapper and any direct launcher whose bias contract changes.
   bias keys, exact values, dtype, and shape after the affected transitions.
   Compare in-session and restored forwards and inspect the tensor after
   re-save where applicable. When changing runtime bias preparation, check
-  storage after switching to another supported activation dtype. Check
+  storage after repeated forwards in the same activation dtype; cover other
+  activation dtypes on separate module instances, never by switching one
+  module (see the [forward dtype contract](../../../../contracts/kernel/forward-dtype.md)). Check
   `MODEL_DTYPE_BUFFERS` and restore destination dtypes when the loader is
   involved. Include offload or resume when that is the changed entry point.
   [AWQ pack/load tests](../../../../tests/test_awq_pack_bias_representability.py),

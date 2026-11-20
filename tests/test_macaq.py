@@ -111,8 +111,10 @@ def test_macaq_weight_quantizer_requests_compiled_flips_by_default():
 # Packed codes and E8M0 exponents for the seed-0 8x64 matrix below, captured
 # from the implementation before the dead-reference release.  The lifetime fix
 # only drops locals, so every code and exponent must stay bit-identical.
+# Re-captured once for #5840: the balance pre-scale is now rounded to the
+# stored BF16 value before the weight and Hessian are transformed.
 _MACAQ_PRE_FIX_GOLDEN_PACKED_B64 = (
-    "QAudLq4toeobwwBKGsaqTLPa1BowKh2juTctCwEuuSTwyakEJQCRHcHcYB7DoQWQQC1BKw1QQzEqGqdGoK1SFL0Z7mEm3eA/bNnds5mr3nBQSssJFjEeJSIBJTQ5CzLNphIGHtTqcyxJH+/p8TSs5CDg2joqMwrdygOlW8TBFbQq/gWXrlVBT1N9v+ZdVdo7GxPwwEsaRTMEkAIjGaRbslMC6QTmITPNAs7RHlAjLmqWCkOhxyrDmQXAQ5KhwgwrZtySliwh29yzsxbCxH4TSyUC8knBVREzuq3hLJurGjUiC8zNIEA80KYbav1MwdrgLdS7BikqDCml4FtNatHsQA=="
+    "QAudLq4toeobwwBKGsaqTLPa1BowKx2juTctCwEuuSTwyakEJQCRHcHcYB7DoQWQQC1AKw1QQzEqGqdGoK1SFL0Z7mEm3eA/bNnds5mr3nBQSssJFjEeJSIBJTQ5CzLNlhIHHtTpcjw5H+/q8TSs5SDg2joqNJrcygOVW8TBFbQq/gWXrlVBT1N9v+ZdVdo7GxPwwEsaRTMEkAIjGaRbslMC6QTmITPNAs7RHlAjLmqWCkOhxyrDmQXAQ5KhwgwrZtyTliwh29yzsxbCxH4TSiUC8knBVRE0yq3hLJurGjUiC8zNIEA80KYbav1MwdrgLdS7BikqDCml4FtNatHsQA=="
 )
 _MACAQ_PRE_FIX_GOLDEN_SCALES_B64 = "fn5+fn1+fX59fn5+fn5+fg=="
 

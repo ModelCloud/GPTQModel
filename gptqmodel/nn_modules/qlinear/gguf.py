@@ -350,6 +350,31 @@ def _gguf_quantize_sign_only(blocks: np.ndarray, *, block_size: int) -> np.ndarr
     return packed
 
 
+def _pad_sign_only_tail(
+    weight: torch.Tensor,
+    *,
+    padded_in_features: int,
+    block_size: int,
+) -> torch.Tensor:
+    """Zero-pad a sign-only weight without diluting its final partial block.
+
+    ``_gguf_quantize_sign_only`` stores one scale per block: the mean magnitude
+    over all ``block_size`` columns. Filling the synthetic tail with the real
+    tail's mean magnitude keeps that mean unchanged, so the packed scale is the
+    least-squares optimum over the real columns. Forward paths always zero-pad
+    activations, so the filled columns never contribute to a result.
+    """
+    padding = padded_in_features - weight.shape[1]
+    if padding <= 0:
+        return weight
+    tail_columns = weight.shape[1] % block_size
+    if tail_columns == 0:  # pragma: no cover - padding implies a partial block
+        tail_scale = weight.new_zeros((weight.shape[0], 1))
+    else:
+        tail_scale = weight[:, -tail_columns:].abs().mean(dim=1, keepdim=True)
+    return torch.cat((weight, tail_scale.expand(-1, padding)), dim=1)
+
+
 def _gguf_roundf(values: np.ndarray) -> np.ndarray:
     absolute = np.abs(values)
     floored = np.floor(absolute)
@@ -1595,7 +1620,14 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             group_size=self.smooth_block_size(),
         )
         if weight.shape[1] != self.padded_in_features:
-            weight = torch.nn.functional.pad(weight, (0, self.padded_in_features - weight.shape[1]))
+            if self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+                weight = _pad_sign_only_tail(
+                    weight,
+                    padded_in_features=self.padded_in_features,
+                    block_size=self.gguf_block_size,
+                )
+            else:
+                weight = torch.nn.functional.pad(weight, (0, self.padded_in_features - weight.shape[1]))
 
         weight = weight.contiguous()
         if _mlx_quantization_available() and weight.numel() >= _MLX_GGUF_MIN_ELEMENTS:

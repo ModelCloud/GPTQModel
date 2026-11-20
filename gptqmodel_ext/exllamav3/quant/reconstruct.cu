@@ -150,6 +150,20 @@ void reconstruct_frac(at::Tensor unpacked, at::Tensor packed, int K)
     reconstruct_impl(unpacked, packed, K * 16 + 8, reconstruct_kernel_instances[24 + K - 1]);
 }
 
+void reconstruct_r4nx(at::Tensor unpacked, at::Tensor packed, double rate)
+{
+    TORCH_CHECK(rate == 2.5 || rate == 3.0 || rate == 3.5 || rate == 4.0,
+                "R4NX reconstruction requires 2.5, 3.0, 3.5, or 4.0 bpw (got ", rate, ")");
+    const int K = static_cast<int>(rate);
+    const bool half_k = rate != static_cast<double>(K);
+    decltype(&reconstruct_kernel<1, 0>) kernel;
+    if (rate == 2.5) kernel = reconstruct_kernel<2, EXL3_R4NX_CODEBOOK, true>;
+    else if (rate == 3.0) kernel = reconstruct_kernel<3, EXL3_R4NX_CODEBOOK>;
+    else if (rate == 3.5) kernel = reconstruct_kernel<3, EXL3_R4NX_CODEBOOK, true>;
+    else kernel = reconstruct_kernel<4, EXL3_R4NX_CODEBOOK>;
+    reconstruct_impl(unpacked, packed, 16 * K + 8 * half_k, kernel);
+}
+
 #if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
 void reconstruct_q4nx(at::Tensor unpacked, at::Tensor packed, int K, bool half_k)
 {

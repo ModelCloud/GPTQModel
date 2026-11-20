@@ -23,6 +23,19 @@ Paste the exact test commands and results here:
 ```bash
 ```
 
+## Measured Impact
+
+<!--
+For claimed issues, include a measured before/after table here for each
+applicable VRAM, performance, or accuracy metric before marking the PR ready.
+Use the same workload, hardware, and settings on the base and PR revisions.
+Include benchmark commands and conditions. Explain any unavailable measurements.
+
+| Metric (unit) | Before | After | Change (after − before) |
+| --- | ---: | ---: | ---: |
+| | | | |
+-->
+
 ## Model Support / Module Plan
 
 Required for new model support, model-type aliases, and definition changes.

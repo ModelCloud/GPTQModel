@@ -1,6 +1,7 @@
 #include <cuda_fp16.h>
 
 #include <c10/util/Exception.h>
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -27,6 +28,7 @@ struct TPackedTable
     const int* n_axis;
     int n_count;
     const uint16_t* payload;
+    const uint16_t* payload_q4nx;
 };
 
 // The tuned-kernel cache is process-wide and is filled on first use, so GIL=0
@@ -50,22 +52,32 @@ int exl3_gemm_tilesize_k[] = {EXL3_GEMM_TILESIZE_K};
 int exl3_gemm_tilesize_n[] = {EXL3_GEMM_TILESIZE_N};
 int exl3_gemm_blockdim[] = {EXL3_GEMM_BLOCKDIM};
 
+// Tuning sweeps (tests/benchmark_exl3_q4nx_tuning_ada.py) need to pin a single
+// (shape, num_sms) pair to measure a whole table from one build.  Production
+// dispatch never sets this, and it only applies when the caller did not ask for
+// a forced shape itself.  A non-positive shape restores the tuned lookup.
+std::atomic<int> sweep_shape_idx{-1};
+std::atomic<int> sweep_num_sms{0};
+
 constexpr TPackedTable packed_table_128 = {
     exl3_packed::n_axis_128,
     exl3_packed::n_axis_len_128,
-    exl3_packed::samples_128
+    exl3_packed::samples_128,
+    exl3_packed::samples_128_q4nx
 };
 
 constexpr TPackedTable packed_table_256 = {
     exl3_packed::n_axis_256,
     exl3_packed::n_axis_len_256,
-    exl3_packed::samples_256
+    exl3_packed::samples_256,
+    exl3_packed::samples_256_q4nx
 };
 
 constexpr TPackedTable packed_table_512 = {
     exl3_packed::n_axis_512,
     exl3_packed::n_axis_len_512,
-    exl3_packed::samples_512
+    exl3_packed::samples_512,
+    exl3_packed::samples_512_q4nx
 };
 
 int map_cc_to_index(int cc)
@@ -114,6 +126,26 @@ uint16_t lookup_packed_sample(const TPackedTable& table, int cc_idx, int bits, i
     int flat_idx =
         ((((cc_idx * exl3_packed::bit_count) + (bits - 1)) * exl3_packed::k_axis_len) + k_idx) * table.n_count + n_idx;
     return table.payload[flat_idx];
+}
+
+// Q4NX packs 10, 12 or 14 bits per step instead of one row per bitrate, so its
+// three rates get their own axis.  The order matches q4nx_rate_step_bits[].
+int q4nx_rate_index(int K, bool half_k)
+{
+    switch (4 * K + 2 * (half_k ? 1 : 0))
+    {
+        case 10: return 0;
+        case 12: return 1;
+        case 14: return 2;
+        default: return -1;
+    }
+}
+
+uint16_t lookup_q4nx_sample(const TPackedTable& table, int cc_idx, int rate_idx, int k_idx, int n_idx)
+{
+    int flat_idx =
+        ((((cc_idx * exl3_packed::q4nx_rate_count) + rate_idx) * exl3_packed::k_axis_len) + k_idx) * table.n_count + n_idx;
+    return table.payload_q4nx[flat_idx];
 }
 
 fp_exl3_gemm_kernel get_gemm_kernel_ptr(int K, int shape_idx, bool c_fp32, int cb, bool half_k, bool fused_gemm)
@@ -200,6 +232,15 @@ bool compatible(int shape, int size_k, int size_n, int K, bool half_k, int smem_
 
 }  // namespace
 
+// Pin the tuned dispatch to one configuration so a tuning sweep can measure
+// every shape from a single build.  Passing a non-positive shape restores the
+// tuned lookup; this is inert unless a caller opts in.
+extern "C" void exl3_gemm_force_tuned_config(int shape_idx, int num_sms)
+{
+    sweep_num_sms.store(num_sms, std::memory_order_relaxed);
+    sweep_shape_idx.store(shape_idx, std::memory_order_relaxed);
+}
+
 TResult* select_exl3_gemm_kernel_tuned
 (
     int cc,
@@ -229,6 +270,21 @@ TResult* select_exl3_gemm_kernel_tuned
         return &forced_result;
     }
     TORCH_CHECK(!force_num_sms, "Must supply force_shape_idx and force_num_sms together.");
+
+    const int sweep_shape = sweep_shape_idx.load(std::memory_order_relaxed);
+    if (sweep_shape > 0)
+    {
+        TORCH_CHECK(sweep_shape <= (fused_gemm ? EXL3_GEMM_NUM_SHAPES : EXL3_LEGACY_GEMM_NUM_SHAPES)
+                    && compatible(sweep_shape, size_k, size_n, K, half_k, smem_max),
+                    "incompatible swept EXL3 GEMM shape");
+        const int swept_cap = sweep_num_sms.load(std::memory_order_relaxed);
+        const int max_slices = size_k / exl3_gemm_tilesize_k[sweep_shape] * size_n / exl3_gemm_tilesize_n[sweep_shape];
+        forced_result.kernel = get_gemm_kernel_ptr(K, sweep_shape, c_fp32, cb, half_k, fused_gemm);
+        forced_result.shape_idx = sweep_shape;
+        forced_result.num_sms = MAX(MIN(max_slices, swept_cap > 0 ? swept_cap : max_slices), 1);
+        forced_result.block_dim = exl3_gemm_blockdim[sweep_shape];
+        return &forced_result;
+    }
 
     // The common dimensions select the integer or half-bit instances, and
     // multi-row tiles speed up prefill when they replace two or more slab passes.
@@ -263,7 +319,17 @@ TResult* select_exl3_gemm_kernel_tuned
         const TPackedTable& table = select_packed_table(size_n);
         int k_idx = nearest_axis_index(exl3_packed::k_axis, exl3_packed::k_axis_len, size_k);
         int n_idx = nearest_axis_index(table.n_axis, table.n_count, size_n);
-        uint16_t packed = lookup_packed_sample(table, MAX(0, cc_idx), K + half_k, k_idx, n_idx);
+        uint16_t packed;
+        if (cb == EXL3_Q4NX_CODEBOOK)
+        {
+            const int rate_idx = q4nx_rate_index(K, half_k);
+            TORCH_CHECK(rate_idx >= 0, "Q4NX requires 2.5, 3.0, or 3.5 bpw");
+            packed = lookup_q4nx_sample(table, MAX(0, cc_idx), rate_idx, k_idx, n_idx);
+        }
+        else
+        {
+            packed = lookup_packed_sample(table, MAX(0, cc_idx), K + half_k, k_idx, n_idx);
+        }
         int shape_idx = packed >> 8;
         int tuned_num_sms = packed & 0xff;
         TORCH_CHECK(shape_idx, "Failed to find valid kernel for shape");

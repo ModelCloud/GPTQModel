@@ -112,6 +112,63 @@ Packed FP16 forward uses FP32 for split-K partials, the output Hadamard
 transform, scales and bias, then casts once. The BF16 bridge rescales the raw
 projection, adds the canonical bias in FP32, and writes BF16. [Activation dispatch](exl3-wide-activation-dispatch.md)
 
+### Blackwell (sm_120)
+
+Blackwell was unmeasured when the Ada band landed, so `exl3_gemv_try_launch`
+declined Q4NX there. The same sweep on an RTX 5090 (170 SMs, 96 MiB L2) shows
+the packed GEMV is not numerically correct on sm_120: in all 180 cells it
+disagrees with the reconstructed FP32 weight by 0.16 to 0.82 relative, while
+the block-pipelined kernel stays within 3.3e-4. The defect is not specific to
+Q4NX — `mul1` W3 and `mcg` W2/W4 miss by 0.26 to 0.43 on the same device — so
+it belongs to the GEMV kernel on sm_120, not to the Q4NX decoder. Enabling it
+would be a poor trade even if the kernel were correct: the geometric mean is
+1.06x cold and 1.18x warm, and 61 of the 180 cells regress (0.77x warm at the
+worst). Blackwell keeps the block-pipelined kernel, and
+`tests/kernels/test_exllamav3_q4nx_gemv_blackwell.py` pins the decline so the
+gate is not opened without a working kernel and a new sweep.
+
+| bpw | Cells | GEMV vs FP32 reference | Packed vs reference | Cold geomean | Warm geomean | Regressions |
+| --- | ---: | --- | --- | ---: | ---: | ---: |
+| 2.5 | 60 | 0.16–0.74, median 0.37 | ≤ 3.2e-4 | 1.04x | 1.18x | 24/60 |
+| 3.0 | 60 | 0.17–0.82, median 0.37 | ≤ 3.1e-4 | 1.05x | 1.17x | 20/60 |
+| 3.5 | 60 | 0.16–0.68, median 0.36 | ≤ 3.2e-4 | 1.07x | 1.18x | 17/60 |
+
+The GEMV rows need the gate opened for the duration of the measurement; the
+committed tree declines every cell, so the table below is the kernel Blackwell
+actually runs. Times are medians in microseconds per projection: `cold`
+flushes 160 MiB of L2 before each of 20 launches, `warm` is a 100-launch batch
+after five warmups. `GB/s` is the packed trellis, `k * n * bits / 8` bytes over
+the measured time.
+
+| bpw | k | n | m | Cold | GB/s | Warm | GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2.5 | 2048 | 2048 | 1 | 15.70 | 83.5 | 14.40 | 91.1 |
+| 2.5 | 4096 | 4096 | 1 | 19.46 | 269.5 | 16.75 | 312.9 |
+| 2.5 | 8192 | 8192 | 1 | 35.82 | 585.4 | 32.28 | 649.7 |
+| 2.5 | 2048 | 16384 | 8 | 23.55 | 445.2 | 20.22 | 518.6 |
+| 3.0 | 2048 | 2048 | 1 | 16.37 | 96.1 | 13.52 | 116.4 |
+| 3.0 | 4096 | 4096 | 1 | 19.44 | 323.6 | 16.46 | 382.2 |
+| 3.0 | 8192 | 8192 | 1 | 37.89 | 664.2 | 32.22 | 781.0 |
+| 3.0 | 2048 | 16384 | 8 | 25.54 | 492.8 | 20.09 | 626.3 |
+| 3.5 | 2048 | 2048 | 1 | 15.36 | 119.5 | 13.32 | 137.7 |
+| 3.5 | 4096 | 4096 | 1 | 21.09 | 348.1 | 16.48 | 445.5 |
+| 3.5 | 8192 | 8192 | 1 | 39.94 | 735.2 | 32.27 | 909.9 |
+| 3.5 | 2048 | 16384 | 8 | 25.55 | 574.5 | 20.08 | 731.1 |
+
+The packed Q4NX GEMM tuning grid (`exl3_packed::samples_*` and
+`map_cc_to_index`) has no Blackwell row: `cc_values` covers Ampere, Ada and
+Hopper. `CC_BLACKWELL` is defined as `CC_HOPPER`, so sm_120 indexes the Hopper
+row and prefill is a tuned launch, not a generic fallback. At 3.0 bpw and 64
+rows the 5090 takes 45.49 us for 5120 → 4608 and 76.77 us for 8192 → 8192 cold
+(42.54 and 73.26 us warm, dispatch shape 7); 128 rows doubles that.
+
+Run the sweep with:
+
+```bash
+PYTHONPATH=. CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=2 \
+    /root/venv/bin/python tests/benchmark_exl3_q4nx_gemv_blackwell.py --check
+```
+
 ## Runtime policy
 
 ```python
@@ -179,8 +236,10 @@ flowchart TD
 The original integer Torch operator and default Python call remain available.
 The configured operator accepts a float bitrate and returns the selected path
 for diagnostics. NVIDIA CUDA serves the native tensor-core paths. The EXL3
-Torch backend provides the CPU and ROCm inference paths. NVIDIA CUDA also
-serves the new half-bit Viterbi quantizer.
+Torch backend provides the CPU inference path; on ROCm, RDNA4 (gfx120x) also
+has native HIP GEMV and WMMA GEMM paths (see [RDNA4 HIP dispatch](#rdna4-hip-dispatch)),
+while CDNA keeps reconstruct + hipBLAS. NVIDIA CUDA also serves the new
+half-bit Viterbi quantizer.
 
 Only immutable launch geometry and function attributes are cached across
 streams. CUDA graph allocations retain the pointer addresses of each graph's
@@ -190,6 +249,104 @@ call-private matrix consumed by prefill HGEMM.
 
 For gate, up and down projections in an expert layer, the extension also
 provides the [routed decode operator](exl3-routed-decode.md).
+
+### Q4NX launch table on Ada
+
+The packed launch table stores one sample per `(cc, bits, k, n)`. Q4NX rates
+are 10, 12 or 14 bits per step, so they do not line up with the integer
+`bits = K + half_k` rows. Before this table, every Q4NX launch read the integer
+sample for the nearest bitrate: `lookup_packed_sample(table, cc_idx, K + half_k,
+k_idx, n_idx)` at `exl3_kernel_map.cu:266` in the parent commit. The retune
+adds a `[cc][rate][k][n]` grid (`exl3_packed::samples_*_q4nx`) that only the
+Q4NX codebook reads.
+
+```mermaid
+flowchart TD
+    subgraph before["Before: shared bitrate grid"]
+        A1["select_exl3_gemm_kernel_tuned<br/>cb = EXL3_Q4NX_CODEBOOK"] --> B1["lookup_packed_sample<br/>bits = K + half_k"]
+        B1 --> C1["integer-tuned shape and num_sms"]
+    end
+    subgraph after["After: measured Q4NX grid"]
+        A2["select_exl3_gemm_kernel_tuned<br/>cb = EXL3_Q4NX_CODEBOOK"] --> R2{"q4nx_rate_index(K, half_k)"}
+        R2 -->|"0, 1, 2"| B2["lookup_q4nx_sample<br/>[cc][rate][k][n]"]
+        R2 -->|"-1"| E2["TORCH_CHECK: Q4NX requires 2.5, 3.0, or 3.5 bpw"]
+        B2 --> C2["measured shape and num_sms<br/>else the declared bitrate fallback"]
+    end
+    classDef error fill:#f9d5d5,stroke:#af3b3b,color:#222
+    class E2 error
+```
+
+| Mechanism | Parent commit | This change |
+| --- | --- | --- |
+| Q4NX sample | `lookup_packed_sample(..., K + half_k, ...)`, `exl3_kernel_map.cu:266` | `lookup_q4nx_sample(..., q4nx_rate_index(K, half_k), ...)` |
+| Unknown Q4NX rate | nearest integer row | `TORCH_CHECK` fails closed |
+| Grid | integer samples only | 585 measured Ada Q4NX cells, 0 fallbacks |
+| Coverage | implicit | the generator refuses an undeclared missing cell |
+
+`tests/benchmark_exl3_q4nx_tuning_ada.py` measures each shape with five
+warmups and the median of 100 launches at m=1 and m=16, picks the shape with
+the smallest worst-case slowdown across those rows, and scores the `num_sms`
+cap across m=16 and m=2048. `scripts/generate_exl3_kernel_map_packed.py`
+requires every Ada `(rate, k, n)` cell to be measured or listed in the JSON
+`fallback` array; a declared fallback copies the integer `bits = K + half_k`
+sample, which is exactly the launch the parent commit used. The generator also
+rejects a JSON measured on another capability or device, and the generated
+header records the measured and fallback counts. The checked-in table has
+585/585 measured cells and no fallbacks.
+
+`exl3_gemm_force_tuned_config(shape_idx, num_sms)` pins one `(shape, cap)` pair
+so a sweep can measure every shape from a single build. Production dispatch
+never calls it, and a non-positive shape restores the tuned lookup.
+
+Reproduce with:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4 \
+    python tests/benchmark_exl3_q4nx_tuning_ada.py sweep --max-weight-gb 6 \
+    --emit-json /tmp/q4nx_ada.json --raw-json /tmp/q4nx_ada_raw.json
+cp /tmp/q4nx_ada.json scripts/exl3_kernel_map_q4nx_ada.json
+python scripts/generate_exl3_kernel_map_packed.py
+```
+
+## RDNA4 HIP dispatch
+
+ROCm builds compile `quant/exl3_gemm_hip.cu` instead of the CUDA tensor-core
+tables. The HIP entry point owns the whole decision: it runs the fused
+trellis -> WMMA kernel when the device and geometry are covered, and otherwise
+reconstructs the weight and calls hipBLAS, so `bc_linear_exl3_run_configured`
+never raises for a supported geometry. `EXL3_HIP_DISPATCH_NATIVE` (93) and
+`EXL3_HIP_DISPATCH_FALLBACK` (94) report which path ran.
+
+```mermaid
+flowchart TD
+    A["LinearEXL3.forward (ROCm)"] --> B{"reconstruct flag, R4NX, or (Q4NX and bsz > 8)?"}
+    B -->|yes| T["EXL3_TORCH reconstruct + hgemm"]
+    B -->|no| C{"bsz <= 8?"}
+    C -->|yes| D["bc_linear_exl3_run_hip_gemv"]
+    D -->|accepted| J["Projection output"]
+    D -->|declined| Q{"Q4NX?"}
+    C -->|no| Q
+    Q -->|yes| T
+    Q -->|no| E["bc.run -> bc_linear_exl3_run_configured -> exl3_gemm"]
+    E --> F["exl3_gemm_hip: had_r_128, then validate K and N % 128"]
+    F --> G{"c_fp32 and 0 < m <= 512 and gfx120x?"}
+    G -->|yes| H["exl3_hip_gemm_kernel WMMA decode, FP32 accumulate, output Hadamard"]
+    G -->|no| I["reconstruct, hgemm, output Hadamard"]
+    H --> J
+    I --> J
+    T --> J
+```
+
+The native GEMM covers integer rates 1-8 bpw for the `3inst`, `mcg` and
+`mul1` codebooks and the 1.5/2.5/3.5 bpw `mul1` half rates, with K and N
+multiples of 128 and at most 512 rows. Q4NX has no fused ROCm decoder, so it
+keeps the Torch path above the GEMV's batch size. R4NX always reconstructs
+(there is no R4NX GEMM kernel on any backend). CDNA and every non-gfx120x ROCm
+target fall back to reconstruct + hipBLAS.
+
+`EXL3_EXLLAMA_V3` is accepted on RDNA4 only, through the
+`exl3_native_hip_gemm_available` metadata probe. `backend=AUTO` still resolves
+to `EXL3_TORCH` on ROCm, so the fused HIP kernel is opt-in there.
 
 ## A100 validation
 
