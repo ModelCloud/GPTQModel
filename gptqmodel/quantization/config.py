@@ -4550,6 +4550,12 @@ def apply_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: ResolvedM
         "preprocessors": _normalize_preprocessors,
     }
     for key, value in resolved_cfg.overrides.items():
+        if value is None:
+            # `None` means "no override": the rule inherits the run-level value,
+            # the same way the numeric validators already read it. Applying it
+            # overwrote the clone with `None` and the next `__post_init__` died
+            # with a bare TypeError (#5659).
+            continue
         canonical = QUANT_CONFIG_ARG_SYNONYMS.get(key, key)
         if canonical in ("smoother", "smooth"):
             config.smoother = _normalize_smoother_config(value)
@@ -6901,6 +6907,19 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                 )
             )
 
+        # `None` means "inherit the run-level value", not an override, so
+        # drop it before validation. A rule such as `{"krot": None}` used
+        # to reach `int(None)` in the per-module clone (#5659).
+        if self.dynamic is not None:
+            self.dynamic = {
+                layer: (
+                    {key: value for key, value in layer_dict.items() if value is not None}
+                    if isinstance(layer_dict, dict)
+                    else layer_dict
+                )
+                for layer, layer_dict in self.dynamic.items()
+            }
+
         # 5/6/7-bit GPTQ only exists in the planar (split-plane) layout, which is
         # a distinct checkpoint format from the continuous gptq/gptq_v2 layouts.
         # Per-layer dynamic bit overrides count too: one 5/6/7-bit layer makes
@@ -8289,7 +8308,11 @@ class ParoConfig(PreProcessorConfig):
         for pattern, rule in self.dynamic.items():
             if not isinstance(rule, Mapping):
                 continue
-            for key in rule:
+            for key, value in rule.items():
+                if value is None:
+                    # Explicit `None` inherits the top-level value, so it is
+                    # not a per-module setting to reject (#5659).
+                    continue
                 canonical = QUANT_CONFIG_ARG_SYNONYMS.get(key, key)
                 if canonical == "opt_scope":
                     scope_keys.append(f"`dynamic[{pattern!r}].{key}`")

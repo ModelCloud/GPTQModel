@@ -36,6 +36,8 @@ import torch
 try:  # pragma: no cover - import availability is environment dependent
     import triton
     import triton.language as tl
+    from triton import knobs as _triton_knobs
+    from triton.runtime import driver as _triton_driver
 
     from .triton_jit import jit as triton_jit
 
@@ -43,6 +45,8 @@ try:  # pragma: no cover - import availability is environment dependent
 except Exception:  # pragma: no cover
     triton = None
     tl = None
+    _triton_knobs = None
+    _triton_driver = None
     TRITON_AVAILABLE = False
 
 
@@ -98,11 +102,24 @@ def _launch_device(device: torch.device):
     Triton launches into the current CUDA/HIP context, but a sharded checkpoint
     hands each layer operands on that layer's device. MACaQ and GGUF use the
     same guard.
+
+    The guard is skipped when the operands already sit on the current device,
+    which is the decode case. A ``torch.cuda.device`` context probes the current
+    device on entry, and the old ``torch.cuda.is_available()`` probe was not
+    cached by every torch build, so both were pure per-launch overhead on a
+    path that already runs at single-digit microseconds (#5582). A device with
+    no index is the current device by definition.
     """
 
-    if device.type == "cuda" and torch.cuda.is_available():
-        return torch.cuda.device(device)
-    return nullcontext()
+    if device.type != "cuda":
+        return nullcontext()
+    try:
+        if device.index is None or device.index == torch.cuda.current_device():
+            return nullcontext()
+    except Exception:
+        # No usable CUDA context: let the launch raise the real error.
+        return nullcontext()
+    return torch.cuda.device(device)
 
 
 if TRITON_AVAILABLE:
@@ -388,6 +405,45 @@ def fp8_block_gemv_payload_supported(
     return scale.shape == (out_features // block_rows, in_features // block_cols)
 
 
+#: Compiled GEMV launchers keyed by the full launch geometry. Bounded because a
+#: model can call this with a few shapes per payload; 64 entries cover the
+#: decode shapes of every projection without holding kernels for arbitrary
+#: batches. Each entry is ``(run, function, packed_metadata, grid0, grid1,
+#: device_index)``.
+_GEMV_LAUNCHERS: dict[tuple, tuple] = {}
+_GEMV_LAUNCHERS_MAX = 64
+
+
+def _launch_hook_active(hook: object) -> bool:
+    """Whether *hook* would run callbacks.
+
+    Triton 3.9 stores the launch hooks as ``HookChain`` objects that are never
+    ``None``; older releases used ``None`` plus a plain callable.
+    """
+
+    if hook is None:
+        return False
+    calls = getattr(hook, "calls", None)
+    if calls is None:
+        return True
+    return bool(calls)
+
+
+def _direct_launch_ready() -> bool:
+    """Whether a cached launcher may skip Triton's per-call argument binder.
+
+    Triton installs launch hooks for profilers (Proton and the Nsight wrappers).
+    When a hook is active the standard ``CompiledKernel.__getitem__`` runner has
+    to stay in charge so the hook still sees the launch.
+    """
+
+    runtime = None if _triton_knobs is None else _triton_knobs.runtime
+    return runtime is not None and not (
+        _launch_hook_active(runtime.launch_enter_hook)
+        or _launch_hook_active(runtime.launch_exit_hook)
+    )
+
+
 def fp8_block_gemv(
     x: torch.Tensor,
     codes: torch.Tensor,
@@ -410,35 +466,122 @@ def fp8_block_gemv(
     rows, in_features = x.shape
     out_features = codes.shape[0]
     block_m, block_n, num_warps, num_stages = _gemv_tiles(rows, out_features)
+    block_h = int(block_size[0])
+    block_w = int(block_size[1])
+    block_k = _gemv_block_k()
+    has_bias = bias is not None
+    grid_0 = (out_features + block_n - 1) // block_n
+    grid_1 = (rows + block_m - 1) // block_m
     out = torch.empty((rows, out_features), dtype=x.dtype, device=x.device)
+    x_strides = x.stride()
+    codes_strides = codes.stride()
+    scale_strides = scale.stride()
+    out_strides = out.stride()
+    bias_arg = bias if has_bias else scale
+    args = (
+        x,
+        codes,
+        scale,
+        out,
+        bias_arg,
+        rows,
+        out_features,
+        in_features,
+        x_strides[0],
+        x_strides[1],
+        codes_strides[0],
+        codes_strides[1],
+        scale_strides[0],
+        scale_strides[1],
+        out_strides[0],
+        out_strides[1],
+        block_h,
+        block_w,
+        inverse,
+        has_bias,
+        block_m,
+        block_n,
+        block_k,
+    )
+    # ``JITFunction.run`` re-binds and re-specializes every runtime argument and
+    # rebuilds the cache key on each call; for a batch-1 decode that bookkeeping
+    # costs more than the launch (#5582). The first call per geometry keeps the
+    # compiled kernel's launcher, and later calls pass the same argument tuple
+    # straight to it. The stream is still read per call, so stream switches and
+    # CUDA-graph capture stay correct.
+    key = (
+        x.device.index,
+        x.dtype,
+        codes.dtype,
+        scale.dtype,
+        bias.dtype if has_bias else None,
+        # Triton specializes each pointer on 16-byte divisibility; a view with
+        # an unaligned offset needs its own compiled kernel.
+        x.data_ptr() & 15,
+        codes.data_ptr() & 15,
+        scale.data_ptr() & 15,
+        bias.data_ptr() & 15 if has_bias else -1,
+        rows,
+        in_features,
+        out_features,
+        x_strides,
+        codes_strides,
+        scale_strides,
+        inverse,
+        has_bias,
+        block_h,
+        block_w,
+        block_m,
+        block_n,
+        num_warps,
+        num_stages,
+    )
+    entry = _GEMV_LAUNCHERS.get(key)
+    if entry is not None and _direct_launch_ready():
+        run, function, packed_metadata, entry_grid_0, entry_grid_1, device_index = entry
+        with _launch_device(x.device):
+            stream = _triton_driver.active.get_current_stream(device_index)
+            run(
+                entry_grid_0,
+                entry_grid_1,
+                1,
+                stream,
+                function,
+                packed_metadata,
+                None,
+                None,
+                None,
+                *args,
+            )
+        return out
     with _launch_device(x.device):
-        _fp8_block_gemv_kernel[(triton.cdiv(out_features, block_n), triton.cdiv(rows, block_m))](
-            x,
-            codes,
-            scale,
-            out,
-            bias if bias is not None else scale,
-            rows,
-            out_features,
-            in_features,
-            x.stride(0),
-            x.stride(1),
-            codes.stride(0),
-            codes.stride(1),
-            scale.stride(0),
-            scale.stride(1),
-            out.stride(0),
-            out.stride(1),
-            BLOCK_H=int(block_size[0]),
-            BLOCK_W=int(block_size[1]),
+        kernel = _fp8_block_gemv_kernel[(grid_0, grid_1)](
+            *args[:16],
+            BLOCK_H=block_h,
+            BLOCK_W=block_w,
             INVERSE=inverse,
-            HAS_BIAS=bias is not None,
+            HAS_BIAS=has_bias,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
-            BLOCK_K=_gemv_block_k(),
+            BLOCK_K=block_k,
             num_warps=num_warps,
             num_stages=num_stages,
         )
+    if _direct_launch_ready() and len(_GEMV_LAUNCHERS) < _GEMV_LAUNCHERS_MAX:
+        try:
+            # ``kernel.run`` initialises the handles lazily, so read it first.
+            run = kernel.run
+            _GEMV_LAUNCHERS[key] = (
+                run,
+                kernel.function,
+                kernel.packed_metadata,
+                grid_0,
+                grid_1,
+                x.device.index,
+            )
+        except Exception:
+            # An older Triton without this launcher shape: keep the slow path.
+            pass
     return out
 
 

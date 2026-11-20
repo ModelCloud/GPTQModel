@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import List, Optional, Tuple
 
 import torch
+import transformers
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import CPU, DEVICE, PLATFORM
@@ -21,6 +22,7 @@ from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import dynamo_is_compiling
 from ._compile_support import COMPILE_LEVEL
+from ._numerics import scaled_accumulation
 from ._runtime_cache import tensor_cache_key
 
 
@@ -525,6 +527,10 @@ class QQQLinear(GroupedQuantLinear):
             device=CPU,
         )
         weight = linear.weight.data
+        if isinstance(linear, transformers.Conv1D):
+            # ``transformers.Conv1D`` stores ``[in_features, out_features]``;
+            # the tiling below addresses the logical ``[out, in]`` layout.
+            weight = weight.t()
         perm = self._perm.to(device=weight.device)
         for input_start in range(0, self.in_features, input_chunk_size):
             input_end = min(input_start + input_chunk_size, self.in_features)
@@ -1309,8 +1315,15 @@ class QQQTorchLinear(QQQLinear):
                     quant_A.to(torch.float32),
                     weight.to(device=A_flat.device, dtype=torch.float32),
                 )
-        accum = accum * s1
-        accum = accum * s_channel.to(device=A_flat.device, dtype=torch.float32)
+        # Apply both scales through the overflow-safe product: the historical
+        # left-to-right order overflows an FP32 intermediate for a finite
+        # BF16 result (#5608), while the helper keeps that order's exact bits
+        # whenever it is representable.
+        accum = scaled_accumulation(
+            accum,
+            s1,
+            s_channel.to(device=A_flat.device, dtype=torch.float32),
+        )
         if self.bias is not None:
             # The INT8 reduction and scales are still FP32 here. Add bias
             # before the output cast so a finite sum cannot overflow in FP16.

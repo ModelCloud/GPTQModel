@@ -196,13 +196,14 @@ def apply_paro_rotation_reference(
     hidden = x2d.shape[-1]
     group_size = _normalize_group_size(group_size, hidden)
 
-    # A bf16 rotation cannot absorb a rounding after every Givens stage: the
+    # A 16-bit rotation cannot absorb a rounding after every Givens stage: the
     # krot stages each round the activation and cos/sin, which is about three
-    # times the error of rounding the fp32 result once. Accumulate in fp32 for
-    # bf16 and round once at the end; fp16 keeps the historical per-stage
-    # arithmetic (its 11-bit significand is already fine).
+    # times the error of rounding the fp32 result once. FP16 has the narrower
+    # exponent range of the two, so a partial sum such as 84853 overflows to
+    # inf even when the final value is representable (#5634). Accumulate in
+    # fp32 for both 16-bit dtypes and round once at the end.
     input_dtype = x2d.dtype
-    accumulate_fp32 = input_dtype == torch.bfloat16
+    accumulate_fp32 = input_dtype in (torch.bfloat16, torch.float16)
     work_dtype = torch.float32 if accumulate_fp32 else input_dtype
 
     if scales is not None:
@@ -262,10 +263,10 @@ def apply_paro_rotation_vectorized(
     num_groups = hidden // group_size
     half_group = group_size // 2
 
-    # Same single-rounding contract as the reference path: bf16 accumulates in
-    # fp32 and is narrowed once below, while fp16 keeps its per-stage rounding.
+    # Same single-rounding contract as the reference path: both 16-bit dtypes
+    # accumulate in fp32 and are narrowed once below (#5634).
     input_dtype = x2d.dtype
-    accumulate_fp32 = input_dtype == torch.bfloat16
+    accumulate_fp32 = input_dtype in (torch.bfloat16, torch.float16)
     work_dtype = torch.float32 if accumulate_fp32 else input_dtype
 
     if scales is not None:

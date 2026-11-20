@@ -346,6 +346,28 @@ def pack_mxfp4_from_signed_index(
     return packed.contiguous(), scales
 
 
+def decode_mxfp4_scales(
+    scales: torch.Tensor, out_features: int, groups: int
+) -> torch.Tensor:
+    """Decode E8M0 scale bytes to FP32 powers of two.
+
+    ``scales`` may be an ``E8M0`` tensor or its ``uint8`` view and may carry
+    kernel padding; only the first ``out_features`` rows and ``groups`` columns
+    are read. E8M0 ``0xFF`` is the format's NaN, not ``2**128``:
+    :func:`pack_mxfp4_from_signed_index` writes it for a block that held a
+    NaN/Inf value.
+    """
+
+    scale_bytes = scales.view(torch.uint8)[:out_features, :groups].to(torch.float32)
+    # `2 ** exponent` rather than `exp2`: `exp2(0 - 127)` rounds 2**-127 one ulp
+    # low on CUDA, which would decode a representable block incorrectly.
+    return torch.where(
+        scale_bytes == 255.0,
+        torch.full_like(scale_bytes, float("nan")),
+        torch.pow(2.0, scale_bytes - 127.0),
+    )
+
+
 @torch.no_grad()
 def dequantize_mxfp4(
     packed: torch.Tensor,
@@ -366,16 +388,7 @@ def dequantize_mxfp4(
     groups = in_features // MXFP4_BLOCK
     if packed.shape[1] * 2 < in_features:
         raise ValueError("MACaQ: `packed` holds fewer than `in_features` values.")
-    scale_bytes = scales.view(torch.uint8)[:out_features, :groups].to(torch.float32)
-    # E8M0 0xFF is the format's NaN, not 2**128; `pack_mxfp4_from_signed_index`
-    # writes it for a block that held a NaN/Inf value.
-    # `2 ** exponent` rather than `exp2`: `exp2(0 - 127)` rounds 2**-127 one
-    # ulp low on CUDA, which would decode a representable block incorrectly.
-    scale = torch.where(
-        scale_bytes == 255.0,
-        torch.full_like(scale_bytes, float("nan")),
-        torch.pow(2.0, scale_bytes - 127.0),
-    )
+    scale = decode_mxfp4_scales(scales, out_features, groups)
     lo = (packed & 0x0F).to(torch.int64)
     hi = ((packed >> 4) & 0x0F).to(torch.int64)
     code = torch.stack([lo, hi], dim=-1).reshape(out_features, packed.shape[1] * 2)[:, :in_features]

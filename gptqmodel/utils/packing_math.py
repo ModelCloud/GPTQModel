@@ -62,12 +62,12 @@ def awq_packed_codes(
     """Recover the integer codes the AWQ packers store for ``weight``.
 
     The AWQ GEMM, GEMV and GEMV-fast packers form the affine offset from the
-    source scales in FP32, divide by the checkpoint-stored scale in FP32,
-    round, and saturate to the code range. Use the same operand order,
-    precision and saturation so a predicted code always names the exported
-    code instead of a neighbouring value.
+    checkpoint-stored scale in FP32, divide by that same scale in FP32, round,
+    and saturate to the code range. Use the same operand order, precision and
+    saturation so a predicted code always names the exported code instead of a
+    neighbouring value.
     """
     stored = scales.to(scale_dtype)
-    offset = zeros.float() * scales.float()
+    offset = zeros.float() * stored.float()
     values = (weight.float() + offset[:, g_idx]) / stored.float()[:, g_idx]
     return values.round().clamp_(0, (1 << bits) - 1)

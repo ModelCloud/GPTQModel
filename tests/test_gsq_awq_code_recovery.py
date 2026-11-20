@@ -3,8 +3,8 @@
 
 """GSQ AWQ code recovery must name the code the real packer stores.
 
-The AWQ packers build the affine offset from the source scales in FP32, divide
-by the checkpoint-stored scale in FP32, round, and saturate. GSQ scores hard
+The AWQ packers build the affine offset from the checkpoint-stored scale in
+FP32, divide by that same scale in FP32, round, and saturate. GSQ scores hard
 candidates through the same reconstruction, so any drift in precision, operand
 order or saturation changes which weights the optimizer evaluates.
 """
@@ -78,8 +78,9 @@ def _unpack(module, packing):
 
 def _oracle(weight, scales, zeros, groups, scale_dtype):
     """FP64 oracle with explicit rounding at each specified FP32 operation."""
-    stored = scales.to(scale_dtype).double()[:, groups]
-    offset = (zeros.float().double() * scales.float().double()).float().double()
+    stored_source = scales.to(scale_dtype)
+    stored = stored_source.double()[:, groups]
+    offset = (zeros.float().double() * stored_source.float().double()).float().double()
     numerator = (weight.float().double() + offset[:, groups]).float().double()
     quotient = (numerator / stored).float().double()
     return quotient.round().clamp(0, (1 << BITS) - 1)
@@ -148,27 +149,22 @@ def test_gsq_awq_codes_match_fp64_oracle_and_packed_bytes(
 
 def test_awq_gemm_resolves_wider_source_scale_to_fp16_storage(device):
     """A wider source scale still packs into the FP16 scale buffer."""
-    source = torch.full((OUT_FEATURES, 1), 0.1, dtype=torch.float32, device=device)
+    source = torch.full((OUT_FEATURES, 1), 1.4 * 2.0**-24, dtype=torch.float32, device=device)
     stored = source.to(torch.float16)
+    assert stored.flatten()[0].item() == 2.0**-24
     zeros = torch.full((OUT_FEATURES, 1), 8, dtype=torch.int32, device=device)
     groups = torch.arange(IN_FEATURES, dtype=torch.int32, device=device) // GROUP_SIZE
 
-    # The correct quotient (FP16 divisor) sits just above a half step while
-    # dividing by the FP32 source would land below it.
-    sample = (8.501 * stored.double() - 8 * source.double()).to(torch.float16)
-    weights = sample.expand(OUT_FEATURES, IN_FEATURES)
+    # The FP32 source scale rounds to the FP16 subnormal the checkpoint stores.
+    # The affine offset must use that stored grid, so an exact zero weight
+    # keeps the zero point instead of being pushed off it by the wider scale.
+    weights = torch.zeros((OUT_FEATURES, IN_FEATURES), dtype=torch.float16, device=device)
     predicted = affine_codes(
         weights, source, zeros, groups, BITS, packing="awq_gemm", scale_dtype=torch.float32
     )
     oracle = _oracle(weights, source, zeros, groups, torch.float16)
     assert torch.equal(predicted, oracle)
-    assert torch.unique(predicted).tolist() == [9.0]
-
-    legacy = (
-        (weights.double() + zeros.double() * source.double()[:, groups])
-        / source.double()[:, groups]
-    ).round().clamp(0, (1 << BITS) - 1)
-    assert not torch.equal(predicted, legacy)
+    assert torch.unique(predicted).tolist() == [8.0]
 
     exported = _decode(
         predicted, source, zeros, groups, torch.float16, "awq_gemm"
@@ -218,14 +214,19 @@ def device(request):
 
 @pytest.mark.parametrize("packing,cls", PACKERS)
 def test_wide_source_codes_follow_each_fp32_rounding_step(device, packing, cls):
-    # A raw FP64 quotient falls below 1.5, while the packer's FP32 addition
-    # lands exactly on 1.5. The format specifies FP32 round-to-even: code 2.
+    # A raw FP64 quotient on the stored grid falls below 1.5, while the
+    # packer's FP32 addition lands exactly on 1.5. The format specifies FP32
+    # round-to-even: code 2.
+    stored = torch.tensor(0.1, dtype=torch.float32).to(torch.float16)
+    weight_below_half_step = torch.nextafter(
+        0.5 * stored.float(), torch.full((), float("-inf"))
+    ).item()
     weight, scales, zeros, groups = _tensors(
-        0.04996337369084358, 0.1, 1, torch.float32, device=device, weight_dtype=torch.float32,
+        weight_below_half_step, 0.1, 1, torch.float32, device=device, weight_dtype=torch.float32,
     )
     predicted = affine_codes(weight, scales, zeros, groups, BITS, packing=packing)
     expected = _oracle(weight, scales, zeros, groups, torch.float16)
-    ideal = ((weight.double() + zeros.double()[:, groups] * scales.double()[:, groups])
+    ideal = ((weight.double() + zeros.double()[:, groups] * scales.half().double()[:, groups])
              / scales.half().double()[:, groups]).round()
     assert torch.equal(predicted, expected)
     assert torch.unique(predicted).tolist() == [2.0]
