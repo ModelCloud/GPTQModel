@@ -14,6 +14,16 @@
     const int SH_STAGES, \
     const int FRAG_STAGES
 
+// `guard_mode` folds the FP16/BF16 input-range guard into this launch (#5942):
+// 0 disables it, 1 writes FP16 output, 2 writes BF16 output with the bound,
+// scale and epilogue in FP32, and 3 writes BF16 output with them in FP64 for a
+// checkpoint whose scales can push `x * suh` past FP32. `row_amax` is the
+// per-row bound the prologue reduces and the epilogue reads back; `guard_out`
+// is the final-dtype result the epilogue writes after applying that row scale
+// and `guard_bias` (mode 1 FP16, 2 BF16, 3 FP32). C stays the FP32
+// accumulation buffer so the split-K partial sums keep their precision. Every
+// guard argument is unused when `guard_mode` is 0, so the GEMV and legacy
+// kernels keep their signatures and ignore them.
 #define EXL3_GEMM_ARGS \
     const half* __restrict__  A, \
     const uint16_t* __restrict__ B, \
@@ -24,9 +34,16 @@
     int* __restrict__ locks, \
     const half* __restrict__ suh, \
     half* __restrict__ A_had, \
-    const half* __restrict__ svh
+    const half* __restrict__ svh, \
+    double* __restrict__ row_amax, \
+    void* __restrict__ guard_out, \
+    const void* __restrict__ guard_bias, \
+    const int guard_mode, \
+    const int guard_bias_mode, \
+    const double guard_bound
 
 typedef void (*fp_exl3_gemm_kernel) (EXL3_GEMM_ARGS);
+
 
 #define EXL3_GEMM_BASE_THREADS 256
 #define SMEM_MAX EXL3_SMEM_MAX_DEFAULT

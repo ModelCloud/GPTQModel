@@ -634,14 +634,14 @@ def test_exllamav2_gptq_forward_compacts_noncontiguous_activations(monkeypatch):
 
 
 def test_exllamav3_wide_inputs_route_to_torch_reconstruction():
-    """Wide activations must not reach the FP16-only native EXL3 kernel.
+    """Non-CUDA wide activations keep the bounded Torch reconstruction.
 
     #3717 pinned a native path that upcast wide inputs to FP32. #3731
     (``86a59903e``) replaced it with the bounded Torch reconstruction path,
     which receives the caller dtype as-is and upcasts internally inside
-    ``ExllamaV3TorchLinear._forward_eager``. Because that inner takes a single
-    ``x`` argument, the native ``(x, _params, out_dtype=...)`` call would still
-    be reached here under the stale contract and explode.
+    ``ExllamaV3TorchLinear._forward_eager``. #5942 keeps that reconstruction
+    for non-CUDA input while the CUDA native GEMM folds the bound into its own
+    Hadamard and epilogue (covered by ``test_exl3_native_guard_5942``).
     """
     seen = {}
 
@@ -685,6 +685,11 @@ def test_exllamav3_wide_inputs_route_to_torch_reconstruction():
         _ensure_inner=lambda: NativeInner(),
         _native_bf16_input=lambda x: (x.to(torch.float16), torch.ones(x.shape[:-1] + (1,))),
         _rescale_native_output=lambda result, scale: result.float() * scale,
+        # The real probe reduces the row bound; this CPU input is finite. The
+        # folded-guard op is absent from this fake build, so the eager native
+        # fallback must still run (#5942).
+        _native_input_is_finite=lambda x: True,
+        _guarded_native_forward=lambda x: None,
         out_features=4,
     )
     out = ExllamaV3Linear.forward(layer, torch.ones((1, 2), dtype=torch.float16))

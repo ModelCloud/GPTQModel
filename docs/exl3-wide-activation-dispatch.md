@@ -13,24 +13,27 @@ kernel. Native EXL3 still requires FP16 operands; the bridge now supplies them.
 ```mermaid
 flowchart TD
     A["ExllamaV3Linear.forward(x)"] --> B{"x.dtype"}
-    B -->|float16| C["_ensure_inner"]
-    B -->|bfloat16 on CUDA| D["_native_bf16_input"]
+    B -->|"float32 or bfloat16 off CUDA"| H["_ensure_torch_inner"]
+    B -->|"float16 or bfloat16 on CUDA"| P{"_native_input_is_finite<br/>once per module"}
+    P -->|"finite and the guard owns the shape"| G["_guarded_native_forward<br/>bound in the input Hadamard,<br/>scale + bias in the epilogue"]
+    G -->|accepted| YF["final-dtype result"]
+    P -->|"non-finite first probe"| H
+    P -->|"guard declined"| D["_native_bf16_input"]
     D --> E{"module warm and<br/>fused op present?"}
     E -->|yes| S["bf16_prescale: one launch<br/>row amax, power-of-two scale, FP16 cast"]
     E -->|no| N["first forward: isfinite probe"]
     N -->|finite| R["eager reference: vector_norm, div,<br/>frexp, ldexp, where, divide, cast"]
-    N -->|non-finite| H["_ensure_torch_inner"]
-    S --> G["FP16 activations plus per-row FP32 scale"]
-    R --> G
-    G --> C
+    N -->|non-finite| H
+    S --> G2["FP16 activations plus per-row FP32 scale"]
+    R --> G2
+    G2 --> C["_ensure_inner"]
     C --> I["LinearEXL3.forward"]
     I --> K["Native projection with FP32 reduction and scaling"]
     K --> W{"BF16 output?"}
-    W -->|no| Y["Add bias in FP32 and cast to FP16"]
+    W -->|no| Y2["Add bias in FP32 and cast to FP16"]
     W -->|yes| Q{"Fused BF16 epilogue present?"}
     Q -->|yes| T["bf16_rescale.raw<br/>out * scale + bias in FP32, then BF16 cast"]
     Q -->|no| U["Eager FP32 multiply and bias add, then BF16 cast"]
-    B -->|float32| H
     H --> M["ExllamaV3TorchLinear._forward_eager"]
     M --> N2["reshape rows; convert to FP32"]
     N2 --> O["_forward_chunked: packed trellis decode and FP32 matmul"]
@@ -175,6 +178,103 @@ Single `mlp.gate_proj` (4096 -> 14336), M=1, CUDA-event minimum per call:
 FP16 32.8 us, BF16 eager 88.2 us (2.69x), BF16 fused 35.8 us (1.09x). The
 fused cost is two launches of ~2 us of GPU time plus ~6 us of host dispatch,
 against ~60 us of dispatch for the eager chain.
+
+## Folded input-range guard (#5942)
+
+For the shapes the EXL3 GEMM owns, #5942 moves the guard into the GEMM. The
+GEMM already reads the activation and `suh` for its input Hadamard, so the
+same pass reduces the row bound, the narrowing cast applies the row's
+power-of-two scale, and the epilogue applies the scale and the bias before
+its single cast. The `bf16_prescale` + GEMM + `bf16_rescale.raw` sequence
+above remains the reference and the fallback for the shapes the GEMM does
+not own.
+
+Before:
+
+```mermaid
+flowchart LR
+    X["FP16/BF16 x"] --> P["bf16_prescale<br/>row bound, scale, FP16 copy"]
+    P --> G["EXL3 GEMM<br/>FP16 in, FP32 out"]
+    G --> R["bf16_rescale.raw<br/>scale + bias, final cast"]
+    R --> Y["final-dtype y"]
+```
+
+After:
+
+```mermaid
+flowchart LR
+    X["FP16/BF16 x"] --> H["EXL3 GEMM prologue<br/>bound and scale in the input Hadamard"]
+    H --> G["EXL3 GEMM<br/>FP16 in, FP32 accumulation"]
+    G --> E["EXL3 GEMM epilogue<br/>row scale + bias, one final cast"]
+    E --> Y["final-dtype y"]
+```
+
+The prologue zeroes the per-row `double` bound, reduces
+`max(|x|, |x * suh|)` in the same warp loop that applies `2**-exponent` and
+rotates, and publishes one atomic max per 128-element block. The epilogue
+computes `out * 2**exponent + bias` and rounds once into a separate
+final-dtype buffer; `C` stays the FP32 accumulation buffer so the split-K
+partial sums keep their precision (#5331). The bound buffer is allocated per
+call, so CUDA Graph capture and replay recompute it from the static input and
+nothing is read back to the host.
+
+**Precision.** FP16, and BF16 without checkpoint scales, bound, scale and
+round in FP32. BF16 with `suh` uses FP64 for the bound, the scale and the
+epilogue: a finite BF16 value times a finite FP16 `suh` can exceed FP32 even
+when the projection is finite, and the epilogue must not round twice. This is
+a deliberate trade-off: the FP64 path is taken for every BF16 checkpoint
+(every EXL3 checkpoint carries `suh`), not only on rows whose FP32 product
+overflows. An FP32 bound with a per-row FP64 fallback would need a second
+reduction pass or a device-side flag; it is left as a follow-up. On an RTX
+4090 the FP64 epilogue costs about 8 us on a 4096x4096, M=32 forward against
+the unguarded FP16 GEMM.
+
+**Failure contract.** The folded guard declines instead of approximating:
+
+| Situation | Path |
+| --- | --- |
+| More than 32 rows on a non-Q4NX checkpoint (`LinearEXL3` reconstructs through HGEMM) | eager pre-scale reference |
+| Q4NX without `fused_gemm` (the reconstruction dispatch) | eager pre-scale reference |
+| `fp16_gemv` or `int8_gemv` policy (the GEMV writes its own epilogue) | eager pre-scale reference |
+| R4NX, or a portable reconstruction with no tensor-core GEMM | eager pre-scale reference |
+| Ampere Q4NX large prefill (the expanded-weight reconstruction) | eager pre-scale reference |
+| Build without `bc_linear_exl3_run_guarded` (stale prebuilt extension) | eager pre-scale reference |
+| Non-CUDA device, or an FP32 activation | portable FP32 reconstruction |
+| First forward with a non-finite input (the one `isfinite` probe) | portable FP32 reconstruction |
+
+The shape-independent declines are remembered on the module, so a forward
+that must keep the eager reference does not pay the inner-handle signature
+probe twice. The decision is cleared whenever the inner handle is rebuilt.
+
+Measured on an RTX 4090 (torch 2.15.0+cu132, CUDA 13.2), the #5898 W4 MCG
+fixture (K=512, N=256, `suh=1`, `svh=2**-10`, no bias, all-ones inputs).
+Eager numbers are the minimum of five 200-forward CUDA-event trials, repeated
+five times; graph numbers capture 20 forwards per graph and replay 100 times
+per trial. "Unguarded" is the pre-#5898 FP16 layer forward (`_ensure_inner`
+plus the native GEMM writing FP16); "eager" is the head tree with the folded
+op disabled; "folded" is the head tree.
+
+| Path | M=1 eager | M=33 eager | M=1 graph | M=33 graph |
+| --- | ---: | ---: | ---: | ---: |
+| Unguarded FP16 | 31.09 us | 60.71 us | 8.68 us | 6.72 us |
+| FP16 eager guard (before) | 45.61 us | 81.25 us | 10.25 us | 8.32 us |
+| FP16 folded guard (after) | 32.62 us | 81.11 us | 9.58 us | 8.31 us |
+| BF16 eager guard (before) | 40.57 us | 81.04 us | 11.87 us | 9.96 us |
+| BF16 folded guard (after) | 29.10 us | 82.28 us | 10.88 us | 9.96 us |
+
+At M=1 the folded guard is +1.53 us (FP16) and -1.36 us (BF16) over the
+unguarded FP16 layer path, against +14.52 and +10.11 us for the eager guard.
+M=33 is unchanged because a non-Q4NX checkpoint reconstructs through HGEMM
+above 32 rows; that path keeps the eager reference. The 4096x4096 prefill
+shape follows the same split: FP16 M=32 graph replay is about +1.4 us over
+the unguarded GEMM, while BF16 M=32 is about +8.1 us from the FP64 epilogue.
+
+`tests/test_exl3_native_guard_5942.py` pins the dispatch (FP16/BF16, with and
+without `suh`, padded width, Q4NX large prefill, every decline case, a stale
+extension), bit-exact equality with the eager guard for FP16/BF16 at
+M=1/4/32 with and without bias and with an outlier row, non-finite first
+inputs, CUDA Graph replay with changed inputs, a BF16 product above FP32, and
+the `_ensure_inner` decline cache.
 
 ## Dispatch contract
 
