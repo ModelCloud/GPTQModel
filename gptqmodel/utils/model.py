@@ -83,7 +83,12 @@ from .kernel import resolve_kernel_config, snapshot_kernel_config
 from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
 from .p2p import safe_module_to, safe_move_to
-from .packing import _auto_pack_impl
+from .packing import (
+    _auto_pack_impl,
+    _is_accelerator_pack_family,
+    _pack_target_family,
+    _requests_auto_pack_impl,
+)
 from .tensor import tensor_buffer
 from .tied_weights import tied_weights_keys
 from .torch import HAS_CUDA, as_torch_device, release_pinned_host_cache, torch_empty_cache
@@ -1321,9 +1326,14 @@ def resolve_pack_device(
     ``QuantizeConfig.device`` is normalized to an index-less ``DEVICE`` enum by
     the loader, so on a multi-GPU host it would silently pin GPU packing to
     ``cuda:0`` even when the module was quantized on another GPU. Callers that
-    know the assigned device pass it here; a CPU assignment keeps the historical
-    auto-select behavior because ``pack_impl="auto"`` still prefers GPU packing
-    when one is available.
+    know the assigned device pass it here; a non-CPU assignment overrides the
+    configured family, while a CPU assignment leaves the configured family in
+    place.
+
+    The result is the target ``pack_impl="auto"`` honours. An explicit CPU
+    ``QuantizeConfig.device`` resolves to ``torch.device("cpu")``, so AUTO
+    selects the CPU block packer even when an accelerator is visible (#5761).
+    An unspecified target (``None``) keeps AUTO's accelerator preference.
     """
 
     cfg_device = getattr(quantize_config, "device", None)
@@ -1424,16 +1434,34 @@ def pack_module(
                 g_idx=q_g_idx,
             )
     else:
-        effective_impl = (pack_impl or "original").lower()
+        auto_selected = _requests_auto_pack_impl(pack_impl)
+        effective_impl = (pack_impl or "original").strip().lower()
 
         if effective_impl in {"cpu", "block", "pack_block"}:
             effective_impl = "block"
         elif effective_impl in {"original", "pack_original"}:
             effective_impl = "original"
-        elif effective_impl in {"auto", "default"}:
-            effective_impl = _auto_pack_impl(module=module, linear=layer)
+        elif auto_selected:
+            # AUTO must see the resolved target: an explicit CPU target packs
+            # on the CPU block packer instead of a GPU branch that rejects it
+            # and falls through to the slower original packer (#5761).
+            effective_impl = _auto_pack_impl(
+                module=module, linear=layer, target=target_device
+            )
         elif effective_impl == "gpu":
-            if not HAS_CUDA:
+            if not _is_accelerator_pack_family(_pack_target_family(target_device)):
+                # An explicit CPU/XPU/NPU/MPS/XLA target cannot run the GPU
+                # packer. Use the CPU block packer when the kernel has one so
+                # the explicit target still packs on CPU.
+                fallback = "block" if hasattr(module, "pack_block") else "original"
+                log.warning(
+                    "pack_module: GPU packing requested but the target device `%s` is not a "
+                    "CUDA/ROCm accelerator; falling back to %s pack.",
+                    target_device,
+                    fallback,
+                )
+                effective_impl = fallback
+            elif not HAS_CUDA:
                 log.warning("pack_module: GPU packing requested but CUDA is unavailable; falling back to original pack.")
                 effective_impl = "original"
             elif not hasattr(module, "pack_gpu"):
@@ -1446,21 +1474,15 @@ def pack_module(
             )
             effective_impl = "original"
 
-        label_map = {
-            "gpu": "module.pack_gpu",
-            "block": "module.pack_block",
-            "original": "module.pack_original",
-        }
-
-        packer_label = label_map[effective_impl]
-
-        with log_time_block(
-            packer_label,
-            logger=log,
-            module_name=name,
-        ):
-            if effective_impl == "gpu":
-                try:
+        # The label names the packer that actually finished, not the one AUTO
+        # selected before its fallback chain ran.
+        if effective_impl == "gpu":
+            try:
+                with log_time_block(
+                    "module.pack_gpu",
+                    logger=log,
+                    module_name=name,
+                ):
                     module.pack_gpu(
                         linear=layer,
                         scales=q_scales,
@@ -1468,20 +1490,84 @@ def pack_module(
                         g_idx=q_g_idx,
                         device=target_device,
                     )
-                except (ValueError, NotImplementedError):
-                    module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
-            elif effective_impl == "block":
-                try:
+                packer_label = "module.pack_gpu"
+            except (ValueError, NotImplementedError):
+                if auto_selected and hasattr(module, "pack_block"):
+                    # AUTO chose the GPU packer from device availability, but
+                    # this layer's geometry/word width is unsupported there.
+                    # The bounded CPU block packer is the next-fastest
+                    # implementation; the original packer stays the last resort.
+                    log.warning(
+                        "pack_module: GPU packing rejected `%s` under AUTO; trying the CPU block packer.",
+                        type(module).__name__,
+                    )
+                    try:
+                        with log_time_block(
+                            "module.pack_block",
+                            logger=log,
+                            module_name=name,
+                        ):
+                            module.pack_block(
+                                linear=layer,
+                                scales=q_scales,
+                                zeros=q_zeros,
+                                g_idx=q_g_idx,
+                            )
+                        packer_label = "module.pack_block"
+                    except (ValueError, NotImplementedError):
+                        with log_time_block(
+                            "module.pack_original",
+                            logger=log,
+                            module_name=name,
+                        ):
+                            module.pack_original(
+                                linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx
+                            )
+                        packer_label = "module.pack_original"
+                else:
+                    with log_time_block(
+                        "module.pack_original",
+                        logger=log,
+                        module_name=name,
+                    ):
+                        module.pack_original(
+                            linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx
+                        )
+                    packer_label = "module.pack_original"
+        elif effective_impl == "block":
+            try:
+                with log_time_block(
+                    "module.pack_block",
+                    logger=log,
+                    module_name=name,
+                ):
                     module.pack_block(
                         linear=layer,
                         scales=q_scales,
                         zeros=q_zeros,
                         g_idx=q_g_idx,
                     )
-                except ValueError:
-                    module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
-            else:
-                module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
+                packer_label = "module.pack_block"
+            except ValueError:
+                with log_time_block(
+                    "module.pack_original",
+                    logger=log,
+                    module_name=name,
+                ):
+                    module.pack_original(
+                        linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx
+                    )
+                packer_label = "module.pack_original"
+        else:
+            packer_label = "module.pack_original"
+            with log_time_block(
+                "module.pack_original",
+                logger=log,
+                module_name=name,
+            ):
+                module.pack_original(
+                    linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx
+                )
 
         target_format = (
             resolve_quant_format(quantize_config.format, quantize_config.method)

@@ -1082,6 +1082,17 @@ class QQQTorchLinear(QQQLinear):
                 self._torch_packed_cache_key = self._torch_weight_state_key()
             return True
 
+    def iter_runtime_weight_tensors(self):
+        """Yield the packed CPU operands that replaced the checkpoint buffers.
+
+        ``_torch_packed_cache`` is a plain tuple, so a budget walk that only
+        reads ``parameters()`` and ``buffers()`` misses almost all of the
+        projection's weight bytes once the first forward has dropped
+        ``B``/``s_group``/``s_channel`` (#5810).
+        """
+
+        yield from self._torch_packed_cache or ()
+
     def materialize_checkpoint_layout_for_export(self) -> bool:
         """Publish the dropped checkpoint buffers so an export can see them.
 

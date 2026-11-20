@@ -169,10 +169,18 @@ class _HessianAccumulatorState:
 # released tensor. The actual reusable slots live in ``_WORKSPACE_SLOTS``;
 # a slot is reusable from another CUDA stream only after that stream waits
 # on the release event.
+#
+# A slot is only reusable at its exact column width, so a worker that visits
+# different projection widths could retain one slot per width ever seen and
+# never reuse any of them (#5758). Idle storage is therefore bounded in bytes:
+# the shape just released stays resident for the next layer and concurrent
+# workers, and other shapes are evicted least-recently-released first.
 _WORKSPACE_CACHE: Dict[Tuple[str, Optional[int]], torch.Tensor] = {}
 _WORKSPACE_SLOTS: Dict[Tuple[Tuple[str, Optional[int]], torch.dtype], list["_WorkspaceSlot"]] = {}
 _WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int]], threading.Lock] = {}
 _WORKSPACE_GENERATION = 0
+_WORKSPACE_SEQUENCE = 0
+_WORKSPACE_IDLE_SHAPE_FACTOR = 2
 _BF16_SUPPORT_CACHE: Dict[Tuple[str, Optional[int]], bool] = {}
 
 
@@ -180,6 +188,8 @@ _BF16_SUPPORT_CACHE: Dict[Tuple[str, Optional[int]], bool] = {}
 class _WorkspaceSlot:
     tensor: torch.Tensor
     ready_event: Optional[torch.cuda.Event] = None
+    #: Release order, used to evict the least recently idle shape first.
+    seq: int = 0
 
 
 class SharedHessianFactorCache:
@@ -271,6 +281,73 @@ def _workspace_lock(key: Tuple[str, Optional[int]]) -> threading.Lock:
     return lock
 
 
+def _next_workspace_sequence() -> int:
+    """Monotonic release order for idle slots; only the LRU policy reads it."""
+
+    global _WORKSPACE_SEQUENCE
+    with _WORKSPACE_LOCKS_GUARD:
+        _WORKSPACE_SEQUENCE += 1
+        return _WORKSPACE_SEQUENCE
+
+
+def _workspace_slot_bytes(slot: "_WorkspaceSlot") -> int:
+    tensor = slot.tensor
+    return tensor.numel() * tensor.element_size()
+
+
+def _prune_workspace_slots(
+    key: Tuple[str, Optional[int]],
+    keep_shape: Tuple[int, ...],
+) -> None:
+    """Bound idle staging storage for one device (#5758).
+
+    Called with the device lock held, after the released slot is back in the
+    pool. Slots of ``keep_shape`` -- the shape just released -- stay resident,
+    so concurrent workers and the next projection of that width still reuse
+    them. The remaining shapes are evicted least-recently-released first until
+    idle storage is at most ``_WORKSPACE_IDLE_SHAPE_FACTOR`` working sets of
+    the retained shape. ``_WORKSPACE_CACHE`` always points at a retained slot,
+    so evicting a slot releases its allocation.
+    """
+
+    # Other devices prune their own entries concurrently: take the pool guard
+    # so this scan cannot observe a dict that changed size mid-iteration.
+    with _WORKSPACE_LOCKS_GUARD:
+        keep_bytes = 0
+        idle_bytes = 0
+        victims = []
+        for slot_key, slots in _WORKSPACE_SLOTS.items():
+            if slot_key[0] != key:
+                continue
+            for slot in slots:
+                size = _workspace_slot_bytes(slot)
+                idle_bytes += size
+                if tuple(slot.tensor.shape) == keep_shape:
+                    keep_bytes += size
+                else:
+                    victims.append((slot.seq, id(slot), slot))
+        if keep_bytes <= 0 or idle_bytes <= _WORKSPACE_IDLE_SHAPE_FACTOR * keep_bytes:
+            return
+
+        budget = _WORKSPACE_IDLE_SHAPE_FACTOR * keep_bytes
+        evicted = set()
+        for _, identity, slot in sorted(victims, key=lambda item: item[0]):
+            if idle_bytes <= budget:
+                break
+            evicted.add(identity)
+            idle_bytes -= _workspace_slot_bytes(slot)
+        if not evicted:
+            return
+        for slot_key in list(_WORKSPACE_SLOTS):
+            if slot_key[0] != key:
+                continue
+            kept = [slot for slot in _WORKSPACE_SLOTS[slot_key] if id(slot) not in evicted]
+            if kept:
+                _WORKSPACE_SLOTS[slot_key] = kept
+            else:
+                del _WORKSPACE_SLOTS[slot_key]
+
+
 def _needs_workspace_resize(
     workspace: Optional[torch.Tensor],
     dtype: torch.dtype,
@@ -348,6 +425,7 @@ def _lease_workspace(
                 released_while_leased = _WORKSPACE_GENERATION != generation
             if not released_while_leased:
                 slots = _WORKSPACE_SLOTS.setdefault(slot_key, [])
+                slot.seq = _next_workspace_sequence()
                 slots.append(slot)
                 # Keep a small bounded pool (the default CUDA worker pool is four
                 # workers/GPU) while allowing concurrent leases without a host
@@ -355,6 +433,9 @@ def _lease_workspace(
                 if len(slots) > 8:
                     del slots[:-8]
                 _WORKSPACE_CACHE[key] = workspace
+                # The alias above keeps the released tensor alive, so pruning
+                # here always drops the allocation of the shapes it evicts.
+                _prune_workspace_slots(key, tuple(workspace.shape))
 
 
 def release_workspace_cache() -> None:

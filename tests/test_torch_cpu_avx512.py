@@ -152,12 +152,13 @@ def _dequantize_oracle(
     zeros: torch.Tensor,
     scales: torch.Tensor,
     group_size: int,
+    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """Dequantize in FP32 so the oracle is independent of the kernel's BF16 path."""
+    """Dequantize in ``dtype`` so the oracle is independent of the kernel's BF16 path."""
 
-    codes_kn = codes.t().to(torch.float32)
-    zeros_kn = zeros.to(torch.float32).repeat_interleave(group_size, dim=0)
-    scales_kn = scales.to(torch.float32).repeat_interleave(group_size, dim=0)
+    codes_kn = codes.t().to(dtype)
+    zeros_kn = zeros.to(dtype).repeat_interleave(group_size, dim=0)
+    scales_kn = scales.to(dtype).repeat_interleave(group_size, dim=0)
     return (codes_kn - zeros_kn) * scales_kn
 
 
@@ -166,13 +167,67 @@ def _layer_dequantize_oracle(
     zeros: torch.Tensor,
     scales: torch.Tensor,
     g_idx: torch.Tensor,
+    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Reference GPTQ dequantization in the checkpoint's channel order."""
 
     groups = g_idx.to(torch.long)
     return (
-        (codes.float() - zeros.index_select(0, groups).float())
-        * scales.index_select(0, groups).float()
+        (codes.to(dtype) - zeros.index_select(0, groups).to(dtype))
+        * scales.index_select(0, groups).to(dtype)
+    )
+
+
+def _output_steps(reference: torch.Tensor, actual: torch.Tensor) -> torch.Tensor:
+    """Distance from ``actual`` to ``reference`` in output-dtype steps.
+
+    ``reference`` must already be the correctly rounded value, so ``0`` means
+    the output is exactly that value and ``1`` means the kernel's pre-rounding
+    result crossed one rounding boundary. The step is measured toward
+    ``actual`` so a value that crosses a binade boundary uses the spacing it
+    actually traversed.
+    """
+
+    positive = torch.full_like(reference, float("inf"))
+    negative = torch.full_like(reference, float("-inf"))
+    direction = torch.where(actual >= reference, positive, negative)
+    step = (torch.nextafter(reference, direction).double() - reference.double()).abs()
+    return (actual.double() - reference.double()).abs() / step
+
+
+def _assert_matches_rounded_reference(
+    output: torch.Tensor,
+    reference_fp64: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+) -> None:
+    """Separate required output rounding from kernel arithmetic error (#5798).
+
+    ``dtype`` is the declared output dtype, so the correctly rounded reference
+    is the FP64 oracle cast to it. A correct kernel may differ from that
+    reference by the rounding interval (half a step) plus at most one FP32
+    accumulator step, i.e. two whole output steps. The pre-cast drift is
+    bounded by the unavoidable rounding floor rather than a flat tolerance
+    that the floor alone can exceed.
+    """
+
+    assert output.dtype == dtype
+    reference = reference_fp64.to(dtype)
+    max_steps = _output_steps(reference, output).max().item()
+    assert max_steps <= 2, (
+        f"output is {max_steps:.2f} output steps from the rounded reference ({dtype})"
+    )
+
+    reference64 = reference.double()
+    output64 = output.double()
+    output_error = (output64 - reference64).norm() / reference64.norm()
+    assert output_error.item() < 2e-3, f"visible output error {output_error.item():.6f} exceeds 2e-3"
+
+    arithmetic_error = (output64 - reference_fp64).norm() / reference_fp64.norm()
+    rounding_floor = (reference64 - reference_fp64).norm() / reference_fp64.norm()
+    assert arithmetic_error.item() <= rounding_floor.item() * 1.05, (
+        f"pre-cast drift {arithmetic_error.item():.6f} exceeds 1.05x the "
+        f"rounding floor {rounding_floor.item():.6f}"
     )
 
 
@@ -596,9 +651,8 @@ def test_kernel_matches_independent_bf16_oracle(
     scales = torch.rand((groups, out_features), dtype=torch.float32) * 0.04 + 0.01
     x = torch.randn(tokens, in_features, dtype=torch.bfloat16)
 
-    weight = _dequantize_oracle(codes, zeros, scales, group_size)
-    reference_fp32 = torch.matmul(x.float(), weight)
-    reference = reference_fp32.to(torch.bfloat16)
+    weight = _dequantize_oracle(codes, zeros, scales, group_size, dtype=torch.float64)
+    reference_fp64 = torch.matmul(x.double(), weight)
     output = TorchCpuAvx512Linear.gemm_int4_qzero_group_scaled_cpu_kernel(
         x,
         pack_hf_int4(codes),
@@ -607,12 +661,40 @@ def test_kernel_matches_independent_bf16_oracle(
         group_size,
     )
 
-    assert output.dtype == torch.bfloat16
-    torch.testing.assert_close(output, reference, atol=0.2, rtol=0.01)
-    output_error = (output.float() - reference.float()).norm() / reference.float().norm()
-    arithmetic_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
-    assert output_error.item() < 2e-3
-    assert arithmetic_error.item() < 2e-3
+    _assert_matches_rounded_reference(output, reference_fp64, dtype=torch.bfloat16)
+
+
+def test_rounded_reference_comparator_rejects_genuine_kernel_error():
+    """The #5798 comparator must still reject real arithmetic error."""
+
+    _skip_unless_avx512_bf16()
+    torch.manual_seed(1000 + 1 + 512 + 64)
+    tokens, in_features, out_features, group_size = 1, 512, 64, 16
+    groups = in_features // group_size
+    codes = torch.randint(0, 16, (out_features, in_features), dtype=torch.uint8)
+    zeros = torch.randint(0, 16, (groups, out_features), dtype=torch.uint8)
+    scales = torch.rand((groups, out_features), dtype=torch.float32) * 0.04 + 0.01
+    x = torch.randn(tokens, in_features, dtype=torch.bfloat16)
+    weight = _dequantize_oracle(codes, zeros, scales, group_size, dtype=torch.float64)
+    reference_fp64 = torch.matmul(x.double(), weight)
+    kernel = TorchCpuAvx512Linear.gemm_int4_qzero_group_scaled_cpu_kernel
+    output = kernel(x, pack_hf_int4(codes), zeros, scales, group_size)
+    _assert_matches_rounded_reference(output, reference_fp64, dtype=torch.bfloat16)
+
+    # A single badly wrong element is hidden by the old ``atol=0.2`` check but
+    # must trip the per-element rounding-residual bound.
+    localized = output.clone()
+    localized[0, 0] = localized[0, 0] * 1.1
+    with pytest.raises(AssertionError, match="output steps from the rounded reference"):
+        _assert_matches_rounded_reference(localized, reference_fp64, dtype=torch.bfloat16)
+
+    # A 0.6% scale regression stays inside the two-step rounding bound but is
+    # invisible to the old ``atol=0.2`` check; the visible-output gate must
+    # still reject it.
+    bad_scales = scales * 1.006
+    bad_output = kernel(x, pack_hf_int4(codes), zeros, bad_scales, group_size)
+    with pytest.raises(AssertionError, match="visible output error"):
+        _assert_matches_rounded_reference(bad_output, reference_fp64, dtype=torch.bfloat16)
 
 
 def test_layer_fp16_dense_fallback_preserves_input_dtype():
@@ -686,7 +768,7 @@ def test_aten_cpu_fused_forward_matches_fp32_oracle(dtype, checkpoint_scale_dtyp
     # Asymmetric offsets that cannot be represented exactly use FP32 compute.
     arithmetic_scales = scales.float()
     weight = _aten_affine_oracle(codes, zeros, arithmetic_scales, g_idx)
-    reference_fp32 = torch.matmul(x.float(), weight)
+    reference_fp64 = torch.matmul(x.double(), weight.double())
 
     layer.eval()
     with torch.inference_mode():
@@ -700,9 +782,7 @@ def test_aten_cpu_fused_forward_matches_fp32_oracle(dtype, checkpoint_scale_dtyp
     # the wider FP32 affine metadata is the packed runtime tensor.
     assert layer.scales.dtype == checkpoint_scale_dtype
     assert layer.scales_and_zeros.dtype == torch.float32
-    torch.testing.assert_close(output, reference_fp32.to(dtype), atol=2e-3, rtol=2e-3)
-    normalized_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
-    assert normalized_error.item() < 2e-3
+    _assert_matches_rounded_reference(output, reference_fp64, dtype=dtype)
 
 
 @pytest.mark.parametrize(
@@ -769,21 +849,17 @@ def test_layer_fused_bias_matches_independent_fp32_oracle():
     layer.bias.copy_(bias)
 
     x = torch.randn(tokens, in_features, dtype=torch.bfloat16)
-    weight = _layer_dequantize_oracle(codes, zeros, scales, g_idx)
-    reference_fp32 = torch.matmul(x.float(), weight) + bias.float()
-    reference = reference_fp32.to(torch.bfloat16)
+    weight = _layer_dequantize_oracle(codes, zeros, scales, g_idx, dtype=torch.float64)
+    reference_fp64 = torch.matmul(x.double(), weight) + bias.double()
 
     layer.eval()
     with torch.inference_mode():
         output = layer(x)
 
-    assert output.dtype == torch.bfloat16
     assert layer.linear_mode == "inference"
     assert layer._cpu_transformed is True
     assert layer.bias.dtype == torch.float32
-    torch.testing.assert_close(output, reference, atol=0.2, rtol=0.01)
-    normalized_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
-    assert normalized_error.item() < 2e-3
+    _assert_matches_rounded_reference(output, reference_fp64, dtype=torch.bfloat16)
 
 
 def test_fused_bias_validation():

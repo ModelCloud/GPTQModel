@@ -43,9 +43,10 @@ log = setup_logger()
 
 
 # Extreme decoded MXFP4 magnitudes: every decoded weight is one of
-# `E2M1_MAGNITUDES` times a power-of-two E8M0 scale.
-_E2M1_MIN_NONZERO = float(macaq_core.E2M1_MAGNITUDES[macaq_core.E2M1_MAGNITUDES > 0].min())
-_E2M1_MAX = float(macaq_core.E2M1_MAGNITUDES.max())
+# `E2M1_MAGNITUDES` times a power-of-two E8M0 scale.  Use the codebook's Python
+# constants so this module also imports under `torch.device("meta")` (#5776).
+_E2M1_MIN_NONZERO = macaq_core.E2M1_MIN_NONZERO_MAGNITUDE
+_E2M1_MAX = macaq_core.E2M1_MAX_MAGNITUDE
 
 # The activation dtypes the Torch fallback decodes a weight for. The answers
 # are computed eagerly so a compiled graph reads them as Python constants
