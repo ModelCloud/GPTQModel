@@ -680,6 +680,34 @@ def _resolved_placement(device_map: Dict[str, Any], module_name: str):
         name = name.rpartition(".")[0]
 
 
+def _device_map_has_execution_device(device_map: Dict[str, Any]) -> bool:
+    """Whether a resolved map gives offloaded layers a GPU to run on.
+
+    Accelerate's `AlignDevicesHook` moves a CPU/disk-mapped layer to the
+    execution device only for `forward`. With every entry on CPU/disk there is
+    no such device and Transformers dispatches the model on CPU (#5579).
+    """
+
+    for value in device_map.values():
+        if isinstance(value, int):
+            return True
+        try:
+            device = torch.device(value)
+        except (RuntimeError, ValueError, TypeError):
+            # `"disk"` is not a device; it has no execution device either.
+            continue
+        if device.type != "cpu":
+            return True
+    return False
+
+
+def _kernel_supports_cpu(kernel) -> bool:
+    """Whether `kernel` declares that it executes on a CPU-resident layer."""
+
+    devices = getattr(kernel, "SUPPORTS_DEVICES", None) or ()
+    return DEVICE.ALL in devices or DEVICE.CPU in devices
+
+
 def hf_gptqmodel_reselect_offloaded_kernels(
     model: nn.Module,
     context: Optional[HFGPTQModelLoadContext],
@@ -693,6 +721,13 @@ def hf_gptqmodel_reselect_offloaded_kernels(
     the spill and AUTO keeps `MarlinLinear` / `AwqMarlinLinear`. Those kernels
     need resident CUDA tensors in `post_init`, so the load crashed once
     Accelerate placed a layer on CPU or disk (#5194).
+
+    `SUPPORTS_CPU_OFFLOAD` means "safe when Accelerate offloads the layer to a
+    GPU execution device", not "safe to execute on CPU". When the resolved map
+    has no GPU entry (a CPU-only `max_memory`, or a budget too small for any
+    layer), nothing moves the layer and a CUDA-only Triton kernel fails at the
+    first forward with a CPU pointer (#5579). Such kernels are rebuilt here too
+    unless they declare CPU support.
 
     This runs after the placement is known but before any checkpoint tensor is
     assigned: the affected modules are still meta placeholders, so they are
@@ -718,12 +753,18 @@ def hf_gptqmodel_reselect_offloaded_kernels(
     from .model import create_quant_layer, find_modules
 
     modules = find_modules(model, layers=[BaseQuantLinear])
-    offloaded = {
-        name: module
-        for name, module in modules.items()
-        if is_offload_placement(_resolved_placement(device_map, name))
-        and not getattr(type(module), "SUPPORTS_CPU_OFFLOAD", False)
-    }
+    has_execution_device = _device_map_has_execution_device(device_map)
+    offloaded = {}
+    for name, module in modules.items():
+        if not is_offload_placement(_resolved_placement(device_map, name)):
+            continue
+        kernel = type(module)
+        if getattr(kernel, "SUPPORTS_CPU_OFFLOAD", False):
+            # The declaration covers the Accelerate path only; with no GPU in
+            # the map the layer is executed by a CPU kernel or not at all.
+            if has_execution_device or _kernel_supports_cpu(kernel):
+                continue
+        offloaded[name] = module
     if not offloaded:
         return False
 
