@@ -146,7 +146,7 @@ class FOEM(GPTQ):
             if self._routed_expert:
                 self.native_inps = []
 
-    def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
+    def add_batch(self, inp: torch.Tensor, out: Optional[torch.Tensor], batch_index: Optional[int] = None):
         with self.lock:
             self.fwd_counter += 1
             self.process_batch(inp, batch_index=batch_index)
@@ -520,14 +520,19 @@ class FOEM(GPTQ):
             self.module_copy = None
         self._align_foem_hessian_device()
 
-        self.quantizer.find_params(W, weight=True)
-
         H = self.H
         del self.H
         if self.gptaq:
             _neutralize_dead_columns(H, W, self.dXXT)
         else:
             _neutralize_dead_columns(H, W)
+
+        # Fit the whole-row grid after dead-column masking: a channel absent
+        # from every calibration sample carries no signal, so its weight must
+        # not set the per-channel scale that every live column is quantized
+        # with. GPTQ/QQQ got this ordering in #5611; the subclasses that
+        # re-implement the block pass kept the old order (#5714).
+        self.quantizer.find_params(W, weight=True)
 
         # g_idx = []
         scale = []

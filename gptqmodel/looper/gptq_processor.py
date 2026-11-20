@@ -24,6 +24,7 @@ from ..looper.loop_processor import (
     active_padding_mask,
     bind_resolved_module_config,
     get_resolved_module_config,
+    install_moe_padding_zero_hook,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -189,6 +190,17 @@ def clone_gptq_config_for_module(
         qcfg_clone.validate_gsq()
 
     return qcfg_clone
+
+def _capture_payload(value: Any) -> Any:
+    """Detach one captured tensor for a quantizer; pass ``None`` through.
+
+    The capture hook hands ``add_batch`` the module input and, only for a task
+    that asks for it, the forward output. ``None`` means "this task does not
+    read an output" and must reach ``add_batch`` unchanged (#5724).
+    """
+
+    return value.data if torch.is_tensor(value) else value
+
 
 class GPTQProcessor(LoopProcessor):
     """Captures activations and quantizes modules with GPTQ or GPTAQ/FOEM."""
@@ -601,6 +613,15 @@ class GPTQProcessor(LoopProcessor):
             """Records one activation batch for GPTQ Hessian/statistics accumulation."""
 
             g = self.tasks[name]  # noqa: F821
+            # GPTQ, GPTAQ and FOEM accumulate only `X^T X` from the module
+            # input; none of them reads the forward output, so slicing,
+            # gathering and copying `out` once per sample was work thrown away:
+            # a `kept_tokens x out_features` copy per sample per hooked module,
+            # plus a `nonzero` sync for every boolean index on CUDA (#5724).
+            # A task that needs the output opts in with `needs_module_output`.
+            needs_out = bool(getattr(g, "needs_module_output", False))
+            if not needs_out:
+                out = None
             batch_idx = self.current_batch_index()
             inp_tensor = inp[0]
             if capture_nvfp4:
@@ -633,7 +654,9 @@ class GPTQProcessor(LoopProcessor):
                     selected_out = out[keep_on_input].contiguous()
                 else:
                     selected_out = out
-                g.add_batch(selected_ids.data, selected_out.data, batch_index=batch_idx)  # noqa: F821
+                g.add_batch(
+                    selected_ids.data, _capture_payload(selected_out), batch_index=batch_idx
+                )  # noqa: F821
             elif (
                 torch.is_tensor(inp_tensor)
                 and torch.is_tensor(keep_mask)
@@ -664,7 +687,7 @@ class GPTQProcessor(LoopProcessor):
                         ].contiguous()
                     else:
                         sample_out = out
-                    g.add_batch(sample_inp.data, sample_out.data, batch_index=batch_idx)  # noqa: F821
+                    g.add_batch(sample_inp.data, _capture_payload(sample_out), batch_index=batch_idx)  # noqa: F821
             elif (
                 torch.is_tensor(inp_tensor)
                 and torch.is_tensor(keep_mask)
@@ -706,7 +729,7 @@ class GPTQProcessor(LoopProcessor):
                         sample_out = out
                     g.add_batch(
                         sample_inp.data,
-                        sample_out.data if torch.is_tensor(sample_out) else sample_out,
+                        _capture_payload(sample_out),
                         batch_index=batch_idx,
                     )  # noqa: F821
             elif (
@@ -741,13 +764,13 @@ class GPTQProcessor(LoopProcessor):
                         kept_out = out
                     g.add_batch(
                         kept_inp.data,
-                        kept_out.data if torch.is_tensor(kept_out) else kept_out,
+                        _capture_payload(kept_out),
                         batch_index=batch_idx,
                     )  # noqa: F821
                 else:
-                    g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
+                    g.add_batch(inp_tensor.data, _capture_payload(out), batch_index=batch_idx)  # noqa: F821
             else:
-                g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
+                g.add_batch(inp_tensor.data, _capture_payload(out), batch_index=batch_idx)  # noqa: F821
             del inp, out
         return tmp
 
@@ -761,35 +784,10 @@ class GPTQProcessor(LoopProcessor):
         every expert Hessian while leaving real rows untouched.
         """
 
+        del moe_block_name
         if not getattr(self, "preserve_batch_keep_mask", False):
             return False
-
-        def zero_masked_rows(_module, args, kwargs):
-            # Zero padding only: a BOS sink is a real token whose MoE
-            # output the following positions attend to.
-            keep_mask = active_padding_mask(self)
-            if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
-                return None
-
-            hidden_states = kwargs.get("hidden_states") if kwargs else None
-            from_kwargs = hidden_states is not None
-            if hidden_states is None:
-                if not args or not torch.is_tensor(args[0]):
-                    return None
-                hidden_states = args[0]
-            if hidden_states.dim() != 3 or tuple(hidden_states.shape[:2]) != tuple(keep_mask.shape):
-                return None
-
-            row_mask = keep_mask.to(device=hidden_states.device, dtype=hidden_states.dtype).unsqueeze(-1)
-            masked = hidden_states * row_mask
-            if from_kwargs:
-                kwargs = dict(kwargs)
-                kwargs["hidden_states"] = masked
-                return args, kwargs
-            return (masked,) + tuple(args[1:]), kwargs
-
-        handles.append(moe_block.register_forward_pre_hook(zero_masked_rows, with_kwargs=True))
-        return True
+        return install_moe_padding_zero_hook(self, moe_block, handles)
 
     def _w_wq_diff(self, module: NamedModule, wq: torch.Tensor) -> torch.Tensor:
         """Build the FP32 ``w - wq`` EoRA consumes.

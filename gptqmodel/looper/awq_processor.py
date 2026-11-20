@@ -140,6 +140,37 @@ def _resolve_module_exec_device(module: nn.Module) -> torch.device:
     return get_device(module)
 
 
+# q/k outputs feed the qk bmm, where a clipped bound changes the attention
+# logits instead of only the value path; AWQ leaves those projections unclipped.
+_CLIP_SKIP_ROLES = frozenset({"q", "k"})
+# Fused projections that emit q and k among other outputs. A module plan
+# declares one role per leaf, so these are matched by their own leaf name.
+_CLIP_SKIP_LEAVES = frozenset({
+    "qkv_proj",  # Phi-3 / Phi-4
+    "qkv",       # generic fused qkv
+    "wqkv",      # MPT / InternLM2 (``Wqkv``)
+    "c_attn",    # GPT-2 / Qwen-1
+    "w_pack",    # Baichuan (``W_pack``)
+})
+
+
+def _clip_search_skips(name: str, plan: Optional[Any] = None) -> bool:
+    """Whether AWQ clip search must leave one projection's weights alone.
+
+    The decision used to be ``any(part in name for part in ["q_", "k_", ...])``
+    over the whole dotted path, so the container ``block_sparse_moe`` matched
+    ``k_`` and every routed expert of the Granite-MoE family silently skipped
+    clipping (#5722). Roles from the model's module plan are authoritative; a
+    leaf the plan does not declare falls back to a test on that leaf only.
+    """
+
+    roles = plan.roles(name) if plan is not None else ()
+    if roles:
+        return any(role in _CLIP_SKIP_ROLES for role in roles)
+    leaf = name.rsplit(".", 1)[-1].lower()
+    return leaf in _CLIP_SKIP_LEAVES or leaf.startswith(("q_", "k_", "query", "key"))
+
+
 @dataclass
 class _AWQLayerState:
     """Tracks subset progress and cached state needed to quantize one AWQ layer."""
@@ -4816,11 +4847,11 @@ class AWQProcessor(LoopProcessor):
         """Searches per-layer clipping thresholds for AWQ-eligible linears."""
 
         clip_list = []
-        avoid_clipping = ["q_", "k_", "query", "key", "Wqkv"]
+        plan = _model_module_plan(self.gptq_model)
 
         for name in named_linears:
             # due to qk bmm, it is hard to clip precisely
-            if any(_ in name for _ in avoid_clipping):
+            if _clip_search_skips(name, plan):
                 continue
 
             features = input_feat[name]

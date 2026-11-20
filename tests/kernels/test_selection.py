@@ -14,6 +14,8 @@ from gptqmodel.adapter.adapter import Adapter
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
+from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
@@ -1961,6 +1963,37 @@ def test_exllamav2_auto_priority_demotes_dense_non_fp16_fallback():
     # The dense fallback stays reachable through an explicit backend.
     assert ExllamaV2Linear.supports_dtype(torch.bfloat16)
     assert ExllamaV2Linear.supports_dtype(torch.float32)
+
+
+def test_awq_exllamav2_auto_priority_demotes_dense_non_fp16_fallback():
+    """#5732: AUTO must rank the native-BF16 AWQ GEMM above the dense fallback.
+
+    ``ext_awq.cpp`` has a native quantized GEMM only for FP16 activations.
+    BF16/FP32 inputs rebuild the dense weight per forward, so AUTO must not
+    prefer ``AwqExllamaV2Linear`` over ``AwqGEMMLinear`` (native BF16 kernel)
+    for BF16.
+    """
+
+    fmt = FORMAT.GEMM
+    assert AwqExllamaV2Linear.auto_select_priority(fmt, torch.float16) == 80
+    assert AwqExllamaV2Linear.auto_select_priority(fmt, torch.bfloat16) < 80
+    assert AwqExllamaV2Linear.auto_select_priority(fmt, torch.float32) < 80
+    assert AwqGEMMLinear.supports_dtype(torch.bfloat16)
+    assert AwqGEMMLinear.auto_select_priority(fmt, torch.bfloat16) > (
+        AwqExllamaV2Linear.auto_select_priority(fmt, torch.bfloat16)
+    )
+    # ``AwqGEMMLinear`` has no FP32 kernel, but its declared rank still
+    # documents that the dense fallback is last.
+    assert AwqGEMMLinear.auto_select_priority(fmt, torch.float32) > (
+        AwqExllamaV2Linear.auto_select_priority(fmt, torch.float32)
+    )
+    # FP16 still prefers the ExLlamaV2 kernel.
+    assert AwqExllamaV2Linear.auto_select_priority(fmt, torch.float16) > (
+        AwqGEMMLinear.auto_select_priority(fmt, torch.float16)
+    )
+    # The dense fallback stays reachable through an explicit backend.
+    assert AwqExllamaV2Linear.supports_dtype(torch.bfloat16)
+    assert AwqExllamaV2Linear.supports_dtype(torch.float32)
 
 
 class _DenseFallbackKernel:
