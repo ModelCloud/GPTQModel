@@ -139,3 +139,51 @@ def test_an_explicit_offset_replacement_is_kept(cls):
         module.qzeros = torch.full_like(module.qzeros, explicit)
         module.clear_weight_cache()
         assert module(x)[0, 0].item() == pytest.approx(_decode(SCALE * 2, explicit))
+
+
+@pytest.mark.parametrize("cls", KERNELS, ids=lambda cls: cls.__name__)
+def test_a_grad_forward_observes_a_scale_change(cls):
+    """A grad forward decodes the live layout and must see the new scales.
+
+    The no-grad forward refreshes the affine offsets in ``_refresh_fused_state``
+    (#5372); the eval-mode grad forward decodes the runtime layout directly, so
+    it must refresh them first instead of pairing the new scales with the
+    offsets derived from the old ones (#5571).
+    """
+
+    module = _module(cls)
+    x = _activation()
+
+    with torch.no_grad():
+        module(x)
+        module.scales.mul_(2)
+
+    xx = x.clone().requires_grad_(True)
+    assert module(xx)[0, 0].item() == pytest.approx(
+        _decode(SCALE * 2, _derived_offset(SCALE * 2))
+    )
+
+
+@pytest.mark.parametrize("cls", KERNELS, ids=lambda cls: cls.__name__)
+def test_a_compiled_grad_forward_observes_a_scale_change(cls):
+    """A traced grad forward decodes fresh offsets without eager state writes.
+
+    ``_refresh_fused_state`` cannot run inside a trace (cache keys and module
+    writes), so the compiled branch decodes the affine offsets from the
+    checkpoint zero codes and the current scales (#5571).
+    """
+
+    module = _module(cls)
+    x = _activation()
+
+    with torch.no_grad():
+        module(x)
+    comp = torch.compile(module, backend="eager")
+    with torch.no_grad():
+        comp(x)
+
+    module.scales.mul_(2)
+    xx = x.clone().requires_grad_(True)
+    assert comp(xx)[0, 0].item() == pytest.approx(
+        _decode(SCALE * 2, _derived_offset(SCALE * 2))
+    )

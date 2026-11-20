@@ -431,6 +431,30 @@ def ensure_cpu_inference_layout(module: nn.Module, dtype: torch.dtype | None) ->
     return True
 
 
+def runtime_zero_offsets_from_codes(
+    module: nn.Module, *, bits: int, dtype: torch.dtype
+) -> Optional[torch.Tensor]:
+    """Return the affine offsets implied by the checkpoint zero codes.
+
+    Pure read-only variant of :func:`refresh_runtime_zero_offsets`: it does not
+    touch ``scales_and_zeros`` or ``qzeros`` and performs no cache-key or
+    ``data_ptr`` access, so a traced grad decode can call it. ``None`` means the
+    codes are unavailable or a fused source owns the storage.
+    """
+
+    if getattr(module, "_fused_operands_shared", False):
+        return None
+    codes = getattr(module, "_cpu_zero_codes", None)
+    scales = getattr(module, "scales", None)
+    if not isinstance(codes, torch.Tensor) or not isinstance(scales, torch.Tensor):
+        return None
+    if tuple(codes.shape) != tuple(scales.shape):
+        return None
+    from .torch_aten_kernel import _cpu_int4pack_zero_offsets
+
+    return _cpu_int4pack_zero_offsets(codes, scales.to(dtype), bits).to(dtype)
+
+
 def refresh_runtime_zero_offsets(
     module: nn.Module, *, bits: int, dtype: torch.dtype
 ) -> Optional[torch.Tensor]:
@@ -448,19 +472,7 @@ def refresh_runtime_zero_offsets(
     must keep the offsets it was given.
     """
 
-    if getattr(module, "_fused_operands_shared", False):
-        # A fused source owns the storage and rebinding ``qzeros`` would break
-        # the shared allocation; the fusion path does not change scales.
-        return None
-    codes = getattr(module, "_cpu_zero_codes", None)
-    scales = getattr(module, "scales", None)
-    if not isinstance(codes, torch.Tensor) or not isinstance(scales, torch.Tensor):
-        return None
-    if tuple(codes.shape) != tuple(scales.shape):
-        return None
-    from .torch_aten_kernel import _cpu_int4pack_zero_offsets
-
-    return _cpu_int4pack_zero_offsets(codes, scales.to(dtype), bits).to(dtype)
+    return runtime_zero_offsets_from_codes(module, bits=bits, dtype=dtype)
 
 
 def reset_fused_runtime_state(module: nn.Module) -> None:
