@@ -154,7 +154,10 @@ def test_qqq_native_forward_passes_a_fresh_scratch_as_c(monkeypatch):
     monkeypatch.setattr(qqq_module, "qqq_runtime_available", lambda: True)
     calls = []
 
-    def fake_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16):
+    def fake_gemm(
+        A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1,
+        sms=-1, max_par=16, bias=None,
+    ):
         # Retain ``C`` so the allocator cannot legally reuse the block: the
         # contract is that the two live buffers never alias, not that the two
         # calls get different addresses over time.
@@ -234,7 +237,10 @@ def test_qqq_native_forward_separates_scratch_across_streams(monkeypatch):
     monkeypatch.setattr(qqq_module, "qqq_runtime_available", lambda: True)
     scratches = []
 
-    def fake_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16):
+    def fake_gemm(
+        A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1,
+        sms=-1, max_par=16, bias=None,
+    ):
         # Retain ``C``; a freed block may legally be handed to a later call.
         scratches.append(C)
         D.zero_()

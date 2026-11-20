@@ -20,6 +20,8 @@
  * limitations under the License.
  */
 
+#include <optional>
+
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda.h>
@@ -272,7 +274,8 @@ __global__ void Marlin(
   int  prob_m, // batch dimension m
   int  prob_n, // output dimension n
   int  prob_k, // reduction dimension k
-  int* locks // extra global storage for barrier synchronization 
+  int* locks, // extra global storage for barrier synchronization 
+  const float* __restrict__ bias // optional fp32 per-column bias of shape 1xn, added to the fp32 accumulator
 ) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the same size, which might involve multiple 
   // column "slices" (of width 16 * `thread_n_blocks`). Stripes are defined as shown in the 3x3 matrix 5 SM example: 
@@ -719,12 +722,24 @@ __global__ void Marlin(
 
     int d_gl_wr_end = d_gl_stride * prob_m;
 
+    // The bias is added to the complete fp32 reduction, before the single
+    // output cast (#5725). Rounding the partial sum to fp16 first turns a
+    // finite biased result into inf whenever the pre-bias sum exceeds 65504,
+    // and double-rounds every other row. With a bias the shared reorder
+    // buffer therefore holds fp32, i.e. twice the bytes of the fp16 layout,
+    // and the final write adds the bias and performs the only rounding.
+    const bool with_bias = bias != nullptr;
+
     // We first reorder in shared memory to guarantee the most efficient final global write patterns
     auto write = [&] (int idx, int c0, int c1, float a_s, FragS_CHANNEL& w_s) {
       float2 deq_res;
       deq_res.x = int32_to_float(c0) * w_s[0] * a_s;
       deq_res.y = int32_to_float(c1) * w_s[1] * a_s;
-      ((half2*) sh)[idx] = float2_to_half2(deq_res);
+      if (with_bias) {
+        ((float2*) sh)[idx] = deq_res;
+      } else {
+        ((half2*) sh)[idx] = float2_to_half2(deq_res);
+      }
     };
 
     if (threadIdx.x / 32 < thread_n_blocks / 4) {
@@ -743,10 +758,29 @@ __global__ void Marlin(
     }
     __syncthreads();
 
+    // The column group is invariant across the strided row walk because
+    // `d_gl_wr_delta` is a whole number of rows.
+    const int d_bias_col = with_bias ? (d_gl_wr % d_gl_stride) * 8 : 0;
+
     #pragma unroll
     for (int i = 0; i < ceildiv(16 * thread_m_blocks, threads / (2 * thread_n_blocks)); i++) {
       if (d_gl_wr < d_gl_wr_end) {
-        D[d_gl_wr] = sh[d_sh_rd];
+        if (with_bias) {
+          // Eight adjacent output columns were staged as fp32 by `write`; add
+          // the bias here, where the column index is known, and round once.
+          const float* reordered = reinterpret_cast<const float*>(sh) + 8 * d_sh_rd;
+          int4 out;
+          #pragma unroll
+          for (int v = 0; v < 4; v++) {
+            float2 pair;
+            pair.x = reordered[2 * v] + bias[d_bias_col + 2 * v];
+            pair.y = reordered[2 * v + 1] + bias[d_bias_col + 2 * v + 1];
+            reinterpret_cast<half2*>(&out)[v] = float2_to_half2(pair);
+          }
+          D[d_gl_wr] = out;
+        } else {
+          D[d_gl_wr] = sh[d_sh_rd];
+        }
         d_gl_wr += d_gl_wr_delta;
         d_sh_rd += d_sh_rd_delta;
       }
@@ -957,7 +991,7 @@ thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k) {
            STAGES, GROUP_BLOCKS>                                                   \
         <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                         \
             A_ptr, B_ptr, C_ptr, D_ptr, s1_ptr, s2_ptr, s3_ptr,                    \
-            prob_m, prob_n, prob_k, locks);                                        \
+            prob_m, prob_n, prob_k, locks, bias_ptr);                              \
   }
 
 #define CALL_IF(N_BLOCKS, K_BLOCKS, NUM_THREADS)    \
@@ -983,6 +1017,7 @@ int qqq_cuda(
   const void* s1,
   const void* s2,
   const void* s3,
+  const void* bias, // optional fp32 per-column bias, nullptr when absent
   int prob_m,
   int prob_n,
   int prob_k,
@@ -1037,6 +1072,7 @@ int qqq_cuda(
   const float* s1_ptr = (const float*) s1;
   const int4* s2_ptr = (const int4*) s2;
   const int4* s3_ptr = (const int4*) s3;
+  const float* bias_ptr = (const float*) bias;
 
   int* locks = (int*) workspace;
 
@@ -1085,7 +1121,8 @@ void qqq_gemm(
   int thread_k = -1,
   int thread_n = -1,
   int sms = -1,
-  int max_par = 8
+  int max_par = 8,
+  const std::optional<torch::Tensor>& bias = std::nullopt
 ) {
   // ``qqq_cuda`` indexes A/B/C/D through their data_ptr with no stride
   // argument, so every operand must be densely packed. A strided INT8
@@ -1121,6 +1158,19 @@ void qqq_gemm(
      AT_ERROR("s2 dtype must be float32, but got ", s2.dtype(), ".");
   if (s3.dtype() != torch::kFloat16)
      AT_ERROR("s3 dtype must be float16, but got ", s3.dtype(), ".");
+  // The bias is added to the fp32 accumulator before the single output cast,
+  // so it is staged in fp32 and in output-column order (#5725).
+  const void* bias_ptr = nullptr;
+  if (bias.has_value()) {
+    const torch::Tensor& bias_tensor = bias.value();
+    if (bias_tensor.scalar_type() != torch::kFloat32)
+      AT_ERROR("bias dtype must be float32, but got ", bias_tensor.scalar_type(), ".");
+    if (bias_tensor.numel() != prob_n)
+      AT_ERROR("bias must have ", prob_n, " elements, but got ", bias_tensor.numel(), ".");
+    if (!bias_tensor.is_contiguous())
+      AT_ERROR("bias must be contiguous.");
+    bias_ptr = bias_tensor.data_ptr();
+  }
   int dev = A.get_device();
   int err = qqq_cuda(
     A.data_ptr(),
@@ -1130,6 +1180,7 @@ void qqq_gemm(
     s1.data_ptr(),
     s2.data_ptr(),
     s3.data_ptr(),
+    bias_ptr,
     prob_m, prob_n, prob_k,
     workspace.data_ptr(),
     groupsize,

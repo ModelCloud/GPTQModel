@@ -1,6 +1,8 @@
 // Adapted from https://github.com/HandH1998/QQQ
 
 #include <c10/cuda/CUDAGuard.h>
+#include <optional>
+
 #include <torch/library.h>
 
 #include "qqq_gemm.h"
@@ -9,8 +11,9 @@ namespace {
 
 void qqq_gemm_dispatch(const torch::Tensor& A, const torch::Tensor& B, torch::Tensor& C,
                        torch::Tensor& D, const torch::Tensor& s1, const torch::Tensor& s2,
-                       const torch::Tensor& s3, torch::Tensor& workspace, int64_t thread_k,
-                       int64_t thread_n, int64_t sms, int64_t max_par) {
+                       const torch::Tensor& s3, torch::Tensor& workspace,
+                       int64_t thread_k, int64_t thread_n, int64_t sms, int64_t max_par,
+                       const std::optional<torch::Tensor>& bias) {
   // The kernel launches on the stream of A's device, so the calling thread's
   // current device must match it. Without this guard, a module placed on a
   // non-current device (e.g. cuda:1 while the thread is still on cuda:0, as in
@@ -18,7 +21,7 @@ void qqq_gemm_dispatch(const torch::Tensor& A, const torch::Tensor& B, torch::Te
   // its output (NaNs) or raises an illegal memory access.
   const c10::cuda::OptionalCUDAGuard device_guard(A.device());
   qqq_gemm(A, B, C, D, s1, s2, s3, workspace, static_cast<int>(thread_k),
-           static_cast<int>(thread_n), static_cast<int>(sms), static_cast<int>(max_par));
+           static_cast<int>(thread_n), static_cast<int>(sms), static_cast<int>(max_par), bias);
 }
 
 }  // namespace
@@ -26,7 +29,8 @@ void qqq_gemm_dispatch(const torch::Tensor& A, const torch::Tensor& B, torch::Te
 TORCH_LIBRARY(gptqmodel_qqq, m) {
   m.def(
       "qqq_gemm(Tensor A, Tensor B, Tensor(a!) C, Tensor(a!) D, Tensor s1, Tensor s2, Tensor s3, "
-      "Tensor(a!) workspace, int thread_k=-1, int thread_n=-1, int sms=-1, int max_par=8) -> ()");
+      "Tensor(a!) workspace, int thread_k=-1, int thread_n=-1, int sms=-1, int max_par=8, "
+      "Tensor? bias=None) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qqq, CUDA, m) {

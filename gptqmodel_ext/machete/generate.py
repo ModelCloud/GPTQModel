@@ -602,6 +602,13 @@ def generate(output_dir: str | os.PathLike[str] | None = None):
 
     impl_configs = []
 
+    # ``out`` is the epilogue's output element type. The 16-bit images round the
+    # fp32 accumulator in the CUTLASS epilogue, so a bias added afterwards to
+    # the narrowed tensor double-rounds every row and turns a pre-bias partial
+    # sum above 65504 into inf even when the biased result is finite (#5725).
+    # A biased layer therefore asks for the fp32 image and finishes with
+    # ``(out + bias.float()).to(activation_dtype)``: one rounding, after the
+    # complete reduction. Bias-free layers keep the 16-bit image.
     GPTQ_kernel_type_configs = list(
         TypeConfig(
             a=a,
@@ -610,11 +617,12 @@ def generate(output_dir: str | os.PathLike[str] | None = None):
             b_group_zeropoint=DataType.void,
             b_channel_scale=DataType.void,
             a_token_scale=DataType.void,
-            out=a,
+            out=out,
             accumulator=DataType.f32,
         )
         for b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
         for a in (DataType.f16, DataType.bf16)
+        for out in (a, DataType.f32)
     )
 
     impl_configs += [
@@ -634,11 +642,12 @@ def generate(output_dir: str | os.PathLike[str] | None = None):
             b_group_zeropoint=a,
             b_channel_scale=DataType.void,
             a_token_scale=DataType.void,
-            out=a,
+            out=out,
             accumulator=DataType.f32,
         )
         for b in (DataType.u4, DataType.u8)
         for a in (DataType.f16, DataType.bf16)
+        for out in (a, DataType.f32)
     )
 
     impl_configs += [
