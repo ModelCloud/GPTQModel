@@ -281,6 +281,12 @@ class FOEM(GPTQ):
         device = inp.device
         use_native = self.gptaq
 
+        # ``process_batch`` hands over ``[features, tokens]``; pad the feature
+        # axis so the outer product matches the expanded TP Hessian (#5823).
+        inp = self.pad_tp_features(inp)
+        if use_native:
+            native_inp = self.pad_tp_features(native_inp)
+
         if self._foem_active_device is not None and device != self._foem_active_device:
             self._foem_device_hessian[self._foem_active_device] = self.H
             if use_native:

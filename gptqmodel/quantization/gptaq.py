@@ -198,6 +198,12 @@ class GPTAQ(GPTQ):
         device = inp.device
         use_native = self._use_native_delta
 
+        # ``process_batch`` hands over ``[features, tokens]``; pad the feature
+        # axis so the outer product matches the expanded TP Hessian (#5823).
+        inp = self.pad_tp_features(inp)
+        if use_native:
+            native_inp = self.pad_tp_features(native_inp)
+
         if self._gptaq_active_device is not None and device != self._gptaq_active_device:
             # A second device appeared: demote the live single-device buffers
             # into the partial map and continue accumulating per device.

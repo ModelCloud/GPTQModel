@@ -998,6 +998,20 @@ class GPTQ:
 
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
+    def pad_tp_features(self, inp: torch.Tensor) -> torch.Tensor:
+        """Append the planned TP columns to a ``[features, tokens]`` batch.
+
+        Plain GPTQ pads the feature axis while reshaping ``[tokens, features]``.
+        GPTAQ and FOEM transpose first, so their accumulator receives
+        ``[features, tokens]``; pad dimension 0 there instead, otherwise the
+        batch cannot be added to the expanded ``self.columns`` Hessian (#5823).
+        """
+
+        if not self._tp_pad_cols:
+            return inp
+        pad = inp.new_zeros((self._tp_pad_cols, inp.shape[1]))
+        return torch.cat((inp, pad), dim=0)
+
     def add_batch(self, inp: torch.Tensor, out: Optional[torch.Tensor], batch_index: Optional[int] = None):
         if not self._hessian_capture_enabled:
             return
