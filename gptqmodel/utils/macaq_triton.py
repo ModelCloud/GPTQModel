@@ -158,7 +158,11 @@ if TRITON_AVAILABLE:
         nonfinite = (tl.max(((xl != xl) | (xh != xh)).to(tl.int32), axis=1) > 0) | (
             amax == float("inf")
         )
-        amax = tl.maximum(amax, 1e-20)
+        # Only an exact-zero block needs the historical floor (keeps its packed
+        # byte stable).  Any nonzero peak goes straight to `floor(log2(amax))`:
+        # E8M0 reaches down to 2**-127, so a `max(amax, 1e-20)` erased blocks
+        # whose peak is below 1e-20 but still representable (#5627).
+        amax = tl.where(amax == 0.0, 1e-20, amax)
         e = tl.floor(tl.log2(amax)) - 2.0
         e = tl.minimum(tl.maximum(e, -127.0), 127.0)
         scale = tl.exp2(e)[:, None]
@@ -202,7 +206,8 @@ if TRITON_AVAILABLE:
         nonfinite = (tl.max(((rl != rl) | (rh != rh)).to(tl.int32), axis=1) > 0) | (
             amax == float("inf")
         )
-        amax = tl.maximum(amax, 1e-20)
+        # Same zero-only floor as `_quant_mxfp4_kernel` (#5627).
+        amax = tl.where(amax == 0.0, 1e-20, amax)
         e = tl.floor(tl.log2(amax)) - 2.0
         e = tl.minimum(tl.maximum(e, -127.0), 127.0)
         scale = tl.exp2(e)[:, None]
@@ -387,10 +392,12 @@ def dequantize_mxfp4(packed: torch.Tensor, e8m0: torch.Tensor, k: int) -> torch.
     scale_bytes = e8m0.view(torch.uint8)[:rows, :k // MXFP4_BLOCK].to(torch.float32)
     # E8M0 0xFF is the format's NaN, written for a block that held a NaN/Inf
     # value; `exp2(255 - 127)` would be a finite-range overflow instead.
+    # `2 ** exponent` is bit-exact at the E8M0 floor (2**-127); `exp2` rounds
+    # that one ulp low on CUDA (#5627).
     scale = torch.where(
         scale_bytes == 255.0,
         torch.full_like(scale_bytes, float("nan")),
-        torch.exp2(scale_bytes - 127.0),
+        torch.pow(2.0, scale_bytes - 127.0),
     ).repeat_interleave(32, dim=1)
     return value * scale
 
