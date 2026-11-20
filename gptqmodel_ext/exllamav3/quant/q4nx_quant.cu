@@ -5,11 +5,7 @@
 // Copyright (c) 2025 Turboderp. See ../LICENSE.exllamav3.
 // Qubitium extended Q4NX to 3.5 bits per weight with exact Viterbi search.
 
-#include <ATen/cuda/CUDAContext.h>
-#include <ATen/ops/empty.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/library.h>
+#include "../../torch_stable_compat.h"
 #include <cuda_runtime.h>
 #include <limits>
 
@@ -221,7 +217,7 @@ void quantize_tiles(const at::Tensor& input, at::Tensor& output, at::Tensor& suf
 {
     TORCH_CHECK(q4nx_supports_step_bits(kv), "Q4NX requires 2.5, 3.0, or 3.5 bpw");
     TORCH_CHECK(input.dim() == 2 && input.size(1) == tile_weights
-        && output.sizes() == input.sizes() && suffixes.sizes() == input.sizes(),
+        && output.sizes().equals(input.sizes()) && suffixes.sizes().equals(input.sizes()),
         "Q4NX quantization expects matching [tiles, 256] buffers");
     TORCH_CHECK(input.scalar_type() == at::kFloat && output.scalar_type() == at::kFloat
         && suffixes.scalar_type() == at::kShort, "Q4NX quantization expects FP32 input/output and int16 suffixes");
@@ -234,11 +230,11 @@ void quantize_tiles(const at::Tensor& input, at::Tensor& output, at::Tensor& suf
     TORCH_CHECK(tiles <= std::numeric_limits<int>::max(), "Too many Q4NX tiles");
     const c10::cuda::CUDAGuard guard(input.device());
     const auto stream = at::cuda::getCurrentCUDAStream();
-    auto history = at::empty({tiles, steps, scale_search || kv == 14 ? 16 : 128}, input.options().dtype(at::kInt));
+    auto history = at::empty({tiles, steps, scale_search || kv == 14 ? 16 : 128}, at::options(input).dtype(at::kInt));
     const float* in = input.const_data_ptr<float>();
-    float* out = output.data_ptr<float>();
-    auto* codes = suffixes.data_ptr<int16_t>();
-    auto* back = reinterpret_cast<uint32_t*>(history.data_ptr<int32_t>());
+    float* out = output.mutable_data_ptr<float>();
+    auto* codes = suffixes.mutable_data_ptr<int16_t>();
+    auto* back = reinterpret_cast<uint32_t*>(history.mutable_data_ptr<int32_t>());
     if (kv == 10 && scale_search)
         quantize_kernel<10, 16><<<tiles, 256, 0, stream>>>(in, out, codes, back);
     else if (kv == 10)
@@ -269,7 +265,7 @@ void pack_trellis(at::Tensor& packed, const at::Tensor& suffixes, int64_t kv)
     const c10::cuda::CUDAGuard guard(suffixes.device());
     const auto stream = at::cuda::getCurrentCUDAStream();
     const auto* codes = suffixes.const_data_ptr<int16_t>();
-    auto* words = reinterpret_cast<uint16_t*>(packed.data_ptr<int16_t>());
+    auto* words = reinterpret_cast<uint16_t*>(packed.mutable_data_ptr<int16_t>());
     if (kv == 10)
         pack_kernel<10><<<blocks, 128, 0, stream>>>(codes, words, tiles);
     else if (kv == 12)
