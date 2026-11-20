@@ -4864,10 +4864,13 @@ class AWQProcessor(LoopProcessor):
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
         # Stream directly on the source device to avoid creating full CPU copies while still enforcing
-        # a predictable memory bound derived from max_chunk_memory.
-        inp_flat = inp.abs().view(-1, inp.shape[-1])
+        # a predictable memory bound derived from max_chunk_memory. Flatten the capture once (a view
+        # when it is contiguous) and take the magnitude per chunk: an activation-sized ``abs()``
+        # bound to this frame would stay live through the FP reference and every candidate replay
+        # (#5765).
+        num_channels = inp.shape[-1]
+        inp_flat = inp.reshape(-1, num_channels)
         num_elements = inp_flat.size(0)
-        num_channels = inp_flat.size(1)
         float32_size = torch.tensor([], dtype=torch.float32).element_size()
         element_size_bytes = float32_size  # accumulation happens in FP32
 
@@ -4881,13 +4884,14 @@ class AWQProcessor(LoopProcessor):
 
         for i in range(0, num_elements, chunk_size):
             end = min(i + chunk_size, num_elements)
-            chunk = inp_flat[i:end]
-            # Accumulate each chunk in FP32 to balance precision and memory usage.
-            chunk_sum = chunk.to(torch.float32).sum(dim=0)
+            # Accumulate each chunk in FP32 to balance precision and memory usage. The magnitude is
+            # materialized for the current chunk only, so the peak stays at the chunk bound.
+            chunk_sum = inp_flat[i:end].abs().to(torch.float32).sum(dim=0)
             x_sum += chunk_sum
 
         x_mean = (x_sum / num_elements).to(inp.dtype)
-        del x_sum
+        # Release the reduction scaffolding before the reference and candidate replays run.
+        del x_sum, inp_flat
 
         # [STEP 3]: Compute output of module
         module_kwargs = self._sanitize_kwargs(kwargs, module2inspect)
