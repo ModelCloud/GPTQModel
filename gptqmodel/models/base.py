@@ -63,6 +63,7 @@ from ..quantization.config import (
     configure_dynamic_override_cache_for_model,
     dynamic_get,
     dynamic_override_cache_stats,
+    encoder_stages_on_host,
     log_dynamic_override_cache_stats,
     normalize_norm_types,
     resolve_model_rotation,
@@ -5660,13 +5661,29 @@ class BaseQModel(nn.Module):
                 devices = list(filtered)
         return as_torch_device(devices[0] if devices else base_device)
 
+    def _pre_quantize_staging_device(self) -> torch.device:
+        """Device `pre_quantize` stages one layer on.
+
+        A CPU-backed encoder (GGUF, BitsAndBytes, NF12) reads its host source
+        directly -- NF12 stages an eligible host tensor itself -- so moving the
+        dense layer to the quantization device only to send it back is a wasted
+        round trip of the whole tensor, and a lazy shell would hold VRAM for a
+        layer that never encodes there (#5757). The requested device still
+        selects the inference backend and owns the packed checkpoint handoff.
+        """
+
+        quantize_config = getattr(self, "quantize_config", None)
+        if quantize_config is not None and encoder_stages_on_host(quantize_config):
+            return CPU
+        return self._pre_quantize_device()
+
     def pre_quantize(
         self,
         module: nn.Module,
         module_path: Optional[str] = None,
     ) -> nn.Module:
         if get_device(module) == META or _module_has_meta_tensors(module):
-            device = self._pre_quantize_device()
+            device = self._pre_quantize_staging_device()
             if self._materialize_floatx_layer_shell(
                 module, device, module_path=module_path
             ):
@@ -5677,7 +5694,7 @@ class BaseQModel(nn.Module):
                 module_path=module_path,
             )
         elif get_device(module) == CPU and self.quantize_config.device != CPU:
-            return move_to(module, device=self._pre_quantize_device())
+            return move_to(module, device=self._pre_quantize_staging_device())
         else:
             return module
 

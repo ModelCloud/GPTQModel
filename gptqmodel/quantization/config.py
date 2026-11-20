@@ -194,6 +194,29 @@ class METHOD(str, Enum):
     TT_BLOCKFLOAT = "tt-blockfloat"
 
 
+#: Methods whose weight encoder consumes a host-resident (CPU) source.
+#:
+#: GGUF and BitsAndBytes encode on the host, so their dense source never needs
+#: the accelerator: staging it there first copies the whole layer down and back
+#: for nothing (#5757). NF12 does have a native accelerator encoder, but it
+#: stages an eligible host source itself, so the looper must not stage the layer
+#: first either. Every other method quantizes on the accelerator.
+CPU_BACKED_ENCODER_METHODS: frozenset = frozenset(
+    {METHOD.GGUF, METHOD.BITSANDBYTES, METHOD.NF12}
+)
+
+
+def encoder_stages_on_host(qcfg: Any) -> bool:
+    """Report whether ``qcfg``'s weight encoder consumes a host-resident source.
+
+    Accepts any config-like object, including the lightweight stubs that tests
+    and adapters pass around, so staging decisions never assume the full
+    :class:`BaseQuantizeConfig` surface.
+    """
+
+    return getattr(qcfg, "method", None) in CPU_BACKED_ENCODER_METHODS
+
+
 # Bit widths each method's packer and kernels can actually realize.
 METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int | float, ...]] = {
     # GPTQ/RTN pack 2-8 bit weights (5/6/7 use the planar layout).
