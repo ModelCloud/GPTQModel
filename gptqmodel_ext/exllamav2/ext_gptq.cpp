@@ -155,7 +155,7 @@ void gemm_half_q_half(
                     at::cuda::getCurrentCUDABlasHandle(),
                     (const half*) a.data_ptr(),
                     (const half*) weights.data_ptr(),
-                    c.data_ptr<float>(),
+                    c.mutable_data_ptr<float>(),
                     c.size(0),
                     c.size(1),
                     a.size(1),
