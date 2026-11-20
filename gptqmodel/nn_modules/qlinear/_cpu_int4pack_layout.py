@@ -136,7 +136,7 @@ def int4pack_to_codes(
     return _unpack_blocks(packed, block_size)
 
 
-def runtime_int4pack_dense_weight(module) -> torch.Tensor:
+def runtime_int4pack_dense_weight(module, *, use_zero_codes: bool = False) -> torch.Tensor:
     """Decode a live CPU int4pack runtime layout to a dense ``[in, out]`` weight.
 
     The inference transform replaces the checkpoint ``qweight`` with the ATen
@@ -150,6 +150,12 @@ def runtime_int4pack_dense_weight(module) -> torch.Tensor:
     The result stays in runtime input order; a ``desc_act`` caller must gather
     its activations with ``ret_idx`` before the matmul, exactly as the fused op
     does. Nothing is cached or written back to the module.
+
+    ``use_zero_codes`` decodes the offsets from the checkpoint zero codes and
+    the current ``scales`` instead of the installed ``qzeros``. A traced graph
+    cannot run the eager scale-change refresh (#5372) because it reads
+    ``tensor_cache_key`` and writes module state, so the compiled grad branch
+    asks for this read-only form and sees a scale change immediately (#5571).
     """
 
     bits = int(getattr(module, "bits", 0))
@@ -170,6 +176,14 @@ def runtime_int4pack_dense_weight(module) -> torch.Tensor:
         raise RuntimeError(
             f"{type(module).__name__} has no live CPU int4pack weight operands"
         )
+    if use_zero_codes:
+        from ._fused_train_state import runtime_zero_offsets_from_codes
+
+        fresh_zeros = runtime_zero_offsets_from_codes(
+            module, bits=bits, dtype=zeros.dtype
+        )
+        if fresh_zeros is not None:
+            zeros = fresh_zeros
 
     codes = int4pack_to_codes(qweight, block_size=block_size)  # [out, in]
     out_features, in_features = codes.shape

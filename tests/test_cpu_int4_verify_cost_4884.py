@@ -227,24 +227,18 @@ def _checkpoint_tensors(module) -> dict[str, torch.Tensor]:
 
 @pytest.mark.parametrize("desc_act", [False, True], ids=["identity", "desc_act"])
 def test_transformed_state_dict_is_bounded_by_its_own_bytes(avx512_stand_in, desc_act):
-    """``state_dict()`` must stay close to copying the checkpoint bytes.
+    """``state_dict()`` must stay close to one pack of the checkpoint bytes.
 
     A transformed module cannot emit the checkpoint ``qweight`` without
     rebuilding it, so the guard bounds that rebuild instead of pretending it is
-    free. The ratio uses the module's own checkpoint byte count, and a second
-    ratio against the forward pack keeps the bound meaningful on a loaded host.
+    free. The ratio is against the forward pack of the same weight, which stays
+    meaningful on a loaded host where a raw ``memcpy`` ratio does not.
     """
 
     module = _make_module(desc_act)
     checkpoint = _checkpoint_tensors(module)
-    qweight_bytes = (
-        checkpoint["qweight"].numel() * checkpoint["qweight"].element_size()
-    )
     _transform(module, _fake_avx512_pack)
 
-    source = torch.empty(qweight_bytes, dtype=torch.uint8)
-    destination = torch.empty(qweight_bytes, dtype=torch.uint8)
-    memcpy = _best_seconds(lambda: destination.copy_(source))
     state_dict = _best_seconds(lambda: module.state_dict())
     forward = _best_seconds(
         lambda: pack_hf_int4(
@@ -252,14 +246,10 @@ def test_transformed_state_dict_is_bounded_by_its_own_bytes(avx512_stand_in, des
         )
     )
 
-    assert memcpy > 0.0
-    # A pure-Torch nibble permutation runs at a few GB/s while a raw copy
-    # reaches tens of GB/s, so the honest floor is tens of copies. 150x is
-    # still far below the ~350x of the old eight-pass rebuild on this host.
-    assert state_dict < 150 * memcpy, (
-        f"state_dict() took {state_dict * 1e3:.2f} ms for {qweight_bytes / 1e6:.1f} MB "
-        f"of checkpoint bytes ({state_dict / memcpy:.0f}x a raw copy)"
-    )
+    # Compare against the forward pack of the same weight instead of a raw
+    # ``memcpy``: a small memcpy is dominated by scheduling, so its ratio is
+    # host-load dependent (#5325). The old eight-pass rebuild was ~8x the
+    # single-pass pack, so the 3x bound still catches it.
     assert state_dict < 3 * forward, (
         f"state_dict() took {state_dict * 1e3:.2f} ms, "
         f"{state_dict / forward:.1f}x the forward pack of the same weight"

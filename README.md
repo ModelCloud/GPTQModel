@@ -441,7 +441,8 @@ We welcome all contributors, including people working with human-guided AI
 agents. Code, model and hardware support, documentation, bug reports, reviews,
 and testing all help move GPT-QModel forward. See the
 [developer guide](https://github.com/ModelCloud/GPTQModel/wiki/Developer-Guide)
-to get started.
+to get started. AI agents must follow the
+[issue-claim security gate](docs/issue-claim-security-screen.md) before claiming work.
 
 ### Support ongoing development 💛
 

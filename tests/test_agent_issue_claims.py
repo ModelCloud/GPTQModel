@@ -4,6 +4,7 @@
 and only maintainer-authored issues whose content passes the security screen."""
 
 import importlib.util
+import json
 import sys
 import threading
 from datetime import timedelta
@@ -17,6 +18,11 @@ _SCRIPT = (
     Path(__file__).resolve().parents[1] / ".agents" / "skills" / "gptqmodel-issue-claims" / "scripts" / "issue_claim.py"
 )
 HOSTS_SESSIONS = [(f"host{h}", f"sess{s}") for h in (1, 2) for s in ("a", "b")]
+
+
+def _label_event(name, login="devin-ai-integration", actor_type="Bot", at="2026-01-01T00:02:00Z"):
+    return {"__typename": "LabeledEvent", "createdAt": at, "label": {"name": name},
+            "actor": {"__typename": actor_type, "login": login}}
 
 
 @pytest.fixture
@@ -38,7 +44,7 @@ def ic(monkeypatch, tmp_path):
             self.settle_barrier = None
             self.before_post = None
             self.local = threading.local()
-            self.issue_meta = {}  # number -> {"author": ..., "body": ...}
+            self.issue_meta = {}
 
         def add_comment(self, number, author, body):
             with self.lock:
@@ -68,12 +74,24 @@ def ic(monkeypatch, tmp_path):
             with self.lock:
                 return [dict(c) for _, c in sorted(self.comments.items()) if c["issue"] == number]
 
-        def fetch(self, repo, number):
+        def issue_node(self, number):
             meta = self.issue_meta.get(number, {})
+            labels = meta.get("labels", ("scanned", "safe"))
+            return {
+                "number": number, "title": meta.get("title", "t"), "state": "OPEN", "body": meta.get("body", ""),
+                "author": {"login": meta.get("author", "Qubitium")}, "assignees": {"nodes": []},
+                "timelineItems": {"nodes": []}, "comments": {"totalCount": 0, "nodes": []},
+                "labels": {"nodes": [{"name": label} for label in labels], "pageInfo": {"hasNextPage": False}},
+                "lastEditedAt": meta.get("last_edited"),
+                "screenEvents": {"nodes": meta.get("events", [_label_event(label) for label in labels])},
+            }
+
+        def fetch(self, repo, number):
+            node = self.issue_node(number)
             thread = self.thread(number)
-            return mod.IssueState(number, meta.get("title", "t"), "OPEN", [], mod.parse_claims(thread), [],
-                                  author=meta.get("author", "Qubitium"), body=meta.get("body", ""),
-                                  comments=thread)
+            return mod.IssueState(number, node["title"], "OPEN", [], mod.parse_claims(thread),
+                                  author=node["author"]["login"], body=node["body"], comments=thread,
+                                  screen_blocker=mod._external_screen_blocker(node))
 
         def search(self, repo, me):
             with self.lock:
@@ -273,6 +291,90 @@ def test_only_maintainer_authored_issues_are_claimable(ic):
     assert _as(ic, agent, ic.cmd_claim, issue=[2]) == 0
     # Only an explicit user direction may override the author gate.
     assert _as(ic, agent, ic.cmd_claim, issue=[1], allow_untrusted_author=True, capacity=2) == 0
+
+
+@pytest.mark.parametrize("labels", [(), ("scanned",), ("safe",), ("scanned", "safe", "unsafe")])
+def test_claim_refuses_incomplete_or_unsafe_external_screen_before_writing(ic, labels, capsys):
+    ic.fake.issue_meta[2] = {"author": "drive-by-user", "labels": labels}
+    assert _as(
+        ic, HOSTS_SESSIONS[0], ic.cmd_claim, issue=[1, 2], related="shared fix",
+        allow_untrusted_author=True, user_reviewed_findings=True,
+    ) == 2
+    assert "external security screen" in capsys.readouterr().out
+    assert ic.fake.comments == {}
+
+
+@pytest.mark.parametrize(
+    ("meta", "reason"),
+    [
+        ({"events": []}, "could not be verified"),
+        ({"events": [_label_event("scanned"), _label_event("safe", actor_type="User")]}, "could not be verified"),
+        ({"events": [_label_event("scanned"), _label_event("safe"),
+                     {"__typename": "UnlabeledEvent", "label": {"name": "safe"}},
+                     _label_event("safe", login="other-app")]}, "could not be verified"),
+        ({"last_edited": "2026-01-01T00:03:00Z"}, "latest title or body edit"),
+        ({"events": [_label_event("scanned"), _label_event("safe"),
+                     {"__typename": "RenamedTitleEvent", "createdAt": "2026-01-01T00:02:00Z"}]},
+         "latest title or body edit"),
+    ],
+)
+def test_claim_rejects_unverifiable_or_stale_label_history(ic, meta, reason, capsys):
+    ic.fake.issue_meta[1] = meta
+    assert _as(ic, HOSTS_SESSIONS[0], ic.cmd_claim) == 2
+    assert reason in capsys.readouterr().out
+    assert ic.fake.comments == {}
+
+
+def test_claim_accepts_external_issue_with_current_rescan_and_user_direction(ic):
+    ic.fake.issue_meta[1] = {
+        "author": "drive-by-user",
+        "last_edited": "2026-01-01T00:01:00Z",
+        "events": [
+            {"__typename": "RenamedTitleEvent", "createdAt": "2026-01-01T00:01:30Z"},
+            _label_event("scanned"),
+            _label_event("safe"),
+        ],
+    }
+    assert _as(ic, HOSTS_SESSIONS[0], ic.cmd_claim, allow_untrusted_author=True) == 0
+
+
+def test_scan_available_filters_both_text_and_json(ic, monkeypatch, capsys):
+    ic.fake.issue_meta[2] = {"labels": ("safe",)}
+    ic.fake.issue_meta[3] = {"author": "drive-by-user"}
+    ic.fake.issue_meta[4] = {"last_edited": "2026-01-01T00:03:00Z"}
+    nodes = [ic.fake.issue_node(n) for n in range(1, 5)]
+    monkeypatch.setattr(ic, "graphql", lambda *_a, **_kw: {"repository": {"issues": {"nodes": nodes}}})
+    agent = HOSTS_SESSIONS[0]
+    for json_output in (False, True):
+        assert _as(ic, agent, ic.cmd_scan, repo="owner/repo", limit=4, available=True, json=json_output) == 0
+        output = capsys.readouterr().out
+        if json_output:
+            assert [row["number"] for row in json.loads(output)] == [1]
+        else:
+            assert len(output.splitlines()) == 1 and output.startswith("#1")
+
+
+def test_claim_withdraws_group_when_screen_changes_during_settle(ic):
+    def revoke(number):
+        if number == 2:
+            ic.fake.issue_meta[2] = {"labels": ("scanned", "unsafe")}
+
+    ic.fake.before_post = revoke
+    assert _as(ic, HOSTS_SESSIONS[0], ic.cmd_claim, issue=[1, 2], related="shared fix") == 2
+    assert ic.fake.comments == {}
+
+
+def test_revoked_screen_blocks_renewal_and_verification_but_not_release(ic):
+    agent = HOSTS_SESSIONS[0]
+    assert _as(ic, agent, ic.cmd_claim) == 0
+    ic.fake.issue_meta[1] = {"labels": ("scanned", "unsafe")}
+    initial = ic.fake.thread(1)
+    assert _as(ic, agent, ic.cmd_claim) == 2
+    assert _as(ic, agent, ic.cmd_heartbeat) == 4
+    assert _as(ic, agent, ic.cmd_verify) == 4
+    assert ic.fake.thread(1) == initial
+    assert _as(ic, agent, ic.cmd_release) == 0
+    assert not ic.fake.fetch("R", 1).live_claims(ic.fake.clock)
 
 
 RISKY_BODIES = {

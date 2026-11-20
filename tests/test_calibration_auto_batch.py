@@ -183,3 +183,70 @@ def test_auto_batch_ignores_a_single_row_mapping():
 
     assert _calibration_row_count(calibration) == 1
     assert _calibration_tokens_per_row(_tokenizer_qmodel(), calibration) == 3
+
+
+def _materialize(config):
+    """Apply the #5567 fix through a runtime lookup.
+
+    Kept out of the module-level import so this file still collects on the
+    pre-fix tree and only the regression nodes fail.
+    """
+
+    from gptqmodel.models.base import _materialized_calibration_config
+
+    return _materialized_calibration_config(config)
+
+
+def _one_shot_factories():
+    return (
+        lambda: (text for text in TEXTS),
+        lambda: iter(TEXTS),
+        lambda: map(str, TEXTS),
+    )
+
+
+def test_auto_batch_materialises_a_one_shot_dataset():
+    """Sizing must not consume a generator/iter/map before preparation (#5567)."""
+
+    for factory in _one_shot_factories():
+        config = CalibrationConfig(dataset=factory(), batch_size="auto")
+        bound = _materialize(config)
+
+        assert bound is not config
+        assert isinstance(bound.dataset, list)
+        assert _calibration_row_count(bound) == 64
+        # The EoRA pass sizes again: a materialised input keeps the rows.
+        assert _calibration_row_count(bound) == 64
+        assert list(bound.dataset) == TEXTS
+
+
+def test_auto_batch_materialises_a_one_shot_adapter_dataset():
+    config = CalibrationConfig(
+        dataset=TEXTS,
+        adapter_dataset=(text for text in TEXTS),
+        batch_size="auto",
+    )
+    bound = _materialize(config)
+
+    assert bound.dataset is TEXTS
+    assert isinstance(bound.adapter_dataset, list)
+    assert list(bound.adapter_dataset) == TEXTS
+
+
+def test_materialisation_keeps_sized_containers_unchanged():
+    for dataset in (TEXTS, tuple(TEXTS), {"text": TEXTS}):
+        config = CalibrationConfig(dataset=dataset, batch_size="auto")
+        assert _materialize(config) is config
+
+
+def test_materialisation_keeps_a_bound_preparer():
+    def preparer(**kwargs):
+        return kwargs
+    config = CalibrationConfig(
+        dataset=(text for text in TEXTS), batch_size="auto"
+    ).bind(preparer)
+
+    bound = _materialize(config)
+
+    assert bound.prepare_dataset is preparer
+    assert isinstance(bound.dataset, list)

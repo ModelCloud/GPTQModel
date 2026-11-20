@@ -644,6 +644,35 @@ def _calibration_tokens_per_row(qmodel, calibration) -> int:
     return longest or 512
 
 
+def _materialized_calibration_config(calibration):
+    """Return a calibration config whose one-shot inputs are materialised once.
+
+    ``batch_size="auto"`` sizes the run by reading the calibration rows before
+    ``prepare_calibration_dataset`` runs, and ``quantize()`` may size the native
+    and EoRA passes separately. A generator (or ``iter(list)``/``map``) is
+    exhausted by the first read, so the later preparation saw no rows and
+    failed with "Quantize: calibration dataset is empty" (#5567). Materialise
+    the inputs up front so every read and every processor sees the same rows;
+    sized containers and ``datasets.IterableDataset`` are returned unchanged.
+    """
+
+    from dataclasses import replace
+
+    from ..looper.loop_processor import _reusable_calibration_dataset
+
+    dataset = _reusable_calibration_dataset(calibration.dataset)
+    adapter_dataset = _reusable_calibration_dataset(calibration.adapter_dataset)
+    if dataset is calibration.dataset and adapter_dataset is calibration.adapter_dataset:
+        return calibration
+
+    bound = replace(calibration, dataset=dataset, adapter_dataset=adapter_dataset)
+    if calibration.prepare_dataset is not None:
+        # ``replace()`` drops the non-init field, and a bound config must keep
+        # the preparer that its owner installed.
+        object.__setattr__(bound, "prepare_dataset", calibration.prepare_dataset)
+    return bound
+
+
 def _module_weight_dtype(module: object) -> Optional[torch.dtype]:
     """dtype of the first floating parameter of a module, or None."""
 
@@ -2856,6 +2885,7 @@ class BaseQModel(nn.Module):
             if self.quantize_config.method != METHOD.AWQ:
                 raise ValueError(f"Staged GSQ is unsupported for {self.quantize_config.method}")
 
+        calibration = _materialized_calibration_config(calibration)
         batch_size = self._calibration_batch_size(calibration)
         if not self.support_batch_quantize:
             log.warn("Quantize: batch_size overridden by model class definition to `disabled`")
@@ -3313,6 +3343,7 @@ class BaseQModel(nn.Module):
                 "requantize(calibration=...) must be a CalibrationConfig, got "
                 f"{type(calibration).__name__}; pass `CalibrationConfig(dataset=...)`."
             )
+        calibration = _materialized_calibration_config(calibration)
         if not self.quantized:
             raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
         embed_quant_config = self._normalize_embed_quant_config(embed_quant_config, embed_quant_mode)
@@ -3979,6 +4010,8 @@ class BaseQModel(nn.Module):
             )
         if self.quantized:
             raise EnvironmentError("eora_generate() is called a model that is already quantized")
+
+        calibration = _materialized_calibration_config(calibration)
 
         # Use the provided tokenizer if one is passed to quantize()
         if tokenizer is not None:
