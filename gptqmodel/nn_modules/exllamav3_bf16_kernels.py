@@ -78,14 +78,16 @@ def _can_prescale(x: torch.Tensor) -> bool:
     )
 
 
-def try_prescale(x: torch.Tensor) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+def try_prescale(
+    x: torch.Tensor, *, bound: float = FP16_SAFE_AMAX,
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
     """Fused ``_native_bf16_input``; ``None`` means use the eager reference."""
     if not _can_prescale(x):
         return None
     op = _op("bf16_prescale")
     if op is None:
         return None
-    out, scale = op(x, FP16_SAFE_AMAX)
+    out, scale = op(x, bound)
     return out, scale
 
 

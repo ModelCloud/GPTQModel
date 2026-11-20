@@ -59,8 +59,12 @@ flowchart LR
     R -->|no| E["ValueError"]
     V --> P["pack_trellis_q4nx"]
     P --> S["Safetensors trellis, scales and q4nx marker"]
-    S --> G["Native CUDA projection or explicit routed decode"]
-    S --> T["Chunked EXL3_TORCH reconstruction"]
+    S --> L{"Marker keys agree with tensor_storage?"}
+    L -->|yes| G["Native CUDA projection or routed decode"]
+    L -->|yes| T["Chunked EXL3_TORCH reconstruction"]
+    L -->|no| F["ValueError names the marker key"]
+    classDef error fill:#f9d5d5,stroke:#af3b3b,color:#222
+    class E,F error
 ```
 
 Quantization requires NVIDIA CUDA. Inference uses native CUDA kernels for
@@ -87,7 +91,19 @@ The saved quantization config keeps the default `codebook` and the
 `dynamic` recipe. Its `tensor_storage` entry lists each projection's
 `.q4nx` tensor and its dtype and shape. The loader selects the decoder
 from the per-projection marker, so a checkpoint can mix Q4NX and other EXL3
-codebooks.
+codebooks. Both loaders verify marker keys against the actual safetensors
+contents before constructing a decoder. A dynamic output-head rule can
+select a different codebook. The effective head rate is validated against
+that codebook.
+
+| Checkpoint state | Loader result |
+| --- | --- |
+| The storage manifest and safetensors agree on the markers | Construct the selected decoder. |
+| Either side is missing a marker present on the other | Raise a `ValueError` identifying the tensor. |
+
+Packed FP16 forward uses FP32 for split-K partials, the output Hadamard
+transform, scales and bias, then casts once. The BF16 bridge rescales the raw
+projection, adds the canonical bias in FP32, and writes BF16. [Activation dispatch](exl3-wide-activation-dispatch.md)
 
 ## Runtime policy
 

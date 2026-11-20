@@ -672,6 +672,7 @@ def test_v41_q4nx_native_routing_matches_expert_order(v41_checkpoint, bits):
     if not torch.cuda.is_available() or torch.version.hip or torch.cuda.get_device_capability() < (8, 0):
         pytest.skip("DeepSeek V4.1 Q4NX routing requires NVIDIA SM80+")
     from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import reconstruct_exl3_tensors
+    from gptqmodel.models.deepseek_v41.exl3 import routed_q4nx
 
     tensors = _replace_v41_experts(v41_checkpoint, bits=bits, all_experts=True)
     model = GPTQModel.load(v41_checkpoint, device="cuda", backend="exl3_exllama_v3")
@@ -724,3 +725,25 @@ def test_v41_q4nx_native_routing_matches_expert_order(v41_checkpoint, bits):
         packed_weights[0][0].neg_()
         torch.testing.assert_close(layer(x, None), reference(x), rtol=2e-3, atol=2e-3)
         assert layer._q4nx_tables is not previous_tables
+
+        if bits == 3.5:
+            # Input scales participate in the FP16 range checks. An in-place
+            # edit to a versioned scale must rebuild the existing tables.
+            with torch.inference_mode(False):
+                projection.suh = projection.suh.clone()
+            layer(x, None)
+            previous_tables = layer._q4nx_tables
+            projection.suh.mul_(2)
+            packed_weights[0][0].mul_(2)
+            torch.testing.assert_close(layer(x, None), reference(x), rtol=2e-3, atol=2e-3)
+            assert layer._q4nx_tables.input_bound == previous_tables.input_bound / 2
+
+            layer.experts[1].limit = 0.25
+            torch.testing.assert_close(layer(x, None), reference(x), rtol=2e-3, atol=2e-3)
+            assert layer._q4nx_tables is False
+            for expert in layer.experts:
+                expert.limit = 1e-4
+            layer.gate.scale = 2**36
+            values = x.flatten(0, 1)
+            ids, rw = layer.gate(values, None)
+            assert routed_q4nx(layer, values, ids, rw) is None

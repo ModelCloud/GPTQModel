@@ -3,8 +3,10 @@
 
 """Packed Q4NX projections for DeepSeek V4.1 Flash."""
 
+import math
 import re
 import weakref
+from dataclasses import dataclass
 
 import torch
 
@@ -85,12 +87,35 @@ def bind_q4nx_routing(model, paths):
         layer._q4nx_tables = None
 
 
-def _routing_tables(layer, device):
-    banks = [tuple(getattr(expert, name) for expert in layer.experts) for name in ("w1", "w3", "w2")]
-    widths = []
+@dataclass(frozen=True)
+class _RoutingTables:
+    pointers: tuple
+    rates: tuple
+    experts: tuple
+    scale_versions: tuple
+    width: int
+    intermediate: int
+    input_bound: float
+    down_scale: float
+
+
+def _routing_tables(layer, device, width):
+    experts = tuple(layer.experts)
+    owner = weakref.ref(layer)
+    banks = [tuple(getattr(expert, name) for expert in experts) for name in ("w1", "w3", "w2")]
+    for expert in experts:
+        expert._route_owner = owner
+    for bank in banks:
+        for linear in bank:
+            if isinstance(linear, V41Q4NXLinear):
+                linear._route_owner = owner
+    rates = []
+    shapes = []
+    if any(expert.limit != layer.experts[0].limit for expert in layer.experts):
+        return False
     for bank in banks:
         first = bank[0]
-        if not isinstance(first, V41Q4NXLinear):
+        if not isinstance(first, V41Q4NXLinear) or first.trellis is None:
             return False
         shape = tuple(first.trellis.shape)
         if len(shape) != 3 or shape[-1] not in (40, 48, 56):
@@ -110,15 +135,16 @@ def _routing_tables(layer, device):
             for linear in bank
         ):
             return False
-        widths.append(shape[-1] / 16)
-    if widths[0] != widths[1]:
+        rates.append(shape[-1] / 16)
+        shapes.append((k, n))
+    k, intermediate = shapes[0]
+    if k != width or shapes[1] != shapes[0] or shapes[2] != (intermediate, width) or rates[0] != rates[1]:
         return False
-    owner = weakref.ref(layer)
-    for expert in layer.experts:
-        expert._route_owner = owner
-    for bank in banks:
-        for linear in bank:
-            linear._route_owner = owner
+    scales = [tuple(linear.suh for linear in bank) for bank in banks]
+    maxima = torch.stack([torch.stack(bank).abs().amax() for bank in scales]).tolist()
+    if not all(math.isfinite(value) for value in maxima):
+        return False
+    versions = tuple((t, t._version) for bank in scales for t in bank if not t.is_inference())
     # Allocate the immutable pointer tables once. The projections remain the
     # owners of packed weights and sign vectors. Device moves and reassignment
     # invalidate the tables before the next launch.
@@ -127,7 +153,10 @@ def _routing_tables(layer, device):
          for bank in banks for leaf in ("trellis", "suh", "svh")],
         dtype=torch.int64, device=device,
     )
-    return tuple(pointers.unbind(0)), widths, banks[0][0].out_features, tuple(layer.experts)
+    return _RoutingTables(
+        tuple(pointers.unbind(0)), tuple(rates), experts, versions, width, intermediate,
+        FP16_SAFE_AMAX / max(1.0, *maxima[:2]), max(1.0, maxima[2]),
+    )
 
 
 def routed_q4nx(layer, x, indices, weights):
@@ -136,34 +165,39 @@ def routed_q4nx(layer, x, indices, weights):
         return None
     limit = layer.experts[0].limit
     topk = indices.size(1)
-    # A normalized route weight is at most abs(scale). With the Flash clamp
-    # this bounds the down input and its 128-wide rotation inside FP16.
+    # A normalized route weight is at most abs(scale). The negative SiLU
+    # lobe has magnitude below 0.279 and the up value is clamped symmetrically.
+    # Allow headroom for BF16 rounding before the down input rotation.
+    activation_bound = max(limit, 0.279) * limit * abs(layer.gate.scale)
     if (not layer.gate.normalize or topk <= 1 or topk > 16 or limit <= 0
-            or not (limit * limit * abs(layer.gate.scale) <= FP16_SAFE_AMAX / 2)):
+            or not activation_bound <= FP16_SAFE_AMAX / 2):
         return None
     tables = layer._q4nx_tables
-    if tables and tables[-1] != tuple(layer.experts):
+    if tables and (
+        tables.experts != tuple(layer.experts)
+        or any(t._version != version for t, version in tables.scale_versions)
+    ):
         tables = None
     if tables is None:
         if torch.cuda.get_device_capability(x.device) < (8, 0) or torch.cuda.is_current_stream_capturing():
             return None
-        tables = _routing_tables(layer, x.device)
+        tables = _routing_tables(layer, x.device, x.size(1))
         layer._q4nx_tables = tables
     if tables is False:
         return None
 
-    pointers, widths, intermediate, _ = tables
-    if pointers[0].device != x.device:
+    if (tables.pointers[0].device != x.device or tables.width != x.size(1)
+            or not activation_bound * tables.down_scale <= FP16_SAFE_AMAX / 2):
         return None
     op = _runtime_op("exl3_moe_coop")
-    prepared = try_prescale(x.contiguous())
+    prepared = try_prescale(x.contiguous(), bound=tables.input_bound)
     if prepared is None:
         return None
     native_input, scales = prepared
     # Keep the expert-ID accumulation order of V41MoE's reference loop.
     ordered, order = indices.sort(dim=1)
     weights = weights.gather(1, order)
-    width = x.size(1)
+    width, intermediate = tables.width, tables.intermediate
     outputs = []
     for rows, ids, rw, scale in zip(
         native_input.split(256 // topk), ordered.split(256 // topk),
@@ -178,7 +212,7 @@ def routed_q4nx(layer, x, indices, weights):
         count = capacity * (intermediate // 128 + 2) + rows.size(0) * (width // 128) + 3
         counters = rows.new_zeros((count,), dtype=torch.int32)
         op(
-            rows, ids, rw, -1, -1, width, *pointers, None, None, None, *widths,
+            rows, ids, rw, -1, -1, width, *tables.pointers, None, None, None, *tables.rates,
             False, False, 0, limit, True, had_g, had_u, gu_g, gu_u, act,
             down, counters, out, q4nx=True, flash_input_scale=scale,
         )

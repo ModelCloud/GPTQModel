@@ -16,8 +16,8 @@ from safetensors import safe_open
 from transformers.utils.hub import cached_file, cached_files, extract_commit_hash
 
 from ...exllamav3.q4nx import Q4NX_MULTIPLIER
-from ...quantization.dtype import is_fp4_packed_dtype
 from ...quantization.config import METHOD
+from ...quantization.dtype import is_fp4_packed_dtype
 from ...utils.backend import BACKEND
 from ...utils.macaq_triton import TRITON_AVAILABLE
 from ...utils.marlin import marlin_runtime_available, marlin_runtime_error
