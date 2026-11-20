@@ -1,6 +1,11 @@
 #include <cuda_fp16.h>
 #include "exl3_gemm.cuh"
 
+#include <cstdint>
+#include <tuple>
+
+#include <torch/library.h>
+
 #include <algorithm>
 #include <limits>
 #include <set>
@@ -154,3 +159,59 @@ int exl3_gemm(
     return config->shape_idx;
 #endif
 }
+
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
+namespace {
+
+// Which shape of the Q4NX kernel table holds `kernel`, or -1 when the dispatch
+// picked another codebook's instance. The three Q4NX rates have their own
+// tables, so the answer also pins the packed width the caller asked for.
+int q4nx_kernel_shape(fp_exl3_gemm_kernel kernel, int K, bool c_fp32, bool half_k)
+{
+    if (!kernel) return -1;
+    fp_exl3_gemm_kernel* table =
+        K == 2 ? (c_fp32 ? tfp_exl3_gemm_kernel_fp32_q4nx_w25 : tfp_exl3_gemm_kernel_fp16_q4nx_w25)
+      : half_k ? (c_fp32 ? tfp_exl3_gemm_kernel_fp32_q4nx_w35 : tfp_exl3_gemm_kernel_fp16_q4nx_w35)
+               : (c_fp32 ? tfp_exl3_gemm_kernel_fp32_q4nx_w30 : tfp_exl3_gemm_kernel_fp16_q4nx_w30);
+    for (int shape = 1; shape <= EXL3_GEMM_NUM_SHAPES; ++shape)
+        if (table[shape] == kernel)
+            return shape;
+    return -1;
+}
+
+}  // namespace
+
+// Read-only view of the tuned GEMM selection, used by the dispatch tests and by
+// tuning work: the runtime only returns the shape index, which cannot tell a
+// Q4NX instance from a 3-instruction one with the same tile geometry.
+std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t> exl3_gemm_kernel_probe(
+    int64_t cc, int64_t size_k, int64_t size_n, int64_t K, bool c_fp32, int64_t cb,
+    bool half_k, bool fused_gemm, int64_t size_m)
+{
+    const int device = at::cuda::current_device();
+    const int smem_max = std::min<int>(SMEM_MAX, at::cuda::getDeviceProperties(device)->sharedMemPerBlockOptin);
+    const TResult* config = select_exl3_gemm_kernel_tuned(
+        (int) cc, (int) size_k, (int) size_n, (int) K, c_fp32, -1, 0, (int) cb,
+        half_k, fused_gemm, (int) size_m, smem_max);
+    TORCH_CHECK(config && config->kernel, "no EXL3 GEMM kernel for this shape");
+    const int q4nx_shape = cb == EXL3_Q4NX_CODEBOOK
+        ? q4nx_kernel_shape(config->kernel, (int) K, c_fp32, half_k) : -1;
+    return {
+        (int64_t) reinterpret_cast<uintptr_t>(config->kernel),
+        config->shape_idx,
+        config->num_sms,
+        config->block_dim,
+        q4nx_shape,
+    };
+}
+
+// No tensor argument, so the op is registered as a composite kernel rather than
+// under a dispatch key; the selection itself needs no tensor.
+TORCH_LIBRARY_FRAGMENT(gptqmodel_exllamav3, m)
+{
+    m.def("exl3_gemm_kernel_probe(int cc, int size_k, int size_n, int K, bool c_fp32, int cb, "
+          "bool half_k, bool fused_gemm, int size_m) -> (int kernel, int shape_idx, int num_sms, "
+          "int block_dim, int q4nx_shape)");
+    m.impl("exl3_gemm_kernel_probe", &exl3_gemm_kernel_probe);
+}
+#endif

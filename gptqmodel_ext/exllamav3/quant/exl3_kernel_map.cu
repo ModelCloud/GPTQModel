@@ -279,6 +279,15 @@ TResult* select_exl3_gemm_kernel_tuned
         if (q4nx_expert_grid && row_shape == 0)
             shape_idx = 2;
 
+        // Q4NX on Ada. The shared sample predates the codebook, so it carries the
+        // 3-instruction choice of a 32-wide K tile for 16-row batches. Measured
+        // on sm_89 (RTX 4090, 128 SMs) the 128-wide N tile wins up to 8192
+        // columns.
+        const bool q4nx_ada = cb == EXL3_Q4NX_CODEBOOK && cc == CC_ADA && fused_gemm;
+        if (q4nx_ada && row_shape == 0 && size_n <= 8192
+            && compatible(2, size_k, size_n, K, half_k, smem_max))
+            shape_idx = 2;
+
         if (row_shape && compatible(row_shape, size_k, size_n, K, half_k, smem_max))
         {
             shape_idx = row_shape;
@@ -294,6 +303,14 @@ TResult* select_exl3_gemm_kernel_tuned
         int tilesize_n = exl3_gemm_tilesize_n[shape_idx];
         int max_slices = size_k / tilesize_k * size_n / tilesize_n;
         int num_sms = q4nx_expert_grid ? max_slices : MAX(MIN(max_slices, tuned_num_sms), 1);
+
+        // Narrow Q4NX projections on Ada are bound by the split-K reduction
+        // traffic rather than by occupancy.  Measured on sm_89, 64 blocks beat
+        // the 96-128 the shared sample asks for while K <= 4096 (1.1-1.5x);
+        // wider K needs 96 blocks to keep the 128 SMs fed, which still beats
+        // the sample's 128.
+        if (q4nx_ada && size_n <= 2048)
+            num_sms = MIN(max_slices, size_k > 4096 ? 96 : 64);
 
         lookup = tuning_cache.emplace(key, TResult {
             get_gemm_kernel_ptr(K, shape_idx, c_fp32, cb, half_k, fused_gemm),
