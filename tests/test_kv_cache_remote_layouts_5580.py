@@ -32,6 +32,13 @@ def _base(**overrides):
         "num_key_value_heads": 8,
         "head_dim": 128,
         "torch_dtype": torch.bfloat16,
+        # Nemotron-H's Mamba-2 mixer, so its constant state can be sized.
+        "mamba_num_heads": 40,
+        "mamba_head_dim": 112,
+        "n_groups": 8,
+        "ssm_state_size": 128,
+        "conv_kernel": 4,
+        "expand": 2,
     }
     config.update(overrides)
     return SimpleNamespace(**config)
@@ -54,6 +61,8 @@ def test_nemotron_h_hybrid_override_pattern_only_counts_attention_layers():
     assert estimate.growing_layers == 1
     assert estimate.linear_layers == 5
     assert estimate.block_layers == 4
+    assert estimate.state_layers == 5
+    assert estimate.state_bytes_per_sequence > 0
     assert estimate.is_exact is True
     assert estimate.partial == ()
 
@@ -74,6 +83,7 @@ def test_nemotron_h_layers_block_type_property_is_read():
     assert estimate.growing_layers == 1
     assert estimate.linear_layers == 1
     assert estimate.block_layers == 2
+    assert estimate.state_layers == 1
     assert estimate.is_exact is True
 
 
