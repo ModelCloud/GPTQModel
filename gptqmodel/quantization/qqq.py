@@ -40,8 +40,8 @@ from .gptq import (
     _propagate_block_error,
     _uniform_column_group,
     get_number_of_rows_and_cols,
+    recover_damped_hessian_factor,
 )
-from .npu_linalg import npu_inverse_cholesky_factor
 
 
 DEBUG = False
@@ -993,70 +993,69 @@ class QQQ:
             H = H[perm][:, perm]
             invperm = torch.argsort(perm)
 
-        damp = percdamp * torch.mean(torch.diag(H))
-        diag = torch.arange(self.columns, device=H.device)
-        H[diag, diag] += damp
         threshold_raw, is_percent = resolve_threshold(self.fallback, self.expected_nsamples)
         fallback_configured = threshold_raw is not None
 
-        # Inverse-Cholesky factor of the damped Hessian, one step at a time.
-        # Each step rebinds ``Hinv`` so its input is released as soon as the
-        # output exists: holding the input Hessian through the sequence (or
-        # the block pass) costs another ``columns**2 * 4`` bytes of VRAM
-        # (issue #4463). A CUDA allocation failure moves the current step's
-        # input to the host and finishes the remaining steps there, so the
-        # CPU retry never needs the original Hessian.
-        if H.device.type == "npu":
-            npu_block_size = resolve_kernel_config(self.qcfg).npu_cholesky_block_size
-            inverse_steps = (
-                lambda hessian: npu_inverse_cholesky_factor(hessian, block_size=npu_block_size),
-            )
-        else:
-            inverse_steps = (
-                torch.linalg.cholesky,
-                torch.cholesky_inverse,
-                lambda factor: torch.linalg.cholesky(factor, upper=True),
+        # Damping recovery is shared with GPTQ (#5858): probe the configured
+        # `damp_percent` first, then the additive `damp_auto_increment` grid,
+        # then a diagonal floor. `damp_auto_increment=0` stays the explicit
+        # no-recovery control, so a rank-deficient Hessian still fails there.
+        # QQQ keeps its own factor convention: a lower Cholesky factor, then
+        # the inverse's upper factor.
+        orig_diag = H.diagonal().clone()
+        npu_block_size = (
+            resolve_kernel_config(self.qcfg).npu_cholesky_block_size
+            if H.device.type == "npu" else None
+        )
+
+        def _recover_factor(hessian: torch.Tensor):
+            """Return ``(inverse factor, applied damp)`` for ``hessian``."""
+
+            return recover_damped_hessian_factor(
+                hessian,
+                damp_percent=float(percdamp),
+                damp_auto_increment=float(self.qcfg.damp_auto_increment),
+                name=self.name,
+                npu_block_size=npu_block_size,
             )
 
-        Hinv = H
-        del H
         try:
-            for inverse_step in inverse_steps:
-                try:
-                    Hinv = inverse_step(Hinv)
-                except Exception as exc:
-                    # Reuse GPTQ's allocation classifier and CPU retry: cuSOLVER /
-                    # hipSOLVER report a failed workspace allocation as
-                    # ``*SOLVER_STATUS_ALLOC_FAILED``, which the old bare ``raise``
-                    # turned into an aborted run. A non-positive-definite
-                    # factorization is still a numerical failure and keeps the
-                    # sample-count fallback below (issue #4400).
-                    if Hinv.device.type != "cuda" or not _is_memory_allocation_failure(exc):
-                        raise
-                    log.warn(
-                        "Quantization: Module `%s` -> CUDA OOM during Hessian inverse on %s; "
-                        "falling back to CPU. Due to this fallback, the calculation may take "
-                        "much longer than normal.",
-                        self.name,
-                        Hinv.device,
-                    )
-                    cpu_device = torch.device("cpu")
-                    Hinv = Hinv.to(device=cpu_device)
-                    W = W.to(device=cpu_device)
-                    if actorder:
-                        # ``perm``/``invperm`` were built from the CUDA Hessian.
-                        # The block pass now runs on the host, so the epilogue's
-                        # ``Q[:, invperm]`` must not index a CPU tensor with a
-                        # CUDA index tensor (issue #4538).
-                        perm = perm.to(device=cpu_device)
-                        invperm = invperm.to(device=cpu_device)
-                    self.quantizer.find_params(W, weight=True)
-                    if static_groups:
-                        scale, zero = _move_static_groups(groups, cpu_device)
-                    Hinv = inverse_step(Hinv)
-        except Exception:
-            # The failed step may have left a partial factor bound to ``Hinv``.
-            Hinv = None
+            Hinv, used_damp = _recover_factor(H)
+        except Exception as exc:
+            # Reuse GPTQ's allocation classifier and CPU retry: cuSOLVER /
+            # hipSOLVER report a failed workspace allocation as
+            # ``*SOLVER_STATUS_ALLOC_FAILED``, which the old bare ``raise``
+            # turned into an aborted run. A non-positive-definite
+            # factorization is a numerical failure instead, and the shared
+            # policy already returned ``None`` for it (issue #4400).
+            if H.device.type != "cuda" or not _is_memory_allocation_failure(exc):
+                raise
+            log.warn(
+                "Quantization: Module `%s` -> CUDA OOM during Hessian inverse on %s; "
+                "falling back to CPU. Due to this fallback, the calculation may take "
+                "much longer than normal.",
+                self.name,
+                H.device,
+            )
+            cpu_device = torch.device("cpu")
+            # The failed attempt may have left the last diagonal floor applied.
+            H.diagonal().copy_(orig_diag)
+            H = H.to(device=cpu_device)
+            W = W.to(device=cpu_device)
+            if actorder:
+                # ``perm``/``invperm`` were built from the CUDA Hessian.
+                # The block pass now runs on the host, so the epilogue's
+                # ``Q[:, invperm]`` must not index a CPU tensor with a
+                # CUDA index tensor (issue #4538).
+                perm = perm.to(device=cpu_device)
+                invperm = invperm.to(device=cpu_device)
+            self.quantizer.find_params(W, weight=True)
+            if static_groups:
+                scale, zero = _move_static_groups(groups, cpu_device)
+            Hinv, used_damp = _recover_factor(H)
+
+        del H
+        if Hinv is None:
             fallback_requested = should_use_fallback(
                 self.fallback,
                 float(self.nsamples),
@@ -1078,8 +1077,14 @@ class QQQ:
                 # fall through here and fail with
                 # ``TypeError: 'NoneType' object is not subscriptable``.
                 return self._fallback_quantize(resolved_strategy)
-            else:
-                raise
+            raise torch._C._LinAlgError(
+                f"QQQ: Hessian remained non positive-definite for `{self.name}` "
+                f"with `damp_percent={float(percdamp):.5f}` and "
+                f"`damp_auto_increment={float(self.qcfg.damp_auto_increment):.5f}`"
+            )
+
+        # Report the additive damping that was actually applied.
+        damp = used_damp * torch.mean(orig_diag)
 
         use_mlx = _should_use_mlx_qqq_quantization(
             W,
