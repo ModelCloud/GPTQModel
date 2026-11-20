@@ -196,7 +196,10 @@ def smooth_block(
         log_mu = math.log1p(mu)
         log_vals = torch.log1p(abs_block * mu) / log_mu
         threshold = _quantile(log_vals, float(method.percentile))
-        lin_threshold = (torch.exp(threshold * log_mu) - 1.0) / mu
+        # ``exp(t) - 1`` rounds to exactly 0 for the small log-space
+        # thresholds a tiny ``mu`` produces, which clamps a constant row to
+        # zero (#5629). ``expm1`` keeps the threshold exact near zero.
+        lin_threshold = torch.expm1(threshold * log_mu) / mu
         return torch.clamp(block_f, -lin_threshold, lin_threshold).to(block.dtype), None
 
     if isinstance(method, SmoothMSE):
