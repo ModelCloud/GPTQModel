@@ -2784,8 +2784,6 @@ class GPTQ:
             W = safe_move_to(self.module_copy, self.H.device)
             del self.module_copy
 
-        self.quantizer.find_params(W, weight=True)
-
         # H = self.H.to(device=self.H.device)
 
         # Capture the NaN-retry diagonal before any activation ordering. The
@@ -2801,6 +2799,12 @@ class GPTQ:
         dead_columns = None
         if use_hessian:
             dead_columns = _neutralize_dead_columns(self.H, W)
+
+        # Fit the whole-row grid after dead-column masking: a channel absent
+        # from every calibration sample carries no signal, so its weight must
+        # not set the per-channel scale that every live column is quantized
+        # with (#5611).
+        self.quantizer.find_params(W, weight=True)
 
         # g_idx = []
         scale = []
@@ -2961,14 +2965,14 @@ class GPTQ:
                 del W
                 if weight_from_module:
                     # Replay the pre-pass preparation on the host: clone,
-                    # natural-order quantizer measurement, dead-column
-                    # neutralization, then activation ordering. Each step is
+                    # natural-order dead-column neutralization, quantizer
+                    # measurement, then activation ordering. Each step is
                     # exact, so this reproduces the pre-pass ``W`` bit for bit.
                     W = self.clone_module(device=cpu_device)
-                    if not self.qcfg.static_groups:
-                        self.quantizer.find_params(W, weight=True)
                     if dead_columns is not None:
                         W.masked_fill_(dead_columns.to(device=cpu_device).unsqueeze(0), 0.0)
+                    if not self.qcfg.static_groups:
+                        self.quantizer.find_params(W, weight=True)
                     if block_column_perm is not None:
                         W = W[:, block_column_perm.to(device=cpu_device)]
                 else:
