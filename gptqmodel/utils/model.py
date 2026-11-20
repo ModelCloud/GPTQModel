@@ -1875,14 +1875,33 @@ def has_cpu_offload_hooks(model: nn.Module) -> bool:
     return False
 
 
+def _cpu_or_mps_placement(device) -> Optional[Tuple[str, int]]:
+    """Canonicalise one CPU/MPS device-map entry for the single-device shortcut.
+
+    ``mps`` and ``mps:0`` name the same accelerator, and a map may hold strings,
+    integers or ``torch.device`` values. Entries that name another device (or a
+    non-device value such as ``"disk"``) return ``None``.
+    """
+
+    try:
+        resolved = torch.device(device)
+    except (TypeError, RuntimeError):
+        return None
+    if resolved.type not in ("cpu", "mps"):
+        return None
+    return resolved.type, resolved.index if resolved.index is not None else 0
+
+
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
     device_map = dict(device_map)
     single_root = "" in device_map and len(device_map) == 1
-    all_single_cpu_or_mps = all(
-        d in ("cpu", "mps") for d in device_map.values()
-    )
+    # The shortcut is only valid when every entry resolves to the same CPU/MPS
+    # device. A mixed cpu/mps map must reach the per-entry hook path below, or
+    # the first entry silently overrides every other placement (#5713).
+    placements = {_cpu_or_mps_placement(d) for d in device_map.values()}
+    all_single_cpu_or_mps = len(placements) == 1 and None not in placements
     # CPU offload is unnecessary for all-CPU/MPS device maps and must be skipped.
     if single_root or all_single_cpu_or_mps:
         d = next(iter(device_map.values()))
