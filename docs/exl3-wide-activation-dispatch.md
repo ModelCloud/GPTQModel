@@ -187,7 +187,8 @@ same pass reduces the row bound, the narrowing cast applies the row's
 power-of-two scale, and the epilogue applies the scale and the bias before
 its single cast. The `bf16_prescale` + GEMM + `bf16_rescale.raw` sequence
 above remains the reference and the fallback for the shapes the GEMM does
-not own.
+not own. Introduced in
+[#5958](https://github.com/ModelCloud/GPTQModel/pull/5958).
 
 Before:
 
