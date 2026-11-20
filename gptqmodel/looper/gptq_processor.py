@@ -24,6 +24,7 @@ from ..looper.loop_processor import (
     active_padding_mask,
     bind_resolved_module_config,
     get_resolved_module_config,
+    install_moe_padding_zero_hook,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -783,35 +784,10 @@ class GPTQProcessor(LoopProcessor):
         every expert Hessian while leaving real rows untouched.
         """
 
+        del moe_block_name
         if not getattr(self, "preserve_batch_keep_mask", False):
             return False
-
-        def zero_masked_rows(_module, args, kwargs):
-            # Zero padding only: a BOS sink is a real token whose MoE
-            # output the following positions attend to.
-            keep_mask = active_padding_mask(self)
-            if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
-                return None
-
-            hidden_states = kwargs.get("hidden_states") if kwargs else None
-            from_kwargs = hidden_states is not None
-            if hidden_states is None:
-                if not args or not torch.is_tensor(args[0]):
-                    return None
-                hidden_states = args[0]
-            if hidden_states.dim() != 3 or tuple(hidden_states.shape[:2]) != tuple(keep_mask.shape):
-                return None
-
-            row_mask = keep_mask.to(device=hidden_states.device, dtype=hidden_states.dtype).unsqueeze(-1)
-            masked = hidden_states * row_mask
-            if from_kwargs:
-                kwargs = dict(kwargs)
-                kwargs["hidden_states"] = masked
-                return args, kwargs
-            return (masked,) + tuple(args[1:]), kwargs
-
-        handles.append(moe_block.register_forward_pre_hook(zero_masked_rows, with_kwargs=True))
-        return True
+        return install_moe_padding_zero_hook(self, moe_block, handles)
 
     def _w_wq_diff(self, module: NamedModule, wq: torch.Tensor) -> torch.Tensor:
         """Build the FP32 ``w - wq`` EoRA consumes.
