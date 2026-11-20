@@ -2144,12 +2144,13 @@ class GPTQ:
 
         if target_device is None:
             target_device = self.H.device if self.H is not None else self.module.weight.device
-        W = self.clone_module(device=target_device)
         # When the Hessian exists its diagonal is the exact input-channel
         # importance for the layer's output error, so weight the SmoothMSE
         # objective with it instead of averaging every channel equally. A
         # fallback without captured activations uses the weight-magnitude
-        # proxy instead of the harmful uniform mean.
+        # proxy instead of the harmful uniform mean. Resolve the diagonal
+        # before cloning so the full matrix is released before the weight
+        # clone and output buffers overlap it (#5778).
         col_weights = None
         if search_mse:
             col_weights = hessian_column_weights(
@@ -2159,6 +2160,8 @@ class GPTQ:
                 col_weights = hessian_column_weights(
                     self.H, self.columns, device=target_device
                 )
+        self.H = None
+        W = self.clone_module(device=target_device)
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
@@ -2298,7 +2301,6 @@ class GPTQ:
         avg_loss = f"fallback({strategy.value}): {mean_abs_err:.7f}"
         damp = 0.0
 
-        self.H = None
         return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
 
     def _rtn_fallback_after_hessian_failure(self, blocksize: int):
