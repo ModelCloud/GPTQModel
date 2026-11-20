@@ -42,9 +42,9 @@ class _FakeNative:
             return torch.zeros(
                 (*x.shape[:-1], self.out_features), dtype=out_dtype, device=x.device
             )
-        # Mimic the native FP16 GEMM (FP16 inputs, FP16 output, bias included).
+        # Mimic the native FP16 GEMM and its optional bias epilogue.
         result = x @ self.weight
-        if self.bias is not None:
+        if params.get("include_bias", True) and self.bias is not None:
             result = result + self.bias
         return result.to(out_dtype)
 

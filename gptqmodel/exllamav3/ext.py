@@ -279,10 +279,12 @@ class _BCLinearEXL3:
         self.fused_gemm = policy.exl3_fused_gemm
         self._configured = not isinstance(self.K, int) or self.fp16_gemv or self.int8_gemv or self.fused_gemm
 
-    def run(self, x: torch.Tensor, y: torch.Tensor) -> None:
-        args = (self.trellis, self.suh, self.svh, self.K, self.bias, self.mcg, self.mul1, x, y)
+    def run(self, x: torch.Tensor, y: torch.Tensor, *, include_bias: bool = True) -> None:
+        bias = self.bias if include_bias else None
+        args = (self.trellis, self.suh, self.svh, self.K, bias, self.mcg, self.mul1, x, y)
         if self.q4nx:
-            _runtime_op("bc_linear_exl3_run_configured")(*args, False, 0, True, q4nx=True)
+            gemv = self.fp16_gemv or not self.fused_gemm
+            _runtime_op("bc_linear_exl3_run_configured")(*args, gemv, 0, self.fused_gemm, q4nx=True)
         elif self._configured:
             _runtime_op("bc_linear_exl3_run_configured")(*args, self.fp16_gemv, self.int8_gemv, self.fused_gemm)
         else:

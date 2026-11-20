@@ -207,6 +207,8 @@ def expand_streams(hidden, residual, post_mix, residual_mix):
 
 
 class V41Expert(nn.Module):
+    _route_owner = None
+
     def __init__(self, config, *, routed):
         super().__init__()
         width, intermediate = config.hidden_size, config.moe_intermediate_size
@@ -214,6 +216,18 @@ class V41Expert(nn.Module):
         self.w2 = V41PackedLinear(intermediate, width, fp4=routed)
         self.w3 = V41PackedLinear(width, intermediate, fp4=routed)
         self.limit = config.swiglu_limit
+
+    def __setattr__(self, name, value):
+        super().__setattr__(name, value)
+        if name in ("w1", "w2", "w3", "limit") and self._route_owner is not None:
+            owner = self._route_owner()
+            if owner is not None:
+                owner._q4nx_tables = None
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        state.pop("_route_owner", None)
+        return state
 
     def forward(self, x, weights=None):
         gate, up = self.w1(x).float(), self.w3(x).float()
@@ -257,10 +271,27 @@ class V41MoE(nn.Module):
         self.gate = V41Router(config, dtype, vision=vision)
         self.experts = nn.ModuleList(V41Expert(config, routed=True) for _ in range(config.n_routed_experts))
         self.shared_experts = V41Expert(config, routed=False)
+        self._q4nx_routing = False
+        self._q4nx_tables = None
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        state["_q4nx_tables"] = None
+        return state
+
+    def _apply(self, fn, recurse=True):
+        self._q4nx_tables = None
+        return super()._apply(fn, recurse=recurse)
 
     def forward(self, hidden, image_mask):
         x = hidden.flatten(0, 1)
         indices, weights = self.gate(x, image_mask)
+        if self._q4nx_routing:
+            from .exl3 import routed_q4nx
+
+            result = routed_q4nx(self, x, indices, weights)
+            if result is not None:
+                return (result + self.shared_experts(x)).to(x.dtype).reshape_as(hidden)
         result = torch.zeros_like(x, dtype=torch.float32)
         for index in indices.unique(sorted=True).tolist():
             rows, slots = torch.where(indices == index)

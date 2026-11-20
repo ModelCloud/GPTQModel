@@ -1315,9 +1315,9 @@ def serialize_quant_bits(bits: Union[int, str, GGUFBits]) -> Union[int, str]:
 
 
 def _normalize_exl3_bits(
-    bits: Union[int, float, str], *, codebook: str, field: str = "bits"
+    bits: Union[int, float, str], *, codebook: str | None, field: str = "bits"
 ) -> int | float:
-    """Keep the exact per-projection EXL3 trellis rate."""
+    """Keep the exact EXL3 trellis rate and check the codebook when resolved."""
 
     if isinstance(bits, bool):
         raise ValueError(
@@ -1338,7 +1338,7 @@ def _normalize_exl3_bits(
         raise ValueError(f"EXL3Config: q4nx supports 2.5, 3.0, or 3.5 bpw, got `{field}={bits:g}`.")
     if bits.is_integer():
         return int(bits)
-    if (bits in HALF_RATES and codebook == "mul1") or codebook == "q4nx":
+    if bits in HALF_RATES and codebook in (None, "mul1", "q4nx"):
         return bits
     raise ValueError(
         f"EXL3Config: `{field}={bits:g}` is not an integer trellis width. "
@@ -9523,11 +9523,6 @@ class EXL3Config(PreProcessorConfig):
             raise ValueError("EXL3Config: `codebook` must be one of `mcg`, `mul1`, `q4nx`, or `3inst`.")
 
         self.bits = _normalize_exl3_bits(self.bits, codebook=self.codebook, field="bits")
-        self.head_bits = (
-            None
-            if self.head_bits is None
-            else _normalize_exl3_bits(self.head_bits, codebook=self.codebook, field="head_bits")
-        )
 
         if self.method != METHOD.EXL3:
             raise ValueError("EXL3Config: `method` must be `exl3`.")
@@ -9559,6 +9554,18 @@ class EXL3Config(PreProcessorConfig):
                     valid_bit_widths=[],
                     checkpoint_format=FORMAT.EXL3,
                 )
+
+        if self.head_bits is not None:
+            # The model definition supplies the output head path. When a rule
+            # could change its codebook, check the rate here and the pair when
+            # the processor resolves that module.
+            head_codebook = self.codebook
+            if any(
+                not pattern.startswith("-:") and rule.get("codebook") not in (None, self.codebook)
+                for pattern, rule in (self.dynamic or {}).items()
+            ):
+                head_codebook = None
+            self.head_bits = _normalize_exl3_bits(self.head_bits, codebook=head_codebook, field="head_bits")
 
         if self.out_scales is not None:
             normalized_out_scales = str(self.out_scales).strip().lower()

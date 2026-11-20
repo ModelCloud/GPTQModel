@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import math
+
 import pytest
 import torch
 
@@ -134,3 +136,62 @@ def test_routed_exl3_uses_independent_scratch_for_live_graphs():
     for stream, _, output, expected in graphs:
         main_stream.wait_stream(stream)
         assert torch.equal(output, expected)
+
+
+@pytest.mark.parametrize("scratch_dtype", [torch.float16, torch.float32])
+@torch.inference_mode()
+def test_routed_q4nx_keeps_gate_up_partials_wide_through_output_scale(scratch_dtype):
+    device = torch.device("cuda")
+    width, bits = 128, 3.5
+    trellis = torch.zeros((8, 8, 56), dtype=torch.int16, device=device)
+    sign = torch.ones(width, dtype=torch.float16, device=device)
+    up_scale = torch.full_like(sign, 2**-14)
+    down_scale = torch.full_like(sign, 1 / width)
+    up_bias = torch.zeros_like(sign)
+    up_bias[0] = -64
+    down_bias = torch.full_like(sign, 0.375)
+    down_bias[0] = 1.125
+
+    def table(t):
+        return torch.tensor([t.data_ptr()], dtype=torch.int64, device=device)
+
+    up_parts = tuple(map(table, (trellis, sign, up_scale)))
+    down_parts = tuple(map(table, (trellis, sign, down_scale)))
+    up_bias_ptr, down_bias_ptr = table(up_bias), table(down_bias)
+    selected = torch.zeros((1, 1), dtype=torch.int64, device=device)
+    routing = torch.full((1, 1), 0.5, dtype=torch.float16, device=device)
+    x = torch.full((1, width), -4096, dtype=torch.float16, device=device)
+    had_gate, had_up, activated = (torch.empty_like(x) for _ in range(3))
+    gate_out, up_out = (torch.empty_like(x, dtype=scratch_dtype) for _ in range(2))
+    down_out, out = (torch.empty_like(x, dtype=torch.float32) for _ in range(2))
+    counters = torch.zeros((7,), dtype=torch.int32, device=device)
+    native = ext._runtime_op("exl3_moe_coop")
+
+    def run():
+        native(x, selected, routing, -1, -1, width, *up_parts, *up_parts, *down_parts,
+               None, up_bias_ptr, down_bias_ptr, bits, bits, bits, False, False, 2, 0, False,
+               had_gate, had_up, gate_out, up_out, activated, down_out, counters, out, None, None, q4nx=True)
+
+    def expected(fill):
+        # Constant Q4NX codewords make each Hadamard block a DC projection.
+        # Model the two specified input-rotation casts and use FP64 elsewhere.
+        root = math.sqrt(width)
+        code = -15 / math.sqrt(42.5)
+        up_dc = torch.tensor(fill * root, dtype=torch.float16).item() * code
+        up = up_dc * root * up_scale[0].item() + up_bias[0].item()
+        down_input = torch.tensor(max(up, 0) ** 2 / root, dtype=torch.float16).item()
+        result = down_bias.double().unsqueeze(0) * routing.item()
+        result[0, 0] += down_input * code * root * routing.item()
+        return result.float()
+
+    run()
+    torch.testing.assert_close(out, expected(-4096), rtol=1e-6, atol=1e-6)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        run()
+    torch.cuda.current_stream().wait_stream(stream)
+    x.fill_(-2048)
+    graph.replay()
+    torch.testing.assert_close(out, expected(-2048), rtol=1e-6, atol=1e-6)

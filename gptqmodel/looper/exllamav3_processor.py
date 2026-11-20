@@ -221,6 +221,24 @@ _OUT_SCALES_TO_ARG = {
 }
 
 
+def build_exl3_quant_args(
+    config: EXL3Config, *, bits: int | float, device: torch.device,
+) -> Dict[str, object]:
+    """Build the common arguments for one resolved EXL3 projection."""
+    codebook = config.codebook
+    validate_trellis_k(bits, codebook == "mcg", codebook == "mul1", q4nx=codebook == "q4nx")
+    quant_args: Dict[str, object] = {
+        "K": bits,
+        "devices": [device],
+        "apply_out_scales": _OUT_SCALES_TO_ARG.get(config.out_scales, None),
+        "sigma_reg": _EXL3_SIGMA_REG,
+        "seed": 787,
+    }
+    if codebook in EXL3_CODEBOOK_MARKERS:
+        quant_args[codebook] = True
+    return quant_args
+
+
 def _inline_candidate_role(policy) -> str:
     return f"candidate_k{policy.base_bits}"
 
@@ -862,10 +880,11 @@ def clone_exllamav3_config_for_module(
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
+    is_head = lm_head_name in (module_full_name, module_full_name.rsplit(".", 1)[-1])
+    qcfg_clone.head_bits = resolved_cfg.get("head_bits", qcfg.head_bits) if is_head else None
 
     if qcfg.dynamic is not None:
         qcfg_clone.bits = resolved_cfg.get("bits", qcfg_clone.bits)
-        qcfg_clone.head_bits = resolved_cfg.get("head_bits", qcfg_clone.head_bits)
 
         out_scales_override = resolved_cfg.get("out_scales", None)
         if out_scales_override is not None:
@@ -874,10 +893,7 @@ def clone_exllamav3_config_for_module(
         codebook_override = resolved_cfg.get("codebook", None)
         if codebook_override is not None and codebook_override != qcfg.codebook:
             qcfg_clone.codebook = codebook_override
-            is_head = lm_head_name in (module_full_name, module_full_name.rsplit(".", 1)[-1])
-            if not is_head:
-                qcfg_clone.head_bits = None
-            elif qcfg_clone.head_bits is not None:
+            if qcfg_clone.head_bits is not None:
                 qcfg_clone.bits = qcfg_clone.head_bits
 
         calibration_override = resolved_cfg.get("calibration", None)
@@ -2553,20 +2569,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
         """Builds the argument bundle passed into the EXL3 quantizer."""
 
         bits = self._target_bits(module, module_qcfg) if bits_override is None else bits_override
-        codebook = module_qcfg.codebook
-        validate_trellis_k(bits, codebook == "mcg", codebook == "mul1", q4nx=codebook == "q4nx")
-        quant_args: Dict[str, object] = {
-            "K": bits,
-            "devices": [device],
-            "apply_out_scales": _OUT_SCALES_TO_ARG.get(module_qcfg.out_scales, None),
-            "sigma_reg": _EXL3_SIGMA_REG,
-            "seed": 787,
-        }
-
-        if codebook in EXL3_CODEBOOK_MARKERS:
-            quant_args[codebook] = True
-
-        return quant_args
+        return build_exl3_quant_args(module_qcfg, bits=bits, device=device)
 
     def _quant_input_weight(self, capture: GPTQ, device: torch.device) -> torch.Tensor:
         """Exports the captured dense weight in EXL3's padded quantizer layout.
