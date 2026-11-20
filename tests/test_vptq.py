@@ -1547,10 +1547,10 @@ def test_vptq_forward_dequantizes_per_call_without_dense_cache(monkeypatch):
     calls = 0
     dequantize = module.dequantize
 
-    def counted_dequantize():
+    def counted_dequantize(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return dequantize()
+        return dequantize(*args, **kwargs)
 
     monkeypatch.setattr(module, "dequantize", counted_dequantize)
 

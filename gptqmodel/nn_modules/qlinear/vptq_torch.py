@@ -31,7 +31,12 @@ from ...utils.vptq import (
 )
 from . import WeightOnlyQuantLinear
 from ._compile_support import COMPILE_LEVEL
-from ._numerics import bias_narrows_losslessly, linear_fp32_reduce, linear_needs_wide_bias
+from ._numerics import (
+    bias_narrows_losslessly,
+    codebook_rounding_dtype,
+    linear_fp32_reduce,
+    linear_needs_wide_bias,
+)
 
 
 log = setup_logger()
@@ -541,8 +546,16 @@ class VPTQLinear(WeightOnlyQuantLinear):
     # runtime
     # ------------------------------------------------------------------
     @torch.no_grad()
-    def dequantize(self) -> torch.Tensor:
-        """Reconstruct the dense weight matrix from codebooks and indices."""
+    def dequantize(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        """Reconstruct the dense weight matrix from codebooks and indices.
+
+        The codebook reduction runs in FP32. ``dtype`` is the dtype the caller
+        needs; when it is omitted the historical codebook storage dtype is
+        returned. Rounding to a narrower dtype is only safe when that dtype can
+        represent the result, so callers that need a wider range (for example
+        BF16 inference from an FP16 checkpoint) must pass it here instead of
+        narrowing and widening again (#5609).
+        """
 
         device = self.centroids.weight.device
         centroids = self.centroids.weight.view(self.group_num, self.num_centroids, self.vector_len)
@@ -623,7 +636,7 @@ class VPTQLinear(WeightOnlyQuantLinear):
 
         if qweight.device != device:
             qweight = qweight.to(device)
-        return qweight.to(self.centroids.weight.dtype)
+        return qweight.to(self.centroids.weight.dtype if dtype is None else dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = getattr(self, "bias", None)
@@ -633,7 +646,13 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 out = self.adapter.apply(x=x, out=out)
             return out
 
-        weight = self.dequantize().to(dtype=x.dtype, device=x.device)
+        # Round the FP32 codebook reduction once, to a dtype that can hold it.
+        # An FP16 checkpoint whose two finite codebooks sum above 65504 must
+        # not narrow to FP16 before a BF16 activation consumes it, while an
+        # FP32 activation keeps the historical codebook-dtype rounding (#5609).
+        weight = self.dequantize(
+            dtype=codebook_rounding_dtype(x.dtype, self.centroids.weight.dtype)
+        ).to(dtype=x.dtype, device=x.device)
         bias = self._promote_stored_bias(x, bias)
         out = linear_fp32_reduce(x, weight, bias)
         if self.adapter is not None:
