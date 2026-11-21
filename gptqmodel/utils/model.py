@@ -4149,8 +4149,9 @@ def _restore_checkpoint_buffers(
     """Restore buffers and dense parameters after Accelerate casts.
 
     ``None`` keeps the source dtype. Dense parameters are restored by the
-    export shell or an explicit native FP32 policy; other dense tensors keep
-    the requested model dtype.
+    export shell, an explicit native FP32 policy, or their module's
+    ``CHECKPOINT_EXACT_DTYPE_PARAMETERS`` declaration. Other dense parameters
+    keep the requested model dtype.
 
     ``name_map`` maps a runtime tensor name to the name stored in the
     checkpoint. It lets the restore read from the original checkpoint when
@@ -4710,7 +4711,14 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                     restore_dtypes[name] = torch.float32
         for name, module in model.named_modules():
             model_dtype_buffers = getattr(module, "MODEL_DTYPE_BUFFERS", None)
-            if model_dtype_buffers is None and not restore_checkpoint_buffer_dtypes:
+            exact_dtype_parameters = getattr(
+                module, "CHECKPOINT_EXACT_DTYPE_PARAMETERS", (),
+            )
+            if (
+                model_dtype_buffers is None
+                and not restore_checkpoint_buffer_dtypes
+                and not exact_dtype_parameters
+            ):
                 continue
             prefix = f"{name}." if name else ""
             exact_dtype_buffers = getattr(module, "CHECKPOINT_EXACT_DTYPE_BUFFERS", ())
@@ -4728,18 +4736,22 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                 if restore_checkpoint_buffer_dtypes or buffer_name in exact_dtype_buffers:
                     restore = current.dtype != checkpoint_dtype
                 else:
-                    restore = buffer_name not in model_dtype_buffers and _load_narrowed(
+                    restore = model_dtype_buffers is not None and buffer_name not in model_dtype_buffers and _load_narrowed(
                         checkpoint_dtype, current.dtype
                     )
                 if restore:
                     restore_dtypes[full_name] = None
-            if restore_checkpoint_buffer_dtypes:
+            if restore_checkpoint_buffer_dtypes or exact_dtype_parameters:
                 # Dense parameters (norms, embeddings, unquantized heads and
                 # projections) are allocated in the export shell's model dtype
                 # too. With ``dtype=None`` Accelerate copies a checkpoint
                 # tensor into that slot, so a mixed-dtype checkpoint was
                 # narrowed on re-save (#4466). The normal load path passes an
-                # explicit model dtype and must keep casting them.
+                # explicit model dtype and must keep casting them, except the
+                # storage parameters a module declares in
+                # `CHECKPOINT_EXACT_DTYPE_PARAMETERS`: those are kernel state
+                # (packed expert payload scales, global scales) and keep the
+                # checkpoint dtype like `CHECKPOINT_EXACT_DTYPE_BUFFERS`.
                 for parameter_name, current in module._parameters.items():
                     full_name = f"{prefix}{parameter_name}"
                     checkpoint_dtype = checkpoint_dtypes.get(full_name)
@@ -4747,10 +4759,14 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                         checkpoint_dtype is None
                         or full_name in restore_dtypes
                         or not isinstance(current, torch.Tensor)
-                        or not current.is_floating_point()
                         or current.dtype == checkpoint_dtype
                     ):
                         continue
+                    if parameter_name not in exact_dtype_parameters:
+                        if not restore_checkpoint_buffer_dtypes:
+                            continue
+                        if not current.is_floating_point():
+                            continue
                     restore_dtypes[full_name] = None
         # BitsAndBytes keeps its 4-bit quant metadata in state buffers whose
         # dtype is part of the kernel contract: the floating state tables must

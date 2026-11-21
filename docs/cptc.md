@@ -3,10 +3,14 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Computed Permutation Trellis Coding
 
-CPTC quantizes blocks of weights jointly. A two-pass Viterbi search picks a
-tail-biting bitstream for each block. During inference, the decoder multiplies
-each overlapping state by two fixed coefficients and adds the top bits of
-their 16-bit products to index a small E2M5 codebook. [CPTC paper](https://arxiv.org/abs/2611.22019)
+CPTC, introduced by Muhammed Fatih Balın, quantizes blocks of weights
+jointly. A two-pass Viterbi search picks a tail-biting bitstream for each
+block. During inference, the decoder multiplies each overlapping state by
+two fixed coefficients and adds the top bits of their 16-bit products to
+index a small E2M5 codebook. [CPTC paper](https://arxiv.org/abs/2611.22019)
+
+The encoder uses the tail-biting bitshift trellis construction from QTIP by
+Albert Tseng, Qingyao Sun, David Hou, and Christopher De Sa. [QTIP paper](https://arxiv.org/abs/2406.11235)
 
 ## Quantize and load
 
@@ -31,6 +35,10 @@ Load CPTC safetensors checkpoints with `GPTQModel.load`.
 
 ## YAQA calibration
 
+The calibrated path uses Sketch B and two-sided adaptive rounding from Yet
+Another Quantization Algorithm (YAQA), introduced by Albert Tseng, Zhaofeng
+Sun, and Christopher De Sa. [YAQA paper](https://arxiv.org/abs/2505.22988) · [YAQA reference implementation](https://github.com/Cornell-RelaxML/yaqa-quantization)
+
 ```python
 from gptqmodel import CPTCConfig, CalibrationConfig, GPTQModel
 
@@ -51,11 +59,10 @@ Calibration holds the complete teacher and its FP32 sketch pairs on the
 quantization device. Both projection dimensions need a supported Hadamard
 width and must be divisible by their tile dimensions.
 
-The paper's LLM experiment uses these transforms and two-sided rounding with
-its larger Sketch-B corpus. GPT-QModel uses its E2M5 tables and traverses each
+The CPTC paper's LLM experiment uses these transforms and two-sided rounding
+with a larger Sketch B corpus. GPT-QModel uses its E2M5 tables and traverses each
 tile in row-major order. The CUDA and RDNA4 kernels consume both checkpoint
-layouts. [CPTC paper](https://arxiv.org/abs/2611.22019) ·
-[YAQA reference](https://github.com/Cornell-RelaxML/yaqa-quantization)
+layouts. [CPTC paper](https://arxiv.org/abs/2611.22019)
 
 ```mermaid
 flowchart TD

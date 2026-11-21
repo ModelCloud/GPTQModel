@@ -511,7 +511,15 @@ def _replace_module(module, child, name, level: int = 0, debug: bool = False) ->
         log.info(f"{level_indent} Hook: {instance_type.__name__}: {name}")
 
     # Replace nn.Linear with HookedLinear, except PhimoeTopKRouter which returns a tuple in forward()
-    if isinstance(child, torch.nn.Linear) and child.__class__.__name__ != "PhimoeTopKRouter":
+    # and packed-source linears. Those keep a kernel forward (JIT decode) for
+    # calibration/Hessian collection and only materialize a dense bf16 weight
+    # when a quantization processor asks for it; wrapping them in HookedLinear
+    # would decode the checkpoint up front.
+    if (
+        isinstance(child, torch.nn.Linear)
+        and child.__class__.__name__ != "PhimoeTopKRouter"
+        and not getattr(child, "_packed_source_linear", False)
+    ):
         setattr(module, name, HookedLinear.from_linear(child))
     elif isinstance(child, transformers.Conv1D):
         setattr(module, name, HookedTransformerConv1D.from_conv1d(child))

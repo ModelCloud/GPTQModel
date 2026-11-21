@@ -1298,14 +1298,10 @@ def _maybe_print_module_tree(model) -> None:
         print_module_tree(model=model)
 
 
-# `requirements.txt` pins `defuser>=0.0.32`. Older releases do not split the
-# fused 3-D expert tensors of afmoe / flint / granitemoe_swa, so their routed
-# experts stay fused and are silently left unquantized; the only symptom is a
-# "0 layer matches" line in the module-coverage report. Defuser 0.0.31 also
-# fixes the GLM-4.x replacement MoE blocks, which crashed on the Transformers
-# 5.22 router tuple, and 0.0.32 scopes its accelerator cache flush to the
-# devices a conversion uses, so GPT-QModel no longer patches it (#5105).
-DEFUSER_MIN_VERSION = "0.0.32"
+# Defuser 0.0.33 adds Inkling 2 Mini expert conversion. It also includes the
+# Afmoe/Flint/GraniteMoeSWA fused-expert conversion, the GLM-4.x router tuple
+# fix and the device-scoped accelerator cache flush from 0.0.32 (#5105).
+DEFUSER_MIN_VERSION = "0.0.33"
 _defuser_version_warning_emitted = False
 
 

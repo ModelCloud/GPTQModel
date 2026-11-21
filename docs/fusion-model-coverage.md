@@ -243,6 +243,7 @@ layout alone does not authorize it.
 | `gpt_pangu` | `PanguAlphaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `grinmoe` | `GrinMoeQModel` | Package-owned GRIN-MoE implementation; attention and SparseMixer expert fusion have not been qualified. |
 | `hymba` | `HymbaQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `inkling2_loop` | `Inkling2LoopQModel` | Package-owned looped hybrid-attention decoder. QKV and gate/up fusion remain unqualified. |
 | `instella` | `InstellaQModel` | Package-owned Instella implementation; full-width Q/K normalization and projection fusion have not been qualified. |
 | `intern_s2_preview` | `InternS2PreviewQModel` | Package-owned Intern-S2 Preview hybrid attention/MoE port; fusion executor has not been qualified. |
 | `internlm` | `InternLMQModel` | Package-owned InternLM 1 port; fusion executor has not been qualified. |

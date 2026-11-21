@@ -45,6 +45,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | HY-V3 | `hy_v3` |
 | Hymba | `hymba` |
 | Inkling | `inkling_mm_model` |
+| Inkling 2 Mini | `inkling2_loop` |
 | Instella | `instella` |
 | Intern S1 / S2 Preview | `interns1`, `intern_s2_preview` |
 | InternLM 1 / 2 / 2.5 | `internlm`, `internlm2` |

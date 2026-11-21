@@ -508,6 +508,9 @@ details are available in the [citation reference](https://github.com/ModelCloud/
 | [VPTQ](https://github.com/ModelCloud/GPTQModel/wiki/VPTQ) | Yifei Liu et al., Microsoft | [Paper](https://arxiv.org/abs/2409.17066) · [Code](https://github.com/microsoft/VPTQ) |
 | [GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF) / llama.cpp | Georgi Gerganov and ggml-org contributors | [Project](https://github.com/ggml-org/llama.cpp) |
 | [ExLlama V3 / EXL3](https://github.com/ModelCloud/GPTQModel/wiki/EXL3) | turboderp and contributors, AlexBrandes (original Q4NX), Qubitium (Q4NX 3.5 bpw extension) | [Project](https://github.com/turboderp-org/exllamav3) · [Native CUDA dispatch](docs/exl3-native-decode.md) · [Source credits](gptqmodel/exllamav3/CREDITS.md) |
+| QTIP (trellis foundation for EXL3 and CPTC) | Albert Tseng, Qingyao Sun, David Hou, and Christopher De Sa | [Paper](https://arxiv.org/abs/2406.11235) · [Code](https://github.com/Cornell-RelaxML/qtip) |
+| [CPTC](docs/cptc.md) | Muhammed Fatih Balın | [Paper](https://arxiv.org/abs/2611.22019) |
+| [YAQA (CPTC calibration)](docs/cptc.md#yaqa-calibration) | Albert Tseng, Zhaofeng Sun, and Christopher De Sa | [Paper](https://arxiv.org/abs/2505.22988) · [Code](https://github.com/Cornell-RelaxML/yaqa-quantization) |
 | [NF12 / NyoomFloat12](https://github.com/ModelCloud/GPTQModel/wiki/NF12) | Liberman et al., Together AI | [Research and codec](https://github.com/dphnAI/nf12) |
 | [EoRA](https://github.com/ModelCloud/GPTQModel/wiki/EoRA) | Shih-Yang Liu et al., NVIDIA | [Paper](https://arxiv.org/abs/2410.21271) |
 | [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) | Alireza Dadgarnia et al., IST-DASLab | [Paper](https://arxiv.org/abs/2604.18556) · [Code](https://github.com/IST-DASLab/GSQ) |

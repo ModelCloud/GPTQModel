@@ -51,6 +51,14 @@ class BACKEND(str, Enum):
     # method and checkpoint format select the concrete GPTQ or AWQ implementation.
     SWORDFISH = "swordfish"  # Blackwell (sm100/sm110) w4a16/w8a16 GEMM kernel
 
+    # Humming kernels
+    # Humming is an external JIT-compiled CUDA GEMM library for W<8-bit weights
+    # (github.com/vllm-project/humming, PyPI `humming-kernels`). It is the same
+    # optional dependency vLLM and SGLang consume, so nothing is vendored here.
+    # A single backend covers both the GPTQ and AWQ sub-kernels; the checkpoint
+    # method/format selects the concrete implementation.
+    HUMMING = "humming"  # SM75+ w2/w4/w8 a16 GEMM (dense; 3/5/6/7-bit layouts unsupported)
+
     # QQQ kernels
     QQQ = "qqq"  # marlin-based qqq kernel
     QQQ_TORCH = "qqq_torch"
@@ -211,6 +219,8 @@ _LEGACY_BACKEND_ALIASES = {
     "awq_machete": BACKEND.MACHETE,
     "gptq_swordfish": BACKEND.SWORDFISH,
     "awq_swordfish": BACKEND.SWORDFISH,
+    "gptq_humming": BACKEND.HUMMING,
+    "awq_humming": BACKEND.HUMMING,
 }
 
 _PROFILE_BY_INDEX = {

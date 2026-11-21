@@ -314,6 +314,20 @@ def _compile_keep_in_fp32_matcher(model, attrs=_KEEP_IN_FP32_ATTRS):
     return matches
 
 
+def _checkpoint_exact_dtype_parameter_names(model) -> set[str]:
+    """Return the fully qualified names of checkpoint-owned kernel storage."""
+
+    names: set[str] = set()
+    named_modules = getattr(model, "named_modules", None)
+    if named_modules is None:
+        return names
+    for module_name, module in named_modules():
+        declared = getattr(module, "CHECKPOINT_EXACT_DTYPE_PARAMETERS", ())
+        prefix = f"{module_name}." if module_name else ""
+        names.update(f"{prefix}{name}" for name in declared)
+    return names
+
+
 def assert_loaded_model_state(
     model,
     *,
@@ -351,6 +365,9 @@ def assert_loaded_model_state(
     Hymba port's ``mamba.A_log``) declares it in ``_keep_in_fp32_modules_strict``
     so transformers keeps it fp32 and this guard exempts it through the same
     declaration (issue #4888).
+
+    Parameters declared in ``CHECKPOINT_EXACT_DTYPE_PARAMETERS`` keep their
+    checkpoint dtype and must still be materialized.
     """
 
     problems = []
@@ -375,13 +392,17 @@ def assert_loaded_model_state(
         require_materialized or require_uniform_dtype or expected_dtype is not None
     ):
         keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
+        storage_parameters = _checkpoint_exact_dtype_parameter_names(model)
         dtypes = Counter()
         meta = []
         for name, parameter in named_parameters():
-            if not parameter.is_floating_point():
+            is_storage = name in storage_parameters
+            if not parameter.is_floating_point() and not is_storage:
                 continue
             if parameter.is_meta:
                 meta.append(name)
+                continue
+            if is_storage:
                 continue
             if (
                 parameter.dtype is torch.float32
@@ -393,7 +414,7 @@ def assert_loaded_model_state(
 
         if require_materialized and meta:
             problems.append(
-                f"{len(meta)} floating parameter(s) stayed on the meta device, "
+                f"{len(meta)} parameter(s) stayed on the meta device, "
                 f"e.g. {meta[:3]}"
             )
         if expected_dtype is not None:

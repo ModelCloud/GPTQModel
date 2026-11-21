@@ -629,6 +629,75 @@ def test_lazy_turtle_applies_reversed_weight_renamings_with_capturing_groups(tmp
     assert turtle._resolve_checkpoint_tensor_name("timm_model.backbone.conv", "weight") == "backbone.conv.weight"
 
 
+def test_inkling2_loop_reverse_map_resolves_message_gates_and_packed_experts(tmp_path):
+    from gptqmodel.models.ports.inkling2_loop import Inkling2LoopForConditionalGeneration
+
+    checkpoint_tensors = {
+        "model.llm.embed_norm.weight": torch.zeros(2),
+        "model.llm.attn_res.attn_queries.5": torch.zeros(2),
+        "model.llm.attn_res.mlp_queries.6": torch.zeros(2),
+        "model.llm.layers.6.controllers.attn.down_weight": torch.zeros(2),
+        "model.llm.layers.6.controllers.k.down_weight": torch.zeros(2),
+        "model.llm.layers.6.controllers.v.down_weight": torch.zeros(2),
+        "model.llm.layers.6.controllers.mlp.down_weight": torch.zeros(2),
+        "model.llm.layers.6.controllers.attn.gain_weight": torch.zeros(2),
+        "model.llm.layers.6.attn.wq_du.weight": torch.zeros(2),
+        "model.llm.layers.6.attn_sconv.weight": torch.zeros(2),
+        "model.llm.layers.6.attn.rel_l2_clip.scale": torch.zeros(2),
+        "model.llm.layers.6.mlp.experts.w13_weight": torch.zeros(2),
+        "model.visual.backbone.layers.0.ln_1.weight": torch.zeros(2),
+        "model.visual.proj_out.weight": torch.zeros(2),
+    }
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        checkpoint_tensors,
+        config=SimpleNamespace(model_type="inkling2_loop"),
+        hf_conversion_map_reversed=LazyTurtle.infer_hf_conversion_map_reversed(
+            target_model=SimpleNamespace(
+                _checkpoint_conversion_mapping=Inkling2LoopForConditionalGeneration._checkpoint_conversion_mapping,
+            ),
+            model_type="inkling2_loop",
+        ),
+    )
+
+    def resolve(runtime_name):
+        candidates = turtle._all_runtime_to_checkpoint_candidates(runtime_name)
+        return next((candidate for candidate in candidates if candidate in checkpoint_tensors), None)
+
+    # Message-gate `down_weight` leaves need their own reverse rules: an
+    # alternation group is dropped when the target is processed for reverse
+    # lookup, which used to leave these gates on the meta device.
+    assert resolve("model.language_model.layers.6.q_message_gate.down_proj.weight") == (
+        "model.llm.layers.6.controllers.attn.down_weight"
+    )
+    assert resolve("model.language_model.layers.6.mlp_message_gate.down_proj.weight") == (
+        "model.llm.layers.6.controllers.mlp.down_weight"
+    )
+    assert resolve("model.language_model.layers.6.q_message_gate.message_gate_proj.weight") == (
+        "model.llm.layers.6.controllers.attn.gain_weight"
+    )
+    # Attention-residual queries are offset by one layer in the checkpoint.
+    assert resolve("model.language_model.layers.6.attention_input.query") == (
+        "model.llm.attn_res.attn_queries.5"
+    )
+    assert resolve("model.language_model.layers.6.mlp_input.query") == "model.llm.attn_res.mlp_queries.6"
+    # Vision leaves must be renamed before the `vision_tower.layers` prefix.
+    assert resolve("model.vision_tower.layers.0.layernorm_before.weight") == (
+        "model.visual.backbone.layers.0.ln_1.weight"
+    )
+    # `rel_l2_clip` must win over the generic relative-position-bias rule.
+    assert resolve("model.language_model.layers.6.self_attn.relative_position_bias.norm.scale") == (
+        "model.llm.layers.6.attn.rel_l2_clip.scale"
+    )
+    assert resolve("model.language_model.embed_norm.weight") == "model.llm.embed_norm.weight"
+    assert resolve("model.language_model.layers.6.post_attention_convolution.conv1d.weight") == (
+        "model.llm.layers.6.attn_sconv.weight"
+    )
+    assert resolve("model.language_model.layers.6.mlp.experts.gate_up_weight") == (
+        "model.llm.layers.6.mlp.experts.w13_weight"
+    )
+
+
 def test_lazy_turtle_applies_reversed_weight_renamings_inside_module_relative_name(tmp_path):
     turtle = _build_lazy_turtle(
         tmp_path,

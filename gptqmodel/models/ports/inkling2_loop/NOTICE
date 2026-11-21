@@ -1,0 +1,4 @@
+The modeling code comes from ModelCloud/GPTQModel commit 4682e21d9,
+derived from the released thinkingmachines/Inkling-2-Mini checkpoint layout.
+The image processor and processor are adapted from Transformers v5.23.0
+src/transformers/models/inkling2/ (Apache-2.0).
