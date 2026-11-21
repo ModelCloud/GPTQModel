@@ -32,6 +32,8 @@ struct Geometry {
   int groups;
   int n;
   int half_table;
+  int tile_shift;
+  int group_width;
 };
 
 void check_tensor(const at::Tensor& value, const at::Tensor& anchor,
@@ -41,7 +43,8 @@ void check_tensor(const at::Tensor& value, const at::Tensor& anchor,
 }
 
 Geometry geometry(const at::Tensor& packed, const at::Tensor& table, const at::Tensor& coeffs,
-                  const at::Tensor& scales, int64_t bits, int64_t depth, int64_t shift, int64_t k) {
+                  const at::Tensor& scales, int64_t bits, int64_t depth, int64_t shift, int64_t k,
+                  int64_t tile_rows) {
   check_tensor(packed, packed, at::kByte, "packed bytes");
   check_tensor(table, packed, at::kByte, "E2M5 table");
   check_tensor(coeffs, packed, at::kInt, "coefficients");
@@ -56,15 +59,29 @@ Geometry geometry(const at::Tensor& packed, const at::Tensor& table, const at::T
   TORCH_CHECK(block_bytes == 128 * bits / 8 || block_bytes == 256 * bits / 8,
               "CPTC: encoded block size must be 128 or 256 values");
   const int64_t block_size = block_bytes * 8 / bits;
+  TORCH_CHECK(tile_rows == 1 || (tile_rows == block_size / 16 && k % 16 == 0),
+              "CPTC: invalid packed tile geometry");
+  const int64_t group_width = block_size / tile_rows;
   TORCH_CHECK(k > 0 && k <= std::numeric_limits<int>::max() / 2 &&
-              (k + block_size - 1) / block_size == packed.size(1), "CPTC: invalid input size");
+              (k + group_width - 1) / group_width == packed.size(1), "CPTC: invalid input size");
+  TORCH_CHECK(packed.size(0) <= std::numeric_limits<int>::max() / (2 * tile_rows),
+              "CPTC: output size exceeds the kernel limit");
   const auto half_table = table.numel();
   TORCH_CHECK(table.dim() == 1 && half_table >= 2 && half_table <= 64 &&
               !(half_table & (half_table - 1)) && (half_table >= (1 << bits)) &&
               shift >= 10 && shift <= 15 && (1 << (16 - shift)) <= half_table && coeffs.numel() == 2,
               "CPTC: invalid coefficient or table geometry");
   return {int(bits), (1 << depth) - 1, int(shift), int(block_size), int(block_bytes),
-          int(packed.size(1)), int(packed.size(0)), int(half_table)};
+          int(packed.size(1)), int(packed.size(0) * tile_rows), int(half_table),
+          tile_rows == 16 ? 4 : tile_rows == 8 ? 3 : 0, int(group_width)};
+}
+
+__device__ __forceinline__ int64_t group_index(const Geometry& g, int row, int group) {
+  return int64_t(row >> g.tile_shift) * g.groups + group;
+}
+
+__device__ __forceinline__ int tile_offset(const Geometry& g, int row) {
+  return (row & ((1 << g.tile_shift) - 1)) * g.group_width;
 }
 
 __device__ __forceinline__ float e2m5(uint8_t code) {
@@ -102,8 +119,10 @@ __global__ void decode_kernel(float* output, const uint8_t* packed, const uint8_
   for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
        i += int64_t(blockDim.x) * gridDim.x) {
     const int col = i % k;
-    const int64_t group = (i / k) * g.groups + col / g.block_size;
-    const int index = cptc_index(packed + group * g.block_bytes, col % g.block_size, g, a0, a1);
+    const int row = i / k;
+    const int64_t group = group_index(g, row, col / g.group_width);
+    const int pos = tile_offset(g, row) + col % g.group_width;
+    const int index = cptc_index(packed + group * g.block_bytes, pos, g, a0, a1);
     output[i] = lookup[index] * scales[group];
   }
 }
@@ -128,13 +147,14 @@ __device__ __forceinline__ float add_group(float dot, float scale, float sum,
     // The factored dot can exceed FP32 range before multiplication by a small
     // scale, even if every effective weight and the final output are finite.
     if (m < rows && !isfinite(dot)) {
-      const auto* block = packed + (int64_t(n) * g.groups + group) * g.block_bytes;
-      const int begin = group * g.block_size;
-      const int count = min(g.block_size, k - begin);
+      const auto* block = packed + group_index(g, n, group) * g.block_bytes;
+      const int begin = group * g.group_width;
+      const int count = min(g.group_width, k - begin);
+      const int offset = tile_offset(g, n);
       const auto* input = x + int64_t(m) * k + begin;
       double wide = sum;
       for (int i = 0; i < count; ++i) {
-        const auto code = lookup[cptc_index(block, i, g, a0, a1)];
+        const auto code = lookup[cptc_index(block, offset + i, g, a0, a1)];
         const float weight = __uint_as_float(uint32_t(code) << 16) * scale;
         const float value = __uint_as_float(uint32_t(input[i]) << 16);
         wide += double(weight) * value;
@@ -163,15 +183,15 @@ __device__ void mma_tile(float* partial, const uint16_t* x, const uint8_t* packe
   Float8 sum{};
   for (int group = begin; group < end; ++group) {
     Float8 dot{};
-    for (int step = 0; step < g.block_size; step += 16) {
+    for (int step = 0; step < g.group_width; step += 16) {
       Short8 a{}, b{};
       #pragma unroll
       for (int j = 0; j < 8; ++j) {
         const int position = step + half + j;
-        const int input_col = group * g.block_size + position;
+        const int input_col = group * g.group_width + position;
         if (load_n < g.n) {
-          const auto* block = packed + (int64_t(load_n) * g.groups + group) * g.block_bytes;
-          a[j] = lookup[cptc_index(block, position, g, a0, a1)];
+          const auto* block = packed + group_index(g, load_n, group) * g.block_bytes;
+          a[j] = lookup[cptc_index(block, tile_offset(g, load_n) + position, g, a0, a1)];
         }
         if (load_m < rows && input_col < k) b[j] = x[int64_t(load_m) * k + input_col];
       }
@@ -186,7 +206,7 @@ __device__ void mma_tile(float* partial, const uint16_t* x, const uint8_t* packe
     for (int j = 0; j < 8; ++j) {
       const int out = n + half + j;
       if (out < g.n) {
-        sum[j] = add_group<Bf16>(dot[j], scales[int64_t(out) * g.groups + group], sum[j],
+        sum[j] = add_group<Bf16>(dot[j], scales[group_index(g, out, group)], sum[j],
                                  x, packed, lookup, g, group, out, load_m, rows, k, a0, a1);
       }
     }
@@ -231,18 +251,19 @@ __device__ void mma_tile(float* partial, const uint16_t* x, const uint8_t* packe
   const int offset = (lane & 3) * 2;
   const auto* x_row = load_m < rows ? x + int64_t(load_m) * k : nullptr;
   float sum[4]{};
+  const int off0 = tile_offset(g, n0), off1 = tile_offset(g, n1);
   for (int group = begin; group < end; ++group) {
-    const int64_t g0 = int64_t(n0) * g.groups + group, g1 = int64_t(n1) * g.groups + group;
+    const int64_t g0 = group_index(g, n0, group), g1 = group_index(g, n1, group);
     const auto* block0 = n0 < g.n ? packed + g0 * g.block_bytes : nullptr;
     const auto* block1 = n1 < g.n ? packed + g1 * g.block_bytes : nullptr;
     float dot[4]{};
-    for (int step = 0; step < g.block_size; step += 16) {
+    for (int step = 0; step < g.group_width; step += 16) {
       const int pos = step + offset;
-      const int input_col = group * g.block_size + pos;
-      const uint32_t a0r = weight_pair(block0, pos, lookup, g, a0, a1);
-      const uint32_t a1r = weight_pair(block1, pos, lookup, g, a0, a1);
-      const uint32_t a2r = weight_pair(block0, pos + 8, lookup, g, a0, a1);
-      const uint32_t a3r = weight_pair(block1, pos + 8, lookup, g, a0, a1);
+      const int input_col = group * g.group_width + pos;
+      const uint32_t a0r = weight_pair(block0, off0 + pos, lookup, g, a0, a1);
+      const uint32_t a1r = weight_pair(block1, off1 + pos, lookup, g, a0, a1);
+      const uint32_t a2r = weight_pair(block0, off0 + pos + 8, lookup, g, a0, a1);
+      const uint32_t a3r = weight_pair(block1, off1 + pos + 8, lookup, g, a0, a1);
       const uint32_t b0 = input_pair(x_row, input_col, k), b1 = input_pair(x_row, input_col + 8, k);
       #define CPTC_MMA(TYPE)                                                                        \
         asm volatile("mma.sync.aligned.m16n8k16.row.col.f32." TYPE "." TYPE ".f32 "                \
@@ -349,7 +370,7 @@ void encode_kernel(const float* input, const void* decoded, int32_t* path,
   extern __shared__ float local_cost[];
   const int cost_stride = Cached ? cached_prefixes + choices : prefixes;
   float* costs = global_cost ? global_cost + int64_t(blockIdx.x) * 2 * cost_stride : local_cost;
-  __shared__ int seam;
+  __shared__ int overlap;
   __shared__ float end_cost[threads];
   __shared__ int end_index[threads];
   auto cost_index = [](int p) {
@@ -373,7 +394,7 @@ void encode_kernel(const float* input, const void* decoded, int32_t* path,
   }
   for (int pass = 0; pass < 2; ++pass) {
     const int first = pass == 0 ? length / 2 : 0;
-    const int pinned = pass ? seam : -1;
+    const int pinned = pass ? overlap : -1;
     for (int t = 0; t < length; ++t) {
       const float target = input[t ^ first];
       const float* prev = costs + ((t + 1) & 1) * cost_stride;
@@ -392,7 +413,7 @@ void encode_kernel(const float* input, const void* decoded, int32_t* path,
             const float error = diff * diff;
             float score = error;
             if (t != 0) score += prev[u * (cols + 1) + previous_col];
-            else if (pass && pinned != ((p << Bits) | u)) score = INFINITY;
+            else if (pass && pinned != (((p << Bits) | u) & mask)) score = INFINITY;
             if (score < best) {
               best = score;
               selected = u;
@@ -411,7 +432,7 @@ void encode_kernel(const float* input, const void* decoded, int32_t* path,
             #pragma unroll
             for (int u = lane; u < choices; u += lanes) {
               const int state = (p << Bits) | u;
-              if (t == 0 && pass && state != pinned) continue;
+              if (t == 0 && pass && (state & mask) != pinned) continue;
               const float diff = target - static_cast<const float*>(decoded)[state];
               const float score = diff * diff + (t ? prev[state & mask] : 0.0f);
               select_min(score, u, best, selected);
@@ -450,14 +471,14 @@ void encode_kernel(const float* input, const void* decoded, int32_t* path,
       }
     }
     if (threadIdx.x == 0) {
-      int prefix = pass == 0 ? end_index[0] : pinned & mask;
+      int prefix = pass == 0 ? end_index[0] : pinned;
       int state = 0;
       for (int t = length - 1; t >= first; --t) {
         state = (prefix << Bits) | back[int64_t(t) * prefixes + prefix];
         prefix = state & mask;
         if (pass) path[t] = state;
       }
-      if (pass == 0) seam = state;
+      if (pass == 0) overlap = prefix;
     }
     __syncthreads();
   }
@@ -466,8 +487,9 @@ void encode_kernel(const float* input, const void* decoded, int32_t* path,
 }  // namespace
 
 at::Tensor cptc_decode(const at::Tensor& packed, const at::Tensor& table, const at::Tensor& coeffs,
-                       const at::Tensor& scales, int64_t bits, int64_t depth, int64_t shift, int64_t k) {
-  const auto g = geometry(packed, table, coeffs, scales, bits, depth, shift, k);
+                       const at::Tensor& scales, int64_t bits, int64_t depth, int64_t shift, int64_t k,
+                       int64_t tile_rows) {
+  const auto g = geometry(packed, table, coeffs, scales, bits, depth, shift, k, tile_rows);
   const c10::cuda::CUDAGuard guard(packed.device());
   auto output = at::empty({g.n, k}, scales.options());
   const auto ctas = std::min<int64_t>((output.numel() + kThreads - 1) / kThreads, 65535);
@@ -480,12 +502,12 @@ at::Tensor cptc_decode(const at::Tensor& packed, const at::Tensor& table, const 
 
 at::Tensor cptc_mma(const at::Tensor& input, const at::Tensor& packed, const at::Tensor& table,
                     const at::Tensor& coeffs, const at::Tensor& scales,
-                    int64_t bits, int64_t depth, int64_t shift) {
+                    int64_t bits, int64_t depth, int64_t shift, int64_t tile_rows) {
   TORCH_CHECK(input.dim() == 2 && input.size(0) > 0 && input.size(0) <= 16 &&
               (input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16),
               "CPTC MMA: expected 1 to 16 rows of FP16 or BF16 input");
   check_tensor(input, packed, input.scalar_type(), "MMA input");
-  const auto g = geometry(packed, table, coeffs, scales, bits, depth, shift, input.size(1));
+  const auto g = geometry(packed, table, coeffs, scales, bits, depth, shift, input.size(1), tile_rows);
   const c10::cuda::CUDAGuard guard(packed.device());
   const int rows = input.size(0), k = input.size(1);
   const int groups_per_split = (g.groups + 15) / 16;

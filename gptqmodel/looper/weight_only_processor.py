@@ -87,6 +87,7 @@ class WeightOnlyProcessor(LoopProcessor):
         forward: Optional[ForwardConfig] = None,
         *,
         measure_weight_error: bool = False,
+        cptc_hessian_sketches=None,
     ):
         """Initialize the processor for weight-only quantization.
 
@@ -103,6 +104,7 @@ class WeightOnlyProcessor(LoopProcessor):
         )
         self.lock = threading.Lock()
         self.measure_weight_error = bool(measure_weight_error)
+        self.cptc_hessian_sketches = cptc_hessian_sketches
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Report whether dynamic configuration excludes this module."""
@@ -322,6 +324,8 @@ class WeightOnlyProcessor(LoopProcessor):
             # Finalization keeps the checkpoint on CPU while CPTC encodes on
             # the concrete device assigned to this module.
             pack_kwargs = {"device": active_qcfg.device} if active_qcfg.method == METHOD.CPTC else {}
+            if self.cptc_hessian_sketches is not None:
+                pack_kwargs["sketch"] = self.cptc_hessian_sketches[module.full_name]
             with log_time_block("module.pack_original", logger=log, module_name=module_label):
                 with parent_module_lock(parent_key):
                     qmodule = qmodules[module.full_name]
@@ -333,6 +337,8 @@ class WeightOnlyProcessor(LoopProcessor):
                         smooth=active_qcfg.smooth,
                         **pack_kwargs,
                     )
+            if self.cptc_hessian_sketches is not None:
+                self.cptc_hessian_sketches.pop(module.full_name)
             pack_elapsed = time.perf_counter() - pack_start
             if timer is not None:
                 timer.record(

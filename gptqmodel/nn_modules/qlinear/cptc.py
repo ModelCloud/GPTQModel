@@ -9,6 +9,13 @@ from ...adapter.adapter import Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...quantization.cptc import CPTCSpec, decode_weight, quantize_weight
+from ...quantization.cptc_yaqa import (
+    TILE_COLUMNS,
+    hadamard,
+    quantize_calibrated_weight,
+    rotate_matrix,
+    validate_tile_shape,
+)
 from ...quantization.nf12 import weight_to_matrix
 from ...utils.backend import BACKEND
 from ...utils.cptc import native_ops
@@ -39,6 +46,7 @@ class CPTCLinear(WeightOnlyQuantLinear):
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
     SUPPORTS_GRAPH_CAPTURE = False
     CHECKPOINT_REQUIRED_BUFFERS = ("cptc_packed", "cptc_table", "cptc_coeffs", "cptc_scale_bits")
+    YAQA_BUFFERS = ("cptc_input_signs", "cptc_output_signs")
     MODEL_DTYPE_BUFFERS = ()
     CHECKPOINT_EXACT_DTYPE_BUFFERS = ("bias",)
 
@@ -59,6 +67,8 @@ class CPTCLinear(WeightOnlyQuantLinear):
         trellis_depth: int = 16,
         table_q: int = 6,
         block_size: int = 128,
+        yaqa: bool = False,
+        yaqa_seed: int = 0,
         dtype: torch.dtype | None = None,
         bias_dtype: torch.dtype | None = None,
         **kwargs,
@@ -73,6 +83,9 @@ class CPTCLinear(WeightOnlyQuantLinear):
             dtype=dtype, bias_dtype=bias_dtype or dtype or torch.float32, **kwargs,
         )
         self.spec = CPTCSpec(bits, trellis_depth, table_q, block_size)
+        self.yaqa = yaqa
+        self.yaqa_seed = yaqa_seed
+        self.tile_rows = validate_tile_shape(in_features, out_features, block_size) if yaqa else 1
         self.bias = None
         if register_buffers:
             for name, (shape, storage_dtype) in self._payload_layout().items():
@@ -82,14 +95,24 @@ class CPTCLinear(WeightOnlyQuantLinear):
                 self.register_buffer("bias", torch.zeros(out_features, dtype=self.bias_dtype))
 
     def _payload_layout(self):
-        blocks = self.spec.blocks(self.in_features)
-        return {
-            "cptc_packed": ((self.out_features, blocks, self.spec.block_bytes), torch.uint8),
+        if self.yaqa:
+            shape = (self.out_features // self.tile_rows, self.in_features // TILE_COLUMNS)
+        else:
+            shape = (self.out_features, self.spec.blocks(self.in_features))
+        layout = {
+            "cptc_packed": ((*shape, self.spec.block_bytes), torch.uint8),
             "cptc_table": ((self.spec.table_size,), torch.uint8),
             "cptc_coeffs": ((2,), torch.int32),
             # IEEE FP32 scale bits survive Accelerate/model dtype conversion.
-            "cptc_scale_bits": ((self.out_features, blocks), torch.int32),
+            "cptc_scale_bits": (shape, torch.int32),
         }
+        if self.yaqa:
+            layout[self.YAQA_BUFFERS[0]] = ((self.in_features,), torch.int8)
+            layout[self.YAQA_BUFFERS[1]] = ((self.out_features,), torch.int8)
+        return layout
+
+    def checkpoint_required_buffers(self):
+        return self.CHECKPOINT_REQUIRED_BUFFERS + (self.YAQA_BUFFERS if self.yaqa else ())
 
     def post_init(self):
         for name, (shape, dtype) in self._payload_layout().items():
@@ -105,7 +128,7 @@ class CPTCLinear(WeightOnlyQuantLinear):
         self.pack_original(linear, scales, zeros, g_idx, **kwargs)
 
     @torch.no_grad()
-    def pack_original(self, linear, scales=None, zeros=None, g_idx=None, *, smooth=None, device=None):
+    def pack_original(self, linear, scales=None, zeros=None, g_idx=None, *, smooth=None, device=None, sketch=None):
         if any(value is not None for value in (scales, zeros, g_idx, smooth)):
             raise ValueError("CPTC packs original weights and does not use external scales, zeros, indices or smoothing")
         weight = self._weight_to_matrix(linear)
@@ -114,13 +137,21 @@ class CPTCLinear(WeightOnlyQuantLinear):
         target = self.runtime_device() or weight.device
         if target.type == "meta":
             target = weight.device
-        result = quantize_weight(weight, self.spec, device=weight.device if device is None else as_torch_device(device))
-        packed, table, coeffs, scale = result
+        device = weight.device if device is None else as_torch_device(device)
+        if self.yaqa:
+            if sketch is None:
+                raise ValueError("CPTC YAQA packing requires a two-sided Hessian sketch")
+            packed, table, coeffs, scale, *signs = quantize_calibrated_weight(
+                weight, self.spec, sketch, device=device, seed=self.yaqa_seed, name=self.name or "",
+            )
+        else:
+            packed, table, coeffs, scale = quantize_weight(weight, self.spec, device=device)
+            signs = ()
         # Direct-pack may be called inside the looper's inference_mode scope.
         # Keep checkpoint buffers usable by ordinary state_dict and move APIs.
         with torch.inference_mode(False):
-            tensors = (packed, table, coeffs, scale.view(torch.int32))
-            for name, tensor in zip(self.CHECKPOINT_REQUIRED_BUFFERS, tensors):
+            tensors = (packed, table, coeffs, scale.view(torch.int32), *signs)
+            for name, tensor in zip(self.checkpoint_required_buffers(), tensors, strict=True):
                 value = tensor.to(target, copy=tensor.is_inference()).contiguous()
                 self.register_buffer(name, value)
             bias = getattr(linear, "bias", None)
@@ -132,22 +163,31 @@ class CPTCLinear(WeightOnlyQuantLinear):
                 self.bias = None
 
     def _decode_rows(self, start, end, device, ops):
-        packed = self.cptc_packed[start:end].to(device)
+        tiles = slice(start // self.tile_rows, end // self.tile_rows)
+        packed = self.cptc_packed[tiles].to(device)
         table = self.cptc_table.to(device)
         coefficients = self.cptc_coeffs.to(device)
-        scales = self.cptc_scale_bits[start:end].to(device).view(torch.float32)
+        scales = self.cptc_scale_bits[tiles].to(device).view(torch.float32)
         if ops is not None:
             return ops.decode(
                 packed, table, coefficients, scales, self.bits, self.spec.trellis_depth,
-                self.spec.shift, self.in_features,
+                self.spec.shift, self.in_features, self.tile_rows,
             )
-        return decode_weight(packed, table, coefficients, scales, self.spec, self.in_features)
+        if not self.yaqa:
+            return decode_weight(packed, table, coefficients, scales, self.spec, self.in_features)
+        n, k, _ = packed.shape
+        decoded = decode_weight(packed, table, coefficients, scales, self.spec, k * self.spec.block_size)
+        return decoded.reshape(n, k, self.tile_rows, TILE_COLUMNS).transpose(1, 2).reshape(end - start, self.in_features)
 
     @torch.no_grad()
     def dequantize_weight(self, *, device=None, dtype=torch.float32):
         """Return a dense [out_features, in_features] matrix for explicit export."""
         target = self.cptc_packed.device if device is None else as_torch_device(device)
-        return self._decode_rows(0, self.out_features, target, native_ops(target)).to(dtype=dtype)
+        weight = self._decode_rows(0, self.out_features, target, native_ops(target))
+        if self.yaqa:
+            weight = rotate_matrix(weight, self.cptc_input_signs.to(target),
+                                   self.cptc_output_signs.to(target), inverse=True)
+        return weight.to(dtype=dtype)
 
     def dequantize(self, *, dtype=torch.float32):
         return self.dequantize_weight(dtype=dtype)
@@ -160,31 +200,39 @@ class CPTCLinear(WeightOnlyQuantLinear):
             return self.empty_linear_output(x)
         if x.dtype not in self.SUPPORTS_DTYPES:
             raise TypeError(f"CPTCLinear does not support input dtype {x.dtype}")
+        activations = hadamard(x.float() * self.cptc_input_signs.to(x.device)).to(x.dtype) if self.yaqa else x
+        bias = None if self.yaqa else self.bias
         ops = native_ops(x.device)
         if (ops is not None and self.cptc_packed.device == x.device and rows <= 16
                 and x.dtype in (torch.float16, torch.bfloat16)
                 and not (torch.is_grad_enabled() and x.requires_grad)):
             output = ops.mma(
-                x.reshape(rows, self.in_features).contiguous(), self.cptc_packed, self.cptc_table,
+                activations.reshape(rows, self.in_features).contiguous(), self.cptc_packed, self.cptc_table,
                 self.cptc_coeffs, self.cptc_scale_bits.view(torch.float32), self.bits,
-                self.spec.trellis_depth, self.spec.shift,
+                self.spec.trellis_depth, self.spec.shift, self.tile_rows,
             )
-            if self.bias is not None:
-                output = output + self.bias.float()
-            output = output.to(x.dtype).reshape(*x.shape[:-1], self.out_features)
+            if bias is not None:
+                output = output + bias.float()
+            output = output.reshape(*x.shape[:-1], self.out_features)
         else:
             # Process the out_features axis in tiles so even a wide prefill
             # only holds a bounded dense FP32 weight scratch tile at a time.
             tile_values = (1 << 22) if ops is not None else (1 << 18)
-            tile_rows = max(1, tile_values // self.in_features)
+            tile_rows = max(1, tile_values // (self.in_features * self.tile_rows)) * self.tile_rows
+            wide = activations.float() if self.yaqa else activations
             tiles = []
             for start in range(0, self.out_features, tile_rows):
                 end = min(start + tile_rows, self.out_features)
                 weight = self._decode_rows(start, end, x.device, ops)
-                bias = self.bias[start:end] if self.bias is not None else None
-                tiles.append(linear_wide_bias(x, weight, bias))
+                tile_bias = bias[start:end] if bias is not None else None
+                tiles.append(linear_wide_bias(wide, weight, tile_bias))
                 del weight
             output = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=-1)
+        if self.yaqa:
+            output = hadamard(output.float(), transpose=True) * self.cptc_output_signs.to(x.device)
+            if self.bias is not None:
+                output = output + self.bias.float().to(x.device)
+        output = output.to(x.dtype)
         if self.adapter is not None:
             output = self.adapter.apply(x=x, out=output)
         return output
