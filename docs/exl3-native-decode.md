@@ -6,6 +6,9 @@ GPT-QModel supplies the Torch operator boundary, packed launch-selection
 table, and per-call scratch. Its EXL3 port also adapts AlexBrandes's Q4NX
 codebook, beam encoder, and CUDA fragment decoder. [ExLlamaV3 v1.6.7 source](https://github.com/turboderp-org/exllamav3/tree/8c593e4e5c88da76a4aaf8f1b1838bb7c1fce4e0) · [EXL3 source credits](../gptqmodel/exllamav3/CREDITS.md)
 
+EXL3 builds on the QTIP trellis design by Albert Tseng, Qingyao Sun, David
+Hou, and Christopher De Sa. [QTIP paper](https://arxiv.org/abs/2406.11235) · [ExLlamaV3 quantization](https://github.com/turboderp-org/exllamav3#exl3-quantization)
+
 The `3inst`, `mcg` and `mul1` codebooks handle integer
 rates from 1 to 8 bits per weight. The `mul1` codebook also handles
 1.5, 2.5 and 3.5 bits per weight, with 24, 40 and 56 16-bit words per

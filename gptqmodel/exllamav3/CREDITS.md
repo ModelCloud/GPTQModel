@@ -7,6 +7,9 @@ encoder, and tensor-core fragment decoder developed by AlexBrandes
 the decoder from his Apache-2.0 vLLM fork. Qubitium extended Q4NX from 2.5
 and 3.0 bits per weight to support 3.5 bits per weight. [ExLlamaV3](https://github.com/turboderp-org/exllamav3) · [Q4NX encoder](https://github.com/AlexBrandes/exllamav3/commit/0674697c45e2450ffd4538eb5ade0cf8e6a78f6d) · [Q4NX decoder](https://github.com/AlexBrandes/vllm/blob/ff413b2df19718342e02d9763f161d69afce7b4a/csrc/exl3/codec_q4n.cuh)
 
+The EXL3 format builds on QTIP by Albert Tseng, Qingyao Sun, David Hou, and
+Christopher De Sa. [QTIP paper](https://arxiv.org/abs/2406.11235) · [QTIP reference implementation](https://github.com/Cornell-RelaxML/qtip)
+
 Ported components in this repo:
 - `gptqmodel/exllamav3/ext.py`
 - `gptqmodel/exllamav3/modules/quant/exl3.py`
