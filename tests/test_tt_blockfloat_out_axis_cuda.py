@@ -140,3 +140,17 @@ def test_out_axis_tied_head_reads_the_same_packed_embedding(device, monkeypatch)
     with torch.inference_mode():
         assert torch.equal(head(hidden), torch.zeros(9, 16, dtype=hidden.dtype, device=device))
     assert not head.state_dict()
+
+
+def test_out_axis_wide_decode_keeps_the_split_k_epilogue_bounded(device, monkeypatch):
+    k = 8208
+    signed = torch.zeros(k, 16, dtype=torch.int32)
+    signed[-1] = 4
+    exponents = torch.zeros(k, 1, dtype=torch.int8)
+    layer, _ = _layer(4, signed, exponents, torch.bfloat16, device)
+    x = torch.zeros(k, dtype=torch.bfloat16, device=device)
+    x[-1] = 3.5
+    monkeypatch.setattr(layer, "dequantize", _reject_materialization)
+
+    with torch.inference_mode():
+        assert torch.equal(layer(x), torch.full((16,), 3.5, dtype=x.dtype, device=device))

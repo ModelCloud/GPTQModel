@@ -182,17 +182,23 @@ def linear_out_axis(
         return None
     if bias is not None and bias.shape != (n,):
         return None
+    bn = 64
+    tiles_n = triton.cdiv(n, bn)
+    if tiles_n > 65535:  # CUDA's second grid dimension limit in _gemm
+        return None
     activation = x.reshape(-1, k)
     m = activation.size(0)
     out = torch.empty((m, n), dtype=x.dtype, device=x.device)
     stride_bias = bias.stride(0) if bias is not None else 0
     with torch.cuda.device(x.device):
-        bn = 64
-        if m <= 4:
-            bk = 128
-            splits = triton.cdiv(k, bk)
+        gemv_bk = 128
+        gemv_splits = triton.cdiv(k, gemv_bk)
+        # Bound the GEMV accumulation and epilogue tile. Very wide inputs use
+        # GEMM's tiled loop with at most four reduction partitions.
+        if m <= 4 and gemv_splits <= 64:
+            splits = gemv_splits
             partial = torch.empty((m, splits, n), dtype=torch.float32, device=x.device)
-            _gemv_partials[(triton.cdiv(n, bn), splits)](
+            _gemv_partials[(tiles_n, splits)](
                 activation,
                 codes,
                 exponents,
@@ -203,12 +209,12 @@ def linear_out_axis(
                 m,
                 splits,
                 bits,
-                bk,
+                gemv_bk,
                 bn,
             )
         else:
             bm, bk = 16, 32
-            tiles_m, tiles_n = triton.cdiv(m, bm), triton.cdiv(n, bn)
+            tiles_m = triton.cdiv(m, bm)
             # A short prefill has few output tiles. Split its K axis to expose
             # more parallel work without expanding or storing any weight tile.
             splits = 4 if tiles_m * tiles_n < 128 and k >= 512 else 1
@@ -232,7 +238,7 @@ def linear_out_axis(
                 bn,
             )
         if partial is not out:
-            _split_k_epilogue[(triton.cdiv(n, bn), m)](
+            _split_k_epilogue[(tiles_n, m)](
                 partial,
                 bias,
                 out,
