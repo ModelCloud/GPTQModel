@@ -5,16 +5,16 @@
 #include <torch/library.h>
 
 at::Tensor cptc_decode(const at::Tensor&, const at::Tensor&, const at::Tensor&,
-                       const at::Tensor&, int64_t, int64_t, int64_t, int64_t);
+                       const at::Tensor&, int64_t, int64_t, int64_t, int64_t, int64_t);
 at::Tensor cptc_mma(const at::Tensor&, const at::Tensor&, const at::Tensor&,
-                    const at::Tensor&, const at::Tensor&, int64_t, int64_t, int64_t);
+                    const at::Tensor&, const at::Tensor&, int64_t, int64_t, int64_t, int64_t);
 at::Tensor cptc_encode(const at::Tensor&, const at::Tensor&, int64_t);
 
 TORCH_LIBRARY(gptqmodel_cptc, m) {
   m.def("decode(Tensor packed, Tensor table, Tensor coefficients, Tensor scales, "
-        "int bits, int depth, int shift, int in_features) -> Tensor");
+        "int bits, int depth, int shift, int in_features, int tile_rows=1) -> Tensor");
   m.def("mma(Tensor input, Tensor packed, Tensor table, Tensor coefficients, Tensor scales, "
-        "int bits, int depth, int shift) -> Tensor");
+        "int bits, int depth, int shift, int tile_rows=1) -> Tensor");
   m.def("encode(Tensor blocks, Tensor decoded_states, int bits) -> Tensor");
 }
 

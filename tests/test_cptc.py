@@ -10,7 +10,7 @@ from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer, models
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import CPTCConfig, GPTQModel
+from gptqmodel import CalibrationConfig, CPTCConfig, GPTQModel
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.cptc import CPTCLinear
 from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
@@ -25,6 +25,8 @@ from gptqmodel.quantization.cptc import (
     unpack_states,
     viterbi_encode,
 )
+from gptqmodel.quantization.cptc_hessian import HessianSketch
+from gptqmodel.quantization.cptc_yaqa import _wavefront_tiles, block_feedback
 from gptqmodel.utils import arch, cptc
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import select_quant_linear
@@ -68,6 +70,13 @@ def _operands(spec, k, n, *, unified=False):
     scales = torch.rand(shape, generator=rng) * 0.05
     scales[0, 0] = 0
     return packed, table, coeffs, scales
+
+
+def _walsh(size):
+    matrix = torch.ones((1, 1), dtype=torch.float64)
+    while matrix.shape[0] < size:
+        matrix = torch.cat((torch.cat((matrix, matrix), dim=1), torch.cat((matrix, -matrix), dim=1)))
+    return matrix / math.sqrt(size)
 
 
 @pytest.fixture(scope="module")
@@ -137,6 +146,34 @@ def test_scalar_trellis_threshold_and_tail_biting():
     codebook = (torch.randperm(128, generator=rng) - 64).float() / 32
     assert torch.equal(viterbi_encode(codebook[path.long()], codebook, spec), path)
     assert bytes(pack_states(path, spec)[0].tolist()) == whole.to_bytes(32, "little")
+
+
+@pytest.mark.parametrize("device_name", ("cpu", "native"))
+def test_tail_biting_optimizes_all_states_at_fixed_overlap(device_name, request):
+    device, ops = request.getfixturevalue("cptc_gpu") if device_name == "native" else (torch.device("cpu"), None)
+    spec = CPTCSpec(bits=3, trellis_depth=16)
+    torch_rng = torch.Generator().manual_seed(617)
+    targets = torch.randn((64, 128), generator=torch_rng)[[18, 36, 51]].to(device) * 2
+    coefficients = torch.tensor(spec.coefficients(), dtype=torch.int32, device=device)
+    states = torch.arange(65536, device=device)
+    table = gaussian_table(spec, device)
+    values = torch.tensor([_e2m5_oracle(v) for v in table.tolist()], device=device)
+    values = torch.cat((values, -values[:-1].flip(0)))[state_indices(states, coefficients, spec.shift)]
+    paths = viterbi_encode(targets, values.half() if ops else values, spec, native=ops).long()
+    assert torch.equal(paths, unpack_states(pack_states(paths, spec), spec))
+
+    # The paper's reverse recursion groups its running costs by the low
+    # L-K bits. Compare the exact optimum conditioned on the encoded overlap.
+    overlap = paths[:, 0] & 8191
+    cost = (targets[:, -1:].double() - values.double()).square()
+    high = states >> spec.bits
+    cost.masked_fill_(high != overlap[:, None], math.inf)
+    for target in targets[:, :-1].flip(1).T:
+        best = cost.reshape(-1, 8, 8192).amin(dim=1)
+        cost = best[:, high] + (target[:, None].double() - values.double()).square()
+    optimum = cost.reshape(-1, 8, 8192).amin(dim=1).gather(1, overlap[:, None]).flatten()
+    actual = (targets.double() - values[paths].double()).square().sum(dim=1)
+    torch.testing.assert_close(actual, optimum, rtol=0, atol=1e-10)
 
 
 @pytest.mark.parametrize("bits", (3, 4))
@@ -299,7 +336,8 @@ def test_config_format_resolution_and_architecture(monkeypatch):
 
 
 @pytest.mark.parametrize("pack_on_gpu", (False, True), ids=("cpu-encode", "native-encode"))
-def test_gptqmodel_weight_only_save_reload_and_resave(tmp_path, pack_on_gpu, request, monkeypatch):
+@pytest.mark.parametrize("yaqa", (False, True), ids=("direct", "yaqa"))
+def test_gptqmodel_cptc_save_reload_and_resave(tmp_path, pack_on_gpu, yaqa, request, monkeypatch):
     dense, quantized = tmp_path / "dense", tmp_path / "quantized"
     config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=128, num_hidden_layers=1,
                          num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=32,
@@ -312,7 +350,7 @@ def test_gptqmodel_weight_only_save_reload_and_resave(tmp_path, pack_on_gpu, req
     tokenizer = Tokenizer(models.WordLevel({"[UNK]": 0, "x": 1}, unk_token="[UNK]"))
     PreTrainedTokenizerFast(tokenizer_object=tokenizer, unk_token="[UNK]").save_pretrained(dense)
     pack_device = request.getfixturevalue("cptc_gpu")[0] if pack_on_gpu else torch.device("cpu")
-    qcfg = CPTCConfig(bits=4, trellis_depth=8, offload_to_disk=False, device=pack_device,
+    qcfg = CPTCConfig(bits=4, trellis_depth=8, yaqa=yaqa, offload_to_disk=False, device=pack_device,
                       dynamic={"+:.*q_proj$": {"bits": 3}})
     model = GPTQModel.load(str(dense), quantize_config=qcfg, dtype=torch.float32)
     encoder_calls = []
@@ -322,7 +360,12 @@ def test_gptqmodel_weight_only_save_reload_and_resave(tmp_path, pack_on_gpu, req
         return viterbi_encode(blocks, decoded, spec, native=native)
 
     monkeypatch.setattr("gptqmodel.quantization.cptc.viterbi_encode", encode)
-    model.quantize()
+    calibration = CalibrationConfig(dataset=[[1, 3, 5, 7, 9]], min_length=1) if yaqa else None
+    if yaqa:
+        with pytest.raises(ValueError, match="CalibrationConfig.dataset is required"):
+            model.quantize()
+        assert not encoder_calls
+    model.quantize(calibration)
     assert encoder_calls and set(encoder_calls) == {(pack_device, pack_on_gpu)}
     model.save(str(quantized))
 
@@ -334,6 +377,7 @@ def test_gptqmodel_weight_only_save_reload_and_resave(tmp_path, pack_on_gpu, req
     for loaded in (reloaded, restored):
         projection = loaded.model.get_submodule(name)
         assert type(projection) is CPTCLinear and projection.bits == 3
+        assert projection.yaqa == yaqa
         source = model.model.get_submodule(name)
         for key, tensor in source.state_dict().items():
             restored_tensor = projection.state_dict()[key]
@@ -354,7 +398,89 @@ def test_gptqmodel_weight_only_save_reload_and_resave(tmp_path, pack_on_gpu, req
         "format": "pt", "quant_method": "cptc", "cptc_depth": "8", "cptc_block_size": "128",
     }
     payload = load_file(checkpoint)
-    payload.pop(f"{name}.cptc_packed")
+    deleted = "cptc_input_signs" if yaqa else "cptc_packed"
+    payload.pop(f"{name}.{deleted}")
     save_file(payload, checkpoint, metadata={"format": "pt"})
-    with pytest.raises(ValueError, match=r"Missing required.*cptc_packed"):
+    with pytest.raises(ValueError, match=f"Missing required.*{deleted}"):
         GPTQModel.load(str(quantized), **load_options)
+
+
+def test_yaqa_partial_trace_and_tile_feedback():
+    rng = torch.Generator().manual_seed(519)
+    x = torch.randn((2, 11, 48), generator=rng)
+    dy = torch.randn((2, 11, 32), generator=rng)
+    sketch = HessianSketch.empty(48, 32, x.device)
+    sketch.add(x, dy)
+    weight_grads = dy.double().mT @ x.double()
+    for observed, expected in (
+        (sketch.input, (weight_grads.mT @ weight_grads).sum(dim=0)),
+        (sketch.output, (weight_grads @ weight_grads.mT).sum(dim=0)),
+    ):
+        assert torch.linalg.norm(observed.double() - expected) / torch.linalg.norm(expected) < 1e-6
+
+    # Use power-of-two matrices so the explicit normalized Walsh transform is
+    # an independent oracle for the factorization and congruence.
+    factors = []
+    for size, tile, value in ((32, 16, sketch.input[:32, :32]), (32, 8, sketch.output)):
+        signs = torch.tensor([-1, 1] * (size // 2), dtype=torch.int8)
+        factor = block_feedback(value, signs, tile, 0.01).double()
+        h = _walsh(size) * signs
+        hessian = h @ value.double() @ h.T
+        hessian = hessian / hessian.diag().mean() + 0.01 * torch.eye(size, dtype=torch.float64)
+        chol = torch.linalg.cholesky(hessian)
+        d = torch.block_diag(*(chol[i:i + tile, i:i + tile] for i in range(0, size, tile)))
+        unit = factor + torch.eye(size, dtype=torch.float64)
+        assert torch.linalg.norm(unit @ d @ d.T @ unit.T - hessian) / torch.linalg.norm(hessian) < 1e-6
+        assert factor.abs().sum() > 0
+        factors.append(unit)
+
+    input_factor, output_factor = factors
+    weight = torch.randn((32, 32), generator=rng, dtype=torch.float64)
+    residuals = torch.zeros_like(weight)
+    visited = set()
+
+    def encode(target, row_tiles, col_tiles):
+        for block, row, col in zip(target, row_tiles.tolist(), col_tiles.tolist(), strict=True):
+            y, x = slice(row * 8, (row + 1) * 8), slice(col * 16, (col + 1) * 16)
+            projected = output_factor.T @ residuals @ input_factor
+            torch.testing.assert_close(block, weight[y, x] + projected[y, x], atol=1e-10, rtol=1e-10)
+            # Apply a coarse deterministic quantizer so previous tiles have
+            # nonzero, off-diagonal contributions in the remaining targets.
+            residuals[y, x] = weight[y, x] - (block * 2).round() / 2
+            visited.add((row, col))
+        return (target * 2).round() / 2
+
+    _wavefront_tiles(weight, input_factor - torch.eye(32), output_factor - torch.eye(32), 8, encode)
+    assert len(visited) == 8
+
+
+@pytest.mark.parametrize("bits", (3, 4))
+@pytest.mark.parametrize("block_size", (128, 256))
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_yaqa_tile_mma_matches_dense_oracle(cptc_gpu, bits, block_size, dtype):
+    device, ops = cptc_gpu
+    n, k = 32, 64
+    rng = torch.Generator().manual_seed(739)
+    source = torch.nn.Linear(k, n, bias=True, dtype=torch.float32)
+    sketch = HessianSketch.empty(k, n, "cpu")
+    sketch.add(torch.randn((2, 23, k), generator=rng), torch.randn((2, 23, n), generator=rng))
+    layer = CPTCLinear(bits, k, n, True, block_size=block_size, yaqa=True).to(device)
+    layer.pack_original(source, sketch=sketch, device=device)
+    layer.post_init()
+    payload = tuple(getattr(layer, name).cpu() for name in CPTCLinear.CHECKPOINT_REQUIRED_BUFFERS)
+    expected = _decode_oracle(*payload[:3], payload[3].view(torch.float32), layer.spec,
+                              k * layer.tile_rows)
+    expected = expected.view(n // layer.tile_rows, k // 16, layer.tile_rows, 16)
+    expected = expected.transpose(1, 2).reshape(n, k).double()
+    actual = layer._decode_rows(0, n, device, ops)
+    torch.testing.assert_close(actual.cpu().double(), expected, atol=0, rtol=0)
+    torch.testing.assert_close(layer._decode_rows(0, n, torch.device("cpu"), None).double(), expected, atol=0, rtol=0)
+    u = _walsh(k) * layer.cptc_input_signs.cpu()
+    v = _walsh(n) * layer.cptc_output_signs.cpu()
+    torch.testing.assert_close(layer.dequantize_weight().cpu().double(), v.T @ expected @ u, atol=1e-6, rtol=1e-6)
+    inputs = torch.randn((17, k), generator=rng).to(dtype)
+    target = (((inputs.double() @ u.T).to(dtype).double() @ expected.T) @ v + source.bias.double()).to(dtype)
+    with torch.inference_mode():
+        for rows in (1, 16, 17):
+            actual = layer(inputs[:rows].to(device)).cpu()
+            torch.testing.assert_close(actual, target[:rows], atol=2e-3, rtol=2e-3)

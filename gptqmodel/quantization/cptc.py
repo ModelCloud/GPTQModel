@@ -153,17 +153,17 @@ def decode_weight(packed, table, coeffs, scales, spec: CPTCSpec, in_features: in
     return values.flatten(-2)[..., :in_features].contiguous()
 
 
-def _viterbi_pass(blocks, decoded, spec, back, seam=None):
+def _viterbi_pass(blocks, decoded, spec, back, overlap=None):
     """Minimize forward costs grouped by the high L-K bits of the window."""
     count, length = blocks.shape
     choices = 1 << spec.bits
     prefixes = 1 << (spec.trellis_depth - spec.bits)
     rows = torch.arange(count, device=blocks.device)
     cost = (blocks[:, :1] - decoded).square()
-    if seam is not None:
-        states = torch.arange(decoded.numel(), device=blocks.device)
-        cost.masked_fill_(states != seam.unsqueeze(1), float("inf"))
-    first = 0 if seam is not None else length // 2
+    if overlap is not None:
+        suffixes = torch.arange(decoded.numel(), device=blocks.device) & (prefixes - 1)
+        cost.masked_fill_(suffixes != overlap.unsqueeze(1), float("inf"))
+    first = 0 if overlap is not None else length // 2
     for step in range(length):
         best, low_bits = cost.reshape(count, prefixes, choices).min(dim=2)
         if step >= first:
@@ -171,22 +171,22 @@ def _viterbi_pass(blocks, decoded, spec, back, seam=None):
         if step + 1 < length:
             error = (blocks[:, step + 1:step + 2] - decoded).square()
             cost = (error.view(count, choices, prefixes) + best[:, None, :]).view(count, -1)
-    prefix = best.argmin(dim=1) if seam is None else seam & (prefixes - 1)
-    if seam is not None:
+    prefix = best.argmin(dim=1) if overlap is None else overlap
+    if overlap is not None:
         path = torch.empty_like(blocks, dtype=torch.int32)
     for step in range(length - 1, first - 1, -1):
         state = (prefix << spec.bits) | back[step, rows, prefix].long()
         prefix = state & (prefixes - 1)
-        if seam is not None:
+        if overlap is not None:
             path[:, step] = state
-    return path if seam is not None else state
+    return path if overlap is not None else prefix
 
 
 def _viterbi_reference(blocks, decoded, spec):
     prefixes = 1 << (spec.trellis_depth - spec.bits)
     back = torch.empty((spec.block_size, blocks.shape[0], prefixes), dtype=torch.uint8, device=blocks.device)
-    seam = _viterbi_pass(blocks.roll(spec.block_size // 2, dims=1), decoded, spec, back)
-    return _viterbi_pass(blocks, decoded, spec, back, seam=seam)
+    overlap = _viterbi_pass(blocks.roll(spec.block_size // 2, dims=1), decoded, spec, back)
+    return _viterbi_pass(blocks, decoded, spec, back, overlap=overlap)
 
 
 def _encode_batch_size(spec: CPTCSpec) -> int:
@@ -285,6 +285,30 @@ def gaussian_table(spec: CPTCSpec, device) -> torch.Tensor:
     return snap_e2m5(_starting_table(spec, _indices(spec, "cpu"))).to(device)
 
 
+def _block_scales(blocks, count, loading, limits):
+    low, high = torch.aminmax(blocks, dim=-1)
+    maximum = torch.maximum(low.abs(), high.abs())
+    normalized = blocks / torch.where(maximum > 0, maximum, 1).unsqueeze(-1)
+    rms = (normalized.square().sum(dim=-1) / count).sqrt() * maximum
+    negative_limit, positive_limit = limits
+    range_scale = torch.maximum(-low / negative_limit, high / positive_limit)
+    scale = torch.maximum(rms / loading, range_scale).clamp_max(torch.finfo(torch.float32).max / 8)
+    return scale, torch.isfinite(maximum).all()
+
+
+def _codebook_limits(decoded):
+    lo, hi = torch.aminmax(decoded)
+    return torch.where(lo < 0, -lo, math.inf), torch.where(hi > 0, hi, math.inf)
+
+
+def _encode_scaled_blocks(blocks, scales, decoded, spec, native):
+    targets = blocks / torch.where(scales > 0, scales, 1).unsqueeze(-1)
+    # Bound the FP32 squared-error cost for extreme inputs and defer reporting
+    # invalid source values to the caller's end-of-pack validation.
+    targets = torch.nan_to_num(targets, nan=0, posinf=2048, neginf=-2048).clamp(-2048, 2048)
+    return viterbi_encode(targets, decoded, spec, native=native)
+
+
 @torch.no_grad()
 def quantize_weight(weight: torch.Tensor, spec: CPTCSpec, *, device: torch.device, table=None):
     """Encode a weight matrix and return row-major packed blocks and FP32 scales."""
@@ -299,9 +323,7 @@ def quantize_weight(weight: torch.Tensor, spec: CPTCSpec, *, device: torch.devic
     if table.dtype != torch.uint8 or table.shape != (spec.table_size,) or bool(((table & 127) == 127).any()):
         raise ValueError("CPTC requires a finite E2M5 table with 2**table_q entries")
     decoded = _lookup(_indices(spec, device), decode_e2m5(table))
-    lowest, highest = torch.aminmax(decoded)
-    negative_limit = torch.where(lowest < 0, -lowest, math.inf)
-    positive_limit = torch.where(highest > 0, highest, math.inf)
+    limits = _codebook_limits(decoded)
     native = native_ops(device)
     if native is not None and spec.trellis_depth == 16:
         decoded = decoded.half()  # Exact E2M5 values for the register-cached GPU encoder.
@@ -317,20 +339,11 @@ def quantize_weight(weight: torch.Tensor, spec: CPTCSpec, *, device: torch.devic
         end = min(start + rows_per_batch, out_features)
         rows = weight[start:end].to(device=device, dtype=torch.float32)
         blocks = torch.nn.functional.pad(rows, (0, padding)).view(-1, blocks_per_row, spec.block_size)
-        low, high = torch.aminmax(blocks, dim=-1)
-        maximum = torch.maximum(low.abs(), high.abs())
-        invalid |= ~torch.isfinite(maximum).all()
-        normalized = blocks / torch.where(maximum > 0, maximum, 1).unsqueeze(-1)
-        rms = (normalized.square().sum(dim=-1) / counts).sqrt() * maximum
         # Gaussian RMS loading can put an outlier beyond every reachable
         # trellis value. Reserve its range before running the path search.
-        range_scale = torch.maximum(-low / negative_limit, high / positive_limit)
-        scale = torch.maximum(rms / _TABLE_STORAGE_SCALE, range_scale).clamp_max(torch.finfo(torch.float32).max / 8)
-        targets = (blocks / torch.where(scale > 0, scale, 1).unsqueeze(-1)).flatten(0, 1)
-        # Cost arithmetic is FP32. Clipping very large normalized values to
-        # a finite cost range only affects source weights outside FP32 range.
-        targets = torch.nan_to_num(targets, nan=0, posinf=2048, neginf=-2048).clamp(-2048, 2048)
-        path = viterbi_encode(targets, decoded, spec, native=native)
+        scale, finite = _block_scales(blocks, counts, _TABLE_STORAGE_SCALE, limits)
+        invalid |= ~finite
+        path = _encode_scaled_blocks(blocks.flatten(0, 1), scale.flatten(), decoded, spec, native)
         packed[start:end].copy_(pack_states(path, spec).view(-1, blocks_per_row, spec.block_bytes))
         scales[start:end].copy_(scale)
     if bool(invalid):

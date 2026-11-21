@@ -358,6 +358,54 @@ class _BCLinearEXL3:
         self.fused_gemm = policy.exl3_fused_gemm
         self._configured = not isinstance(self.K, int) or self.fp16_gemv or self.int8_gemv or self.fused_gemm
 
+    def run_guarded(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        *,
+        guard_mode: int,
+        bound: float,
+        include_bias: bool = True,
+    ) -> int:
+        """Native GEMM with the input-range guard folded in; -1 means fall back.
+
+        ``y`` receives the result in the activation's dtype. The FP32
+        accumulation buffer, the per-row bound and the re-scale stay inside the
+        op: the GEMM reduces the bound in its input-Hadamard pass, applies the
+        row's power-of-two scale while narrowing the activation, and folds the
+        scale and the bias into its epilogue (#5942). ``guard_mode`` is 1 for
+        FP16, 2 for BF16 bounded in FP32, and 3 for BF16 whose checkpoint
+        scales can push ``x * suh`` past FP32, which widens the bound, the
+        scale and the epilogue to FP64. ``bound`` is the FP16-safe per-row amax.
+
+        A negative return means the shape, device or dtype is not covered; the
+        caller then keeps the eager pre-scale reference.
+        """
+        bias = self.bias if include_bias else None
+        try:
+            op = _runtime_op("bc_linear_exl3_run_guarded")
+        except AttributeError:
+            # A stale prebuilt extension predates the folded guard; let the
+            # caller keep the eager pre-scale reference (#5942).
+            return -1
+        return int(
+            op(
+                self.trellis,
+                self.suh,
+                self.svh,
+                float(self.K),
+                bias,
+                self.mcg,
+                self.mul1,
+                x,
+                y,
+                self.fused_gemm,
+                self.q4nx,
+                int(guard_mode),
+                float(bound),
+            )
+        )
+
     def run(self, x: torch.Tensor, y: torch.Tensor, *, include_bias: bool = True) -> None:
         bias = self.bias if include_bias else None
         args = (self.trellis, self.suh, self.svh, self.K, bias, self.mcg, self.mul1, x, y)

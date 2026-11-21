@@ -20,11 +20,11 @@
 // bit-identical to the eager reference.  Everything stays on the device; no
 // value is read back to the host.
 //
-// PERF FOLLOW-UP (maintainer request, #5898): these two launches run on every
-// FP16/BF16 native forward although an out-of-range row is rare. Fold the
-// row bound into the input Hadamard and the rescale into the GEMM epilogue in
-// future kernel work, and use FP64 only for rows whose FP32 product overflows,
-// so the common case does not pay for the guard. See ExllamaV3Linear.forward.
+// The native GEMM now folds this bound into its input Hadamard and its
+// rescale into its epilogue (#5942), so a forward that stays on the native
+// kernels no longer runs these two launches. They remain the reference for
+// the shapes the native GEMM does not own and for the eager fallback. See
+// ExllamaV3Linear._guarded_native_forward.
 //
 // With BF16 inputs and checkpoint suh, the
 // bound, scale and epilogue use FP64 to cover products beyond FP32's range;

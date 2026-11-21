@@ -27,7 +27,17 @@ void exl3_gemm_kernel_inner
     const int size_n,
     int* __restrict__ locks,
     const half* post_scale,
-    int size_n_stride = 0     // full width of B and C when computing a column slice (0: = size_n)
+    int size_n_stride = 0,    // full width of B and C when computing a column slice (0: = size_n)
+    // Folded input-range guard (#5942): unused unless guard_mode is set, which
+    // also requires the FP32 accumulation buffer (c_fp32) so the split-K
+    // partial sums keep their precision.
+    double* row_amax = nullptr,
+    void* guard_out = nullptr,
+    const void* guard_bias = nullptr,
+    int guard_mode = 0,
+    int guard_bias_mode = 0,
+    double guard_bound = 0.0,
+    int row_base = 0
 )
 {
     const int TILEBLOCKS_M = TILESIZE_M / 16;
@@ -610,8 +620,31 @@ void exl3_gemm_kernel_inner
 
             if constexpr (c_fp32)
             {
-                float* had_out = gl_c_ptr_32 + row * size_n_stride + col * 128;
-                had_ff_r_128_inner<false, true>(had_in, had_out, post_scale_c, had_scale);
+                if (guard_mode)
+                {
+                    // Folded re-scale: the row's power of two and the bias are
+                    // applied to the FP32 result and it is rounded once into
+                    // the final-dtype buffer (#5942).
+                    float values[4];
+                    had_ff_r_128_values<true>(had_in, values, post_scale_c, had_scale);
+                    const int lane = threadIdx.x & 31;
+                    const int bias_index = slice2_n * gl_c_stride_n + col * 128 + lane * 4;
+                    void* out_ptr = static_cast<char*>(guard_out)
+                        + (static_cast<size_t>(row_base + row) * size_n_stride
+                           + slice2_n * gl_c_stride_n + col * 128 + lane * 4) * 2;
+                    const double amax = row_amax[row_base + row];
+                    if (guard_mode == 3)
+                        exl3_guard_store<true, true>(values, out_ptr, amax, guard_bound, guard_bias, guard_bias_mode, bias_index);
+                    else if (guard_mode == 2)
+                        exl3_guard_store<false, true>(values, out_ptr, amax, guard_bound, guard_bias, guard_bias_mode, bias_index);
+                    else
+                        exl3_guard_store<false, false>(values, out_ptr, amax, guard_bound, guard_bias, guard_bias_mode, bias_index);
+                }
+                else
+                {
+                    float* had_out = gl_c_ptr_32 + row * size_n_stride + col * 128;
+                    had_ff_r_128_inner<false, true>(had_in, had_out, post_scale_c, had_scale);
+                }
             }
             else
             {

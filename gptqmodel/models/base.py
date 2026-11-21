@@ -3377,10 +3377,11 @@ class BaseQModel(nn.Module):
         # (issue #4123).
         blas_context = quant_blas_backend(
             deterministic=_needs_deterministic_hessian(run_plan)
+            or (run_plan.method == METHOD.CPTC and self.quantize_config.requires_calibration_dataset())
         )
         with blas_context:
             if run_plan.weight_only:
-                if calibration.exclude_attention_sinks:
+                if calibration.exclude_attention_sinks and not self.quantize_config.requires_calibration_dataset():
                     log.warn(
                         "Quantize: `CalibrationConfig.exclude_attention_sinks` has no effect on "
                         "weight-only quantization, which uses no calibration rows."
@@ -4126,7 +4127,17 @@ class BaseQModel(nn.Module):
         if run_plan.processors != (ProcessorStep.WEIGHT_ONLY,):
             raise ValueError("weight-only quantization requires a weight-only run plan")
 
-        if calibration.dataset is not None:
+        sketches = None
+        if self.quantize_config.method == METHOD.CPTC and self.quantize_config.requires_calibration_dataset():
+            from ..quantization.cptc_hessian import collect_model_hessian_sketches
+
+            batches = self._prepare_calibration_before_rotation(
+                calibration=calibration, batch_size=run_plan.batch_size, field="dataset",
+            )
+            sketches = collect_model_hessian_sketches(
+                self, batches, exclude_attention_sinks=calibration.exclude_attention_sinks,
+            )
+        elif calibration.dataset is not None:
             log.info("Weight-only quantization selected; ignoring provided calibration dataset.")
 
         processor = None
@@ -4135,6 +4146,7 @@ class BaseQModel(nn.Module):
                 tokenizer=self.tokenizer,
                 qcfg=self.quantize_config,
                 measure_weight_error=measure_weight_error,
+                cptc_hessian_sketches=sketches,
             )
 
             gc_context = (

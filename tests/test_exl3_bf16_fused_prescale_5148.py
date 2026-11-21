@@ -137,6 +137,12 @@ def _disable_fused_ops(monkeypatch):
     monkeypatch.setattr(
         exl3_bridge, "_try_fused_rescale", lambda *a, **kw: None, raising=False
     )
+    # #5942 folds the guard into the native GEMM, so the eager chain is only
+    # reached when that op declines. Force it here to keep measuring the
+    # pre-#5148 reference this module exists to bound.
+    monkeypatch.setattr(
+        ExllamaV3Linear, "_guarded_native_forward", lambda self, x: None, raising=False
+    )
 
 
 # --------------------------------------------------------------------------
@@ -424,6 +430,10 @@ def test_bf16_decode_is_within_1_3x_of_fp16_per_linear(monkeypatch):
     x_bf16 = (torch.randn(1, in_features, device=cuda) * 0.5).to(torch.bfloat16)
     x_fp16 = x_bf16.to(torch.float16)
     fp16_us = _per_call_us(module, x_fp16)
+    # This test deliberately measures both dtypes on one module; the
+    # forward-dtype contract (#5897) forbids that within a run, so clear the
+    # lock between the two phases.
+    module._forward_dtype_lock = None
     fused_us = _per_call_us(module, x_bf16)
     _disable_fused_ops(monkeypatch)
     eager_us = _per_call_us(module, x_bf16)
