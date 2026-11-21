@@ -476,6 +476,29 @@ def _record_construction_dtypes(model) -> None:
     object.__setattr__(model, CONSTRUCTION_DTYPES_ATTR, dtypes)
 
 
+def _checkpoint_exact_dtype_parameter_names(model) -> set[str]:
+    """Fully-qualified names of parameters a module declares as kernel storage.
+
+    ``CHECKPOINT_EXACT_DTYPE_PARAMETERS`` marks tensors whose dtype is part of
+    the kernel contract (packed payloads, block scales, global scales). They
+    keep the checkpoint dtype instead of the model dtype, so the uniform-dtype
+    guard below must not hold them to it -- the same way transformers' fp32
+    keep-list is exempted.
+    """
+
+    names: set[str] = set()
+    named_modules = getattr(model, "named_modules", None)
+    if named_modules is None:
+        return names
+    for module_name, module in named_modules():
+        declared = getattr(module, "CHECKPOINT_EXACT_DTYPE_PARAMETERS", ())
+        if not declared:
+            continue
+        prefix = f"{module_name}." if module_name else ""
+        names.update(f"{prefix}{name}" for name in declared)
+    return names
+
+
 def assert_loaded_model_state(
     model,
     *,
@@ -516,6 +539,10 @@ def assert_loaded_model_state(
     ``post_init``; a parameter that is *still* fp32 after the load is treated
     as intentional. A parameter the load changed away from its construction
     dtype is still reported, so a broken cast is never masked (issue #4888).
+
+    Parameters a module declares in ``CHECKPOINT_EXACT_DTYPE_PARAMETERS`` are
+    kernel storage, not activation operands, and are excluded from the dtype
+    checks (they are still checked for materialization).
     """
 
     problems = []
@@ -541,6 +568,7 @@ def assert_loaded_model_state(
     ):
         keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
         construction_dtypes = getattr(model, CONSTRUCTION_DTYPES_ATTR, None)
+        storage_parameters = _checkpoint_exact_dtype_parameter_names(model)
         dtypes = Counter()
         meta = []
         for name, parameter in named_parameters():
@@ -548,6 +576,8 @@ def assert_loaded_model_state(
                 continue
             if parameter.is_meta:
                 meta.append(name)
+                continue
+            if name in storage_parameters:
                 continue
             if (
                 parameter.dtype is torch.float32

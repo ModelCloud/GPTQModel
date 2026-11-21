@@ -16,6 +16,7 @@ the text, or close the issue or PR.
 | Area | Contract | Rule in one line |
 | --- | --- | --- |
 | Kernel / module | [Forward dtype](kernel/forward-dtype.md) | Kernel modules use one input dtype (output dtype = input dtype), and their weight dtypes are frozen after the first forward. Quantization may rewrite source weight values in their existing dtype, but never casts live modules. A violation is a caller bug and must raise. |
+| Model / container | [Re-fusion](model/refusion.md) | A fused checkpoint tensor holds one quantization: only modules with an identical quantization signature may be re-fused into it, and never a quantized kernel module. A violation raises before any tensor is created. |
 
 ## Rules for agents and contributors
 

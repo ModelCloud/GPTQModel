@@ -64,6 +64,7 @@ from .hy_v3 import HYV3QModel
 from .hymba import HymbaQModel
 from .instella import InstellaQModel
 from .inkling import InklingMMQModel
+from .inkling2_loop import Inkling2LoopQModel
 from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
 from .intern_s2_preview import InternS2PreviewQModel

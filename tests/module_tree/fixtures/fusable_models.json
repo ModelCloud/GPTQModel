@@ -2435,6 +2435,10 @@
       "definition": "HymbaQModel",
       "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
     },
+    "inkling2_loop": {
+      "definition": "Inkling2LoopQModel",
+      "reason": "Clean-room Inkling2Loop implementation: the native module tree is not qualified for the fused qkv/gate_up executor."
+    },
     "inkling_mm_model": {
       "definition": "InklingMMQModel",
       "profiles": {

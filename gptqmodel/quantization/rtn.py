@@ -88,6 +88,9 @@ def get_number_of_rows_and_cols(layer: nn.Module) -> tuple[int, int]:
     if isinstance(layer, transformers.Conv1D):
         return layer.weight.shape[1], layer.weight.shape[0]
 
+    if getattr(layer, "_packed_source_linear", False):
+        return layer.out_features, layer.in_features
+
     return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
 
 

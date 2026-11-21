@@ -158,6 +158,7 @@ from .definitions.hy_v3 import HYV3QModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.inkling import InklingMMQModel  # noqa: E402
+from .definitions.inkling2_loop import Inkling2LoopQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
 from .definitions.intern_s2_preview import InternS2PreviewQModel  # noqa: E402
@@ -437,6 +438,7 @@ MODEL_MAP = {
     "telechat": TeleChat2QModel,
     "instella": InstellaQModel,
     "inkling_mm_model": InklingMMQModel,
+    "inkling2_loop": Inkling2LoopQModel,
     "mimo": MimoQModel,
     "mimo_v2": MimoV2QModel,
     "mimo_v2_flash": MimoV2FlashQModel,
