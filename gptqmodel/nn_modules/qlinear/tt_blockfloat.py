@@ -70,10 +70,10 @@ def packed_code_bytes(numel: int, bits: int) -> int:
 
 
 #: Axes a block of 16 shared-exponent values may run along. ``"in"`` stores
-#: ``W [out, in]`` blocked along ``in_features`` (the historical layout, and the
-#: one the CUDA/HIP kernels read). ``"out"`` stores ``W^T [in, out]`` blocked
-#: along ``out_features``: the operand ``ttnn.linear(x, W^T)`` consumes, so a
-#: Tenstorrent upload is exact with no host-side re-quantization.
+#: ``W [out, in]`` blocked along ``in_features`` for the CUDA/HIP extension.
+#: ``"out"`` stores ``W^T [in, out]`` blocked along ``out_features``, the
+#: operand ``ttnn.linear(x, W^T)`` consumes. Its CUDA fast path reads that
+#: layout directly.
 BLOCK_AXES = ("in", "out")
 
 
@@ -271,6 +271,11 @@ class _BlockfloatStorage(nn.Module):
 
         Returning ``None`` keeps every other device on the dense path.
         """
+
+        if self.block_axis == "out" and self.block == BLOCKFLOAT_BLOCK and x.device.type == "cuda":
+            from ...utils.tt_blockfloat_triton import linear_out_axis
+
+            return linear_out_axis(x, self.codes, self.exponents, self.bits, bias)
 
         from ...utils import tt_blockfloat_hip
 
