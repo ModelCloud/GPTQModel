@@ -295,3 +295,100 @@ def test_checkpoint_conversion_reverses_into_clean_save_keys():
         for rule in MAPPING:
             back, _ = rule.reverse_transform().rename_source_key(back)
         assert back == checkpoint_key, runtime_key
+
+
+class _ExpertsHost(nn.Module):
+    """Minimal host so Defuser can walk a model that owns expert containers."""
+
+    def __init__(self, config, experts):
+        super().__init__()
+        self.config = config
+        language_model = nn.Module()
+        language_model.layers = nn.ModuleList()
+        for module in experts:
+            layer = nn.Module()
+            layer.mlp = nn.Module()
+            layer.mlp.experts = module
+            language_model.layers.append(layer)
+        self.model = nn.Module()
+        self.model.language_model = language_model
+
+
+def test_defuser_leaves_a_packed_checkpoint_payload_untouched():
+    """Defuser must not decode or split packed experts, and must still expand dense ones.
+
+    ``Inkling2LoopPackedExperts`` is deliberately not decorated with
+    ``@use_experts_implementation``: Defuser's generic pass only defuses
+    decorator-backed containers, so a checkpoint's NVFP4/MXFP8 bytes survive
+    load. ``defuse_packed_experts`` splits them per layer, right before the layer
+    is planned, and ``refuse()`` re-fuses the layers the plan skipped.
+    """
+
+    import defuser
+
+    from gptqmodel.models.inkling2_loop.configuration import Inkling2LoopConfig
+
+    config = Inkling2LoopConfig(
+        text_config={
+            "hidden_size": 32,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 8,
+            "intermediate_size": 16,
+            "n_routed_experts": 2,
+            "num_experts_per_tok": 1,
+            "moe_intermediate_size": 8,
+            "vocab_size": 64,
+            "unpadded_vocab_size": 64,
+            "n_layers_per_attn_res_block": 3,
+            "d_rel": 2,
+            "rel_extent": 4,
+            "sliding_window_size": 4,
+            "experts_formats": ["nvfp4", None],
+        },
+        vision_config={
+            "hidden_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "projection_hidden_dim": 16,
+            "text_hidden_size": 32,
+        },
+    )
+    text_config = config.text_config
+    packed = E.build_experts(text_config, 0)
+    dense = E.build_experts(text_config, 1)
+    assert isinstance(packed, E.Inkling2LoopPackedExperts)
+    assert isinstance(dense, E.Inkling2LoopExperts)
+    _fill_nvfp4(packed)
+
+    payload = {name: getattr(packed, name) for name in ("gate_up_weight", "down_weight")}
+    pointers = {name: tensor.data_ptr() for name, tensor in payload.items()}
+    sums = {name: tensor.float().sum().item() for name, tensor in payload.items()}
+
+    host = _ExpertsHost(config, [packed, dense])
+    assert defuser.convert_model(host, cleanup_original=False) is True
+
+    # Packed container: same objects, same bytes, still fused.
+    assert host.model.language_model.layers[0].mlp.experts is packed
+    assert packed.defused is False
+    assert not hasattr(packed, "0")
+    for name, tensor in payload.items():
+        current = getattr(packed, name)
+        assert current is tensor, name
+        assert current.data_ptr() == pointers[name], name
+        assert current.float().sum().item() == sums[name], name
+
+    # Dense container: Defuser expands it into per-expert linears.
+    assert host.model.language_model.layers[1].mlp.experts is dense
+    assert getattr(dense, "gate_up_proj", None) is None
+    assert getattr(dense, "down_proj", None) is None
+    for index in range(text_config.n_routed_experts):
+        expert = getattr(dense, str(index))
+        for projection, (out_features, in_features) in (
+            ("gate_proj", (text_config.moe_intermediate_size, text_config.hidden_size)),
+            ("up_proj", (text_config.moe_intermediate_size, text_config.hidden_size)),
+            ("down_proj", (text_config.hidden_size, text_config.moe_intermediate_size)),
+        ):
+            leaf = getattr(expert, projection)
+            assert (leaf.out_features, leaf.in_features) == (out_features, in_features), projection
