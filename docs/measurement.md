@@ -167,10 +167,29 @@ kernel.
   a short row contributes its own two or three positions, not the configured 64.
 - **Report-only by default**: no grades, no verdict.
 
+## Command line
+
+```
+python -m gptqmodel.measure --model <quant> --reference <fp16> --text <file> [--text ...] \
+    --ppl --kld --topk 1,5 --rmse --kld-pass "<=0.05" --topk-pass ">=0.95" --fail-on fail
+```
+
+It prints the same table (or JSON with `--json`, or `--json-out FILE` for a clean
+file when the library logs share stdout) and exits `0` when nothing failed, `1`
+when a grade failed, `2` when the measurement itself could not run. `--fail-on
+warn` also fails on WARN.
+
+`--reference-device cpu` keeps the fp16 copy out of VRAM: the runner already
+moves each batch to whichever device each model lives on, so the reference can
+run on the host while the quantized model stays on the GPU.
+
 ## Not in this version
 
-- `quantize(measure=...)`, which would capture reference logits before the first
-  module is replaced (no second model needed).
-- A `python -m gptqmodel.measure` CLI.
+- `quantize(measure=...)`. It is not implementable as designed: a model loaded for
+  quantization is a `LazyTurtle` shell (every parameter is `meta` until the looper
+  materialises it layer by layer), so there are no dense weights to capture at the
+  start - and materialising the whole model first would cost the copy the feature
+  was meant to avoid. Measure after quantizing against a reference checkpoint, or
+  keep the reference off the GPU with `--reference-device cpu`.
 - Task benchmarks - use [Evalution](https://github.com/modelcloud/Evalution) for
   end-to-end quality.
