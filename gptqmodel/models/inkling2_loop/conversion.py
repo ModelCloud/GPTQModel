@@ -16,9 +16,55 @@ untouched and no weight is re-quantized or decoded to bf16.
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 from transformers.conversion_mapping import register_checkpoint_conversion_mapping
 from transformers.core_model_loading import WeightRenaming
+
+
+_INDEX_GROUP = r"(\d+)"
+_INDEX_TEMPLATE = "\\1"
+
+
+def _key_template(pattern: str) -> str:
+    """Turn a rename pattern into the key template it describes.
+
+    ``layers\.(\d+)\.ln_1\.`` becomes ``layers.\\1.ln_1.``: anchors and regex
+    escapes are dropped, and the index capture becomes the ``\\1`` template.
+    """
+
+    template = pattern.removeprefix("^").removesuffix("$")
+    template = template.replace(_INDEX_GROUP, _INDEX_TEMPLATE)
+    return template.replace("\\.", ".")
+
+
+def _key_pattern(template: str) -> str:
+    """Regex matching ``template`` literally, with ``\\1`` as a capture group."""
+
+    return re.escape(template).replace(re.escape(_INDEX_TEMPLATE), _INDEX_GROUP)
+
+
+class CheckpointRename(WeightRenaming):
+    """A pure rename that also reverses into a usable save mapping.
+
+    Transformers reverses a rename by swapping the two pattern strings, but a
+    source pattern is a regex (anchors, escaped dots) while a target pattern is a
+    key template. Swapping them verbatim made ``save_pretrained`` write keys such
+    as ``...embed.weight$``; the reverse direction is built from the templates
+    instead.
+    """
+
+    def reverse_transform(self) -> WeightRenaming:
+        source = self.source_patterns[0]
+        target = _key_pattern(_key_template(self.target_patterns[0]))
+        template = _key_template(source)
+        # Mirror the anchor: a prefix rule must stay a prefix rule, or the save
+        # side would only rewrite keys that end at the prefix.
+        if source.startswith("^") and not source.endswith("$"):
+            return CheckpointRename(source_patterns="^" + target, target_patterns=template)
+        if source.endswith("$"):
+            return CheckpointRename(source_patterns=target + "$", target_patterns=template)
+        return CheckpointRename(source_patterns=target, target_patterns=template)
 
 
 class IndexShiftRename(WeightRenaming):
@@ -26,19 +72,47 @@ class IndexShiftRename(WeightRenaming):
 
     The checkpoint lists the per-layer attention-residual queries from layer 1
     (layer 0 has no such input), so ``attn_queries.i`` belongs to ``layers.i+1``.
+    ``reverse_transform`` (used by ``save_pretrained`` to write checkpoint names
+    back) needs its own patterns: the reverse of a ``\\1`` template is not a
+    valid regex, so the reverse direction is spelled out explicitly.
     """
 
-    def __init__(self, source_patterns: str, target_patterns: str, offset: int):
-        super().__init__(source_patterns, target_patterns)
+    def __init__(
+        self,
+        source_patterns: str,
+        target_patterns: str,
+        offset: int = 1,
+        reverse_source_patterns: Optional[str] = None,
+        reverse_target_patterns: Optional[str] = None,
+        **kwargs,
+    ):
+        super().__init__(source_patterns, target_patterns, **kwargs)
         self.offset = offset
+        self.reverse_source_patterns = reverse_source_patterns
+        self.reverse_target_patterns = reverse_target_patterns
+
+    @staticmethod
+    def _template(pattern: str, index: int) -> str:
+        return _key_template(pattern).replace("\\1", str(index), 1)
 
     def rename_source_key(self, source_key: str):
         match = re.search(self.source_patterns[0], source_key)
         if match is None:
             return source_key, None
         self._was_used = True
-        target = self.target_patterns[0].replace("\\1", str(int(match.group(1)) + self.offset))
+        target = self._template(self.target_patterns[0], int(match.group(1)) + self.offset)
         return source_key.replace(match.group(0), target, 1), self.source_patterns[0]
+
+    def reverse_transform(self) -> WeightRenaming:
+        if self.reverse_source_patterns is None:
+            return super().reverse_transform()
+        return IndexShiftRename(
+            source_patterns=self.reverse_source_patterns,
+            target_patterns=self.reverse_target_patterns,
+            offset=-self.offset,
+            reverse_source_patterns=self.source_patterns[0],
+            reverse_target_patterns=self.target_patterns[0],
+        )
 
 
 #: Vision tower names.
@@ -113,40 +187,45 @@ _GATE_AND_EXPERT_RENAMES = [
 
 def _build_mapping():
     mapping = [
-        WeightRenaming(source_patterns=r"^model\.llm\.unembed\.weight$", target_patterns=r"lm_head.weight"),
-        WeightRenaming(source_patterns=r"^model\.llm\.", target_patterns=r"model.language_model."),
+        CheckpointRename(source_patterns=r"^model\.llm\.unembed\.weight$", target_patterns=r"lm_head.weight"),
+        CheckpointRename(source_patterns=r"^model\.llm\.", target_patterns=r"model.language_model."),
         # Keep both rules anchored: the loader applies every rule repeatedly
         # until none matches, and an unanchored `.embed_norm.` rule would keep
         # re-wrapping its own output.
-        WeightRenaming(
+        CheckpointRename(
             source_patterns=r"^model\.language_model\.embed_norm\.",
             target_patterns=r"model.language_model.embed_tokens.embed_norm.",
         ),
-        WeightRenaming(
+        CheckpointRename(
             source_patterns=r"^embed_norm\.",
             target_patterns=r"embed_tokens.embed_norm.",
         ),
-        WeightRenaming(source_patterns=r"\.embed\.weight$", target_patterns=r".embed_tokens.weight"),
+        CheckpointRename(source_patterns=r"\.embed\.weight$", target_patterns=r".embed_tokens.weight"),
     ]
-    mapping += [WeightRenaming(source_patterns=src, target_patterns=dst) for src, dst in _VISION_RENAMES]
-    mapping += [WeightRenaming(source_patterns=src, target_patterns=dst) for src, dst in _ATTENTION_RENAMES]
-    mapping += [WeightRenaming(source_patterns=src, target_patterns=dst) for src, dst in _GATE_AND_EXPERT_RENAMES]
+    mapping += [CheckpointRename(source_patterns=src, target_patterns=dst) for src, dst in _VISION_RENAMES]
+    mapping += [CheckpointRename(source_patterns=src, target_patterns=dst) for src, dst in _ATTENTION_RENAMES]
+    mapping += [CheckpointRename(source_patterns=src, target_patterns=dst) for src, dst in _GATE_AND_EXPERT_RENAMES]
     mapping += [
         IndexShiftRename(
             source_patterns=r"attn_res\.attn_queries\.(\d+)$",
             target_patterns=r"layers.\1.attention_input.query",
             offset=1,
+            reverse_source_patterns=r"layers\.(\d+)\.attention_input\.query$",
+            reverse_target_patterns=r"attn_res.attn_queries.\1",
         ),
-        WeightRenaming(
+        IndexShiftRename(
             source_patterns=r"attn_res\.mlp_queries\.(\d+)$",
             target_patterns=r"layers.\1.mlp_input.query",
+            offset=0,
+            reverse_source_patterns=r"layers\.(\d+)\.mlp_input\.query$",
+            reverse_target_patterns=r"attn_res.mlp_queries.\1",
         ),
-        WeightRenaming(source_patterns=r"attn_res\.output_query$", target_patterns=r"final_input.query"),
-        WeightRenaming(
+        CheckpointRename(source_patterns=r"attn_res\.output_query$", target_patterns=r"final_input.query"),
+        CheckpointRename(
             source_patterns=r"\.middle_cycle_cross_pass_queries$",
             target_patterns=r".message_input.query",
         ),
-        WeightRenaming(
+        CheckpointRename(
             source_patterns=r"\.middle_cycle_cross_pass_kv_queries$",
             target_patterns=r".message_input.kv_query",
         ),
@@ -184,6 +263,7 @@ def register_conversion_mappings() -> None:
 
 __all__ = [
     "MAPPING",
+    "CheckpointRename",
     "IndexShiftRename",
     "register_conversion_mappings",
 ]

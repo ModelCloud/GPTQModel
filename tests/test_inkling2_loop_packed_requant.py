@@ -264,3 +264,34 @@ def test_partially_quantized_expert_layer_is_reported_not_saved_mixed():
         assert "cannot be re-fused" in str(error)
     else:  # pragma: no cover - the mixed layout must never be accepted silently
         raise AssertionError("mixed packed/quantized expert layer was accepted")
+
+
+def test_checkpoint_conversion_reverses_into_clean_save_keys():
+    """`save_pretrained` reverts the mapping; the reverse must yield checkpoint keys."""
+
+    from gptqmodel.models.inkling2_loop.conversion import MAPPING
+
+    cases = {
+        "model.llm.embed.weight": "model.language_model.embed_tokens.weight",
+        "model.llm.unembed.weight": "lm_head.weight",
+        "model.llm.layers.0.mlp.experts.w13_weight": (
+            "model.language_model.layers.0.mlp.experts.gate_up_weight"
+        ),
+        "model.llm.attn_res.attn_queries.3": (
+            "model.language_model.layers.4.attention_input.query"
+        ),
+        "model.llm.attn_res.mlp_queries.5": "model.language_model.layers.5.mlp_input.query",
+        "model.visual.backbone.layers.2.ln_1.weight": (
+            "model.vision_tower.layers.2.layernorm_before.weight"
+        ),
+    }
+    for checkpoint_key, runtime_key in cases.items():
+        forward = checkpoint_key
+        for rule in MAPPING:
+            forward, _ = rule.rename_source_key(forward)
+        assert forward == runtime_key, checkpoint_key
+
+        back = forward
+        for rule in MAPPING:
+            back, _ = rule.reverse_transform().rename_source_key(back)
+        assert back == checkpoint_key, runtime_key
