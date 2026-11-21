@@ -20,14 +20,13 @@
 
 import copy
 import math
-from inspect import signature
 from collections.abc import Callable
 from dataclasses import dataclass
+from inspect import signature
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
@@ -51,12 +50,12 @@ from transformers.modeling_outputs import (
     MoeModelOutputWithPast,
 )
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from transformers.models.auto import AutoModel
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, logging, torch_compilable_check
 from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import OutputRecorder, capture_outputs
-from transformers.models.auto import AutoModel
 
 from .configuration_inkling2_loop import Inkling2LoopConfig, Inkling2LoopTextConfig
 

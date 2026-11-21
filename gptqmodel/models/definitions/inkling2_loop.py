@@ -12,7 +12,6 @@ from transformers.masking_utils import create_causal_mask, create_sliding_window
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from ...hf_inkling2_loop import Inkling2LoopConfig, Inkling2LoopForConditionalGeneration
-
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
@@ -72,8 +71,12 @@ class Inkling2LoopQModel(BaseQModel):
       ``linear`` leaf (plus short-convolution and L2-clip children), ``o_proj``
       holds a gated output pair, and routed experts are 3D parameters that Defuser
       expands into per-expert ``gate_proj``/``up_proj``/``down_proj`` linears.
-    - The released checkpoint stores NVFP4/MXFP8 experts; transformers converts
-      them to dense tensors while loading, so GPT-QModel sees regular weights.
+    - The released checkpoint stores packed NVFP4 (layers 0-19) and MXFP8
+      (20-23) experts under `mlp.experts.w13_*` / `w2_*`, plus a checkpoint-side
+      attention naming (`attn.wq_du`, `attn.wo_ud`, ...) that the installed
+      Transformers release does not rename yet. Loading those tensors needs the
+      conversion mapping and the packed-expert decode hook; the decode kernels
+      themselves are in `gptqmodel/utils/nvfp4_triton.py`.
     """
 
     loader = AutoModelForMultimodalLM

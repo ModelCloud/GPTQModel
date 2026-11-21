@@ -19,10 +19,9 @@
 # limitations under the License.
 
 from huggingface_hub.dataclasses import strict
-
 from transformers.configuration_utils import PreTrainedConfig, SubConfigSpec
-from transformers.utils import auto_docstring
 from transformers.models.auto import AutoConfig
+from transformers.utils import auto_docstring
 
 
 @auto_docstring(checkpoint="thinkingmachines/Inkling-2-Mini")
