@@ -616,7 +616,34 @@ void exl3_gemm_kernel(EXL3_GEMM_ARGS)
 {
     auto grid = cg::this_grid();
 
-    if (suh)
+    if (guard_mode)
+    {
+        // Folded input-range guard (#5942), same prologue as the fused kernel.
+        if (guard_mode == 2)
+        {
+            const __nv_bfloat16* A_bf16 = reinterpret_cast<const __nv_bfloat16*>(A);
+            exl3_guard_input<false, __nv_bfloat16, false>
+                (A_bf16, A_had, nullptr, row_amax, size_m, size_k, guard_bound, grid);
+        }
+        else if (guard_mode == 3)
+        {
+            const __nv_bfloat16* A_bf16 = reinterpret_cast<const __nv_bfloat16*>(A);
+            exl3_guard_input<true, __nv_bfloat16, true>
+                (A_bf16, A_had, suh, row_amax, size_m, size_k, guard_bound, grid);
+        }
+        else if (suh)
+        {
+            exl3_guard_input<false, __half, true>
+                (A, A_had, suh, row_amax, size_m, size_k, guard_bound, grid);
+        }
+        else
+        {
+            exl3_guard_input<false, __half, false>
+                (A, A_had, nullptr, row_amax, size_m, size_k, guard_bound, grid);
+        }
+        A = A_had;
+    }
+    else if (suh)
     {
         int total_warps = size_m * size_k / 128;
         int warps_grid = gridDim.x * blockDim.x / 32;
@@ -655,7 +682,48 @@ void exl3_gemm_kernel(EXL3_GEMM_ARGS)
             grid.sync();
     }
 
-    if (svh)
+    if (guard_mode)
+    {
+        // Folded re-scale: the output Hadamard, the row's power of two and the
+        // bias are applied to the FP32 result, which is then rounded once into
+        // the final-dtype buffer (#5942).
+        int total_warps = size_m * size_n / 128;
+        int warps_grid = gridDim.x * blockDim.x / 32;
+        int this_warp = threadIdx.x / 32 + blockDim.x / 32 * blockIdx.x;
+
+        for(; this_warp < total_warps; this_warp += warps_grid)
+        {
+            float values[4];
+            const int lane = threadIdx.x & 31;
+            if (svh)
+                had_ff_r_128_values<true>
+                (
+                    ((const float*) C) + this_warp * 128,
+                    values,
+                    svh + (this_warp * 128) % size_n,
+                    0.088388347648f  // 1/sqrt(128)
+                );
+            else
+                had_ff_r_128_values<false>
+                (
+                    ((const float*) C) + this_warp * 128,
+                    values,
+                    nullptr,
+                    0.088388347648f  // 1/sqrt(128)
+                );
+
+            void* out_ptr = static_cast<char*>(guard_out) + static_cast<size_t>(this_warp * 128 + lane * 4) * 2;
+            const double amax = row_amax[(this_warp * 128) / size_n];
+            const int bias_index = (this_warp * 128) % size_n + lane * 4;
+            if (guard_mode == 3)
+                exl3_guard_store<true, true>(values, out_ptr, amax, guard_bound, guard_bias, guard_bias_mode, bias_index);
+            else if (guard_mode == 2)
+                exl3_guard_store<false, true>(values, out_ptr, amax, guard_bound, guard_bias, guard_bias_mode, bias_index);
+            else
+                exl3_guard_store<false, false>(values, out_ptr, amax, guard_bound, guard_bias, guard_bias_mode, bias_index);
+        }
+    }
+    else if (svh)
     {
         int total_warps = size_m * size_n / 128;
         int warps_grid = gridDim.x * blockDim.x / 32;

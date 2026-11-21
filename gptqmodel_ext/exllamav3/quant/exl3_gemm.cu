@@ -32,17 +32,37 @@ std::shared_mutex kernel_attr_mutex;
 int exl3_gemm(
     const at::Tensor& A, const at::Tensor& B, at::Tensor& C,
     const at::Tensor& suh, const at::Tensor& A_had, const at::Tensor& svh,
-    bool mcg, bool mul1, bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx, bool r4nx)
+    bool mcg, bool mul1, bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx, bool r4nx,
+    const Exl3Guard* guard)
 {
     const at::cuda::OptionalCUDAGuard device_guard(A.device());
 
     TORCH_CHECK_DIM(B, 3);
     TORCH_CHECK_SHAPES(A, -1, B, 0, 16);
     TORCH_CHECK_SHAPES(C, -1, B, 1, 16);
-    TORCH_CHECK_DTYPE(A, kHalf);
     TORCH_CHECK_DTYPE(B, kShort);
     const bool c_fp32 = C.dtype() == at::kFloat;
     if (!c_fp32) TORCH_CHECK_DTYPE(C, kHalf);
+    if (guard)
+    {
+        // The folded guard narrows the activation itself, so it accepts BF16
+        // input; the accumulation buffer stays FP32 for the split-K sums.
+        TORCH_CHECK(guard->mode >= 1 && guard->mode <= 3, "invalid EXL3 guard mode");
+        TORCH_CHECK(guard->mode == 1 ? A.scalar_type() == at::kHalf
+                                     : A.scalar_type() == at::kBFloat16,
+                    "EXL3 guard mode does not match the activation dtype");
+        TORCH_CHECK(c_fp32, "the EXL3 guard requires the FP32 accumulation buffer");
+        TORCH_CHECK(guard->out.scalar_type() == (guard->mode == 1 ? at::kHalf : at::kBFloat16),
+                    "EXL3 guard output dtype does not match its mode");
+        TORCH_CHECK(guard->out.is_contiguous() && guard->out.numel() == C.numel(),
+                    "EXL3 guard output must be a contiguous buffer the size of C");
+        TORCH_CHECK(guard->row_amax.scalar_type() == at::kDouble && guard->row_amax.is_contiguous(),
+                    "EXL3 guard row bound must be a contiguous float64 buffer");
+    }
+    else
+    {
+        TORCH_CHECK_DTYPE(A, kHalf);
+    }
     TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) + int(r4nx) <= 1, "conflicting EXL3 codebooks");
     TORCH_CHECK(int8_gemv >= 0 && int8_gemv <= 2, "EXL3 INT8 mode must be 0, 1 or 2");
 
@@ -104,7 +124,7 @@ int exl3_gemm(
     // Cap the per-call expanded matrix at 48 MiB and require more rows for
     // the wider projections. Keep the HGEMM result wide through normalization.
     const int64_t weight_elements = (int64_t) size_k * size_n;
-    if (q4nx && c_fp32 && cc == CC_AMPERE && !fused_gemm &&
+    if (!guard && q4nx && c_fp32 && cc == CC_AMPERE && !fused_gemm &&
         weight_elements >= 4 * 1024 * 1024 && weight_elements <= 24 * 1024 * 1024 &&
         size_m >= (weight_elements <= 12 * 1024 * 1024 ? 64 : 128))
     {
@@ -126,7 +146,9 @@ int exl3_gemm(
         }
     }
 
-    if (int8_gemv && mul1 && size_m <= (int8_gemv == 1 ? 1 : 2)
+    // The small-batch GEMVs write their own epilogue, so the folded guard
+    // leaves them to the caller's fallback path.
+    if (!guard && int8_gemv && mul1 && size_m <= (int8_gemv == 1 ? 1 : 2)
         && exl3_gemv_int8(A, B, C, suh, A_had, svh, int8_gemv, stream))
         return 91;
 
@@ -137,11 +159,19 @@ int exl3_gemm(
     half* xh = reinterpret_cast<half*>(A_had.data_ptr());
     const half* sv = reinterpret_cast<const half*>(svh.const_data_ptr());
     int* locks = nullptr;
+    double* row_amax_ptr = guard ? guard->row_amax.data_ptr<double>() : nullptr;
+    void* guard_out_ptr = guard ? guard->out.data_ptr() : nullptr;
+    const void* guard_bias_ptr = guard ? guard->bias : nullptr;
+    const int guard_mode = guard ? guard->mode : 0;
+    const int guard_bias_mode = guard ? guard->bias_mode : 0;
+    const double guard_bound = guard ? guard->bound : 0.0;
     void* args[] = {
         (void*)&A_ptr, (void*)&B_ptr, (void*)&C_ptr, (void*)&size_m, (void*)&size_k,
-        (void*)&size_n, (void*)&locks, (void*)&su, (void*)&xh, (void*)&sv
+        (void*)&size_n, (void*)&locks, (void*)&su, (void*)&xh, (void*)&sv,
+        (void*)&row_amax_ptr, (void*)&guard_out_ptr, (void*)&guard_bias_ptr,
+        (void*)&guard_mode, (void*)&guard_bias_mode, (void*)&guard_bound
     };
-    if (fp16_gemv && exl3_gemv_try_launch(args, size_m, size_k, size_n, K, half_k, cb, c_fp32, device, stream))
+    if (!guard && fp16_gemv && exl3_gemv_try_launch(args, size_m, size_k, size_n, K, half_k, cb, c_fp32, device, stream))
         return 90;
 
     const bool use_fused = fused_gemm || half_k || q4nx;

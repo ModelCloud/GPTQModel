@@ -148,6 +148,15 @@ void bc_linear_exl3_run_wrapper(
     bc_linear_exl3_run(trellis, suh, svh, K, bias, mcg, mul1, x, y);
 }
 
+int64_t bc_linear_exl3_run_guarded_wrapper(
+    torch::Tensor trellis, torch::Tensor suh, torch::Tensor svh, double K,
+    std::optional<torch::Tensor> bias, bool mcg, bool mul1, torch::Tensor x, torch::Tensor& y,
+    bool fused_gemm, bool q4nx, int64_t guard_mode, double bound)
+{
+    return bc_linear_exl3_run_guarded(trellis, suh, svh, K, bias, mcg, mul1, x, y,
+                                     fused_gemm, q4nx, guard_mode, bound);
+}
+
 int64_t bc_linear_exl3_run_configured_wrapper(
     torch::Tensor trellis, torch::Tensor suh, torch::Tensor svh, double K,
     std::optional<torch::Tensor> bias, bool mcg, bool mul1, torch::Tensor x, torch::Tensor& y,
@@ -208,6 +217,7 @@ TORCH_LIBRARY(gptqmodel_exllamav3, m)
     m.def("bc_linear_exl3_run(Tensor trellis, Tensor suh, Tensor svh, int K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y) -> ()");
     m.def("bc_linear_exl3_run_configured(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(a!) y, bool fp16_gemv, int int8_gemv, bool fused_gemm=False, bool q4nx=False, bool r4nx=False) -> int");
     m.def("bc_linear_exl3_run_hip_gemv(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y, bool q4nx=False, int int8_gemv=0) -> int");
+    m.def("bc_linear_exl3_run_guarded(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y, bool fused_gemm, bool q4nx, int guard_mode, float bound) -> int");
     m.def("bf16_prescale(Tensor x, float bound, Tensor? suh=None) -> (Tensor, Tensor)");
     m.def("bf16_rescale(Tensor result, Tensor scale, Tensor? bias, int n_cols, ScalarType? output_dtype=None) -> Tensor");
     m.def("bf16_rescale.raw(Tensor result, Tensor scale, Tensor? bias, int n_cols, ScalarType? output_dtype=None) -> Tensor");
@@ -241,6 +251,7 @@ TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m)
     m.impl("bc_linear_exl3_run", &bc_linear_exl3_run_wrapper);
     m.impl("bc_linear_exl3_run_configured", &bc_linear_exl3_run_configured_wrapper);
     m.impl("bc_linear_exl3_run_hip_gemv", &bc_linear_exl3_run_hip_gemv_wrapper);
+    m.impl("bc_linear_exl3_run_guarded", &bc_linear_exl3_run_guarded_wrapper);
     m.impl("bf16_prescale", &bf16_prescale_wrapper);
     m.impl("bf16_rescale", &bf16_rescale_wrapper<true>);
     m.impl("bf16_rescale.raw", &bf16_rescale_wrapper<false>);
