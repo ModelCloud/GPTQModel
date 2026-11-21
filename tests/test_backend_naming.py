@@ -46,6 +46,20 @@ def test_legacy_method_qualified_swordfish_names_resolve_to_shared_backend():
     assert normalize_backend("awq_swordfish", quant_method=METHOD.AWQ) == BACKEND.SWORDFISH
 
 
+def test_humming_backend_is_method_agnostic():
+    assert normalize_backend(BACKEND.HUMMING, quant_method=METHOD.GPTQ) == BACKEND.HUMMING
+    assert normalize_backend(BACKEND.HUMMING, quant_method=METHOD.AWQ) == BACKEND.HUMMING
+
+
+def test_legacy_method_qualified_humming_names_resolve_to_shared_backend():
+    assert normalize_backend("gptq_humming") == BACKEND.HUMMING
+    assert normalize_backend("awq_humming") == BACKEND.HUMMING
+    assert normalize_backend("GPTQ_HUMMING") == BACKEND.HUMMING
+    assert normalize_backend("AWQ_HUMMING") == BACKEND.HUMMING
+    assert normalize_backend("gptq_humming", quant_method=METHOD.GPTQ) == BACKEND.HUMMING
+    assert normalize_backend("awq_humming", quant_method=METHOD.AWQ) == BACKEND.HUMMING
+
+
 def test_removed_mentaray_backend_names_are_rejected():
     with pytest.raises(ValueError):
         normalize_backend("mentaray", quant_method=METHOD.GPTQ)

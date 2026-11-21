@@ -278,7 +278,7 @@ Three guarantees keep copy-based repacking numerically correct:
   finite instead of becoming infinity or zero. The kernel's `post_init()` still
   performs any ABI conversion it needs.
 * Kernels that repack their buffers into a private runtime ABI inside
-  `post_init()` (Marlin, Machete, Swordfish, BitBLAS) are valid repack targets
+  `post_init()` (Marlin, Machete, Swordfish, BitBLAS, Humming) are valid repack targets
   but are rejected as repack *sources*, because their buffers no longer hold
   the checkpoint layout. Repack from the kernel holding the checkpoint layout
   (for example a Torch kernel) instead.
