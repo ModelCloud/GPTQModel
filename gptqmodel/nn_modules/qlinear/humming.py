@@ -43,12 +43,9 @@ from ...utils.humming import (
     prepare_humming_gptq_tensors,
     prepare_humming_mxfp4_tensors,
 )
-from ...utils.logger import setup_logger
 from ...utils.marlin import replace_parameter
 from ...utils.rocm import IS_ROCM
 
-
-log = setup_logger()
 
 _HUMMING_ROCM_UNSUPPORTED = (
     "Humming (BACKEND.HUMMING) is CUDA-only: it ships NVIDIA SASS/PTX kernels "

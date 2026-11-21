@@ -31,11 +31,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from .logger import setup_logger
 from .rocm import IS_ROCM
 
-
-log = setup_logger()
 
 # Humming's dense GEMM targets SM75 (Turing) and newer; it has no HIP port.
 HUMMING_MIN_CAPABILITY: Tuple[int, int] = (7, 5)
