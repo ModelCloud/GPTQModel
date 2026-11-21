@@ -202,20 +202,26 @@ def test_batch_size_groups_equal_length_rows(tiny_model):
     assert report.batches == 1
 
 
-def test_unequal_rows_are_not_padded_into_one_batch(tiny_model):
+def test_unequal_rows_are_padded_safely_into_one_batch(tiny_model):
     model, _source = tiny_model
-    reference = _Counting(model.model)
-    candidate = _Counting(model.model)
+    reference = _perturbed(model.model)
     rows = [torch.tensor([[1, 2, 3]]), torch.tensor([[4, 5, 6, 7]])]
+    metrics = (PPLConfig(window=8, stride=4), KLDConfig(positions=2))
+    config = {"metrics": metrics, "dataset": ROWS, "reference": reference}
 
-    report = measure_models(candidate, reference, rows, MeasureConfig(
-        metrics=Metric.PPL, dataset=ROWS, reference=reference, batch_size=2,
-    ))
+    batched = measure_models(model.model, reference, rows,
+                             MeasureConfig(batch_size=2, **config))
+    separate = measure_models(model.model, reference, rows,
+                              MeasureConfig(batch_size=1, **config))
 
-    # Padding the short row would add padding tokens to the PPL sum, so the two
-    # lengths stay in separate batches.
-    assert reference.calls == 2
-    assert report.batches == 2
+    # Unequal rows now batch. Padding is inert where it must be - the padded
+    # targets are masked out of the perplexity sum, which is a pure average -
+    # and the divergence survives only as float reduction-order noise.
+    assert batched.batches == 1
+    assert separate.batches == 2
+    assert batched.positions == separate.positions
+    assert batched.values["PPL"] == pytest.approx(separate.values["PPL"], rel=1e-4)
+    assert batched.values["KLD"] == pytest.approx(separate.values["KLD"], rel=1e-2)
 
 
 def test_positions_reports_what_was_actually_sampled(tiny_model):

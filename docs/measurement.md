@@ -112,6 +112,24 @@ GradedThresholdConfig(
 - Without grades at all, `report.overall` is `None` and `report.passed` is
   `None`: "measured" never reads as "passed".
 
+## Batching and reproducibility
+
+Default `batch_size=1`, and that default is the reproducible one. In bfloat16 the
+forward is sensitive to the batch shape: the same row alone and inside a batch
+of equally long rows differs by up to 0.84 in logits, which moves KLD by about
+1% and top-k by a few points. That is kernel accumulation, not padding - the
+padded and unpadded float32 runs agree to 1.5e-4.
+
+Use `batch_size > 1` when you want the speed (4x fewer forwards in the runs
+below) and `batch_size=1` when numbers must be comparable across runs.
+
+Measured on the 0.5B pair, 4 rows of 402-512 tokens:
+
+| batch_size | forwards | KLD | TOP_K@1 |
+| --- | --- | --- | --- |
+| 1 | 4 | 0.2204 | 0.7734 |
+| 4 | 1 | 0.2184 | 0.8047 |
+
 ## What "good" looks like
 
 There is no universal budget. Measured on Qwen2.5-0.5B over out-of-distribution
@@ -138,9 +156,12 @@ kernel.
   `TOP_K {1: 1.0}` - not "close to zero". A harness that cannot do that is
   measuring drifted positions rather than models.
 - **One forward per batch** for any number of fused metrics (asserted by a
-  counting test). Rows of different lengths are never padded together - padding
-  tokens would enter the PPL sum - so `batch_size` batches only equal-length
-  rows.
+  counting test). `batch_size` batches rows of different lengths too: they are
+  padded to the widest row, and every consumer masks the padding - the attention
+  mask keeps pads out of attention, the NLL ignores padded targets, and position
+  sampling stays inside each row's real length. In float32 the padded and
+  unpadded runs agree to 1.5e-4, and adding `attention_mask` alone changes
+  nothing.
 - **`report.positions` is what was actually sampled**, not what was requested:
   a short row contributes its own two or three positions, not the configured 64.
 - **Report-only by default**: no grades, no verdict.

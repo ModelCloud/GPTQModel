@@ -112,27 +112,37 @@ def build_token_rows(
     return rows[:max_rows]
 
 
-def _batch_rows(rows: Sequence[torch.Tensor], batch_size: int) -> List[torch.Tensor]:
-    """Group rows of equal length into batches of ``batch_size``.
+@dataclass
+class _Batch:
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
 
-    Padding a short row to a long one would put padding tokens into the PPL sum
-    and change what the metrics mean, so rows of different lengths stay in
-    separate batches.
+
+def _batch_rows(
+    rows: Sequence[torch.Tensor], batch_size: int, pad_token_id: int = 0
+) -> List[_Batch]:
+    """Pad rows into batches of ``batch_size``.
+
+    Padding is unavoidable for text - windows differ in length - and it is only
+    safe because every consumer masks it: the attention mask keeps pads out of
+    attention, the NLL ignores padded targets, and position sampling stays inside
+    each row's real length. Padding tokens are therefore inert rather than
+    counted, which is the difference between batching and corrupting the metric.
     """
 
-    if batch_size <= 1:
-        return list(rows)
-    pending: Dict[int, List[torch.Tensor]] = {}
-    batches: List[torch.Tensor] = []
-    for row in rows:
-        bucket = pending.setdefault(int(row.shape[1]), [])
-        bucket.append(row)
-        if len(bucket) == batch_size:
-            batches.append(torch.cat(bucket, dim=0))
-            pending[row.shape[1]] = []
-    for bucket in pending.values():
-        if bucket:
-            batches.append(torch.cat(bucket, dim=0))
+    rows = list(rows)
+    batches: List[_Batch] = []
+    for start in range(0, len(rows), max(1, batch_size)):
+        chunk = rows[start:start + batch_size]
+        widths = [int(row.shape[1]) for row in chunk]
+        width = max(widths)
+        input_ids = torch.full((len(chunk), width), int(pad_token_id), dtype=torch.long)
+        attention_mask = torch.zeros((len(chunk), width), dtype=torch.long)
+        for index, row in enumerate(chunk):
+            length = int(row.shape[1])
+            input_ids[index, :length] = row[0, :length]
+            attention_mask[index, :length] = 1
+        batches.append(_Batch(input_ids=input_ids, attention_mask=attention_mask))
     return batches
 
 
@@ -162,32 +172,42 @@ def _logits_of(output: Any) -> torch.Tensor:
 
 def _capture(
     model: torch.nn.Module,
-    batches: Sequence[torch.Tensor],
+    batches: Sequence[_Batch],
     *,
     device: torch.device,
     needs_nll: bool,
     positions: int,
-    track_reference: bool,
 ) -> _Captures:
     """One pass over the batches, collecting what the fused metrics need."""
 
     captures = _Captures()
-    for tokens in batches:
-        tokens = tokens.to(device)
+    for batch in batches:
+        input_ids = batch.input_ids.to(device)
+        attention_mask = batch.attention_mask.to(device)
         with torch.no_grad():
-            logits = _logits_of(model(input_ids=tokens))
+            logits = _logits_of(model(input_ids=input_ids, attention_mask=attention_mask))
         if needs_nll:
-            total, count = mean_negative_log_likelihood(logits, tokens)
+            total, count = mean_negative_log_likelihood(
+                logits, input_ids, attention_mask=attention_mask
+            )
             captures.nll_sum += total
             captures.tokens += count
         if positions:
-            picked = _sample_positions(logits.shape[1], positions)
-            if picked.numel() == 0:
-                raise ValueError("measurement rows are too short to sample a prediction position")
-            captures.positions += int(picked.numel())
-            captures.logits.append(
-                logits[:, picked, :].detach().cpu().to(torch.float16)
-            )
+            lengths = attention_mask.sum(dim=1)
+            usable = int(lengths.min()) - 1
+            if usable < 1:
+                continue
+            # Per-row positions keep the sample independent of how rows were
+            # batched: every row contributes the same number of predictions at
+            # evenly spaced offsets inside its own length.
+            count = min(positions, usable)
+            index = torch.stack([
+                torch.linspace(0, int(length) - 2, count).round().long()
+                for length in lengths
+            ]).to(device)
+            picked = logits.gather(1, index.unsqueeze(-1).expand(-1, -1, logits.shape[-1]))
+            captures.positions += int(index.numel())
+            captures.logits.append(picked.detach().cpu().to(torch.float16))
     return captures
 
 
@@ -196,6 +216,8 @@ def measure_models(
     reference: torch.nn.Module,
     token_rows: Sequence[torch.Tensor],
     config: MeasureConfig,
+    *,
+    pad_token_id: Optional[int] = None,
 ) -> MeasurementReport:
     """Run every configured metric over the same token rows for both models."""
 
@@ -206,16 +228,18 @@ def measure_models(
 
     reference_device = config.device or _model_device(reference)
     candidate_device = config.device or _model_device(candidate)
-    batches = _batch_rows(list(token_rows), config.batch_size)[: max(1, config.max_batches)]
+    batches = _batch_rows(list(token_rows), config.batch_size, pad_token_id or 0)[
+        : max(1, config.max_batches)
+    ]
 
     # `fuse` plans the passes; the captures those passes must produce are the
     # union of what the members read.
     fuse(config.metrics)
     needs = frozenset().union(*[member.capture_needs for member in config.metrics])
-    positions_wanted = _DEFAULT_POSITIONS
-    for member in config.metrics:
-        if isinstance(member, KLDConfig):
-            positions_wanted = max(positions_wanted, member.positions)
+    # An explicit KLDConfig.positions wins; the default only applies when no
+    # metric asked for a width (TOP_K and RMSE read the same sample).
+    asked = [member.positions for member in config.metrics if isinstance(member, KLDConfig)]
+    positions_wanted = max(asked) if asked else _DEFAULT_POSITIONS
     if CAPTURE_SAMPLED_LOGITS not in needs:
         positions_wanted = 0
 
@@ -226,7 +250,6 @@ def measure_models(
         device=reference_device,
         needs_nll=CAPTURE_NLL in needs,
         positions=positions_wanted,
-        track_reference=True,
     )
     candidate_captures = _capture(
         candidate,
@@ -234,7 +257,6 @@ def measure_models(
         device=candidate_device,
         needs_nll=CAPTURE_NLL in needs,
         positions=positions_wanted,
-        track_reference=False,
     )
 
     values: Dict[str, Any] = {}

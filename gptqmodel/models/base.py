@@ -2687,7 +2687,13 @@ class BaseQModel(nn.Module):
             stride=stride,
             max_rows=config.max_batches * config.batch_size,
         )
-        return measure_models(self.model, reference, rows, config)
+        return measure_models(
+            self.model,
+            reference,
+            rows,
+            config,
+            pad_token_id=getattr(getattr(self, "tokenizer", None), "pad_token_id", None),
+        )
 
     def _measurement_reference(self, config: "MeasureConfig"):
         """Resolve the reference model: a module, or a checkpoint path to load."""

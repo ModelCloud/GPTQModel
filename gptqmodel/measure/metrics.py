@@ -57,6 +57,7 @@ def mean_negative_log_likelihood(
     input_ids: torch.Tensor,
     *,
     ignore_index: Optional[int] = None,
+    attention_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[float, int]:
     """``(sum of -log p(token), number of scored tokens)`` over next-token pairs.
 
@@ -73,8 +74,20 @@ def mean_negative_log_likelihood(
         gather_targets = targets.masked_fill(targets == ignore_index, 0)
     picked = log_probs.gather(-1, gather_targets.unsqueeze(-1)).squeeze(-1)
 
+    keep = torch.ones_like(picked, dtype=torch.bool)
     if ignore_index is not None:
-        picked = picked[targets != ignore_index]
+        keep &= targets != ignore_index
+    if attention_mask is not None:
+        # A padded position predicts nothing: its target is a pad id, and
+        # counting it would drag the perplexity toward whatever pad happens to
+        # look like.
+        if attention_mask.shape != input_ids.shape:
+            raise ValueError(
+                f"attention_mask {tuple(attention_mask.shape)} does not match "
+                f"input_ids {tuple(input_ids.shape)}"
+            )
+        keep &= attention_mask[:, 1:].bool()
+    picked = picked[keep]
     if picked.numel() == 0:
         return 0.0, 0
     return float(-picked.sum()), int(picked.numel())

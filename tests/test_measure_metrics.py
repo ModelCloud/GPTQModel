@@ -79,6 +79,24 @@ def test_ignore_index_drops_positions():
     assert total > 0
 
 
+def test_attention_mask_removes_padded_targets():
+    logits = _logits(sequence=4, vocab=8, seed=7)
+    ids = torch.randint(0, 8, (2, 4), generator=torch.Generator().manual_seed(8))
+    mask = torch.tensor([[1, 1, 1, 1], [1, 1, 1, 0]])
+
+    masked_total, masked_count = mean_negative_log_likelihood(logits, ids, attention_mask=mask)
+
+    # Same predictions the mask keeps, computed on the trimmed rows. A row of
+    # three real tokens makes two predictions (logit i predicts token i + 1),
+    # so the padded row contributes two, not three.
+    trimmed_total, trimmed_count = mean_negative_log_likelihood(
+        logits[1:2, :3, :], ids[1:2, :3]
+    )
+    row0_total, row0_count = mean_negative_log_likelihood(logits[0:1], ids[0:1])
+    assert masked_count == trimmed_count + row0_count == 2 + 3
+    assert masked_total == pytest.approx(row0_total + trimmed_total, rel=1e-6)
+
+
 def test_more_noise_moves_every_metric_the_same_way():
     reference = _logits(seed=3)
     small = reference + 0.05 * _logits(seed=4)
