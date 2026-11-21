@@ -458,6 +458,7 @@ from .quantization import (
     AWQConfig,
     BaseQuantizeConfig,
     CalibrationConfig,
+    CPTCConfig,
     FOEMConfig,
     GGUFConfig,
     GPTAQConfig,

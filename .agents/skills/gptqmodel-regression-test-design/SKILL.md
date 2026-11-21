@@ -20,8 +20,8 @@ to the existing test family. Exercise the risky transition and its **next
 consumer**, not just the helper or first successful call. Select the applicable
 cases below and record the evidence in the PR. For landed fixes and the tests
 to extend, see the audits from [Nov 17](references/2026-11-17-regressions.md),
-[Nov 18](references/2026-11-18-regressions.md), [Nov 19](references/2026-11-19-regressions.md)
-and [Nov 20](references/2026-11-20-regressions.md).
+[Nov 18](references/2026-11-18-regressions.md), [Nov 19](references/2026-11-19-regressions.md),
+[Nov 20](references/2026-11-20-regressions.md) and [Nov 21](references/2026-11-21-regressions.md).
 
 ## 1. Write the invariant before the patch
 
@@ -268,6 +268,24 @@ Follow the [numerical oracle skill](../gptqmodel-torch-oracle-numerics/SKILL.md)
 its tolerances, packed-code rules, and hardware requirements remain unchanged.
 Cross the **changed mechanism** with supported FP16/BF16/FP32 and dispatch paths,
 including outer autocast and inference mode when they affect it.
+
+For changes to a GPTQ-family solve, identify which variants override the
+changed stage. Run the same invariant through each applicable solver, not
+just the shared helper. For a per-channel grid, vary only a dead column and
+compare live weights, scales and zeros. For a replay-to-pack change, choose a
+code the replay dtype cannot recover and inspect the integer lane after the
+processor actually packs it; a close replay tensor is not evidence.
+
+When a memory budget is meant to change only chunk size, force the same
+unequal rows into one chunk and separate chunks. Check both the export and
+the reported objective against hand-computed oracles; two budgets can agree
+on the same wrong answer.
+
+When refactoring a dtype lock or a wide fallback, keep the input dtype fixed
+and toggle **ambient autocast**, not the module dtype. Choose a wide operand
+that overflows when narrowed but gives a finite output. Compute the reference
+outside autocast; assert the public value and dtype in both contexts. See the
+[fixtures and controls](references/2026-11-21-regressions.md).
 
 For layers supporting activation gradients, pack or load under
 `torch.inference_mode()`, leave that context and run the same layer with

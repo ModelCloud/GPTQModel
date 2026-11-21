@@ -304,6 +304,46 @@ def test_source_operands_share_only_fused_storage_and_unfuse_restores_it(method,
         torch.testing.assert_close(tensor, original[name], rtol=0, atol=0)
 
 
+def test_warm_compiled_decode_does_not_pin_source_operands_through_fusion():
+    """Fusion must not leave the pre-fusion buffers alive in a compiled graph (#5797).
+
+    ``torch.compile`` used to trace the bound ``dequantize_weight``, so dynamo
+    lifted ``qweight``/``qzeros``/``scales`` into the compiled graph.  Fusion
+    then replaced those buffers with views of the fused allocation, but the
+    cached graph still held the originals until a full ``torch._dynamo.reset()``,
+    so a fused model kept a second copy of every packed weight alive.  Compiling
+    the operand-taking decoder keeps the graph free of module attributes.
+    """
+    model, _ = _wrapper("gptq")
+    projections = [module for layer in model.model.model.layers
+                   for module in (layer.self_attn.q_proj, layer.self_attn.k_proj,
+                                  layer.self_attn.v_proj, layer.self_attn.o_proj,
+                                  layer.mlp.gate_proj, layer.mlp.up_proj, layer.mlp.down_proj)]
+    assert all(isinstance(module, TorchLinear) for module in projections)
+    # `_wrapper` packs the buffers without running `post_init`, which is where a
+    # loaded model installs the compiled decoder.
+    for module in projections:
+        module.optimize()
+    assert all(type(module.dequantize_weight).__name__ == "_CompiledDequantizeWeight"
+               for module in projections)
+    ids = torch.tensor([[1, 2, 3, 4]])
+    with torch.inference_mode():
+        baseline = model.model(ids).logits
+    # The warm forward traced the compiled decode, so its graph now caches
+    # whatever operands it was handed.
+    references = {id(module): weakref.ref(module.qweight) for module in projections}
+    plan = model.fuse()
+    fused = {id(module) for group in plan.groups for module in group.modules}
+    assert fused
+    gc.collect()
+    assert all(references[id(module)]() is None
+               for module in projections if id(module) in fused)
+    with torch.inference_mode():
+        output = model.model(ids).logits
+    torch.testing.assert_close(output, baseline, rtol=2e-3, atol=2e-3)
+    assert plan.to_dict()["fused_calls"] > 0
+
+
 @pytest.mark.parametrize("override", [{"bits": 8}, {"group_size": 32}, {"sym": True},
                                       {"desc_act": True}, {"mse": 0.2}, {"format": "gptq_v2"}])
 def test_dynamic_effective_config_must_match(override):

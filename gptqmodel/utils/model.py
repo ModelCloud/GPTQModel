@@ -4713,6 +4713,7 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             if model_dtype_buffers is None and not restore_checkpoint_buffer_dtypes:
                 continue
             prefix = f"{name}." if name else ""
+            exact_dtype_buffers = getattr(module, "CHECKPOINT_EXACT_DTYPE_BUFFERS", ())
             for buffer_name, current in module._buffers.items():
                 full_name = f"{prefix}{buffer_name}"
                 checkpoint_dtype = checkpoint_dtypes.get(full_name)
@@ -4724,7 +4725,7 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                     or buffer_name in module._non_persistent_buffers_set
                 ):
                     continue
-                if restore_checkpoint_buffer_dtypes:
+                if restore_checkpoint_buffer_dtypes or buffer_name in exact_dtype_buffers:
                     restore = current.dtype != checkpoint_dtype
                 else:
                     restore = buffer_name not in model_dtype_buffers and _load_narrowed(

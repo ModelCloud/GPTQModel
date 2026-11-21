@@ -27,7 +27,7 @@ test_cache_key="${test_cache_key//-/_}"
 extensions_dir="/tmp/gptqmodel/torch_extensions/${run_id}/${run_attempt}/${ENV_NAME}/${test_cache_key}"
 mkdir -p "$extensions_dir"
 venv="$RUNNER_TEMP/$ENV_NAME"
-uv venv --managed-python --python "$PYTHON_VERSION" "$venv"
+uv venv --clear --managed-python --python "$PYTHON_VERSION" "$venv"
 "$venv/bin/python" .github/scripts/ci_assert_free_threaded.py --python-only
 printf '%s\n' "$venv/bin" >> "$GITHUB_PATH"
 printf 'VIRTUAL_ENV=%s\n' "$venv" >> "$GITHUB_ENV"

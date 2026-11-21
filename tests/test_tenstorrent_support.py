@@ -2813,6 +2813,402 @@ def test_ttnn_zero_words_crossing_shard_boundaries(chips):
         close_mesh()
 
 
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+@pytest.mark.parametrize("chips", [1, 4])
+def test_ttnn_budget_counts_the_packed_device_tensors(chips):
+    """``model.budget()`` reports the DRAM a TTNN layer's operands own (#5810).
+
+    ``TTNNLinear`` uploads weight words, zero words, scales, g_idx and bias as
+    ``ttnn.Tensor`` objects, which Torch's registry never sees. The report must
+    add the allocator's measured per-chip bytes, keep the host checkpoint bytes,
+    and drop back to host-only after the cache is cleared.
+    """
+
+    from gptqmodel.models.base import BaseQModel, _parameter_devices
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+    from gptqmodel.utils.resource_budget import DeviceBudget
+    from gptqmodel.utils.ttnn_runtime import close_mesh, dram_allocated_bytes
+
+    layer = TTNNLinear(
+        bits=4, group_size=128, sym=True, desc_act=False,
+        in_features=768, out_features=768, bias=True,
+        format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.ttnn_device_count = chips
+    layer.qweight.zero_()
+    layer.qzeros.fill_(0x88888888 - 2**32)
+    layer.scales.fill_(0.0625)
+    layer.g_idx.copy_(torch.arange(768, dtype=torch.int32) // 128)
+    layer.bias.zero_()
+    layer.qzero_format(2)
+
+    def budget():
+        return BaseQModel.budget(types.SimpleNamespace(model=layer))
+
+    mesh = layer._mesh()
+    try:
+        host_bytes = sum(_parameter_devices(layer).values())
+        assert budget().accelerator_devices == ()
+        assert budget().weights_bytes == host_bytes
+
+        before = dram_allocated_bytes(mesh.device)
+        layer.post_init()
+        delta = dram_allocated_bytes(mesh.device) - before
+        assert delta > 0
+
+        # The budget reports chip entries in ordinal order; a mesh lists its
+        # chips in physical topology order, which need not be sorted.
+        expected_ids = (0,) if chips == 1 else tuple(sorted(mesh.device.get_device_ids()))
+        measured = budget()
+        assert measured.accelerator_devices == tuple(
+            DeviceBudget(index=index, weights_bytes=delta, backend="ttnn")
+            for index in expected_ids
+        )
+        assert measured.host_weights_bytes == host_bytes
+        # The view is per chip, so every chip contributes its own measured delta.
+        assert measured.weights_bytes == host_bytes + delta * chips
+        assert measured.weights_coverage == "measured"
+        assert "ttnn device 0" in next(
+            line for line in measured.describe() if line.startswith("Budget: weights")
+        )
+
+        with torch.inference_mode():
+            result = layer(torch.ones(1, 768, dtype=torch.bfloat16))
+        assert result.isfinite().all()
+        # A forward must not change what the weights cost.
+        assert budget().weights_bytes == host_bytes + delta * chips
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
+
+    released = budget()
+    assert released.accelerator_devices == ()
+    assert released.weights_bytes == host_bytes
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+@pytest.mark.parametrize("chips", [1, 4])
+def test_ttnn_group_indices_are_stored_row_major(chips):
+    """``g_idx`` is a lookup table, not a tile (#5854).
+
+    Tiled storage pads the single logical row of indices to 32 physical rows:
+    96 KiB for a 768-input projection instead of 24 KiB row-major. The
+    ``ttnn.embedding`` consumer accepts the row-major tensor directly, so the
+    forward must stay bit-identical while the device allocation drops by the
+    72 KiB the issue measured.
+    """
+
+    import dataclasses
+
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+    from gptqmodel.utils.ttnn_runtime import close_mesh, dram_allocated_bytes, import_ttnn
+
+    ttnn = import_ttnn()
+    layer = TTNNLinear(
+        bits=4, group_size=128, sym=True, desc_act=False,
+        in_features=768, out_features=768, bias=True,
+        format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.ttnn_device_count = chips
+    layer.qweight.fill_(0x99999999 - 2**32)
+    layer.qzeros.fill_(0x88888888 - 2**32)
+    layer.scales.fill_(0.0625)
+    layer.g_idx.copy_(torch.arange(768, dtype=torch.int32) // 128)
+    layer.bias.zero_()
+    layer.qzero_format(2)
+    try:
+        layer.post_init()
+        mesh = layer._mesh()
+        indices = layer._ttnn_layer.g_idx
+        assert indices.layout == ttnn.ROW_MAJOR_LAYOUT
+        activation = torch.randn(2, 768, dtype=torch.bfloat16)
+        with torch.inference_mode():
+            row_major = layer(activation)
+
+        # Upload the same indices tiled: the reference forward and the cost the
+        # row-major layout avoids.
+        payload = layer.g_idx.detach().to("cpu", dtype=torch.uint32).reshape(1, 1, 1, -1).contiguous()
+        before = dram_allocated_bytes(mesh.device)
+        tiled = ttnn.to_device(
+            ttnn.from_torch(payload, dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT),
+            mesh.device,
+        )
+        tiled_bytes = dram_allocated_bytes(mesh.device) - before
+        before = dram_allocated_bytes(mesh.device)
+        row = ttnn.to_device(
+            ttnn.from_torch(payload, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT),
+            mesh.device,
+        )
+        row_bytes = dram_allocated_bytes(mesh.device) - before
+        ttnn.deallocate(row)
+        assert tiled_bytes == 96 * 1024
+        assert row_bytes == 24 * 1024
+        assert tiled_bytes - row_bytes == 72 * 1024
+
+        original = layer._ttnn_layer.g_idx
+        layer._ttnn_layer = dataclasses.replace(layer._ttnn_layer, g_idx=tiled)
+        try:
+            with torch.inference_mode():
+                tiled_out = layer(activation)
+        finally:
+            ttnn.deallocate(original)
+        torch.testing.assert_close(row_major, tiled_out, rtol=0, atol=0)
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
+
+
+def test_ttnn_scale_split_is_exact_for_fp16():
+    """Every finite FP16 scale survives the two-BF16 split exactly (#5822).
+
+    ``ttnn.embedding`` only accepts BF16 tables, so a wider checkpoint scale is
+    carried as a BF16 high and a BF16 residual and recombined in FP32. FP16 has
+    eleven significand bits and BF16 eight, so the three residual bits round
+    trip without loss. The canonical checkpoint tensor must not be mutated.
+    """
+
+    from gptqmodel.nn_modules.qlinear.ttnn import _scales_fit_bf16, _split_bf16_residual
+
+    bits = torch.arange(2**16, dtype=torch.int32).numpy().astype(np.uint16).view(np.float16)
+    scales = torch.from_numpy(bits.copy())
+    finite = scales[torch.isfinite(scales)]
+    high, residual = _split_bf16_residual(finite)
+    assert high.dtype == torch.bfloat16
+    assert residual.dtype == torch.bfloat16
+    assert torch.equal(high.float() + residual.float(), finite.float())
+
+    # Values outside the BF16 grid take the wide path; grid values do not.
+    assert not _scales_fit_bf16(torch.tensor([1.00390625], dtype=torch.float16))
+    assert _scales_fit_bf16(torch.tensor([1.0, 0.5, 256.0], dtype=torch.float16))
+
+    canonical = scales.clone()
+    wide = scales[torch.isfinite(scales) & (scales != scales.to(torch.bfloat16).to(scales.dtype))]
+    _split_bf16_residual(wide)
+    # Compare bit patterns: the table includes NaN payloads, which compare false.
+    assert torch.equal(scales.view(torch.int16), canonical.view(torch.int16))
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+@pytest.mark.parametrize("chips", [1, 4])
+@pytest.mark.parametrize(
+    "scale_value, wide",
+    [
+        (1.00390625, True),  # FP16 scale that BF16 rounds to 1.0
+        (1.0, False),        # exactly representable, keeps the BF16 path
+    ],
+)
+def test_ttnn_scales_keep_the_checkpoint_value(chips, scale_value, wide):
+    """A non-BF16 checkpoint scale reaches the FP32 dot intact (#5822).
+
+    ``ttnn.embedding`` only accepts BF16 tables, so the scale is uploaded as a
+    BF16 high and a BF16 residual and recombined in FP32 before the decoded
+    weight is built. The ``1.00390625`` scale is FP16-exact but not BF16-exact:
+    rounding it to ``1.0`` at upload turned the exact ``256 - 256 = 1``
+    cancellation into ``0``. The equal-scale control must stay ``0``.
+    """
+
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+    from gptqmodel.utils.ttnn_runtime import close_mesh, import_ttnn
+
+    layer = TTNNLinear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.qweight.fill_(0x99999999 - 2**32)  # codes are 9
+    layer.qzeros.fill_(0x88888888 - 2**32)   # logical zero points are 8
+    layer.qzero_format(2)
+    layer.scales.fill_(1)
+    layer.scales[0, :64] = scale_value
+    layer.ttnn_device_count = chips
+    x = torch.zeros(2, 64, dtype=torch.bfloat16)
+    x[:, 0] = 256
+    x[0, 32] = -256
+    weights = layer.scales.double().repeat_interleave(32, dim=0)
+    expected = (x.double() @ weights).bfloat16()
+    canonical = layer.scales.clone()
+    try:
+        layer.post_init()
+        assert (layer._ttnn_layer.scale_residual is not None) is wide
+        ttnn = import_ttnn()
+        assert layer._ttnn_layer.scales.dtype == ttnn.bfloat16
+        with torch.inference_mode():
+            actual = layer(x)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        # The issue's cancellation: 1.0 in the affected columns, 0 elsewhere.
+        assert actual[0, :64].tolist() == ([1.0] if wide else [0.0]) * 64
+        assert actual[0, 64:].tolist() == [0.0] * 64
+        # Uploading the split must not rewrite the canonical checkpoint scale.
+        assert torch.equal(layer.scales, canonical)
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+@pytest.mark.parametrize("chips", [1, 4])
+@pytest.mark.parametrize(
+    "bias_value, wide",
+    [
+        (-257.0, True),   # FP16 value that BF16 rounds to -256
+        (-256.0, False),  # exactly representable in BF16
+    ],
+)
+def test_ttnn_bias_keeps_the_checkpoint_value(chips, bias_value, wide):
+    """A wider checkpoint bias is added to the FP32 accumulator (#5808).
+
+    The fused ``ttnn.linear`` bias operand is BF16, so ``-257`` would become
+    ``-256`` before the epilogue and the exact dot ``256 - 257 = -1`` would
+    come back as ``0``. A bias that does not round-trip through BF16 must take
+    the FP32 add; an exactly representable bias keeps the fused fast path.
+    """
+
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+    from gptqmodel.utils.ttnn_runtime import close_mesh, import_ttnn
+
+    layer = TTNNLinear(
+        bits=4, group_size=128, sym=True, desc_act=False,
+        in_features=256, out_features=128, bias=True,
+        format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.qweight.fill_(0x99999999 - 2**32)
+    layer.qzeros.fill_(0x88888888 - 2**32)
+    layer.scales.fill_(1.0)
+    layer.g_idx.copy_(torch.arange(256, dtype=torch.int32) // 128)
+    layer.bias = torch.full((128,), bias_value, dtype=torch.float16)
+    layer.qzero_format(2)
+    layer.ttnn_device_count = chips
+    x = torch.zeros(1, 256, dtype=torch.bfloat16)
+    x[0, 0] = 256
+    expected = (x.double() @ torch.ones(256, 128, dtype=torch.float64)
+                + layer.bias.double()).to(torch.bfloat16)
+    try:
+        layer.post_init()
+        assert layer._ttnn_layer.wide_bias is wide
+        ttnn = import_ttnn()
+        assert layer._ttnn_layer.bias.dtype == (ttnn.float32 if wide else ttnn.bfloat16)
+        with torch.inference_mode():
+            actual = layer(x)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+def test_block_float_budget_counts_the_device_weight():
+    """The ``bf8_b`` kernel's device weight is budgeted too (#5810)."""
+
+    from gptqmodel.models.base import BaseQModel, _parameter_devices
+    from gptqmodel.nn_modules.qlinear.ttnn_blockfloat import TTNNBlockFloat8Linear
+    from gptqmodel.utils.resource_budget import DeviceBudget
+    from gptqmodel.utils.ttnn_runtime import close_mesh, dram_allocated_bytes
+
+    layer = TTNNBlockFloat8Linear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.ttnn_device_count = 1
+    layer.qweight.fill_(0x99999999 - 2**32)
+    layer.qzeros.fill_(0x88888888 - 2**32)
+    layer.qzero_format(2)
+    layer.scales.fill_(1)
+
+    def budget():
+        return BaseQModel.budget(types.SimpleNamespace(model=layer))
+
+    mesh = layer._mesh()
+    try:
+        host_bytes = sum(_parameter_devices(layer).values())
+        assert budget().accelerator_devices == ()
+
+        before = dram_allocated_bytes(mesh.device)
+        layer.post_init()
+        delta = dram_allocated_bytes(mesh.device) - before
+        assert delta > 0
+
+        measured = budget()
+        assert measured.accelerator_devices == (
+            DeviceBudget(index=0, weights_bytes=delta, backend="ttnn"),
+        )
+        assert measured.weights_bytes == host_bytes + delta
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
+
+    assert budget().accelerator_devices == ()
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+def test_ttnn_budget_follows_the_layer_to_another_chip():
+    """Clearing and reopening on another chip moves the reported allocation.
+
+    A device move is a fresh upload: the old chip's entry must disappear and
+    the new chip must report the same measured storage (#5810).
+    """
+
+    from gptqmodel.models.base import BaseQModel
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+    from gptqmodel.utils.ttnn_runtime import close_mesh, ttnn_device_count
+
+    if ttnn_device_count() < 2:
+        pytest.skip("needs at least two visible Tenstorrent chips")
+
+    layer = TTNNLinear(
+        bits=4, group_size=32, sym=True, desc_act=False,
+        in_features=64, out_features=128, bias=False,
+        format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.ttnn_device_count = 1
+    layer.ttnn_device_id = 0
+    layer.qweight.zero_()
+    layer.qzeros.fill_(0x88888888 - 2**32)
+    layer.scales.fill_(0.0625)
+    layer.g_idx.copy_(torch.arange(64, dtype=torch.int32) // 32)
+    layer.qzero_format(2)
+
+    def budget():
+        return BaseQModel.budget(types.SimpleNamespace(model=layer))
+
+    try:
+        layer.post_init()
+        first = budget()
+        assert [device.index for device in first.accelerator_devices] == [0]
+        first_bytes = first.accelerator_devices[0].weights_bytes
+        assert first_bytes > 0
+
+        layer.release_device()
+        assert budget().accelerator_devices == ()
+
+        layer.ttnn_device_id = 1
+        layer.post_init()
+        second = budget()
+        assert [device.index for device in second.accelerator_devices] == [1]
+        assert second.accelerator_devices[0].weights_bytes == first_bytes
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
+
+
 def _cached_opt_gptq_checkpoint():
     """Return the cached OPT-125M GPTQ snapshot directory, or None.
 
@@ -2883,6 +3279,17 @@ def test_ttnn_load_places_the_model_on_the_requested_chip(device, ordinal):
             ).logits
         assert tuple(logits.shape) == (1, 4, 50272)
         assert torch.isfinite(logits).all()
+
+        # The loaded model's native device weights are part of its budget: the
+        # host staging copy stays reported, and the chips add their own bytes
+        # (#5810).
+        budget = model.budget()
+        device_bytes = sum(device.weights_bytes for device in budget.accelerator_devices)
+        assert device_bytes > 0, "the native TTNN device weights were not reported"
+        assert {device.backend for device in budget.accelerator_devices} == {"ttnn"}
+        assert {device.index for device in budget.accelerator_devices} == {ordinal}
+        assert budget.weights_bytes == budget.host_weights_bytes + device_bytes
+        assert budget.weights_coverage == "measured"
     finally:
         if model is not None:
             model.release_device()

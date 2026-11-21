@@ -30,16 +30,56 @@ from .kv_cache import KVCacheEstimate, human_bytes
 MEASURED = "measured"
 DECLARED = "declared"
 ESTIMATED = "estimated"
+PARTIAL = "partial"
+
+
+@dataclass(frozen=True)
+class DeviceAllocation:
+    """Weight storage one backend device holds outside Torch's registry.
+
+    ``backend`` names the runtime that owns the bytes (``ttnn``), and ``index``
+    is that backend's own device ordinal. Keeping the backend explicit is what
+    stops a TTNN chip ``1`` from being read as CUDA device ``1`` or as the host
+    (``-1``).
+    """
+
+    backend: str
+    index: int
+    weights_bytes: int
+
+
+class RuntimeAllocationUnavailable(RuntimeError):
+    """A backend holds weight storage but cannot report its size.
+
+    Raised by ``iter_runtime_device_allocations`` when the runtime cannot
+    enumerate its device tensors. The budget records the backend as unmeasured
+    instead of reporting those bytes as zero (#5810).
+    """
+
+    def __init__(self, backend: str):
+        super().__init__(f"{backend} device allocations cannot be measured")
+        self.backend = backend
 
 
 @dataclass(frozen=True)
 class DeviceBudget:
-    """One device's measured numbers."""
+    """One device's measured numbers.
+
+    ``backend`` keeps device identity explicit: ``cuda`` and ``host`` are
+    Torch's, while a native runtime such as ``ttnn`` reports its own chip
+    ordinals in ``index``. An empty ``backend`` is inferred from ``index`` so
+    existing CUDA and host call sites keep their meaning.
+    """
 
     index: int
     free_bytes: Optional[int] = None
     total_bytes: Optional[int] = None
     weights_bytes: int = 0
+    backend: str = ""
+
+    def __post_init__(self):
+        if not self.backend:
+            object.__setattr__(self, "backend", "host" if self.index < 0 else "cuda")
 
     def kv_budget_bytes(self, reserve_fraction: float) -> Optional[int]:
         """(measured) Free memory on this device minus the reserve."""
@@ -82,11 +122,16 @@ class ResourceBudget:
     kv_cache: Optional[KVCacheEstimate] = None
     layer_devices: Optional[Tuple[int, ...]] = None
     reserve_fraction: float = 0.1
+    #: Backends that own resident weight storage this report could not measure
+    #: (a native runtime whose allocator cannot be enumerated). ``weights_bytes``
+    #: is then a lower bound, never the whole weight.
+    unmeasured_backends: Tuple[str, ...] = ()
 
     #: Provenance of each accessor, so a caller can tell measured from estimated
     #: without reading the implementation.
     ACCURACY = {
         "devices": MEASURED,
+        "accelerator_devices": MEASURED,
         "weights_bytes": MEASURED,
         "kv_budget_bytes": MEASURED,
         "context_limit": DECLARED,
@@ -100,9 +145,20 @@ class ResourceBudget:
 
     @property
     def weights_bytes(self) -> int:
-        """(measured) Storage of the model's parameters and buffers, all devices."""
+        """(measured) Resident weight storage on every device.
+
+        Registered parameters and buffers plus whatever a native backend
+        reports from its own allocator (TTNN device tensors, #5810). A lower
+        bound when :attr:`unmeasured_backends` is non-empty.
+        """
 
         return sum(device.weights_bytes for device in self.devices)
+
+    @property
+    def weights_coverage(self) -> str:
+        """``measured`` when every resident weight is counted, else ``partial``."""
+
+        return MEASURED if not self.unmeasured_backends else PARTIAL
 
     @property
     def device_count(self) -> int:
@@ -112,13 +168,25 @@ class ResourceBudget:
     def cuda_devices(self) -> Tuple[DeviceBudget, ...]:
         """Devices with real CUDA memory; index ``-1`` is host memory."""
 
-        return tuple(device for device in self.devices if device.index >= 0)
+        return tuple(
+            device for device in self.devices
+            if device.backend == "cuda" and device.index >= 0
+        )
+
+    @property
+    def accelerator_devices(self) -> Tuple[DeviceBudget, ...]:
+        """Devices owned by a native backend, separate from CUDA and host."""
+
+        return tuple(
+            device for device in self.devices
+            if device.backend not in ("cuda", "host")
+        )
 
     @property
     def host_weights_bytes(self) -> int:
         """(measured) Weight bytes held in host memory rather than VRAM."""
 
-        return sum(device.weights_bytes for device in self.devices if device.index < 0)
+        return sum(device.weights_bytes for device in self.devices if device.backend == "host")
 
     @property
     def is_sharded(self) -> bool:
@@ -385,7 +453,13 @@ class ResourceBudget:
     def describe(self, contexts: Sequence[int] = (8192, 32768)) -> Tuple[str, ...]:
         """Log lines with every number's kind spelled out."""
 
-        weights = f"Budget: weights {human_bytes(self.weights_bytes)} (measured)"
+        if self.unmeasured_backends:
+            coverage = "measured, partial: " + ", ".join(
+                f"{backend} allocations unmeasured" for backend in self.unmeasured_backends
+            )
+        else:
+            coverage = "measured"
+        weights = f"Budget: weights {human_bytes(self.weights_bytes)} ({coverage})"
         if self.devices:
             parts = []
             for device in self.cuda_devices:
@@ -395,6 +469,11 @@ class ResourceBudget:
                 parts.append(
                     f"device {device.index} free {human_bytes(device.free_bytes)}"
                     f" of {human_bytes(device.total_bytes)}"
+                )
+            for device in self.accelerator_devices:
+                parts.append(
+                    f"{device.backend} device {device.index}"
+                    f" {human_bytes(device.weights_bytes)}"
                 )
             if parts:
                 weights += ", " + ", ".join(parts) + " (measured)"

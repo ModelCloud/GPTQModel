@@ -165,9 +165,9 @@ int64_t bc_linear_exl3_run_hip_gemv_wrapper(
     return bc_linear_exl3_run_hip_gemv(trellis, suh, svh, K, bias_tensor, mcg, mul1, x, y, q4nx, int8_gemv);
 }
 
-std::tuple<torch::Tensor, torch::Tensor> bf16_prescale_wrapper(torch::Tensor x, double bound)
+std::tuple<torch::Tensor, torch::Tensor> bf16_prescale_wrapper(torch::Tensor x, double bound, std::optional<torch::Tensor> suh)
 {
-    return bf16_prescale(x, bound);
+    return bf16_prescale(x, bound, suh);
 }
 
 template <bool result_has_bias>
@@ -175,10 +175,11 @@ torch::Tensor bf16_rescale_wrapper(
     torch::Tensor result,
     torch::Tensor scale,
     std::optional<torch::Tensor> bias_opt,
-    int64_t n_cols)
+    int64_t n_cols,
+    std::optional<at::ScalarType> output_dtype)
 {
     const std::optional<at::Tensor> bias = bias_opt.has_value() ? std::optional<at::Tensor>(bias_opt.value()) : std::nullopt;
-    return bf16_rescale(result, scale, bias, n_cols, result_has_bias);
+    return bf16_rescale(result, scale, bias, n_cols, result_has_bias, output_dtype.value_or(at::kBFloat16));
 }
 
 }  // namespace
@@ -207,9 +208,9 @@ TORCH_LIBRARY(gptqmodel_exllamav3, m)
     m.def("bc_linear_exl3_run(Tensor trellis, Tensor suh, Tensor svh, int K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y) -> ()");
     m.def("bc_linear_exl3_run_configured(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(a!) y, bool fp16_gemv, int int8_gemv, bool fused_gemm=False, bool q4nx=False, bool r4nx=False) -> int");
     m.def("bc_linear_exl3_run_hip_gemv(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y, bool q4nx=False, int int8_gemv=0) -> int");
-    m.def("bf16_prescale(Tensor x, float bound) -> (Tensor, Tensor)");
-    m.def("bf16_rescale(Tensor result, Tensor scale, Tensor? bias, int n_cols) -> Tensor");
-    m.def("bf16_rescale.raw(Tensor result, Tensor scale, Tensor? bias, int n_cols) -> Tensor");
+    m.def("bf16_prescale(Tensor x, float bound, Tensor? suh=None) -> (Tensor, Tensor)");
+    m.def("bf16_rescale(Tensor result, Tensor scale, Tensor? bias, int n_cols, ScalarType? output_dtype=None) -> Tensor");
+    m.def("bf16_rescale.raw(Tensor result, Tensor scale, Tensor? bias, int n_cols, ScalarType? output_dtype=None) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CPU, m)

@@ -785,6 +785,19 @@ class BaseQuantLinear(ForwardDtypeLockMixin, nn.Module):
 
         return ()
 
+    def iter_runtime_device_allocations(self):
+        """Yield accelerator weight storage kept outside Torch's registry.
+
+        A native runtime can hold packed weights in its own allocator: TTNN
+        keeps them as device tensors on the mesh, where neither ``parameters()``
+        nor ``iter_runtime_weight_tensors`` can see them (#5810). Each entry is
+        a :class:`~gptqmodel.utils.resource_budget.DeviceAllocation` naming its
+        backend and that backend's device ordinal. Backends that own such
+        storage override this; the default owns nothing extra.
+        """
+
+        return ()
+
     def materialize_checkpoint_layout_for_export(self) -> bool:
         """Restore checkpoint buffers a derived cache replaced; True if restored.
 
@@ -2466,12 +2479,13 @@ class PackableQuantLinear(GPTQQuantLinear):
         for name, tensor in buffers.items():
             self.register_buffer(name, tensor, persistent=False)
 
-    def _init_wf_unsqueeze_buffers(self):
+    def _init_wf_unsqueeze_buffers(self, force: bool = False):
         if not self.enable_wf_unsqueeze:
             return
 
         if (
-            getattr(self, "wf_unsqueeze_zero", None) is not None
+            not force
+            and getattr(self, "wf_unsqueeze_zero", None) is not None
             and getattr(self, "wf_unsqueeze_neg_one", None) is not None
         ):
             return
@@ -2482,6 +2496,14 @@ class PackableQuantLinear(GPTQQuantLinear):
             return
 
         device = self._wf_device()
+
+        if device.type == "meta":
+            # A disk offload replaces the packed leaves with meta placeholders
+            # (#5788). Keep the live tables (or leave them absent) until the
+            # operands are materialized; rebuilding them here would put the
+            # derived metadata on meta, where accelerate's detach hook cannot
+            # restore it.
+            return
 
         if self.bits in [2, 4, 8]:
             wf = t.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=t.int32).unsqueeze(0).to(
@@ -2537,7 +2559,11 @@ class PackableQuantLinear(GPTQQuantLinear):
         return result
 
     def post_init(self, **kwargs):
-        self._init_wf_unsqueeze_buffers()
+        # The shift tables are derived metadata, not checkpoint state.
+        # Transformers can materialize their non-persistent slots with
+        # `empty_like` before this runs, so rebuild them from the assigned
+        # operands instead of trusting an existing value (issue #5843).
+        self._init_wf_unsqueeze_buffers(force=True)
         super().post_init(**kwargs)
 
     def list_buffers(self):

@@ -519,6 +519,7 @@ def _is_supported_quantization_config(config: PreTrainedConfig) -> bool:
         METHOD.VPTQ,
         METHOD.MACAQ,
         METHOD.NF12,
+        METHOD.CPTC,
         METHOD.EXL3,
         METHOD.TT_BLOCKFLOAT,
     ):
@@ -536,6 +537,7 @@ def _is_supported_quantization_config(config: PreTrainedConfig) -> bool:
         METHOD.VPTQ,
         METHOD.MACAQ,
         METHOD.NF12,
+        METHOD.CPTC,
         METHOD.EXL3,
         METHOD.TT_BLOCKFLOAT,
     ):

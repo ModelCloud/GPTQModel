@@ -99,6 +99,13 @@ _EXTENSION_SPECS = (
         ),
     ),
     _ExtensionSpec(
+        name="cptc",
+        aliases=(),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.cptc", "_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.cptc", "host_supported")(),
+        unsupported_error=lambda: "CPTC native kernels require CUDA SM80+ or ROCm gfx1200/gfx1201.",
+    ),
+    _ExtensionSpec(
         name="vptq",
         aliases=("vptq_cuda",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.vptq_cuda", "_VPTQ_TORCH_OPS_EXTENSION"),

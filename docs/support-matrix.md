@@ -15,6 +15,7 @@ reference inventories, not a promise that every combination works on every devic
 | GGUF                      | ✅          | x | x | x | x             |
 | FP8                       | ✅          | x | x | x | x             |
 | Exllama V3 / EXL3         | ✅          | x | x | x | x             |
+| [CPTC](cptc.md)            | ✅          | x | x | x | x |
 | EoRA                      | ✅          | ✅ | ✅ | ✅ | x             |
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
 | QQQ                       | ✅          | x | x | x | x             |
@@ -76,6 +77,7 @@ which can mix precisions inside a merged module.
 | `METHOD.VPTQ` | `FORMAT.VPTQ` | `BACKEND.VPTQ_CUDA`, `BACKEND.VPTQ_TORCH` |
 | `METHOD.MACAQ` | `FORMAT.MXFP4_MACAQ` | `BACKEND.MACAQ_TRITON`, `BACKEND.MACAQ_TORCH` |
 | `METHOD.NF12` (`nf12`) | `FORMAT.NF12` (`nf12`) | `BACKEND.NF12` (`nf12`) |
+| `METHOD.CPTC` (`cptc`) | `FORMAT.CPTC` (`cptc`) | `BACKEND.CPTC` (`cptc`) with SM80+ CUDA, gfx1200/gfx1201 ROCm, and Torch fallback |
 | `METHOD.GGUF` | `FORMAT.GGUF` | `BACKEND.GGUF_TRITON`, `BACKEND.GGUF_CPP_CUDA`, `BACKEND.GGUF_CPP_CPU`, `BACKEND.GGUF_TORCH` |
 | `METHOD.FP8` | `FORMAT.FP8` | `BACKEND.FP8_TORCH` |
 | `METHOD.BITSANDBYTES` | `FORMAT.BITSANDBYTES` | `BACKEND.BITSANDBYTES` |

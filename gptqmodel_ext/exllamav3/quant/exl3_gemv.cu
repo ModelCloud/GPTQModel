@@ -98,16 +98,6 @@ bool exl3_gemv_try_launch
 
     int cc = DevCtx::instance().get_cc(device);
 
-    // #5787: the FP16 GEMV returns wrong results on Blackwell (sm_120). The main loop is correct
-    // (its pre-epilogue partial is within 3.0-3.6e-4 of the block-pipelined kernel's on an RTX
-    // 5090), but the output Hadamard epilogue, which runs after the second grid.sync() and reads
-    // the C tiles other blocks wrote, produces whole 128-column tiles that do not match: 0.16-0.82
-    // relative over m 1..8 x k 2048..8192 x n 2048..16384 x 2/3/4 bpw, deterministic per input and
-    // racy at m = 8. The packed kernel is <= 3.3e-4 on every cell. Decline the path until the
-    // cooperative stage is fixed. CC_BLACKWELL and CC_HOPPER share the enum value, so this also
-    // declines Hopper, which the FP16 GEMV was never measured on either.
-    if (cc == CC_BLACKWELL) return false;
-
     // Q4NX small-batch decode measured on the RTX 4090 (sm_89, 128 SMs, m 1..8 x k 2048..8192 x
     // n 2048..16384 x 2.5 / 3.0 / 3.5 bpw, tests/benchmark_exl3_q4nx_gemv_ada.py): the GEMV is
     // 1.03-1.72x the block-pipelined kernel cold and 1.00-1.72x warm (geomean 1.19x / 1.30x), so
@@ -210,6 +200,28 @@ bool exl3_gemv_try_launch
         return false;
     }
     C10_CUDA_CHECK(status);
+
+    // The cooperative kernel writes one C tile per group; a 128-column output
+    // tile spans groups written by different blocks. Run the Hadamard epilogue
+    // as the next launch in the same stream so it observes those stores without
+    // a device-scope barrier (#5873).
+    void* C_ptr = *(void**) kernel_args[2];
+    const half* svh_ptr = *(const half**) kernel_args[9];
+    const int total_warps = size_m * size_n / 128;
+    const int epilogue_threads = 256;
+    const int epilogue_blocks = MIN(CEIL_DIVIDE(total_warps, epilogue_threads / 32), 65535);
+    if (c_fp32)
+    {
+        if (q4nx)
+            exl3_gemv_epilogue_kernel<true, true><<<epilogue_blocks, epilogue_threads, 0, stream>>>(C_ptr, size_m, size_n, svh_ptr);
+        else
+            exl3_gemv_epilogue_kernel<true, false><<<epilogue_blocks, epilogue_threads, 0, stream>>>(C_ptr, size_m, size_n, svh_ptr);
+    }
+    else
+    {
+        exl3_gemv_epilogue_kernel<false, false><<<epilogue_blocks, epilogue_threads, 0, stream>>>(C_ptr, size_m, size_n, svh_ptr);
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return true;
 }
 #else  // __HIP_PLATFORM_AMD__ || USE_ROCM

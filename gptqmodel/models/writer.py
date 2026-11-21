@@ -964,6 +964,36 @@ def _cleanup_saved_weight_files(
 
 
 
+def _cleanup_stale_legacy_weight_files(
+    save_dir: str,
+    *,
+    bits: Optional[int],
+    group_size: Optional[int],
+) -> None:
+    """Remove the legacy ``gptq_model-*bit-*g`` export this config resolves to.
+
+    The writer always emits the canonical ``model`` base name, so a leftover
+    AutoGPTQ name in the same directory would shadow the new checkpoint on the
+    next load (issue #5723). Only the exact legacy name this config resolves to
+    is removed; exports for other bit/group layouts keep their files.
+    """
+    if bits is None or group_size is None:
+        return
+    legacy_base = f"gptq_model-{bits}bit-{group_size}g"
+    legacy_single = legacy_base + ".safetensors"
+    legacy_index = legacy_single + ".index.json"
+    shard_pattern = pcre.compile(
+        rf"{pcre.escape(legacy_base)}-\d{{5}}-of-\d{{5}}\.safetensors"
+    )
+
+    for filename in os.listdir(save_dir):
+        full_filename = join(save_dir, filename)
+        if not isfile(full_filename):
+            continue
+        if filename in (legacy_single, legacy_index) or shard_pattern.fullmatch(filename):
+            os.remove(full_filename)
+
+
 def _read_safetensors_weight_map(model_local_path: str) -> Optional[Dict[str, str]]:
     index_path = join(model_local_path, "model.safetensors.index.json")
     if not os.path.exists(index_path):
@@ -2621,6 +2651,14 @@ def ModelWriter(cls):
         max_shard_size_bytes = _parse_max_shard_size(max_shard_size)
         metadata_dict = _normalize_metadata(safetensors_metadata)
         metadata_dict["format"] = "pt"
+        if quant_method == METHOD.CPTC:
+            metadata_dict.update(
+                quant_method=METHOD.CPTC.value,
+                cptc_bits=str(quantize_config.bits),
+                cptc_depth=str(quantize_config.trellis_depth),
+                cptc_table_q=str(quantize_config.table_q),
+                cptc_block_size=str(quantize_config.block_size),
+            )
         split_by_mode = _parse_split_by(split_by)
 
         if split_by_mode == "layer":
@@ -2666,6 +2704,14 @@ def ModelWriter(cls):
             index_save_path = join(save_dir, model_save_name + ".index.json")
             if os.path.exists(index_save_path):
                 os.remove(index_save_path)
+
+        # A stale legacy export in the output directory would shadow the
+        # canonical files written above on the next load.
+        _cleanup_stale_legacy_weight_files(
+            save_dir,
+            bits=getattr(self.quantize_config, "bits", None),
+            group_size=getattr(self.quantize_config, "group_size", None),
+        )
 
         state_dict.clear()
 

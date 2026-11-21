@@ -34,7 +34,7 @@ from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCovera
 from ..looper.module_preprocessor import ModulePreProcessor
 from ..looper.named_module import NamedModule
 from ..looper.run_exit_recovery import RunExitRecovery
-from ..looper.weight_only_processor import WeightOnlyProcessor
+from ..looper.weight_only_processor import WeightOnlyProcessor, WeightOnlyProcessorConfig
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
 from ..models.module_plan import _model_module_plan
@@ -42,12 +42,14 @@ from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..quantization.config import (
     BitsAndBytesConfig,
     CalibrationConfig,
+    CPTCConfig,
     GGUFConfig,
     NF12Config,
     QuantizeEmbed,
     QuantizeEmbedConfig,
     RTNConfig,
     VramStrategy,
+    encoder_stages_on_host,
 )
 from ..utils import has_gil_disabled
 from ..utils.device import get_device
@@ -436,6 +438,18 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
             )
             return device
 
+    def _encoder_stages_on_host(self) -> bool:
+        """Report whether this run's encoder consumes a host-resident source.
+
+        GGUF and BitsAndBytes encode on the host and NF12 stages an eligible
+        host source itself, so staging their dense layer on the accelerator is
+        a wasted round trip of the whole tensor (#5757). The assigned device
+        still selects the backend and owns the packed checkpoint handoff.
+        """
+
+        qcfg = getattr(self.processor, "qcfg", None)
+        return bool(qcfg is not None and encoder_stages_on_host(qcfg))
+
     def _prepare_named_module_for_quantization(self, named: NamedModule, target_device: torch.device) -> None:
         """Move a weight-only module to the assigned quantization device."""
 
@@ -443,12 +457,14 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
             previous_device = get_device(named.module)
         except Exception:
             previous_device = None
+        host_encoder = self._encoder_stages_on_host()
         with device_ctx(target_device):
-            move_module_to_device(
-                named.module,
-                target_device,
-                root_module=getattr(self.gptq_model, "model", None),
-            )
+            if not host_encoder:
+                move_module_to_device(
+                    named.module,
+                    target_device,
+                    root_module=getattr(self.gptq_model, "model", None),
+                )
             # Keep the quantization device for the final pack step.
             named.state["quant_device"] = target_device
             named.target_device = target_device
@@ -458,6 +474,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
             module=getattr(named, "full_name", named.name),
             previous_device=previous_device,
             target_device=target_device,
+            host_encoder=host_encoder,
         )
 
     def _move_named_module_to_cpu(self, named: NamedModule) -> None:
@@ -504,7 +521,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
         target_device: torch.device,
     ) -> Tuple[
         NamedModule,
-        Optional[RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config],
+        Optional[WeightOnlyProcessorConfig],
     ]:
         """Run one module's weight-only quantization on its assigned device."""
 
@@ -518,7 +535,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
     def _finalize_quantized_module(
         self,
         named: NamedModule,
-        active_qcfg: RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
+        active_qcfg: WeightOnlyProcessorConfig,
     ) -> str:
         """Move a quantized module back to CPU, pack it, and optionally offload it."""
 
@@ -568,7 +585,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
 
     def _finalize_target_device(
         self,
-        active_qcfg: RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
+        active_qcfg: WeightOnlyProcessorConfig,
     ) -> torch.device:
         """Resolve the worker device for one finalize task."""
 
@@ -582,7 +599,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
         quantized_modules: List[
             Tuple[
                 NamedModule,
-                RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
+                WeightOnlyProcessorConfig,
             ]
         ],
     ) -> None:
@@ -686,7 +703,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
     ) -> List[
         Tuple[
             NamedModule,
-            RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
+            WeightOnlyProcessorConfig,
         ]
     ]:
         """Quantize one subset, using multiple devices when available."""
@@ -695,7 +712,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
             str,
             Tuple[
                 NamedModule,
-                RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
+                WeightOnlyProcessorConfig,
             ],
         ] = {}
         task_specs = [
@@ -1085,11 +1102,11 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
         quant_config = self.gptq_model.quantize_config
         if not isinstance(
             quant_config,
-            (RTNConfig, GGUFConfig, BitsAndBytesConfig, NF12Config),
+            (RTNConfig, GGUFConfig, BitsAndBytesConfig, NF12Config, CPTCConfig),
         ):
             raise NotImplementedError(
                 "Weight-only looper only supports `RTNConfig`, `GGUFConfig`, "
-                "`BitsAndBytesConfig`, and `NF12Config` today."
+                "`BitsAndBytesConfig`, `NF12Config`, and `CPTCConfig`."
             )
 
         embedding_targets = self._embedding_quant_targets()

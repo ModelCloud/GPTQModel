@@ -304,6 +304,16 @@ def _ggml_quantization_type():
     return GGMLQuantizationType
 
 
+def _quantized_checkpoint_basenames(qcfg) -> List[str]:
+    """Checkpoint base names to probe, in resolution order.
+
+    ``save_quantized`` always writes the canonical ``model`` base name. The
+    legacy AutoGPTQ name is only a fallback: probing it first silently loaded a
+    stale export when a directory held both files (issue #5723).
+    """
+    return ["model", f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g"]
+
+
 ATTN_IMPLEMENTATION = "attn_implementation"
 
 _EXTERNAL_BACKEND_FORMATS = {
@@ -3680,10 +3690,7 @@ def ModelLoader(cls):
             if format_code == FORMAT.EXL3:
                 possible_model_basenames = ["model"]
             else:
-                possible_model_basenames = [
-                    f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g",
-                    "model",
-                ]
+                possible_model_basenames = _quantized_checkpoint_basenames(qcfg)
 
             extensions = [".safetensors"]
 

@@ -82,6 +82,7 @@ class BACKEND(str, Enum):
 
     # NF12 (NyoomFloat12) lossless 12-bit BF16 weights
     NF12 = "nf12"
+    CPTC = "cptc"
 
     # MACaQ MXFP4 kernels
     MACAQ_TORCH = "macaq_torch"
@@ -175,6 +176,9 @@ _LEGACY_BACKEND_BY_METHOD = {
     },
     "nf12": {
         BACKEND.TORCH: BACKEND.NF12,
+    },
+    "cptc": {
+        BACKEND.TORCH: BACKEND.CPTC,
     },
     "macaq": {
         BACKEND.TORCH: BACKEND.MACAQ_TORCH,

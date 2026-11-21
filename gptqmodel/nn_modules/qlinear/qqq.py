@@ -169,7 +169,8 @@ def _unpack_uint4(packed: torch.Tensor) -> torch.Tensor:
 
 
 def mul(
-    A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16
+    A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16,
+    bias=None,
 ):
     """INT8xINT4 multiply based on Marlin kernel; can be used within `torch.compile`.
     @A: `torch.int8` input matrix of shape `(m, k)` in standard row-major layout
@@ -184,10 +185,13 @@ def mul(
     @thread_n: `n` size of a thread_tile in `B` (can usually be left as auto -1)
     @sms: number of SMs to use for the kernel (can usually be left as auto -1)
     @max_par: maximum number of batch 64 problems to solve in parallel for large input sizes
+    @bias: optional `torch.float32` per-column bias of shape `(n,)`. The kernel adds it to the
+        complete FP32 reduction before the single FP16 output cast, so a pre-bias partial sum
+        above 65504 no longer becomes `inf` and the result is not rounded twice (#5725).
     """
     if not qqq_runtime_available():
         raise ModuleNotFoundError("QQQ torch.ops kernels are not properly installed. Error: " + qqq_runtime_error())
-    qqq_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par)
+    qqq_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par, bias)
 
 
 class QQQLinear(GroupedQuantLinear):
@@ -700,6 +704,26 @@ class QQQLinear(GroupedQuantLinear):
         # separate FP16-narrowed grid.
         return qqq_activation_quantize(x)
 
+    def _kernel_bias(self, device) -> Optional[torch.Tensor]:
+        """Return the FP32, output-column-ordered bias operand for this call.
+
+        The kernel adds the bias to the complete FP32 reduction, so the launch
+        operand must be FP32: narrowing a finite bias the activation dtype
+        cannot hold would change the result before the cancellation (#5725).
+        ``self.bias`` keeps the checkpoint width and order; the converted copy
+        lives only for this call.
+        """
+        bias = self.bias
+        if bias is None:
+            return None
+        if bias.device != device:
+            bias = bias.to(device=device)
+        if bias.dtype != torch.float32:
+            bias = bias.to(dtype=torch.float32)
+        if bias.dim() != 1:
+            bias = bias.reshape(-1)
+        return bias if bias.is_contiguous() else bias.contiguous()
+
     def _split_k_locks(self, device) -> torch.Tensor:
         """A fresh zeroed split-K lock array for one forward call.
 
@@ -743,15 +767,11 @@ class QQQLinear(GroupedQuantLinear):
             self.s_group, # s3
             self._split_k_locks(A.device),
             max_par=self.max_par,
+            bias=self._kernel_bias(A.device),
         )
 
         # TODO: check if we should reshape at end
         D = D.reshape(out_shape)
-
-        if self.bias is not None:
-            # The kernel output is FP16; add the stored bias in FP32 so the
-            # visible cast is the only rounding after the reduction.
-            D = (D.float() + self.bias.float()).to(dtype=A_dtype)
 
         if self.adapter:
             D = self.adapter.apply(x=A, out=D)

@@ -243,3 +243,94 @@ def test_integer_packed_width_cannot_be_used_as_fractional(native):
     y = torch.empty((1, n), dtype=torch.float32, device=x.device)
     with pytest.raises(RuntimeError, match="K does not match packed trellis width"):
         native(*weights, 2.5, None, False, True, x, y, True, 0)
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("rows", (1, 33))
+@pytest.mark.parametrize("with_bias", (False, True))
+@torch.inference_mode()
+def test_native_input_hadamard_range(native, dtype, rows, with_bias):
+    """Finite projections must survive an overflowing input rotation (#5838)."""
+    k, n = 512, 256
+    tensors = {
+        "trellis": torch.zeros((k // 16, n // 16, 64), dtype=torch.int16, device="cuda"),
+        "suh": torch.ones(k, dtype=torch.float16, device="cuda"),
+        "svh": torch.full((n,), 2**-10, dtype=torch.float16, device="cuda"),
+        "mcg": torch.tensor(0xCBAC1FED - 2**32, dtype=torch.int32, device="cuda"),
+    }
+    if with_bias:
+        tensors["bias"] = torch.linspace(-0.1, 0.1, n, device="cuda", dtype=torch.float32)
+    layer = ExllamaV3Linear.from_tensors(
+        in_features=k, out_features=n, name="input_range", tensors=tensors,
+    ).eval()
+    original = {name: value.clone() for name, value in layer.named_buffers()}
+
+    # Exercise warm forwards and live checkpoint-scale changes as well as the
+    # cold path. Small rows next to the large row must not inherit its scale.
+    for value, sign_scale in ((6000., 1.), (4096., 2.), (-4096., -2.), (1., 1.)):
+        layer.suh.fill_(sign_scale)
+        x = torch.full((rows, k), 0.5, dtype=dtype, device="cuda")
+        x[0] = value
+        # All-zero MCG states independently decode to 2 * FP16(0x3b60).
+        # The two normalized 128-point Hadamards leave only the DC entries.
+        expected = torch.zeros((rows, n), dtype=torch.float64, device="cuda")
+        expected[:, ::128] = x[:, :1].double() * (4 * 128 * 1.84375 * sign_scale * 2**-10)
+        if with_bias:
+            expected += tensors["bias"].double()
+        actual = layer(x)
+        assert actual.dtype == dtype
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(actual, expected.to(dtype), rtol=2e-3, atol=2e-3)
+        assert layer._torch_inner is None, "the regression must exercise native EXL3"
+
+    # A warmed forward must not read the activation-dependent bound on the
+    # host. Capture and replay must recompute it when the input changes.
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            layer(x)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        replay_output = layer(x)
+    for value in (6000., -4096.):
+        x[0].fill_(value)
+        graph.replay()
+        expected.zero_()
+        expected[:, ::128] = x[:, :1].double() * (4 * 128 * 1.84375 * 2**-10)
+        if with_bias:
+            expected += tensors["bias"].double()
+        torch.testing.assert_close(replay_output, expected.to(dtype), rtol=2e-3, atol=2e-3)
+
+    for name, saved in original.items():
+        torch.testing.assert_close(getattr(layer, name), saved, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("cancel", (False, True))
+@torch.inference_mode()
+def test_bf16_checkpoint_product_exceeds_fp32(native, cancel):
+    """A finite x*suh must not overflow the range check itself after warmup."""
+    layer = ExllamaV3Linear.from_tensors(in_features=512, out_features=256, name="wide_range", tensors={
+        "trellis": torch.zeros((32, 16, 64), device="cuda", dtype=torch.int16),
+        "suh": torch.full((512,), 65504., device="cuda", dtype=torch.float16),
+        "svh": torch.full((256,), 2**-24, device="cuda", dtype=torch.float16),
+        "mcg": torch.tensor(0xCBAC1FED - 2**32, device="cuda", dtype=torch.int32),
+    }).eval()
+    x = torch.ones((1, 512), device="cuda", dtype=torch.bfloat16)
+    layer(x)
+    if cancel:
+        # Only the DC input coordinates contribute for the constant MCG
+        # fixture. This non-DC impulse has zero projection, despite requiring
+        # a power-of-two pre-scale larger than float32 can represent.
+        x.zero_()
+        x[0, 1] = 3e38
+    else:
+        x.fill_(1e36)
+    expected = torch.zeros((1, 256), device="cuda", dtype=torch.float64)
+    expected[:, ::128] = x[:, :1].double() * (4 * 128 * 1.84375 * 65504 * 2**-24)
+    assert torch.isfinite(expected.to(torch.bfloat16)).all()
+    actual = layer(x)
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected.bfloat16(), rtol=2e-3, atol=2e-3)
+    assert layer._torch_inner is None

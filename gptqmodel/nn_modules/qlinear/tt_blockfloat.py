@@ -701,7 +701,15 @@ class TTBlockfloatTiedHead(nn.Module):
             else out_dtype
         )
         weight = embedding.dequantize(dtype=compute_dtype)
-        out = F.linear(hidden_states.to(compute_dtype), weight)
+        # Ambient autocast would narrow these explicitly wide operands back to
+        # the activation dtype before the reduction, turning a cancelling
+        # float32 dot into NaN in float16 (#5796). The sibling linear fallback
+        # disables autocast for the same reason.
+        if autocast_active(hidden_states.device.type):
+            with torch.autocast(device_type=hidden_states.device.type, enabled=False):
+                out = F.linear(hidden_states.to(compute_dtype), weight)
+        else:
+            out = F.linear(hidden_states.to(compute_dtype), weight)
         del weight
         return out.to(out_dtype)
 

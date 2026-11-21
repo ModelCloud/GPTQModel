@@ -98,6 +98,7 @@ python -m tests.kernels.gen_compile_matrix
 | `BitblasLinear` | `bitblas` | `EAGER` | `EAGER` | no | no | - |
 | `BitsAndBytesLinear` | `bitsandbytes` | `CUDAGRAPH` | `INDUCTOR` | yes | yes | - |
 | `BitsAndBytesMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
+| `CPTCLinear` | `cptc` | `EAGER` | `EAGER` | no | no | - |
 | `ExllamaV2Linear` | `exllamav2` | `EAGER` | `EAGER` | yes | no | - |
 | `GGUFCppKernel` | `gguf_cpp` | `EAGER` | `EAGER` | no | no | static-cache generate() auto-compile stays off: no CPU win was measured for this kernel in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `GGUFCudaKernel` | `gguf_cpp` | `EAGER` | `EAGER` | no | no | static-cache generate() auto-compile stays off: no CPU win was measured for this kernel in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |

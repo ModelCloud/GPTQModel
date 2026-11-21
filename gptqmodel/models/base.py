@@ -61,6 +61,7 @@ from ..quantization.config import (
     configure_dynamic_override_cache_for_model,
     dynamic_get,
     dynamic_override_cache_stats,
+    encoder_stages_on_host,
     log_dynamic_override_cache_stats,
     normalize_norm_types,
     resolve_model_rotation,
@@ -135,7 +136,12 @@ from ..utils.model import (
 from ..utils.model_dequant import infer_block_shape
 from ..utils.p2p import safe_module_to
 from ..utils.quant_metadata import UnsupportedMetadata, describe_unsupported_metadata, find_unsupported_metadata
-from ..utils.resource_budget import DeviceBudget, ResourceBudget, device_memory_bytes
+from ..utils.resource_budget import (
+    DeviceBudget,
+    ResourceBudget,
+    RuntimeAllocationUnavailable,
+    device_memory_bytes,
+)
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
@@ -452,6 +458,59 @@ def _runtime_weight_tensors(inner: object):
             continue
 
 
+def _runtime_device_allocations(inner: object) -> Tuple[Dict[Tuple[str, int], int], Tuple[str, ...]]:
+    """(measured) Accelerator weight storage a backend keeps outside Torch.
+
+    A native runtime can hold packed weights in its own allocator: TTNN keeps
+    them as ``ttnn.Tensor`` device tensors, which neither ``parameters()`` nor
+    ``iter_runtime_weight_tensors`` can see (#5810). Each module publishes them
+    through ``iter_runtime_device_allocations``; the entry names the backend and
+    that backend's own device ordinal, so TTNN chips never collide with CUDA
+    devices or the host.
+
+    A backend that owns storage but cannot measure it is returned as unmeasured,
+    never as zero: an unreadable allocator is unknown memory, not free memory.
+    """
+
+    allocations: Dict[Tuple[str, int], int] = {}
+    unmeasured = []
+    modules = getattr(inner, "modules", None)
+    if not callable(modules):
+        return allocations, ()
+    try:
+        walker = modules()
+    except Exception:  # pragma: no cover - exotic module trees
+        return allocations, ()
+    for module in walker:
+        hook = getattr(type(module), "iter_runtime_device_allocations", None)
+        if hook is None:
+            continue
+        try:
+            entries = tuple(hook(module))
+        except RuntimeAllocationUnavailable as exc:
+            unmeasured.append(exc.backend)
+            continue
+        except Exception:  # pragma: no cover - backend bookkeeping
+            unmeasured.append("unknown")
+            continue
+        for entry in entries:
+            backend = getattr(entry, "backend", None)
+            index = getattr(entry, "index", None)
+            nbytes = getattr(entry, "weights_bytes", None)
+            if (
+                not isinstance(backend, str) or not backend
+                or not isinstance(index, int) or index < 0
+                or not isinstance(nbytes, int) or nbytes < 0
+            ):
+                # A malformed entry is coverage we cannot trust; say so rather
+                # than silently dropping the storage it was meant to describe.
+                unmeasured.append(backend if isinstance(backend, str) and backend else "unknown")
+                continue
+            key = (backend, index)
+            allocations[key] = allocations.get(key, 0) + nbytes
+    return allocations, tuple(dict.fromkeys(unmeasured))
+
+
 def _parameter_devices(inner: object) -> Dict[int, int]:
     """(measured) Weight bytes per device index, meta tensors skipped.
 
@@ -576,16 +635,23 @@ def _budget_for(inner: object, *, wrapper: object = None, reserve: float = 0.1,
     """Resource budget for a decoder module: measured per-device numbers + estimates."""
 
     per_device = _parameter_devices(inner)
+    allocations, unmeasured_backends = _runtime_device_allocations(inner)
     estimate = _kv_cache_estimate_for(inner, dtype=dtype)
     layer_devices = None
     if estimate is not None:
         layer_devices = _layer_device_indices(wrapper if wrapper is not None else inner,
                                               inner, len(estimate.layers))
+    devices = list(_device_budgets(per_device))
+    for (backend, index), weights in sorted(allocations.items()):
+        devices.append(
+            DeviceBudget(index=index, weights_bytes=weights, backend=backend)
+        )
     return ResourceBudget(
-        devices=_device_budgets(per_device),
+        devices=tuple(devices),
         kv_cache=estimate,
         layer_devices=layer_devices,
         reserve_fraction=reserve,
+        unmeasured_backends=unmeasured_backends,
     )
 
 
@@ -2822,7 +2888,7 @@ class BaseQModel(nn.Module):
         embed_quant_mode: Optional[QuantizeEmbed] = None,
         checkpoint: Optional["CheckpointConfig"] = None,
         fuse: Optional[bool] = None,
-        # Weight-only direct-pack methods (GGUF, BitsAndBytes, NF12) skip the
+        # Weight-only direct-pack methods skip the
         # logging-only weight-error MAE by default; requesting it reconstructs
         # every dense weight. It never changes the packed payload.
         measure_weight_error: bool = False,
@@ -3073,6 +3139,8 @@ class BaseQModel(nn.Module):
                 preferred_backend = BACKEND.VPTQ_TORCH
             elif self.quantize_config.method == METHOD.NF12:
                 preferred_backend = BACKEND.NF12
+            elif self.quantize_config.method == METHOD.CPTC:
+                preferred_backend = BACKEND.CPTC
             elif self.quantize_config.method == METHOD.MACAQ:
                 from ..utils.macaq_triton import triton_mxfp4_available
 
@@ -5630,13 +5698,29 @@ class BaseQModel(nn.Module):
                 devices = list(filtered)
         return as_torch_device(devices[0] if devices else base_device)
 
+    def _pre_quantize_staging_device(self) -> torch.device:
+        """Device `pre_quantize` stages one layer on.
+
+        A CPU-backed encoder (GGUF, BitsAndBytes, NF12) reads its host source
+        directly -- NF12 stages an eligible host tensor itself -- so moving the
+        dense layer to the quantization device only to send it back is a wasted
+        round trip of the whole tensor, and a lazy shell would hold VRAM for a
+        layer that never encodes there (#5757). The requested device still
+        selects the inference backend and owns the packed checkpoint handoff.
+        """
+
+        quantize_config = getattr(self, "quantize_config", None)
+        if quantize_config is not None and encoder_stages_on_host(quantize_config):
+            return CPU
+        return self._pre_quantize_device()
+
     def pre_quantize(
         self,
         module: nn.Module,
         module_path: Optional[str] = None,
     ) -> nn.Module:
         if get_device(module) == META or _module_has_meta_tensors(module):
-            device = self._pre_quantize_device()
+            device = self._pre_quantize_staging_device()
             if self._materialize_floatx_layer_shell(
                 module, device, module_path=module_path
             ):
@@ -5647,7 +5731,7 @@ class BaseQModel(nn.Module):
                 module_path=module_path,
             )
         elif get_device(module) == CPU and self.quantize_config.device != CPU:
-            return move_to(module, device=self._pre_quantize_device())
+            return move_to(module, device=self._pre_quantize_staging_device())
         else:
             return module
 
@@ -8279,10 +8363,11 @@ class BaseQModel(nn.Module):
             METHOD.VPTQ,
             METHOD.MACAQ,
             METHOD.NF12,
+            METHOD.CPTC,
         }:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "
-                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PARO/VPTQ/MACAQ/NF12"
+                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PARO/VPTQ/MACAQ/NF12/CPTC"
             )
             return None
 

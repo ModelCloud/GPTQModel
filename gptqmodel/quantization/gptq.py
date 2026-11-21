@@ -3243,6 +3243,10 @@ class GPTQ:
             else:
                 W = W_permuted
                 self.H = H_permuted
+                # ``self.H`` owns the tensor now; the locals would otherwise
+                # keep the full fp32 Hessian resident through the block pass
+                # (#5717).
+                del H_permuted, W_permuted
             invperm = torch.argsort(perm)
 
         elif self.qcfg.act_group_aware and use_hessian:
@@ -3281,6 +3285,9 @@ class GPTQ:
             else:
                 W = W_permuted
                 self.H = H_permuted
+                # See the desc_act branch: drop the locals so only ``self.H``
+                # references the Hessian (#5717).
+                del H_permuted, W_permuted
 
         # Column order the block pass sees, for rebuilding ``W`` on retry.
         block_column_perm = None
