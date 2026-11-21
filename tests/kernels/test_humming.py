@@ -519,3 +519,170 @@ def test_humming_validate_once_reports_missing_runtime(monkeypatch):
     assert ok is False
     assert isinstance(err, ImportError)
     assert "humming" in str(err).lower()
+
+
+def _fp8_layer(scale_method: str, block_size):
+    """Build an FP8 humming layer plus its fp32 dequantized weight oracle."""
+
+    from gptqmodel.nn_modules.qlinear.humming import HummingFP8Linear
+
+    in_features, out_features = 512, 256
+    torch.manual_seed(1234)
+    # Realistic checkpoint: the stored codes are ``weight / multiplier``.
+    source = torch.randn(out_features, in_features) * 0.05
+
+    if scale_method == "tensor":
+        multiplier = torch.tensor([0.01], dtype=torch.float32)
+        ref = source * multiplier.view(1, 1)
+        stored = multiplier
+    elif scale_method == "row":
+        multiplier = (448.0 / source.abs().amax(dim=1).clamp_min(1e-8)).float()
+        ref = source
+        stored = multiplier
+    else:
+        block_n, block_k = block_size
+        blocks = source.abs().reshape(
+            out_features // block_n, block_n, in_features // block_k, block_k
+        ).amax(dim=(1, 3))
+        multiplier = (448.0 / blocks.clamp_min(1e-8)).float()
+        ref = source
+        stored = multiplier
+
+    if scale_method == "tensor":
+        codes = (source / multiplier.view(1, 1)).to(torch.float8_e4m3fn)
+    elif scale_method == "row":
+        codes = (source / multiplier.view(-1, 1)).to(torch.float8_e4m3fn)
+    else:
+        block_n, block_k = block_size
+        expanded = multiplier.repeat_interleave(block_n, 0).repeat_interleave(block_k, 1)
+        codes = (source / expanded).to(torch.float8_e4m3fn)
+    dense = codes.float()
+
+    if scale_method == "tensor":
+        ref = dense * multiplier.view(1, 1)
+    elif scale_method == "row":
+        ref = dense * multiplier.view(-1, 1)
+    else:
+        ref = dense * expanded
+
+    module = HummingFP8Linear(
+        bits=8,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        register_buffers=True,
+        weight_scale_method=scale_method,
+        weight_block_size=block_size,
+        # GPTQModel checkpoints store the inverse of the multiplier.
+        weight_scale_semantics="inverse",
+        dtype=torch.float16,
+    ).to(_device())
+    module.weight.copy_(codes.to(_device()))
+    module.weight_scale_inv.copy_(stored.reciprocal().to(_device()))
+    module.post_init()
+    return module, ref
+
+
+@requires_humming
+@pytest.mark.parametrize(
+    "scale_method,block_size",
+    [("tensor", None), ("row", None), ("block", (128, 128))],
+)
+def test_fp8_humming_matches_dequantized_reference(scale_method, block_size):
+    module, ref = _fp8_layer(scale_method, block_size)
+    x = torch.randn(9, module.in_features, dtype=torch.float16, device=_device())
+    _assert_matches_reference(module(x), x.float() @ ref.to(_device()).T, atol=0.05)
+
+
+@requires_humming
+def test_fp8_humming_rejects_per_token_activation_scaling():
+    from gptqmodel.nn_modules.qlinear.humming import HummingFP8Linear
+
+    ok, error = HummingFP8Linear._validate(activation_quant_method="per_token")
+    assert not ok
+    assert isinstance(error, NotImplementedError)
+
+
+@requires_humming
+def test_mxfp4_humming_matches_dequantized_reference():
+    from gptqmodel.nn_modules.qlinear.humming import HummingMXFP4Linear
+    from gptqmodel.quantization.macaq import (
+        dequantize_mxfp4,
+        mxfp4_rtn_signed_index,
+        pack_mxfp4_from_signed_index,
+    )
+
+    in_features, out_features = 512, 256
+    torch.manual_seed(4321)
+    weight = torch.randn(out_features, in_features, device=_device()) * 0.05
+    index, log2_scale, *_ = mxfp4_rtn_signed_index(weight)
+    packed, scales = pack_mxfp4_from_signed_index(index, log2_scale)
+    ref = dequantize_mxfp4(packed, scales, in_features, dtype=torch.float32)
+
+    module = HummingMXFP4Linear(
+        bits=4,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        register_buffers=True,
+        dtype=torch.float16,
+    ).to(_device())
+    module.W_packed.copy_(packed)
+    # Checkpoints store the E8M0 exponents as raw bytes.
+    module.W_scales.copy_(scales.view(torch.uint8))
+    module.post_init()
+
+    x = torch.randn(9, in_features, dtype=torch.float16, device=_device())
+    _assert_matches_reference(module(x), x.float() @ ref.T, atol=0.05)
+
+
+@requires_humming
+def test_mxfp4_humming_rejects_macaq_rotated_layout():
+    from gptqmodel.nn_modules.qlinear.humming import HummingMXFP4Linear
+
+    with pytest.raises(NotImplementedError):
+        HummingMXFP4Linear(
+            bits=4,
+            in_features=512,
+            out_features=256,
+            rotation="hadamard",
+            pre_mode="none",
+            dtype=torch.float16,
+        )
+
+    ok, error = HummingMXFP4Linear._validate(rotation="none", pre_mode="balance")
+    assert not ok
+    assert isinstance(error, NotImplementedError)
+
+
+def test_humming_float_formats_registered():
+    from gptqmodel.nn_modules.qlinear.humming import (
+        HummingFP8Linear,
+        HummingMXFP4Linear,
+    )
+
+    assert HummingFP8Linear.SUPPORTS_BACKENDS == [BACKEND.HUMMING]
+    assert HummingFP8Linear.SUPPORTS_METHODS == [METHOD.FP8]
+    assert HummingFP8Linear.SUPPORTS_FORMATS == {FORMAT.FP8: 0}
+    assert HummingMXFP4Linear.SUPPORTS_BACKENDS == [BACKEND.HUMMING]
+    assert HummingMXFP4Linear.SUPPORTS_METHODS == [METHOD.MACAQ]
+    assert HummingMXFP4Linear.SUPPORTS_FORMATS == {FORMAT.MXFP4: 0}
+
+    assert (
+        importer.get_kernel_for_backend(BACKEND.HUMMING, METHOD.FP8, FORMAT.FP8)
+        is HummingFP8Linear
+    )
+    assert (
+        importer.get_kernel_for_backend(BACKEND.HUMMING, METHOD.MACAQ, FORMAT.MXFP4)
+        is HummingMXFP4Linear
+    )
+
+
+def test_humming_float_formats_are_opt_in():
+    importer.clear_validation_cache()
+    auto_map, support_map = importer.build_kernel_support_maps()
+
+    assert BACKEND.HUMMING in support_map[METHOD.FP8][FORMAT.FP8]
+    assert BACKEND.HUMMING in support_map[METHOD.MACAQ][FORMAT.MXFP4]
+    assert BACKEND.HUMMING not in auto_map[METHOD.FP8][FORMAT.FP8]
+    assert BACKEND.HUMMING not in auto_map[METHOD.MACAQ][FORMAT.MXFP4]

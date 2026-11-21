@@ -40,7 +40,7 @@ CUDA_ONLY_KERNELS = set("""
     TritonV2Linear W4AFP8Linear W4ANVFP4Linear ExllamaV2Linear AwqExllamaV2Linear
     MarlinLinear AwqMarlinLinear MacheteLinear AwqMacheteLinear
     SwordfishLinear AwqSwordfishLinear BitblasLinear AWQBitBlasKernel
-    HummingLinear AwqHummingLinear
+    HummingLinear AwqHummingLinear HummingFP8Linear HummingMXFP4Linear
     AwqGEMMLinear AwqGEMVLinear AwqGEMVFastLinear LLMAwqLinear QQQLinear
     VPTQCudaLinear GGUFCudaKernel
 """.split())

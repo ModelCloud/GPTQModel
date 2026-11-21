@@ -341,6 +341,115 @@ def prepare_humming_awq_tensors(
     )
 
 
+def prepare_humming_fp8_tensors(
+    *,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    weight_scale_method: str,
+    weight_block_size: Optional[Tuple[int, int]],
+    bias: Optional[torch.Tensor],
+    in_features: int,
+    out_features: int,
+    dtype: torch.dtype,
+    device: torch.device,
+):
+    """Convert an FP8 checkpoint layer into transformed humming operands.
+
+    ``weight`` is the stored E4M3 tensor and ``weight_scale`` must already be a
+    *multiplier* (humming multiplies the codes by their scale, while GPTQModel
+    checkpoints normally store ``weight_scale_inv``). Three layouts are accepted:
+
+    * ``tensor`` -- one FP32 scalar for the whole matrix (``Fp8WeightSchema``).
+    * ``row``    -- one FP32 value per output channel (humming's channel scale).
+    * ``block``  -- ``[out // block_n, in // block_k]`` FP32 block scales
+      (``Fp8WeightSchema`` with ``weight_block_size``).
+    """
+
+    if weight_scale_method == "tensor":
+        weight_schema: Dict[str, Any] = {"quant_method": "fp8"}
+        source_tensors: Dict[str, torch.Tensor] = {
+            "weight": weight,
+            "weight_scale": weight_scale.reshape(1).to(torch.float32),
+        }
+    elif weight_scale_method == "block":
+        if weight_block_size is None:
+            raise ValueError("humming FP8 block scaling requires `weight_block_size`.")
+        block_n, block_k = weight_block_size
+        weight_schema = {"quant_method": "fp8", "weight_block_size": [block_n, block_k]}
+        source_tensors = {
+            "weight": weight,
+            "weight_scale_inv": weight_scale.to(torch.float32),
+        }
+    elif weight_scale_method == "row":
+        # humming's generic schema covers per-output-channel FP32 scales; the
+        # FP8 schema only models tensor and block layouts.
+        weight_schema = {
+            "quant_method": "humming",
+            "b_dtype": "float8e4m3",
+            "bs_dtype": "float32",
+            "weight_scale_type": "channel",
+        }
+        source_tensors = {
+            "weight": weight.view(torch.int32),
+            "weight_scale": weight_scale.reshape(-1, 1).to(torch.float32),
+        }
+    else:
+        raise ValueError(f"unsupported humming FP8 weight scale method: {weight_scale_method}")
+
+    if bias is not None:
+        source_tensors["bias"] = bias
+
+    return _prepare_humming_tensors(
+        source_tensors=source_tensors,
+        weight_schema=weight_schema,
+        shape_n=out_features,
+        shape_k=in_features,
+        param_dtype=dtype,
+        device=device,
+        has_bias=bias is not None,
+    )
+
+
+def prepare_humming_mxfp4_tensors(
+    *,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    in_features: int,
+    out_features: int,
+    dtype: torch.dtype,
+    device: torch.device,
+):
+    """Convert an OCP MXFP4 checkpoint layer into transformed humming operands.
+
+    Both GPTQModel's MACaQ storage and humming use the same layout, so this is a
+    handoff rather than a repack: nibble-packed E2M1 with the low nibble holding
+    the even column, and one E8M0 exponent per 32-element block.
+    """
+
+    if weight.dtype != torch.uint8:
+        raise ValueError(f"MXFP4 `weight` must be uint8, got {weight.dtype}")
+    if weight_scale.dtype != torch.uint8:
+        raise ValueError(f"MXFP4 `weight_scale` must be uint8 (E8M0 view), got {weight_scale.dtype}")
+
+    source_tensors: Dict[str, torch.Tensor] = {
+        "weight": weight,
+        "weight_scale": weight_scale,
+    }
+    if bias is not None:
+        source_tensors["bias"] = bias
+
+    return _prepare_humming_tensors(
+        source_tensors=source_tensors,
+        weight_schema={"quant_method": "mxfp4"},
+        shape_n=out_features,
+        shape_k=in_features,
+        param_dtype=dtype,
+        device=device,
+        has_bias=bias is not None,
+    )
+
+
 def humming_apply_linear(
     *,
     config,
@@ -392,5 +501,7 @@ __all__ = [
     "humming_supports_device",
     "humming_validate_device",
     "prepare_humming_awq_tensors",
+    "prepare_humming_fp8_tensors",
     "prepare_humming_gptq_tensors",
+    "prepare_humming_mxfp4_tensors",
 ]

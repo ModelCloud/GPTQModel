@@ -1,8 +1,8 @@
-# Humming W2/W4/W8 CUDA GEMM backend
+# Humming CUDA GEMM backend
 
 ## Summary
 
-`BACKEND.HUMMING` serves GPTQ and AWQ checkpoints with
+`BACKEND.HUMMING` serves GPTQ, AWQ, FP8 and OCP MXFP4 checkpoints with
 [Humming](https://github.com/vllm-project/humming), the JIT-compiled weight-only
 CUDA GEMM family (W1–W8, dense and MoE) that
 [vLLM](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/humming.py)
@@ -22,12 +22,12 @@ keeps the checkpoint tensors registered under their usual GPTQ/AWQ names,
 | --- | --- |
 | `gptqmodel/utils/backend.py` | `BACKEND.HUMMING` plus the `gptq_humming` / `awq_humming` legacy aliases |
 | `gptqmodel/utils/humming.py` | Import guard, device/capability gates, schema conversion, locks, compute config |
-| `gptqmodel/nn_modules/qlinear/humming.py` | `HummingLinear` (GPTQ) and `AwqHummingLinear` (AWQ) sub-kernels |
+| `gptqmodel/nn_modules/qlinear/humming.py` | `HummingLinear` (GPTQ), `AwqHummingLinear` (AWQ), `HummingFP8Linear` (FP8) and `HummingMXFP4Linear` (MXFP4) sub-kernels |
 | `tests/kernels/test_humming.py` | Registration plus numeric checks against the dequantized reference |
 
 ## Opt-in, never AUTO
 
-Both classes declare `SUPPORTS_FORMATS` with priority `0`, so
+Every class declares `SUPPORTS_FORMATS` with priority `0`, so
 `importer.build_kernel_support_maps()` registers them as explicit candidates
 while leaving `BACKEND.AUTO` on the existing default kernels. Humming
 JIT-compiles one kernel image per (shape, dtype) pair on first use, which is a
@@ -44,10 +44,12 @@ the method/format of the checkpoint selects the sub-kernel.
 
 ## Supported checkpoints
 
-| Method | Format | Bits | Group sizes | `sym` | `desc_act` |
-| --- | --- | --- | --- | --- | --- |
-| GPTQ | `gptq`, `gptq_v2` | 2, 4, 8 | -1, 32, 64, 128 | both | must be `False` |
-| AWQ | `gemm` | 4 | -1, 32, 64, 128 | both | accepted and ignored |
+| Method | Format | Bits | Scale layout | Notes |
+| --- | --- | --- | --- | --- |
+| GPTQ | `gptq`, `gptq_v2` | 2, 4, 8 | group -1/32/64/128 | `sym` both, `desc_act` must be `False` |
+| AWQ | `gemm` | 4 | group -1/32/64/128 | `sym` both, `desc_act` accepted and ignored |
+| FP8 | `fp8` | 8 (E4M3) | tensor, per-row, or 128x128 block | weight-only (A16) |
+| MACaQ | `mxfp4` | 4 (E2M1) | E8M0 block-32 | plain OCP layout (`rotation="none"`, `pre_mode="none"`) |
 
 The bit ranges are layout limits, not preferences. GPT-QModel stores 3-bit GPTQ
 with the `10-1-10-1-10` word scheme and 5/6/7-bit GPTQ in split planes; Humming
@@ -59,6 +61,42 @@ single layout Humming's AWQ converter undoes.
 / `out_features` works otherwise: the layer keeps its logical shape and the
 packed operands are padded to Humming's 256-wide N and 128-wide K tiles during
 conversion.
+
+## Validated formats
+
+All rows were measured against a torch FP32 dequantized oracle
+(`relL2 = ||kernel - oracle|| / ||oracle||`) with fp16 compute, `M` in
+{1, 4, 16, 64, 128}, N=256, K=512. `relL2` is dominated by the mandatory fp16
+output rounding, so ~2e-4 is the floor, not an error budget.
+
+| Weights | Scales | RTX 4090 (SM89) | RTX 5090 (SM120) | MMA path |
+| --- | --- | --- | --- | --- |
+| INT2 group-32 | fp16 | 2.1e-4 | 2.1e-4 | `mma.sync` |
+| INT4 group-32/64/128/channel | fp16 | 2.7e-4 – 3.0e-4 | 2.7e-4 – 3.0e-4 | `mma.sync` |
+| INT8 group-128 | fp16 | 2.9e-4 | 2.9e-4 | `mma.sync` |
+| FP8 E4M3 | fp32 tensor | 2.2e-4 | 2.2e-4 | native FP8 dequant |
+| FP8 E4M3 | fp32 128x128 block | 2.9e-4 | 2.9e-4 | native FP8 dequant |
+| MXFP4 E2M1 | E8M0 block-32 | 2.1e-4 | 2.1e-4 | register dequant |
+| NVFP4 E2M1 | E4M3 block-16 + fp32 global | 2.1e-4 | 2.1e-4 | register dequant |
+| MXFP8 E4M3 | E8M0 block-32 | 2.1e-4 | 2.1e-4 | native FP8 dequant |
+| E3M4 (undocumented) | E8M0 block-32 | 2.1e-4 | 2.1e-4 | cubin-patched |
+| E0M3 (undocumented) | E8M0 block-32 | 2.3e-4 | 2.3e-4 | cubin-patched |
+
+Block-scaled MMA (`kind::mxf4` / `mxf4nvf4` / `mxf8f6f4`) additionally needs
+**quantized activations**, so it only runs where the whole W4A4/W8A8 recipe is
+supported:
+
+| Recipe | SM89 (4090) | SM120/121 (5090, DGX Spark) | SM100/103 (B200) |
+| --- | --- | --- | --- |
+| MXFP4 W4A4 (`scale_vec::2X`, E8M0) | unsupported | 5.4e-5 | via UMMA |
+| NVFP4 W4A4 (`scale_vec::4X`, E4M3) | unsupported | 3.1e-3 (M>=64) | via UMMA |
+| MXFP8 W8A8 (`scale_vec::1X`, E8M0) | unsupported | 2.1e-4 | via UMMA |
+| FP8 W8A8 per-token | 3.1e-4 | 1.7e-3 (M=16..64) | via UMMA |
+
+Only the weight-only (A16) rows are reachable from GPT-QModel today: the FP8
+and MXFP4 classes are weight-only. The W4A4/W8A8 rows document what the
+underlying library does, and what a future activation-quantizing backend would
+inherit.
 
 ## Runtime requirements
 
