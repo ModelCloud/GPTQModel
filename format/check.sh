@@ -29,6 +29,7 @@ ruff --version
 # wheel. A new subpackage must be covered automatically.
 ruff check \
   gptqmodel \
+  gptqmodel_compiler \
   docs/eora \
   tests \
   setup.py

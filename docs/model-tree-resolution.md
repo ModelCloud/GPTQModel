@@ -7,6 +7,11 @@ belongs to, and whether it should be quantized at all.
 The short version: **the architecture's declared `module_tree` is authoritative;
 runtime module names are not consulted.** Introduced in PR #3565.
 
+The [model computation DSL proposal](model-computation-dsl.md) describes a
+future replacement that declares executable computation and typed dependencies
+for both quantization and inference. It is a design draft; this page describes
+the current tree-based implementation.
+
 For a practical tutorial, the complete tag reference, terminal/JSON inspection,
 and new-model requirements, see the [module-plan guide](module-plan-guide.md).
 The [DeepSeek V4.1 Flash inventory](deepseek-v41-module-inventory.md) distinguishes
