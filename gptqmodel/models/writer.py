@@ -2669,6 +2669,8 @@ def ModelWriter(cls):
                 cptc_table_q=str(quantize_config.table_q),
                 cptc_block_size=str(quantize_config.block_size),
             )
+            if quantize_config.yaqa:
+                metadata_dict["cptc_layout"] = "yaqa"
         split_by_mode = _parse_split_by(split_by)
 
         if split_by_mode == "layer":

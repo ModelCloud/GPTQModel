@@ -562,7 +562,8 @@ def hf_gptqmodel_prepare_model_for_load(
     if qcfg.method == METHOD.CPTC:
         from ..nn_modules.qlinear.cptc import CPTCLinear
 
-        payload_suffixes = tuple(f".{name}" for name in CPTCLinear.CHECKPOINT_REQUIRED_BUFFERS)
+        buffers = CPTCLinear.CHECKPOINT_REQUIRED_BUFFERS + (CPTCLinear.YAQA_BUFFERS if qcfg.yaqa else ())
+        payload_suffixes = tuple(f".{name}" for name in buffers)
         owners = {key.rpartition(".")[0] for key in tensor_keys if key.endswith(payload_suffixes)}
         required = {f"{owner}{suffix}" for owner in owners for suffix in payload_suffixes}
         missing = sorted(required - tensor_keys)

@@ -31,6 +31,45 @@ Importing `gptqmodel` also registers the CPTC checkpoint loader for
 `transformers.AutoModelForCausalLM.from_pretrained`. Both entry points load
 the same safetensors checkpoint.
 
+## YAQA calibration
+
+```python
+from gptqmodel import CPTCConfig, CalibrationConfig, GPTQModel
+
+qcfg = CPTCConfig(bits=3, block_size=256, yaqa=True, yaqa_seed=2718, device="cuda:0")
+model = GPTQModel.load("path/to/dense-model", quantize_config=qcfg)
+model.quantize(CalibrationConfig(dataset=calibration_samples, batch_size=8))
+model.save("path/to/calibrated-cptc")
+```
+
+`yaqa=True` gathers input and output partial-trace Fisher sketches from the
+dense model, using next-token samples drawn from its own distribution.
+It rotates the weights and sketches with signed Hadamard transforms, damps
+each sketch by 0.01 of its mean diagonal, and uses two-sided block LDL error
+feedback to form the tile targets for Viterbi. The tiles are 8 × 16 with
+128-weight blocks and 16 × 16 with 256-weight blocks. The Gaussian
+codebook uses 0.9 loading and the packer applies the E2M5 range bound per tile.
+Calibration holds the complete teacher and its FP32 sketch pairs on the
+quantization device. Both projection dimensions need a supported Hadamard
+width and must be divisible by their tile dimensions.
+
+The paper's LLM experiment uses these transforms and two-sided rounding with
+its larger Sketch-B corpus. GPT-QModel uses its E2M5 tables and traverses each
+tile in row-major order. The CUDA and RDNA4 kernels consume both checkpoint
+layouts. [CPTC paper](https://arxiv.org/abs/2611.22019) ·
+[YAQA reference](https://github.com/Cornell-RelaxML/yaqa-quantization)
+
+```mermaid
+flowchart TD
+    A["GPTQModel.quantize"] --> B{"CPTCConfig.yaqa"}
+    B -->|False| C["Encode source rows"]
+    B -->|True| D["collect_hessian_sketches"]
+    D --> E["Rotate weights and both sketches"]
+    E --> F["Two-sided LDL feedback and tile encoding"]
+    C --> G["Save packed CPTC checkpoint"]
+    F --> G
+```
+
 ## Quantization and checkpoint flow
 
 ```mermaid
@@ -59,14 +98,13 @@ flowchart TD
 For each output row, the input axis is divided into contiguous blocks and
 the last block is padded with zeros. Each block stores `block_size * bits / 8`
 bytes, little-endian, with its final windows wrapping to its own first bytes.
-The two Viterbi passes search in FP32 and pin the seam in the second pass.
+The two Viterbi passes search in FP32 and pin the shared boundary bits in
+the second pass.
 The default depth and tap width use fitted Gaussian E2M5 tables from
 `fit_gaussian_table`. Other geometries initialize their tables from Gaussian
 conditional means. Direct weight encoding starts from a per-block RMS
 scale. Before Viterbi, it raises the scale as needed to bring the block's
-positive and negative extremes into the reachable codebook range. The
-paper's model-level KL and perplexity numbers use the YAQA calibration
-pipeline. [CPTC paper](https://arxiv.org/abs/2611.22019)
+positive and negative extremes into the reachable codebook range.
 
 | Tensor | Checkpoint representation |
 | --- | --- |
@@ -75,6 +113,12 @@ pipeline. [CPTC paper](https://arxiv.org/abs/2611.22019)
 | `cptc_coeffs` | `int32`, two 16-bit multiplication constants |
 | `cptc_scale_bits` | `int32`, IEEE FP32 scale bits, `[out_features, blocks]` |
 | `bias` | Optional stored bias in its original dtype |
+
+With YAQA calibration, `cptc_packed` and `cptc_scale_bits` are indexed by
+tile row and tile column. The checkpoint also carries two `int8` Hadamard
+sign vectors, `cptc_input_signs` and `cptc_output_signs`. Inference applies
+the input transform before the packed multiplication and inverts the
+output transform before bias and final rounding.
 
 The scale bit pattern survives model dtype conversion. FP32 scales add 0.25
 bits per weight with 128-value blocks and 0.125 with 256-value blocks, before

@@ -9188,7 +9188,7 @@ class FP8Config(PreProcessorConfig):
 
 @dataclass
 class CPTCConfig(PreProcessorConfig):
-    """Calibration-free Computed Permutation Trellis Coding weight quantization."""
+    """Computed Permutation Trellis Coding with optional two-sided calibration."""
 
     bits: int = field(default=4, metadata={"choices": list(METHOD_SUPPORTED_BITS[METHOD.CPTC])})
     method: METHOD = field(default=METHOD.CPTC)
@@ -9199,6 +9199,8 @@ class CPTCConfig(PreProcessorConfig):
     trellis_depth: int = field(default=16)
     table_q: int = field(default=6)
     block_size: int = field(default=128)
+    yaqa: bool = field(default=False)
+    yaqa_seed: int = field(default=0)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.CPTC,)
@@ -9209,15 +9211,20 @@ class CPTCConfig(PreProcessorConfig):
     def uses_weight_only_lifecycle(self) -> bool:
         return True
 
+    def requires_calibration_dataset(self) -> bool:
+        return self.yaqa
+
     def __post_init__(self):
         super().__post_init__()
         if self.group_size != -1 or self.desc_act or not self.sym:
             raise ValueError("CPTCConfig requires group_size=-1, desc_act=False and sym=True")
+        if type(self.yaqa) is not bool or type(self.yaqa_seed) is not int or not 0 <= self.yaqa_seed < 2**32:
+            raise ValueError("CPTCConfig requires a boolean yaqa and a 32-bit unsigned yaqa_seed")
         CPTCSpec(self.bits, self.trellis_depth, self.table_q, self.block_size)
 
     def _normalize_dynamic_layer_config(self, layer_name, layer_dict, **kwargs):
         super()._normalize_dynamic_layer_config(layer_name, layer_dict, **kwargs)
-        for key in ("trellis_depth", "table_q", "block_size", "format"):
+        for key in ("trellis_depth", "table_q", "block_size", "format", "yaqa", "yaqa_seed"):
             if key in layer_dict:
                 raise ValueError(f"CPTCConfig: `dynamic['{layer_name}'].{key}` must be set globally")
         if (layer_dict.get("group_size", -1) != -1 or layer_dict.get("desc_act", False)
@@ -9231,11 +9238,15 @@ class CPTCConfig(PreProcessorConfig):
             "trellis_depth": self.trellis_depth,
             "table_q": self.table_q,
             "block_size": self.block_size,
+            "yaqa": self.yaqa,
+            "yaqa_seed": self.yaqa_seed,
             "kernel": resolve_kernel_config(self),
         }
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out.update(trellis_depth=self.trellis_depth, table_q=self.table_q, block_size=self.block_size)
+        if self.yaqa:
+            out.update(yaqa=self.yaqa, yaqa_seed=self.yaqa_seed)
         out["sym"] = self.sym
 
 
