@@ -51,6 +51,9 @@ class Inkling2LoopVisionRotary(nn.Module):
 
     def __init__(self, config: Inkling2LoopVisionConfig):
         super().__init__()
+        # Keep the config so the loader can rebuild this module's non-persistent
+        # ``inv_freq`` buffer (the checkpoint does not store it).
+        self.config = config
         spatial_dim = config.head_dim // 2
         inv_freq = 1.0 / (config.rope_theta ** (torch.arange(0, spatial_dim, 2).float() / spatial_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)

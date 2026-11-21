@@ -119,10 +119,33 @@ class NF12QuantResult:
         return self.packed.numel() + self.escapes.numel() * 2 + 1
 
 
+def _views_are_allowed(tensor: torch.Tensor) -> bool:
+    """Whether taking a view (slice, transpose, flatten) of ``tensor`` is legal.
+
+    Lazy checkpoint materialization runs under ``torch.inference_mode()``. A
+    tensor that passes through that path can keep a disabled autograd version
+    counter while reporting ``is_inference() == False``; every view of it then
+    raises "Inference tensors do not track version counter". Direct-pack
+    encoders slice rows out of this matrix, so the guard detects the state
+    before any view is taken.
+    """
+
+    try:
+        tensor._version
+    except RuntimeError:
+        return False
+    return True
+
+
 def weight_to_matrix(module: nn.Module) -> torch.Tensor:
     """Return a module weight as the NF12 ``[out_features, in_features]`` matrix."""
 
     weight = module.weight.detach()
+    if not _views_are_allowed(weight):
+        # Copy outside the inference context: a no-counter tensor cannot be
+        # sliced or transposed, and this copy gets an ordinary version counter.
+        with torch.inference_mode(False):
+            weight = weight.clone()
     if isinstance(module, _ConvNd):
         weight = weight.flatten(1)
     elif isinstance(module, transformers.pytorch_utils.Conv1D):

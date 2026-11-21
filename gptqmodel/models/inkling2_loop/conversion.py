@@ -89,9 +89,14 @@ _GATE_AND_EXPERT_RENAMES = [
     (r"\.controllers\.v\.", ".v_message_gate."),
     (r"\.controllers\.mlp\.", ".mlp_message_gate."),
     # Only the message gates use the `down_weight` spelling. The packed
-    # experts also end in `down_weight` after their own rename, so this rule
-    # must not fire on them.
-    (r"\.((?:q|k|v|mlp)_message_gate)\.down_weight$", r".\1.down_proj.weight"),
+    # experts also end in `down_weight` after their own rename, so these rules
+    # must not fire on them. They are spelled out per gate instead of using one
+    # alternation because the runtime->checkpoint walker derives its reverse
+    # target regex from this pattern and drops non-capturing groups.
+    (r"\.q_message_gate\.down_weight$", ".q_message_gate.down_proj.weight"),
+    (r"\.k_message_gate\.down_weight$", ".k_message_gate.down_proj.weight"),
+    (r"\.v_message_gate\.down_weight$", ".v_message_gate.down_proj.weight"),
+    (r"\.mlp_message_gate\.down_weight$", ".mlp_message_gate.down_proj.weight"),
     (r"\.gain_weight$", ".message_gate_proj.weight"),
     (r"\.forget_weight$", ".forget_gate_proj.weight"),
     (r"\.mlp\.gate\.bias$", ".mlp.gate.e_score_correction_bias"),

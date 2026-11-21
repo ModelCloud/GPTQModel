@@ -126,6 +126,21 @@ class Inkling2LoopPackedExperts(nn.Module):
     never quantized: it stays in the model dtype and the dot accumulates in FP32.
     """
 
+    # The payload and every factor that decodes it are kernel storage, not
+    # activation operands. A model-dtype cast would narrow the FP32 global
+    # scales and reinterpret the E4M3/E8M0 block scales, so the loader keeps
+    # them at exactly the checkpoint dtype.
+    CHECKPOINT_EXACT_DTYPE_PARAMETERS = (
+        "gate_up_weight",
+        "down_weight",
+        "gate_up_scales",
+        "down_scales",
+        "gate_up_amax",
+        "gate_up_outer_scale",
+        "down_amax",
+        "down_outer_scale",
+    )
+
     def __init__(self, config, fmt: str):
         super().__init__()
         if fmt not in ("nvfp4", "mxfp8"):
