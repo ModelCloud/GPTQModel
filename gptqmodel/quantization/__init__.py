@@ -19,6 +19,7 @@ from .config import (
                      BaseQuantizeConfig,
                      BitsAndBytesConfig,
                      CalibrationConfig,
+                     CPTCConfig,
                      EXL3Config,
                      Fallback,
                      FallbackStrategy,

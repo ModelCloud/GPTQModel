@@ -39,6 +39,7 @@ from ..utils.kernel import KernelConfig, resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.p2p import P2PConfig
 from ..utils.vptq import vptq_index_bits
+from .cptc import CPTCSpec
 from .gsq_training_config import GSQTrainingConfig
 
 
@@ -151,6 +152,7 @@ class FORMAT(str, Enum):
     EXL3 = "exl3"
     VPTQ = "vptq"
     NF12 = "nf12"
+    CPTC = "cptc"
     # Tenstorrent native block-float: one shared exponent per 16-value block
     # plus packed mantissa codes. Not a GPTQ layout, so it gets its own code.
     TT_BLOCKFLOAT = "tt_blockfloat"
@@ -190,6 +192,7 @@ class METHOD(str, Enum):
     VPTQ = "vptq"
     MACAQ = "macaq"
     NF12 = "nf12"
+    CPTC = "cptc"
     # Tenstorrent native block-float weights (`bf4_b` / `bf8_b`).
     TT_BLOCKFLOAT = "tt-blockfloat"
 
@@ -244,6 +247,7 @@ METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int | float, ...]] = {
     # NF12 is a lossless 12-bit encoding of BF16. The width is fixed by the
     # format, so 12 is the only valid request.
     METHOD.NF12: (12,),
+    METHOD.CPTC: (1, 2, 3, 4, 5, 6),
     # TT block-float stores a fixed mantissa width per element: `bf4_b`
     # keeps 2 mantissa bits, `bf8_b` keeps 6. Those are the only two
     # widths the hardware has a storage format for.
@@ -1285,6 +1289,8 @@ def resolve_quant_format(
         return FORMAT.MXFP4_MACAQ
     if method == METHOD.NF12:
         return FORMAT.NF12
+    if method == METHOD.CPTC:
+        return FORMAT.CPTC
 
     if isinstance(format_value, FORMAT):
         return format_value
@@ -2836,6 +2842,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.NF12: {
         FORMAT.NF12,
     },
+    METHOD.CPTC: {FORMAT.CPTC},
 }
 
 GPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
@@ -2924,6 +2931,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.MXFP4_MACAQ: METHOD.MACAQ,
     FORMAT.MXFP4: METHOD.MACAQ,
     FORMAT.NF12: METHOD.NF12,
+    FORMAT.CPTC: METHOD.CPTC,
     FORMAT.TT_BLOCKFLOAT: METHOD.TT_BLOCKFLOAT,
 }
 
@@ -5578,6 +5586,8 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         if normalized_format is not None and normalized_format != FORMAT.VPTQ:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.VPTQ}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.VPTQ
+    elif target_cls is CPTCConfig:
+        expected_method = METHOD.CPTC
     elif target_cls is NF12Config:
         expected_method = METHOD.NF12
         format_value = normalized.get(FORMAT_FIELD_CODE)
@@ -5946,7 +5956,7 @@ _FALLBACK_SMOOTHER_METHODS = frozenset({METHOD.GPTQ, METHOD.QQQ})
 #: block-float and FP8 packers have no smoothing step at all. Rejecting here
 #: fails at construction instead of after a model load (#5401).
 _SMOOTHERLESS_WEIGHT_ONLY_METHODS = frozenset(
-    {METHOD.NF12, METHOD.TT_BLOCKFLOAT, METHOD.FP8}
+    {METHOD.CPTC, METHOD.NF12, METHOD.TT_BLOCKFLOAT, METHOD.FP8}
 )
 
 #: Methods whose weight-only lifecycle reads `smooth` in its own packing path.
@@ -5957,6 +5967,7 @@ _WEIGHT_ONLY_METHODS = frozenset(
         METHOD.GGUF,
         METHOD.BITSANDBYTES,
         METHOD.NF12,
+        METHOD.CPTC,
         METHOD.FP8,
         METHOD.TT_BLOCKFLOAT,
     }
@@ -9176,6 +9187,59 @@ class FP8Config(PreProcessorConfig):
 
 
 @dataclass
+class CPTCConfig(PreProcessorConfig):
+    """Calibration-free Computed Permutation Trellis Coding weight quantization."""
+
+    bits: int = field(default=4, metadata={"choices": list(METHOD_SUPPORTED_BITS[METHOD.CPTC])})
+    method: METHOD = field(default=METHOD.CPTC)
+    format: FORMAT = field(default=FORMAT.CPTC)
+    group_size: int = field(default=-1)
+    desc_act: Optional[bool] = field(default=False)
+    sym: bool = field(default=True)
+    trellis_depth: int = field(default=16)
+    table_q: int = field(default=6)
+    block_size: int = field(default=128)
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.CPTC,)
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def uses_weight_only_lifecycle(self) -> bool:
+        return True
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.group_size != -1 or self.desc_act or not self.sym:
+            raise ValueError("CPTCConfig requires group_size=-1, desc_act=False and sym=True")
+        CPTCSpec(self.bits, self.trellis_depth, self.table_q, self.block_size)
+
+    def _normalize_dynamic_layer_config(self, layer_name, layer_dict, **kwargs):
+        super()._normalize_dynamic_layer_config(layer_name, layer_dict, **kwargs)
+        for key in ("trellis_depth", "table_q", "block_size", "format"):
+            if key in layer_dict:
+                raise ValueError(f"CPTCConfig: `dynamic['{layer_name}'].{key}` must be set globally")
+        if (layer_dict.get("group_size", -1) != -1 or layer_dict.get("desc_act", False)
+                or not layer_dict.get("sym", True) or _has_smoother(layer_dict.get("smooth"))
+                or _has_smoother(layer_dict.get("smoother"))):
+            raise ValueError(f"CPTCConfig: unsupported group size, symmetry, activation order or smoother for `{layer_name}`")
+        CPTCSpec(layer_dict.get("bits", self.bits), self.trellis_depth, self.table_q, self.block_size)
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {
+            "trellis_depth": self.trellis_depth,
+            "table_q": self.table_q,
+            "block_size": self.block_size,
+            "kernel": resolve_kernel_config(self),
+        }
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out.update(trellis_depth=self.trellis_depth, table_q=self.table_q, block_size=self.block_size)
+        out["sym"] = self.sym
+
+
+@dataclass
 class NF12Config(PreProcessorConfig):
     """Configuration for NF12 (NyoomFloat12, tiled layout).
 
@@ -9950,11 +10014,11 @@ class GGUFConfig(PreProcessorConfig):
         return True
 
 def clone_weight_only_config_for_module(
-    qcfg: Union[RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig],
+    qcfg: Union[RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig, CPTCConfig, NF12Config],
     module_full_name: str,
     *,
     resolved_cfg: Optional[ResolvedModuleConfig] = None,
-) -> Optional[Union[RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig]]:
+) -> Optional[Union[RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig, CPTCConfig, NF12Config]]:
     resolved_cfg = resolved_cfg or qcfg.resolve_module_config(module_full_name)
     if resolved_cfg.excluded:
         return None
@@ -10115,6 +10179,8 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return MacaqConfig
     if method == METHOD.NF12 or format_value == FORMAT.NF12:
         return NF12Config
+    if method == METHOD.CPTC or format_value == FORMAT.CPTC:
+        return CPTCConfig
     if method == METHOD.TT_BLOCKFLOAT or format_value == FORMAT.TT_BLOCKFLOAT:
         return TTBlockfloatConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
@@ -10140,6 +10206,7 @@ def _known_quantize_config_field_names() -> set[str]:
         QQQConfig,
         VPTQConfig,
         MacaqConfig,
+        CPTCConfig,
         NF12Config,
         TTBlockfloatConfig,
         FP8Config,

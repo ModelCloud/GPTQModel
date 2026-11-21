@@ -2862,7 +2862,7 @@ class BaseQModel(nn.Module):
         embed_quant_mode: Optional[QuantizeEmbed] = None,
         checkpoint: Optional["CheckpointConfig"] = None,
         fuse: Optional[bool] = None,
-        # Weight-only direct-pack methods (GGUF, BitsAndBytes, NF12) skip the
+        # Weight-only direct-pack methods skip the
         # logging-only weight-error MAE by default; requesting it reconstructs
         # every dense weight. It never changes the packed payload.
         measure_weight_error: bool = False,
@@ -3113,6 +3113,8 @@ class BaseQModel(nn.Module):
                 preferred_backend = BACKEND.VPTQ_TORCH
             elif self.quantize_config.method == METHOD.NF12:
                 preferred_backend = BACKEND.NF12
+            elif self.quantize_config.method == METHOD.CPTC:
+                preferred_backend = BACKEND.CPTC
             elif self.quantize_config.method == METHOD.MACAQ:
                 from ..utils.macaq_triton import triton_mxfp4_available
 
@@ -8326,10 +8328,11 @@ class BaseQModel(nn.Module):
             METHOD.VPTQ,
             METHOD.MACAQ,
             METHOD.NF12,
+            METHOD.CPTC,
         }:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "
-                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PARO/VPTQ/MACAQ/NF12"
+                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PARO/VPTQ/MACAQ/NF12/CPTC"
             )
             return None
 

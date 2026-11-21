@@ -157,6 +157,8 @@ def is_native_gptqmodel_checkpoint(model: nn.Module, checkpoint_files=None) -> b
 def _is_native_gptqmodel_config(qcfg: QuantizeConfig) -> bool:
     """Return whether a loaded config needs GPTQModel's native load path."""
 
+    if qcfg.method == METHOD.CPTC:
+        return True
     meta = qcfg.meta if isinstance(qcfg.meta, dict) else {}
     quantizers = meta.get("quantizer") or []
     if isinstance(quantizers, str):
@@ -551,14 +553,21 @@ def hf_gptqmodel_prepare_model_for_load(
     if not _is_native_gptqmodel_config(qcfg):
         return None
 
-    # Serialized packed tensors are authoritative; dynamic rules may also name
-    # dense modules. NF12 stores its packed weight under `nf12_packed`.
-    packed_suffix = (
-        ".nf12_packed"
-        if resolve_quant_format(qcfg.format, qcfg.method) == FORMAT.NF12
-        else ".qweight"
-    )
+    # Serialized packed tensors are authoritative; dynamic rules may also name dense modules.
+    packed_suffix = {
+        FORMAT.NF12: ".nf12_packed",
+        FORMAT.CPTC: ".cptc_packed",
+    }.get(resolve_quant_format(qcfg.format, qcfg.method), ".qweight")
     tensor_keys = _checkpoint_tensor_keys(checkpoint_path, checkpoint_files)
+    if qcfg.method == METHOD.CPTC:
+        from ..nn_modules.qlinear.cptc import CPTCLinear
+
+        payload_suffixes = tuple(f".{name}" for name in CPTCLinear.CHECKPOINT_REQUIRED_BUFFERS)
+        owners = {key.rpartition(".")[0] for key in tensor_keys if key.endswith(payload_suffixes)}
+        required = {f"{owner}{suffix}" for owner in owners for suffix in payload_suffixes}
+        missing = sorted(required - tensor_keys)
+        if missing:
+            raise ValueError(f"Missing required CPTC tensors: {', '.join(missing[:8])}")
     quantized_module_names = tuple(
         sorted(
             key.removesuffix(packed_suffix)
@@ -689,7 +698,8 @@ def hf_gptqmodel_prepare_model_for_load(
                     for name, tensor_dtype in checkpoint_dtypes.items()
                 }
         checkpoint_dtype = checkpoint_dtypes.get(f"{module_name}.bias")
-        if checkpoint_dtype is None or not _load_narrowed(checkpoint_dtype, dtype):
+        exact = "bias" in getattr(module, "CHECKPOINT_EXACT_DTYPE_BUFFERS", ())
+        if checkpoint_dtype is None or (not exact and not _load_narrowed(checkpoint_dtype, dtype)):
             continue
         if bias.dtype != checkpoint_dtype:
             module.bias = bias.to(dtype=checkpoint_dtype)
