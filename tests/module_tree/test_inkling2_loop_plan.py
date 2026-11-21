@@ -9,10 +9,9 @@ L2-clip children, a gated ``o_proj`` pair, short convolutions) and four decoder
 layer classes: sliding/full attention, each with a looped and a non-looped
 variant. The looped variants add q/k/v/mlp message gates.
 
-``Inkling2Loop`` only exists on the open ``huggingface/transformers#51050``
-branch, so the real-model cases skip with a precise reason on a Transformers
-release that has no ``inkling2_loop`` implementation. The registry contract in
-``test_registered_module_plans.py`` always runs.
+The architecture itself is vendored in ``gptqmodel/hf_inkling2_loop``, so
+every case here builds the real model class from a tiny config: nothing skips
+on a Transformers release that has no ``inkling2_loop`` implementation.
 """
 
 from __future__ import annotations
@@ -56,19 +55,16 @@ ATTENTION_LEAVES = (
 
 
 def _inkling2_modules():
-    """Return the Inkling2Loop configuration/modeling modules or skip."""
+    """Return the vendored Inkling2Loop configuration/modeling modules.
 
-    try:
-        from transformers.models.inkling2_loop import configuration_inkling2_loop, modeling_inkling2_loop
-    except ImportError:
-        import transformers
+    GPT-QModel ships its own copy of the architecture (see
+    ``gptqmodel/hf_inkling2_loop``), so the contract runs on every supported
+    Transformers release instead of waiting for the modeling code to land
+    upstream.
+    """
 
-        pytest.skip(
-            "Installed Transformers "
-            f"{transformers.__version__} has no `inkling2_loop` implementation; it only "
-            "exists on the open huggingface/transformers#51050 branch "
-            "(run with PYTHONPATH=<transformers branch>/src)."
-        )
+    from gptqmodel.hf_inkling2_loop import configuration_inkling2_loop, modeling_inkling2_loop
+
     return configuration_inkling2_loop, modeling_inkling2_loop
 
 

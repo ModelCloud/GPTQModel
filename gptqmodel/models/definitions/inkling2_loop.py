@@ -7,8 +7,11 @@ from inspect import signature
 from typing import Any, Dict
 
 import torch
-from transformers import AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
+from transformers import AutoConfig, AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+from ...hf_inkling2_loop import Inkling2LoopConfig, Inkling2LoopForConditionalGeneration
 
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
@@ -26,6 +29,17 @@ _MASK_CACHE_KWARG = {
     factory: ("cache" if "cache" in signature(factory).parameters else "past_key_values")
     for factory in (create_causal_mask, create_sliding_window_causal_mask)
 }
+
+# The architecture is vendored in `gptqmodel/hf_inkling2_loop` (Apache-2.0, from
+# huggingface/transformers#51050) so the released checkpoint loads on any
+# supported Transformers release instead of waiting for the modeling code to
+# land upstream. A native implementation still wins when the installed release
+# ships one.
+if "inkling2_loop" not in CONFIG_MAPPING:
+    AutoConfig.register("inkling2_loop", Inkling2LoopConfig)
+AutoModelForMultimodalLM.register(
+    Inkling2LoopConfig, Inkling2LoopForConditionalGeneration, exist_ok=True
+)
 
 # Every decoder layer takes the attention-residual bank as its second
 # positional argument. The generic capture keeps only ``hidden_states``, so the
