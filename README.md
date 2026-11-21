@@ -242,6 +242,8 @@ and [Apple silicon guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs
 
 Tenstorrent-compatible block-float formats also run on CPU without Tenstorrent
 hardware. See the [CPU block-float guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/tt-blockfloat-cpu.md).
+The [GPU dispatch guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/tenstorrent.md#block-float-kernel-dispatch)
+describes packed execution for the Tenstorrent weight layouts.
 
 ## Model Support 🤖
 
