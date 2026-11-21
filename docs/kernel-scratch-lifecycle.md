@@ -13,6 +13,41 @@ per-call QQQ reduce scratch that replaced its stream-keyed cache in
 per-call EXL3 kernel scratch introduced for
 [issue #4619](https://github.com/ModelCloud/GPTQModel/issues/4619).
 
+## Inkling eager attention
+
+Inkling's eager `_attend` releases each intermediate after its last use.
+For grouped-query attention, it expands key heads for the score product and
+value heads for the final probability product. The score path applies bias,
+masking and optional sinks before FP32 softmax. The cropped probabilities
+return to the query dtype before dropout and the final matrix product.
+[Implementation](../gptqmodel/models/inkling2_loop/modeling.py#L174)
+
+| Scratch | Previous lifetime | Current lifetime |
+| --- | --- | --- |
+| Repeated keys | Held through the full attention call | Released after the score product |
+| Repeated values | Allocated before the score product | Allocated immediately before the final product |
+| Scores with and without sink columns | The local variables could pin both allocations during softmax | Each stage replaces the score reference when its consumer has finished |
+
+```mermaid
+flowchart LR
+    A["_attend repeats key heads"] --> B["Score matmul drops the repeated key"]
+    B --> C["Apply scaling, bias and mask"]
+    C --> D{"Sink column supplied?"}
+    D -- Yes --> E["Append sink and release prior scores"]
+    D -- No --> F["Cast current scores to FP32 and run softmax"]
+    E --> F
+    F --> G["Slice the optional sink and cast to the query dtype"]
+    G --> H["Apply dropout, expand value heads and multiply"]
+    F -. Allocation failure .-> X["Propagate the Torch error"]
+    classDef failure fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d
+    class X failure
+```
+
+The eager regression checks the score and key references at the softmax
+boundary. A separate Torch reference compares forward and backward bit
+patterns across BF16, FP16 and FP32, with sink, grouped-head and dropout
+variants. [CPU regression](../tests/test_inkling2_loop_attention.py)
+
 ## QQQ reduce scratch
 
 `qqq_gemm` writes its INT32 global reduction into the `C` argument.  Nothing in
