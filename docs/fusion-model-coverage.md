@@ -245,7 +245,7 @@ layout alone does not authorize it.
 | `gpt_pangu` | `PanguAlphaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `grinmoe` | `GrinMoeQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `hymba` | `HymbaQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `inkling2_loop` | `Inkling2LoopQModel` | Inkling2Loop only exists in the open huggingface/transformers#51050 branch; the installed Transformers has no native config, so the fusion executor profile is unqualified. |
+| `inkling2_loop` | `Inkling2LoopQModel` | Clean-room Inkling2Loop implementation: the native module tree is not qualified for the fused qkv/gate_up executor. |
 | `instella` | `InstellaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `intern_s2_preview` | `InternS2PreviewQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `internlm` | `InternLMQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |

@@ -680,6 +680,11 @@ class _LazyWeightRenaming:
 
     source_patterns: list[str] | str
     target_patterns: list[str] | str
+    # Applied to a digit captured by the target pattern when the rule is used
+    # in reverse (runtime -> checkpoint), where a checkpoint list can be offset
+    # from the runtime layer index (e.g. Inkling 2 Mini's attention-residual
+    # queries start at layer 1).
+    index_offset: int = 0
 
     def __post_init__(self) -> None:
         self.source_patterns = self._coerce_patterns(self.source_patterns)
@@ -805,6 +810,11 @@ class _LazyWeightRenaming:
 
         return processed_sources, processed_targets, compiled_sources
 
+    def _shift_group(self, value: str) -> str:
+        if self.index_offset and value.isdigit():
+            return str(int(value) + self.index_offset)
+        return value
+
     def rename_source_key(self, source_key: str) -> tuple[str, str | None]:
         _, processed_targets, compiled_sources = self._prepared_patterns()
         match_object = compiled_sources.search(source_key)
@@ -819,7 +829,7 @@ class _LazyWeightRenaming:
             max_group_index = len(match_object.groups())
             replacement = re.sub(
                 r"\\(\d+)",
-                lambda m: (
+                lambda m: self._shift_group(
                     match_object.group(group_start + int(m.group(1)))
                     if (group_start + int(m.group(1))) <= max_group_index
                     and match_object.group(group_start + int(m.group(1))) is not None
@@ -2234,7 +2244,13 @@ class LazyTurtle:
                 continue
             # New path: consume reversed WeightRenaming-style entries directly.
             runtime_pattern, checkpoint_pattern = patterns
-            renamings.append(_LazyWeightRenaming(runtime_pattern, checkpoint_pattern))
+            renamings.append(
+                _LazyWeightRenaming(
+                    runtime_pattern,
+                    checkpoint_pattern,
+                    index_offset=int(getattr(entry, "index_offset", 0) or 0),
+                )
+            )
 
         return tuple(renamings)
 
@@ -2296,7 +2312,13 @@ class LazyTurtle:
             if renaming_patterns is None:
                 continue
             checkpoint_pattern, runtime_prefix = renaming_patterns
-            reversed_map.append(_LazyWeightRenaming(runtime_prefix, checkpoint_pattern))
+            reversed_map.append(
+                _LazyWeightRenaming(
+                    runtime_prefix,
+                    checkpoint_pattern,
+                    index_offset=-int(getattr(entry, "offset", 0) or 0),
+                )
+            )
         return reversed_map or None
 
     @classmethod

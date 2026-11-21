@@ -3,39 +3,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from inspect import signature
 from typing import Any, Dict
 
 import torch
 from transformers import AutoConfig, AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
-from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from ...hf_inkling2_loop import Inkling2LoopConfig, Inkling2LoopForConditionalGeneration
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..inkling2_loop import (
+    Inkling2LoopConfig,
+    Inkling2LoopForConditionalGeneration,
+    Inkling2LoopPackedExperts,
+)
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
-# Transformers 5.24 renamed the cache argument of the mask builders from
-# ``past_key_values`` to ``cache``. ``Inkling2Loop`` only exists on releases
-# with the new spelling, but the definition must import on the installed
-# release too, so resolve the accepted name from the live signature.
-_MASK_CACHE_KWARG = {
-    factory: ("cache" if "cache" in signature(factory).parameters else "past_key_values")
-    for factory in (create_causal_mask, create_sliding_window_causal_mask)
-}
-
-# The architecture is vendored in `gptqmodel/hf_inkling2_loop` (Apache-2.0, from
-# huggingface/transformers#51050) so the released checkpoint loads on any
-# supported Transformers release instead of waiting for the modeling code to
-# land upstream. A native implementation still wins when the installed release
-# ships one.
-if "inkling2_loop" not in CONFIG_MAPPING:
-    AutoConfig.register("inkling2_loop", Inkling2LoopConfig)
+AutoConfig.register("inkling2_loop", Inkling2LoopConfig, exist_ok=True)
 AutoModelForMultimodalLM.register(
     Inkling2LoopConfig, Inkling2LoopForConditionalGeneration, exist_ok=True
 )
@@ -97,13 +84,49 @@ class Inkling2LoopQModel(BaseQModel):
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj.linear"]
 
     @classmethod
-    def after_defuser_conversion(cls, model):
-        """Require every decoder layer's routed experts to be expanded.
+    def simple_layer_modules(
+        cls,
+        model_config,
+        quantize_config,
+        is_awq_quantize: bool = False,
+        include_capture_only: bool = False,
+    ):
+        """Skip the routed experts that the checkpoint already stores quantized.
 
-        ``Inkling2Loop`` keeps routed experts as 3-D parameters. Without a
-        Defuser registry entry for ``inkling2_loop`` the conversion silently
-        returns False and all experts would keep their source dtype while the
-        declared expert subsets resolve to nothing.
+        Layers whose experts are packed NVFP4/MXFP8 run through
+        :class:`Inkling2LoopPackedExperts`' fused kernels. They have no
+        per-expert ``Linear`` leaves, so leaving the expert specs in the plan
+        would only produce unresolved module names.
+        """
+
+        blocks = super().simple_layer_modules(
+            model_config,
+            quantize_config,
+            is_awq_quantize=is_awq_quantize,
+            include_capture_only=include_capture_only,
+        )
+        text_config = getattr(model_config, "text_config", model_config)
+        formats = getattr(text_config, "experts_formats", None)
+        if not formats:
+            return blocks
+        packed = {index for index, fmt in enumerate(formats) if fmt}
+        if not packed:
+            return blocks
+        filtered = []
+        for index, block in enumerate(blocks):
+            if index in packed:
+                block = [name for name in block if ".mlp.experts." not in name]
+            filtered.append(block)
+        return filtered
+
+    @classmethod
+    def after_defuser_conversion(cls, model):
+        """Validate the expert layout Defuser leaves behind.
+
+        Packed (pre-quantized) experts must stay packed: decoding them here
+        would throw away the 4-bit checkpoint and re-quantize the result.
+        Dense experts must be expanded into per-expert ``Linear`` modules so
+        GPTQ can quantize them.
         """
 
         config = getattr(model.config, "text_config", model.config)
@@ -113,16 +136,19 @@ class Inkling2LoopQModel(BaseQModel):
         ]
         if len(containers) != expected:
             raise RuntimeError(
-                "Inkling2Loop expert defusion coverage mismatch: "
-                f"converted={len(containers)} expected={expected}. The installed Defuser has "
-                "no `inkling2_loop` registry entry; upgrade Defuser before quantizing."
+                "Inkling2Loop expert coverage mismatch: "
+                f"converted={len(containers)} expected={expected}."
             )
         for experts in containers:
+            if isinstance(experts, Inkling2LoopPackedExperts):
+                for part in ("gate_up_weight", "gate_up_scales", "down_weight", "down_scales"):
+                    if getattr(experts, part, None) is None:
+                        raise RuntimeError(f"Packed Inkling2Loop experts lost `{part}` during conversion.")
+                continue
             if getattr(experts, "gate_up_proj", None) is not None or getattr(experts, "down_proj", None) is not None:
                 raise RuntimeError(
-                    "Inkling2Loop routed experts were not defused into per-expert Linear modules. "
-                    "The installed Defuser has no `inkling2_loop` registry entry; upgrade Defuser "
-                    "before quantizing."
+                    "Inkling2Loop dense routed experts were not defused into per-expert Linear modules. "
+                    "Upgrade Defuser before quantizing."
                 )
             for index in range(int(config.n_routed_experts)):
                 expert = getattr(experts, str(index), None)
@@ -364,7 +390,7 @@ class Inkling2LoopQModel(BaseQModel):
             "position_ids": additional_inputs.get("position_ids"),
             "layer_idx": getattr(self_attn, "layer_idx", None),
         }
-        mask_kwargs[_MASK_CACHE_KWARG[mask_factory]] = additional_inputs.get("past_key_values")
+        mask_kwargs["past_key_values"] = additional_inputs.get("past_key_values")
         additional_inputs["attention_mask"] = mask_factory(**mask_kwargs)
         return additional_inputs
 

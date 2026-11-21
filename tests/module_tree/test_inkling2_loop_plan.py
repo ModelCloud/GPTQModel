@@ -9,9 +9,9 @@ L2-clip children, a gated ``o_proj`` pair, short convolutions) and four decoder
 layer classes: sliding/full attention, each with a looped and a non-looped
 variant. The looped variants add q/k/v/mlp message gates.
 
-The architecture itself is vendored in ``gptqmodel/hf_inkling2_loop``, so
-every case here builds the real model class from a tiny config: nothing skips
-on a Transformers release that has no ``inkling2_loop`` implementation.
+The architecture is implemented in ``gptqmodel/models/inkling2_loop``, so every
+case here builds the real model class from a tiny config: nothing depends on a
+Transformers release shipping an ``inkling2_loop`` implementation.
 """
 
 from __future__ import annotations
@@ -55,17 +55,11 @@ ATTENTION_LEAVES = (
 
 
 def _inkling2_modules():
-    """Return the vendored Inkling2Loop configuration/modeling modules.
+    """Return the clean-room Inkling2Loop configuration/modeling modules."""
 
-    GPT-QModel ships its own copy of the architecture (see
-    ``gptqmodel/hf_inkling2_loop``), so the contract runs on every supported
-    Transformers release instead of waiting for the modeling code to land
-    upstream.
-    """
+    from gptqmodel.models.inkling2_loop import configuration, modeling
 
-    from gptqmodel.hf_inkling2_loop import configuration_inkling2_loop, modeling_inkling2_loop
-
-    return configuration_inkling2_loop, modeling_inkling2_loop
+    return configuration, modeling
 
 
 def _tiny_config(configuration):
@@ -286,7 +280,7 @@ def test_inkling2_loop_rejects_an_unconverted_model(inkling2_case):
     with torch.device("meta"):
         raw = modeling.Inkling2LoopForConditionalGeneration(inkling2_case.config)
 
-    with pytest.raises(RuntimeError, match="no `inkling2_loop` registry entry"):
+    with pytest.raises(RuntimeError, match="not defused into per-expert Linear modules"):
         inkling2_case.definition.after_defuser_conversion(raw)
 
 

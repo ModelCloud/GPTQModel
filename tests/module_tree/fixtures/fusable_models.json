@@ -2437,7 +2437,7 @@
     },
     "inkling2_loop": {
       "definition": "Inkling2LoopQModel",
-      "reason": "Inkling2Loop only exists in the open huggingface/transformers#51050 branch; the installed Transformers has no native config, so the fusion executor profile is unqualified."
+      "reason": "Clean-room Inkling2Loop implementation: the native module tree is not qualified for the fused qkv/gate_up executor."
     },
     "inkling_mm_model": {
       "definition": "InklingMMQModel",
