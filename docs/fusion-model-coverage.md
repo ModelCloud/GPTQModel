@@ -6,7 +6,7 @@ parents and roles come exclusively from `model.module_plan()`; matching a name,
 shape, or inheritance chain does not grant eligibility.
 
 The checked-in [qualification inventory](../tests/module_tree/fixtures/fusable_models.json)
-accounts for all **208 registered model types**: **102 qualified** and **106 not
+accounts for all **210 registered model types**: **102 qualified** and **108 not
 qualified for the current executor**. Qualified means the real tiny native
 model resolves the declared parents and the planner admits them. It does not
 mean every layer or quantization setting is compatible. In particular, expert
@@ -245,6 +245,7 @@ layout alone does not authorize it.
 | `gpt_pangu` | `PanguAlphaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `grinmoe` | `GrinMoeQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `hymba` | `HymbaQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `inkling2_loop` | `Inkling2LoopQModel` | Inkling2Loop only exists in the open huggingface/transformers#51050 branch; the installed Transformers has no native config, so the fusion executor profile is unqualified. |
 | `instella` | `InstellaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `intern_s2_preview` | `InternS2PreviewQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `internlm` | `InternLMQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
