@@ -264,13 +264,16 @@ class Inkling2LoopShortConvolution(nn.Module):
         )
 
     def _conv(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return F.conv1d(
+        padded = F.conv1d(
             hidden_states,
             weight=self.conv1d.weight,
             bias=self.conv1d.bias,
             padding=self.conv_kernel_size - 1,
             groups=hidden_states.shape[1],
         )
+        # Keep the causal prefix before the caller selects the current chunk.
+        # The right padding otherwise shifts the chunk outputs into the future.
+        return padded[..., : hidden_states.shape[-1]]
 
     def _update(self, hidden_states: torch.Tensor, conv_state: torch.Tensor) -> torch.Tensor:
         state_len = conv_state.shape[-1]
