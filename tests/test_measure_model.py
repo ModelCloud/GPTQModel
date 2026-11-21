@@ -29,7 +29,7 @@ from gptqmodel.measure import (
     RMSEConfig,
     TOPKConfig,
 )
-from gptqmodel.measure.runner import measure_models
+from gptqmodel.measure.runner import capture_reference, measure_against, measure_models
 
 
 VOCAB = 128
@@ -235,3 +235,21 @@ def test_positions_reports_what_was_actually_sampled(tiny_model):
     # 2 usable positions in the first row and 3 in the second, not the 64 asked
     # for: the report must not claim a sample it did not read.
     assert report.positions == 5
+
+
+def test_capture_then_measure_matches_the_one_shot_api(tiny_model):
+    model, _source = tiny_model
+    reference = _perturbed(model.model)
+    rows = [torch.tensor(row).unsqueeze(0) for row in ROWS]
+    config = MeasureConfig(
+        metrics=(PPLConfig(window=8, stride=4), KLDConfig(positions=2)),
+        dataset=ROWS, reference=reference, batch=2, max_batches=2,
+    )
+
+    capture = capture_reference(reference, rows, config)
+    split = measure_against(model.model, capture, config)
+    one_shot = measure_models(model.model, reference, rows, config)
+
+    assert split.values == one_shot.values
+    assert split.reference == one_shot.reference
+    assert split.batches == one_shot.batches
