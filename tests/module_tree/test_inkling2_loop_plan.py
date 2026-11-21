@@ -17,6 +17,7 @@ Transformers release shipping an ``inkling2_loop`` implementation.
 from __future__ import annotations
 
 import copy
+import json
 import re
 from types import SimpleNamespace
 
@@ -94,6 +95,47 @@ def _tiny_config(configuration):
             "text_hidden_size": hidden,
         },
     )
+
+
+def test_inkling2_config_preserves_unused_kwargs_with_expert_manifest(tmp_path):
+    configuration, _ = _inkling2_modules()
+    config_dir = tmp_path / "submodel"
+    _tiny_config(configuration).save_pretrained(config_dir)
+    manifest = {
+        "model": {
+            "parameter_groups": [
+                {
+                    "output_dtype": "uint8",
+                    "tensors": ["model.llm.layers.0.mlp.experts.w13_weight"],
+                }
+            ]
+        },
+    }
+    (config_dir / configuration.QUANT_MANIFEST).write_text(json.dumps(manifest), encoding="utf-8")
+
+    config_class = configuration.Inkling2LoopConfig
+    loaded, unused = config_class.from_pretrained(
+        tmp_path,
+        subfolder="submodel",
+        return_unused_kwargs=True,
+        test_argument="retained",
+    )
+    plain = config_class.from_pretrained(tmp_path, subfolder="submodel")
+    assert unused["test_argument"] == "retained"
+    assert isinstance(loaded, config_class)
+    assert loaded.text_config.experts_formats == ["nvfp4"] + [None] * 11
+    assert plain.text_config.experts_formats == loaded.text_config.experts_formats
+
+
+def test_inkling2_concrete_model_loads_without_explicit_config(tmp_path):
+    configuration, modeling = _inkling2_modules()
+    model_class = modeling.Inkling2LoopForConditionalGeneration
+    model = model_class(_tiny_config(configuration))
+    model.save_pretrained(tmp_path)
+
+    loaded = model_class.from_pretrained(tmp_path)
+    assert loaded.config.text_config.hidden_size == model.config.text_config.hidden_size
+    torch.testing.assert_close(loaded.state_dict(), model.state_dict(), rtol=0, atol=0)
 
 
 @pytest.fixture(scope="module")
