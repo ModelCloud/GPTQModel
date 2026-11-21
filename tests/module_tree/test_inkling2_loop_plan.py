@@ -141,6 +141,33 @@ def test_inkling2_concrete_model_loads_without_explicit_config(tmp_path):
     torch.testing.assert_close(loaded.state_dict(), model.state_dict(), rtol=0, atol=0)
 
 
+@torch.no_grad()
+def test_inkling2_defused_dense_experts_keep_bf16_routing_order():
+    configuration, modeling = _inkling2_modules()
+    model = modeling.Inkling2LoopForConditionalGeneration(_tiny_config(configuration))
+    experts = model.model.language_model.layers[0].mlp.experts.to(torch.bfloat16)
+    half = experts.gate_up_proj.shape[1] // 2
+    experts.gate_up_proj.zero_()
+    experts.gate_up_proj[0, [0, 1, half, half + 1], 0] = torch.tensor([1, -1, 2, 4], dtype=torch.bfloat16)
+    experts.down_proj.zero_()
+    experts.down_proj[0, 0, :2] = torch.tensor([1, 0.5], dtype=torch.bfloat16)
+
+    x = torch.zeros((1, model.config.text_config.hidden_size), dtype=torch.bfloat16)
+    x[0, 0] = 1.25
+    indices = torch.tensor([[0]])
+    routing = torch.tensor([[0.4731]])
+    gate = torch.tensor([1.25, -1.25])
+    up = torch.tensor([2.5, 5.0])
+    activation = (4 * (gate / 4).tanh() * gate.sigmoid() * (25 * (up / 25).tanh()) * routing).bfloat16()
+    expected = torch.zeros_like(x)
+    expected[0, 0] = activation[0, 0].float() + 0.5 * activation[0, 1].float()
+
+    torch.testing.assert_close(experts(x, indices, routing), expected, rtol=0, atol=0)
+    assert _convert_model_with_defuser(MODEL_MAP["inkling2_loop"], model, cleanup_original=True)
+    assert isinstance(experts.get_submodule("0.down_proj"), torch.nn.Linear)
+    torch.testing.assert_close(experts(x, indices, routing), expected, rtol=0, atol=0)
+
+
 @pytest.fixture(scope="module")
 def inkling2_case():
     configuration, modeling = _inkling2_modules()
