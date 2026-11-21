@@ -63,7 +63,10 @@ def declare_expert_storage(model) -> None:
             isinstance(module, Inkling2LoopPackedExpertLinear)
             for module in experts.modules()
         ):
-            experts.refuse()
+            # Re-fusion is contract-checked: the layer may only go back to
+            # packed storage while every leaf still holds the checkpoint's own
+            # payload with one identical quantization (contracts/model/refusion.md).
+            experts.refuse(name)
             continue
         formats[layer_index] = None
 

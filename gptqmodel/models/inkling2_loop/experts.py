@@ -41,6 +41,7 @@ from ...utils.nvfp4_triton import (
     nvfp4_w4a16_linear,
     scaled_wxa16_available,
 )
+from ...utils.refusion import RefusionContractError, assert_refusable
 
 
 class Inkling2LoopSoftcap(nn.Module):
@@ -428,30 +429,42 @@ class Inkling2LoopPackedExperts(nn.Module):
         return self
 
     @torch.no_grad()
-    def refuse(self) -> "Inkling2LoopPackedExperts":
+    def refuse(self, target: Optional[str] = None) -> "Inkling2LoopPackedExperts":
         """Reassemble the fused packed storage from untouched per-expert leaves.
 
         A layer whose experts the quantization plan skipped must keep the
         checkpoint's packed declaration, so its leaves are re-fused before the
         save instead of being written in a layout the packed declaration cannot
-        describe. Only valid while every leaf still holds packed storage.
+        describe. Re-fusion is only sound while every leaf still holds this
+        container's own packed payload with one identical quantization: one
+        format, bit width, block size and dtype. That contract
+        (``contracts/model/refusion.md``) is enforced before any tensor is
+        created, so a rejected layer is left exactly as it was.
         """
 
         if not self._defused:
             return self
 
         leaves = []
+        labelled = []
         for expert_idx in range(self.num_experts):
             expert = getattr(self, str(expert_idx))
             projections = (expert.gate_proj, expert.up_proj, expert.down_proj)
-            for projection in projections:
-                if not isinstance(projection, Inkling2LoopPackedExpertLinear):
-                    raise RuntimeError(
-                        "Inkling2Loop packed experts cannot be re-fused: expert "
-                        f"{expert_idx} already holds {type(projection).__name__}. "
-                        "Quantize every projection of a layer's experts or none."
-                    )
             leaves.append(projections)
+            labelled.extend(
+                (f"expert {expert_idx}.{name}", projection)
+                for name, projection in zip(("gate_proj", "up_proj", "down_proj"), projections)
+            )
+
+        owner = target or f"Inkling2Loop packed experts ({self.num_experts} experts)"
+        signature = assert_refusable(owner, labelled)
+        if signature.format != self.fmt:
+            # The container's declaration is part of the checkpoint: a layer
+            # cannot claim one format and store another.
+            raise RefusionContractError(
+                f"{owner} cannot be re-fused: its leaves are {signature.format}, but the "
+                f"container declares {self.fmt} (contracts/model/refusion.md R1)."
+            )
 
         self.gate_up_weight = nn.Parameter(
             torch.stack(

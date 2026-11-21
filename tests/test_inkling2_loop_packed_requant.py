@@ -12,6 +12,7 @@ the dense bf16 source is materialized only when a processor asks for
 
 from __future__ import annotations
 
+import pytest
 import torch
 from torch import nn
 
@@ -258,12 +259,132 @@ def test_partially_quantized_expert_layer_is_reported_not_saved_mixed():
     expert = getattr(model.layers[0].mlp.experts, "0")
     expert.gate_proj = nn.Linear(config.hidden_size, config.moe_intermediate_size, bias=False, device="meta")
 
-    try:
+    with pytest.raises(RuntimeError) as error:
         declare_expert_storage(model)
-    except RuntimeError as error:
-        assert "cannot be re-fused" in str(error)
-    else:  # pragma: no cover - the mixed layout must never be accepted silently
-        raise AssertionError("mixed packed/quantized expert layer was accepted")
+    message = str(error.value)
+    assert "cannot be re-fused" in message
+    assert "layers.0.mlp.experts" in message
+    assert "contracts/model/refusion.md" in message
+
+
+class _KernelStub(nn.Module):
+    """Stand-in for an installed quantized kernel module."""
+
+    def __init__(self, bits=4, group_size=128):
+        super().__init__()
+        self.bits = bits
+        self.group_size = group_size
+        self.sym = True
+        self.desc_act = False
+        self.pack_dtype = torch.int32
+        self.scales_dtype = torch.float16
+        self.qzero_dtype = torch.int32
+        self.in_features = 32
+        self.out_features = 8
+        self.qweight = nn.Parameter(torch.zeros(4, 1, dtype=torch.int32), requires_grad=False)
+        self.scales = nn.Parameter(torch.zeros(1, 1, dtype=torch.float16), requires_grad=False)
+
+
+def test_refusion_signature_separates_packed_dense_and_kernel_modules():
+    from gptqmodel.utils.refusion import quantization_signature
+
+    config = _text_config(experts_formats=["nvfp4"])
+    container = E.build_experts(config, 0)
+    _fill_nvfp4(container)
+    container.defuse()
+    packed = quantization_signature(getattr(container, "0").gate_proj)
+    assert (packed.kind, packed.format, packed.bits) == ("packed", "nvfp4", 4)
+    assert packed.values_per_scale == 16
+
+    mxfp8 = E.Inkling2LoopPackedExpertLinear(
+        in_features=32,
+        out_features=16,
+        fmt="mxfp8",
+        weight=torch.zeros(16, 32, dtype=torch.float8_e4m3fn),
+        scales=torch.zeros(16, 1, dtype=torch.uint8),
+    )
+    assert quantization_signature(mxfp8).bits == 8
+    assert quantization_signature(nn.Linear(4, 4)).kind == "dense"
+    assert quantization_signature(_KernelStub()).kind == "quantized"
+    assert quantization_signature(nn.LayerNorm(4)).kind == "unknown"
+
+
+def test_refusion_rejects_a_leaf_with_a_different_quantization():
+    """Different format/bit width/block size may never share one fused tensor."""
+
+    from gptqmodel.utils.refusion import RefusionContractError
+
+    config = _text_config(experts_formats=["nvfp4"])
+    container = E.build_experts(config, 0)
+    _fill_nvfp4(container)
+    container.defuse()
+
+    # One leaf that reports a different block-scaled format (8-bit instead of
+    # 4-bit): the fused container cannot describe both.
+    getattr(container, "1").up_proj.fmt = "mxfp8"
+
+    with pytest.raises(RefusionContractError) as error:
+        container.refuse("model.language_model.layers.0.mlp.experts")
+
+    message = str(error.value)
+    assert "different quantization" in message
+    assert "contracts/model/refusion.md" in message
+    assert "nvfp4" in message and "mxfp8" in message
+    assert "expert 1.up_proj" in message
+
+    # Nothing was mutated: the layer stays defused and unsavable as packed.
+    assert container.defused
+    assert not hasattr(container, "gate_up_weight")
+    for index in range(config.n_routed_experts):
+        expert = getattr(container, str(index))
+        for projection in ("gate_proj", "up_proj", "down_proj"):
+            assert getattr(expert, projection) is not None
+
+
+def test_refusion_rejects_leaves_that_disagree_with_the_container_declaration():
+    """Every leaf agreeing is not enough: the declaration must match too."""
+
+    from gptqmodel.utils.refusion import RefusionContractError
+
+    config = _text_config(experts_formats=["nvfp4"])
+    container = E.build_experts(config, 0)
+    _fill_nvfp4(container)
+    container.defuse()
+    for index in range(config.n_routed_experts):
+        expert = getattr(container, str(index))
+        for projection in ("gate_proj", "up_proj", "down_proj"):
+            getattr(expert, projection).fmt = "mxfp8"
+
+    with pytest.raises(RefusionContractError) as error:
+        container.refuse("layers.0.mlp.experts")
+
+    message = str(error.value)
+    assert "its leaves are mxfp8" in message
+    assert "container declares nvfp4" in message
+    assert container.defused
+
+
+def test_refusion_rejects_a_quantized_leaf():
+    """A quantized kernel module cannot be merged back into a packed container."""
+
+    from gptqmodel.utils.refusion import RefusionContractError
+
+    config = _text_config(experts_formats=["nvfp4"])
+    container = E.build_experts(config, 0)
+    _fill_nvfp4(container)
+    container.defuse()
+    getattr(container, "0").gate_proj = _KernelStub()
+
+    with pytest.raises(RefusionContractError) as error:
+        container.refuse("layers.0.mlp.experts")
+
+    message = str(error.value)
+    assert "layers.0.mlp.experts cannot be re-fused" in message
+    assert "expert 0.gate_proj already holds _KernelStub" in message
+    assert "bits=4" in message
+    assert "contracts/model/refusion.md" in message
+    assert container.defused
+    assert not hasattr(container, "gate_up_weight")
 
 
 def test_checkpoint_conversion_reverses_into_clean_save_keys():
