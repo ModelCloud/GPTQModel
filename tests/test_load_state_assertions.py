@@ -431,3 +431,65 @@ def test_ernie4_5_moe_negative_controls_still_raise(tmp_path):
             api_name="test.load",
             require_uniform_dtype=True,
         )
+
+
+class _PackedStorage(nn.Module):
+    """Module whose scale parameter is kernel storage, not an activation operand."""
+
+    CHECKPOINT_EXACT_DTYPE_PARAMETERS = ("scales",)
+
+    def __init__(self):
+        super().__init__()
+        self.scales = nn.Parameter(
+            torch.empty(2, dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        self.dense = nn.Parameter(torch.empty(2, dtype=torch.bfloat16))
+
+
+class _StorageModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.experts = _PackedStorage()
+
+
+def test_accepts_declared_storage_parameters_at_the_checkpoint_dtype():
+    # A declared parameter keeps the checkpoint dtype (float8) while the rest of
+    # the model is bf16; that is the kernel contract, not corruption.
+    assert_loaded_model_state(
+        _StorageModel(),
+        api_name="test.load",
+        expected_dtype=torch.bfloat16,
+        require_uniform_dtype=True,
+    )
+
+
+def test_still_rejects_an_undeclared_storage_parameter():
+    class _Undeclared(_PackedStorage):
+        CHECKPOINT_EXACT_DTYPE_PARAMETERS = ()
+
+    model = nn.Module()
+    model.experts = _Undeclared()
+
+    with pytest.raises(RuntimeError, match="not all torch.bfloat16"):
+        assert_loaded_model_state(
+            model,
+            api_name="test.load",
+            expected_dtype=torch.bfloat16,
+            require_uniform_dtype=True,
+        )
+
+
+def test_declared_storage_parameters_must_still_be_materialized():
+    class _MetaStorage(_PackedStorage):
+        def __init__(self):
+            super().__init__()
+            self.scales = nn.Parameter(
+                torch.empty(2, dtype=torch.float8_e4m3fn, device="meta"),
+                requires_grad=False,
+            )
+
+    model = nn.Module()
+    model.experts = _MetaStorage()
+
+    with pytest.raises(RuntimeError, match="stayed on the meta device"):
+        assert_loaded_model_state(model, api_name="test.load")
