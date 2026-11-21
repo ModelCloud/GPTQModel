@@ -34,8 +34,8 @@ report = quantized.measure(MeasureConfig(
     ),
     dataset=texts,          # strings, HF dataset rows, or token-id lists
     reference=reference,
-    batch_size=4,           # rows of equal length are batched together
-    max_batches=4,          # forward batches per model
+    batch=4,                # rows are padded and batched together
+    max_batches=4,          # rows read, and the forward-batch cap
 ))
 
 print(report)              # aligned columns for a terminal or TUI
@@ -114,18 +114,19 @@ GradedThresholdConfig(
 
 ## Batching and reproducibility
 
-Default `batch_size=1`, and that default is the reproducible one. In bfloat16 the
+Default `batch=1`, and that default is the reproducible one. In bfloat16 the
 forward is sensitive to the batch shape: the same row alone and inside a batch
 of equally long rows differs by up to 0.84 in logits, which moves KLD by about
 1% and top-k by a few points. That is kernel accumulation, not padding - the
 padded and unpadded float32 runs agree to 1.5e-4.
 
-Use `batch_size > 1` when you want the speed (4x fewer forwards in the runs
-below) and `batch_size=1` when numbers must be comparable across runs.
+`batch` changes how the same rows are fed, never how many rows are read:
+`batch > 1` gives the speed (4x fewer forwards below), `batch=1` gives the
+reproducible numbers.
 
 Measured on the 0.5B pair, 4 rows of 402-512 tokens:
 
-| batch_size | forwards | KLD | TOP_K@1 |
+| batch | forwards | KLD | TOP_K@1 |
 | --- | --- | --- | --- |
 | 1 | 4 | 0.2204 | 0.7734 |
 | 4 | 1 | 0.2184 | 0.8047 |
@@ -156,7 +157,7 @@ kernel.
   `TOP_K {1: 1.0}` - not "close to zero". A harness that cannot do that is
   measuring drifted positions rather than models.
 - **One forward per batch** for any number of fused metrics (asserted by a
-  counting test). `batch_size` batches rows of different lengths too: they are
+  counting test). `batch` batches rows of different lengths too: they are
   padded to the widest row, and every consumer masks the padding - the attention
   mask keeps pads out of attention, the NLL ignores padded targets, and position
   sampling stays inside each row's real length. In float32 the padded and

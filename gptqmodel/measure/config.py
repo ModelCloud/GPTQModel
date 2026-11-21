@@ -228,8 +228,10 @@ class MeasureConfig:
     )
     dataset: Any = None
     reference: Any = None
+    #: Rows to read, and therefore the cap on forward batches.
     max_batches: int = 4
-    batch_size: int = 1
+    #: Rows per forward. Same rows, fewer forwards; it never changes coverage.
+    batch: int = 1
     device: Any = None
     strict: bool = False
     seed: int = 0
@@ -256,9 +258,9 @@ class MeasureConfig:
 
         if self.max_batches <= 0:
             raise ValueError(f"MeasureConfig.max_batches must be positive, got {self.max_batches}")
-        if not isinstance(self.batch_size, int) or self.batch_size <= 0:
+        if not isinstance(self.batch, int) or self.batch <= 0:
             raise ValueError(
-                f"MeasureConfig.batch_size must be a positive int, got {self.batch_size!r}"
+                f"MeasureConfig.batch must be a positive int, got {self.batch!r}"
             )
 
     @staticmethod

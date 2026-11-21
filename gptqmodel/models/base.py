@@ -2685,7 +2685,7 @@ class BaseQModel(nn.Module):
             config.dataset,
             window=window,
             stride=stride,
-            max_rows=config.max_batches * config.batch_size,
+            max_rows=config.max_batches,
         )
         return measure_models(
             self.model,

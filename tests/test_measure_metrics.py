@@ -169,8 +169,8 @@ def test_measure_config_rejects_ambiguous_runs():
         MeasureConfig(metrics=())
     with pytest.raises(ValueError, match="max_batches"):
         MeasureConfig(max_batches=0)
-    with pytest.raises(ValueError, match="batch_size"):
-        MeasureConfig(batch_size=0)
+    with pytest.raises(ValueError, match="batch"):
+        MeasureConfig(batch=0)
     with pytest.raises(ValueError, match="window"):
         PPLConfig(window=1)
     with pytest.raises(ValueError, match="stride"):

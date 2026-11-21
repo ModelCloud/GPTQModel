@@ -187,14 +187,14 @@ def test_only_requested_metrics_appear(tiny_model):
     assert set(report.values) == {"KLD"}
     assert report.positions > 0
 
-def test_batch_size_groups_equal_length_rows(tiny_model):
+def test_batch_groups_equal_length_rows(tiny_model):
     model, _source = tiny_model
     reference = _Counting(model.model)
     candidate = _Counting(model.model)
     rows = [torch.tensor(row).unsqueeze(0) for row in ROWS]  # all length 10
 
     report = measure_models(candidate, reference, rows, MeasureConfig(
-        metrics=Metric.PPL, dataset=ROWS, reference=reference, batch_size=2, max_batches=4,
+        metrics=Metric.PPL, dataset=ROWS, reference=reference, batch=2, max_batches=4,
     ))
 
     assert reference.calls == 1      # 2 rows of equal length -> 1 batch
@@ -210,9 +210,9 @@ def test_unequal_rows_are_padded_safely_into_one_batch(tiny_model):
     config = {"metrics": metrics, "dataset": ROWS, "reference": reference}
 
     batched = measure_models(model.model, reference, rows,
-                             MeasureConfig(batch_size=2, **config))
+                             MeasureConfig(batch=2, **config))
     separate = measure_models(model.model, reference, rows,
-                              MeasureConfig(batch_size=1, **config))
+                              MeasureConfig(batch=1, **config))
 
     # Unequal rows now batch. Padding is inert where it must be - the padded
     # targets are masked out of the perplexity sum, which is a pure average -

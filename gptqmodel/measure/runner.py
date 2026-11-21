@@ -119,9 +119,9 @@ class _Batch:
 
 
 def _batch_rows(
-    rows: Sequence[torch.Tensor], batch_size: int, pad_token_id: int = 0
+    rows: Sequence[torch.Tensor], batch: int, pad_token_id: int = 0
 ) -> List[_Batch]:
-    """Pad rows into batches of ``batch_size``.
+    """Pad rows into batches of ``batch``.
 
     Padding is unavoidable for text - windows differ in length - and it is only
     safe because every consumer masks it: the attention mask keeps pads out of
@@ -132,8 +132,8 @@ def _batch_rows(
 
     rows = list(rows)
     batches: List[_Batch] = []
-    for start in range(0, len(rows), max(1, batch_size)):
-        chunk = rows[start:start + batch_size]
+    for start in range(0, len(rows), max(1, batch)):
+        chunk = rows[start:start + batch]
         widths = [int(row.shape[1]) for row in chunk]
         width = max(widths)
         input_ids = torch.full((len(chunk), width), int(pad_token_id), dtype=torch.long)
@@ -228,7 +228,7 @@ def measure_models(
 
     reference_device = config.device or _model_device(reference)
     candidate_device = config.device or _model_device(candidate)
-    batches = _batch_rows(list(token_rows), config.batch_size, pad_token_id or 0)[
+    batches = _batch_rows(list(token_rows), config.batch, pad_token_id or 0)[
         : max(1, config.max_batches)
     ]
 
