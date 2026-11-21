@@ -1,0 +1,23 @@
+Raon-1-mini local Transformers 5 port for GPT-QModel
+
+Adapted from KRAFTON/Raon-1-mini-preview at
+1b4f494d71dff50318288309f64c72aa8c11340e:
+https://huggingface.co/KRAFTON/Raon-1-mini-preview/tree/1b4f494d71dff50318288309f64c72aa8c11340e
+
+The upstream configuration, modeling implementation and tokenizer assets are
+licensed under Apache License 2.0 (see the repository LICENSE). Upstream source
+SHA-256 digests at that revision:
+  modeling_raon1_mini.py       ca0742570e8c9b730115f2feedbcd9f424dc47d21b132729f27c4d8ac6998fc6
+  configuration_raon1_mini.py  3656b59a41dec3b228852973f0e2472ed081b14bcd80b36040e0e0afccba42c0
+
+Modified for package-owned Transformers 5.23 configuration/model/tokenizer
+selection, native masking/generation APIs, portable per-projection MXFP8
+expansion without persistent dense storage, strict source FP32 controls,
+cache validation, reset and package-local imports. No checkpoint Python is
+downloaded or executed at runtime. Upstream optional CUDA/FLA/Blackwell paths and
+process-global MXFP8 quantizer monkeypatches are not shipped by this port.
+
+Released tensor inventory, tokenizer and release metadata used by the tests live
+under tests/fixtures/ports/raon1_mini, not in this package. Tiny numerical
+oracles are independently expressed equations; they do not qualify trained
+checkpoint quality or GPU/native fused kernels.

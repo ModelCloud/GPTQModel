@@ -48,7 +48,6 @@ def test_defaults_are_the_retired_environment_defaults():
         "disable_bitblas": False,
         "gsq_disable_cuda_relaxation": False,
         "gsq_disable_hip_relaxation": False,
-        "rocm_llc": True,
         "cpu_workers": None,
         "cuda_workers": None,
         "max_packers": None,
@@ -118,7 +117,7 @@ def test_kernel_field_is_runtime_only():
 
     from gptqmodel.quantization.config import QuantizeConfig
 
-    config = QuantizeConfig(bits=4, group_size=128, kernel=KernelConfig(rocm_llc=False))
+    config = QuantizeConfig(bits=4, group_size=128, kernel=KernelConfig(disable_bitblas=True))
     payload = config.to_dict()
     assert "kernel" not in payload
     assert "kernel" not in payload.get("meta", {})
@@ -148,6 +147,7 @@ def test_paro_triton_linear_reads_the_policy():
     the module and assert the symbol resolves before any device work.
     """
 
+    pytest.importorskip("triton")
     from gptqmodel.nn_modules.qlinear import paro_triton
 
     assert paro_triton.resolve_kernel_config is resolve_kernel_config

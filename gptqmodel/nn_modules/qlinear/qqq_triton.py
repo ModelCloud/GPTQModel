@@ -7,8 +7,10 @@ import triton
 import triton.language as tl
 from triton.language.extra import libdevice
 
+from gptqmodel.utils.triton_jit import jit as triton_jit
 
-@triton.jit
+
+@triton_jit
 def _quantize_rows(X, Q, S, K: tl.constexpr, BLOCK: tl.constexpr):
     # rows * K can exceed 2^31 for a very large prefill batch; compute the row
     # offset in 64-bit so the load/store addresses do not wrap.

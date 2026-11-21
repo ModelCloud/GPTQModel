@@ -25,6 +25,7 @@ from ...utils.exl3_error_ledger import (
     zero_route_recovery_recipe,
 )
 from ...utils.exl3_router_candidates import has_learned_router_recovery, learned_router_ranked_choices
+from ..local import LocalModelLoader
 from .deepseek_v3 import DeepSeekV3QModel
 
 
@@ -272,7 +273,8 @@ class DeepSeekV4MTPAuxiliaryShell(nn.Module):
     def __init__(self, config, *, device: torch.device | str = "meta"):
         super().__init__()
         from transformers.modeling_utils import local_torch_dtype
-        from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+
+        from ..ports.native.deepseek_v4.modeling_deepseek_v4 import (
             DeepseekV4DecoderLayer,
             DeepseekV4HyperHead,
             DeepseekV4RMSNorm,
@@ -348,11 +350,8 @@ class DeepSeekV4MTPAuxiliaryShell(nn.Module):
 
         import defuser
 
-        from ...utils.torch import defuser_conversion_scope
-
-        with defuser_conversion_scope(self):
-            if not defuser.convert_model(self, cleanup_original=False):
-                raise RuntimeError("Defuser did not expand DeepSeek V4 MTP expert tensors")
+        if not defuser.convert_model(self, cleanup_original=False):
+            raise RuntimeError("Defuser did not expand DeepSeek V4 MTP expert tensors")
         patched = patch_deepseek_v4_router_precision(self)
         if patched != MTP_BLOCK_COUNT:
             raise RuntimeError(
@@ -948,7 +947,8 @@ class DeepSeekV4MTPReplay:
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
     ):
         from transformers.cache_utils import DynamicCache
-        from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+
+        from ..ports.native.deepseek_v4.modeling_deepseek_v4 import (
             apply_rotary_pos_emb,
         )
 
@@ -981,7 +981,7 @@ class DeepSeekV4MTPReplay:
     ) -> DeepSeekV4MTPReplayState:
         """Prepare the one shared target window and five proposal rows once."""
 
-        from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+        from ..ports.native.deepseek_v4.modeling_deepseek_v4 import (
             DeepseekV4RotaryEmbedding,
         )
 
@@ -1309,6 +1309,31 @@ def patch_deepseek_v4_router_precision(model) -> int:
     return patched
 
 
+def _compressor_projection_forward(self, input: torch.Tensor) -> torch.Tensor:
+    if self.weight.dtype == torch.float32 and input.dtype == torch.float16:
+        return nn.Linear.forward(self, input.float()).to(input.dtype)
+    return nn.Linear.forward(self, input)
+
+
+def _patch_deepseek_v4_compressor_projections(model) -> None:
+    # Transformers 5.23 pins these dense weights to FP32 when loading FP16.
+    # Its compressor still supplies FP16 activations and expects FP16 KV.
+    projections = (
+        "self_attn.compressor.kv_proj",
+        "self_attn.compressor.gate_proj",
+        "self_attn.compressor.indexer.kv_proj",
+        "self_attn.compressor.indexer.gate_proj",
+        "self_attn.compressor.indexer.scorer.weights_proj",
+    )
+    for name, module in model.named_modules():
+        if (
+            type(module) is nn.Linear
+            and name.endswith(projections)
+            and getattr(module.forward, "__func__", None) is nn.Linear.forward
+        ):
+            module.forward = MethodType(_compressor_projection_forward, module)
+
+
 def patch_deepseek_v4_checkpoint_precision(model) -> dict[str, int]:
     """Preserve every V4 checkpoint tensor intentionally stored in FP32.
 
@@ -1320,7 +1345,7 @@ def patch_deepseek_v4_checkpoint_precision(model) -> dict[str, int]:
     in their native packed source format.
     """
 
-    from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+    from ..ports.native.deepseek_v4.modeling_deepseek_v4 import (
         DeepseekV4Attention,
         DeepseekV4CSACompressor,
         DeepseekV4HCACompressor,
@@ -1413,6 +1438,14 @@ def deepseek_v4_mtp_source_projection_prefix(runtime_prefix: str) -> str:
 
 
 class DeepSeekV4QModel(DeepSeekV3QModel):
+    # V3 owns a package config/model bridge for Kimi-K2. V4 loads the vendored
+    # Transformers 5.23 port and must not inherit the V3 local loader.
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+    require_trust_remote_code = False
+
     dynamic_expert_index = "n_routed_experts"
     rotary_embedding = "model.rotary_emb"
     # Transformers intentionally ignores the integrated dSpark/MTP checkpoint
@@ -1743,6 +1776,7 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
 
     def after_model_load(self, model, load_quantized_model=False):
         precision = patch_deepseek_v4_checkpoint_precision(model)
+        _patch_deepseek_v4_compressor_projections(model)
         expected_layers = int(getattr(model.config, "num_hidden_layers", 0))
         if expected_layers <= 0:
             raise RuntimeError(
@@ -2414,6 +2448,11 @@ class DeepSeekV4MTPQuantizationModel(DeepSeekV4QModel):
         "ffn_hc.base",
         "ffn_hc.scale",
     )
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Only routed experts cross this adapter's artifact boundary; the norms,
+        # router and shared experts a fold would rewrite stay native and unsaved.
+        return []
 
     def after_model_load(self, model, load_quantized_model=False):
         del load_quantized_model

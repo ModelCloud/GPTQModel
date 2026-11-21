@@ -37,7 +37,15 @@ def test_fp8_replay_import_does_not_require_native_fp4_apis():
         with torch.inference_mode():
             assert torch.isfinite(core(input_ids=torch.arange(4)[None], use_cache=False).logits).all()
         valid, error = W4ANVFP4Linear.validate_once()
-        assert not valid and 'block-scaled FP4' in str(error)
+        assert not valid
+        # validate_once() reports a missing Triton (the activation packer)
+        # before it probes the Torch FP4 API, so the block-scaled FP4 reason is
+        # only reachable on a host that has Triton.
+        import importlib.util
+        if importlib.util.find_spec('triton') is not None:
+            assert 'block-scaled FP4' in str(error), error
+        else:
+            assert 'Triton' in str(error), error
     """)
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
                             env={**os.environ, "CUDA_VISIBLE_DEVICES": ""}, timeout=60)
@@ -340,6 +348,7 @@ def test_w4a_modules_import_without_gluon_mma_v2():
     quantizer and the NVFP4 packer are plain ``tl.jit`` kernels and must stay
     importable.
     """
+    pytest.importorskip("triton.experimental.gluon.language.nvidia.ampere")
     script = textwrap.dedent("""
         import sys
         import triton.experimental.gluon.language.nvidia.ampere as ampere

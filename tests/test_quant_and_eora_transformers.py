@@ -13,7 +13,12 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 
+import pytest  # noqa: E402
 import torch  # noqa: E402
+
+
+pytest.importorskip("peft")
+
 from datasets import load_dataset  # noqa: E402
 from logbar import LogBar  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402

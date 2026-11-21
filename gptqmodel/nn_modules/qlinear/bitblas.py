@@ -271,7 +271,6 @@ def import_bitblas():
     if BITBLAS_TARGET is None:
         from .bitblas_target_detector import patched_auto_detect_nvidia_target
 
-        bitblas.auto_detect_nvidia_target = patched_auto_detect_nvidia_target
         # device_smi resolves ``cuda:N`` against CUDA_VISIBLE_DEVICES, so N is a
         # logical index. The env entry itself may be a physical id, UUID or MIG
         # name and must not be parsed as one.

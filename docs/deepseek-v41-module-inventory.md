@@ -6,6 +6,10 @@ vision tower, and aligner. It loads the published dSpark weights under
 `mtp.*`. The two Engram tables are mapped from safetensors, and the model
 reads and decodes only the hashed rows needed by each request.
 
+The package-owned `DeepSeekV41FlashQModel.loader` selects the config and model
+for the published checkpoint. The separate `ports/deepseek_v41` reference
+decoder remains available through the explicit V4.1 calibration API.
+
 ```python
 from gptqmodel import GPTQModel
 
@@ -253,7 +257,7 @@ and Engram even if all its attention and expert projections resolve.
 
 | Stage | Before this integration | Current path |
 | --- | --- | --- |
-| Dispatch | `deepseek_v41` failed config detection on Transformers releases without V4.1. | GPT-QModel recognizes the config and selects `DeepSeekV41FlashQModel`. |
+| Dispatch | `deepseek_v41` failed config detection on Transformers releases without V4.1. | GPT-QModel selects `DeepSeekV41FlashQModel.loader` from the checkpoint's model type. |
 | Load | `V41Source` provided an explicit calibration API. | `load_checkpoint` validates the backbone, mapped Engram tables, vision, and dSpark keys before binding the runtime. |
 | Forward | The public loader had no V4.1 runtime. | Engram updates the residual before the decoder block. `V41AttentionState` shares compressed KV and selections between blocks. |
 | Quantization and save | The initial loader recognized the published weight formats. | `quantize_projections` captures the backbone with Engram active. `save_checkpoint` streams untouched weights and writes the GPTQ overlay. |
@@ -261,9 +265,10 @@ and Engram even if all its attention and expert projections resolve.
 
 ```mermaid
 flowchart TD
-    LOAD["GPTQModel.load"] --> DEF["DeepSeekV41FlashQModel"]
+    LOAD["GPTQModel.load"] --> DEF["DeepSeekV41FlashQModel.loader resolves the config"]
     DEF --> IDX["load_checkpoint reads the index"]
-    IDX --> MATCH{"Checkpoint matches the model?"}
+    IDX --> SHELL["LocalModelLoader.from_config builds a meta model"]
+    SHELL --> MATCH{"Checkpoint matches the model?"}
     MATCH -->|"Yes"| SELECT["_configure_projection_backends checks devices and geometry"]
     MATCH -->|"No"| ERROR["Raise with the missing or unexpected tensor"]
     MATCH -->|"Mapped tables"| TABLE["Bind read-only Engram table and scale files"]

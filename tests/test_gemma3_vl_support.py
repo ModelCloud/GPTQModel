@@ -93,19 +93,15 @@ def test_gemma3_text_definition_stays_text_only():
     assert Gemma3QModel.require_load_processor is False
 
 
-def test_gemma3_vl_load_processor_uses_model_path(monkeypatch):
-    calls = []
+def test_gemma3_vl_load_processor_reuses_the_loader_processor():
+    loader = Gemma3ForConditionalGenerationGPTQ.loader
+    assert loader.processor_class == "gptqmodel.models.ports.native.auto.NativeProcessor"
+    assert loader.tokenizer_class == "gptqmodel.models.ports.native.auto.NativeTokenizer"
     processor = object()
-
-    def fake_from_pretrained(*args, **kwargs):
-        calls.append((args, kwargs))
-        return processor
-
-    monkeypatch.setattr(gemma3_def.AutoProcessor, "from_pretrained", fake_from_pretrained)
     model = _vl_qmodel()
+    model.processor = processor
 
     assert model.load_processor() is processor
-    assert calls == [(("google/gemma-3-4b-it",), {"trust_remote_code": False})]
 
 
 def test_gemma3_vl_prepare_dataset_renders_conversations_with_processor(monkeypatch):
@@ -152,10 +148,12 @@ def test_gemma3_vl_prepare_dataset_accepts_pretokenized_text_without_processor(m
     prepared = model.prepare_dataset(rows, batch_size=1)
 
     assert len(prepared) == 2
-    # The leading mask-0 slot is tokenizer padding and is stripped since #4889.
-    assert [row["input_ids"].shape for row in prepared] == [(1, 11), (1, 12)]
+    # The base path strips the leading pad position of each row (#4889), so a
+    # pre-tokenized row reaches the looper at its real length.
+    assert [tuple(row["input_ids"].shape) for row in prepared] == [(1, 11), (1, 12)]
     assert prepared[0]["input_ids"].tolist() == [list(range(1, 12))]
     assert prepared[1]["input_ids"].tolist() == [list(range(1, 13))]
+    assert prepared[0]["attention_mask"].tolist() == [[1] * 11]
 
 
 def test_gemma3_checkpoint_keys_are_saved_in_huggingface_layout():

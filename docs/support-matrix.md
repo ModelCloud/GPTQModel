@@ -15,7 +15,7 @@ reference inventories, not a promise that every combination works on every devic
 | GGUF                      | ✅          | x | x | x | x             |
 | FP8                       | ✅          | x | x | x | x             |
 | Exllama V3 / EXL3         | ✅          | x | x | x | x             |
-| [CPTC](cptc.md)            | ✅          | ✅ after importing `gptqmodel` | x | x | x |
+| [CPTC](cptc.md)            | ✅          | x | x | x | x |
 | EoRA                      | ✅          | ✅ | ✅ | ✅ | x             |
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
 | QQQ                       | ✅          | x | x | x | x             |

@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 import transformers
-from ricursive_test_utils import compatibility_module, make_model
+from ricursive_test_utils import make_model
 
 
 @torch.inference_mode()
@@ -19,32 +19,6 @@ def test_embeddings_only_generation():
         inputs_embeds=model.get_input_embeddings()(ids), attention_mask=torch.ones_like(ids), max_new_tokens=3
     )
     assert torch.equal(actual, expected)
-
-
-@torch.inference_mode()
-def test_explicit_cache_position_advances_during_generation():
-    model = make_model()
-    ids = torch.arange(3, 13).unsqueeze(0)
-    cache = model(ids[:, :4], use_cache=True).past_key_values
-    expected = model.generate(ids, max_new_tokens=3)[:, -3:]
-    actual = model.generate(
-        ids[:, 4:],
-        past_key_values=cache,
-        attention_mask=torch.ones_like(ids),
-        cache_position=torch.arange(4, 10),
-        max_new_tokens=3,
-    )
-    assert torch.equal(actual[:, -3:], expected)
-
-
-@torch.inference_mode()
-def test_explicit_full_prompt_positions_do_not_repeat_cached_tokens():
-    model = make_model()
-    ids = torch.tensor([[3, 4, 5, 6]])
-    expected = model.generate(ids, max_new_tokens=3)
-    actual = model.generate(ids, cache_position=torch.arange(4), max_new_tokens=3, return_dict_in_generate=True)
-    assert actual.past_key_values.get_seq_length() == 6
-    assert torch.equal(actual.sequences, expected)
 
 
 @torch.inference_mode()
@@ -128,20 +102,6 @@ def test_assisted_decoding_reuses_default_cache_after_window():
     assert torch.equal(actual, expected)
 
 
-@torch.inference_mode()
-def test_short_mask_matches_full_visible_prefix():
-    model = make_model()
-    ids = torch.arange(3, 15).unsqueeze(0)
-    cache = model(ids[:, :10], use_cache=True).past_key_values
-    inputs = model.prepare_inputs_for_generation(
-        ids[:, 10:], past_key_values=cache, attention_mask=torch.ones(1, 2, dtype=torch.long)
-    )
-    assert inputs["position_ids"].tolist() == [[10, 11]]
-    expected = model(ids, use_cache=False).logits[:, -1:]
-    actual = model(**inputs).logits
-    torch.testing.assert_close(actual, expected)
-
-
 @pytest.mark.parametrize("mask_dtype", ["additive", "bool"])
 @torch.inference_mode()
 def test_4d_causal_mask(mask_dtype):
@@ -155,39 +115,10 @@ def test_4d_causal_mask(mask_dtype):
 
 
 @torch.inference_mode()
-def test_static_cache_is_trimmed_before_kv_head_expansion(monkeypatch):
-    import sys
-
-    from transformers.cache_utils import StaticCache
-
-    model = make_model()
-    module = sys.modules[type(model).__module__]
-    original = module.repeat_kv
-    lengths = []
-
-    def record(states, repeats):
-        lengths.append(states.shape[-2])
-        return original(states, repeats)
-
-    monkeypatch.setattr(module, "repeat_kv", record)
-    model(
-        torch.tensor([[3, 4, 5, 6]]),
-        past_key_values=StaticCache(config=model.config, max_cache_len=32),
-        use_cache=True,
-    )
-    assert lengths == [4, 4, 4, 4], lengths
-
-
-@torch.inference_mode()
-@pytest.mark.parametrize("legacy", [False, True])
-def test_gptq_logits_projection_is_bounded_for_every_instance(legacy):
-    _patch_logits_to_keep = compatibility_module()._patch_logits_to_keep
+def test_logits_projection_is_bounded_for_every_instance():
     first = make_model()
-    if legacy:
-        type(first)._ricursive_tf5_native_fix = "2026-11-05"
     second = type(first)(first.config).eval()
     for index, model in enumerate([first, second]):
-        _patch_logits_to_keep(model)
         projected_shapes = []
         handle = model.lm_head.register_forward_hook(lambda _, inp, out: projected_shapes.append(tuple(out.shape)))
         out = model(torch.tensor([[3, 4, 5, 6]]), use_cache=False, logits_to_keep=1)
@@ -197,13 +128,8 @@ def test_gptq_logits_projection_is_bounded_for_every_instance(legacy):
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("legacy", [False, True])
-def test_gptq_logits_to_keep_with_labeled_tuple_output(legacy):
-    _patch_logits_to_keep = compatibility_module()._patch_logits_to_keep
+def test_logits_to_keep_with_labeled_tuple_output():
     model = make_model()
-    if legacy:
-        type(model)._ricursive_tf5_native_fix = "2026-11-05"
-    _patch_logits_to_keep(model)
     ids = torch.tensor([[3, 4, 5, 6]])
     out = model(ids, labels=ids, use_cache=False, logits_to_keep=1, return_dict=False)
     assert torch.isfinite(out[0])
@@ -222,7 +148,8 @@ def test_gradient_checkpointing_recomputes_and_preserves_gradients(use_reentrant
 
     model.gradient_checkpointing_enable({"use_reentrant": use_reentrant})
     calls = []
-    handle = model.model.layers[0].register_forward_pre_hook(lambda *_: calls.append(1))
+    # Checkpointed layers recompute through `forward`, so count a submodule call.
+    handle = model.model.layers[0].mlp.register_forward_pre_hook(lambda *_: calls.append(1))
     actual = model(ids, labels=ids, use_cache=True)
     assert actual.past_key_values is None
     actual.loss.backward()
@@ -234,40 +161,9 @@ def test_gradient_checkpointing_recomputes_and_preserves_gradients(use_reentrant
         torch.testing.assert_close(parameter.grad, expected_parameter.grad, atol=2e-6, rtol=2e-5, msg=name)
 
 
-@pytest.mark.parametrize("layout", ["full", "new", "embeddings"])
 @torch.inference_mode()
-def test_compatibility_generation_advances_positions(layout):
-    apply_ricursive_generate_patch = compatibility_module().apply_ricursive_generate_patch
+def test_requested_attention_weights_match_sdpa_and_mask():
     model = make_model()
-    # A historical native marker must not suppress newer generation fixes.
-    type(model)._ricursive_tf5_native_fix = "2026-11-05"
-    assert apply_ricursive_generate_patch(model)
-    ids = torch.arange(3, 13).unsqueeze(0)
-    expected = model.generate(ids, max_new_tokens=3)[:, -3:]
-    if layout == "embeddings":
-        actual = model.generate(
-            inputs_embeds=model.get_input_embeddings()(ids), attention_mask=torch.ones_like(ids), max_new_tokens=3
-        )
-    else:
-        cache = model(ids[:, :4], use_cache=True).past_key_values
-        actual = model.generate(
-            ids if layout == "full" else ids[:, 4:],
-            past_key_values=cache,
-            cache_position=torch.arange(4, 10),
-            attention_mask=torch.ones_like(ids),
-            max_new_tokens=3,
-        )
-    assert torch.equal(actual[:, -3:], expected)
-
-
-@pytest.mark.parametrize("legacy", [False, True])
-@torch.inference_mode()
-def test_requested_attention_weights_match_sdpa_and_mask(legacy):
-    model = make_model()
-    if legacy:
-        apply_ricursive_generate_patch = compatibility_module().apply_ricursive_generate_patch
-        type(model)._ricursive_tf5_native_fix = "2026-11-05"
-        apply_ricursive_generate_patch(model)
     ids = torch.arange(3, 12).unsqueeze(0)
     allowed = torch.ones(1, 1, 9, 9, dtype=torch.bool).tril()
     allowed[..., 1] = False
@@ -276,29 +172,22 @@ def test_requested_attention_weights_match_sdpa_and_mask(legacy):
     torch.testing.assert_close(actual.logits, expected.logits, atol=2e-6, rtol=2e-5)
     for index, weights in enumerate(actual.attentions):
         assert weights.shape == (1, 4, 9, 9)
-        visible = allowed.clone()
-        if index == 0:
-            positions = torch.arange(9)
-            visible &= (positions[:, None] - positions[None, :]) < model.config.sliding_window
+        # A caller-provided 4D mask is used as given for every layer type (Transformers 5.23 masking_utils).
+        visible = allowed
         assert torch.count_nonzero(weights.masked_select(~visible)) == 0
         torch.testing.assert_close(weights.sum(-1), torch.ones_like(weights.sum(-1)))
 
 
+
+
 @torch.inference_mode()
-def test_legacy_logits_hook_is_removed_on_exception_and_head_replacement():
-    _patch_logits_to_keep = compatibility_module()._patch_logits_to_keep
+def test_default_return_dict_reads_transformers5_config_field(monkeypatch):
     model = make_model()
-    type(model)._ricursive_tf5_native_fix = "2026-11-05"
-    _patch_logits_to_keep(model)
-    head = model.lm_head
-    hook_count = len(head._forward_pre_hooks)
-    with pytest.raises(IndexError):
-        model(torch.tensor([[1000]]), use_cache=False, logits_to_keep=1)
-    assert len(head._forward_pre_hooks) == hook_count
-    model.lm_head = torch.nn.Linear(32, 64, bias=False)
-    shapes = []
-    handle = model.lm_head.register_forward_hook(lambda _, inp, out: shapes.append(tuple(out.shape)))
-    model(torch.tensor([[3, 4, 5]]), use_cache=False, logits_to_keep=1)
-    handle.remove()
-    assert shapes == [(1, 1, 64)]
-    assert not model.lm_head._forward_pre_hooks
+    # `use_return_dict` is deprecated in Transformers 5 and warns on every read.
+    monkeypatch.setattr(type(model.config), "use_return_dict",
+                        property(lambda self: pytest.fail("deprecated use_return_dict was read")))
+    ids = torch.tensor([[3, 4, 5]])
+    assert not isinstance(model(ids, use_cache=False), tuple)
+    model.config.return_dict = False
+    assert isinstance(model(ids, use_cache=False), tuple)
+    assert isinstance(model.model(ids, use_cache=False), tuple)

@@ -67,7 +67,7 @@ def test_resolution_tolerates_a_model_without_a_quantize_config():
     assert model._calibration_batch_size(calibration) == 1
 
 
-def _build_quantized(tmp_path: Path) -> Path:
+def _build_quantized(tmp_path: Path, calibration: CalibrationConfig | None = None) -> Path:
     source = tmp_path / "src"
     torch.manual_seed(0)
     config = Qwen2Config(
@@ -89,13 +89,26 @@ def _build_quantized(tmp_path: Path) -> Path:
         device="cpu",
         dtype=torch.float16,
     )
-    model.quantize(
-        CalibrationConfig(dataset=SAMPLES, batch_size=1, min_length=1),
-        backend=BACKEND.TORCH,
-    )
+    if calibration is None:
+        calibration = CalibrationConfig(dataset=SAMPLES, batch_size=1, min_length=1)
+    model.quantize(calibration, backend=BACKEND.TORCH)
     checkpoint = tmp_path / "quantized"
     model.save(str(checkpoint))
     return checkpoint
+
+
+def test_quantize_auto_batch_preserves_one_shot_calibration(tmp_path):
+    calibration = CalibrationConfig(
+        dataset=(row for row in SAMPLES[:4]), batch_size=AUTO_BATCH_SIZE, min_length=1
+    )
+
+    checkpoint = _build_quantized(tmp_path, calibration)
+
+    reloaded = GPTQModel.load(
+        str(checkpoint), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16
+    )
+    logits = reloaded.model(input_ids=torch.tensor([SAMPLES[0]["input_ids"]])).logits
+    assert torch.isfinite(logits).all()
 
 
 def test_requantize_norm_accepts_the_auto_sentinel(tmp_path):

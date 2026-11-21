@@ -1,0 +1,20 @@
+GPT-QModel Ouro Transformers 5 port
+
+Adapted from ByteDance's Ouro-1.4B, Ouro-2.6B, Ouro-1.4B-Thinking and
+Ouro-2.6B-Thinking configuration/modeling sources. The upstream model cards
+declare Apache-2.0; see the repository root LICENSE for the license text.
+
+The upstream configuration derives from Qwen2:
+Copyright 2024 The Qwen team, Alibaba Group and the HuggingFace Inc. team.
+All rights reserved.
+
+Ouro paper: Scaling Latent Reasoning via Looped Language Models,
+Rui-Jie Zhu et al., arXiv:2510.25741 (2025).
+Project: https://ouro-llm.github.io/
+
+Transformers 5 adaptation and qualification:
+Copyright 2026 ModelCloud.ai.
+
+This distribution contains no trained model weights. The upstream model cards
+describe the models as intended for research and provided without warranties;
+this port does not assert generation quality or production suitability.

@@ -1,0 +1,28 @@
+{
+  "tensor_key_ranges": [
+    ["lm_head.weight", [], null],
+    ["model.embed_tokens.weight", [], null],
+    ["model.layers.{}.block_sparse_moe.e_score_correction_bias", ["0-61"], null],
+    ["model.layers.{}.block_sparse_moe.experts.{}.w1.weight", ["0-61", "0-255"], null],
+    ["model.layers.{}.block_sparse_moe.experts.{}.w1.weight_scale_inv", ["0-61", "0-255"], null],
+    ["model.layers.{}.block_sparse_moe.experts.{}.w2.weight", ["0-61", "0-255"], null],
+    ["model.layers.{}.block_sparse_moe.experts.{}.w2.weight_scale_inv", ["0-61", "0-255"], null],
+    ["model.layers.{}.block_sparse_moe.experts.{}.w3.weight", ["0-61", "0-255"], null],
+    ["model.layers.{}.block_sparse_moe.experts.{}.w3.weight_scale_inv", ["0-61", "0-255"], null],
+    ["model.layers.{}.block_sparse_moe.gate.weight", ["0-61"], null],
+    ["model.layers.{}.input_layernorm.weight", ["0-61"], null],
+    ["model.layers.{}.post_attention_layernorm.weight", ["0-61"], null],
+    ["model.layers.{}.self_attn.k_norm.weight", ["0-61"], null],
+    ["model.layers.{}.self_attn.k_proj.weight", ["0-61"], null],
+    ["model.layers.{}.self_attn.k_proj.weight_scale_inv", ["0-61"], null],
+    ["model.layers.{}.self_attn.o_proj.weight", ["0-61"], null],
+    ["model.layers.{}.self_attn.o_proj.weight_scale_inv", ["0-61"], null],
+    ["model.layers.{}.self_attn.q_norm.weight", ["0-61"], null],
+    ["model.layers.{}.self_attn.q_proj.weight", ["0-61"], null],
+    ["model.layers.{}.self_attn.q_proj.weight_scale_inv", ["0-61"], null],
+    ["model.layers.{}.self_attn.v_proj.weight", ["0-61"], null],
+    ["model.layers.{}.self_attn.v_proj.weight_scale_inv", ["0-61"], null],
+    ["model.norm.weight", [], null]
+  ],
+  "keys_only": true
+}

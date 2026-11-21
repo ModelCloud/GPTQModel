@@ -1,0 +1,492 @@
+{
+ "small_modules": {
+  "convnext_ls": {
+   "ctor": {
+    "dim": 8,
+    "intermediate_dim": 32,
+    "kernel": 7,
+    "dilation": 2
+   },
+   "keys": [
+    "coef",
+    "dwconv.bias",
+    "dwconv.weight",
+    "norm.bias",
+    "norm.weight",
+    "pwconv1.bias",
+    "pwconv1.weight",
+    "pwconv2.bias",
+    "pwconv2.weight"
+   ],
+   "input_shape": [
+    2,
+    8,
+    13
+   ],
+   "output_shape": [
+    2,
+    8,
+    13
+   ]
+  },
+  "convnext_k3d1": {
+   "ctor": {
+    "dim": 6,
+    "intermediate_dim": 12,
+    "kernel": 3,
+    "dilation": 1
+   },
+   "keys": [
+    "coef",
+    "dwconv.bias",
+    "dwconv.weight",
+    "norm.bias",
+    "norm.weight",
+    "pwconv1.bias",
+    "pwconv1.weight",
+    "pwconv2.bias",
+    "pwconv2.weight"
+   ],
+   "input_shape": [
+    2,
+    6,
+    13
+   ],
+   "output_shape": [
+    2,
+    6,
+    13
+   ]
+  },
+  "convnext_noscale": {
+   "ctor": {
+    "dim": 8,
+    "intermediate_dim": 16,
+    "kernel": 5,
+    "dilation": 3,
+    "layer_scale_init_value": 0.0
+   },
+   "keys": [
+    "dwconv.bias",
+    "dwconv.weight",
+    "norm.bias",
+    "norm.weight",
+    "pwconv1.bias",
+    "pwconv1.weight",
+    "pwconv2.bias",
+    "pwconv2.weight"
+   ],
+   "input_shape": [
+    2,
+    8,
+    13
+   ],
+   "output_shape": [
+    2,
+    8,
+    13
+   ]
+  },
+  "dvae_decoder": {
+   "ctor": {
+    "idim": 6,
+    "odim": 5,
+    "n_layer": 2,
+    "bn_dim": 4,
+    "hidden": 8,
+    "kernel": 7,
+    "dilation": 2
+   },
+   "keys": [
+    "conv_in.0.bias",
+    "conv_in.0.weight",
+    "conv_in.2.bias",
+    "conv_in.2.weight",
+    "conv_out.weight",
+    "decoder_block.0.coef",
+    "decoder_block.0.dwconv.bias",
+    "decoder_block.0.dwconv.weight",
+    "decoder_block.0.norm.bias",
+    "decoder_block.0.norm.weight",
+    "decoder_block.0.pwconv1.bias",
+    "decoder_block.0.pwconv1.weight",
+    "decoder_block.0.pwconv2.bias",
+    "decoder_block.0.pwconv2.weight",
+    "decoder_block.1.coef",
+    "decoder_block.1.dwconv.bias",
+    "decoder_block.1.dwconv.weight",
+    "decoder_block.1.norm.bias",
+    "decoder_block.1.norm.weight",
+    "decoder_block.1.pwconv1.bias",
+    "decoder_block.1.pwconv1.weight",
+    "decoder_block.1.pwconv2.bias",
+    "decoder_block.1.pwconv2.weight"
+   ],
+   "input_shape": [
+    2,
+    6,
+    11
+   ],
+   "output_shape": [
+    2,
+    5,
+    11
+   ]
+  },
+  "gfsq": {
+   "ctor": {
+    "dim": 1024,
+    "levels": [
+     5,
+     5,
+     5,
+     5
+    ],
+    "G": 2,
+    "R": 2
+   },
+   "keys": [
+    "quantizer.rvqs.0.project_in.bias",
+    "quantizer.rvqs.0.project_in.weight",
+    "quantizer.rvqs.0.project_out.bias",
+    "quantizer.rvqs.0.project_out.weight",
+    "quantizer.rvqs.1.project_in.bias",
+    "quantizer.rvqs.1.project_in.weight",
+    "quantizer.rvqs.1.project_out.bias",
+    "quantizer.rvqs.1.project_out.weight"
+   ],
+   "n_ind": 625,
+   "embed_output_shape": [
+    2,
+    1024,
+    7
+   ],
+   "forward_indices_shape": [
+    2,
+    4,
+    7
+   ],
+   "forward_indices_dtype": "torch.int32"
+  }
+ },
+ "dvae": {
+  "decode.codes1": [
+   [
+    1,
+    4,
+    6
+   ],
+   "torch.int64"
+  ],
+  "decode.codes2": [
+   [
+    2,
+    4,
+    5
+   ],
+   "torch.int64"
+  ],
+  "encode.mel": [
+   [
+    100,
+    12
+   ],
+   "torch.float32"
+  ],
+  "encode.mel_odd": [
+   [
+    100,
+    9
+   ],
+   "torch.float32"
+  ],
+  "decode.mel1": [
+   [
+    1,
+    100,
+    12
+   ],
+   "torch.float32"
+  ],
+  "decode.mel2": [
+   [
+    2,
+    100,
+    10
+   ],
+   "torch.float32"
+  ],
+  "encode.indices": [
+   [
+    1,
+    4,
+    6
+   ],
+   "torch.int32"
+  ],
+  "encode.indices_odd": [
+   [
+    1,
+    4,
+    4
+   ],
+   "torch.int32"
+  ],
+  "roundtrip.mel": [
+   [
+    1,
+    100,
+    12
+   ],
+   "torch.float32"
+  ]
+ },
+ "tts": {
+  "condition_length": 11,
+  "scenarios": {
+   "s1_first_call_no_eos": {
+    "seed": 9,
+    "finished": false,
+    "steps": 6,
+    "input_len": 11,
+    "audio_input_ids_len": 17,
+    "new_ids_len": 6,
+    "cache_len_after": 16,
+    "cache_is_same_object": true,
+    "kwargs": {
+     "min_new_token": 2,
+     "max_new_token": 6,
+     "temperature": [
+      0.699999988079071,
+      1.0,
+      0.699999988079071,
+      1.0
+     ],
+     "eos_token": [
+      15
+     ],
+     "logits_warpers": [
+      "TopPLogitsWarper",
+      "TopKLogitsWarper"
+     ],
+     "logits_processors": [
+      "CustomRepetitionPenaltyLogitsProcessorRepeat"
+     ]
+    }
+   },
+   "s2_continuation": {
+    "seed": 77,
+    "finished": false,
+    "steps": 5,
+    "input_len": 17,
+    "audio_input_ids_len": 22,
+    "new_ids_len": 11,
+    "cache_len_after": 21,
+    "cache_is_same_object": true,
+    "kwargs": {
+     "min_new_token": 0,
+     "max_new_token": 5,
+     "force_no_stop": true,
+     "temperature": [
+      0.699999988079071,
+      1.0,
+      0.699999988079071,
+      1.0
+     ],
+     "eos_token": [
+      15
+     ],
+     "logits_warpers": [
+      "TopPLogitsWarper",
+      "TopKLogitsWarper"
+     ],
+     "logits_processors": [
+      "CustomRepetitionPenaltyLogitsProcessorRepeat"
+     ]
+    }
+   },
+   "s3_eos_mid_run": {
+    "seed": 0,
+    "finished": true,
+    "steps": 6,
+    "input_len": 11,
+    "audio_input_ids_len": 17,
+    "new_ids_len": 5,
+    "cache_len_after": 16,
+    "cache_is_same_object": true,
+    "kwargs": {
+     "min_new_token": 2,
+     "max_new_token": 8,
+     "temperature": [
+      0.699999988079071,
+      1.0,
+      0.699999988079071,
+      1.0
+     ],
+     "eos_token": [
+      15
+     ],
+     "logits_warpers": [
+      "TopPLogitsWarper",
+      "TopKLogitsWarper"
+     ],
+     "logits_processors": [
+      "CustomRepetitionPenaltyLogitsProcessorRepeat"
+     ]
+    }
+   },
+   "s4_eos_at_step0_first_call": {
+    "seed": 3,
+    "finished": true,
+    "steps": 1,
+    "input_len": 11,
+    "audio_input_ids_len": 11,
+    "new_ids_len": 0,
+    "cache_len_after": 11,
+    "cache_is_same_object": true,
+    "kwargs": {
+     "min_new_token": 0,
+     "max_new_token": 4,
+     "temperature": [
+      0.699999988079071,
+      1.0,
+      0.699999988079071,
+      1.0
+     ],
+     "eos_token": [
+      15
+     ],
+     "logits_warpers": [
+      "TopPLogitsWarper",
+      "TopKLogitsWarper"
+     ],
+     "logits_processors": [
+      "CustomRepetitionPenaltyLogitsProcessorRepeat"
+     ]
+    }
+   },
+   "s5_eos_at_step0_continuation": {
+    "seed": 1,
+    "finished": true,
+    "steps": 1,
+    "input_len": 17,
+    "audio_input_ids_len": 17,
+    "new_ids_len": 5,
+    "cache_len_after": 17,
+    "cache_is_same_object": true,
+    "kwargs": {
+     "min_new_token": 0,
+     "max_new_token": 3,
+     "temperature": [
+      0.699999988079071,
+      1.0,
+      0.699999988079071,
+      1.0
+     ],
+     "eos_token": [
+      15
+     ],
+     "logits_warpers": [
+      "TopPLogitsWarper",
+      "TopKLogitsWarper"
+     ],
+     "logits_processors": [
+      "CustomRepetitionPenaltyLogitsProcessorRepeat"
+     ]
+    }
+   },
+   "s6_plain_sampling_int_eos_force_no_stop": {
+    "seed": 123,
+    "finished": false,
+    "steps": 5,
+    "input_len": 11,
+    "audio_input_ids_len": 16,
+    "new_ids_len": 5,
+    "cache_len_after": 15,
+    "cache_is_same_object": true,
+    "kwargs": {
+     "temperature": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+     ],
+     "eos_token": 15,
+     "min_new_token": 0,
+     "max_new_token": 5,
+     "force_no_stop": true,
+     "logits_warpers": [],
+     "logits_processors": []
+    }
+   },
+   "s7_temperature_len1": {
+    "seed": 9,
+    "finished": false,
+    "steps": 4,
+    "input_len": 11,
+    "audio_input_ids_len": 15,
+    "new_ids_len": 4,
+    "cache_len_after": 14,
+    "cache_is_same_object": true,
+    "kwargs": {
+     "temperature": [
+      0.5
+     ],
+     "eos_token": [
+      15
+     ],
+     "min_new_token": 3,
+     "max_new_token": 4,
+     "logits_warpers": [
+      "TopPLogitsWarper",
+      "TopKLogitsWarper"
+     ],
+     "logits_processors": [
+      "CustomRepetitionPenaltyLogitsProcessorRepeat"
+     ]
+    }
+   }
+  },
+  "decode_to_mel_specs": {
+   "empty_list": {
+    "type": "numpy.ndarray",
+    "dtype": "float32",
+    "shape": [
+     0
+    ]
+   },
+   "zero_length_element": {
+    "error": "AxisSizeError"
+   },
+   "a": {
+    "in": [
+     1,
+     6,
+     4
+    ],
+    "out": [
+     1,
+     100,
+     12
+    ]
+   },
+   "b": {
+    "in": [
+     [
+      3,
+      4
+     ],
+     [
+      5,
+      4
+     ]
+    ],
+    "out": [
+     2,
+     100,
+     10
+    ]
+   }
+  }
+ }
+}

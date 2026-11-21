@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from .qwen3_moe import Qwen3MoeQModel
 
 
@@ -10,6 +11,11 @@ class Qwen3_5_MoeTextQModel(Qwen3MoeQModel):
     Text-only Qwen 3.5/3.6 MoE shells use the causal LM loader and keep routed
     experts under `model.layers`.
     """
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("qwen3_5_moe_text").merge(LlamaFusableConfig(), profiles=("qkv",))
 
 

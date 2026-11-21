@@ -1,0 +1,219 @@
+{
+ "valid": {
+  "no_rope": {
+   "kwargs": {},
+   "rope_parameters": {
+    "rope_type": "default",
+    "rope_theta": 10000.0
+   },
+   "rope_theta": 10000.0,
+   "num_key_value_heads": 2,
+   "saved_has_rope_scaling": false,
+   "saved_rope_parameters": {
+    "rope_theta": 10000.0,
+    "rope_type": "default"
+   }
+  },
+  "legacy_type_linear": {
+   "kwargs": {
+    "rope_scaling": {
+     "type": "linear",
+     "factor": 2.0
+    },
+    "rope_theta": 20000.0
+   },
+   "rope_parameters": {
+    "rope_type": "linear",
+    "rope_theta": 20000.0,
+    "factor": 2.0
+   },
+   "rope_theta": 20000.0,
+   "num_key_value_heads": 2,
+   "saved_has_rope_scaling": false,
+   "saved_rope_parameters": {
+    "factor": 2.0,
+    "rope_theta": 20000.0,
+    "rope_type": "linear"
+   }
+  },
+  "legacy_rope_type_dynamic_int": {
+   "kwargs": {
+    "rope_scaling": {
+     "rope_type": "dynamic",
+     "factor": 3
+    },
+    "rope_theta": 20000.0
+   },
+   "rope_parameters": {
+    "rope_type": "dynamic",
+    "rope_theta": 20000.0,
+    "factor": 3
+   },
+   "rope_theta": 20000.0,
+   "num_key_value_heads": 2,
+   "saved_has_rope_scaling": false,
+   "saved_rope_parameters": {
+    "factor": 3,
+    "rope_theta": 20000.0,
+    "rope_type": "dynamic"
+   }
+  },
+  "legacy_default_dropped": {
+   "kwargs": {
+    "rope_scaling": {
+     "rope_type": "default"
+    }
+   },
+   "rope_parameters": {
+    "rope_type": "default",
+    "rope_theta": 10000.0
+   },
+   "rope_theta": 10000.0,
+   "num_key_value_heads": 2,
+   "saved_has_rope_scaling": false,
+   "saved_rope_parameters": {
+    "rope_theta": 10000.0,
+    "rope_type": "default"
+   }
+  },
+  "rope_parameters_linear": {
+   "kwargs": {
+    "rope_parameters": {
+     "rope_type": "linear",
+     "rope_theta": 5000.0,
+     "factor": 4.0
+    }
+   },
+   "rope_parameters": {
+    "rope_type": "linear",
+    "rope_theta": 5000.0,
+    "factor": 4.0
+   },
+   "rope_theta": 5000.0,
+   "num_key_value_heads": 2,
+   "saved_has_rope_scaling": false,
+   "saved_rope_parameters": {
+    "factor": 4.0,
+    "rope_theta": 5000.0,
+    "rope_type": "linear"
+   }
+  },
+  "rope_parameters_wins_over_rope_scaling": {
+   "kwargs": {
+    "rope_parameters": {
+     "rope_type": "default",
+     "rope_theta": 777.0
+    },
+    "rope_scaling": {
+     "type": "linear",
+     "factor": 2.0
+    }
+   },
+   "rope_parameters": {
+    "rope_type": "default",
+    "rope_theta": 777.0
+   },
+   "rope_theta": 777.0,
+   "num_key_value_heads": 2,
+   "saved_has_rope_scaling": false,
+   "saved_rope_parameters": {
+    "rope_theta": 777.0,
+    "rope_type": "default"
+   }
+  },
+  "kv_none_defaults_to_heads": {
+   "kwargs": {
+    "num_key_value_heads": null
+   },
+   "rope_parameters": {
+    "rope_type": "default",
+    "rope_theta": 10000.0
+   },
+   "rope_theta": 10000.0,
+   "num_key_value_heads": 4,
+   "saved_has_rope_scaling": false,
+   "saved_rope_parameters": {
+    "rope_theta": 10000.0,
+    "rope_type": "default"
+   }
+  }
+ },
+ "invalid": {
+  "bad_unknown_type": {
+   "kwargs": {
+    "rope_scaling": {
+     "type": "unknown",
+     "factor": 2.0
+    }
+   },
+   "error": "ValueError",
+   "message": "Instella rope_scaling requires type linear/dynamic and factor > 1"
+  },
+  "bad_factor_le_1": {
+   "kwargs": {
+    "rope_scaling": {
+     "type": "linear",
+     "factor": 1.0
+    }
+   },
+   "error": "ValueError",
+   "message": "Instella rope_scaling requires type linear/dynamic and factor > 1"
+  },
+  "bad_factor_str": {
+   "kwargs": {
+    "rope_scaling": {
+     "type": "linear",
+     "factor": "2"
+    }
+   },
+   "error": "ValueError",
+   "message": "Instella rope_scaling requires type linear/dynamic and factor > 1"
+  },
+  "bad_empty_dict": {
+   "kwargs": {
+    "rope_scaling": {}
+   },
+   "error": "ValueError",
+   "message": "Instella rope_scaling requires type linear/dynamic and factor > 1"
+  },
+  "bad_kv_not_divisor": {
+   "kwargs": {
+    "num_key_value_heads": 3
+   },
+   "error": "ValueError",
+   "message": "num_key_value_heads must divide num_attention_heads"
+  },
+  "bad_kv_zero": {
+   "kwargs": {
+    "num_key_value_heads": 0
+   },
+   "error": "ValueError",
+   "message": "num_key_value_heads must divide num_attention_heads"
+  },
+  "bad_hidden_not_divisible": {
+   "kwargs": {
+    "hidden_size": 30
+   },
+   "error": "ValueError",
+   "message": "Instella requires an even head dimension and hidden_size divisible by num_attention_heads"
+  },
+  "bad_odd_head_dim": {
+   "kwargs": {
+    "hidden_size": 36
+   },
+   "error": "ValueError",
+   "message": "Instella requires an even head dimension and hidden_size divisible by num_attention_heads"
+  },
+  "bad_dynamic_head_dim_2": {
+   "kwargs": {
+    "hidden_size": 8,
+    "rope_scaling": {
+     "type": "dynamic",
+     "factor": 2.0
+    }
+   },
+   "error": "ValueError",
+   "message": "Dynamic NTK scaling requires head_dim > 2"
+  }
+ }
+}

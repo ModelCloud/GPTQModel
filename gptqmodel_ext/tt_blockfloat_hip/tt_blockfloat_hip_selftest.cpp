@@ -12,7 +12,7 @@
 //   hipcc --offload-arch=gfx1201 -O3 -std=c++17 \
 //       tt_blockfloat_hip.hip tt_blockfloat_hip_selftest.cpp -o ttbf_selftest
 //   ./ttbf_selftest            # internal checks + timings
-//   ./ttbf_selftest --dump DIR # also write DIR/*.bin for verify_against_torch.py
+//   ./ttbf_selftest --dump DIR # also write DIR/*.bin for scripts/verify_tt_blockfloat_hip.py
 // ---------------------------------------------------------------------------
 
 #include "tt_blockfloat_hip.h"

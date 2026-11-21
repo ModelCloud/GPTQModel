@@ -1,0 +1,14 @@
+{
+  "auto_map": {
+    "AutoProcessor": "processing_phi4mm.Phi4MMProcessor",
+    "AutoImageProcessor": "processing_phi4mm.Phi4MMImageProcessor",
+    "AutoFeatureExtractor": "processing_phi4mm.Phi4MMAudioFeatureExtractor"
+  },
+  "image_processor_type": "Phi4MMImageProcessor",
+  "processor_class": "Phi4MMProcessor",
+  "feature_extractor_type": "Phi4MMAudioFeatureExtractor",
+  "audio_compression_rate": 8,
+  "audio_downsample_rate": 1,
+  "audio_feat_stride": 1,
+  "dynamic_hd": 36
+}

@@ -1,0 +1,172 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "attention_dropout": 0.0,
+  "audio_config": {
+   "_name_or_path": "",
+   "activation": "swish",
+   "architectures": null,
+   "audio_token_id": 200011,
+   "bias_max_distance": 1000,
+   "bias_symmetric": false,
+   "chunk_size": -1,
+   "chunk_size_feed_forward": 0,
+   "conv_activation": "swish",
+   "conv_glu_type": "swish",
+   "depthwise_multiplier": 1,
+   "depthwise_separable_out_channel": 128,
+   "downsample_rate": 1,
+   "dropout_rate": 0.0,
+   "dtype": null,
+   "ext_pw_out_channel": 1024,
+   "feature_layer": -2,
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "initializer_range": 1e-05,
+   "input_size": 80,
+   "intermediate_size": 48,
+   "is_encoder_decoder": false,
+   "kernel_size": 3,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "left_chunk": 18,
+   "model_type": "phi4_multimodal_audio",
+   "nemo_activation": "relu",
+   "nemo_conv_channels": 128,
+   "nemo_final_size": 10,
+   "num_attention_heads": 8,
+   "num_blocks": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "problem_type": null,
+   "return_dict": true,
+   "time_reduction": 8
+  },
+  "bos_token_id": 0,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "embd_pdrop": 0.0,
+  "eos_token_id": [
+   199999,
+   200020
+  ],
+  "hidden_act": "silu",
+  "hidden_size": 32,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_range": 0.02,
+  "intermediate_size": 64,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "max_position_embeddings": 4096,
+  "model_type": "phi4_multimodal",
+  "num_attention_heads": 4,
+  "num_hidden_layers": 2,
+  "num_key_value_heads": 2,
+  "original_max_position_embeddings": 4096,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 0,
+  "problem_type": null,
+  "resid_pdrop": 0.0,
+  "return_dict": true,
+  "rms_norm_eps": 1e-05,
+  "rope_parameters": {
+   "partial_rotary_factor": 1.0,
+   "rope_theta": 10000.0,
+   "rope_type": "default"
+  },
+  "sliding_window": null,
+  "tie_word_embeddings": false,
+  "transformers_version": "5.23.0",
+  "use_cache": true,
+  "vision_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.0,
+   "chunk_size_feed_forward": 0,
+   "crop_size": 16,
+   "dtype": null,
+   "feature_layer": -2,
+   "hidden_act": "gelu_pytorch_tanh",
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "image_size": 448,
+   "image_token_id": 200010,
+   "initializer_range": 1e-05,
+   "intermediate_size": 64,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_norm_eps": 1e-06,
+   "model_type": "phi4_multimodal_vision",
+   "num_attention_heads": 8,
+   "num_channels": 3,
+   "num_hidden_layers": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "patch_size": 14,
+   "problem_type": null,
+   "return_dict": true
+  },
+  "vocab_size": 49
+ },
+ "config_class": "Phi4MultimodalConfig",
+ "config_module": "configuration_phi4_multimodal",
+ "extra_inputs": {},
+ "float_inputs": {
+  "audio_input_features": {
+   "dtype": "float32",
+   "shape": [
+    2,
+    61,
+    80
+   ]
+  },
+  "image_attention_mask": {
+   "dtype": "float32",
+   "shape": [
+    2,
+    2,
+    1,
+    1
+   ]
+  },
+  "image_pixel_values": {
+   "dtype": "float32",
+   "shape": [
+    2,
+    2,
+    3,
+    16,
+    16
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_phi4_multimodal",
+   "Phi4MultimodalForCausalLM"
+  ],
+  [
+   "modeling_phi4_multimodal",
+   "Phi4MultimodalModel"
+  ]
+ ]
+}

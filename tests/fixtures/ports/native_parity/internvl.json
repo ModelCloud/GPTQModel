@@ -1,0 +1,149 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "chunk_size_feed_forward": 0,
+  "downsample_ratio": 0.5,
+  "dtype": null,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "image_seq_length": 64,
+  "image_token_id": 1,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "model_type": "internvl",
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "problem_type": null,
+  "projector_hidden_act": "gelu",
+  "return_dict": true,
+  "text_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.0,
+   "bos_token_id": 3,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "eos_token_id": 4,
+   "hidden_act": "silu",
+   "hidden_size": 128,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "initializer_range": 0.02,
+   "intermediate_size": 37,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_types": [
+    "full_attention",
+    "full_attention"
+   ],
+   "max_position_embeddings": 512,
+   "max_window_layers": 28,
+   "mlp_ratio": 4,
+   "model_type": "qwen2",
+   "num_attention_heads": 4,
+   "num_hidden_layers": 2,
+   "num_key_value_heads": 2,
+   "output_attentions": false,
+   "output_channels": 64,
+   "output_hidden_states": false,
+   "pad_token_id": 5,
+   "problem_type": null,
+   "return_dict": true,
+   "rms_norm_eps": 1e-06,
+   "rope_parameters": {
+    "rope_theta": 10000,
+    "rope_type": "default"
+   },
+   "sliding_window": null,
+   "tie_word_embeddings": true,
+   "use_cache": true,
+   "use_sliding_window": false,
+   "vocab_size": 99
+  },
+  "tie_word_embeddings": true,
+  "transformers_version": "5.23.0",
+  "vision_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_bias": false,
+   "attention_dropout": 0.0,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "hidden_act": "quick_gelu",
+   "hidden_dropout_prob": 0.0,
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "image_size": [
+    64,
+    64
+   ],
+   "initializer_range": 0.02,
+   "intermediate_size": 128,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_norm_eps": 1e-06,
+   "layer_scale_init_value": 0.1,
+   "model_type": "internvl_vision",
+   "norm_type": "layer_norm",
+   "num_attention_heads": 4,
+   "num_channels": 3,
+   "num_hidden_layers": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "patch_size": [
+    4,
+    4
+   ],
+   "problem_type": null,
+   "projection_dropout": 0.0,
+   "return_dict": true,
+   "use_absolute_position_embeddings": true,
+   "use_mask_token": false,
+   "use_mean_pooling": true,
+   "use_qk_norm": false
+  },
+  "vision_feature_layer": -1,
+  "vision_feature_select_strategy": "default"
+ },
+ "config_class": "InternVLConfig",
+ "config_module": "configuration_internvl",
+ "extra_inputs": {},
+ "float_inputs": {
+  "pixel_values": {
+   "dtype": "float32",
+   "shape": [
+    3,
+    3,
+    64,
+    64
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_internvl",
+   "InternVLForConditionalGeneration"
+  ],
+  [
+   "modeling_internvl",
+   "InternVLModel"
+  ]
+ ]
+}

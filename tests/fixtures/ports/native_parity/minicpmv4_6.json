@@ -1,0 +1,154 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "chunk_size_feed_forward": 0,
+  "downsample_mode": "16x",
+  "drop_vision_last_layer": false,
+  "dtype": null,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "image_size": 64,
+  "image_token_id": 100,
+  "insert_layer_id": 0,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "merge_kernel_size": [
+   2,
+   2
+  ],
+  "merger_times": 1,
+  "model_type": "minicpmv4_6",
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 2,
+  "patch_size": 8,
+  "problem_type": null,
+  "return_dict": true,
+  "text_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_bias": false,
+   "attention_dropout": 0.0,
+   "bos_token_id": 0,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "eos_token_id": 1,
+   "head_dim": 32,
+   "hidden_act": "silu",
+   "hidden_size": 64,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "initializer_range": 0.02,
+   "intermediate_size": 37,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_types": [
+    "full_attention",
+    "linear_attention"
+   ],
+   "linear_conv_kernel_dim": 2,
+   "linear_key_head_dim": 16,
+   "linear_num_key_heads": 4,
+   "linear_num_value_heads": 8,
+   "linear_value_head_dim": 16,
+   "max_position_embeddings": 512,
+   "model_type": "qwen3_5_text",
+   "num_attention_heads": 4,
+   "num_hidden_layers": 2,
+   "num_key_value_heads": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "pad_token_id": 2,
+   "problem_type": null,
+   "return_dict": true,
+   "rms_norm_eps": 1e-06,
+   "rope_parameters": {
+    "mrope_section": [
+     2,
+     1,
+     1
+    ],
+    "partial_rotary_factor": 0.25,
+    "rope_theta": 10000,
+    "rope_type": "default",
+    "type": "default"
+   },
+   "tie_word_embeddings": true,
+   "use_cache": true,
+   "vocab_size": 256
+  },
+  "tie_word_embeddings": true,
+  "transformers_version": "5.23.0",
+  "video_token_id": null,
+  "vision_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.0,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "hidden_act": "gelu_pytorch_tanh",
+   "hidden_size": 64,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "image_size": 64,
+   "insert_layer_id": 0,
+   "intermediate_size": 128,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_norm_eps": 1e-06,
+   "model_type": "minicpmv4_6_vision",
+   "num_attention_heads": 4,
+   "num_channels": 3,
+   "num_hidden_layers": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "patch_size": 8,
+   "problem_type": null,
+   "return_dict": true,
+   "window_kernel_size": [
+    2,
+    2
+   ]
+  }
+ },
+ "config_class": "MiniCPMV4_6Config",
+ "config_module": "configuration_minicpmv4_6",
+ "extra_inputs": {},
+ "float_inputs": {
+  "pixel_values": {
+   "dtype": "float32",
+   "shape": [
+    1,
+    3,
+    8,
+    1024
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_minicpmv4_6",
+   "MiniCPMV4_6Model"
+  ],
+  [
+   "modeling_minicpmv4_6",
+   "MiniCPMV4_6ForConditionalGeneration"
+  ]
+ ]
+}

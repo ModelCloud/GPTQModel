@@ -3,21 +3,32 @@
 
 """Embedding endpoints of the Qwen Omni wrappers (issue #4816).
 
-transformers 5.22 leaves ``PreTrainedModel.get_input_embeddings`` and
-``get_output_embeddings`` in place on ``Qwen2_5OmniForConditionalGeneration``
+Transformers 5.23 (vendored unchanged) leaves ``PreTrainedModel.get_input_embeddings``
+and ``get_output_embeddings`` in place on ``Qwen2_5OmniForConditionalGeneration``
 and ``Qwen3OmniMoeForConditionalGeneration``. The token embedding and the
 language head live on the nested ``thinker``, so the input getter raises
-``NotImplementedError`` and the output getter returns ``None`` (it delegates to
-the input getter). The quantized loader discovers those endpoints before it
-builds our wrapper, so the HF class getters have to be supplied as well as the
-wrapper ones.
+``NotImplementedError`` and the output getter returns ``None``. The quantized
+loader (and writer, RCO, lm_head handling) discovers those endpoints on the
+loaded model before or outside our wrapper, so the loaded *instance* gets
+thinker-resolving getters. No class is modified: the vendored classes stay
+exactly as Transformers ships them.
 """
 
 from __future__ import annotations
 
+import types
 from typing import Optional
 
 from torch import nn
+from transformers import PreTrainedModel
+
+
+def _thinker_input_embeddings(model: nn.Module) -> Optional[nn.Module]:
+    return model.thinker.get_input_embeddings()
+
+
+def _thinker_output_embeddings(model: nn.Module) -> Optional[nn.Module]:
+    return model.thinker.lm_head
 
 
 class ThinkerEmbeddingsMixin:
@@ -25,32 +36,20 @@ class ThinkerEmbeddingsMixin:
 
     #: Wrapper attribute that owns ``embed_tokens`` and ``lm_head``.
     THINKER_ROOT = "thinker"
-    #: Transformers wrapper whose missing getters must be supplied.
-    HF_WRAPPER_CLASS_NAME: Optional[str] = None
 
     @classmethod
-    def _hf_wrapper_class(cls):
-        import transformers
-
-        if cls.HF_WRAPPER_CLASS_NAME is None:
-            raise NotImplementedError(
-                f"{cls.__name__} must declare HF_WRAPPER_CLASS_NAME to patch the Omni getters"
-            )
-        return getattr(transformers, cls.HF_WRAPPER_CLASS_NAME)
-
-    def before_model_load(self, model_local_path: str, load_quantized_model: bool):
-        # The loader passes the definition *class* as the receiver: no model
-        # instance exists yet.
-        from transformers import PreTrainedModel
-
-        model_cls = self._hf_wrapper_class()
-        root = self.THINKER_ROOT
-        # Only replace the inherited default: a transformers release that grows
-        # real getters keeps them.
+    def after_defuser_conversion(cls, model):
+        parent = getattr(super(), "after_defuser_conversion", None)
+        if callable(parent):
+            parent(model)
+        if not isinstance(model, PreTrainedModel) or not hasattr(model, cls.THINKER_ROOT):
+            return
+        model_cls = type(model)
+        # Instance-level getters only; a class that grows real getters keeps them.
         if model_cls.get_input_embeddings is PreTrainedModel.get_input_embeddings:
-            model_cls.get_input_embeddings = lambda model: getattr(model, root).get_input_embeddings()
+            model.__dict__["get_input_embeddings"] = types.MethodType(_thinker_input_embeddings, model)
         if model_cls.get_output_embeddings is PreTrainedModel.get_output_embeddings:
-            model_cls.get_output_embeddings = lambda model: getattr(model, root).lm_head
+            model.__dict__["get_output_embeddings"] = types.MethodType(_thinker_output_embeddings, model)
 
     def _thinker_embeddings_root(self) -> nn.Module:
         return getattr(self.model, self.THINKER_ROOT)

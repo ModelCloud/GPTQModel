@@ -326,3 +326,28 @@ def test_resave_skips_checkpoint_tensors_without_a_module(tmp_path, qqq_checkpoi
     assert orphan not in keys
     assert {name for name in state if name != orphan} <= keys
     json.loads((resaved / "config.json").read_text(encoding="utf-8"))
+
+
+def test_save_state_keeps_every_empty_buffer():
+    """Distinct empty buffers share the null storage pointer but are not tied.
+
+    QQQ's per-channel modules hold an empty ``s_group``. The shared-storage
+    filter keyed tensors by storage pointer, so all but one empty ``s_group``
+    were dropped from the export and the reload rejected the checkpoint.
+    """
+
+    from gptqmodel.utils.model import get_state_dict_for_save
+
+    class Owner(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("s_group", torch.empty(0, dtype=torch.float16))
+            self.register_buffer("s_channel", torch.ones(1, 4, dtype=torch.float32))
+
+    model = nn.Module()
+    model.a = Owner()
+    model.b = Owner()
+    model.c = Owner()
+    model._tied_weights_keys = None
+    state = get_state_dict_for_save(model)
+    assert {name for name in state if name.endswith("s_group")} == {"a.s_group", "b.s_group", "c.s_group"}

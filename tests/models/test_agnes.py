@@ -8,7 +8,7 @@ from model_test import ModelTest
 # ARC-Challenge test split (1,172 samples), raw prompts, and eager attention.
 class TestAgnes(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Agnes-3.0-Flash" # Agnes-AI/Agnes-3.0-Flash
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 1
 

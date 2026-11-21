@@ -754,8 +754,17 @@ def test_gguf_dequantize_weight_accepts_requested_dtype_and_device(bits: str):
     torch.testing.assert_close(direct, baseline, atol=2e-3, rtol=0.0)
 
 
-def test_gguf_forward_requests_dequantized_weight_in_input_dtype(monkeypatch):
-    dtype = torch.float16 if torch.cuda.is_available() else torch.bfloat16
+@pytest.mark.parametrize(
+    ("dtype", "expected_dtype"),
+    [
+        # Finite Q4_0 scales let an FP16 activation dequantize narrow.
+        (torch.float16, torch.float16),
+        # BF16 activations always reconstruct the dense fallback in FP32 so the
+        # output (and bias) are rounded once (``_use_fp32_gguf_weight``).
+        (torch.bfloat16, torch.float32),
+    ],
+)
+def test_gguf_forward_requests_dequantized_weight_in_input_dtype(monkeypatch, dtype, expected_dtype):
     case = _build_rtn_microbench_case(dtype, bits="q4_0")
     module = _build_rtn_gguf_module(case)
     module.gguf_fused_cpu_max_rows = 0
@@ -776,7 +785,7 @@ def test_gguf_forward_requests_dequantized_weight_in_input_dtype(monkeypatch):
     module(case["inputs"])
 
     assert observed["device"] == case["inputs"].device
-    assert observed["dtype"] == case["inputs"].dtype
+    assert observed["dtype"] == expected_dtype
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF K-path CUDA tests")
@@ -914,6 +923,9 @@ def test_gguf_triton_q1_0_g128_fused_forward_matches_dense_baseline():
 
 
 def test_gguf_triton_kernel_rejects_unsupported_formats():
+    # Construction validates the Triton runtime before the format check.
+    pytest.importorskip("triton")
+
     with pytest.raises(NotImplementedError, match="only supports fused GGUF Triton formats"):
         GGUFTritonKernel(
             bits="q4_0",

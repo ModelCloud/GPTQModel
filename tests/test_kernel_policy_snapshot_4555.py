@@ -14,6 +14,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+
+# Every case drives a Triton kernel module (bitsandbytes_triton, paro_triton).
+pytest.importorskip("triton")
+
 from gptqmodel.nn_modules.qlinear import bitsandbytes as bnb_module
 from gptqmodel.nn_modules.qlinear import bitsandbytes_triton as bt
 from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear

@@ -1,0 +1,53 @@
+{
+  "longllama": {
+    "repository": "syzymon/long_llama_3b_instruct",
+    "revision": "8805cbd788e0c76fcd388569596e401d9590f6f5",
+    "metadata_sha256": "52485c15463c4ca9b64a50c77e975248d084d50b21b9e375f4f049257dcc13d4",
+    "key_count": 263,
+    "keys_sha256": "5e27c566991c92b2cfee805e20f2aadfa49ea8be3adc728c3f4776a82ed89dcc",
+    "shapes_sha256": "b53f67a90f78cd85bd4af52fd6339fb276cdbd5c162b6f3fa0a0ae22d6e9f610",
+    "config": {
+      "model_type": "longllama", "vocab_size": 32000, "hidden_size": 3200,
+      "intermediate_size": 8640, "num_hidden_layers": 26, "num_attention_heads": 32,
+      "hidden_act": "silu", "max_position_embeddings": 2048, "initializer_range": 0.02,
+      "rms_norm_eps": 0.000001, "use_cache": true, "pad_token_id": 0,
+      "bos_token_id": 1, "eos_token_id": 2, "tie_word_embeddings": false,
+      "last_context_length": 1024, "mem_layers": [6, 12, 18], "mem_dtype": "bfloat16",
+      "mem_positionals": true, "mem_attention_grouping": null, "torch_attention": false,
+      "gradient_checkpoint_every_ith": 1
+    }
+  },
+  "stablelm_epoch": {
+    "repository": "stabilityai/japanese-stablelm-3b-4e1t-base",
+    "revision": "e7d2ebdd200a28be321058be9a67514780073736",
+    "metadata_sha256": "11bac5391ec035976e005d4c7d5d52e8618660f9821f49615541d70895e06338",
+    "key_count": 356,
+    "keys_sha256": "18878a4b6495b1d193a0698fb7ede15fe0612d4f25b4ee4a7a5c4d8e3034922d",
+    "shapes_sha256": "7b0e88e1530774833e61ac8ff5d3d56477b1eb1ebf544d4afe479682ff0994f1",
+    "config": {
+      "model_type": "stablelm_epoch", "vocab_size": 50304, "hidden_size": 2560,
+      "intermediate_size": 6912, "num_hidden_layers": 32, "num_attention_heads": 32,
+      "num_key_value_heads": 32, "num_heads": 32, "hidden_act": "silu",
+      "max_position_embeddings": 4096, "initializer_range": 0.02, "norm_eps": 0.00001,
+      "rope_pct": 0.25, "rope_theta": 10000, "rotary_scaling_factor": 1.0,
+      "tie_word_embeddings": false, "use_cache": true, "bos_token_id": 0, "eos_token_id": 0
+    }
+  },
+  "yi_coder": {
+    "repository": "01-ai/Yi-Coder-1.5B-Chat",
+    "revision": "92fdd1b2f1539ac990e7f4a921db5601da2f0299",
+    "metadata_sha256": "6b76bc6c166b360b5e245a8e85dc0219d9cafcae486ffe820391ce31a4aa3493",
+    "key_count": 219,
+    "keys_sha256": "c0598721ccdd6705c471bcca0db1e0533ce2eb549602ce05827896c69885dab5",
+    "shapes_sha256": "54ecdc77fa41381a25d6f3d3590d494857b7a49bbd2042d415e34311c6f92009",
+    "config": {
+      "model_type": "llama", "vocab_size": 64000, "hidden_size": 2048,
+      "intermediate_size": 5504, "num_hidden_layers": 24, "num_attention_heads": 16,
+      "num_key_value_heads": 16, "attention_bias": false, "attention_dropout": 0.0,
+      "mlp_bias": false, "hidden_act": "silu", "max_position_embeddings": 131072,
+      "initializer_range": 0.02, "rms_norm_eps": 0.00001, "rope_theta": 10000000,
+      "rope_scaling": null, "pretraining_tp": 1, "tie_word_embeddings": false,
+      "use_cache": false, "pad_token_id": 0, "bos_token_id": 1, "eos_token_id": 7
+    }
+  }
+}

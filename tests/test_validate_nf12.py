@@ -47,6 +47,23 @@ def test_perf_helpers_synchronize_requested_gpu(monkeypatch):
     monkeypatch.setattr(validate_nf12.torch.cuda, "synchronize",
                         lambda device=None: observed.append(device))
     monkeypatch.setattr(validate_nf12.torch.cuda, "empty_cache", lambda: None)
+
+    class _Event:
+        # A CPU-only torch build exposes ``torch.cuda.Event`` as a dummy that
+        # refuses construction; this test only observes synchronize targets.
+        def __init__(self, enable_timing=False):
+            pass
+
+        def record(self, stream=None):
+            pass
+
+        def synchronize(self):
+            pass
+
+        def elapsed_time(self, other):
+            return 1.0
+
+    monkeypatch.setattr(validate_nf12.torch.cuda, "Event", _Event)
     monkeypatch.setattr(validate_nf12.torch, "empty", lambda *args, **kwargs: tiny)
     monkeypatch.setattr(validate_nf12.torch, "randn", lambda *args, **kwargs: tiny)
 

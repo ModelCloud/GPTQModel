@@ -6,7 +6,7 @@
 from typing import Any, Dict
 
 import torch
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched
 from ...utils.model import MODALITY, get_module, move_to
@@ -14,6 +14,7 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 
@@ -21,7 +22,12 @@ from ._vlm_calibration import prepare_vlm_calibration_dataset
 class DeepSeekOCR2QModel(BaseQModel):
     fusable = FusableConfig("deepseek_ocr2").merge(LlamaFusableConfig(), profiles=("qkv",))
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
     modules_with_direct_meta_tensors = ["model"]
 
     require_load_processor = True
@@ -120,7 +126,14 @@ class DeepSeekOCR2QModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
+        processor = getattr(self, "processor", None)
+        if processor is not None:
+            return processor
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
 
     def _prepare_calibration_batches(self, conversations, batch_size):
         processor = self.load_processor()

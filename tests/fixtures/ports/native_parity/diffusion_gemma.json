@@ -1,0 +1,164 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "boi_token_id": 5,
+  "canvas_length": 16,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "eoi_token_id": 6,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "image_token_id": 4,
+  "initializer_range": 0.02,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "mm_tokens_per_image": 2,
+  "model_type": "diffusion_gemma",
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "problem_type": null,
+  "return_dict": true,
+  "self_conditioning_size": 16,
+  "text_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_bias": false,
+   "attention_dropout": 0.0,
+   "bos_token_id": 1,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "eos_token_id": 2,
+   "head_dim": 256,
+   "hidden_act": "gelu",
+   "hidden_activation": "gelu_pytorch_tanh",
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "initializer_range": 0.02,
+   "intermediate_size": 32,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_types": [
+    "sliding_attention",
+    "full_attention"
+   ],
+   "max_position_embeddings": 512,
+   "model_type": "diffusion_gemma_text",
+   "moe_intermediate_size": 8,
+   "moe_num_shared_experts": 1,
+   "num_attention_heads": 2,
+   "num_experts": 4,
+   "num_hidden_layers": 2,
+   "num_key_value_heads": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "pad_token_id": 0,
+   "per_layer_config": {
+    "1": {
+     "head_dim": 16
+    }
+   },
+   "problem_type": null,
+   "return_dict": true,
+   "rms_norm_eps": 1e-06,
+   "rope_parameters": {
+    "full_attention": {
+     "partial_rotary_factor": 0.25,
+     "rope_theta": 1000000.0,
+     "rope_type": "proportional"
+    },
+    "sliding_attention": {
+     "rope_theta": 10000.0,
+     "rope_type": "default"
+    }
+   },
+   "sliding_window": 512,
+   "tie_word_embeddings": true,
+   "top_k_experts": 2,
+   "use_bidirectional_attention": "vision",
+   "vocab_size": 99
+  },
+  "tie_word_embeddings": true,
+  "transformers_version": "5.23.0",
+  "vision_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_bias": false,
+   "attention_dropout": 0.1,
+   "chunk_size_feed_forward": 0,
+   "dropout": 0.1,
+   "dtype": null,
+   "head_dim": 64,
+   "hidden_activation": "gelu_pytorch_tanh",
+   "hidden_size": 16,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "image_size": 20,
+   "initializer_range": 0.02,
+   "intermediate_size": 37,
+   "is_encoder_decoder": false,
+   "is_training": true,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "max_position_embeddings": 131072,
+   "model_type": "gemma4_vision",
+   "num_attention_heads": 4,
+   "num_channels": 3,
+   "num_hidden_layers": 2,
+   "num_key_value_heads": 1,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "patch_size": 5,
+   "pooling_kernel_size": 2,
+   "position_embedding_size": 10240,
+   "problem_type": null,
+   "return_dict": true,
+   "rms_norm_eps": 1e-06,
+   "rope_parameters": {
+    "rope_theta": 100.0,
+    "rope_type": "axial"
+   },
+   "standardize": false,
+   "use_clipped_linears": false,
+   "use_labels": true
+  }
+ },
+ "config_class": "DiffusionGemmaConfig",
+ "config_module": "configuration_diffusion_gemma",
+ "extra_inputs": {},
+ "float_inputs": {
+  "pixel_values": {
+   "dtype": "float32",
+   "shape": [
+    3,
+    20,
+    75
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_diffusion_gemma",
+   "DiffusionGemmaModel"
+  ],
+  [
+   "modeling_diffusion_gemma",
+   "DiffusionGemmaForBlockDiffusion"
+  ]
+ ]
+}

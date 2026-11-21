@@ -7,8 +7,8 @@ import torch  # noqa: E402
 from model_test import ModelTest
 
 
-class TestGpt2(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/pangu_alpha_2_6B" # "ModelCloud/pangu_alpha_2_6B"
+class TestPanguAlpha(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/pangu_alpha_2_6B"  # ModelCloud/pangu_alpha_2_6B
     NATIVE_ARC_CHALLENGE_ACC = 0.1655
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.1945
     NATIVE_ARC_CHALLENGE_ACC_SLOW = NATIVE_ARC_CHALLENGE_ACC
@@ -16,9 +16,9 @@ class TestGpt2(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
     TORCH_DTYPE = torch.float16
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     INPUTS_MAX_LENGTH = 1024
     ASSERT_INFERENCE = True
 
-    def test_gpt2(self):
+    def test_pangu_alpha(self):
         self.quantize_and_evaluate()

@@ -1,3 +1,10 @@
+import pytest
+
+
+# The benchmark script imports tabulate and the AWQ Triton kernels at module scope.
+pytest.importorskip("tabulate")
+pytest.importorskip("triton")
+
 from gptqmodel.quantization.awq.modules.triton.scheduler import AwqTritonPlan
 from scripts.benchmark_awq_triton_fp32_ab import _module_forward
 

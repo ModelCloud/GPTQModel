@@ -5,7 +5,7 @@
 
 from typing import Dict
 
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to, nested_move_to
@@ -13,6 +13,7 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig
+from ..local import LocalModelLoader
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
@@ -24,7 +25,12 @@ from .qwen3_5 import Qwen3_5QModel
 class MiniCPMV4_6QModel(BaseQModel):
     fusable = FusableConfig("minicpmv4_6").merge(Qwen3_5QModel.fusable)
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     pre_lm_head_norm_module = "model.language_model.norm"
     rotary_embedding = "model.language_model.rotary_emb"
@@ -68,6 +74,58 @@ class MiniCPMV4_6QModel(BaseQModel):
     require_trust_remote_code = False
     layer_modules_strict = False
 
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        if getattr(module, "block_type", None) != "linear_attention":
+            return nodes
+
+        # Transformers 5.23 Qwen3_5DecoderLayer feeds input_layernorm to all
+        # four DeltaNet input projections. Missing self_attn alternatives and
+        # the *later*, per-head gated norm are not execution boundaries here.
+        # Keep the generic absent-block barrier; bind this native edge directly.
+        attn = module.linear_attn
+        internal = {id(child) for child in attn.modules()}
+        nodes = [node for node in nodes
+                 if node["prev_op"] is not module.input_layernorm
+                 and id(node["prev_op"]) not in internal
+                 and not any(id(target) in internal for target in node["layers"])]
+        feature = "linear_attn.in_proj_qkv"
+        if feature not in input_feat:
+            return nodes
+        kwargs = dict(module_kwargs or {})
+        per_feature = kwargs.pop("_awq_feature_kwargs", {})
+        kwargs.update(per_feature.get(feature, {}))
+        # The decoder calls the same cache `past_key_values`; DeltaNet calls
+        # it `cache_params`. Never silently lose a captured recurrent state.
+        if "past_key_values" in kwargs:
+            kwargs.setdefault("cache_params", kwargs.pop("past_key_values"))
+        node = {
+            "prev_op": module.input_layernorm,
+            "layers": [attn.in_proj_qkv, attn.in_proj_z],
+            "inp": input_feat[feature],
+            "module2inspect": attn,
+            "kwargs": kwargs,
+            "_input_feature_name": feature,
+            "_scale_consumers": ["linear_attn.in_proj_b", "linear_attn.in_proj_a"],
+        }
+        # No internal DeltaNet fold: convolution, recurrent mixing and gated
+        # per-head RMS normalization separate the inputs from out_proj.
+        return self._filter_awq_scaling_sources(module, [node, *nodes])
+
+    def awq_module_replay_inputs(self, module, x, module_kwargs):
+        x, kwargs = super().awq_module_replay_inputs(module, x, module_kwargs)
+        # Calibration is an uncached prefill. A mutable recurrent/KV cache
+        # would advance on the reference and again on each candidate replay.
+        if any(kwargs.get(key) is not None for key in ("cache_params", "past_key_values")):
+            raise NotImplementedError("MiniCPM-V 4.6 AWQ requires uncached calibration context")
+        if getattr(module, "layer_type", None) == "linear_attention":
+            if x.ndim != 3:
+                raise NotImplementedError("MiniCPM-V 4.6 DeltaNet replay requires batch/sequence/hidden inputs")
+            mask = kwargs.get("attention_mask")
+            if mask is not None and (mask.ndim != 2 or tuple(mask.shape) != tuple(x.shape[:2])):
+                raise NotImplementedError("MiniCPM-V 4.6 DeltaNet replay requires its captured batch/sequence mask")
+        return x, kwargs
+
     def pre_quantize_generate_hook_start(self):
         language_model = self.model.model.language_model
         self.shell_module_materialize(language_model.embed_tokens, self.quantize_config.device)
@@ -109,7 +167,14 @@ class MiniCPMV4_6QModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
+        processor = getattr(self, "processor", None)
+        if processor is not None:
+            return processor
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
 
     @classmethod
     def prepare_inputs_for_conversations(
@@ -160,4 +225,5 @@ class MiniCPMV4_6QModel(BaseQModel):
     def run_input_capture(self, example, use_cache: bool, data_device):
         return self.model.generate(
             **example,
+            use_cache=use_cache,
         )

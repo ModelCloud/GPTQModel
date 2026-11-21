@@ -1,0 +1,6 @@
+{
+  "auto_map": {
+    "AutoProcessor": "processing_prismatic.PrismaticProcessor"
+  },
+  "processor_class": "PrismaticProcessor"
+}

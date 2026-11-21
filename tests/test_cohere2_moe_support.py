@@ -7,15 +7,13 @@ import pytest
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.cohere2_moe import Cohere2MoeQModel
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
 
-def test_cohere2_moe_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="cohere2_moe")
+def test_cohere2_moe_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["cohere2_moe"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/cohere2_moe") is Cohere2MoeQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is Cohere2MoeQModel
 
 
 def test_cohere2_moe_module_tree_expands_dense_and_sparse_moe_paths():

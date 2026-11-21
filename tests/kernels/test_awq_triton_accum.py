@@ -4,6 +4,10 @@
 import pytest
 import torch
 
+
+# Every case here exercises a Triton kernel module that imports Triton.
+pytest.importorskip("triton")
+
 from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 from gptqmodel.quantization.awq.modules.triton.gemm import awq_gemm_triton
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm

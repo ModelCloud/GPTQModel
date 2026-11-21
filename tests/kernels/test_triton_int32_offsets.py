@@ -9,6 +9,10 @@ address wrapped and rows past the boundary read or wrote the wrong memory.
 import pytest
 import torch
 
+
+# Every case here exercises a Triton kernel module that imports Triton.
+pytest.importorskip("triton")
+
 from gptqmodel.nn_modules.qlinear.qqq_triton import dynamic_quant
 
 

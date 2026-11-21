@@ -1,0 +1,85 @@
+[
+  {
+    "text": "Hello world!",
+    "ids": [
+      26240,
+      3179,
+      14
+    ],
+    "decoded": "Hello world!"
+  },
+  {
+    "text": "你好，世界！ Spark 2.5",
+    "ids": [
+      16491,
+      280,
+      3078,
+      1343,
+      78646,
+      220,
+      31,
+      27,
+      34
+    ],
+    "decoded": "你好，世界！ Spark 2.5"
+  },
+  {
+    "text": "  a\t\t b\n\nnext",
+    "ids": [
+      220,
+      259,
+      23014,
+      287,
+      198,
+      198,
+      7591
+    ],
+    "decoded": "  a\t\t b\n\nnext"
+  },
+  {
+    "text": "café naïve 🐈🚀",
+    "ids": [
+      80,
+      2234,
+      596,
+      652,
+      9339,
+      377,
+      31224,
+      238,
+      230,
+      11013,
+      248,
+      222
+    ],
+    "decoded": "café naïve 🐈🚀"
+  },
+  {
+    "text": "def f(x):\n    return x + 1\n",
+    "ids": [
+      3068,
+      289,
+      5211,
+      2407,
+      198,
+      293,
+      948,
+      1812,
+      1336,
+      220,
+      30,
+      198
+    ],
+    "decoded": "def f(x):\n    return x + 1\n"
+  },
+  {
+    "text": "<｜start▁of▁sentence｜><|User|>hi<｜end▁of▁sentence｜>",
+    "ids": [
+      0,
+      130973,
+      3019,
+      1
+    ],
+    "decoded": "<｜start▁of▁sentence｜><|User|>hi<｜end▁of▁sentence｜>"
+  }
+]

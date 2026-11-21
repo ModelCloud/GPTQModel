@@ -1,0 +1,69 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "activation_function": "gelu_new",
+  "architectures": null,
+  "attention_dropout": 0.0,
+  "attention_layers": [
+   "global",
+   "local"
+  ],
+  "attention_types": [
+   [
+    [
+     "global",
+     "local"
+    ],
+    1
+   ]
+  ],
+  "bos_token_id": 98,
+  "chunk_size_feed_forward": 0,
+  "classifier_dropout": 0.1,
+  "dtype": null,
+  "embed_dropout": 0.0,
+  "eos_token_id": 98,
+  "hidden_size": 32,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_range": 0.02,
+  "intermediate_size": null,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "layer_norm_epsilon": 1e-05,
+  "max_position_embeddings": 512,
+  "model_type": "gpt_neo",
+  "num_heads": 4,
+  "num_layers": 2,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 98,
+  "problem_type": null,
+  "resid_dropout": 0.0,
+  "return_dict": true,
+  "tie_word_embeddings": true,
+  "transformers_version": "5.23.0",
+  "use_cache": true,
+  "vocab_size": 99,
+  "window_size": 7
+ },
+ "config_class": "GPTNeoConfig",
+ "config_module": "configuration_gpt_neo",
+ "extra_inputs": {},
+ "float_inputs": {},
+ "model_classes": [
+  [
+   "modeling_gpt_neo",
+   "GPTNeoModel"
+  ],
+  [
+   "modeling_gpt_neo",
+   "GPTNeoForCausalLM"
+  ]
+ ]
+}

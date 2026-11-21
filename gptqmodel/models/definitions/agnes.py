@@ -10,42 +10,23 @@ quantized module tree.
 """
 
 import torch
-from transformers import AutoModelForImageTextToText
 from transformers.masking_utils import create_causal_mask
 
-from ...utils import _MONKEY_PATCH_LOCK
 from ...utils.attn_mask import normalize_seq_mask
 from ...utils.model import MODALITY
 from ..base import BaseQModel
-
-
-def _patch_agnes_transformers_compat() -> None:
-    """Provide only the legacy Transformers symbols used by Agnes remote code."""
-
-    try:
-        from transformers import cache_utils, video_processing_utils
-    except Exception:
-        return
-
-    with _MONKEY_PATCH_LOCK:
-        if not hasattr(cache_utils, "LAYER_TYPE_CACHE_MAPPING"):
-            dynamic_layer_mapping = getattr(cache_utils, "DYNAMIC_LAYER_TYPE_MAPPING", None)
-            if isinstance(dynamic_layer_mapping, dict):
-                # Agnes registers its custom cache layers through the old name.
-                cache_utils.LAYER_TYPE_CACHE_MAPPING = dynamic_layer_mapping
-
-        if not hasattr(video_processing_utils, "BASE_VIDEO_PROCESSOR_DOCSTRING"):
-            # This is documentation-only, but Agnes imports it while defining
-            # its remote BaseVideoProcessor subclass.
-            video_processing_utils.BASE_VIDEO_PROCESSOR_DOCSTRING = ""
+from ..local import LocalModelLoader
 
 
 class AgnesQModel(BaseQModel):
     """Quantization layout for the multimodal Agnes 3.0 Flash decoder."""
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.agnes.configuration_agnes.AgnesConfig",
+        model_class="gptqmodel.models.ports.agnes.modeling_agnes.AgnesForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.agnes.processing_agnes.AgnesProcessor",
+    )
 
-    require_trust_remote_code = True
     require_load_processor = True
     layer_modules_strict = False
     # Quantization calibration and the module tree cover the language backbone
@@ -57,6 +38,7 @@ class AgnesQModel(BaseQModel):
     rotary_embedding = "model.language_model.rotary_emb"
 
     out_of_model_tensors = {"prefixes": ["mtp"]}
+    # GQA: `v_proj` and `o_proj` widths differ, so the v->o fold is skipped.
     awq_scale_optimize_shape_dependent_modules = ["global_attn.o_proj"]
 
     module_tree = [
@@ -69,7 +51,7 @@ class AgnesQModel(BaseQModel):
             # Delta-rule attention has recurrent/convolution state.  Only the
             # learned projections are weight-only quantized; the state update
             # parameters and gated norm remain in their native precision.
-            "delta_attn": (
+            "delta_attn:!": (
                 "norm:!",
                 "conv1d:!",
                 "in_proj_qkv:0:in=x",
@@ -91,19 +73,13 @@ class AgnesQModel(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             # Agnes always has the main FFN and may have a parallel FFN.  Keep
             # these branches in separate groups: their activations are formed
-            # by separate module calls in the remote forward implementation.
+            # by separate module calls in the local forward implementation.
             "mlp": {
                 "": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
                 "parallel_ffn": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             },
         },
     ]
-
-    def before_model_load(self, model_local_path: str, load_quantized_model: bool):
-        """Prepare the Transformers symbols required by Agnes remote modules."""
-
-        del self, model_local_path, load_quantized_model
-        _patch_agnes_transformers_compat()
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         """Refresh only global-attention masks during cached layer replay.

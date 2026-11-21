@@ -101,8 +101,30 @@ fix snippets where applicable. See the audit and review skill for the procedure.
   argument, not `setenv`. Packing threads use `workers` on
   `BaseQuantLinear.pack_block` and `hf_pack_layer`. Environment variables may
   only locate files, enable diagnostics that change neither results nor paths,
-  or bypass the documented `GPTQ_BYPASS_SAFETY_CHECKS` torch-version gate.
+  or bypass the documented `GPTQ_BYPASS_SAFETY_CHECKS` safety gate. Checkpoint
+  Python requires both the bypass and explicit `trust_remote_code=True`.
+  A definition-owned `LocalModelLoader` takes precedence over both.
   Remove behaviour switches in code you touch; report others in the PR.
+- **Transformers 5.23 ABI only; every model is ported.** GPT-QModel
+  quantizes, infers and trains only on the Transformers 5.23 ABI, pinned as
+  `transformers>=5.23.0,<5.24`; moving to another minor means re-vendoring the
+  native ports and passing parity (docs/transformers5-model-ports.md), never
+  just widening the pin. Every
+  `MODEL_MAP` definition loads through a `LocalModelLoader` whose config and
+  modeling code live in `gptqmodel/models/ports/`, including models that
+  Transformers implements natively. Ports import Transformers framework
+  infrastructure only, never `transformers.models.*`, and contain no
+  backward-compatibility code (no `cache_position`, tuple/legacy caches,
+  `rope_scaling`, `return_dict` tuple plumbing or version checks). GPT-QModel
+  never patches, monkeypatches or registers into Transformers, the HF
+  ecosystem (optimum, OpenVINO, safetensors, huggingface_hub) or any other
+  library (Accelerate, Defuser, torch, Triton), and never assigns onto a model
+  class at load time, not even temporarily or scoped. Behavior GPT-QModel needs
+  lives on package-owned subclasses (`GPTQModelAlignDevicesHook`,
+  `gptqmodel.utils.triton_jit.jit`) or on its own model instances; GPT-QModel
+  checkpoints load through `GPTQModel.load`.
+  `tests/test_model_port_policy.py` and `tests/test_transformers_unpatched.py`
+  enforce this.
 - **Naming:** use **GPT-QModel** in prose, UI, docs and release notes;
   `gptqmodel` is the package, `GPTQModel` the Python class. Preserve actual
   identifiers, filenames and URLs.
@@ -122,6 +144,7 @@ for the procedure.
 | Kernel, dispatch, or pack/load/fusion changes that can affect linear bias. Preserve the canonical checkpoint bias and add it once to the wide reduction before output rounding. | [Linear bias in the Torch oracle skill](.agents/skills/gptqmodel-torch-oracle-numerics/SKILL.md#linear-bias) |
 | Device selection, placement and kernel support: declare actual families (`DEVICE.CUDA` = NVIDIA, `DEVICE.ROCM` = AMD); preserve ordinals, never infer capability from a fixed index | [gptqmodel-device-families](.agents/skills/gptqmodel-device-families/SKILL.md) |
 | Threaded PyTorch, streams or P2P: multi-GPU runs with `PYTHON_GIL=0`; APIs absent from `pytorch_gil_0_compat.md` are unverified. Never call `torch.cuda.comm.*` on worker threads | [gptqmodel-pytorch-gil0](.agents/skills/gptqmodel-pytorch-gil0/SKILL.md) |
+| Any model, alias, definition or port: config and modeling live in `gptqmodel/models/ports/` on the Transformers 5.23 ABI, with no `transformers.models.*` imports and no backward-compatibility code | [gptqmodel-model-porting](.agents/skills/gptqmodel-model-porting/SKILL.md) |
 | Model types, aliases, definitions, module plans or fusion eligibility: `module_tree` accounts for every checkpoint-owned weight; new models need module-plan tests | [gptqmodel-model-plan-tests](.agents/skills/gptqmodel-model-plan-tests/SKILL.md) |
 | New models, definitions or AWQ grouping/search/replay/folding: state an explicit AWQ policy | [gptqmodel-awq-model-onboarding](.agents/skills/gptqmodel-awq-model-onboarding/SKILL.md) |
 | Writers, converters, exports or uploads: all published tensor payloads are safetensors unless the user explicitly requests otherwise. Pickle is legacy, read-only | [gptqmodel-checkpoint-serialization](.agents/skills/gptqmodel-checkpoint-serialization/SKILL.md) |

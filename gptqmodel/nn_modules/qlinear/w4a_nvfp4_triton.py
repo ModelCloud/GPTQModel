@@ -14,6 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
+from gptqmodel.utils.triton_jit import jit as triton_jit
+
 from ...utils.rocm import IS_ROCM
 from .w4a_triton import _launch_device, _to_e4m3_rn
 
@@ -21,7 +23,7 @@ from .w4a_triton import _launch_device, _to_e4m3_rn
 _E4M3_SEARCH_RADIUS = tl.constexpr(8)
 
 
-@triton.jit
+@triton_jit
 def _e2m1_codes(x):
     magnitude = tl.minimum(tl.abs(x), 6.0)
     code = tl.full(magnitude.shape, 0, tl.uint8)
@@ -35,7 +37,7 @@ def _e2m1_codes(x):
     return code | (tl.cast(x < 0, tl.uint8) << 3)
 
 
-@triton.jit
+@triton_jit
 def _e2m1_values(codes):
     magnitude = codes & 7
     value = tl.full(codes.shape, 0.0, tl.float32)
@@ -49,7 +51,7 @@ def _e2m1_values(codes):
     return tl.where((codes & 8) != 0, -value, value)
 
 
-@triton.jit(do_not_specialize=["M", "PADDED_M"])
+@triton_jit(do_not_specialize=["M", "PADDED_M"])
 def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
                                    M, K: tl.constexpr,
                                    PADDED_M):
@@ -97,7 +99,7 @@ def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
     tl.store(SwizzledScales + scale_offset, tl.where(row < M, local, 0.0))
 
 
-@triton.jit(do_not_specialize=["M", "PADDED_M"])
+@triton_jit(do_not_specialize=["M", "PADDED_M"])
 def _quantize_nvfp4_input_nvidia(X, GlobalScale, Packed, SwizzledScales,
                                  M, K: tl.constexpr,
                                  PADDED_M):
@@ -133,7 +135,7 @@ def _quantize_nvfp4_input_nvidia(X, GlobalScale, Packed, SwizzledScales,
     tl.store(SwizzledScales + scale_offset, tl.where(row < M, local, 0.0))
 
 
-@triton.jit(do_not_specialize=["M", "PADDED_M"])
+@triton_jit(do_not_specialize=["M", "PADDED_M"])
 def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
                           M, K: tl.constexpr, PADDED_M,
                           GRID_SEARCH: tl.constexpr):
@@ -304,7 +306,7 @@ def nvfp4_pack_and_swizzle(x: torch.Tensor, global_scale: torch.Tensor, *, recip
     return packed.view(torch.float4_e2m1fn_x2), scales
 
 
-@triton.jit(do_not_specialize=["M", "PADDED_M"])
+@triton_jit(do_not_specialize=["M", "PADDED_M"])
 def _decode_nvfp4(Packed, Scales, GlobalScale, Out,
                   M, K: tl.constexpr, PADDED_M):
     # rows * K can exceed 2^31; address rows with 64-bit offsets.
@@ -354,7 +356,7 @@ def nvfp4_decode(codes: torch.Tensor, scales: torch.Tensor, global_scale: torch.
     return output
 
 
-@triton.jit(do_not_specialize=["M"])
+@triton_jit(do_not_specialize=["M"])
 def _accumulate_fp4_planes(Both, GroupScales, GlobalScale, TokenScale, Bias, Accumulator, Output,
                            M, N: tl.constexpr, FIRST: tl.constexpr,
                            LAST: tl.constexpr, HAS_BIAS: tl.constexpr, HAS_TOKEN_SCALE: tl.constexpr,

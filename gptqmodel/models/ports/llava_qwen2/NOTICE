@@ -1,0 +1,25 @@
+GPT-QModel package-owned LLaVA-Qwen2 / Apple FastVLM flat-checkpoint port
+
+Original LLaVA wrapper and multimodal/image utilities:
+Copyright 2023 Haotian Liu, Apache License 2.0.
+
+FastViTHD / MobileCLIP portions:
+Copyright (C) 2025 Apple Inc. All Rights Reserved.
+See LICENSE-Apple and the unmodified upstream ACKNOWLEDGEMENTS, including
+the FastViT, MobileCLIP and timm subcomponent notices.
+
+S2 multiscale chessboard/resampling equations:
+Copyright (c) 2024 Baifeng Shi. All rights reserved.
+MIT License; upstream LICENSE.md also attributes Microsoft Corporation.
+See LICENSE-S2.
+
+Transformers 5 adaptation, package-local vision construction, owned processor,
+loader/capture/AWQ integration and regression tests:
+Copyright 2026 ModelCloud.ai, Apache License 2.0.
+The Apple-derived code retains its own license; this notice does not relicense it.
+
+Pinned sources: github.com/apple/ml-fastvlm @ 6f7b13179bbc81e6aa7d921bc7c6335c43904778
+(llava_qwen.py, llava_arch.py, mobileclip/mci.py, clip_encoder.py, mm_utils.py),
+huggingface.co/apple/FastVLM-0.5B @ 16375720c2d673fa583e57e9876afde27549c7d0, and
+github.com/bfshi/scaling_on_scales @ 188b59d8a331a7d0ac2f072ddeebd6e650b6e48e (s2wrapper/core.py). No trained model weights are distributed here;
+checkpoint weight licenses are separate and remain the user's responsibility.

@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForMultimodalLM
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class GlmASRGPTQ(BaseQModel):
@@ -13,7 +13,12 @@ class GlmASRGPTQ(BaseQModel):
     # text decoder directly under `language_model`. The checkpoint is a
     # `GlmAsrForConditionalGeneration`, so load the complete wrapper and
     # quantize the decoder through `model.language_model`.
-    loader = AutoModelForMultimodalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForMultimodalLM",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     require_load_processor = True
 

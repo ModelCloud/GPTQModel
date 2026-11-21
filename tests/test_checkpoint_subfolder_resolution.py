@@ -306,6 +306,192 @@ def test_normalize_checkpoint_subfolder_canonicalizes_without_touching_the_root(
         normalize_checkpoint_subfolder("../x")
 
 
+def _selection_checkpoint_dir(root, subfolder):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    root.mkdir(parents=True, exist_ok=True)
+    if subfolder:
+        config = LlamaConfig(
+            vocab_size=64,
+            hidden_size=16,
+            intermediate_size=32,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            num_hidden_layers=1,
+        )
+        LlamaForCausalLM(config).save_pretrained(root)
+    return root / subfolder
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("subfolder", ["", "nested"])
+def test_public_resave_keeps_selected_config_and_exact_checkpoint(tmp_path, subfolder):
+    import torch
+    from test_resave_preserves_checkpoint_dtypes_4379 import CALIBRATION, _shard_tensors, _tiny_source
+
+    from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
+
+    source = tmp_path / "source"
+    selected = _selection_checkpoint_dir(source, subfolder)
+    torch.manual_seed(417)
+    _tiny_source(selected)
+    qcfg = QuantizeConfig(bits=4, group_size=32, desc_act=False, device="cpu", offload_to_disk=False)
+    model = GPTQModel.load(str(source), subfolder=subfolder, quantize_config=qcfg, backend=BACKEND.GPTQ_TORCH)
+    assert model.model.config.hidden_size == 32
+    assert Path(model.model_local_path) == selected
+    model.quantize(CalibrationConfig(dataset=CALIBRATION, batch_size=1, min_length=1), backend=BACKEND.GPTQ_TORCH)
+    ids = torch.tensor([[1, 7, 4, 9, 2]])
+    with torch.inference_mode():
+        expected_logits = model.model(ids).logits.clone()
+    assert torch.isfinite(expected_logits).all()
+
+    first_root = tmp_path / "packed"
+    first = _selection_checkpoint_dir(first_root, subfolder)
+    model.save(str(first))
+    expected = _shard_tensors(first)
+    assert any(key.endswith(".qweight") and value[1].any() for key, value in expected.items())
+    assert "model.embed_tokens.weight" in expected
+    assert "model.norm.weight" in expected
+
+    for generation in range(2):
+        load = GPTQModel.load if generation == 0 else GPTQModel.from_quantized
+        model = load(
+            str(first_root), subfolder=subfolder, backend=BACKEND.GPTQ_TORCH, device="cpu", dtype=torch.bfloat16
+        )
+        assert not hasattr(model.model, "_model_init_kwargs")
+        assert model.model.config.hidden_size == 32
+        assert Path(model.model_local_path) == first
+        with torch.inference_mode():
+            torch.testing.assert_close(model.model(ids).logits, expected_logits, rtol=0, atol=0)
+
+        output_root = tmp_path / f"resaved-{generation}"
+        output = _selection_checkpoint_dir(output_root, subfolder)
+        if generation == 1:
+            live_state = {name: tensor.detach().clone() for name, tensor in model.model.state_dict().items()}
+            config_file = first / "config.json"
+            original_config = config_file.read_bytes()
+            failed_save = output
+            config_file.write_text("{broken config", encoding="utf-8")
+            try:
+                with pytest.raises(OSError, match="JSON"):
+                    model.save(str(failed_save))
+            finally:
+                config_file.write_bytes(original_config)
+            assert not list(failed_save.glob("*.safetensors"))
+            for name, tensor in model.model.state_dict().items():
+                assert torch.equal(tensor, live_state[name]), name
+            with torch.inference_mode():
+                torch.testing.assert_close(model.model(ids).logits, expected_logits, rtol=0, atol=0)
+
+        model.save(str(output))
+        assert model.model.config.hidden_size == 32
+        actual = _shard_tensors(output)
+        assert actual.keys() == expected.keys()
+        for name, (dtype, payload) in expected.items():
+            assert actual[name][0] == dtype, name
+            assert torch.equal(actual[name][1], payload), name
+        with torch.inference_mode():
+            torch.testing.assert_close(model.model(ids).logits, expected_logits, rtol=0, atol=0)
+        first_root, first = output_root, output
+
+    reloaded = GPTQModel.load(
+        str(first_root), subfolder=subfolder, backend=BACKEND.GPTQ_TORCH, device="cpu", dtype=torch.bfloat16
+    )
+    with torch.inference_mode():
+        torch.testing.assert_close(reloaded.model(ids).logits, expected_logits, rtol=0, atol=0)
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("entry", ["load", "from_pretrained"])
+def test_public_source_retains_config_selection_without_model_init_state(tmp_path, entry):
+    import torch
+    from test_resave_preserves_checkpoint_dtypes_4379 import _tiny_source
+
+    from gptqmodel import GPTQModel
+
+    source = tmp_path / "source"
+    selected = _selection_checkpoint_dir(source, "nested")
+    _tiny_source(selected)
+    model = getattr(GPTQModel, entry)(
+        str(source),
+        subfolder="nested",
+        revision="pinned-source",
+        local_files_only=True,
+        device="cpu",
+        dtype=torch.bfloat16,
+        quantize_config=QuantizeConfig(bits=4, group_size=32, offload_to_disk=False),
+    )
+    del model.model._model_init_kwargs
+    assert model._config_load_kwargs == {
+        "subfolder": "nested",
+        "revision": "pinned-source",
+        "local_files_only": True,
+    }
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("trust", [False, True])
+def test_writer_reads_retained_gguf_metadata_from_pinned_source(tmp_path, monkeypatch, trust):
+    from test_local_model_loading import _gguf_config
+    from test_resave_preserves_checkpoint_dtypes_4379 import _tiny_source
+
+    from gptqmodel import GPTQModel
+    from gptqmodel.models import writer
+    pytest.importorskip("gguf", reason="Transformers' GGUF loader needs the gguf package")
+    source = _tiny_source(tmp_path / "snapshot")
+    (source / "nested").mkdir()
+    _gguf_config(source / "nested" / "selected.gguf")
+    model = GPTQModel.load(str(source), device="cpu")
+    selection = {
+        "subfolder": "nested",
+        "revision": "pinned-source",
+        "gguf_file": "selected.gguf",
+        "proxies": {"https": "https://original.invalid"},
+    }
+    wrapped = type(model)(
+        model.model,
+        quantized=False,
+        quantize_config=None,
+        tokenizer=model.tokenizer,
+        model_local_path=str(source),
+        trust_remote_code=trust,
+        config_load_kwargs=selection,
+    )
+    selection["subfolder"] = "wrong-after-construction"
+    selection["proxies"]["https"] = "https://changed.invalid"
+    assert wrapped._config_load_kwargs["subfolder"] == "nested"
+    assert wrapped._config_load_kwargs["proxies"]["https"] == "https://original.invalid"
+
+    calls = []
+    resolve = writer.resolve_trust_remote_code
+    load_config = writer.load_model_config
+
+    def observed_resolve(path, **kwargs):
+        calls.append((path, kwargs))
+        return resolve(path, **kwargs)
+
+    def observed_config(path, **kwargs):
+        calls.append((path, kwargs))
+        return load_config(path, **kwargs)
+
+    class ConfigReached(Exception):
+        pass
+
+    def stop_at_model(config, **kwargs):
+        assert config.model_type == "llama"
+        assert config.hidden_size == 16  # GGUF metadata, not the root JSON's 32.
+        raise ConfigReached
+
+    monkeypatch.setattr(writer, "resolve_trust_remote_code", observed_resolve)
+    monkeypatch.setattr(writer, "load_model_config", observed_config)
+    monkeypatch.setattr(wrapped.loader, "from_config", stop_at_model)
+    with pytest.raises(ConfigReached):
+        wrapped.get_model_with_quantize(QuantizeConfig(bits=4, group_size=32), str(source))
+    assert len(calls) == 2
+    for index, (path, kwargs) in enumerate(calls):
+        assert path == str(source)
+        assert kwargs == {**wrapped._config_load_kwargs, "trust_remote_code": trust if index == 0 else False}
+
 def test_quantize_config_from_pretrained_reports_missing_config(tmp_path):
     with pytest.raises(ValueError) as exc:
         QuantizeConfig.from_pretrained(str(tmp_path))

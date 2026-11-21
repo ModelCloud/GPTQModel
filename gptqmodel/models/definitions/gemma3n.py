@@ -11,6 +11,7 @@ from ...utils.device import get_device
 from ...utils.model import get_module_by_name_prefix, move_to, nested_move_to
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from . import LlamaQModel
 
 
@@ -225,6 +226,11 @@ def _restore_gemma3n_per_layer_input_capture(model_def):
 
 
 class Gemma3nTextQModel(LlamaQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("gemma3n_text").merge(LlamaFusableConfig(), profiles=("gate_up",))
 
     layer_modules_strict = False
@@ -276,6 +282,13 @@ class Gemma3nTextQModel(LlamaQModel):
 
 
 class Gemma3nForConditionalGenerationGPTQ(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
+
     layer_modules_strict = False
     support_batch_quantize = False
     require_load_processor = True

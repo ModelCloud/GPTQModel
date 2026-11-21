@@ -3,26 +3,21 @@
 
 from os import fspath
 
-from transformers import AutoConfig
-from transformers.models.auto.configuration_auto import CONFIG_MAPPING
-
 from ...quantization.config import METHOD, QuantizeConfig
 from ...utils.backend import BACKEND, PROFILE, normalize_backend
 from ...utils.hf import get_config_selection_kwargs, load_hf_tokenizer, normalize_torch_dtype_kwarg
 from ...utils.model import MODALITY
 from .._const import DEFAULT_MAX_SHARD_SIZE
 from ..base import BaseQModel
-from ..deepseek_v41.configuration import DeepSeekV41FlashConfig
 from ..fusable import require_fusable_config
-
-
-# GPT-QModel can dispatch the official config on Transformers versions that do
-# not recognize the architecture. The weight loader always uses our own class.
-if "deepseek_v41" not in CONFIG_MAPPING:
-    AutoConfig.register("deepseek_v41", DeepSeekV41FlashConfig)
+from ..local import LocalModelLoader
 
 
 class DeepSeekV41FlashQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.deepseek_v41_flash.configuration.DeepSeekV41FlashConfig",
+        model_class="gptqmodel.models.ports.deepseek_v41_flash.modeling.DeepSeekV41FlashForCausalLM",
+    )
     require_trust_remote_code = False
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
     layer_modules_strict = False  # Compressor and indexer owners vary across layers.
@@ -90,10 +85,11 @@ class DeepSeekV41FlashQModel(BaseQModel):
         ):
             raise ValueError("DeepSeek V4.1 Flash uses its built-in module tree and the auto, marlin, torch, or EXL3 backend")
 
-        from ..deepseek_v41.checkpoint import load_checkpoint
+        from ..ports.deepseek_v41_flash.checkpoint import load_checkpoint
 
         model_id_or_path = fspath(model_id_or_path)
         tokenizer_trust = kwargs.pop("tokenizer_trust_remote_code", trust_remote_code)
+        kwargs.pop("code_revision", None)
         normalize_torch_dtype_kwarg(kwargs, api_name="DeepSeekV41FlashQModel.from_quantized")
         dtype = kwargs.pop("dtype", "auto")
         selection = get_config_selection_kwargs(kwargs)
@@ -102,7 +98,7 @@ class DeepSeekV41FlashQModel(BaseQModel):
             raise TypeError(f"Unsupported DeepSeek V4.1 Flash load arguments: {', '.join(sorted(unsupported))}")
         model, local_path, selection = load_checkpoint(
             model_id_or_path, selection=selection, dtype=dtype, device=device, device_map=device_map, max_memory=max_memory,
-            backend=backend, kernel=kernel,
+            backend=backend, loader=cls.loader, kernel=kernel,
         )
         tokenizer = load_hf_tokenizer(
             model_id_or_path, model_config=model.config, trust_remote_code=tokenizer_trust, **selection,
@@ -115,7 +111,7 @@ class DeepSeekV41FlashQModel(BaseQModel):
         ).eval()
 
     def quantize(self, calibration=None, *, projections=None):
-        from ..deepseek_v41.gptq import quantize_projections
+        from ..ports.deepseek_v41_flash.gptq import quantize_projections
 
         with self.model.calibration():
             return quantize_projections(self, calibration, projections)
@@ -124,7 +120,7 @@ class DeepSeekV41FlashQModel(BaseQModel):
         self, save_dir, safetensors_metadata=None, max_shard_size=DEFAULT_MAX_SHARD_SIZE,
         meta_quantizer=None, eora_path=None, split_by=None,
     ):
-        from ..deepseek_v41.writer import save_checkpoint
+        from ..ports.deepseek_v41_flash.writer import save_checkpoint
 
         if eora_path is not None or split_by is not None:
             raise ValueError("DeepSeek V4.1 checkpoint save uses a single indexed model with all its components")

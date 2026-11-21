@@ -5,7 +5,7 @@
 
 from typing import Dict
 
-from transformers import AutoModelForPreTraining, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.audio import process_audio_info
 from ...utils.model import move_to
@@ -13,6 +13,7 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig
+from ..local import LocalModelLoader
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .qwen2 import Qwen2QModel
 
@@ -20,7 +21,12 @@ from .qwen2 import Qwen2QModel
 class Qwen2AudioGPTQ(BaseQModel):
     fusable = FusableConfig("qwen2_audio").merge(Qwen2QModel.fusable)
 
-    loader = AutoModelForPreTraining
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForPreTraining",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     # The audio tower and projector stay dense; only the Qwen2 text decoder is quantized.
     pre_lm_head_norm_module = "model.language_model.norm"
@@ -76,7 +82,7 @@ class Qwen2AudioGPTQ(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path)
+        return self.__dict__.get("processor") or type(self).loader.load_processor(self.model_local_path)
 
     def _prepare_calibration_batch(self, processor, batch):
         text = processor.apply_chat_template(batch, tokenize=False, add_generation_prompt=True)

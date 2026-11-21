@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded Kimi K3 calibration against the checkpoint's own decoder code.
+"""Bounded Kimi K3 calibration against the package-owned K3 decoder port.
 
 Only the routed w1/w3/w2 matrices are quantized. Attention, latent projections,
 shared experts, SiTU and attention-residual state retain source semantics.
@@ -8,12 +8,8 @@ must use an explicit layer boundary with both prefix_sum and block_residual.
 """
 from __future__ import annotations
 
-import ast
-import hashlib
-import importlib.util
 import json
 import sys
-import types
 from pathlib import Path
 
 import torch
@@ -21,49 +17,27 @@ from safetensors import safe_open
 from torch import nn
 
 
-def load_calibration_reference(snapshot, trust_remote_code: bool = False):
-    """Load unmodified decoder math, excluding unused HF whole-model wrappers.
+def load_calibration_reference(snapshot=None, trust_remote_code: bool = False):
+    """Return the package-owned K3 decoder (``KimiLinearConfig``/``KimiDecoderLayer``).
 
-    K3's bundled decoder imports HF4's removed OutputRecorder/check_model_inputs
-    solely for its top-level model wrapper. Excluding those wrappers lets HF5
-    execute the same decoder without global monkey patches or checkpoint edits.
-
-    This executes Python files from the snapshot, so it requires an explicit
-    ``trust_remote_code=True`` from the caller.
+    Calibration no longer executes Python from the checkpoint snapshot. The
+    arguments are accepted for backward compatibility and ignored.
     """
-    if trust_remote_code is not True:
-        raise ValueError(
-            "Kimi K3 calibration executes code from the checkpoint snapshot; "
-            "pass trust_remote_code=True to opt in."
-        )
-    snapshot = Path(snapshot).resolve()
-    name = "_gptqmodel_kimi_k3_" + hashlib.sha256(str(snapshot).encode()).hexdigest()[:16]
-    if name + ".modeling_kimi_linear" in sys.modules:
-        return sys.modules[name + ".modeling_kimi_linear"]
-    package = types.ModuleType(name)
-    package.__path__ = [str(snapshot)]
-    sys.modules[name] = package
-    config_name = name + ".configuration_kimi_k3"
-    spec = importlib.util.spec_from_file_location(config_name, snapshot / "configuration_kimi_k3.py")
-    config = importlib.util.module_from_spec(spec)
-    sys.modules[config_name] = config
-    spec.loader.exec_module(config)
-    path = snapshot / "modeling_kimi_linear.py"
-    tree = ast.parse(path.read_text(), filename=str(path))
-    wrappers = {"KimiPreTrainedModel", "KimiLinearModel", "KimiLinearForCausalLM"}
-    tree.body = [node for node in tree.body
-                 if not (isinstance(node, ast.ClassDef) and node.name in wrappers)
-                 and not (isinstance(node, ast.ImportFrom) and node.module == "transformers.utils.generic")]
-    module = types.ModuleType(name + ".modeling_kimi_linear")
-    module.__package__ = name
-    module.__file__ = str(path)
-    sys.modules[module.__name__] = module
-    try:
-        exec(compile(tree, str(path), "exec"), module.__dict__)
-    except BaseException:
-        del sys.modules[module.__name__]
-        raise
-    return module
+    del snapshot, trust_remote_code
+    from ..models.ports.kimi_k3 import modeling_kimi_linear
+
+    return modeling_kimi_linear
+
+
+def fit_checkpoint_parameter(key, tensor, parameter):
+    """Validate a checkpoint tensor against a block parameter; drop zero KDA ``A_log`` padding."""
+    if tuple(tensor.shape) == tuple(parameter.shape):
+        return tensor
+    if key.endswith("self_attn.A_log") and tensor.ndim == 1 and parameter.ndim == 1:
+        from ..models.ports.kimi_k3.checkpoint import ActiveKDAHeads
+
+        return next(iter(ActiveKDAHeads(parameter.numel()).convert({key: tensor}, [key], [key]).values()))
+    raise ValueError(f"checkpoint parameter geometry differs: {key}")
 
 
 @torch.no_grad()
@@ -103,9 +77,7 @@ class KimiK3Source:
         for shard in set(self.weight_map.values()):
             if Path(shard).name != shard or not (self.snapshot / shard).is_file():
                 raise ValueError(f"invalid/missing K3 shard: {shard}")
-        self.reference = load_calibration_reference(
-            self.snapshot, trust_remote_code=trust_remote_code
-        )
+        self.reference = load_calibration_reference()
 
     def tensor(self, name, device="cpu"):
         with safe_open(self.snapshot / self.weight_map[name], framework="pt", device="cpu") as file:
@@ -131,15 +103,11 @@ class KimiK3Source:
         config.use_cache = False
         with torch.device("meta"):
             block = self.reference.KimiDecoderLayer(config, layer)
-        # Checkpoint KDA A_log is padded to 128 heads; kernels read only the
-        # 96 active heads. Preserve those source bytes rather than trimming it.
+        # Checkpoint KDA A_log is zero-padded to 128 heads; the port keeps the
+        # 96 active heads, exactly as its checkpoint loader does.
         prefix = f"language_model.model.layers.{layer}."
         for key, parameter in list(block.named_parameters()):
-            tensor = self.decoded(prefix + key, device)
-            if tuple(tensor.shape) != tuple(parameter.shape):
-                if not (key == "self_attn.A_log" and tensor.ndim == 1
-                        and tensor.numel() >= parameter.numel()):
-                    raise ValueError(f"checkpoint parameter geometry differs: {prefix + key}")
+            tensor = fit_checkpoint_parameter(prefix + key, self.decoded(prefix + key, device), parameter)
             parent, _, leaf = key.rpartition(".")
             target = block.get_submodule(parent) if parent else block
             target._parameters[leaf] = nn.Parameter(tensor, requires_grad=False)
@@ -148,13 +116,18 @@ class KimiK3Source:
         return block.eval()
 
 
+def attn_res_function(block):
+    """The decoder module's own ``_apply_attn_res``, independent of forward wrappers."""
+    return getattr(sys.modules[type(block).__module__], "_apply_attn_res")
+
+
 @torch.no_grad()
 def prepare_moe(block, prefix_sum, block_residual):
     """Exactly the reference decoder's attention half, before routed MoE."""
     hidden = prefix_sum
     b, length, width = hidden.shape
     if block_residual.shape[1]:
-        hidden = block.forward.__globals__["_apply_attn_res"](
+        hidden = attn_res_function(block)(
             prefix_sum.view(-1, width), block_residual,
             block.self_attention_res_proj, block.self_attention_res_norm).view(b, length, width)
     if block.layer_idx % block.attn_res_block_size == 0:
@@ -163,7 +136,7 @@ def prepare_moe(block, prefix_sum, block_residual):
     hidden = block.input_layernorm(hidden)
     attention = block.self_attn(hidden_states=hidden, attention_mask=None, use_cache=False)
     prefix_sum = attention if prefix_sum is None else prefix_sum + attention
-    hidden = block.forward.__globals__["_apply_attn_res"](
+    hidden = attn_res_function(block)(
         prefix_sum.view(-1, width), block_residual,
         block.mlp_res_proj, block.mlp_res_norm).view(b, length, width)
     hidden = block.post_attention_layernorm(hidden)

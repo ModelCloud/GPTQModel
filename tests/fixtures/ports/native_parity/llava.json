@@ -1,0 +1,146 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "ignore_index": -100,
+  "image_seq_length": 16,
+  "image_token_index": 0,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "model_type": "llava",
+  "multimodal_projector_bias": true,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "problem_type": null,
+  "projector_hidden_act": "gelu",
+  "return_dict": true,
+  "text_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_bias": false,
+   "attention_dropout": 0.0,
+   "attention_probs_dropout_prob": 0.1,
+   "bos_token_id": 1,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "eos_token_id": 2,
+   "head_dim": 8,
+   "hidden_act": "gelu",
+   "hidden_dropout_prob": 0.1,
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1",
+    "2": "LABEL_2"
+   },
+   "initializer_range": 0.02,
+   "intermediate_size": 37,
+   "is_encoder_decoder": false,
+   "is_training": true,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1,
+    "LABEL_2": 2
+   },
+   "max_position_embeddings": 512,
+   "mlp_bias": false,
+   "model_type": "llama",
+   "num_attention_heads": 4,
+   "num_choices": 4,
+   "num_hidden_layers": 2,
+   "num_key_value_heads": 4,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "pad_token_id": 1,
+   "pretraining_tp": 1,
+   "problem_type": null,
+   "return_dict": true,
+   "rms_norm_eps": 1e-06,
+   "rope_parameters": {
+    "rope_theta": 10000.0,
+    "rope_type": "default"
+   },
+   "seq_length": 7,
+   "tie_word_embeddings": false,
+   "type_sequence_label_size": 2,
+   "type_vocab_size": 16,
+   "use_cache": true,
+   "use_input_mask": true,
+   "use_labels": true,
+   "use_token_type_ids": false,
+   "vocab_size": 99
+  },
+  "tie_word_embeddings": false,
+  "transformers_version": "5.23.0",
+  "vision_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.1,
+   "chunk_size_feed_forward": 0,
+   "dropout": 0.1,
+   "dtype": null,
+   "hidden_act": "quick_gelu",
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "image_size": 8,
+   "initializer_factor": 1.0,
+   "initializer_range": 0.02,
+   "intermediate_size": 37,
+   "is_encoder_decoder": false,
+   "is_training": true,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_norm_eps": 1e-05,
+   "model_type": "clip_vision_model",
+   "num_attention_heads": 4,
+   "num_channels": 3,
+   "num_hidden_layers": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "patch_size": 2,
+   "problem_type": null,
+   "projection_dim": 32,
+   "return_dict": true
+  },
+  "vision_feature_layer": -1,
+  "vision_feature_select_strategy": "default"
+ },
+ "config_class": "LlavaConfig",
+ "config_module": "configuration_llava",
+ "extra_inputs": {},
+ "float_inputs": {
+  "pixel_values": {
+   "dtype": "float32",
+   "shape": [
+    3,
+    3,
+    8,
+    8
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_llava",
+   "LlavaModel"
+  ],
+  [
+   "modeling_llava",
+   "LlavaForConditionalGeneration"
+  ]
+ ]
+}

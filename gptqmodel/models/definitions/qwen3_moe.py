@@ -7,9 +7,15 @@ from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class Qwen3MoeQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("qwen3_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     shared_input_verified_model_types = frozenset({"qwen3_moe"})

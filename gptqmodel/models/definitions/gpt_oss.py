@@ -4,9 +4,15 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class GPTOSSGPTQ(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("gpt_oss").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     shared_input_verified_model_types = frozenset({"gpt_oss"})

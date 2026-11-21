@@ -10,7 +10,7 @@ class TestMinimaxM2(ModelTest):
 
     NATIVE_MODEL_ID = "/monster/data/model/MiniMax-M2-bf16"
     USE_FLASH_ATTN = False
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     DELETE_QUANTIZED_MODEL = False
     DATASET_SIZE = 1024
     GROUP_SIZE = 32

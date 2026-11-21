@@ -12,18 +12,16 @@ from transformers import AutoConfig, AutoModelForImageTextToText
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.minimax_m3_vl import MiniMaxM3VLGPTQ
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
 
 MODEL_PATH = Path("/monster/data/model/MiniMax-M3")
 
 
-def test_minimax_m3_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="minimax_m3_vl")
+def test_minimax_m3_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["minimax_m3_vl"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/minimax-m3") is MiniMaxM3VLGPTQ
+    assert auto.check_and_get_model_definition(str(tmp_path)) is MiniMaxM3VLGPTQ
 
 
 @pytest.mark.skipif(not MODEL_PATH.exists(), reason="MiniMax-M3 model not found")

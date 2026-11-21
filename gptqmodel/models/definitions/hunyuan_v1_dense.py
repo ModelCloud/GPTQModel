@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from .llama import LlamaQModel
 
 
@@ -11,6 +12,10 @@ class HunYuanDenseV1QModel(LlamaQModel):
     RMSNorm modules inside attention. Those norms are metadata/base modules for
     quantization and should not be replaced by quantized linear kernels.
     """
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     fusable = FusableConfig("hunyuan_v1_dense").merge(LlamaFusableConfig())
 
     # q/k/v share the post-norm hidden state and gate/up share the MLP input.

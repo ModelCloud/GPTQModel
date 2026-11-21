@@ -266,7 +266,7 @@ def test_loader_converts_bin_under_configured_offload_path_not_tmpdir(tmp_path, 
     monkeypatch.setattr(loader, "auto_select_device", lambda *_args, **_kwargs: torch.device("cpu"))
     monkeypatch.setattr(loader, "auto_dtype", lambda *_args, **_kwargs: torch.float16)
     monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: base_config)
+    monkeypatch.setattr(loader, "load_model_config", lambda *_args, **_kwargs: base_config)
     monkeypatch.setattr(loader, "load_hf_tokenizer", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("gptqmodel.utils.hf.build_shell_model", _fake_build_shell_model)
     monkeypatch.setattr(loader.defuser, "convert_model", _fake_convert_model)

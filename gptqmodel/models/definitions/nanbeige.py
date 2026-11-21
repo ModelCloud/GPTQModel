@@ -1,22 +1,23 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from functools import wraps
-
-import torch
-
+from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..looped_capture import LoopedLayerCaptureMixin
-from . import LlamaQModel
 
 
-class NanbeigeQModel(LoopedLayerCaptureMixin, LlamaQModel):
-    """Nanbeige's looped decoder reuses a Llama-shaped set of physical layers."""
-    fusable = None  # No qualified executor for this definition.
+class NanbeigeQModel(LoopedLayerCaptureMixin, BaseQModel):
+    """Physical Nanbeige layers are shared across logical loop/cache slots."""
 
-
-    require_trust_remote_code = True
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.nanbeige.configuration_nanbeige.NanbeigeConfig",
+        model_class="gptqmodel.models.ports.nanbeige.modeling_nanbeige.NanbeigeForCausalLM",
+    )
+    require_trust_remote_code = False
+    fusable = None
+    pre_lm_head_norm_module = "model.norm"
+    modules_with_direct_meta_tensors = ["model"]
 
     module_tree = [
         "model",
@@ -30,89 +31,28 @@ class NanbeigeQModel(LoopedLayerCaptureMixin, LlamaQModel):
         },
     ]
 
-    @staticmethod
-    def _restore_rotary_inv_freq(model) -> None:
-        layers = getattr(getattr(model, "model", None), "layers", None)
-        if layers is None:
-            return
+    @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
+        config = getattr(model, "config", None)
+        if config is None:
+            return tree
+        if getattr(config, "qk_layernorm", False):
+            tree[-1]["self_attn"] = tuple(dict.fromkeys((*tree[-1]["self_attn"], "q_layernorm:!", "k_layernorm:!")))
+        if getattr(config, "enable_hyper_connection", False):
+            for name in ("self_attn_hc", "mlp_hc"):
+                tree[-1][name] = (f"{name}:!", "mapping_proj:!")
+            if config.mhc_diff_for_loop:
+                count = (config.num_hidden_layers + config.loop_middle_layers) // config.loop_middle_layers
+                for name in ("self_attn_mhc_loop_hcs", "mlp_mhc_loop_hcs"):
+                    tree[-1][name] = {str(index): (f"{index}:!", "mapping_proj:!") for index in range(count - 1)}
+        return tree
 
-        for layer in layers:
-            attention = getattr(layer, "self_attn", None)
-            rotary = getattr(attention, "rotary_emb", None)
-            if rotary is None:
-                continue
-
-            dim = getattr(rotary, "dim", None)
-            base = getattr(rotary, "base", None)
-            if (
-                not isinstance(dim, int)
-                or dim <= 0
-                or not isinstance(base, (int, float))
-                or base <= 0
-            ):
-                continue
-
-            current = getattr(rotary, "inv_freq", None)
-            if isinstance(current, torch.Tensor) and current.device.type != "meta":
-                device = current.device
-            else:
-                weight = getattr(getattr(attention, "q_proj", None), "weight", None)
-                weight_device = getattr(weight, "device", None)
-                device = (
-                    weight_device
-                    if weight_device is not None and weight_device.type != "meta"
-                    else torch.device("cpu")
-                )
-
-            inv_freq = 1.0 / (
-                float(base)
-                ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
-            )
-            rotary.register_buffer("inv_freq", inv_freq, persistent=False)
-
-    @staticmethod
-    def _patch_generation_inputs(model) -> None:
-        model_cls = type(model)
-        original = getattr(model_cls, "prepare_inputs_for_generation", None)
-        if not callable(original) or getattr(
-            original, "_gptqmodel_nanbeige_cache_position_patch", False
-        ):
-            return
-
-        @wraps(original)
-        def prepare_inputs_for_generation_compat(self, *args, **kwargs):
-            model_inputs = original(self, *args, **kwargs)
-            if not isinstance(model_inputs, dict):
-                return model_inputs
-
-            input_ids = model_inputs.get("input_ids")
-            inputs_embeds = model_inputs.get("inputs_embeds")
-            if isinstance(input_ids, torch.Tensor):
-                sequence_length = input_ids.shape[-1]
-            elif isinstance(inputs_embeds, torch.Tensor):
-                sequence_length = inputs_embeds.shape[-2]
-            else:
-                return model_inputs
-
-            for name in ("position_ids", "cache_position"):
-                value = model_inputs.get(name)
-                if (
-                    isinstance(value, torch.Tensor)
-                    and value.shape[-1] != sequence_length
-                ):
-                    model_inputs[name] = value[..., -sequence_length:].contiguous()
-            return model_inputs
-
-        prepare_inputs_for_generation_compat._gptqmodel_nanbeige_cache_position_patch = True
-        model_cls.prepare_inputs_for_generation = prepare_inputs_for_generation_compat
-
-    def after_model_load(self, model, load_quantized_model=False):
-        model = super().after_model_load(
-            model, load_quantized_model=load_quantized_model
-        )
-        self._restore_rotary_inv_freq(model)
-        self._patch_generation_inputs(model)
-        return model
-
-    def pre_quantize_generate_hook_start(self):
-        self._restore_rotary_inv_freq(self.model)
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        if not getattr(self.model.config, "enable_depth_attention", False):
+            return nodes
+        # Depth-Attention mixes this layer's values with other layers' cached
+        # values before `o_proj`, so a `v_proj -> o_proj` fold is not neutral.
+        v_proj = getattr(getattr(module, "self_attn", None), "v_proj", None)
+        return [node for node in nodes if v_proj is None or node.get("prev_op") is not v_proj]

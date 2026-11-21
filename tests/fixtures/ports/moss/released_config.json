@@ -1,0 +1,47 @@
+{
+  "_name_or_path": "OpenMOSS-Team/moss-moon-003-base",
+  "activation_function": "gelu_new",
+  "architectures": [
+    "MossForCausalLM"
+  ],
+  "attn_pdrop": 0.0,
+  "auto_map": {
+    "AutoConfig": "configuration_moss.MossConfig",
+    "AutoModel": "modeling_moss.MossModel",
+    "AutoModelForCausalLM": "modeling_moss.MossForCausalLM"
+  },
+  "bos_token_id": 106028,
+  "embd_pdrop": 0.0,
+  "eos_token_id": 106028,
+  "gradient_checkpointing": false,
+  "initializer_range": 0.02,
+  "layer_norm_epsilon": 1e-05,
+  "model_type": "moss",
+  "n_ctx": 2048,
+  "n_embd": 6144,
+  "n_head": 24,
+  "n_inner": null,
+  "n_layer": 34,
+  "n_positions": 2048,
+  "resid_pdrop": 0.0,
+  "rotary_dim": 64,
+  "scale_attn_weights": true,
+  "summary_activation": null,
+  "summary_first_dropout": 0.1,
+  "summary_proj_to_labels": true,
+  "summary_type": "cls_index",
+  "summary_use_proj": true,
+  "task_specific_params": {
+    "text-generation": {
+      "do_sample": true,
+      "max_length": 50,
+      "temperature": 1.0
+    }
+  },
+  "tie_word_embeddings": false,
+  "tokenizer_class": "GPT2Tokenizer",
+  "torch_dtype": "float16",
+  "transformers_version": "4.25.1",
+  "use_cache": true,
+  "vocab_size": 107008
+}

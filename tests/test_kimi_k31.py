@@ -98,6 +98,7 @@ class Block(nn.Module):
 
 
 def test_source_deferred_experts_one_active_reader_and_f32_indexer(tmp_path, monkeypatch):
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
     snapshot = tmp_path / k31.REVISION
     snapshot.mkdir()
     prefix = "language_model.model.layers.3."

@@ -143,17 +143,16 @@ def test_vlm_pretokenized_mapping_rows_take_base_text_path(cls, monkeypatch):
     monkeypatch.setattr(cls, "load_processor", _fail_load_processor, raising=False)
     model = _make_model(cls)
     rows = [
-        {"input_ids": list(range(12)), "attention_mask": [1] * 12},
-        {"input_ids": list(range(13)), "attention_mask": [0] + [1] * 12},
+        {"input_ids": [0] + list(range(12)), "attention_mask": [0] + [1] * 12},
+        {"input_ids": list(range(13)), "attention_mask": [1] * 6 + [0] + [1] * 6},
     ]
 
     batches = model.prepare_dataset(rows, batch_size=1)
 
     assert len(batches) == 2
-    # The leading mask-0 slot is tokenizer padding and is stripped since #4889.
-    assert [batch["input_ids"].shape for batch in batches] == [(1, 12), (1, 12)]
-    assert batches[1]["input_ids"].tolist() == [list(range(1, 13))]
-    assert batches[1]["attention_mask"].tolist() == [[1] * 12]
+    assert [batch["input_ids"].shape for batch in batches] == [(1, 12), (1, 13)]
+    assert batches[0]["input_ids"].tolist() == [list(range(12))]
+    assert batches[1]["attention_mask"].tolist() == [[1] * 6 + [0] + [1] * 6]
 
 
 @pytest.mark.parametrize(

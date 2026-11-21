@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 import torch
 from PIL import Image
 from torch import nn
-from transformers import AutoModelForCausalLM, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import fetch_image
@@ -17,17 +17,21 @@ from ...utils.offload import offload_to_disk
 from ...utils.torch import as_torch_device
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class DeepSeekVLV2QModel(BaseQModel):
-    loader = AutoModelForCausalLM
-    require_trust_remote_code = True
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.deepseek_vl_v2.configuration_deepseek_vl_v2.DeepseekVLV2Config",
+        model_class="gptqmodel.models.ports.deepseek_vl_v2.modeling_deepseek_vl_v2.DeepseekVLV2ForCausalLM",
+        processor_class="gptqmodel.models.ports.deepseek_vl_v2.processing_deepseek_vl_v2.DeepseekVLV2Processor",
+    )
     require_load_processor = True
     support_batch_quantize = False
 
-    require_pkgs = ["xformers>=0.0.21", "flash-attn"]
+    require_pkgs = ["timm>=1.0.22", "einops>=0.8.1"]
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
 
@@ -46,14 +50,26 @@ class DeepSeekVLV2QModel(BaseQModel):
             # MLA split mirrors DeepSeek-V2/V3: q_a/kv_a produce the low-rank
             # latents, q_b/kv_b consume them, and o_proj consumes the attention
             # output. `use_mla=false` checkpoints (deepseek-vl2-tiny) instead
-            # instantiate `LlamaAttention`, so `k_proj`/`v_proj` are
+            # instantiate `DenseAttention`, so `k_proj`/`v_proj` are
             # checkpoint-owned decoder Linears next to the dense
             # `q_proj`/`o_proj`; MLA checkpoints keep the q_a/q_b and
             # kv_a/kv_b low-rank path.
-            "self_attn": ("q_a_proj:0", "q_b_proj:1:in=q_a", "q_proj:0", "k_proj:0", "v_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:1:in=kv_a", "o_proj:2"),
+            "self_attn": (
+                "q_a_proj:0",
+                "q_a_layernorm:!",
+                "q_b_proj:1:in=q_a",
+                "q_proj:0",
+                "k_proj:0",
+                "v_proj:0",
+                "kv_a_proj_with_mqa:0",
+                "kv_a_layernorm:!",
+                "kv_b_proj:1:in=kv_a",
+                "o_proj:2",
+            ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "gate": ("gate:!",),
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
@@ -92,26 +108,27 @@ class DeepSeekVLV2QModel(BaseQModel):
                 nn.Parameter(parameter.to(device=device), requires_grad=parameter.requires_grad),
             )
 
-    def _ensure_remote_config_defaults(self) -> None:
-        config = getattr(self.model, "config", None)
-        if config is None:
-            return
-
-        for name, value in (
-            ("use_cache", True),
-            ("output_attentions", False),
-            ("output_hidden_states", False),
-            ("use_return_dict", True),
-        ):
-            if not hasattr(config, name):
-                setattr(config, name, value)
-
-    def forward(self, *args, **kwargs):
-        self._ensure_remote_config_defaults()
-        return super().forward(*args, **kwargs)
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        attn = getattr(module, "self_attn", None)
+        # MLA: each latent norm feeds only its own up-projection. With equal
+        # q/kv LoRA ranks the shared q_b/kv_b stage resolves to kv_a_layernorm
+        # for both, which would rescale q_b_proj's input without its norm.
+        latent_consumer = {
+            id(norm): consumer
+            for norm, consumer in (
+                (getattr(attn, "q_a_layernorm", None), getattr(attn, "q_b_proj", None)),
+                (getattr(attn, "kv_a_layernorm", None), getattr(attn, "kv_b_proj", None)),
+            )
+            if norm is not None
+        }
+        return [
+            node for node in nodes
+            if id(node.get("prev_op")) not in latent_consumer
+            or all(layer is latent_consumer[id(node["prev_op"])] for layer in node.get("layers") or [])
+        ]
 
     def pre_quantize_generate_hook_start(self):
-        self._ensure_remote_config_defaults()
         if self.turtle_model is not None:
             self.shell_direct_meta_materialize(target_submodule=self.model, device=self.quantize_config.device)
         language_model = self.model.language.model
@@ -167,7 +184,14 @@ class DeepSeekVLV2QModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
+        if self.processor is not None:
+            return self.processor
+        tokenizer = getattr(self.tokenizer, "tokenizer", self.tokenizer)
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=tokenizer,
+        )
 
     def _prepare_calibration_batches(self, conversations):
         processor = self.load_processor()
@@ -180,14 +204,17 @@ class DeepSeekVLV2QModel(BaseQModel):
                 force_batchify=True,
                 system_prompt="",
             )
-            calib_data.append({
-                "input_ids": inputs.input_ids,
-                "attention_mask": inputs.attention_mask,
-                "labels": inputs.labels,
-                "images": inputs.images,
-                "images_seq_mask": inputs.images_seq_mask,
-                "images_spatial_crop": inputs.images_spatial_crop,
-            })
+            calib_data.append(
+                {
+                    "input_ids": inputs.input_ids,
+                    "attention_mask": inputs.attention_mask,
+                    "labels": inputs.labels,
+                    "images": inputs.images,
+                    "images_seq_mask": inputs.images_seq_mask,
+                    "images_spatial_crop": inputs.images_spatial_crop,
+                }
+            )
+        del processor
         return calib_data
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):

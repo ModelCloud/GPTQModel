@@ -7,7 +7,7 @@ Issue #4094: with ``PYTHON_GIL=0`` and an empty ``TRITON_CACHE_DIR``, 24 threads
 launched the first ``awq_gemm_kernel`` together. libtriton is not free-thread
 safe, so its nanobind refcounts collided and the process died with
 ``attempted to delete an unknown instance`` (exit code 134). The fix serializes
-Triton JIT compilation in ``TritonPatch``; this test reproduces the cold launch
+compilation of GPT-QModel's own kernels (``gptqmodel.utils.triton_jit``); this test reproduces the cold launch
 in a child process and asserts a clean exit. It is repeated because a single
 pass is not evidence for a race.
 """

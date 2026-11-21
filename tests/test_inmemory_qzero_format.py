@@ -98,8 +98,15 @@ def quantized_model(tmp_path_factory):
             }
         )
 
-    qcfg = RTNConfig(bits=4, group_size=128, offload_to_disk=False, device="cuda:0")
-    model = GPTQModel.load(str(model_dir), quantize_config=qcfg, backend=BACKEND.TORCH)
+    qcfg = RTNConfig(bits=4, group_size=128, offload_to_disk=False, device="cpu")
+    # Pin FP16 so the live model matches the FP16 reload below bit-for-bit;
+    # without it a CPU load picks bfloat16 for the unquantized layers.
+    model = GPTQModel.load(
+        str(model_dir),
+        quantize_config=qcfg,
+        backend=BACKEND.TORCH,
+        dtype=torch.float16,
+    )
     model.quantize(
         CalibrationConfig(
             dataset=calibration,

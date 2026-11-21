@@ -3,8 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoProcessor
-
+from ..local import LocalModelLoader
 from .base_qwen3_vl import BaseQwen3VLGPTQ
 
 
@@ -26,12 +25,17 @@ class MageVLQModel(BaseQwen3VLGPTQ):
         ],
     }
 
-    require_trust_remote_code = True
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.mage_vl.configuration_mage_vl.MageVLConfig",
+        model_class="gptqmodel.models.ports.mage_vl.modeling_mage_vl.MageVLForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.mage_vl.processing_mage_vl.MageVLProcessor",
+    )
 
     def load_processor(self):
-        return AutoProcessor.from_pretrained(
+        return self.loader.load_processor(
             self.model_local_path,
-            trust_remote_code=self.require_trust_remote_code,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
         )
 
 

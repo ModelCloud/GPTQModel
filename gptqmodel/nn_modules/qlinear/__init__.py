@@ -1650,7 +1650,7 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         reporting an unexpected key.
 
         A checkpoint write is the one transport that must not carry the marker.
-        HF ``save_pretrained()`` runs inside ``checkpoint_serialization()``, so
+        GPT-QModel's checkpoint writer runs inside ``checkpoint_serialization()``, so
         without this guard the writer persisted an extra ``*.qzeros_format``
         tensor per quantized layer: a key neither ``config.json`` nor the
         GPTQ/AWQ format describes. A reloaded checkpoint takes its layout from

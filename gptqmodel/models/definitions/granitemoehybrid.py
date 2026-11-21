@@ -3,13 +3,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from inspect import signature
+from types import MethodType
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class GraniteMoeHybridQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     # Quantized Granite Mamba layers must use the eager path because the fast kernels
     # expect dense projections instead of GPTQ quantized linear modules.
     fusable = FusableConfig("granitemoehybrid").merge(LlamaFusableConfig(), profiles=("qkv",))
@@ -70,22 +76,20 @@ class GraniteMoeHybridQModel(BaseQModel):
     def monkey_patch(self):
         from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-        mamba_layer_cls = type(self.model.model.layers[0].mamba)
-        if getattr(mamba_layer_cls.forward, "_gptqmodel_granite_patch", False):
+        # Bound per mamba instance of this model: the (vendored) layer class
+        # itself is never modified.
+        mambas = [
+            mamba for layer in self.model.model.layers
+            if (mamba := getattr(layer, "mamba", None)) is not None
+        ]
+        if not mambas:
             return
-        original_forward = mamba_layer_cls.forward
-        # Older Transformers releases exposed a separate eager `torch_forward`
-        # next to the fast `forward`. Newer releases folded the eager
-        # implementation into `forward` and removed the symbol, so probe the
-        # installed class instead of assuming either layout.
-        torch_forward = getattr(mamba_layer_cls, "torch_forward", original_forward)
-        torch_forward_params = frozenset(signature(torch_forward).parameters)
+        original_forward = type(mambas[0]).forward
 
         def granitemoehybrid_mamba_forward(
             layer_self,
             hidden_states,
             cache_params=None,
-            cache_position=None,
             attention_mask=None,
             seq_idx=None,
             **kwargs,
@@ -98,27 +102,25 @@ class GraniteMoeHybridQModel(BaseQModel):
                 dtype = hidden_states.dtype
                 if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
                     hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
-                # The eager forward dropped cache_position in newer Transformers
-                # releases, so only pass kwargs the installed callable explicitly
-                # supports.
-                torch_forward_kwargs = {}
-                if "cache_params" in torch_forward_params:
-                    torch_forward_kwargs["cache_params"] = cache_params
-                if "cache_position" in torch_forward_params:
-                    torch_forward_kwargs["cache_position"] = cache_position
-                if "attention_mask" in torch_forward_params:
-                    torch_forward_kwargs["attention_mask"] = attention_mask
-                return torch_forward(layer_self, hidden_states, **torch_forward_kwargs)
+                return original_forward(
+                    layer_self,
+                    hidden_states,
+                    cache_params=cache_params,
+                    attention_mask=attention_mask,
+                )
 
             return original_forward(
                 layer_self,
                 hidden_states,
                 cache_params=cache_params,
-                cache_position=cache_position,
                 attention_mask=attention_mask,
                 seq_idx=seq_idx,
                 **kwargs,
             )
 
         granitemoehybrid_mamba_forward._gptqmodel_granite_patch = True
-        mamba_layer_cls.forward = granitemoehybrid_mamba_forward
+        for mamba in mambas:
+            bound = mamba.__dict__.get("forward")
+            if getattr(getattr(bound, "__func__", None), "_gptqmodel_granite_patch", False):
+                continue
+            mamba.forward = MethodType(granitemoehybrid_mamba_forward, mamba)

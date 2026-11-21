@@ -2,13 +2,22 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+from transformers import ProcessorMixin
+
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from .base_qwen3_vl import BaseQwen3VLGPTQ
 
 
 class Qwen3_5_MoeQModel(BaseQwen3VLGPTQ):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
     # Qwen3.5 computes multimodal RoPE from this processor-produced field.
     # Keep it opt-in on the shared VL base because Mage-VL's processor does
     # not emit mm_token_type_ids and remains compatible without it.
@@ -81,3 +90,13 @@ class Qwen3_5_MoeQModel(BaseQwen3VLGPTQ):
             },
         },
     ]
+
+    def load_processor(self) -> ProcessorMixin:
+        processor = getattr(self, "processor", None)
+        if processor is not None:
+            return processor
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )

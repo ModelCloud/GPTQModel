@@ -10,7 +10,7 @@ from gptqmodel.utils.backend import BACKEND
 
 class TestLongLlama(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/long_llama_3b_instruct" # "syzymon/long_llama_3b_instruct"
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "acc": {"value": 0.3515, "floor_pct": 0.5},

@@ -3,23 +3,37 @@
 
 from __future__ import annotations
 
-import inspect
 from typing import Dict, Optional
 
 from PIL import Image
-from transformers import AutoProcessor, ProcessorMixin
+from torch import nn
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
+from ..local import LocalModelLoader
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .nemotron_h import NEMOTRON_H_LAYER_MODULES, NemotronHQModel
 
 
 class NemotronOmniQModel(NemotronHQModel):
     """GPTQ wrapper for Nemotron Omni models that embed a Nemotron-H language backbone."""
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.nemotron_omni.configuration.NemotronOmniConfig",
+        model_class="gptqmodel.models.ports.nemotron_omni.modeling.NemotronH_Omni_Reasoning_V3",
+        processor_class="gptqmodel.models.ports.nemotron_omni.processing.NemotronOmniProcessor",
+        tokenizer_class="gptqmodel.models.ports.nemotron_omni.processing.NemotronOmniTokenizer",
+    )
+    require_trust_remote_code = False
+    require_monkeypatch = False
+    fusable = None
+    defuser_module_paths = ("language_model",)
+    out_of_model_tensors = {"prefixes": ["vision_model.radio_model.input_conditioner",
+                                        "sound_encoder.encoder.feature_extractor"]}
 
     # The language backbone is calibrated on activations that already contain
     # the vision tower's embeddings, so text-only calibration is not
@@ -28,13 +42,10 @@ class NemotronOmniQModel(NemotronHQModel):
 
     require_load_processor = True
 
-    # The dynamic-resolution image processor returns `pixel_values` as a list
-    # when image sizes differ, but the remote `generate()` only accepts a
-    # stacked tensor. Keep calibration single-sample so batching cannot mix
-    # differently sized images.
+    # Calibrate one multimodal conversation at a time.
     support_batch_quantize = False
 
-    pre_lm_head_norm_module = "language_model.backbone.norm_f"
+    pre_lm_head_norm_module = "language_model.model.norm_f"
 
     # The embedded language backbone is the Nemotron-H decoder, so the layer
     # inventory must be the one `NemotronHQModel` declares. Reusing it keeps
@@ -43,11 +54,17 @@ class NemotronOmniQModel(NemotronHQModel):
     # most of the checkpoint in BF16 with no error (issue #4355).
     module_tree = [
         "language_model",
-        "backbone",
+        "model",
         "layers",
         "#",
         NEMOTRON_H_LAYER_MODULES,
     ]
+
+    @classmethod
+    def resolve_hf_conversion_map_reversed(cls, target_model=None):
+        from ..ports.nemotron_omni.checkpoint import reversed_mapping
+
+        return reversed_mapping()
 
     @classmethod
     def get_base_modules(cls, model):
@@ -61,7 +78,7 @@ class NemotronOmniQModel(NemotronHQModel):
     def _has_multimodal_inputs(kwargs) -> bool:
         return any(
             kwargs.get(name) is not None
-            for name in ("pixel_values", "pixel_values_videos", "sound_clips", "sound_length")
+            for name in ("pixel_values", "pixel_values_videos", "input_features", "input_features_mask")
         )
 
     def _materialize_top_level_module(self, attr_name: str):
@@ -78,15 +95,15 @@ class NemotronOmniQModel(NemotronHQModel):
         )
 
     def pre_quantize_generate_hook_start(self):
-        for attr_name in ("vision_model", "mlp1", "sound_encoder", "sound_projection"):
+        for attr_name in ("vision_model", "multi_modal_projector", "audio_tower", "embed_audio"):
             if hasattr(self.model, attr_name):
                 self._materialize_top_level_module(attr_name)
 
-        self.shell_module_materialize(self.model.language_model.backbone.norm_f, self.quantize_config.device)
+        self.shell_module_materialize(self.model.language_model.model.norm_f, self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
         if self.quantize_config.offload_to_disk:
-            for attr_name in ("vision_model", "mlp1", "sound_encoder", "sound_projection"):
+            for attr_name in ("vision_model", "multi_modal_projector", "audio_tower", "embed_audio"):
                 module = getattr(self.model, attr_name, None)
                 if module is not None:
                     offload_to_disk(
@@ -96,25 +113,21 @@ class NemotronOmniQModel(NemotronHQModel):
                     )
 
             offload_to_disk(
-                model=self.model.language_model.backbone,
-                module=self.model.language_model.backbone.norm_f,
+                model=self.model.language_model.model,
+                module=self.model.language_model.model.norm_f,
                 disk_path=self.quantize_config.offload_to_disk_path,
             )
             return
 
-        for attr_name in ("vision_model", "mlp1", "sound_encoder", "sound_projection"):
+        for attr_name in ("vision_model", "multi_modal_projector", "audio_tower", "embed_audio"):
             module = getattr(self.model, attr_name, None)
             if module is not None:
                 setattr(self.model, attr_name, move_to(module, device=CPU))
 
-        self.model.language_model.backbone.norm_f = move_to(self.model.language_model.backbone.norm_f, device=CPU)
+        self.model.language_model.model.norm_f = move_to(self.model.language_model.model.norm_f, device=CPU)
 
     def forward(self, *args, **kwargs):
-        # Text-only quantization/eval paths should bypass the multimodal wrapper,
-        # whose `forward()` requires image tensors even when no visual inputs exist.
-        if self._has_multimodal_inputs(kwargs):
-            return self.model(*args, **kwargs)
-        return self.model.language_model(*args, **kwargs)
+        return self.model(*args, **kwargs)
 
     @staticmethod
     def process_vision_info(conversations) -> Optional[list[Image.Image]]:
@@ -132,8 +145,8 @@ class NemotronOmniQModel(NemotronHQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(
-            self.model_local_path, trust_remote_code=self.trust_remote_code
+        return self.loader.load_processor(
+            self.model_local_path, config=self.model.config, tokenizer=self.tokenizer.tokenizer,
         )
 
     def _prepare_calibration_batches(self, conversations, batch_size):
@@ -169,7 +182,7 @@ class NemotronOmniQModel(NemotronHQModel):
             if image_inputs is not None:
                 missing = [
                     name
-                    for name in ("pixel_values", "num_patches", "num_tokens", "imgs_sizes")
+                    for name in ("pixel_values", "image_grid_hw")
                     if inputs.get(name) is None
                 ]
                 if missing:
@@ -191,85 +204,74 @@ class NemotronOmniQModel(NemotronHQModel):
         )
 
     def run_input_capture(self, example, use_cache: bool, data_device):
-        if self._has_multimodal_inputs(example):
-            # The top-level `forward()` requires `image_flags` and calls
-            # `torch.distributed.get_rank()` unconditionally, which raises
-            # outside a process group. `generate()` performs the same vision
-            # merge without either requirement; the capture hook aborts it at
-            # the first decoder layer, so no tokens are actually generated.
-            capture_keys = (
-                "input_ids",
-                "attention_mask",
-                "pixel_values",
-                "pixel_values_videos",
-                "sound_clips",
-                "sound_length",
-            )
-            capture_inputs = {
-                key: example[key] for key in capture_keys if example.get(key) is not None
-            }
-            return self.model.generate(**capture_inputs, max_new_tokens=1)
-        return self.model.language_model(**example, use_cache=use_cache)
+        return self.model(**example, use_cache=use_cache)
 
     def monkey_patch(self):
-        if not self.load_quantized_model:
-            return
+        """Native Transformers owns optional-kernel dispatch; never mutate classes."""
 
-        from transformers.utils.import_utils import (
-            is_causal_conv1d_available,
-            is_flash_attn_2_available,
-            is_mamba_2_ssm_available,
-        )
+    @classmethod
+    def awq_input_feature_aggregation(cls, module_name):
+        # `norm -> in_proj` replays the whole Mamba mixer, whose chunked scan
+        # carries state along the sequence; packed token rows from different
+        # samples are not a sequence. Keep that one feature sequence-shaped.
+        if module_name == "mixer.in_proj":
+            return None
+        return super().awq_input_feature_aggregation(module_name)
 
-        if is_mamba_2_ssm_available():
-            from mamba_ssm.ops.triton.selective_state_update import selective_state_update
-            from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined, mamba_split_conv1d_scan_combined
-        else:
-            mamba_chunk_scan_combined, mamba_split_conv1d_scan_combined, selective_state_update = None, None, None
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        """Generic planner, corrected for the MoE input group.
 
-        if is_causal_conv1d_available():
-            from gptqmodel.hf_kernels.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-        else:
-            causal_conv1d_update, causal_conv1d_fn = None, None
+        Mamba, attention and dense-MLP layers use the generic groups unchanged.
+        On a MoE layer the norm feeds the router, the shared expert and the
+        routed experts (through `fc1_latent_proj` when `moe_latent_size` is set).
+        """
 
-        if is_flash_attn_2_available():
-            pass
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        mixer = getattr(module, "mixer", None)
+        experts = getattr(mixer, "experts", None)
+        if experts is None:
+            return nodes
+        routed = {id(child) for child in experts.modules()}
+        fc1 = getattr(mixer, "fc1_latent_proj", None)
+        latent = isinstance(fc1, nn.Linear)
+        kept = []
+        for node in nodes:
+            layers = list(node.get("layers") or [])
+            if latent and any(layer is fc1 or layer is mixer.fc2_latent_proj for layer in layers):
+                # Tree order hands `fc1_latent_proj` the shared expert's
+                # `down_proj` and `fc2_latent_proj` the last routed `down_proj`;
+                # neither produces their input.
+                continue
+            if node.get("prev_op") is getattr(module, "norm", None):
+                node = dict(node)
+                if latent:
+                    # Routed experts read `fc1_latent_proj(norm(x))`, so the norm
+                    # folds into the shared expert and `fc1_latent_proj` instead.
+                    node["layers"] = [layer for layer in layers if id(layer) not in routed] + [fc1]
+                    node["module2inspect"] = mixer
+                    node.pop("_awq_search_layers", None)
+                    node.pop("_awq_allow_outside_fold", None)
+                    consumers = list(node.get("_scale_consumers") or [])
+                    if "mixer.gate" not in consumers:
+                        consumers.append("mixer.gate")
+                    node["_scale_consumers"] = consumers
+                elif any(id(layer) in routed for layer in layers):
+                    # The nested `mixer.experts` root is not captured, so the
+                    # search reads the shared expert's input, which is the MoE
+                    # block input. Name it as such: native top-k may leave an
+                    # expert unrouted on that sample, and the processor then
+                    # scores the executed members and folds the rest (#4675).
+                    node["_input_feature_name"] = "mixer"
+            kept.append(node)
+        return kept
 
-        is_fast_path_available = all(
-            (
-                selective_state_update,
-                mamba_chunk_scan_combined,
-                mamba_split_conv1d_scan_combined,
-                causal_conv1d_fn,
-                causal_conv1d_update,
-            )
-        )
-
-        def forward(
-                self,
-                hidden_states,
-                cache_params=None,
-                cache_position=None,
-                attention_mask=None,
-        ):
-            def call_mixer_compat(fn):
-                call_args = (hidden_states, cache_params, cache_position, attention_mask)
-                try:
-                    arity = len(inspect.signature(fn).parameters)
-                except (TypeError, ValueError):
-                    arity = 3
-                arity = max(1, min(arity, len(call_args)))
-                return fn(*call_args[:arity])
-
-            if is_fast_path_available and "cuda" in self.in_proj.qweight.device.type:
-                return call_mixer_compat(self.cuda_kernels_forward)
-            dtype = hidden_states.dtype
-            if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
-                hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
-
-            return call_mixer_compat(self.torch_forward)
-
-        for layer in self.model.language_model.backbone.layers:
-            if layer.mixer.__class__.__name__ == "NemotronHMamba2Mixer":
-                mixer_class = type(layer.mixer)
-                mixer_class.forward = forward
+    @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
+        # The SSM parameters belong to the `in_proj` (index 2) stage. Untagged they
+        # joined the attention q/k/v stage, and that stage's last entry, absent on
+        # an attention layer, hid `v_proj` as the `o_proj` source, so the planner
+        # merged `o_proj` into the input-norm group.
+        tree[-1]["mixer"] = tuple(dict.fromkeys((*tree[-1]["mixer"], "A_log:2:!", "D:2:!", "dt_bias:2:!")))
+        tree[-1]["mixer.norm"] = ("norm:!",)
+        return tree

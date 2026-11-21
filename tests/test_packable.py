@@ -62,7 +62,9 @@ class TestPackable(unittest.TestCase):
     def test_post_init(self, backend: BACKEND, equal: Dict[str, bool]):
         if backend in (BACKEND.EXLLAMA_V2, BACKEND.TRITON, BACKEND.MARLIN) and not requires_nvidia_cuda():
             self.skipTest(f"{backend.name} is CUDA-only")
-        model = GPTQModel.load(self.model_id, backend=backend, device="cpu" if backend == BACKEND.TORCH_FUSED else "cuda")
+        # TORCH runs on either device; CUDA-only backends were skipped above.
+        load_device = "cuda" if backend != BACKEND.TORCH_FUSED and torch.cuda.is_available() else "cpu"
+        model = GPTQModel.load(self.model_id, backend=backend, device=load_device)
         model = convert_gptq_v2_to_v1_format(model, model.quantize_config, self.QLINEAR_DICT[backend])
 
         module = find_modules(model.model, [self.QLINEAR_DICT[backend]])[self.TARGET]

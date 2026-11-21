@@ -56,10 +56,20 @@ def _assert_partials_released(task: GPTQ) -> None:
 
 
 class TestFallbackReleasesPartials:
-    def test_shared_input_fallback_releases_adopted_source_before_clone(self, monkeypatch):
+    def test_shared_input_fallback_never_holds_the_adopted_source(self, monkeypatch):
+        """Adoption is the last consumer of the leader's Hessian (#4430).
+
+        The follower synchronizes the copy's readiness event and drops its
+        reference to ``leader.H`` inside ``adopt_hessian_from``, so freeing the
+        leader releases the source before the follower's fallback clone runs.
+        """
+
+        events = []
+
         class _FakeEvent:
             def __init__(self):
                 self.synchronized = False
+                events.append(self)
 
             def query(self):
                 return False
@@ -74,38 +84,34 @@ class TestFallbackReleasesPartials:
         follower = _task(rows_fed=FALLBACK_ROWS)
         monkeypatch.setattr(GPTQ, "_cuda_event_for", staticmethod(lambda _device: _FakeEvent()))
         monkeypatch.setattr(torch.cuda, "current_stream", lambda _device: object())
+
+        leader.materialize_global_hessian()
+        source_ref = weakref.ref(leader.H)
         follower.adopt_hessian_from(leader)
         follower.expected_nsamples = EXPECTED_ROWS
 
-        # Adoption is the last consumer of the leader's Hessian: the source is
-        # deferred against the follower's ready event and released immediately
-        # (#4430), so nothing survives into the quantization clone. The event the
-        # deferral used is still ``_hessian_ready_event``; only the registry is
-        # already drained when ``adopt_hessian_from`` returns.
-        follower_event = follower._hessian_ready_event
-        source_ref = weakref.ref(leader.H)
+        # The adopted copy's readiness event was recorded and then synchronized
+        # before the deferred source was dropped.
+        assert events and all(event.synchronized for event in events)
         assert follower._deferred_hessian_sources == []
-        assert follower_event.synchronized
+        assert follower.H is not None and follower.H is not leader.H
+        torch.testing.assert_close(follower.H, leader.H, rtol=0.0, atol=0.0)
+
+        leader.free()
+        assert source_ref() is None
 
         boundary = {}
         original_clone = follower.clone_module
 
         def _clone_at_fallback_boundary(*args, **kwargs):
-            boundary["event_synchronized"] = follower_event.synchronized
             boundary["deferred_sources"] = len(follower._deferred_hessian_sources)
             boundary["source_alive"] = source_ref() is not None
             return original_clone(*args, **kwargs)
 
         monkeypatch.setattr(follower, "clone_module", _clone_at_fallback_boundary)
-        leader.free()
-        assert source_ref() is None
         follower.quantize(blocksize=GROUP_SIZE)
 
-        assert boundary == {
-            "event_synchronized": True,
-            "deferred_sources": 0,
-            "source_alive": False,
-        }
+        assert boundary == {"deferred_sources": 0, "source_alive": False}
 
     def test_fixture_is_on_the_fallback_branch(self):
         task = _task(rows_fed=FALLBACK_ROWS)
@@ -165,6 +171,7 @@ class TestFallbackReleasesPartials:
             strategy: FallbackStrategy,
             blocksize: int,
             target_device: torch.device | None = None,
+            **_kwargs,
         ) -> tuple:
             seen["device"] = target_device
             seen["partials_at_entry"] = dict(self._device_hessian_partials)

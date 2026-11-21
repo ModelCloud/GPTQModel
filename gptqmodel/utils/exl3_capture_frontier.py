@@ -20,9 +20,9 @@ from typing import Any, Callable, Iterable
 import torch
 import xxhash
 from safetensors.torch import load_file as load_safetensors_file
-from safetensors.torch import save_file as save_safetensors_file
 
 from .exl3_error_ledger import routed_expert_identity, routed_expert_processor_layer
+from .safe import safetensors_save_file as save_safetensors_file
 
 
 CAPTURE_FRONTIER_SCHEMA = "ds4rt.exl3-capture-frontier"

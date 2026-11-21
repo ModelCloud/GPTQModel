@@ -4,11 +4,11 @@
 from types import SimpleNamespace
 
 import torch
-from transformers.models.zamba.configuration_zamba import ZambaConfig
-from transformers.models.zamba.modeling_zamba import ZambaForCausalLM
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.zamba import ZambaQModel
+from gptqmodel.models.ports.native.zamba.configuration_zamba import ZambaConfig
+from gptqmodel.models.ports.native.zamba.modeling_zamba import ZambaForCausalLM
 
 
 def _tiny_zamba_config() -> ZambaConfig:
@@ -35,13 +35,10 @@ def _tiny_zamba_config() -> ZambaConfig:
     )
 
 
-def test_zamba_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="zamba")
+def test_zamba_model_type_selects_definition(tmp_path):
+    _tiny_zamba_config().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/zamba") is ZambaQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is ZambaQModel
 
 
 def test_zamba_module_tree_expands_mamba_and_hybrid_paths():
@@ -74,126 +71,6 @@ def test_zamba_base_modules_include_embeddings_and_final_norm():
     assert "model.embed_tokens" in base_modules
     assert "model.final_layernorm" in base_modules
     assert "model.layers" not in base_modules
-
-
-class _CudaTensorHandle:
-    def __init__(self):
-        self.device = SimpleNamespace(type="cuda")
-
-
-def _build_dummy_zamba_mixer():
-    def __init__(self):
-        self.x_proj_weight = _CudaTensorHandle()
-        self.path = None
-        self.call = None
-
-    def cuda_kernels_forward(self, hidden_states, cache_params=None, attention_mask=None):
-        self.path = "fast"
-        self.call = {
-            "hidden_states": hidden_states,
-            "cache_params": cache_params,
-            "attention_mask": attention_mask,
-        }
-        return "fast"
-
-    def slow_forward(self, hidden_states, cache_params=None, attention_mask=None):
-        self.path = "slow"
-        self.call = {
-            "hidden_states": hidden_states,
-            "cache_params": cache_params,
-            "attention_mask": attention_mask,
-        }
-        return "slow"
-
-    mixer_class = type(
-        "ZambaMambaMixer",
-        (),
-        {
-            "__init__": __init__,
-            "cuda_kernels_forward": cuda_kernels_forward,
-            "slow_forward": slow_forward,
-        },
-    )
-    return mixer_class()
-
-
-def test_zamba_mixer_falls_back_to_slow_path_when_fast_kernels_missing(monkeypatch):
-    from transformers.models.zamba import modeling_zamba
-
-    monkeypatch.setattr(modeling_zamba, "selective_state_update", None, raising=False)
-    monkeypatch.setattr(modeling_zamba, "selective_scan_fn", object(), raising=False)
-    monkeypatch.setattr(modeling_zamba, "causal_conv1d_fn", object(), raising=False)
-    monkeypatch.setattr(modeling_zamba, "causal_conv1d_update", object(), raising=False)
-    monkeypatch.setattr(modeling_zamba, "mamba_inner_fn", object(), raising=False)
-
-    mixer = _build_dummy_zamba_mixer()
-    layer = SimpleNamespace(mamba=mixer)
-    qmodel = ZambaQModel.__new__(ZambaQModel)
-    qmodel.model = SimpleNamespace(model=SimpleNamespace(layers=[layer]))
-
-    qmodel.monkey_patch()
-
-    hidden_states = object()
-    cache_params = object()
-    attention_mask = object()
-
-    result = mixer.forward(hidden_states, cache_params=cache_params, attention_mask=attention_mask)
-
-    assert result == "slow"
-    assert mixer.path == "slow"
-    assert mixer.call == {
-        "hidden_states": hidden_states,
-        "cache_params": cache_params,
-        "attention_mask": attention_mask,
-    }
-
-
-def test_zamba_mixer_uses_fast_path_when_kernels_are_available(monkeypatch):
-    from transformers.models.zamba import modeling_zamba
-
-    monkeypatch.setattr(modeling_zamba, "selective_state_update", object(), raising=False)
-    monkeypatch.setattr(modeling_zamba, "selective_scan_fn", object(), raising=False)
-    monkeypatch.setattr(modeling_zamba, "causal_conv1d_fn", object(), raising=False)
-    monkeypatch.setattr(modeling_zamba, "causal_conv1d_update", object(), raising=False)
-    monkeypatch.setattr(modeling_zamba, "mamba_inner_fn", object(), raising=False)
-
-    mixer = _build_dummy_zamba_mixer()
-    layer = SimpleNamespace(mamba_decoder=SimpleNamespace(mamba=mixer))
-    qmodel = ZambaQModel.__new__(ZambaQModel)
-    qmodel.model = SimpleNamespace(model=SimpleNamespace(layers=[layer]))
-
-    qmodel.monkey_patch()
-
-    hidden_states = torch.Tensor(1, 1).to("cuda")
-    cache_params = object()
-    attention_mask = object()
-
-    result = mixer.forward(hidden_states, cache_params=cache_params, attention_mask=attention_mask)
-
-    assert result == "fast"
-    assert mixer.path == "fast"
-    assert mixer.call == {
-        "hidden_states": hidden_states,
-        "cache_params": cache_params,
-        "attention_mask": attention_mask,
-    }
-
-
-def test_zamba_mixer_without_legacy_paths_keeps_upstream_forward():
-    """Transformers 5.22 removed slow_forward/cuda_kernels_forward from the mixer."""
-
-    def forward(self, hidden_states, cache_params=None, attention_mask=None, **kwargs):
-        return "upstream"
-
-    mixer_class = type("ZambaMambaMixer", (), {"forward": forward})
-    mixer = mixer_class()
-    layer = SimpleNamespace(mamba=mixer)
-    qmodel = ZambaQModel.__new__(ZambaQModel)
-    qmodel.model = SimpleNamespace(model=SimpleNamespace(layers=[layer]))
-
-    qmodel.monkey_patch()
-
-    assert mixer.forward(object()) == "upstream"
 
 
 def test_zamba_capture_and_replay_kwargs_preserve_original_hidden_states_and_layer_index():

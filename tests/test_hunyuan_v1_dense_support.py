@@ -11,15 +11,13 @@ from transformers.models.hunyuan_v1_moe.configuration_hunyuan_v1_moe import HunY
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.hunyuan_v1_dense import HunYuanDenseV1QModel
 from gptqmodel.models.definitions.hunyuan_v1_moe import HunYuanMoEV1QModel
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
 
-def test_hunyuan_v1_dense_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="hunyuan_v1_dense")
+def test_hunyuan_v1_dense_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["hunyuan_v1_dense"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/hunyuan_v1_dense") is HunYuanDenseV1QModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is HunYuanDenseV1QModel
 
 
 def test_hunyuan_v1_dense_module_tree_skips_qk_norms():
@@ -33,13 +31,10 @@ def test_hunyuan_v1_dense_module_tree_skips_qk_norms():
     assert "key_layernorm:!" in attn_modules
 
 
-def test_hunyuan_v1_moe_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="hunyuan_v1_moe")
+def test_hunyuan_v1_moe_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["hunyuan_v1_moe"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/hunyuan_v1_moe") is HunYuanMoEV1QModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is HunYuanMoEV1QModel
 
 
 def test_hunyuan_v1_moe_module_tree_matches_defused_experts():

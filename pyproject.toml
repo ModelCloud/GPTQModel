@@ -14,7 +14,7 @@ name = "GPTQModel"
 dynamic = ["version", "dependencies"]
 description = "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
@@ -22,7 +22,6 @@ authors = [
 keywords = ["gptq", "awq", "qqq", "autogptq", "autoawq", "eora", "gar", "quantization", "large-language-models", "transformers", "llm", "moe", "compression"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -44,7 +43,34 @@ dependencies = { file = ["requirements.txt"] }
 
 
 [project.optional-dependencies]
+vision = [
+    "torchvision>=0.29.2",
+    "timm>=1.0.22",
+    "einops>=0.8.1",
+]
+video = [
+    "torchvision>=0.29.2",
+    "opencv-python-headless>=4.10.0.84",
+    "qwen-vl-utils>=0.0.14",
+]
+decord = [
+    "decord>=0.6.0",
+]
+audio = [
+    "librosa>=0.11.0",
+    "scipy>=1.15.0",
+    "soundfile>=0.13.1",
+]
+minicpm-o = [
+    "librosa>=0.11.0",
+    "soundfile>=0.13.1",
+    "vector-quantize-pytorch>=1.27.15",
+]
+pangu-alpha = [
+    "jieba>=0.42.1",
+]
 test = [
+    "jieba>=0.42.1",
     "pytest>=9.1.1",
     "pytest-timeout>=2.4.0",
     "parameterized>=0.9.0",
@@ -53,21 +79,11 @@ quality = [
     "ruff==0.14.2",
     # "isort==6.0.1",
 ]
-# An engine extra may only advertise a release range whose published
-# Torch/Transformers pins intersect requirements.txt on that interpreter,
-# because one environment has to hold both. vLLM 0.30.0 is the newest release
-# whose torch==2.13.0 / transformers>=5.10.4 pins fit the 3.10 floors; 0.31.0
-# pins transformers<5.18.0, and 0.32.0+ needs Python >=3.11 with torch
-# 2.13/2.14, outside the 3.11+ floors. SGLang 0.5.15-0.5.23 pin transformers
-# exactly (5.12.1 or 5.19.0), below every core floor, so no SGLang extra is
-# published until upstream catches up. See docs/engine-extras.md.
-vllm = [
-    "vllm>=0.30.0,<0.31; python_version < \"3.11\"",
-]
+# Publish engine extras when a release's Torch and Transformers pins
+# intersect the core requirements on a supported Python. See docs/engine-extras.md.
 bitblas = [
     "bitblas==0.1.0.post1",
-    "numpy>=2.2.6; python_version < \"3.11\"",
-    "numpy>=2.4.6; python_version >= \"3.11\" and python_version < \"3.12\"",
+    "numpy>=2.4.6; python_version < \"3.12\"",
     "numpy>=2.5.4; python_version >= \"3.12\"",
 ]
 bitsandbytes = [
@@ -75,14 +91,16 @@ bitsandbytes = [
 ]
 # ggml runtime for the GGUF_CPP kernels. llama-cpp-python 0.3.37 is the first
 # release that vendors ggml v1.0.0; the kernels load its shared
-# ggml-base/ggml-cpu/ggml-cuda libraries directly. The `gguf` package is not
-# required: gptqmodel vendors its own reader/writer in utils/internal_gguf.py.
-# NumPy stays declared here because the GGUF reader/dequantizers import it and
-# it is no longer a base requirement.
+# ggml-base/ggml-cpu/ggml-cuda libraries directly. GPT-QModel's own GGUF
+# reader/writer lives in utils/internal_gguf.py, but loading a `.gguf` file
+# goes through Transformers' GGUF integration (config, tokenizer and the dense
+# import), which needs the real `gguf` package: GPT-QModel never substitutes
+# its reader for Transformers'. NumPy stays declared here because the GGUF
+# reader/dequantizers import it and it is no longer a base requirement.
 gguf = [
+    "gguf>=0.10.0",
     "llama-cpp-python>=0.3.37",
-    "numpy>=2.2.6; python_version < \"3.11\"",
-    "numpy>=2.4.6; python_version >= \"3.11\" and python_version < \"3.12\"",
+    "numpy>=2.4.6; python_version < \"3.12\"",
     "numpy>=2.5.4; python_version >= \"3.12\"",
 ]
 hf = [
@@ -113,10 +131,8 @@ openai = [
 ]
 mlx = [
     "mlx>=0.32.4",
-    "mlx_lm>=0.31.3; python_version < \"3.11\"",
-    "mlx_lm>=0.32.2; python_version >= \"3.11\"",
-    "numpy>=2.2.6; python_version < \"3.11\"",
-    "numpy>=2.4.6; python_version >= \"3.11\" and python_version < \"3.12\"",
+    "mlx_lm>=0.32.2",
+    "numpy>=2.4.6; python_version < \"3.12\"",
     "numpy>=2.5.4; python_version >= \"3.12\"",
 ]
 
@@ -125,6 +141,9 @@ mlx = [
 # first-party import detection) no matter which directory it is invoked from.
 [tool.ruff]
 line-length = 119
+# Verbatim Transformers 5.23 sources (scripts/vendor_transformers_ports.py); kept byte-reproducible.
+extend-exclude = ["gptqmodel/models/ports/native/*/"]
+# That glob also excludes the hand-written registry in native/auto; format/check.sh lints it explicitly.
 
 [tool.ruff.lint]
 select = ["C", "E", "F", "I", "W"]

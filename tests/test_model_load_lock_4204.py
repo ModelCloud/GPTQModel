@@ -23,14 +23,15 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import transformers
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
-from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.models import loader as loader_module
 from gptqmodel.models.base import BaseQModel
+from gptqmodel.models.ports.native.llama.configuration_llama import LlamaConfig
+from gptqmodel.models.ports.native.llama.modeling_llama import LlamaForCausalLM
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import RTNConfig
 from gptqmodel.utils import model_dequant
@@ -109,8 +110,8 @@ def test_dequant_from_config_enters_model_load_lock(monkeypatch):
     lock = _TrackingLock()
     monkeypatch.setattr(loader_module, "_MODEL_LOAD_LOCK", lock)
     monkeypatch.setattr(
-        "gptqmodel.utils.hf.normalize_hf_config_compat",
-        lambda *_args, **_kwargs: None,
+        "gptqmodel.utils.hf.load_model_config",
+        lambda *_args, **_kwargs: SimpleNamespace(model_type="lock_fixture"),
     )
     observed = []
 
@@ -121,13 +122,7 @@ def test_dequant_from_config_enters_model_load_lock(monkeypatch):
             observed.append(lock.held())
             return SimpleNamespace()
 
-    class _AutoConfig:
-        @classmethod
-        def from_pretrained(cls, *_args, **_kwargs):
-            return SimpleNamespace()
-
     deps = {
-        "AutoConfig": _AutoConfig,
         "init_empty_weights": lambda **_kwargs: nullcontext(),
         "AutoModelForCausalLM": _Loader(),
         "AutoModelForSeq2SeqLM": None,
@@ -165,9 +160,9 @@ def test_tt_blockfloat_from_config_enters_model_load_lock(tmp_path, monkeypatch)
         observed.append(lock.held())
         raise _Stop
 
-    monkeypatch.setattr(
-        transformers.LlamaForCausalLM, "_from_config", classmethod(_fake_from_config)
-    )
+    from gptqmodel.models.ports.native.llama.modeling_llama import LlamaForCausalLM
+
+    monkeypatch.setattr(LlamaForCausalLM, "_from_config", classmethod(_fake_from_config))
 
     with pytest.raises(_Stop):
         tt_module.build_blockfloat_model(str(checkpoint), dtype=torch.float32)

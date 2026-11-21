@@ -1,0 +1,26 @@
+{
+  "architectures": [
+    "XverseForCausalLM"
+  ],
+  "auto_map": {
+    "AutoConfig": "configuration_xverse.XverseConfig",
+    "AutoModelForCausalLM": "modeling_xverse.XverseForCausalLM"
+  },
+  "pad_token_id": 1,
+  "bos_token_id": 2,
+  "eos_token_id": 3,
+  "hidden_act": "silu",
+  "hidden_size": 8192,
+  "initializer_range": 0.02,
+  "intermediate_size": 22016,
+  "max_position_embeddings": 16384,
+  "model_type": "xverse",
+  "num_attention_heads": 64,
+  "num_hidden_layers": 80,
+  "rms_norm_eps": 1e-06,
+  "tie_word_embeddings": false,
+  "torch_dtype": "bfloat16",
+  "transformers_version": "4.30.2",
+  "use_cache": true,
+  "vocab_size": 100534
+}

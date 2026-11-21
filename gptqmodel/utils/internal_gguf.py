@@ -4,9 +4,7 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
-import sys
 from collections import OrderedDict
 from enum import IntEnum
 from typing import Any, Literal, NamedTuple, TypeVar, Union
@@ -306,14 +304,6 @@ def _resolve_torch_dequant_device(policy: KernelConfig | None = None) -> torch.d
                 f"{torch.cuda.device_count()} device(s) this process can address."
             )
     return device
-
-
-def torch_dequant_loader_enabled(policy: KernelConfig | None = None) -> bool:
-    """Report whether the dense GGUF import converts straight to Torch."""
-    resolved = resolve_kernel_config(policy)
-    if resolved.gguf_torch_dequant_loader is not None:
-        return bool(resolved.gguf_torch_dequant_loader)
-    return resolved.gguf_dequant_device is not None
 
 
 def _resolve_torch_dequant_chunk_rows(
@@ -729,28 +719,6 @@ class GGUFReader:
         self.tensors = tensors
 
 
-def install_runtime():
-    """Expose this module as ``gguf`` only when no real package is installed.
-
-    The shim exists for hosts without the optional ``gguf`` extra. Installing
-    it over an installed package hides every architecture the real reader
-    supports and loses the real module process-wide (issue #4396).
-    """
-
-    existing = sys.modules.get("gguf")
-    if existing is not None and existing is not sys.modules[__name__]:
-        return existing
-    if existing is None:
-        try:
-            available = importlib.util.find_spec("gguf") is not None
-        except (ImportError, ValueError):
-            available = False
-        if available:
-            return None
-    sys.modules["gguf"] = sys.modules[__name__]
-    return sys.modules["gguf"]
-
-
 __all__ = [
     "GGML_QUANT_SIZES",
     "GGMLQuantizationType",
@@ -768,9 +736,7 @@ __all__ = [
     "dequantize_to_torch",
     "get_tensor_name_map",
     "inspect_quantized_checkpoint",
-    "install_runtime",
     "native_quantized_loader_enabled",
     "quant_shape_to_byte_shape",
     "quantize",
-    "torch_dequant_loader_enabled",
 ]

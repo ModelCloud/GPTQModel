@@ -5,6 +5,7 @@
 
 from ...utils.logger import setup_logger
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from . import LlamaQModel
 
 
@@ -12,6 +13,11 @@ log = setup_logger()
 
 
 class Ernie4_5QModel(LlamaQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("ernie4_5").merge(LlamaFusableConfig())
 
     pass

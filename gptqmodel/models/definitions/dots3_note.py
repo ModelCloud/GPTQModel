@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from ...utils.exl3_router_candidates import bind_sigmoid_grouped_router_recovery
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -20,7 +21,7 @@ class _SeparateDots3Experts(nn.ModuleList):
     """
 
     def __init__(self, config):
-        from transformers.models.dots3_note.modeling_dots3_note import Dots3NoteTextMLP
+        from ..ports.native.dots3_note.modeling_dots3_note import Dots3NoteTextMLP
 
         super().__init__([
             Dots3NoteTextMLP(config, intermediate_size=config.moe_intermediate_size)
@@ -42,6 +43,11 @@ class _SeparateDots3Experts(nn.ModuleList):
 
 
 class Dots3NoteQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     layer_modules_strict = False  # decoder layer 0 is dense
     dynamic_expert_index = "n_routed_experts"
     pre_lm_head_norm_module = "model.norm"
@@ -76,7 +82,7 @@ class Dots3NoteQModel(BaseQModel):
 
     def before_model_load(self, model_local_path: str, load_quantized_model: bool):
         del model_local_path, load_quantized_model
-        from transformers.models.dots3_note import modeling_dots3_note
+        from ..ports.native.dots3_note import modeling_dots3_note
 
         modeling_dots3_note.Dots3NoteTextExperts = _SeparateDots3Experts
         pretrained = modeling_dots3_note.Dots3NotePreTrainedModel

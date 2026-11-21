@@ -203,4 +203,3 @@ def test_module_scope_scales_an_explicit_lr_from_the_same_reference(monkeypatch)
     assert calls[0]["rotation_lr"] == pytest.approx(0.04)
     assert calls[0]["weight_lr"] == pytest.approx(4e-5)
     assert calls[0]["quantizer_lr"] == pytest.approx(8e-6)
-

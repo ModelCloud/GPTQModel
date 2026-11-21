@@ -3,11 +3,12 @@
 
 """End-to-end module-tree contract tests for current Flash model families.
 
-These tests build the actual Transformers model shells on the ``meta`` device,
+These tests build the package-owned (vendored) model shells on the ``meta`` device,
 run the registered Defuser conversion, and then exercise the same tree consumers
 used by quantization: ``simple_layer_modules``, ``ModulePlan``, the MoE lifecycle
 hooks, and the module looper helpers.
 
+DeepSeek V4.1 Flash has a dedicated checkpoint and module-plan test.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import transformers
 
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
@@ -32,8 +32,9 @@ from gptqmodel.models.definitions.qwen3_5 import Qwen3_5QModel
 from gptqmodel.models.definitions.ricursive import RicursiveQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
-from tests.test_ricursive_support import _build_tiny_fixture, _reference_dir
+from tests.test_ricursive_support import _build_tiny_fixture, _load_tiny_model
 
 
 QC = SimpleNamespace(dynamic=None)
@@ -365,7 +366,7 @@ def _normalize_owner(owner: str) -> str:
 
 
 def _build_meta_case(case: FlashCase) -> SimpleNamespace:
-    config = transformers.AutoConfig.for_model(case.model_type)
+    config = CONFIG_MAPPING[case.model_type]()
     override = CONFIG_OVERRIDES.get(case.model_type)
     if override is not None:
         override(config)
@@ -566,17 +567,11 @@ def test_flash_looper_consumers_use_the_module_plan(flash_case):
         assert looper._extract_moe_group_key("mlp.down_proj") is None
 
 
-def test_ricursive_ripple_real_custom_model_matches_declared_tree(tmp_path):
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
-
+def test_ricursive_ripple_package_model_matches_declared_tree(tmp_path):
     model_dir = tmp_path / "ripple"
-    _build_tiny_fixture(ref_dir, model_dir)
+    _build_tiny_fixture(model_dir)
 
-    from transformers import AutoModelForCausalLM
-
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    model = _load_tiny_model(str(model_dir)).eval()
     layers, layer_names = get_layers_with_prefixes(model, RicursiveQModel.extract_layers_node())
     assert len(layers) == 5
     assert layer_names[0] == "model.layers.0"

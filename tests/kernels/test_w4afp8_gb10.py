@@ -1,20 +1,28 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
+
 import pytest
 import torch
 
 from gptqmodel.looper.gptq_processor import enable_w4afp8_replay
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
-from gptqmodel.nn_modules.qlinear.w4a_triton import (
-    _token_fp8_quant,
-    fp8_linear_prepacked,
-    fp8_pack,
-)
 from gptqmodel.quantization.activation_floatx import fp8_token_qdq
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.backend import BACKEND, backend_for_activation
 from tests.w4a_hardware_marks import FP8_HARDWARE, GLUON_FP8
+
+
+# The kernel entry points need Triton. Every case that uses them carries
+# ``GLUON_FP8``, which already requires Triton; the config/replay cases and the
+# shared oracle helper (imported by test_w4a_stream) do not.
+if importlib.util.find_spec("triton") is not None:
+    from gptqmodel.nn_modules.qlinear.w4a_triton import (
+        _token_fp8_quant,
+        fp8_linear_prepacked,
+        fp8_pack,
+    )
 
 
 def _assert_native_gemm_close(actual, expected, magnitude):

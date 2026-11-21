@@ -1,0 +1,67 @@
+{
+  "LlamaForCausalLM": {
+    "repo": "OpenGVLab/InternVL-Chat-V1-2",
+    "revision": "60f4206a208ef1eedb1566e4a3039450a283703b",
+    "files": {
+      "config.json": "e9d4c38d60cdb2a58ed68b178acbba83b9ff5d4da35f71c133adb0e31e5530f8",
+      "special_tokens_map.json": "334f8b9eb759dd8d5c7845b44fd65d379e2dc8644b418b30e88df24ed3dbde18",
+      "tokenizer.model": "386c49cf943d71aa110361135338c50e38beeff0a66593480421f37b319e1a39",
+      "tokenizer_config.json": "58288c5a8343d7257881a7a0289e79c824b7931f6c798313a9a06a76f9624f60"
+    }
+  },
+  "Phi3ForCausalLM": {
+    "repo": "OpenGVLab/InternVL2-4B",
+    "revision": "6eb21ec278fbdb03b751a3d48d8dfc9724e05608",
+    "files": {
+      "config.json": "0f5b07a3114ae1500eee82b05f7cc059e225e18e2a6c23c69b3b75bcb574d5eb",
+      "special_tokens_map.json": "f877c545fc2db4e95a6afb134d6f3072ae9207af1c8160f7ebbb627e5f5da4ad",
+      "tokenizer.model": "9e556afd44213b6bd1be2b850ebbbd98f5481437a8021afaf58ee7fb1818d347",
+      "tokenizer_config.json": "4c772d1ba4150b17d7a2a66f8b6bb6ff0df484ddeb547a60e5c6aed23f7989d9"
+    }
+  },
+  "InternLM2ForCausalLM": {
+    "repo": "OpenGVLab/InternVL2_5-8B",
+    "revision": "e9e4c0dc1db56bfab10458671519b7fa3dd29463",
+    "files": {
+      "config.json": "923cb73535303a6c439c3c139dc12f1b7bddd6643dee8ddf63d0d56368d5e8d5",
+      "special_tokens_map.json": "8cb729e6fd4c29e8c5be65cb51128735cea0ab56606a186cf8cbb30123c72eae",
+      "tokenizer.model": "f868398fc4e05ee1e8aeba95ddf18ddcc45b8bce55d5093bead5bbf80429b48b",
+      "tokenizer_config.json": "a3c739bcdfbb942f972160124327121b8d11c609c1355e05ed9b5ce8d1b5b67a"
+    }
+  },
+  "Qwen2ForCausalLM": {
+    "repo": "OpenGVLab/InternVL2_5-4B",
+    "revision": "2cf4a8158bbc40d35015e7c63b527890de4d27b3",
+    "files": {
+      "config.json": "625422351ea507e22f25173cd894cb4c578c9c9b6edc52323aed39fb9ed9bfb7",
+      "merges.txt": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+      "special_tokens_map.json": "13a6dea522a937ef05172912c66214162c75165e723a3d6cf4ae2d09752013bf",
+      "tokenizer_config.json": "44ec7e967b6259306f6334e90dcb555833b5d2cf6558a86c6f25deb1bc1a0b6a",
+      "vocab.json": "87a257b04b17642a0688c98cd1df89c398bda4fee532d6f88b38a659ecb4ac8d"
+    }
+  },
+  "Qwen3ForCausalLM": {
+    "repo": "OpenGVLab/InternVL3_5-1B-Instruct",
+    "revision": "5648fa26ff23acaba53588936d9f1dfaf305f522",
+    "files": {
+      "config.json": "cdc9fd1253691f3ce2bb350eb1d99f05f3dc274fe717343bcf7d4dcc34502130",
+      "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+      "special_tokens_map.json": "13a6dea522a937ef05172912c66214162c75165e723a3d6cf4ae2d09752013bf",
+      "tokenizer_config.json": "2d0129d708f6433a0b09f1fc346d3e3c834e2b0ae6f817ad5b491779e39299ab",
+      "vocab.json": "87a257b04b17642a0688c98cd1df89c398bda4fee532d6f88b38a659ecb4ac8d"
+    }
+  },
+  "Qwen3MoeForCausalLM": {
+    "repo": "OpenGVLab/InternVL3_5-30B-A3B",
+    "revision": "ba1762d830e2aeddb3272b66ba9e0abf7e69f626",
+    "files": {
+      "chat_template.jinja": "cabb34545cf3d04f4d256439f6b8e9f6fcf61edaaee3b8cb5c0937a7ea6206d7",
+      "config.json": "c21bc40aa5d14679d661a1bfd2fb630f702cd1c22b73881949aee5a57e0ae0a5",
+      "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+      "special_tokens_map.json": "13a6dea522a937ef05172912c66214162c75165e723a3d6cf4ae2d09752013bf",
+      "tokenizer.json": "6581c44164d273d4222df982905a7e0450dcf3a4a7ebe98f9ec53e4de05beffe",
+      "tokenizer_config.json": "01fa09d7bd718d09a7d795aec4fb310f2be928b5273fd16faf64037f0e3993d5",
+      "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+    }
+  }
+}

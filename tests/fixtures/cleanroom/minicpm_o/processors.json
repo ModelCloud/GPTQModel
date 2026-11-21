@@ -1,0 +1,206 @@
+{
+ "repetition_cases": [
+  {
+   "name": "p1_5_w16_long",
+   "penalty": 1.5,
+   "max_input_ids": 626,
+   "past_window": 16,
+   "input_ids": "hist_long",
+   "scores": "scores",
+   "expected": "out.p1_5_w16_long"
+  },
+  {
+   "name": "p1_5_w16_short",
+   "penalty": 1.5,
+   "max_input_ids": 626,
+   "past_window": 16,
+   "input_ids": "hist_short",
+   "scores": "scores",
+   "expected": "out.p1_5_w16_short"
+  },
+  {
+   "name": "p0_5_w16_long",
+   "penalty": 0.5,
+   "max_input_ids": 626,
+   "past_window": 16,
+   "input_ids": "hist_long",
+   "scores": "scores",
+   "expected": "out.p0_5_w16_long"
+  },
+  {
+   "name": "p2_0_w4_long",
+   "penalty": 2.0,
+   "max_input_ids": 626,
+   "past_window": 4,
+   "input_ids": "hist_long",
+   "scores": "scores",
+   "expected": "out.p2_0_w4_long"
+  },
+  {
+   "name": "p1_3_rows3_long",
+   "penalty": 1.3,
+   "max_input_ids": 3,
+   "past_window": 16,
+   "input_ids": "hist_long",
+   "scores": "scores",
+   "expected": "out.p1_3_rows3_long"
+  },
+  {
+   "name": "p1_5_empty",
+   "penalty": 1.5,
+   "max_input_ids": 626,
+   "past_window": 16,
+   "input_ids": "hist_empty",
+   "scores": "scores",
+   "expected": "out.p1_5_empty"
+  },
+  {
+   "name": "p1_5_w100_long",
+   "penalty": 1.5,
+   "max_input_ids": 626,
+   "past_window": 100,
+   "input_ids": "hist_long",
+   "scores": "scores",
+   "expected": "out.p1_5_w100_long"
+  }
+ ],
+ "constructor_errors": [
+  {
+   "penalty": "2",
+   "error": "ValueError",
+   "message": "`penalty` has to be a strictly positive float, but is 2"
+  },
+  {
+   "penalty": "0.0",
+   "error": "ValueError",
+   "message": "`penalty` has to be a strictly positive float, but is 0.0"
+  },
+  {
+   "penalty": "-1.0",
+   "error": "ValueError",
+   "message": "`penalty` has to be a strictly positive float, but is -1.0"
+  },
+  {
+   "penalty": "'1.5'",
+   "error": "ValueError",
+   "message": "`penalty` has to be a strictly positive float, but is 1.5"
+  }
+ ],
+ "gen_logits_cases": [
+  {
+   "name": "default",
+   "kwargs_26": {},
+   "kwargs_45": {},
+   "num_code": 16,
+   "built": {
+    "warpers": [
+     "TopPLogitsWarper(top_p=0.7,min_keep=3)",
+     "TopKLogitsWarper(top_k=20)"
+    ],
+    "processors": []
+   },
+   "expected": "gl.out.default"
+  },
+  {
+   "name": "rep1_5",
+   "kwargs_26": {
+    "repetition_penalty": 1.5
+   },
+   "kwargs_45": {
+    "repetition_penalty": 1.5
+   },
+   "num_code": 16,
+   "built": {
+    "warpers": [
+     "TopPLogitsWarper(top_p=0.7,min_keep=3)",
+     "TopKLogitsWarper(top_k=20)"
+    ],
+    "processors": [
+     "Repeat(penalty=1.5,max_input_ids=16,past_window=16)"
+    ]
+   },
+   "expected": "gl.out.rep1_5"
+  },
+  {
+   "name": "p0_9_k5_rep1_2",
+   "kwargs_26": {
+    "top_P": 0.9,
+    "top_K": 5,
+    "repetition_penalty": 1.2
+   },
+   "kwargs_45": {
+    "top_p": 0.9,
+    "top_k": 5,
+    "repetition_penalty": 1.2
+   },
+   "num_code": 16,
+   "built": {
+    "warpers": [
+     "TopPLogitsWarper(top_p=0.9,min_keep=3)",
+     "TopKLogitsWarper(top_k=5)"
+    ],
+    "processors": [
+     "Repeat(penalty=1.2,max_input_ids=16,past_window=16)"
+    ]
+   },
+   "expected": "gl.out.p0_9_k5_rep1_2"
+  },
+  {
+   "name": "noP_k2",
+   "kwargs_26": {
+    "top_P": null,
+    "top_K": 2
+   },
+   "kwargs_45": {
+    "top_p": null,
+    "top_k": 2
+   },
+   "num_code": 16,
+   "built": {
+    "warpers": [
+     "TopKLogitsWarper(top_k=3)"
+    ],
+    "processors": []
+   },
+   "expected": "gl.out.noP_k2"
+  },
+  {
+   "name": "p0_1_noK",
+   "kwargs_26": {
+    "top_P": 0.1,
+    "top_K": null
+   },
+   "kwargs_45": {
+    "top_p": 0.1,
+    "top_k": null
+   },
+   "num_code": 16,
+   "built": {
+    "warpers": [
+     "TopPLogitsWarper(top_p=0.1,min_keep=3)"
+    ],
+    "processors": []
+   },
+   "expected": "gl.out.p0_1_noK"
+  },
+  {
+   "name": "none_rep_none",
+   "kwargs_26": {
+    "top_P": null,
+    "top_K": null,
+    "repetition_penalty": null
+   },
+   "kwargs_45": {
+    "top_p": null,
+    "top_k": null,
+    "repetition_penalty": null
+   },
+   "num_code": 16,
+   "built": {
+    "warpers": [],
+    "processors": []
+   },
+   "expected": "gl.out.none_rep_none"
+  }
+ ]
+}

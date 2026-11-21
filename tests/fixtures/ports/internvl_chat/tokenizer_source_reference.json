@@ -1,0 +1,153 @@
+{
+  "LlamaForCausalLM": {
+    "repo": "OpenGVLab/InternVL-Chat-V1-2",
+    "revision": "60f4206a208ef1eedb1566e4a3039450a283703b",
+    "source_transformers": "4.37.2",
+    "source_class": "LlamaTokenizerFast",
+    "source_fast_ids": {
+      "Hello 世界!": [
+        29915,
+        59568,
+        2349,
+        99
+      ],
+      "  spaces\n中文 café 🐍 123": [
+        140,
+        59575,
+        18616,
+        144,
+        14202,
+        59260,
+        59568,
+        545,
+        464,
+        449,
+        446,
+        59568,
+        78,
+        79,
+        80
+      ],
+      "x\n\n世界": [
+        1812,
+        144,
+        144,
+        2349
+      ],
+      " café 🐍": [
+        141,
+        59581,
+        2759,
+        60464,
+        59568,
+        545,
+        464,
+        449,
+        446
+      ],
+      "": [],
+      "\n": [
+        59568,
+        144
+      ],
+      " spaces": [
+        141,
+        59575,
+        18616
+      ],
+      "nospace": [
+        609,
+        718,
+        1455
+      ]
+    },
+    "sp_normalizer": {
+      "name": "identity",
+      "add_dummy_prefix": false,
+      "remove_extra_whitespaces": false,
+      "escape_whitespaces": true
+    },
+    "normalizer_blob_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "normalizer_blob_length": 0
+  },
+  "Phi3ForCausalLM": {
+    "repo": "OpenGVLab/InternVL2-4B",
+    "revision": "6eb21ec278fbdb03b751a3d48d8dfc9724e05608",
+    "source_transformers": "4.37.2",
+    "source_class": "LlamaTokenizerFast",
+    "source_fast_ids": {
+      "Hello 世界!": [
+        1,
+        15043,
+        29871,
+        30793,
+        30967,
+        29991
+      ],
+      "  spaces\n中文 café 🐍 123": [
+        1,
+        259,
+        8162,
+        13,
+        30275,
+        30333,
+        274,
+        28059,
+        29871,
+        243,
+        162,
+        147,
+        144,
+        29871,
+        29896,
+        29906,
+        29941
+      ],
+      "x\n\n世界": [
+        1,
+        921,
+        13,
+        13,
+        30793,
+        30967
+      ],
+      " café 🐍": [
+        1,
+        29871,
+        274,
+        28059,
+        29871,
+        243,
+        162,
+        147,
+        144
+      ],
+      "": [
+        1
+      ],
+      "\n": [
+        1,
+        29871,
+        13
+      ],
+      " spaces": [
+        1,
+        29871,
+        8162
+      ],
+      "nospace": [
+        1,
+        7814,
+        3535
+      ]
+    },
+    "sp_normalizer": {
+      "name": "identity",
+      "add_dummy_prefix": true,
+      "remove_extra_whitespaces": false,
+      "escape_whitespaces": true
+    },
+    "normalizer_blob_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "normalizer_blob_length": 0
+  }
+}
