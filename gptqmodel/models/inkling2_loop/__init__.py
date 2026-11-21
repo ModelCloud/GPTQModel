@@ -16,7 +16,12 @@ from .configuration import (
     Inkling2LoopVisionConfig,
 )
 from .conversion import MAPPING, register_conversion_mappings
-from .experts import Inkling2LoopExperts, Inkling2LoopPackedExperts
+from .experts import (
+    Inkling2LoopExpertProjections,
+    Inkling2LoopExperts,
+    Inkling2LoopPackedExpertLinear,
+    Inkling2LoopPackedExperts,
+)
 from .modeling import (
     Inkling2LoopForCausalLM,
     Inkling2LoopForConditionalGeneration,
@@ -38,7 +43,9 @@ for _model_class in (
 
 __all__ = [
     "Inkling2LoopConfig",
+    "Inkling2LoopExpertProjections",
     "Inkling2LoopExperts",
+    "Inkling2LoopPackedExpertLinear",
     "Inkling2LoopForCausalLM",
     "Inkling2LoopForConditionalGeneration",
     "Inkling2LoopModel",

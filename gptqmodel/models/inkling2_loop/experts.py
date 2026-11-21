@@ -16,6 +16,13 @@ Two storage layouts are supported:
     expert weights. They are decoded inside the GEMM by
     :mod:`gptqmodel.utils.nvfp4_triton`, so a 4-bit expert keeps its 4-bit
     footprint instead of being materialized as bf16.
+
+    :meth:`Inkling2LoopPackedExperts.defuse` splits the fused 3-D payload into
+    one :class:`Inkling2LoopPackedExpertLinear` per expert and projection. That
+    is the layout a quantizer consumes: each leaf is a real ``nn.Linear`` for
+    planning and hooks, it keeps the packed payload for the calibration forward
+    (JIT decode to bf16 activations, no dense weight), and only materializes the
+    dense bf16 weight when the quantization processor asks for it.
 """
 
 from __future__ import annotations
@@ -117,6 +124,125 @@ class Inkling2LoopExperts(nn.Module):
         return self.act_fn(gate, up)
 
 
+class Inkling2LoopPackedExpertLinear(nn.Linear):
+    """One expert projection that keeps the checkpoint's packed storage.
+
+    The class is a real ``nn.Linear`` so module planning, hook installation and
+    the quantizer's ``weight`` contract work unchanged, but it does not own a
+    dense weight by default:
+
+    - ``forward`` decodes inside the GEMM (:func:`nvfp4_w4a16_linear` /
+      :func:`mxfp8_w8a16_linear`) and returns bf16 activations, so calibration
+      and Hessian collection never materialize a dense weight.
+    - ``weight`` is materialized on first access. A quantization processor reads
+      it when it starts packing, which hands it the fully dequantized bf16
+      source instead of the packed payload.
+    """
+
+    #: Marker consumed by ``replace_module_with_hooked_legacy``: the module keeps
+    #: its kernel forward instead of becoming a dense ``HookedLinear``.
+    _packed_source_linear = True
+
+    #: Payload and decode factors are kernel storage, not activation operands.
+    CHECKPOINT_EXACT_DTYPE_PARAMETERS = (
+        "packed_weight",
+        "packed_scales",
+        "packed_global_scale",
+    )
+
+    def __init__(
+        self,
+        *,
+        in_features: int,
+        out_features: int,
+        fmt: str,
+        weight: torch.Tensor,
+        scales: torch.Tensor,
+        global_scale: Optional[torch.Tensor] = None,
+    ) -> None:
+        # ``nn.Linear.__init__`` would allocate the dense weight this class
+        # exists to avoid; only the module bookkeeping is needed.
+        nn.Module.__init__(self)
+        self.in_features = int(in_features)
+        self.out_features = int(out_features)
+        self.fmt = fmt
+        self.packed_weight = nn.Parameter(weight, requires_grad=False)
+        self.packed_scales = nn.Parameter(scales, requires_grad=False)
+        if global_scale is None:
+            self.packed_global_scale = None
+        else:
+            self.packed_global_scale = nn.Parameter(
+                global_scale.detach().reshape(()).float(), requires_grad=False
+            )
+        self.bias = None
+
+    def __getattr__(self, name: str):
+        """Materialize ``weight`` on first access instead of at construction."""
+
+        if name == "weight":
+            parameters = self.__dict__.get("_parameters")
+            if parameters is not None and "weight" in parameters:
+                return parameters["weight"]
+            return self._materialize_dense_weight()
+        return super().__getattr__(name)
+
+    @torch.no_grad()
+    def dequantize_weight(self) -> torch.Tensor:
+        """Decode the packed payload into the dense bf16 quantization source."""
+
+        if self.fmt == "nvfp4":
+            dense = dequant_nvfp4(
+                self.packed_weight, self.packed_scales, self.packed_global_scale
+            )
+        else:
+            dense = dequant_mxfp8(self.packed_weight, self.packed_scales)
+        return dense.to(torch.bfloat16)
+
+    @torch.no_grad()
+    def _materialize_dense_weight(self) -> nn.Parameter:
+        cached = self._parameters.get("_dense_weight")
+        if cached is not None:
+            return cached
+        weight = nn.Parameter(self.dequantize_weight(), requires_grad=False)
+        self._dense_weight = weight
+        return weight
+
+    def dense_weight(self) -> torch.Tensor:
+        """Return the fully dequantized bf16 weight (the quantization source)."""
+
+        return self._materialize_dense_weight()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if scaled_wxa16_available(x.device):
+            if self.fmt == "nvfp4":
+                return nvfp4_w4a16_linear(
+                    x,
+                    self.packed_weight,
+                    self.packed_scales,
+                    self.packed_global_scale,
+                )
+            return mxfp8_w8a16_linear(x, self.packed_weight, self.packed_scales)
+        # No fused decode kernel on this device: fall back to the reference
+        # dense bf16 product (requirement: dequantize when no kernel exists).
+        dense = self.dequantize_weight().to(x.dtype)
+        return F.linear(x, dense)
+
+
+class Inkling2LoopExpertProjections(nn.Module):
+    """Per-expert ``gate_proj`` / ``up_proj`` / ``down_proj`` leaves."""
+
+    def __init__(
+        self,
+        gate_proj: nn.Module,
+        up_proj: nn.Module,
+        down_proj: nn.Module,
+    ) -> None:
+        super().__init__()
+        self.gate_proj = gate_proj
+        self.up_proj = up_proj
+        self.down_proj = down_proj
+
+
 class Inkling2LoopPackedExperts(nn.Module):
     """Routed experts kept in the checkpoint's block-scaled storage.
 
@@ -124,6 +250,10 @@ class Inkling2LoopPackedExperts(nn.Module):
     per-block scales, and for NVFP4 ``*_amax`` / ``*_outer_scale`` the per-expert
     and per-tensor factors that give the FP32 global scale. The activation is
     never quantized: it stays in the model dtype and the dot accumulates in FP32.
+
+    :meth:`defuse` rewrites the container into the per-expert layout a quantizer
+    needs (``experts.<i>.gate_proj`` / ``up_proj`` / ``down_proj``) without
+    decoding anything: each leaf keeps a view of the packed payload.
     """
 
     # The payload and every factor that decodes it are kernel storage, not
@@ -147,6 +277,7 @@ class Inkling2LoopPackedExperts(nn.Module):
             raise ValueError(f"unsupported expert format {fmt!r}")
         self.config = config
         self.fmt = fmt
+        self._defused = False
         self.num_experts = config.n_routed_experts
         self.hidden_dim = config.hidden_size
         self.intermediate_dim = config.moe_intermediate_size
@@ -210,6 +341,153 @@ class Inkling2LoopPackedExperts(nn.Module):
             dense = dequant_mxfp8(weight, scales)
         return F.linear(x, dense.to(x.dtype))
 
+    @property
+    def defused(self) -> bool:
+        """Whether the fused payload was already split into per-expert leaves."""
+
+        return self._defused
+
+    @torch.no_grad()
+    def defuse(self) -> "Inkling2LoopPackedExperts":
+        """Split the fused 3-D payload into per-expert projections, in place.
+
+        Every leaf keeps a view of the checkpoint storage (no copy, no decode),
+        so the calibration forward still runs the packed W4A16/W8A16 kernels.
+        The fused parameters are dropped afterwards; the views keep their
+        storage alive.
+        """
+
+        if self._defused:
+            return self
+
+        gate_amax = getattr(self, "gate_up_amax", None)
+        gate_outer = getattr(self, "gate_up_outer_scale", None)
+        down_amax = getattr(self, "down_amax", None)
+        down_outer = getattr(self, "down_outer_scale", None)
+        # Scalars only: keep the original per-expert/per-tensor factors so
+        # `refuse()` can put them back without recomputing the product.
+        self._fused_factors = {
+            name: getattr(self, name, None)
+            for name in (
+                "gate_up_amax",
+                "gate_up_outer_scale",
+                "down_amax",
+                "down_outer_scale",
+            )
+        }
+        for expert_idx in range(self.num_experts):
+            gate_up_weight = self.gate_up_weight[expert_idx]
+            gate_up_scales = self.gate_up_scales[expert_idx]
+            gate = Inkling2LoopPackedExpertLinear(
+                in_features=self.hidden_dim,
+                out_features=self.intermediate_dim,
+                fmt=self.fmt,
+                weight=gate_up_weight[: self.intermediate_dim],
+                scales=gate_up_scales[: self.intermediate_dim],
+                global_scale=None
+                if gate_amax is None
+                else gate_amax[expert_idx] / gate_outer.reshape(()),
+            )
+            up = Inkling2LoopPackedExpertLinear(
+                in_features=self.hidden_dim,
+                out_features=self.intermediate_dim,
+                fmt=self.fmt,
+                weight=gate_up_weight[self.intermediate_dim :],
+                scales=gate_up_scales[self.intermediate_dim :],
+                global_scale=None
+                if gate_amax is None
+                else gate_amax[expert_idx] / gate_outer.reshape(()),
+            )
+            down = Inkling2LoopPackedExpertLinear(
+                in_features=self.intermediate_dim,
+                out_features=self.hidden_dim,
+                fmt=self.fmt,
+                weight=self.down_weight[expert_idx],
+                scales=self.down_scales[expert_idx],
+                global_scale=None
+                if down_amax is None
+                else down_amax[expert_idx] / down_outer.reshape(()),
+            )
+            self.add_module(
+                str(expert_idx), Inkling2LoopExpertProjections(gate, up, down)
+            )
+
+        for name in (
+            "gate_up_weight",
+            "gate_up_scales",
+            "down_weight",
+            "down_scales",
+            "gate_up_amax",
+            "gate_up_outer_scale",
+            "down_amax",
+            "down_outer_scale",
+        ):
+            if name in self._parameters:
+                delattr(self, name)
+        self._defused = True
+        return self
+
+    @torch.no_grad()
+    def refuse(self) -> "Inkling2LoopPackedExperts":
+        """Reassemble the fused packed storage from untouched per-expert leaves.
+
+        A layer whose experts the quantization plan skipped must keep the
+        checkpoint's packed declaration, so its leaves are re-fused before the
+        save instead of being written in a layout the packed declaration cannot
+        describe. Only valid while every leaf still holds packed storage.
+        """
+
+        if not self._defused:
+            return self
+
+        leaves = []
+        for expert_idx in range(self.num_experts):
+            expert = getattr(self, str(expert_idx))
+            projections = (expert.gate_proj, expert.up_proj, expert.down_proj)
+            for projection in projections:
+                if not isinstance(projection, Inkling2LoopPackedExpertLinear):
+                    raise RuntimeError(
+                        "Inkling2Loop packed experts cannot be re-fused: expert "
+                        f"{expert_idx} already holds {type(projection).__name__}. "
+                        "Quantize every projection of a layer's experts or none."
+                    )
+            leaves.append(projections)
+
+        self.gate_up_weight = nn.Parameter(
+            torch.stack(
+                [
+                    torch.cat([gate.packed_weight, up.packed_weight], dim=0)
+                    for gate, up, _ in leaves
+                ]
+            ),
+            requires_grad=False,
+        )
+        self.gate_up_scales = nn.Parameter(
+            torch.stack(
+                [
+                    torch.cat([gate.packed_scales, up.packed_scales], dim=0)
+                    for gate, up, _ in leaves
+                ]
+            ),
+            requires_grad=False,
+        )
+        self.down_weight = nn.Parameter(
+            torch.stack([down.packed_weight for _, _, down in leaves]),
+            requires_grad=False,
+        )
+        self.down_scales = nn.Parameter(
+            torch.stack([down.packed_scales for _, _, down in leaves]),
+            requires_grad=False,
+        )
+        for name, value in getattr(self, "_fused_factors", {}).items():
+            if value is not None:
+                setattr(self, name, nn.Parameter(value.detach(), requires_grad=False))
+
+        for expert_idx in range(self.num_experts):
+            delattr(self, str(expert_idx))
+        self._defused = False
+        return self
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -221,6 +499,15 @@ class Inkling2LoopPackedExperts(nn.Module):
             hidden_states, top_k_index, top_k_weights, self.num_experts
         ):
             current = hidden_states[tokens]
+            if self._defused:
+                expert = getattr(self, str(expert_idx))
+                current = self.act_fn(expert.gate_proj(current), expert.up_proj(current))
+                current = expert.down_proj(current)
+                current = current * top_k_weights[tokens, slots, None]
+                final_hidden_states.index_add_(
+                    0, tokens, current.to(final_hidden_states.dtype)
+                )
+                continue
             if self.fmt == "nvfp4":
                 gate_up = self._matmul(
                     current,
@@ -288,10 +575,32 @@ def build_experts(config, layer_idx: int) -> nn.Module:
     return Inkling2LoopPackedExperts(config, fmt)
 
 
+def defuse_packed_experts(module: nn.Module) -> int:
+    """Split every packed expert container under ``module`` into per-expert leaves.
+
+    Called once a layer is materialized and before its modules are resolved, so
+    the quantizer sees ``experts.<i>.gate_proj`` / ``up_proj`` / ``down_proj``
+    for a pre-quantized checkpoint exactly as it does for a dense one.
+    """
+
+    converted = 0
+    for _, child in list(module.named_children()):
+        if isinstance(child, Inkling2LoopPackedExperts):
+            if not child.defused:
+                child.defuse()
+                converted += 1
+            continue
+        converted += defuse_packed_experts(child)
+    return converted
+
+
 __all__ = [
+    "Inkling2LoopExpertProjections",
     "Inkling2LoopExperts",
+    "Inkling2LoopPackedExpertLinear",
     "Inkling2LoopPackedExperts",
     "Inkling2LoopSoftcap",
     "Inkling2LoopSoftcappedSwiGLU",
     "build_experts",
+    "defuse_packed_experts",
 ]

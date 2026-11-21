@@ -492,9 +492,13 @@ def get_number_of_rows_and_cols(layer: nn.Module):
     if isinstance(layer, transformers.Conv1D):
         # transformers.Conv1D: weight shape is (n_in, n_out)
         return layer.weight.shape[1], layer.weight.shape[0]
-    else:
-        # weight shape is (n_out, n_in); math.prod keeps `columns` a plain int
-        return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
+    if getattr(layer, "_packed_source_linear", False):
+        # Reading `.weight` decodes the packed checkpoint into its dense bf16
+        # quantization source. Planning only needs the geometry, so answer from
+        # the declared features and keep calibration on the packed kernel.
+        return layer.out_features, layer.in_features
+    # weight shape is (n_out, n_in); math.prod keeps `columns` a plain int
+    return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
 
 
 def conv_patch_matrix(

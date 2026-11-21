@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 from transformers import AutoConfig, AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
@@ -19,6 +19,10 @@ from ..inkling2_loop import (
     Inkling2LoopForConditionalGeneration,
     Inkling2LoopPackedExperts,
 )
+from ..inkling2_loop.experts import (
+    Inkling2LoopPackedExpertLinear,
+    defuse_packed_experts,
+)
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -33,6 +37,45 @@ AutoModelForMultimodalLM.register(
 # plain object (not a dict/list/tensor) survives the looper's device moves
 # unchanged, which is what keeps one holder per calibration batch.
 _BLOCK_STATES_CARRY_KEY = "_inkling2_loop_block_states_carry"
+
+
+def declare_expert_storage(model) -> None:
+    """Make ``experts_formats`` describe the storage the model now holds.
+
+    A defused layer holds one quantized ``Linear`` per expert, so its
+    ``experts_formats`` entry is cleared: leaving ``nvfp4``/``mxfp8`` there makes
+    a reload build the packed container again, and the quantized expert tensors
+    would have nowhere to land. A layer the quantization plan skipped is re-fused
+    instead, so it keeps both its packed declaration and its packed storage.
+    """
+
+    config = getattr(model.config, "text_config", model.config)
+    formats = getattr(config, "experts_formats", None)
+    if not formats:
+        return
+    for name, experts in model.named_modules():
+        if not name.endswith(".mlp.experts") or not getattr(experts, "defused", False):
+            continue
+        layer_index = _layer_index_from_name(name)
+        if layer_index is None or layer_index >= len(formats):
+            continue
+        if any(
+            isinstance(module, Inkling2LoopPackedExpertLinear)
+            for module in experts.modules()
+        ):
+            experts.refuse()
+            continue
+        formats[layer_index] = None
+
+
+def _layer_index_from_name(name: str) -> Optional[int]:
+    """Decoder-layer index from a ``...layers.<i>.mlp.experts`` module name."""
+
+    parts = name.split(".")
+    try:
+        return int(parts[parts.index("layers") + 1])
+    except (ValueError, IndexError):
+        return None
 
 
 class _BlockStatesCarry:
@@ -64,6 +107,11 @@ class Inkling2LoopQModel(BaseQModel):
       Transformers release does not rename yet. Loading those tensors needs the
       conversion mapping and the packed-expert decode hook; the decode kernels
       themselves are in `gptqmodel/utils/nvfp4_triton.py`.
+    - A pre-quantized checkpoint is re-quantized, not passed through: every
+      packed expert is defused into per-expert `Linear` leaves (packed views)
+      before the layer is planned, its calibration/Hessian forwards run the
+      W4A16/W8A16 kernels, and the dense bf16 weight is materialized only when
+      the quantization processor packs that module.
     """
 
     loader = AutoModelForMultimodalLM
@@ -83,50 +131,37 @@ class Inkling2LoopQModel(BaseQModel):
     # differs from the key/value projections under GQA.
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj.linear"]
 
-    @classmethod
-    def simple_layer_modules(
-        cls,
-        model_config,
-        quantize_config,
-        is_awq_quantize: bool = False,
-        include_capture_only: bool = False,
-    ):
-        """Skip the routed experts that the checkpoint already stores quantized.
+    def pre_quantize(self, module, module_path=None):
+        """Materialize a layer, then split its packed experts into quantizable leaves.
 
-        Layers whose experts are packed NVFP4/MXFP8 run through
-        :class:`Inkling2LoopPackedExperts`' fused kernels. They have no
-        per-expert ``Linear`` leaves, so leaving the expert specs in the plan
-        would only produce unresolved module names.
+        A checkpoint that already stores NVFP4/MXFP8 experts is still
+        re-quantized: every method needs per-expert ``Linear`` modules, and
+        calibration/Hessian collection must run the packed W4A16/W8A16 kernels
+        instead of a dense bf16 copy. Defusion keeps the packed payload (views,
+        no decode) so the layer's forwards stay on the kernel until the
+        quantization processor asks for ``weight``, which materializes the fully
+        dequantized bf16 source for packing.
         """
 
-        blocks = super().simple_layer_modules(
-            model_config,
-            quantize_config,
-            is_awq_quantize=is_awq_quantize,
-            include_capture_only=include_capture_only,
-        )
-        text_config = getattr(model_config, "text_config", model_config)
-        formats = getattr(text_config, "experts_formats", None)
-        if not formats:
-            return blocks
-        packed = {index for index, fmt in enumerate(formats) if fmt}
-        if not packed:
-            return blocks
-        filtered = []
-        for index, block in enumerate(blocks):
-            if index in packed:
-                block = [name for name in block if ".mlp.experts." not in name]
-            filtered.append(block)
-        return filtered
+        module = super().pre_quantize(module, module_path=module_path)
+        defuse_packed_experts(module)
+        return module
+
+    def after_quantize(self) -> None:
+        """Declare the expert storage the saved checkpoint will really have."""
+
+        super().after_quantize()
+        declare_expert_storage(self.model)
 
     @classmethod
     def after_defuser_conversion(cls, model):
         """Validate the expert layout Defuser leaves behind.
 
-        Packed (pre-quantized) experts must stay packed: decoding them here
-        would throw away the 4-bit checkpoint and re-quantize the result.
-        Dense experts must be expanded into per-expert ``Linear`` modules so
-        GPTQ can quantize them.
+        Packed (pre-quantized) experts stay packed here: they are defused per
+        layer in :meth:`pre_quantize`, right after the lazy shell materializes
+        the checkpoint payload and before the layer's modules are resolved.
+        Dense experts must already be expanded into per-expert ``Linear``
+        modules by Defuser.
         """
 
         config = getattr(model.config, "text_config", model.config)
