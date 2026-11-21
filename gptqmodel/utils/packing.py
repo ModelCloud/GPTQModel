@@ -60,6 +60,8 @@ _ABI_TRANSFORMING_QUANT_TYPES = frozenset({
     "awq_swordfish",
     "gptq_bitblas",
     "awq_bitblas",
+    "humming",
+    "awq_humming",
 })
 
 
