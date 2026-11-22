@@ -90,3 +90,20 @@ def test_ttxla_packed_linear_buffers_two_k_pairs():
         0: 4096, 1: 16384, 16: 4096,
     }
     assert packed["kernels"][2]["kernel_config"] == dense["kernels"][2]["kernel_config"]
+
+
+def test_ttxla_sfpu_artifact_requires_base_tag_and_one_weight_slab():
+    from gptqmodel.utils.nf12_ttxla import _PREFIX, _artifact, _version_tag
+
+    layout = "!ttcore.tile<32x32 <interleaved> <dram>"
+    shapes = [(32, 128), (192, 32), (184, 32), (32, 128)]
+    args = (_version_tag(), shapes, ["bf16", "si32", "si32", "bf16"], [layout] * 4, (1, 1), "in,in,in,out")
+    with pytest.raises(ValueError, match="exponent base"):
+        _artifact(_PREFIX + "sfpu_linear.128.128.1.55.1.0", *args)
+
+    resolved = json.loads(_artifact(_PREFIX + "sfpu_linear.128.128.1.56.1.0", *args))
+    buffers = {cb["buffer_index"]: cb for cb in resolved["cb_configs"]}
+    assert buffers[16]["total_size"] == 4 * 2048
+    assert buffers[16]["data_format"] == "UInt16"
+    assert buffers[2]["total_size"] == 2048
+    assert buffers[2]["data_format"] == "BFloat16"

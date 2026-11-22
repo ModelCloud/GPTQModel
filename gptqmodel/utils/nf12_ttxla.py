@@ -81,14 +81,43 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
             ("linear_writer", "noc", [3], [nt, mt, out_page]),
             ("linear_compute", "compute", [], [kt, mt, m_block, nt]),
         ]
+    elif op == "sfpu_linear":
+        nt, kt = n // 32, k // 32
+        dense = bool(flag)
+        metadata = tuple(shapes[2])
+        if (m != 1 or n <= 0 or n % 32 or k <= 0 or k % 128 or m_block < 1 or kt // 4 % m_block
+                or not 0 <= base <= 120 or flag not in (0, 1) or len(metadata) != 2
+                or metadata[1] != 32 or metadata[0] % 128 != base
+                or metadata[0] * 32 < round_up(nt * kt // 2, 16)):
+            raise ValueError("Unexpected TT-XLA SFPU LM-head geometry or exponent base")
+        w_shape = (nt * kt * 32, 32) if dense else (round_up(nt * (kt // 4) * 1536, 1024) // 32, 32)
+        expected = [(32, k), w_shape, metadata, (32, n)]
+        expected_dtypes = ("bf16", "bf16" if dense else "si32", "si32", "bf16")
+        tasks = nt
+        cbs = [
+            _cb(1, "BFloat16", 2048, kt),
+            _cb(2, "BFloat16", 2048, kt if dense else 1),
+            _cb(17, "BFloat16", 2048, 2),
+        ]
+        if not dense:
+            cbs += [
+                _cb(0, "UInt16", 2048, min(m_block * 6, kt // 4 * 3)),
+                _cb(16, "UInt16", 2048, kt),
+                _cb(24, "UInt32", 128),
+            ]
+        kernels = [
+            ("sfpu_linear_reader", "noc", [1, 0], [kt, int(dense), m_block, nt]),
+            ("sfpu_linear_writer", "noc", [3] if dense else [3, 2], [kt, int(dense), int(not dense), nt]),
+            ("sfpu_linear_compute", "compute", [], [kt, int(dense), base, nt]),
+        ]
     else:
         raise ValueError(f"Unknown TT-XLA NF12 operation {op}")
     if (list(map(tuple, shapes)) != expected or tuple(dtypes) != expected_dtypes
             or arg_roles != "in,in,in,out" or version_tag != _version_tag()):
         raise ValueError(f"Unexpected TT-XLA NF12 operand or kernel version for {operation_id}")
 
-    grid_x = min(tasks, _GRID_X)
-    grid_y = min(max(1, tasks // grid_x), _GRID_Y)
+    grid_x = min(tasks, 11 if op == "sfpu_linear" else _GRID_X)
+    grid_y = min(max(1, tasks // grid_x), 10 if op == "sfpu_linear" else _GRID_Y)
     sources = []
     for name, thread, indices, config in kernels:
         if thread == "compute":
@@ -116,7 +145,8 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
 def _version_tag():
     digest = hashlib.sha256()
     digest.update(Path(__file__).read_bytes())
-    for name in ("gather_xla", "linear_reader", "linear_pair_reader", "linear_compute", "linear_writer"):
+    for name in ("gather_xla", "linear_reader", "linear_pair_reader", "linear_compute", "linear_writer",
+                 "sfpu_linear_reader", "sfpu_linear_writer", "sfpu_linear_compute"):
         digest.update(kernel_source(name).encode())
     return digest.hexdigest()[:24]
 
