@@ -297,9 +297,10 @@ def _packed_mlx_weights(model, config, lm_head_name, *, stock_compatible: bool =
             weights[f"{name}.packed"] = mx.array(payload["packed"]).astype(mx.uint8)
             weights[f"{name}.escapes"] = mx.array(payload["escapes"]).astype(mx.int16)
             weights[f"{name}.exp_base"] = mx.array([payload["exp_base"]], dtype=mx.uint8)
+            bias_dtype = mx.bfloat16 if module.bias is None else _MLX_DTYPES.get(module.bias.dtype, mx.float32)
             weights[f"{name}.bias"] = (
-                mx.zeros((module.out_features,), dtype=mx.float32)
-                if payload["bias"] is None else mx.array(payload["bias"]).astype(mx.float32)
+                mx.zeros((module.out_features,), dtype=bias_dtype)
+                if payload["bias"] is None else mx.array(payload["bias"]).astype(bias_dtype)
             )
         elif name in layer_params:
             mlx_linear = _mlx_holder_class(module)

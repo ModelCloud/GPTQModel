@@ -1,27 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # NF12 reference: AlpinDale and the nf12 contributors, Apache-2.0, https://github.com/dphnAI/nf12
-"""Packed NF12 (12-bit BF16) inference kernels for MLX Metal.
-
-NF12 keeps the checkpoint's tiled 12-byte group stream: four meta bytes hold the
-sign and the 3-bit exponent offset, eight low bytes hold the mantissa tail, and
-a group whose meta bytes are all zero stores its eight BF16 words in the escape
-table. This module decodes that stream on Metal and never installs a dense
-weight. Three paths cover the token counts that matter on Apple silicon:
-
-* 1..15 tokens: the decode is fused into the dot product. One threadgroup owns
-  16 output columns, reads each 1536-byte super-atom once with coalesced
-  ``uint32`` loads, and keeps one accumulator per token row, so no dense BF16
-  weight buffer is written and no per-super-atom barrier is paid,
-* exactly 16 tokens on a wide output: a fused tile decodes one super-atom per K
-  step into threadgroup memory and runs it through the simdgroup matrix units,
-  which wins back the FMA cost the dot product pays at 16 rows,
-* more tokens: one decode into BF16 followed by an MLX matmul, because the
-  padded 16-row MMA tile would re-read the weights per token block.
-
-NF12 is a lossless BF16 encoding, so every path reproduces the checkpoint's
-exact BF16 weights; only the accumulation order differs from the Torch codec.
-"""
+"""Packed NF12 linear and embedding inference on MLX Metal."""
 
 from functools import lru_cache
 
@@ -31,441 +11,338 @@ import mlx.nn as nn
 
 _THREADS = 256
 _SUPER_ATOM_BYTES = 1536
-# Token count through which the fused MMA tile beats a decode plus matmul.
-_PREFILL_ROWS = 16
-# At exactly 16 tokens the tile's matrix units win back the FMA cost, but only
-# once the output is wide enough for its 16-column grid to fill the GPU.
-_TILE_MIN_OUT_FEATURES = 65536
-# Split-K keeps the 16-column tile grid wide enough to fill the GPU; the
-# reduce pass it adds costs one pass over the activation-sized output.
-_TARGET_TILES = 1024
-_MAX_SPLITS = 8
+_DECODE_SLICE_BYTES = 64 << 20
+
+# Adapted from the Apache-2.0 NF12 Metal linear and codec kernels at
+# https://github.com/dphnAI/nf12/tree/97c4101541a8d92d2b3d89c910c452cfa8efc9c9/csrc/metal
+# GPT-QModel binds the packed checkpoint tensors directly, supports FP16 and
+# FP32 activations and bias, and compiles these shaders through MLX at runtime.
+_LINEAR_HEADER = """
+#include <metal_simdgroup_matrix>
+
+constant constexpr uint kSuperAtomCols = 64;
+constant constexpr uint kSuperAtomBytes = 1536;
+constant constexpr uint kPlaneBytes = 512;
+
+struct Group {
+  uint meta, lo0, lo1;
+};
+
+// ---------------------------------------------------------------------------
+// Widen either half of a packed BF16 pair exactly.
+inline float bf16_lo(uint pair) { return as_type<float>(pair << 16); }
+inline float bf16_hi(uint pair) { return as_type<float>(pair & 0xffff0000u); }
+
+// ---------------------------------------------------------------------------
+// Group decode (SPEC.md section 3). Byte j of a/b is hi(s(2j)) / hi(s(2j+1)).
+inline uint exp_base_x4(uint exp_base) { return exp_base * 0x01010101u; }
+
+inline void decode_bulk(Group g, uint base_x4, thread uint (&r)[4]) {
+  const uint m = g.meta;
+  const uchar4 a = as_type<uchar4>((m & 0x87878787u) + base_x4);
+  const uchar4 b = as_type<uchar4>((((m << 1) & 0x80808080u) | ((m >> 3) & 0x07070707u)) + base_x4);
+  const uchar4 l0 = as_type<uchar4>(g.lo0);
+  const uchar4 l1 = as_type<uchar4>(g.lo1);
+  r[0] = as_type<uint>(uchar4(l0.x, a.x, l0.y, b.x));
+  r[1] = as_type<uint>(uchar4(l0.z, a.y, l0.w, b.y));
+  r[2] = as_type<uint>(uchar4(l1.x, a.z, l1.y, b.z));
+  r[3] = as_type<uint>(uchar4(l1.z, a.w, l1.w, b.w));
+}
+
+// Escapes need no simdgroup-uniform control flow on Metal: each lane reads its own entry.
+inline void decode_group(Group g, uint base_x4, device const uint4* escapes, thread uint (&r)[4]) {
+  if (g.meta == 0u) {
+    const uint4 v = escapes[g.lo0];
+    r[0] = v.x;
+    r[1] = v.y;
+    r[2] = v.z;
+    r[3] = v.w;
+  } else {
+    decode_bulk(g, base_x4, r);
+  }
+}
+
+struct NF12Source {
+  device const uint4* packed;   // super-atoms, 96 uint4 each
+  device const uint4* escapes;  // may be unused when the weight has none
+  uint base_x4;
+
+  // All four atoms of super-atom sa for this lane.
+  inline void load(ulong sa, uint lane, thread uint (&r)[4][4]) const {
+    device const uint4* src = packed + sa * (kSuperAtomBytes / 16) + lane;
+    const uint4 m = src[0];
+    const uint4 l01 = src[kPlaneBytes / 16];
+    const uint4 l23 = src[2 * kPlaneBytes / 16];
+    decode_group(Group{m.x, l01.x, l01.y}, base_x4, escapes, r[0]);
+    decode_group(Group{m.y, l01.z, l01.w}, base_x4, escapes, r[1]);
+    decode_group(Group{m.z, l23.x, l23.y}, base_x4, escapes, r[2]);
+    decode_group(Group{m.w, l23.z, l23.w}, base_x4, escapes, r[3]);
+  }
+};
+
+// Small M (GEMV-like). One simdgroup streams the super-atoms (nb, kb0..kb1) of
+// a 16-row block. Lane (g, t) accumulates rows g and g + 8 over its 16 columns
+// per super-atom for up to MT activation rows, whose element offsets in x are
+// xoff[m]. acc0/acc1 hold rows g / g + 8 and are reduced across t afterwards.
+template <uint MT, typename T>
+inline void gemv_accumulate(NF12Source src, ulong sa_base, uint kb0, uint kb1, device const T* x,
+                            const thread ulong (&xoff)[MT], uint lane, thread float (&acc0)[MT],
+                            thread float (&acc1)[MT]) {
+  const uint col = 2 * (lane & 3u);
+  for (uint kb = kb0; kb < kb1; ++kb) {
+    uint r[4][4];
+    src.load(sa_base + kb, lane, r);
+    float w0[16], w1[16];  // rows g / g + 8, columns 16j + col + {0, 1, 8, 9}
+    for (uint j = 0; j < 4; ++j) {
+      w0[4 * j + 0] = bf16_lo(r[j][0]);
+      w0[4 * j + 1] = bf16_hi(r[j][0]);
+      w0[4 * j + 2] = bf16_lo(r[j][2]);
+      w0[4 * j + 3] = bf16_hi(r[j][2]);
+      w1[4 * j + 0] = bf16_lo(r[j][1]);
+      w1[4 * j + 1] = bf16_hi(r[j][1]);
+      w1[4 * j + 2] = bf16_lo(r[j][3]);
+      w1[4 * j + 3] = bf16_hi(r[j][3]);
+    }
+    const ulong kcol = ulong(kb) * kSuperAtomCols + col;
+    for (uint m = 0; m < MT; ++m) {
+      device const T* xr = x + xoff[m] + kcol;
+      float a0 = acc0[m], a1 = acc1[m];
+      for (uint j = 0; j < 4; ++j) {
+        const float x0 = float(xr[16 * j]), x1 = float(xr[16 * j + 1]);
+        const float x8 = float(xr[16 * j + 8]), x9 = float(xr[16 * j + 9]);
+        a0 = fma(w0[4 * j + 0], x0, a0);
+        a0 = fma(w0[4 * j + 1], x1, a0);
+        a0 = fma(w0[4 * j + 2], x8, a0);
+        a0 = fma(w0[4 * j + 3], x9, a0);
+        a1 = fma(w1[4 * j + 0], x0, a1);
+        a1 = fma(w1[4 * j + 1], x1, a1);
+        a1 = fma(w1[4 * j + 2], x8, a1);
+        a1 = fma(w1[4 * j + 3], x9, a1);
+      }
+      acc0[m] = a0;
+      acc1[m] = a1;
+    }
+  }
+}
+
+// Sums the four t lanes of each g in a fixed order; every lane of the quad
+// ends with the same bits. Must be called by the whole simdgroup.
+template <uint MT>
+inline void gemv_reduce_quad(thread float (&acc0)[MT], thread float (&acc1)[MT]) {
+  for (uint m = 0; m < MT; ++m) {
+    acc0[m] += simd_shuffle_xor(acc0[m], ushort(1));
+    acc1[m] += simd_shuffle_xor(acc1[m], ushort(1));
+    acc0[m] += simd_shuffle_xor(acc0[m], ushort(2));
+    acc1[m] += simd_shuffle_xor(acc1[m], ushort(2));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Medium M (register MMA). Apple's 8x8 simdgroup_matrix fragment gives lane l
+// the elements (fm, fn) and (fm, fn + 1) with
+//   fm = (l / 4 & 4) + (l / 2) % 4,  fn = (l / 4 & 2) * 2 + (l % 2) * 2.
+// A decoded NF12 register is also a bf16 pair (row g, columns 2t, 2t + 1) of an
+// 8x8 quarter of an atom, so the A fragment of W[8h.., 16j + 8q..] is register
+// R[h + 2q] of lane 4 fm + fn / 2: one shuffle per fragment, no threadgroup
+// staging. B[k][m] = x[m][k] is loaded directly (rows fn, fn + 1 of the token tile).
+// One simdgroup streams the super-atoms of a 16-row block for MB 8-token tiles;
+// acc[h][mb] holds rows 8h..8h+7 x tokens 8mb..8mb+7.
+inline ushort2 mma_coord(uint lane) {  // (fm, fn)
+  const uint qid = lane / 4;
+  return ushort2((qid & 4u) + (lane / 2) % 4u, (qid & 2u) * 2 + (lane % 2u) * 2);
+}
+
+template <uint MB, typename T>
+inline void mma_accumulate(NF12Source src, ulong sa_base, uint kb0, uint kb1, device const T* x,
+                           const thread ulong (&xrow)[2 * MB], uint lane, thread simdgroup_float8x8 (&acc)[2][MB]) {
+  const ushort2 c = mma_coord(lane);
+  const ushort src_lane = ushort(4 * c.x + c.y / 2);
+  for (uint kb = kb0; kb < kb1; ++kb) {
+    uint r[4][4];
+    src.load(sa_base + kb, lane, r);
+    const ulong kcol = ulong(kb) * kSuperAtomCols + c.x;
+    for (uint j = 0; j < 4; ++j) {
+      for (uint q = 0; q < 2; ++q) {
+        simdgroup_float8x8 b[MB];
+        for (uint mb = 0; mb < MB; ++mb) {
+          const ulong k = kcol + 16 * j + 8 * q;
+          b[mb].thread_elements()[0] = float(x[xrow[2 * mb] + k]);
+          b[mb].thread_elements()[1] = float(x[xrow[2 * mb + 1] + k]);
+        }
+        for (uint h = 0; h < 2; ++h) {
+          const uint pair = simd_shuffle(r[j][h + 2 * q], src_lane);
+          simdgroup_float8x8 a;
+          a.thread_elements()[0] = bf16_lo(pair);
+          a.thread_elements()[1] = bf16_hi(pair);
+          for (uint mb = 0; mb < MB; ++mb) simdgroup_multiply_accumulate(acc[h][mb], a, b[mb], acc[h][mb]);
+        }
+      }
+    }
+  }
+}
+"""
+
+_LINEAR_SETUP = """
+    const uint lane = thread_index_in_simdgroup;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const uint nb = threadgroup_position_in_grid.x * BLOCKS + sg / SPLITS;
+    const uint ks = sg % SPLITS;
+    const uint kb0 = min(ks * KB_PER_SPLIT, uint(K_BLOCKS));
+    const uint kb1 = min(kb0 + KB_PER_SPLIT, uint(K_BLOCKS));
+    const uint m0 = threadgroup_position_in_grid.y * TILE_M;
+    const NF12Source src{
+        reinterpret_cast<device const uint4*>(packed),
+        reinterpret_cast<device const uint4*>(escapes),
+        exp_base_x4(exp_base[0]),
+    };
+"""
+
+_GEMV_SOURCE = _LINEAR_SETUP + """
+    ulong xoff[TILE_M];
+    float acc0[TILE_M] = {}, acc1[TILE_M] = {};
+    for (uint m = 0; m < TILE_M; ++m) xoff[m] = ulong(min(m0 + m, uint(M - 1))) * K;
+    if (nb < N / 16) gemv_accumulate<TILE_M>(src, ulong(nb) * K_BLOCKS, kb0, kb1, x, xoff, lane, acc0, acc1);
+    gemv_reduce_quad<TILE_M>(acc0, acc1);
+    const uint row = lane >> 2;
+    if (SPLITS == 1) {
+        if ((lane & 3) == 0 && nb < N / 16) {
+            const uint n = nb * 16 + row;
+            for (uint m = 0; m < TILE_M && m0 + m < M; ++m) {
+                device T* y = output + ulong(m0 + m) * N + n;
+                y[0] = T(acc0[m] + float(bias[n]));
+                y[8] = T(acc1[m] + float(bias[n + 8]));
+            }
+        }
+        return;
+    }
+    threadgroup float part[BLOCKS * SPLITS * TILE_M * 16];
+    if ((lane & 3) == 0) {
+        for (uint m = 0; m < TILE_M; ++m) {
+            part[(sg * TILE_M + m) * 16 + row] = acc0[m];
+            part[(sg * TILE_M + m) * 16 + row + 8] = acc1[m];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = thread_position_in_threadgroup.x; i < BLOCKS * TILE_M * 16; i += 32 * BLOCKS * SPLITS) {
+        const uint block = i / (TILE_M * 16), m = i / 16 % TILE_M, col = i % 16;
+        const uint n = (threadgroup_position_in_grid.x * BLOCKS + block) * 16 + col;
+        if (n >= N || m0 + m >= M) continue;
+        const uint offset = ((block * SPLITS) * TILE_M + m) * 16 + col;
+        float sum = part[offset];
+        for (uint s = 1; s < SPLITS; ++s) sum += part[offset + s * TILE_M * 16];
+        output[ulong(m0 + m) * N + n] = T(sum + float(bias[n]));
+    }
+"""
+
+_MMA_SOURCE = _LINEAR_SETUP + """
+    constexpr uint MB = TILE_M / 8;
+    const ushort2 c = mma_coord(lane);
+    ulong xrow[2 * MB];
+    for (uint mb = 0; mb < MB; ++mb) {
+        xrow[2 * mb] = ulong(min(m0 + 8 * mb + c.y, uint(M - 1))) * K;
+        xrow[2 * mb + 1] = ulong(min(m0 + 8 * mb + c.y + 1, uint(M - 1))) * K;
+    }
+    simdgroup_float8x8 acc[2][MB];
+    for (uint h = 0; h < 2; ++h)
+        for (uint mb = 0; mb < MB; ++mb) acc[h][mb] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+    if (nb < N / 16) mma_accumulate<MB>(src, ulong(nb) * K_BLOCKS, kb0, kb1, x, xrow, lane, acc);
+    if (SPLITS == 1) {
+        if (nb < N / 16) {
+            for (uint h = 0; h < 2; ++h) {
+                const uint n = nb * 16 + 8 * h + c.x;
+                const float b = float(bias[n]);
+                for (uint mb = 0; mb < MB; ++mb) {
+                    const uint m = m0 + 8 * mb + c.y;
+                    if (m < M) output[ulong(m) * N + n] = T(acc[h][mb].thread_elements()[0] + b);
+                    if (m + 1 < M) output[ulong(m + 1) * N + n] = T(acc[h][mb].thread_elements()[1] + b);
+                }
+            }
+        }
+        return;
+    }
+    threadgroup float part[BLOCKS * SPLITS * 16 * TILE_M];
+    threadgroup float* dst = part + sg * 16 * TILE_M;
+    for (uint h = 0; h < 2; ++h)
+        for (uint mb = 0; mb < MB; ++mb) simdgroup_store(acc[h][mb], dst + 8 * h * TILE_M + 8 * mb, TILE_M);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = thread_position_in_threadgroup.x; i < BLOCKS * 16 * TILE_M; i += 32 * BLOCKS * SPLITS) {
+        const uint block = i / (16 * TILE_M), col = i / TILE_M % 16, m = i % TILE_M;
+        const uint n = (threadgroup_position_in_grid.x * BLOCKS + block) * 16 + col;
+        if (n >= N || m0 + m >= M) continue;
+        const uint offset = ((block * SPLITS) * 16 + col) * TILE_M + m;
+        float sum = part[offset];
+        for (uint s = 1; s < SPLITS; ++s) sum += part[offset + s * 16 * TILE_M];
+        output[ulong(m0 + m) * N + n] = T(sum + float(bias[n]));
+    }
+"""
 
 
-def _row_blocks(rows, out_features):
-    """Adjacent 16-column blocks per threadgroup for the dot-product path.
-
-    Every output column needs the same activation values, so decoding several
-    blocks per threadgroup divides the per-step activation loads. The price is
-    ``rows * blocks`` accumulator pairs per thread, so the wide token counts
-    keep fewer blocks and stay out of a register spill, and a short output grid
-    keeps one block so the GPU still has a full wave of threadgroups. The block
-    count must divide the 16-column block count: the launch covers exactly
-    ``out_features // (16 * blocks)`` groups, so a non-divisor would floor the
-    grid and leave the trailing columns unwritten.
-    """
-    if rows > 12:
-        return 1
-    cap = 4 if rows <= 4 else 2
-    # One wave is 32 threadgroups; a shorter grid costs more than the shared
-    # activation loads save, so the block count shrinks with the output width.
-    blocks = min(cap, out_features // 512)
-    blocks = 1 if blocks < 2 else (2 if blocks < 4 else 4)
-    column_blocks = out_features // 16
-    while blocks > 1 and column_blocks % blocks:
-        blocks //= 2
-    return blocks
+@lru_cache(maxsize=2)
+def _linear_kernel(use_mma):
+    return mx.fast.metal_kernel(
+        name="gptqmodel_nf12_linear_mma" if use_mma else "gptqmodel_nf12_linear_gemv",
+        input_names=["x", "packed", "escapes", "exp_base", "bias"],
+        output_names=["output"],
+        header=_LINEAR_HEADER,
+        source=_MMA_SOURCE if use_mma else _GEMV_SOURCE,
+    )
 
 
 @lru_cache(maxsize=1)
 def _decode_kernel():
-    """Decode the packed stream into the exact BF16 weight matrix."""
-
     return mx.fast.metal_kernel(
-        name="gptqmodel_nf12_decode",
+        name="gptqmodel_nf12_linear_decode",
         input_names=["packed", "escapes", "exp_base"],
         output_names=["weight"],
+        header=_LINEAR_HEADER,
         source="""
-            uint col = thread_position_in_grid.x;
-            uint column = thread_position_in_grid.y;
-            uint base = (column >> 4) * SA_BYTES + (col >> 6) * 1536u;
-            uint lane = 4u * (column & 7u) + ((col >> 1) & 3u);
-            uint j = (col >> 4) & 3u;
-            uint meta_offset = base + lane * 16u + j * 4u;
-            uint low_offset = base + 512u + (j >> 1) * 512u + lane * 16u + (j & 1u) * 8u;
-            uint m0 = packed[meta_offset];
-            uint m1 = packed[meta_offset + 1u];
-            uint m2 = packed[meta_offset + 2u];
-            uint m3 = packed[meta_offset + 3u];
-            uint slot = 4u * ((col >> 3) & 1u) + 2u * ((column >> 3) & 1u) + (col & 1u);
-            uint bits;
-            if ((m0 | m1 | m2 | m3) == 0u) {
-                uint index = uint(packed[low_offset]) | (uint(packed[low_offset + 1u]) << 8)
-                    | (uint(packed[low_offset + 2u]) << 16) | (uint(packed[low_offset + 3u]) << 24);
-                bits = uint(uint16_t(escapes[index * 8u + slot]));
-            } else {
-                uint meta = slot < 2u ? m0 : (slot < 4u ? m1 : (slot < 6u ? m2 : m3));
-                uint high = (slot & 1u) == 0u ? (meta & 0x87u)
-                    : (((meta << 1u) & 0x80u) | ((meta >> 3u) & 0x07u));
-                high += uint(exp_base[0]);
-                bits = (high << 8u) | uint(packed[low_offset + slot]);
+            const uint gid = thread_position_in_grid.x;
+            const uint lane = gid % 32;
+            const ulong sa = gid / 32;
+            const NF12Source src{
+                reinterpret_cast<device const uint4*>(packed),
+                reinterpret_cast<device const uint4*>(escapes),
+                exp_base_x4(exp_base[0]),
+            };
+            uint r[4][4];
+            src.load(sa, lane, r);
+            const ulong row = (sa / K_BLOCKS) * 16 + (lane >> 2);
+            const ulong col = (sa % K_BLOCKS) * 64 + 2 * (lane & 3);
+            device T* dst = weight + row * K + col;
+            for (uint j = 0; j < 4; ++j) {
+                for (uint i = 0; i < 4; ++i) {
+                    const uint offset = 16 * j + 8 * (i >> 1) + (i & 1) * 8 * K;
+                    const uint pair = r[j][i];
+                    if (WIDE) {
+                        *reinterpret_cast<device float2*>(dst + offset) = float2(bf16_lo(pair), bf16_hi(pair));
+                    } else {
+                        *reinterpret_cast<device uint*>(dst + offset) = pair;
+                    }
+                }
             }
-            weight[column * K + col] = bfloat16_t(as_type<float>(bits << 16));
         """,
     )
 
 
-_PREFILL_SOURCE = """
-            uint physical = thread_position_in_threadgroup.x;
-            uint simdgroup = physical >> 5;
-            uint column_block = threadgroup_position_in_grid.y;
-            uint split = threadgroup_position_in_grid.z / ROW_BLOCKS;
-            uint row_base = (threadgroup_position_in_grid.z % ROW_BLOCKS) * 16u;
-            threadgroup uint words[384];
-            threadgroup float tile_weight[64 * TILE_COLUMNS];
-            threadgroup float tile_input[16 * 64];
-            threadgroup float tile_out[16 * TILE_COLUMNS];
-            simdgroup_float8x8 accumulator = make_filled_simdgroup_matrix<float, 8>(0.0f);
-            uint exp_base_value = uint(exp_base[0]);
+def _linear_launch(rows, out_features, in_features):
+    use_mma = rows > 4
+    tile_rows = 1 << (rows - 1).bit_length()
+    n_blocks = out_features // 16
+    k_blocks = in_features // 64
 
-            for (uint super_atom = split; super_atom < SA_ROW; super_atom += SPLITS) {
-                // Super-atoms are contiguous 1536-byte blocks in the packed
-                // stream; a 16-row block starts SA_BYTES words in.
-                uint base = column_block * SA_BYTES + super_atom * 384u;
-                for (uint index = physical; index < 384u; index += THREADS) {
-                    words[index] = ((const device uint *)packed)[base + index];
-                }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-
-                // The decode is driven by the layout: one (lane, j) group is
-                // three shared words that expand to eight BF16 values. The
-                // slots are unrolled so every shift and mask is a constant.
-                for (uint group = physical; group < 128u; group += THREADS) {
-                    uint lane = group >> 2;
-                    uint j = group & 3u;
-                    uint meta = words[lane * 4u + j];
-                    uint low0 = words[128u + (j >> 1) * 128u + lane * 4u + (j & 1u) * 2u];
-                    uint low1 = words[129u + (j >> 1) * 128u + lane * 4u + (j & 1u) * 2u];
-                    uint k_j = 16u * j + 2u * (lane & 3u);
-                    uint row_rh = lane >> 2;
-                    if (meta == 0u) {
-                        tile_weight[(k_j + 0u) * TILE_COLUMNS + row_rh] = as_type<float>(uint(uint16_t(escapes[low0 * 8u + 0u])) << 16u);
-                        tile_weight[(k_j + 1u) * TILE_COLUMNS + row_rh] = as_type<float>(uint(uint16_t(escapes[low0 * 8u + 1u])) << 16u);
-                        tile_weight[(k_j + 0u) * TILE_COLUMNS + row_rh + 8u] = as_type<float>(uint(uint16_t(escapes[low0 * 8u + 2u])) << 16u);
-                        tile_weight[(k_j + 1u) * TILE_COLUMNS + row_rh + 8u] = as_type<float>(uint(uint16_t(escapes[low0 * 8u + 3u])) << 16u);
-                        tile_weight[(k_j + 8u) * TILE_COLUMNS + row_rh] = as_type<float>(uint(uint16_t(escapes[low0 * 8u + 4u])) << 16u);
-                        tile_weight[(k_j + 9u) * TILE_COLUMNS + row_rh] = as_type<float>(uint(uint16_t(escapes[low0 * 8u + 5u])) << 16u);
-                        tile_weight[(k_j + 8u) * TILE_COLUMNS + row_rh + 8u] = as_type<float>(uint(uint16_t(escapes[low0 * 8u + 6u])) << 16u);
-                        tile_weight[(k_j + 9u) * TILE_COLUMNS + row_rh + 8u] = as_type<float>(uint(uint16_t(escapes[low0 * 8u + 7u])) << 16u);
-                    } else {
-                        uint m0 = meta & 0xFFu;
-                        uint m1 = (meta >> 8u) & 0xFFu;
-                        uint m2 = (meta >> 16u) & 0xFFu;
-                        uint m3 = (meta >> 24u) & 0xFFu;
-                        tile_weight[(k_j + 0u) * TILE_COLUMNS + row_rh] = as_type<float>(((((m0 & 0x87u) + exp_base_value) << 8u) | (low0 & 0xFFu)) << 16u);
-                        tile_weight[(k_j + 1u) * TILE_COLUMNS + row_rh] = as_type<float>(((((((m0 << 1u) & 0x80u) | ((m0 >> 3u) & 0x07u)) + exp_base_value) << 8u) | ((low0 >> 8u) & 0xFFu)) << 16u);
-                        tile_weight[(k_j + 0u) * TILE_COLUMNS + row_rh + 8u] = as_type<float>(((((m1 & 0x87u) + exp_base_value) << 8u) | ((low0 >> 16u) & 0xFFu)) << 16u);
-                        tile_weight[(k_j + 1u) * TILE_COLUMNS + row_rh + 8u] = as_type<float>(((((((m1 << 1u) & 0x80u) | ((m1 >> 3u) & 0x07u)) + exp_base_value) << 8u) | ((low0 >> 24u) & 0xFFu)) << 16u);
-                        tile_weight[(k_j + 8u) * TILE_COLUMNS + row_rh] = as_type<float>(((((m2 & 0x87u) + exp_base_value) << 8u) | (low1 & 0xFFu)) << 16u);
-                        tile_weight[(k_j + 9u) * TILE_COLUMNS + row_rh] = as_type<float>(((((((m2 << 1u) & 0x80u) | ((m2 >> 3u) & 0x07u)) + exp_base_value) << 8u) | ((low1 >> 8u) & 0xFFu)) << 16u);
-                        tile_weight[(k_j + 8u) * TILE_COLUMNS + row_rh + 8u] = as_type<float>(((((m3 & 0x87u) + exp_base_value) << 8u) | ((low1 >> 16u) & 0xFFu)) << 16u);
-                        tile_weight[(k_j + 9u) * TILE_COLUMNS + row_rh + 8u] = as_type<float>(((((((m3 << 1u) & 0x80u) | ((m3 >> 3u) & 0x07u)) + exp_base_value) << 8u) | ((low1 >> 24u) & 0xFFu)) << 16u);
-                    }
-                }
-                for (uint position = physical; position < 1024u; position += THREADS) {
-                    uint token = position >> 6;
-                    uint k_local = position & 63u;
-                    tile_input[position] = row_base + token < ROWS
-                        ? float(x[(row_base + token) * K + super_atom * 64u + k_local])
-                        : 0.0f;
-                }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-
-                if (simdgroup < SIMD_GROUPS) {
-                    uint input_row = (simdgroup / COLUMN_GROUPS) * 512u;
-                    uint weight_column = (simdgroup % COLUMN_GROUPS) * 8u;
-                    simdgroup_float8x8 input_fragment;
-                    simdgroup_float8x8 weight_fragment;
-                    for (uint part = 0; part < 8u; ++part) {
-                        simdgroup_load(input_fragment, tile_input + input_row + part * 8u, 64u);
-                        simdgroup_load(
-                            weight_fragment,
-                            tile_weight + part * 8u * TILE_COLUMNS + weight_column,
-                            TILE_COLUMNS
-                        );
-                        simdgroup_multiply_accumulate(
-                            accumulator, input_fragment, weight_fragment, accumulator
-                        );
-                    }
-                }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-
-            if (simdgroup < SIMD_GROUPS) {
-                simdgroup_store(
-                    accumulator,
-                    tile_out + (simdgroup / COLUMN_GROUPS) * 8u * TILE_COLUMNS
-                        + (simdgroup % COLUMN_GROUPS) * 8u,
-                    TILE_COLUMNS
-                );
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            // The accumulator is only reachable through threadgroup memory, so
-            // the bias and the single output rounding happen here.
-            for (uint position = physical; position < 16u * TILE_COLUMNS; position += THREADS) {
-                uint r = position / TILE_COLUMNS;
-                uint c = position % TILE_COLUMNS;
-                uint row = row_base + r;
-                if (row >= ROWS) continue;
-                uint column = column_block * TILE_COLUMNS + c;
-                float value = tile_out[position];
-                if (SPLITS == 1) {
-                    output[row * N + column] = OUTPUT_TYPE(value + bias[column]);
-                } else {
-                    output[split * ROWS * N + row * N + column] = OUTPUT_TYPE(value);
-                }
-            }
-"""
-
-
-@lru_cache(maxsize=3)
-def _prefill_kernel(output_dtype):
-    """Decode a super-atom per K step and multiply it on the matrix units.
-
-    A super-atom is exactly 16 weight rows by 64 K values in 1536 bytes, so the
-    threadgroup that owns those 16 output columns reads it with coalesced
-    "'``uint32`` loads and decodes it out of threadgroup memory. Reading the packed
-    bytes in place instead issues one 1-byte load per meta byte, which costs four
-    memory transactions for every word it touches.
-
-    The decode is driven by the layout itself: one "'``(lane, j)`` group is three
-    contiguous words that expand to eight BF16 values, so 128 threads decode a
-    whole super-atom with three shared loads each. The result is staged as
-    `[k][out]`, the operand order `simdgroup_multiply_accumulate` expects for
-    `x @ W.T`, so no dense BF16 weight is ever written.
-    """
-
-    output_types = {
-        mx.float16: ("fp16", "half"),
-        mx.bfloat16: ("bf16", "bfloat16_t"),
-        mx.float32: ("fp32", "float"),
-    }
-    try:
-        output_suffix, output_type = output_types[output_dtype]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported NF12 activation dtype: {output_dtype}") from exc
-    return mx.fast.metal_kernel(
-        name=f"gptqmodel_nf12_prefill_{output_suffix}",
-        input_names=["x", "packed", "escapes", "exp_base", "bias"],
-        output_names=["output"],
-        header="#include <metal_simdgroup_matrix>\n",
-        source=_PREFILL_SOURCE.replace("OUTPUT_TYPE", output_type),
-    )
-
-
-@lru_cache(maxsize=3)
-def _reduce_kernel(output_dtype):
-    """Sum the split-K partials, add the bias, and round once."""
-
-    output_types = {
-        mx.float16: ("fp16", "half"),
-        mx.bfloat16: ("bf16", "bfloat16_t"),
-        mx.float32: ("fp32", "float"),
-    }
-    try:
-        output_suffix, output_type = output_types[output_dtype]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported NF12 activation dtype: {output_dtype}") from exc
-    return mx.fast.metal_kernel(
-        name=f"gptqmodel_nf12_reduce_{output_suffix}",
-        input_names=["partial", "bias"],
-        output_names=["output"],
-        source="""
-            uint index = thread_position_in_grid.x;
-            uint column = index % N;
-            float total = 0.0f;
-            for (uint split = 0; split < SPLITS; ++split) {
-                total += partial[split * ROWS_N + index];
-            }
-            output[index] = OUTPUT_TYPE(total + bias[column]);
-        """.replace("OUTPUT_TYPE", output_type),
-    )
-
-
-def _rows_body(rows, blocks):
-    """Unrolled slot decode plus one FMA per token row, over ``blocks`` columns.
-
-    The decode builds each BF16 word from its meta nibble and low byte with the
-    fewest integer ops that fit: the exponent byte is shifted straight to the
-    top of the word, the low byte is masked into place, and the loop prefetches
-    the next super-atom so the load latency overlaps the current step's ALU.
-
-    A threadgroup owns ``blocks`` adjacent 16-column blocks and decodes them
-    from the same activation values, because ``x`` does not depend on the output
-    column. That is what makes the wide token counts fast: at eight rows the
-    per-step activation loads outnumber the packed loads, and sharing them
-    across blocks removes most of that traffic without touching the weight
-    stream.
-    """
-
-    def slots(escaped, pad, block):
-        out = []
-        for s in range(8):
-            ch, rh, p = s >> 2, (s >> 1) & 1, s & 1
-            low = f"{'low0' if s < 4 else 'low1'}_{block}"
-            byte = s & 3
-            k = f"k_j + {8 * ch + p}u"
-            # (byte << 16) written as a masked shift of the source word.
-            shift = {0: "<< 16u", 1: "<< 8u", 2: "", 3: ">> 8u"}[byte]
-            if escaped:
-                # The escape table is indexed by the group's first low word.
-                bits = f"uint(uint16_t(escapes[low0_{block} * 8u + {s}u])) << 16u"
-            else:
-                meta = f"m{s >> 1}"
-                high = (f"({meta} & 0x87u)" if p == 0
-                        else f"((({meta} << 1u) & 0x80u) | (({meta} >> 3u) & 0x07u))")
-                bits = (
-                    f"((({high} + exp_base_value) << 24u)"
-                    f" | (({low} {shift}) & 0x00FF0000u))"
-                )
-            out.append(f"{pad}weight = as_type<float>({bits});")
-            for r in range(rows):
-                out.append(
-                    f"{pad}sum_{block}_{r}_{rh} = metal::fma("
-                    f"float(x[{r} * K + {k}]), weight, sum_{block}_{r}_{rh});"
-                )
-        return "\n".join(out)
-
-    decls = "\n".join(
-        f"            float sum_{b}_{r}_{rh} = 0.0f;"
-        for b in range(blocks) for r in range(rows) for rh in (0, 1)
-    )
-    pre = ""
-    prefetch = ""
-    advance = ""
-    for b in range(blocks):
-        off = "" if b == 0 else f" + {b}u * SA_BYTES"
-        pre += f"""
-            uint meta_{b} = base[meta_word{off}];
-            uint low0_{b} = base[low_word{off}];
-            uint low1_{b} = base[low_word + 1u{off}];"""
-        prefetch += f"""
-                uint next_meta_{b} = next[meta_word{off}];
-                uint next_low0_{b} = next[low_word{off}];
-                uint next_low1_{b} = next[low_word + 1u{off}];"""
-        advance += f"""
-                meta_{b} = next_meta_{b};
-                low0_{b} = next_low0_{b};
-                low1_{b} = next_low1_{b};"""
-    decode = ""
-    for b in range(blocks):
-        decode += f"""
-                {{
-                    uint meta = meta_{b};
-                    // A group whose four meta bytes are all zero carries its
-                    // eight BF16 words in the escape table.
-                    if (meta == 0u) {{
-{slots(True, "                        ", b)}
-                    }} else {{
-                        uint m0 = meta & 0xFFu;
-                        uint m1 = (meta >> 8u) & 0xFFu;
-                        uint m2 = (meta >> 16u) & 0xFFu;
-                        uint m3 = (meta >> 24u) & 0xFFu;
-{slots(False, "                        ", b)}
-                    }}
-                }}"""
-    loop = f"""
-{decls}
-
-            // Double-buffer the super-atom stream: the next step's words are in
-            // flight while this step decodes and accumulates.
-            const device uint *base = (const device uint *)packed;{pre}
-            for (uint step = 0; step < SA_ROW; ++step) {{
-                const device uint *next = base + min(step + 1u, SA_ROW - 1u) * 384u;{prefetch}
-                uint k_j = step * 64u + 16u * j + 2u * (lane & 3u);{decode}{advance}
-            }}
-"""
-    tail = ""
-    for b in range(blocks):
-        for r in range(rows):
-            tail += f"""
-            // A butterfly over the 16 threads that share a column halves the
-            // tail four times, then the surviving lane writes both weight rows.
-            float v0_{b}_{r} = sum_{b}_{r}_0;
-            float v1_{b}_{r} = sum_{b}_{r}_1;
-            v0_{b}_{r} += simd_shuffle_xor(v0_{b}_{r}, 8u);
-            v0_{b}_{r} += simd_shuffle_xor(v0_{b}_{r}, 4u);
-            v0_{b}_{r} += simd_shuffle_xor(v0_{b}_{r}, 2u);
-            v0_{b}_{r} += simd_shuffle_xor(v0_{b}_{r}, 1u);
-            v1_{b}_{r} += simd_shuffle_xor(v1_{b}_{r}, 8u);
-            v1_{b}_{r} += simd_shuffle_xor(v1_{b}_{r}, 4u);
-            v1_{b}_{r} += simd_shuffle_xor(v1_{b}_{r}, 2u);
-            v1_{b}_{r} += simd_shuffle_xor(v1_{b}_{r}, 1u);
-            if ((physical & 15u) == 0u) {{
-                uint column = (column_block + {b}u) * 16u + (physical >> 4);
-                output[{r} * N + column] = OUTPUT_TYPE(v0_{b}_{r} + bias[column]);
-                output[{r} * N + column + 8u] = OUTPUT_TYPE(v1_{b}_{r} + bias[column + 8u]);
-            }}
-"""
-    return loop + tail
-
-
-_ROWS_SOURCE_HEAD = """            uint physical = thread_position_in_threadgroup.x;
-            uint column_block = threadgroup_position_in_grid.y * BLOCKS;
-            uint lane = physical >> 2;
-            uint j = physical & 3u;
-            float weight = 0.0f;
-            uint exp_base_value = uint(exp_base[0]);
-            // Consecutive threads read consecutive words, so a group's three
-            // loads coalesce without staging the super-atom in shared memory.
-            uint meta_word = column_block * SA_BYTES + lane * 4u + j;
-            uint low_word = column_block * SA_BYTES + 128u + (j >> 1) * 128u + lane * 4u + (j & 1u) * 2u;
-__BODY__"""
-
-
-def _rows_source(rows, blocks):
-    """Build the packed-decode GEMV body for one token count and block count.
-
-    Each thread owns one ``(lane, j)`` group, which is three words that expand
-    to eight BF16 values covering two weight rows. The eight slots are unrolled
-    so every shift and mask is a compile-time constant, the escape test is
-    hoisted out of the value loop, and one accumulator per token row keeps the
-    packed read amortized across the whole block.
-    """
-
-    return _ROWS_SOURCE_HEAD.replace("__BODY__", _rows_body(rows, blocks))
-
-
-@lru_cache(maxsize=64)
-def _rows_kernel(rows, blocks, output_dtype):
-    """Decode-plus-dot kernel for 1..16 tokens, ``16 * blocks`` columns per group."""
-
-    output_types = {
-        mx.float16: ("fp16", "half"),
-        mx.bfloat16: ("bf16", "bfloat16_t"),
-        mx.float32: ("fp32", "float"),
-    }
-    try:
-        output_suffix, output_type = output_types[output_dtype]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported NF12 activation dtype: {output_dtype}") from exc
-    return mx.fast.metal_kernel(
-        name=f"gptqmodel_nf12_rows{rows}x{blocks}_{output_suffix}",
-        input_names=["x", "packed", "escapes", "exp_base", "bias"],
-        output_names=["output"],
-        source=_rows_source(rows, blocks).replace("OUTPUT_TYPE", output_type),
-    )
-
-
-def _tile_template(layer, rows, padded, splits, threads, tile_columns):
-    """Template constants for the fused tile kernel."""
-    return [
-        ("K", layer.in_features), ("N", layer.out_features),
-        ("ROWS", rows), ("PADDED", padded),
-        ("SA_ROW", layer.in_features // 64),
-        # Words per 16-row block: 16 rows of 1.5 bytes per weight.
-        ("SA_BYTES", layer.in_features * 6),
-        ("SPLITS", splits), ("ROW_BLOCKS", padded // 16),
-        ("THREADS", threads), ("TILE_COLUMNS", tile_columns),
-        # The tile is 16 token rows, so the 8x8 grid has two row groups; extra
-        # threads only join the decode and load loops.
-        ("COLUMN_GROUPS", tile_columns // 8),
-        ("SIMD_GROUPS", (tile_columns // 8) * 2),
-    ]
+    # Split K for occupancy. Each split gets at least two super-atoms, and
+    # the threadgroup is limited to eight SIMD groups across output blocks.
+    splits = 1
+    while splits < 8 and n_blocks * splits < 2048 and k_blocks >= 4 * splits:
+        splits *= 2
+    blocks = min(8 // splits, n_blocks)
+    grid_n = (n_blocks + blocks - 1) // blocks
+    grid_m = (rows + tile_rows - 1) // tile_rows
+    return use_mma, tile_rows, splits, blocks, grid_n, grid_m
 
 
 class MlxNF12Linear(nn.Module):
-    """Multiply activations by the packed NF12 weight without dense expansion."""
+    """Multiply activations by a packed NF12 weight on Metal."""
 
     def __init__(
         self,
@@ -488,132 +365,69 @@ class MlxNF12Linear(nn.Module):
         self.exp_base = mx.zeros((1,), dtype=mx.uint8)
         # A zero bias keeps one fused kernel for biased and unbiased layers.
         self.bias = mx.zeros((out_features,), dtype=mx.float32)
-        # A single row uses the GEMV: it reads the packed bytes once and needs
-        # no second dispatch, which is the whole cost at that size.
         self.freeze()
 
-    def _decode(self):
+    def _decode(self, start=0, end=None, *, dtype=mx.bfloat16):
+        """Decode a 16-row-aligned slice for the current matmul."""
+        end = self.out_features if end is None else end
+        rows = end - start
         return _decode_kernel()(
-            inputs=[self.packed, self.escapes, self.exp_base],
-            template=[("K", self.in_features), ("SA_BYTES", self.in_features // 64 * _SUPER_ATOM_BYTES)],
-            grid=(self.in_features, self.out_features, 1),
-            threadgroup=(_THREADS, 1, 1),
-            output_shapes=[(self.out_features, self.in_features)],
-            output_dtypes=[mx.bfloat16],
-        )[0]
-
-    def _splits(self, rows):
-        """Split K only when the 16-column tile grid would starve the GPU."""
-        blocks = (self.out_features // 16) * ((rows + 15) // 16)
-        super_atoms = self.in_features // 64
-        splits = 1
-        while (
-            blocks * splits * 2 <= _TARGET_TILES
-            and splits * 2 <= super_atoms
-            and splits < _MAX_SPLITS
-        ):
-            splits *= 2
-        return splits
-
-    def _prefill(self, x, rows):
-        """Fused decode-plus-MMA tile for exactly 16 tokens on a wide output."""
-        tile_columns = 16
-        threads = tile_columns * 8
-        padded = ((rows + 15) // 16) * 16
-        splits = self._splits(rows)
-        # MLX takes the grid in threads: x spans one threadgroup, y and z index
-        # the threadgroups.
-        grid = (threads, self.out_features // tile_columns, splits * (padded // 16))
-        kernel = _prefill_kernel(x.dtype)
-        if splits == 1:
-            return kernel(
-                inputs=[x, self.packed, self.escapes, self.exp_base, self.bias],
-                template=_tile_template(self, rows, padded, splits, threads, tile_columns),
-                grid=grid,
-                threadgroup=(threads, 1, 1),
-                output_shapes=[(padded, self.out_features)],
-                output_dtypes=[x.dtype],
-            )[0][:rows]
-        partial = _prefill_kernel(mx.float32)(
-            inputs=[x, self.packed, self.escapes, self.exp_base, self.bias],
-            template=_tile_template(self, rows, padded, splits, threads, tile_columns),
-            grid=grid,
-            threadgroup=(threads, 1, 1),
-            output_shapes=[(splits, rows, self.out_features)],
-            output_dtypes=[mx.float32],
-        )[0]
-        rows_n = rows * self.out_features
-        return _reduce_kernel(x.dtype)(
-            inputs=[partial, self.bias],
-            template=[("N", self.out_features), ("SPLITS", splits), ("ROWS_N", rows_n)],
-            grid=(rows_n, 1, 1),
-            threadgroup=(256, 1, 1),
-            output_shapes=[(rows, self.out_features)],
-            output_dtypes=[x.dtype],
-        )[0]
-
-    def _rows(self, x, rows):
-        """Packed-decode dot product for 1..16 tokens.
-
-        One threadgroup reads each 1536-byte super-atom exactly once and keeps
-        one accumulator per token row, so a wider block costs FMAs but no extra
-        weight traffic. It also owns several adjacent 16-column blocks, because
-        the activation values are shared by every output column: decoding four
-        blocks from one set of activation loads is what makes the wide token
-        counts fast. That beats the MMA tile up to fifteen rows on this GPU,
-        where the tile's per-super-atom barriers cost more than the matrix units
-        save.
-        """
-        threads = 128
-        blocks = _row_blocks(rows, self.out_features)
-        return _rows_kernel(rows, blocks, x.dtype)(
-            inputs=[x.reshape(rows, self.in_features), self.packed, self.escapes,
-                    self.exp_base, self.bias],
+            inputs=[self.packed[start:end], self.escapes, self.exp_base],
             template=[
-                ("K", self.in_features), ("N", self.out_features),
-                ("ROWS", rows), ("SA_ROW", self.in_features // 64),
-                # Words per 16-row block: 16 rows of 1.5 bytes per weight.
-                ("SA_BYTES", self.in_features * 6),
-                ("BLOCKS", blocks),
+                ("T", dtype), ("K", self.in_features), ("K_BLOCKS", self.in_features // 64),
+                ("WIDE", dtype == mx.float32),
             ],
-            grid=(threads, self.out_features // (16 * blocks), 1),
+            grid=(rows * self.in_features // 32, 1, 1),
+            threadgroup=(_THREADS, 1, 1),
+            output_shapes=[(rows, self.in_features)],
+            output_dtypes=[dtype],
+        )[0]
+
+    def _fused_linear(self, x, rows):
+        use_mma, tile_rows, splits, blocks, grid_n, grid_m = _linear_launch(
+            rows, self.out_features, self.in_features,
+        )
+        k_blocks = self.in_features // 64
+        threads = 32 * splits * blocks
+        return _linear_kernel(use_mma)(
+            inputs=[x, self.packed, self.escapes, self.exp_base, self.bias],
+            template=[
+                ("T", x.dtype), ("K", self.in_features), ("N", self.out_features), ("M", rows),
+                ("K_BLOCKS", k_blocks), ("KB_PER_SPLIT", (k_blocks + splits - 1) // splits),
+                ("TILE_M", tile_rows), ("SPLITS", splits), ("BLOCKS", blocks),
+            ],
+            grid=(threads * grid_n, grid_m, 1),
             threadgroup=(threads, 1, 1),
             output_shapes=[(rows, self.out_features)],
             output_dtypes=[x.dtype],
         )[0]
+
+    def _decode_matmul(self, x):
+        # BF16 addmm reduces and adds a BF16 bias in FP32 before rounding.
+        # Use FP32 operands when either input or bias needs wider precision.
+        compute = mx.bfloat16 if x.dtype == self.bias.dtype == mx.bfloat16 else mx.float32
+        element_bytes = 2 if compute == mx.bfloat16 else 4
+        slice_rows = max(16, _DECODE_SLICE_BYTES // (self.in_features * element_bytes * 16) * 16)
+        activations = x.astype(compute)
+        parts = []
+        for start in range(0, self.out_features, slice_rows):
+            end = min(start + slice_rows, self.out_features)
+            weight = self._decode(start, end, dtype=compute)
+            parts.append(mx.addmm(self.bias[start:end], activations, weight.T).astype(x.dtype))
+        return parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=-1)
 
     def __call__(self, x):
         if x.shape[-1] != self.in_features:
             raise ValueError(f"expected input width {self.in_features}, got {x.shape[-1]}")
         output_shape = (*x.shape[:-1], self.out_features)
-        if x.size == 0:
+        if x.size == 0 or self.out_features == 0:
             return mx.zeros(output_shape, dtype=x.dtype)
         if x.dtype not in (mx.float16, mx.bfloat16, mx.float32):
             raise ValueError(f"Unsupported NF12 activation dtype: {x.dtype}")
         rows = x.size // self.in_features
-        if rows <= _PREFILL_ROWS and not (
-            rows == _PREFILL_ROWS and self.out_features >= _TILE_MIN_OUT_FEATURES
-        ):
-            # One dispatch: the decode never leaves the dot product. At 1..15
-            # tokens this beats the MMA tile at every width measured on this
-            # GPU, because the tile pays a barrier per super-atom and the dot
-            # product does not; only a full 16-row tile on a wide output has
-            # enough matrix-unit work to win back that cost.
-            return self._rows(x, rows).reshape(output_shape)
-        if rows <= _PREFILL_ROWS:
-            # A full 16-row tile on a wide output: the packed stream is read
-            # once, straight into the matrix units, instead of round-tripping a
-            # dense BF16 weight.
-            return self._prefill(x.reshape(rows, self.in_features), rows).reshape(output_shape)
-        # NF12 weights are BF16, so the multiply stays in BF16 for FP16/BF16
-        # activations; FP32 activations widen the exact decode instead of
-        # rounding it down.
-        compute = mx.float32 if x.dtype == mx.float32 else mx.bfloat16
-        weight = self._decode()
-        if compute != mx.bfloat16:
-            weight = weight.astype(compute)
-        output = mx.matmul(x.astype(compute), weight.T) + self.bias
-        return output.astype(x.dtype).reshape(output_shape)
+        x = x.reshape(rows, self.in_features)
+        out = self._fused_linear(x, rows) if rows <= 16 else self._decode_matmul(x)
+        return out.reshape(output_shape)
 
 
 _EMBED_SOURCE = """            uint physical = thread_position_in_threadgroup.x;

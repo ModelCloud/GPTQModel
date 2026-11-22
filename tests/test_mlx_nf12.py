@@ -85,6 +85,7 @@ def test_nf12_mlx_decode_is_bit_exact(monkeypatch, escapes):
     model, config = _transfer(monkeypatch, source)
     assert isinstance(model.proj, MlxNF12Linear)
     assert config["_gptqmodel_custom_mlx_runtime"]
+    assert model.proj.bias.dtype == mx.float32
 
     decoded = model.proj._decode()
     mx.eval(decoded)
@@ -110,7 +111,7 @@ def test_nf12_mlx_forward_matches_torch(monkeypatch, escapes, rows):
         torch.from_numpy(x).to(torch.bfloat16).float() @ weight.float().T
         + source.bias.float()
     ).to(torch.bfloat16).float().numpy()
-    actual = model(mx.array(x))
+    actual = model(mx.array(x).astype(mx.bfloat16))
     mx.eval(actual)
     np.testing.assert_allclose(
         np.array(actual.astype(mx.float32)), expected, rtol=3e-2, atol=2e-3,
@@ -196,97 +197,6 @@ def test_nf12_mlx_fused_tile_matches_the_codec_oracle(monkeypatch, in_features, 
 
 
 @requires_metal
-def test_nf12_mlx_row_count_dispatch(monkeypatch):
-    """1..15 rows use the decode-plus-dot kernel, 16 the tile, 17+ one decode."""
-    from gptqmodel.nn_modules.qlinear import mlx_nf12
-    from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Linear
-
-    source = _source(in_features=256, out_features=48)
-    model, _ = _transfer(monkeypatch, source)
-    proj = model.proj
-    assert isinstance(proj, MlxNF12Linear)
-
-    rng = np.random.default_rng(37)
-    for rows in (1, 2, 4, 8):
-        x = rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)
-        direct = proj._rows(mx.array(x), rows)
-        actual = model(mx.array(x))
-        mx.eval(direct, actual)
-        np.testing.assert_array_equal(
-            np.array(actual.astype(mx.float32)), np.array(direct.astype(mx.float32)),
-        )
-
-    # The decode-plus-dot kernel owns everything below the full 16-row tile,
-    # whatever the output width: the tile's per-super-atom barriers only pay
-    # for themselves at exactly 16 rows.
-    for rows in (9, 12, 16):
-        x = rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)
-        direct = proj._rows(mx.array(x), rows)
-        actual = model(mx.array(x))
-        mx.eval(direct, actual)
-        np.testing.assert_array_equal(
-            np.array(actual.astype(mx.float32)), np.array(direct.astype(mx.float32)),
-        )
-
-    # A 16-row tile on a wide output takes the fused matrix-unit path.
-    monkeypatch.setattr(mlx_nf12, "_TILE_MIN_OUT_FEATURES", 0)
-    rows = 16
-    x = rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)
-    # The tile epilogue applies the bias (and the split-K reduce does too).
-    tiled = proj._prefill(mx.array(x), rows)
-    actual = model(mx.array(x))
-    mx.eval(tiled, actual)
-    np.testing.assert_array_equal(
-        np.array(actual.astype(mx.float32)), np.array(tiled.astype(mx.float32)),
-    )
-
-    rows = 17
-    x = mx.array(rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)).astype(mx.bfloat16)
-    split = (mx.matmul(x, proj._decode().T) + proj.bias).astype(x.dtype)
-    actual = model(x)
-    mx.eval(split, actual)
-    np.testing.assert_allclose(
-        np.array(actual.astype(mx.float32)), np.array(split.astype(mx.float32)),
-        rtol=0, atol=0,
-    )
-
-
-@requires_metal
-def test_nf12_mlx_wide_output_shares_activation_loads(monkeypatch):
-    """A wide output decodes several column blocks from one activation load."""
-    from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Linear, _row_blocks
-
-    # Narrow outputs keep one block so the grid still covers the GPU; wide
-    # outputs take four blocks for the short token counts and two for 5..12.
-    assert _row_blocks(1, 48) == 1
-    assert _row_blocks(1, 512) == 1
-    assert _row_blocks(1, 1024) == 2
-    assert _row_blocks(1, 2048) == 4
-    assert _row_blocks(4, 2048) == 4
-    assert _row_blocks(8, 2048) == 2
-    assert _row_blocks(12, 2048) == 2
-    assert _row_blocks(16, 2048) == 1
-    assert _row_blocks(1, 128256) == 4
-
-    source = _source(in_features=256, out_features=1024)
-    model, _ = _transfer(monkeypatch, source)
-    assert isinstance(model.proj, MlxNF12Linear)
-    weight = source.dequantize_weight(dtype=torch.bfloat16)
-    rng = np.random.default_rng(41)
-    for rows in (1, 4, 8, 12):
-        x = rng.normal(0, 0.2, (rows, source.in_features)).astype(np.float32)
-        expected = (
-            torch.from_numpy(x).to(torch.bfloat16).float() @ weight.float().T
-            + source.bias.float()
-        ).to(torch.bfloat16).float().numpy()
-        actual = model(mx.array(x))
-        mx.eval(actual)
-        np.testing.assert_allclose(
-            np.array(actual.astype(mx.float32)), expected, rtol=3e-2, atol=2e-3,
-        )
-
-
-@requires_metal
 def test_nf12_mlx_embedding_matches_the_table():
     """Packed rows gather bit-exactly; out-of-range IDs give +0.0 rows."""
     from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Embedding
@@ -317,3 +227,62 @@ def test_nf12_mlx_embedding_matches_the_table():
     grid = table(mx.array(np.arange(6, dtype=np.int32).reshape(2, 3)))
     mx.eval(grid)
     assert grid.shape == (2, 3, source.in_features)
+
+
+@pytest.mark.parametrize(("dtype", "bias_dtype"), [
+    (mx.float16, mx.float32), (mx.bfloat16, mx.float32),
+    (mx.float32, mx.float32), (mx.bfloat16, mx.bfloat16),
+])
+@pytest.mark.parametrize("rows", [1, 7, 16, 33])
+@requires_metal
+def test_nf12_linear_bias_precedes_output_rounding(dtype, bias_dtype, rows):
+    from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Linear
+    from gptqmodel.utils import nf12_codec
+
+    # Subtracting a wide bias from values around BF16 midpoints exposes
+    # rounding of either the activation or the product before the bias add.
+    weight = torch.zeros((48, 192), dtype=torch.bfloat16)
+    weight[:, 0] = 1
+    weight[:, 1] = torch.arange(1, 49, dtype=torch.float32) / 256
+    packed, escapes, exp_base = nf12_codec.encode(weight)
+    layer = MlxNF12Linear(in_features=192, out_features=48, num_escapes=len(escapes))
+    layer.packed = mx.array(packed.numpy())
+    if len(escapes):
+        layer.escapes = mx.array(escapes.numpy())
+    layer.exp_base = mx.array([int(exp_base)], dtype=mx.uint8)
+    bias = -1.0 if bias_dtype == mx.bfloat16 else -1.0 - 2**-15
+    layer.bias = mx.full((48,), bias, dtype=bias_dtype)
+
+    activations = torch.zeros((rows, 192))
+    activations[:, :2] = torch.tensor([1.0, 1.0 - 2**-10])
+    torch_dtype = {mx.float16: torch.float16, mx.bfloat16: torch.bfloat16, mx.float32: torch.float32}[dtype]
+    expected = (
+        activations.to(torch_dtype).double() @ weight.double().T + bias
+    ).to(torch_dtype).float().numpy()
+    x = mx.array(activations.numpy()).astype(dtype)
+    for _ in range(2):
+        actual = layer(x)
+        assert actual.dtype == dtype
+        np.testing.assert_array_equal(np.array(actual.astype(mx.float32)), expected)
+    assert set(layer.parameters()) == {"packed", "escapes", "exp_base", "bias"}
+
+
+
+@pytest.mark.parametrize("rows", [1, 4, 8, 16, 33])
+@requires_metal
+def test_nf12_mlx_linear_tails_and_native_bias(monkeypatch, rows):
+    from gptqmodel.nn_modules.qlinear import mlx_nf12
+
+    source = _source(in_features=512, out_features=2064)
+    source.bias = source.bias.to(torch.bfloat16)
+    model, _ = _transfer(monkeypatch, source)
+    assert model.proj.bias.dtype == mx.bfloat16
+    # Force multiple decoded slices with a final 16-row tail in prefill.
+    monkeypatch.setattr(mlx_nf12, "_DECODE_SLICE_BYTES", 512 * 2048 * 2)
+
+    x = torch.randn(2, rows, 512, dtype=torch.bfloat16) * 0.125
+    weight = source.dequantize_weight(dtype=torch.bfloat16)
+    expected = (x[1].double() @ weight.double().T + source.bias.double()).to(torch.bfloat16)
+    # Test activation views as well as a grid with an uneven output width.
+    actual = model(mx.array(x.float().numpy()).astype(mx.bfloat16)[1])
+    np.testing.assert_allclose(np.array(actual.astype(mx.float32)), expected.float().numpy(), rtol=2e-3, atol=2e-3)

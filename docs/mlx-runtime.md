@@ -202,27 +202,43 @@ stops winning on wide token blocks (measured on this host: equal at 16 rows,
 activation rounding, so W4A4 output tracks the Torch MACaQ kernel within the
 4-bit activation grid rather than bit-for-bit; W4A16 is unaffected.
 
-NF12 stays in its 12-byte tiled group stream and `MlxNF12Linear` decodes it on
-Metal. The token count picks the path, because the packed stream is 1.5 bytes per
-weight while a decoded BF16 weight is 2 bytes that must then be read again:
+### NF12 linear dispatch
 
-- 1..15 tokens: one decode-plus-dot kernel. A super-atom is exactly 16 weight
-  rows by 64 K values, so the threadgroup reads each packed byte once per K step
-  and decodes it in place; no BF16 weight buffer is written and no barrier is
-  paid per super-atom. A threadgroup also covers several adjacent 16-column
-  blocks (four for 1..4 tokens, two for 5..12) and reuses one set of activation
-  loads across them, which is where most of the wide-token speed comes from.
-- exactly 16 tokens on a wide output: a fused tile kernel decodes one super-atom
-  per K step into `[k][out]` threadgroup memory and runs it through the
-  simdgroup matrix units, which wins back the FMA cost the dot product pays at
-  16 rows.
-- more tokens: one decode into BF16 followed by an MLX matmul, because the padded
-  16-row MMA tile would re-read the packed stream once per token block while the
-  dense matmul is compute-bound there anyway.
+`MlxNF12Linear` runs the NF12 Metal linear kernels through
+`mx.fast.metal_kernel`. MLX compiles the shaders at runtime using the macOS Metal
+framework. Building the GPT-QModel wheel and running NF12 linear require no
+Xcode installation or offline Metal compiler. The port uses the packed
+checkpoint, escape table, and exponent base directly. Its starting point is
+[the NF12 Metal linear implementation](https://github.com/dphnAI/nf12/tree/97c4101541a8d92d2b3d89c910c452cfa8efc9c9/csrc/metal).
 
-Every path is exact for the checkpoint's BF16 weights, so a decoded layer is
-bit-identical to the Torch codec's `decode()`; only the accumulation order
-differs from the Torch `linear()` oracle.
+| Rows | Previous dispatch | Current dispatch |
+| --- | --- | --- |
+| 1–4 | Fused row-specialized dot product | Vectorized super-atom loads and SIMD dot products |
+| 5–16 | Dot product by default, with a separate threadgroup-memory tile at 16 rows for wide outputs | Register-resident SIMD matrix multiply |
+| 17 or more | Full BF16 decode followed by matmul and bias | Vectorized decode in output slices with the bias fused into MLX `addmm` |
+
+```mermaid
+flowchart TD
+    A["MlxNF12Linear.__call__"] --> B{"Input shape and dtype"}
+    B -->|Invalid| E[Raise ValueError]
+    B -->|Empty| Z[Return empty output]
+    B -->|Valid| M{"Flattened token rows"}
+    M -->|1–4| G["_fused_linear · SIMD dot products"]
+    M -->|5–16| T["_fused_linear · register MMA"]
+    M -->|17 or more| D["_decode_matmul · sliced decode and addmm"]
+    G --> O[Return activation dtype and leading dimensions]
+    T --> O
+    D --> O
+```
+
+A SIMD group reads all four atoms of a 16-by-64 weight tile from three
+coalesced packed planes. Small batches split K inside a threadgroup when
+there are too few output blocks to fill the GPU. The kernel sums those
+partials in FP32 and applies bias before the output cast. Larger batches use
+temporary decoded slices, targeting at most 64 MiB per slice. Matching BF16
+activations and bias use BF16 `addmm` with FP32 accumulation. FP16 or FP32
+activations and wider bias use FP32 operands. The packed weight is the only
+weight representation retained by the layer.
 
 MACaQ folds its diagonal pre-scale and 32-wide block Hadamard into one Metal
 dispatch instead of a multiply plus a batched matmul, which removes an
