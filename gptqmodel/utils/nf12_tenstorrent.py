@@ -148,7 +148,11 @@ def kernel_source(name):
     source = (_KERNELS / f"{name}.cpp").read_text()
     if name in {"gather", "gather_xla", "linear_reader"}:
         source = (_KERNELS / "decode.h").read_text() + "\n" + source
-    return source.replace('#include "program.h"', (_KERNELS / "program.h").read_text())
+    for header in ("program.h", "sfpu_decode_math.h", "sfpu_escape_patch.h"):
+        include = f'#include "{header}"'
+        if include in source:
+            source = source.replace(include, (_KERNELS / header).read_text())
+    return source
 
 
 def round_up(value, multiple):

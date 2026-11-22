@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
+"""Measure 32-lane NF12 reconstruction and sparse escape application on Blackhole."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import statistics
+import time
+from pathlib import Path
+
+import torch
+from bench_nf12_tenstorrent import _errors, _measure, _same
+from safetensors import safe_open
+
+from gptqmodel.utils.nf12_tenstorrent import prepare_nf12, round_up
+from gptqmodel.utils.nf12_ttnn import TTNNNF12, _cb, _cores, _kernel
+from gptqmodel.utils.ttnn_runtime import import_ttnn
+
+
+def _to_tiles(matrix):
+    n, k = matrix.shape
+    return matrix.reshape(n // 32, 32, k // 32, 32).permute(0, 2, 1, 3).reshape(-1, 32, 32)
+
+
+def _pack_four(tiles, base):
+    assert tiles.dtype == torch.int32
+    assert tiles.shape[0] % 4 == 0
+    delta = ((tiles >> 8) & 0x7f) - base
+    escaped = (delta < 0) | (delta > 7)
+    high = (delta.clamp(0, 7) | ((tiles >> 12) & 8)).reshape(-1, 4, 32, 32)
+    low = (tiles & 0xff).reshape_as(high)
+    a, b, c, d = high.unbind(1)
+    planes = torch.stack((low[:, 0] | (low[:, 1] << 8), low[:, 2] | (low[:, 3] << 8),
+                          a | (b << 4) | (c << 8) | (d << 12)), dim=1).reshape(-1, 32, 32)
+    block, tile, row, col = escaped.reshape_as(high).nonzero(as_tuple=True)
+    if not len(block):
+        return planes, ()
+
+    # Each patch names a physical slot in four 32 x 32 tiles and its raw BF16 word.
+    slot = (row // 16 * 2 + col // 16) * 256 + row % 16 * 16 + col % 16
+    patches = ((tiles.reshape_as(high)[block, tile, row, col] << 12) | (tile * 1024 + slot)).int()
+    counts = torch.bincount(block, minlength=high.shape[0])
+    offsets = counts.cumsum(0) - counts
+    headers = torch.stack((offsets, counts), dim=1).int().flatten()
+    return planes, tuple(torch.nn.functional.pad(data, (0, round_up(len(data), 16) - len(data))).reshape(-1, 16)
+                         for data in (headers, patches))
+
+
+def _decode(ttnn, device, words, blocks, base, *, dense, metadata):
+    shape = (blocks * 4, 32, 32)
+    output = ttnn.allocate_tensor_on_device(ttnn.Shape(shape), ttnn.uint16, ttnn.TILE_LAYOUT,
+                                           device, ttnn.DRAM_MEMORY_CONFIG)
+    cores, assignments = _cores(ttnn, device, blocks)
+    reader = _kernel(ttnn, "sfpu_decode_reader", ttnn.ReaderConfigDescriptor(), cores, assignments,
+                     (int(dense),), [words], lambda start, end: [words.buffer_address(), start, end])
+    compute = _kernel(ttnn, "sfpu_decode_compute", ttnn.ComputeConfigDescriptor(fp32_dest_acc_en=False),
+                      cores, assignments, (int(dense), base), (), lambda start, end: [end - start])
+    metadata_addresses = [tensor.buffer_address() for tensor in metadata]
+    writer = _kernel(ttnn, "sfpu_decode_writer", ttnn.WriterConfigDescriptor(), cores, assignments,
+                     (int(bool(metadata)),), [output, *metadata],
+                     lambda start, end: [output.buffer_address(), start, end, *metadata_addresses])
+    buffers = [_cb(ttnn, cores, 0, ttnn.uint16, 2048, 2 * (4 if dense else 3)),
+               _cb(ttnn, cores, 16, ttnn.uint16, 2048, 8)]
+    if metadata:
+        buffers.append(_cb(ttnn, cores, 24, ttnn.uint32, 128))
+    program = ttnn.ProgramDescriptor(kernels=[reader, compute, writer], semaphores=[], cbs=buffers)
+    return ttnn.generic_op([words, *metadata, output], program)
+
+
+def _weight(size, checkpoint, special):
+    if checkpoint is not None:
+        index = json.loads((checkpoint / "model.safetensors.index.json").read_text())["weight_map"]
+        name = "model.llm.unembed.weight"
+        with safe_open(checkpoint / index[name], framework="pt") as shard:
+            weight = shard.get_slice(name)[:size]
+        return 54, weight
+
+    base = 56
+    codes = torch.randint(4096, (size, size), dtype=torch.int32, generator=torch.Generator().manual_seed(12))
+    codes.flatten()[:4096] = torch.arange(4096)
+    bits = (codes & 0xff) | ((((codes >> 8) & 7) + base) << 8) | ((codes & 0x800) << 4)
+    if special:
+        # Place out-of-window zeros, subnormals, infinities and NaNs around tile boundaries.
+        values = torch.tensor([0, 0x8000, 1, 0x8001, 0x7f80, 0xff80, 0x7f81, 0xffc1])
+        positions = torch.arange(8) + 31 * size + 28
+        bits.flatten()[positions] = values.to(torch.int32)
+    return base, bits.to(torch.int16).view(torch.bfloat16)
+
+
+def _exercise(ttnn, device, copy, sync, size, repeats, checkpoint, special):
+    base, weight = _weight(size, checkpoint, special)
+    bf16_bits = weight.view(torch.int16).int() & 0xffff
+    tiles = _to_tiles(bf16_bits)
+    blocks = tiles.shape[0] // 4
+    expected = tiles.to(torch.int16)
+
+    packed, patches = _pack_four(tiles, base)
+    output_bytes = weight.nbytes
+    for dense, data in ((True, tiles), (False, packed)):
+        words = ttnn.from_torch(data, dtype=ttnn.uint16, layout=ttnn.TILE_LAYOUT,
+                                device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        metadata = tuple(ttnn.from_torch(patch, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT,
+                                         device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                         for patch in patches if not dense)
+        output, result = _measure(
+            lambda words=words, dense=dense, metadata=metadata: _decode(
+                ttnn, device, words, blocks, base, dense=dense, metadata=metadata,
+            ), sync, repeats, output_bytes,
+        )
+        torch.testing.assert_close(copy(output).to(torch.int16), expected, atol=0, rtol=0)
+        print(json.dumps({"kind": "bf16_tile_copy" if dense else "sfpu_decode", "shape": list(weight.shape),
+                          "input_bytes": data.numel() * 2 + sum(m.volume() * 4 for m in metadata),
+                          "output_bytes": output_bytes, **result}), flush=True)
+        del output, words, metadata
+
+    layer = TTNNNF12(device, *prepare_nf12(weight, "sfpu.measurement", exp_base=base))
+    ids = layer.upload_ids(torch.arange(len(weight)))
+    output, result = _measure(lambda: layer.gather_device(ids, len(weight)), sync, repeats, output_bytes)
+    _same(copy(output), weight)
+    print(json.dumps({"kind": "canonical_decode", "shape": list(weight.shape), "input_bytes": layer.resident_bytes,
+                      "output_bytes": output_bytes, **result}), flush=True)
+
+
+def _linear_operation(ttnn, device, words, activation, n, k, base, *, dense, metadata, prefetch_groups):
+    output = ttnn.allocate_tensor_on_device(ttnn.Shape((32, n)), ttnn.bfloat16, ttnn.TILE_LAYOUT,
+                                           device, ttnn.DRAM_MEMORY_CONFIG)
+    cores, assignments = _cores(ttnn, device, n // 32)
+    k_tiles = k // 32
+    geometry = (k_tiles, int(dense))
+    reader = _kernel(ttnn, "sfpu_linear_reader", ttnn.ReaderConfigDescriptor(), cores, assignments,
+                     (*geometry, prefetch_groups), [words, activation],
+                     lambda start, end: [words.buffer_address(), activation.buffer_address(), start, end])
+    compute = _kernel(ttnn, "sfpu_linear_compute", ttnn.ComputeConfigDescriptor(fp32_dest_acc_en=True),
+                      cores, assignments, (*geometry, base), (), lambda start, end: [end - start])
+    metadata_addresses = [tensor.buffer_address() for tensor in metadata]
+    writer = _kernel(ttnn, "sfpu_linear_writer", ttnn.WriterConfigDescriptor(), cores, assignments,
+                     (*geometry, int(bool(metadata))), [output, *metadata],
+                     lambda start, end: [output.buffer_address(), start, end, *metadata_addresses])
+    weight_views = [ttnn.CBFormatDescriptor(buffer_index=2, data_format=ttnn.bfloat16, page_size=2048)]
+    if not dense:
+        weight_views.append(ttnn.CBFormatDescriptor(buffer_index=16, data_format=ttnn.uint16, page_size=2048))
+    buffers = [
+        _cb(ttnn, cores, 1, ttnn.bfloat16, 2048, k_tiles),
+        ttnn.CBDescriptor(total_size=k_tiles * 2048, core_ranges=cores, format_descriptors=weight_views),
+        _cb(ttnn, cores, 17, ttnn.bfloat16, 2048, 2),
+    ]
+    if not dense:
+        buffers.append(_cb(ttnn, cores, 0, ttnn.uint16, 2048, min(prefetch_groups * 6, k_tiles // 4 * 3)))
+    if metadata:
+        buffers.append(_cb(ttnn, cores, 24, ttnn.uint32, 128))
+    program = ttnn.ProgramDescriptor(kernels=[reader, compute, writer], semaphores=[], cbs=buffers)
+    return lambda: ttnn.generic_op([words, activation, *metadata, output], program)
+
+
+def _measure_linear_pair(calls, sync, repeats):
+    for call in calls:
+        call()
+        sync()
+    elapsed = [[], []]
+    for repeat in range(repeats):
+        for index in (repeat % 2, 1 - repeat % 2):
+            start = time.perf_counter_ns()
+            calls[index]()
+            sync()
+            elapsed[index].append((time.perf_counter_ns() - start) / 1000)
+    return tuple((statistics.median(times), sorted(times)[math.ceil(0.95 * repeats) - 1]) for times in elapsed)
+
+
+def _exercise_linear(ttnn, device, sync, size, repeats, checkpoint, prefetch_groups):
+    base, weight = _weight(size, checkpoint, False)
+    n, k = weight.shape
+    if (k // 128) % prefetch_groups:
+        raise ValueError("The number of prefetch groups must divide K/128")
+    bits = weight.view(torch.int16).int() & 0xffff
+    tiles = _to_tiles(bits).transpose(-2, -1).contiguous()
+    packed, patches = _pack_four(tiles, base)
+    generator = torch.Generator().manual_seed(54)
+    x = torch.randn((1, k), generator=generator).bfloat16()
+    activation = ttnn.from_torch(torch.nn.functional.pad(x, (0, 0, 0, 31)), dtype=ttnn.bfloat16,
+                                 layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    calls = []
+    resident_bytes = []
+    for dense, data, dtype in ((True, tiles.to(torch.int16).view(torch.bfloat16), ttnn.bfloat16),
+                               (False, packed, ttnn.uint16)):
+        words = ttnn.from_torch(data, dtype=dtype, layout=ttnn.TILE_LAYOUT,
+                                device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        metadata = tuple(ttnn.from_torch(patch, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT,
+                                         device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                         for patch in patches if not dense)
+        calls.append(_linear_operation(ttnn, device, words, activation, n, k, base, dense=dense, metadata=metadata,
+                                       prefetch_groups=1 if dense else prefetch_groups))
+        resident_bytes.append(data.numel() * 2 + sum(m.volume() * 4 for m in metadata))
+
+    timings = _measure_linear_pair(calls, sync, repeats)
+    results = [ttnn.to_torch(call()) for call in calls]
+    _same(*results)
+    golden = torch.nn.functional.linear(x.float(), weight.float()).bfloat16()
+    oracle = _errors(results[1][:1], golden)
+    assert oracle["scaled_rmse"] <= 0.002, oracle
+    for label, weight_bytes, (median, p95) in zip(("matched_bf16_linear", "sfpu_linear"), resident_bytes, timings):
+        print(json.dumps({"kind": label, "shape": [n, k], "m": 1, "weight_bytes": weight_bytes,
+                          "median_us": median, "p95_us": p95, "effective_GBps": weight_bytes / median / 1000}),
+              flush=True)
+    print(json.dumps({"matched_linear_exact": True, "shape": [n, k], "packed_prefetch_groups": prefetch_groups,
+                      "torch_fp32_oracle": oracle}), flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--chip", required=True, type=int)
+    parser.add_argument("--size", type=int, default=2048)
+    parser.add_argument("--repeats", type=int, default=8)
+    parser.add_argument("--checkpoint", type=Path, help="Use the first --size rows of the public Inkling 2 Mini head")
+    parser.add_argument("--special", action="store_true", help="Add special BF16 values to synthetic input")
+    parser.add_argument("--linear", action="store_true", help="Run the M=1 whole-slab SFPU and matmul experiment")
+    parser.add_argument("--prefetch-groups", type=int, default=1, help="Read this many compressed groups per NoC batch")
+    args = parser.parse_args()
+    if args.size < 64 or args.size % 64 or args.repeats < 1:
+        parser.error("Use a size that is a positive multiple of 64 and at least one repeat")
+    if args.linear and (args.special or (args.checkpoint is None and args.size % 128)):
+        parser.error("For linear without a checkpoint, use a synthetic size divisible by 128 and finite weights")
+    if args.prefetch_groups < 1:
+        parser.error("The number of prefetch groups must be positive")
+    torch.set_num_threads(3)
+    ttnn = import_ttnn()
+    device = ttnn.open_device(device_id=args.chip)
+    try:
+        with torch.inference_mode():
+            def sync(_output=None):
+                ttnn.synchronize_device(device)
+
+            if args.linear:
+                _exercise_linear(ttnn, device, sync, args.size, args.repeats, args.checkpoint, args.prefetch_groups)
+            else:
+                _exercise(ttnn, device, ttnn.to_torch, sync, args.size, args.repeats, args.checkpoint, args.special)
+    finally:
+        ttnn.close_device(device)
+
+
+if __name__ == "__main__":
+    main()
