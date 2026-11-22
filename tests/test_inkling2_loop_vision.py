@@ -4,8 +4,8 @@
 import torch
 import torch.nn.functional as F
 
-from gptqmodel.models.inkling2_loop.configuration import Inkling2LoopVisionConfig
-from gptqmodel.models.inkling2_loop.vision import Inkling2LoopVisionModel
+from gptqmodel.models.ports.inkling2_loop.configuration import Inkling2LoopVisionConfig
+from gptqmodel.models.ports.inkling2_loop.vision import Inkling2LoopVisionModel
 
 
 @torch.no_grad()

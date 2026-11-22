@@ -15,19 +15,17 @@ from transformers.models.lfm2.configuration_lfm2 import Lfm2Config
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.lfm2_vl import LFM2VLQModel
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 from gptqmodel.utils.structure import LazyTurtle
 
 
 MODEL_PATH = Path("/monster/data/model/LFM2.5-VL-1.6B")
 
 
-def test_lfm2_vl_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="lfm2_vl")
+def test_lfm2_vl_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["lfm2_vl"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/lfm2-vl") is LFM2VLQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is LFM2VLQModel
 
 
 @pytest.mark.skipif(not MODEL_PATH.exists(), reason="LFM2.5-VL model not found")

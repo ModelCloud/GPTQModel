@@ -275,7 +275,7 @@ flowchart TD
 | `layer_modules_strict=True` and a declared module is missing | block is skipped (unchanged) |
 | `layer_modules_strict=False` and a declared module is missing | only that name is skipped (DeepSeek alternative layouts) |
 | No keep mask bound to the calibration thread | every hook is a no-op; rows pass through |
-| `defuser` older than 0.0.31 | the loader logs an error naming the installed version before conversion, because fused 3-D experts stay unsplit and are left unquantized |
+| `defuser` older than 0.0.32 | the loader logs an error naming the installed version before conversion, because fused 3-D experts stay unsplit and are left unquantized |
 | `prev_op` declared `nosrc` | `_filter_awq_scaling_sources` drops the group before `apply_scale`; consumers are not scaled because the norm is not divided |
 
 ## Measured results

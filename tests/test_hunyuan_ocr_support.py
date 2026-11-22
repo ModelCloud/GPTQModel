@@ -6,28 +6,15 @@ from transformers import AutoConfig
 
 from gptqmodel.models import auto
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.models.definitions import hunyuan_vl as hunyuan_vl_module
 from gptqmodel.models.definitions.hunyuan_vl import HunYuanVLQModel
-from gptqmodel.utils.hf import normalize_hf_config_compat
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 from gptqmodel.utils.model import MODALITY
 
 
-def test_hunyuan_vl_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="hunyuan_vl")
+def test_hunyuan_vl_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["hunyuan_vl"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(
-        auto,
-        "resolve_trust_remote_code",
-        lambda path, trust_remote_code=False: trust_remote_code,
-    )
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda path: None)
-    monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: fake_config,
-    )
-
-    assert auto.check_and_get_model_definition("tencent/HunyuanOCR") is HunYuanVLQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is HunYuanVLQModel
 
 
 def test_hunyuan_vl_module_tree_matches_dense_text_backbone():
@@ -98,7 +85,7 @@ def test_hunyuan_vl_materialize_uses_canonical_device_and_module_path():
     )
 
 
-def test_hunyuan_vl_prepare_dataset_uses_processor_chat_template(monkeypatch):
+def test_hunyuan_vl_prepare_dataset_uses_processor_chat_template():
     calls = []
 
     class FakeProcessor:
@@ -106,15 +93,11 @@ def test_hunyuan_vl_prepare_dataset_uses_processor_chat_template(monkeypatch):
             calls.append((batch, kwargs))
             return {"input_ids": torch.ones((len(batch), 4), dtype=torch.long)}
 
-    monkeypatch.setattr(
-        hunyuan_vl_module.AutoProcessor,
-        "from_pretrained",
-        lambda *args, **kwargs: FakeProcessor(),
-    )
-
     qmodel = object.__new__(HunYuanVLQModel)
     nn.Module.__init__(qmodel)
     qmodel.model_local_path = "tencent/HunyuanOCR"
+    # BaseQModel loads the processor through the definition's LocalModelLoader.
+    qmodel.processor = FakeProcessor()
     samples = [
         [{"role": "user", "content": "first"}],
         [{"role": "user", "content": "second"}],
@@ -138,7 +121,7 @@ def test_hunyuan_vl_prepare_dataset_uses_processor_chat_template(monkeypatch):
     ]
 
 
-def test_hunyuan_vl_rope_normalization_stays_in_text_config(tmp_path):
+def test_hunyuan_vl_rope_stays_in_text_config(tmp_path):
     mrope_section = [16, 16, 16, 16]
     config = AutoConfig.for_model(
         "hunyuan_vl",
@@ -153,8 +136,6 @@ def test_hunyuan_vl_rope_normalization_stays_in_text_config(tmp_path):
             },
         },
     )
-
-    normalize_hf_config_compat(config)
 
     assert "rope_parameters" not in config.to_dict()
     assert config.text_config.rope_parameters["mrope_section"] == mrope_section

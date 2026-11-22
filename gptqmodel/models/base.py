@@ -23,14 +23,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set, Tupl
 import torch
 import torch.nn as nn
 from tokenicer import Tokenicer
-from transformers import (
-    AutoConfig,
+from transformers import (  # Auto*: unsupported-model fallback only (see BaseQModel.loader)
     AutoModelForCausalLM,
     AutoProcessor,
     PreTrainedModel,
     PreTrainedTokenizerBase,
     ProcessorMixin,
-    modeling_utils,
 )
 
 from .. import DEVICE_THREAD_POOL
@@ -111,7 +109,13 @@ from ..utils.calibration import (
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
-from ..utils.hf import apply_legacy_remote_code_fixups, autofix_hf_model_config
+from ..utils.hf import (
+    autofix_hf_model_config,
+    get_config_selection_kwargs,
+    load_model_config,
+    resolve_checkpoint_subfolder,
+    resolve_trust_remote_code,
+)
 from ..utils.importer import select_quant_linear
 from ..utils.kv_cache import KVCacheEstimate, estimate_kv_cache
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
@@ -146,6 +150,7 @@ from ..utils.structure import (
     _resolve_qualified_name,
     alias_direct_meta_from_turtle_for_submodule,
     alias_from_turtle_for_submodule,
+    restore_init_owned_rotary_buffers,
 )
 from ..utils.tied_weights import (
     lm_head_is_tied,
@@ -173,6 +178,7 @@ from ._const import (
 )
 from .fusable import FusableConfig, require_fusable_config
 from .loader import ModelLoader, _setup_rotation_online_had, model_load_lock
+from .local import LocalModelLoader, local_model_loader_for_config
 from .module_plan import ModulePlan
 from .quantization_run_plan import ProcessorStep, QuantizationRunPlan, processor_class
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -684,9 +690,13 @@ def _calibration_rows(calibration) -> List[Any]:
     if hf_rows is not None:
         return hf_rows
     try:
-        return list(dataset)
+        iterator = iter(dataset)
     except TypeError:
         return [dataset]
+    if iterator is dataset:
+        # Sizing must leave one-shot inputs for calibration's first read.
+        return []
+    return list(iterator)
 
 
 def _sequence_length(value: Any) -> int:
@@ -1013,10 +1023,6 @@ def generate_node_for_awq_scaling(inp, prev_op, module_kwargs, nodes_size, subse
 
     return n, None
 
-def check_support_param_buffer_assignment(*args, **kwargs):
-    return False
-
-
 def apply_module_tree_override(module_tree, override):
     """
     Recursively find the corresponding key of override in ``module_tree``.
@@ -1075,10 +1081,6 @@ NORM_FLAG = ":norm"
 POST_NORM_FLAG = ":postnorm"
 NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
 
-
-# Fix cpu memory leak.
-# See https://github.com/huggingface/transformers/issues/34366
-modeling_utils.check_support_param_buffer_assignment = check_support_param_buffer_assignment
 
 log = setup_logger()
 
@@ -1417,6 +1419,9 @@ class BaseQModel(nn.Module):
     # an instance are wrapped in ``__getattribute__`` below so they resolve
     # against that instance's immutable effective tree.
     _MODULE_TREE_RUNTIME_METHODS = frozenset({
+        # MoE roots that exist only in an effective tree must still capture
+        # their shared pre-router input for the gate/up AWQ group.
+        "awq_input_feature_aggregation",
         "extract_layers_node",
         "_iter_module_tree_variants",
         "_expand_module_tree_prefixes",
@@ -1467,7 +1472,7 @@ class BaseQModel(nn.Module):
     # Preserve adapter-supplied position_embeddings during AWQ replay instead of rebuilding them from the root rotary.
     awq_preserve_explicit_position_embeddings = False
 
-    # some models require trust_remove_code = True (dbrx_converted)
+    # Some definitions require an explicit request to execute checkpoint Python.
     require_trust_remote_code = None
 
     # some models require extra python packages and/or specific version of pkgs such as transformer version(internalm require '<=4.42.2')
@@ -1505,7 +1510,8 @@ class BaseQModel(nn.Module):
     # Entries not matching a key continue to use ``dynamic_expert_index``.
     dynamic_expert_indices: Optional[Dict[str, str]] = None
 
-    # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
+    # Policy exception: only a model with no MODEL_MAP definition reaches this
+    # default; it runs Transformers' own (or checkpoint) code, never a port.
     loader = AutoModelForCausalLM
 
     # monkey patch api for trust_remote_code=True models that have broken transformer compat
@@ -1599,6 +1605,8 @@ class BaseQModel(nn.Module):
         turtle_model: Optional[LazyTurtle] = None,
         effective_module_tree: Optional[Any] = None,
         fusion_enabled: bool = False,
+        processor_load_kwargs: Optional[Dict[str, Any]] = None,
+        config_load_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         if type(fusion_enabled) is not bool:
@@ -1639,7 +1647,16 @@ class BaseQModel(nn.Module):
         self.qlinear_kernel = qlinear_kernel
         self.quantize_backend: Optional[BACKEND] = None
         self.trust_remote_code = trust_remote_code
-        self.model_local_path = model_local_path
+        # Wrapper-owned files live beside the selected weights. The save-time
+        # config lookup still needs the repository root and its selection kwargs.
+        self._checkpoint_repo_path = model_local_path
+        self._config_load_kwargs = copy.deepcopy(config_load_kwargs or {})
+        subfolder = self._config_load_kwargs.get("subfolder")
+        self.model_local_path = (
+            resolve_checkpoint_subfolder(model_local_path, subfolder)
+            if model_local_path is not None and subfolder
+            else model_local_path
+        )
         self.quantize_config = quantize_config
         self.quantization_run_plan: Optional[QuantizationRunPlan] = None
         self.quant_region_timer = QuantizationRegionTimer(logger=log)
@@ -1663,28 +1680,22 @@ class BaseQModel(nn.Module):
             if dynamic_cache_prepared else dynamic_override_cache_stats(getattr(quantize_config, "dynamic", None))
         )
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
+        # Hooks Transformers' ``from_pretrained(device_map=...)`` attached are
+        # stock Accelerate hooks that flush the device cache on every offloaded
+        # forward. Rebind them on this model instance only.
+        from ..utils.offload_hooks import adopt_align_device_hooks
+
+        adopt_align_device_hooks(self.model)
         # transformers 5 materializes checkpoint-absent non-persistent buffers
         # with `torch.empty_like`, and only re-derives native rotary buffers in
         # the default `_init_weights`. Restore constructor-owned rotary buffers
         # here so every load path (native eval, quantization, quantized reload)
         # sees real RoPE frequencies instead of uninitialized memory.
-        # transformers 5 also always hands `generate()`'s cache to the remote
-        # `prepare_inputs_for_generation`, even before the first prefill, and
-        # replaced the tuple/attribute cache interface those implementations
-        # were written against. Both repairs are shared with the Transformers
-        # bridge through one helper so neither path can miss one (#5311).
-        restored_rotary_buffers, legacy_generation_compat = apply_legacy_remote_code_fixups(
-            self.model
-        )
+        restored_rotary_buffers = restore_init_owned_rotary_buffers(self.model)
         if restored_rotary_buffers:
             log.debug(
                 "Model: restored %d init-owned rotary buffer(s) for `%s`.",
                 restored_rotary_buffers,
-                type(self.model).__name__,
-            )
-        if legacy_generation_compat:
-            log.debug(
-                "Model: installed legacy generate() adapter for `%s`.",
                 type(self.model).__name__,
             )
         hooks = getattr(self, "moe_lifecycle_hooks", None)
@@ -1712,7 +1723,9 @@ class BaseQModel(nn.Module):
         self.auto_dtype_cast_events: List[Dict[str, Any]] = []
 
         if tokenizer is not None:
-            if isinstance(tokenizer, PreTrainedTokenizerBase):
+            if isinstance(tokenizer, Tokenicer):
+                self.tokenizer = tokenizer
+            elif isinstance(tokenizer, PreTrainedTokenizerBase):
                 self.tokenizer = Tokenicer.load(
                     tokenizer,
                     trust_remote_code=trust_remote_code,
@@ -1728,7 +1741,7 @@ class BaseQModel(nn.Module):
 
         # auto-fix model config erors
         if isinstance(self.model, PreTrainedModel):
-            autofix_hf_model_config(self.model, path=model_local_path)
+            autofix_hf_model_config(self.model, path=self.model_local_path)
         # Reject activation-quantized checkpoints at load time so the rest of
         # the floatx decoder stack can continue assuming dense activations.
         self._configure_modelopt_runtime()
@@ -1739,8 +1752,21 @@ class BaseQModel(nn.Module):
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []
 
+        self._processor_load_kwargs = get_config_selection_kwargs(processor_load_kwargs or {})
         if self.require_load_processor:
-            self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.trust_remote_code)
+            loader = type(self).loader
+            if isinstance(loader, LocalModelLoader) and loader.processor_class is not None:
+                self.processor = loader.load_processor(
+                    model_local_path,
+                    config=self.model.config,
+                    tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+                    **self._processor_load_kwargs,
+                )
+            else:
+                self.processor = AutoProcessor.from_pretrained(
+                    model_local_path, trust_remote_code=self.trust_remote_code,
+                    **self._processor_load_kwargs,
+                )
 
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
@@ -3650,8 +3676,13 @@ class BaseQModel(nn.Module):
             # Resolve the config only: the weights are loaded by
             # `_requantize_norm` after the embeddings, but a bad path/id has to
             # fail here.
-            AutoConfig.from_pretrained(
-                teacher, trust_remote_code=getattr(self, "trust_remote_code", False)
+            # Same resolution `_requantize_norm` uses: vendored config for a
+            # supported model_type, AutoConfig only for unsupported ones.
+            load_model_config(
+                teacher,
+                trust_remote_code=resolve_trust_remote_code(
+                    teacher, trust_remote_code=getattr(self, "trust_remote_code", False)
+                ),
             )
         return names
 
@@ -3698,12 +3729,16 @@ class BaseQModel(nn.Module):
             # untied (#5421). The construction window still holds the
             # global-state writer by itself (#5304), so the teacher's weight
             # I/O stays concurrent with optimized forwards.
+            teacher_trust = resolve_trust_remote_code(teacher, trust_remote_code=self.trust_remote_code)
+            teacher_config = load_model_config(teacher, trust_remote_code=teacher_trust)
+            teacher_loader = local_model_loader_for_config(teacher_config.to_dict()) or AutoModelForCausalLM
             with model_load_lock():
-                teacher = AutoModelForCausalLM.from_pretrained(
+                teacher = teacher_loader.from_pretrained(
                     teacher,
+                    config=teacher_config,
                     dtype=self.model.dtype,
                     device_map={"": device},
-                    trust_remote_code=self.trust_remote_code,
+                    trust_remote_code=teacher_trust,
                 )
         try:
             stats = tune_norm_params(self.model, teacher, batches, names, norm)

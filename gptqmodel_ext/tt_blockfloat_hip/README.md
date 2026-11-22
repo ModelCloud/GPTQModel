@@ -131,13 +131,13 @@ validated on any ROCm host with only `hipcc`:
 hipcc --offload-arch=gfx1201 -O3 -std=c++17 \
     tt_blockfloat_hip.hip tt_blockfloat_hip_selftest.cpp -o ttbf_selftest
 ./ttbf_selftest --dump /tmp/ttbf_dump
-python verify_against_torch.py /tmp/ttbf_dump
+python ../../scripts/verify_tt_blockfloat_hip.py /tmp/ttbf_dump
 # throughput sweep instead of the default shapes
 ./ttbf_selftest --bench 32 4096 4096
 ```
 
 `ttbf_selftest` compares every kernel against an independent CPU
-implementation. `verify_against_torch.py` compares the same outputs against
+implementation. `scripts/verify_tt_blockfloat_hip.py` compares the same outputs against
 `gptqmodel.utils.tt_blockfloat_quant` (CPU torch is sufficient), so the
 checkpoint oracle is exercised even when the host has no ROCm-built PyTorch.
 

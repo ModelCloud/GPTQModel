@@ -16,7 +16,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from gptqmodel.quantization.awq.modules.triton import gemm as awq_gemm_mod
 from gptqmodel.quantization.awq.modules.triton.scheduler import (
     _VERIFIED_4090_FP16_RULES,
     _VERIFIED_4090_PROFILE,
@@ -86,6 +85,10 @@ def test_no_bf16_rule_set_is_installed():
     # ``awq_gemm_triton`` rejects BF16 input/scales, so a BF16 plan could not
     # be executed, let alone measured: keep it out of the table.
     assert all(plan is not None for plan in _VERIFIED_4090_FP16_RULES.values())
+    # The kernel module itself needs Triton; the plan table above does not.
+    pytest.importorskip("triton")
+    from gptqmodel.quantization.awq.modules.triton import gemm as awq_gemm_mod
+
     with pytest.raises(ValueError, match="requires float16 input and scales"):
         awq_gemm_mod.awq_gemm_triton(
             torch.zeros(4, 128, device="cpu", dtype=torch.bfloat16),

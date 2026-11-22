@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hymba AWQ regressions (#4891).
-
-`nvidia/Hymba-1.5B-Base` needs remote code and CUDA-only mamba kernels, and the
-model class is not part of this transformers release, so the cases here are
-synthesised with the exact module names `HymbaQModel.module_tree` declares:
-
-* `input_layernorm` -> `mamba` -> `pre_moe_layernorm` -> `moe`,
-* a `HymbaBlock`-style `forward(self, hidden_states, past_key_value=None, **kwargs)`
-  that reads `attention_mask`, `position_ids` and `kv_last_layer` out of the
-  catch-all.
-"""
+"""Hymba's owned norm and generic sequential AWQ replay regressions (#4891)."""
 
 from types import SimpleNamespace
 
@@ -21,10 +11,12 @@ from torch import nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.hymba import HymbaQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.quantization.awq.utils.module import get_op_name
 from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
+from tests.module_tree.test_hymba_local_port import _config
 from tests.test_awq_scaling_groups import (
     _features,
     _foldable_groups,
@@ -146,15 +138,26 @@ class _HymbaForCausalLM(nn.Module):
         return _Out(self.lm_head(self.model.final_layernorm(hidden)))
 
 
-def _synthetic_hymba():
-    """A tiny Hymba-shaped model plus the definition bound to it."""
+class _SequentialHymbaFixture(BaseQModel):
+    # Preserve the generic sequential-fold regression using its original
+    # replica. The owned implementation is qualified on real layers below.
+    module_tree = [
+        "model", "layers", "#", {
+            "input_layernorm": ("input_layernorm:!",),
+            "mamba": ("in_proj:0:nosrc", "out_proj:1", "conv1d:!", "x_proj.0:!", "dt_proj.0:!"),
+            "pre_moe_layernorm": ("pre_moe_layernorm:!",),
+            "moe:moe": {"experts": {"0": ("gate_proj:0", "up_proj:0", "down_proj:1")}},
+        },
+    ]
 
+
+def _synthetic_hymba():
     torch.manual_seed(0)
     hf_model = _HymbaForCausalLM().eval()
-    qmodel = HymbaQModel.__new__(HymbaQModel)
+    qmodel = _SequentialHymbaFixture.__new__(_SequentialHymbaFixture)
     nn.Module.__init__(qmodel)
     qmodel.__dict__["model"] = hf_model
-    tree = HymbaQModel._resolve_effective_module_tree(hf_model, None)
+    tree = _SequentialHymbaFixture._resolve_effective_module_tree(hf_model, None)
     qmodel.__dict__["effective_module_tree"] = tree
     qmodel.__dict__["module_tree"] = tree
     return hf_model, qmodel
@@ -238,23 +241,16 @@ def test_prepare_module_forward_promotes_a_var_keyword_block_input():
 
 def test_hymba_tree_declares_the_norm_the_layer_actually_owns():
     plan = ModulePlan.from_tree(HymbaQModel.module_tree)
+    model = HymbaQModel.loader.from_config(_config(num_experts=3, num_experts_per_tok=2))
 
     assert plan.find("post_attention_layernorm") is None, (
         "HymbaDecoderLayer has no post_attention_layernorm; declaring it left the "
         "routed-expert gate/up block without a producer"
     )
     assert plan.find("pre_moe_layernorm") is not None
-
-    layer = _HymbaBlock()
-    missing = []
-    for spec in plan.specs:
-        if "{expert_index}" in spec.template:
-            continue
-        try:
-            layer.get_submodule(spec.template)
-        except AttributeError:
-            missing.append(spec.template)
-    assert not missing, f"Hymba tree declares modules the layer does not own: {missing}"
+    for layer in model.model.layers:
+        assert "pre_moe_layernorm.weight" in layer.state_dict()
+        assert "moe.router.weight" in layer.state_dict()
 
 
 def test_hymba_mixer_declares_its_dense_leaves_and_no_fold_source():
@@ -314,6 +310,123 @@ def test_hymba_awq_fold_is_output_preserving():
         f"folding the Hymba AWQ groups changed the logits by {worst:.3e}; the "
         "routed-expert gate/up group was folded into the wrong norm"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Owned Hymba implementation: real layers and the public AWQ lifecycle.
+# --------------------------------------------------------------------------- #
+
+_HYMBA_LAYOUTS = [
+    {},
+    {"num_experts": 3, "num_experts_per_tok": 2, "kq_norm": "perhead-rms"},
+    {"mlp_hidden_act": "relu2", "mamba_inner_layernorms": False},
+    {"intermediate_size": 0},
+]
+
+
+def _expected_hymba_groups(layer, options):
+    expected = [("input_layernorm", ["mamba.in_proj"], [])]
+    if options.get("intermediate_size", 1) == 0:
+        return expected
+    experts = range(options.get("num_experts", 1))
+    gated = options.get("mlp_hidden_act", "silu") == "silu"
+    names = ("gate_proj", "up_proj") if gated else ("up_proj",)
+    router = ["moe.router"] if layer.moe.router is not None else []
+    expected.append(("pre_moe_layernorm", [f"moe.experts.{i}.{name}" for i in experts for name in names], router))
+    if gated:
+        expected += [(f"moe.experts.{i}.up_proj", [f"moe.experts.{i}.down_proj"], []) for i in experts]
+    return expected
+
+
+@pytest.mark.parametrize("options", _HYMBA_LAYOUTS)
+def test_owned_hymba_awq_folds_preserve_layer_output(options):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    from tests.test_hymba_local_port import tiny_model
+
+    # Layer 0 produces shared KV, layer 1 reuses it, layer 2 is global.
+    model = tiny_model(**options)
+    ids = torch.tensor([[1, 8, 6, 11, 4]])
+
+    def forward():
+        return model(ids, use_cache=False).logits
+
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(HymbaQModel, model, layer, forward)
+        # in_proj feeds the conv/SSM/attention mixer and out_proj reads the
+        # average of two normalized branches, so neither is a fold source or
+        # target. A relu2 expert's up_proj feeds a non-linear activation.
+        assert checked == _expected_hymba_groups(layer, options)
+
+
+def test_owned_hymba_drops_only_the_gateless_expert_up_to_down_fold():
+    from tests.test_hymba_local_port import tiny_model
+
+    model = tiny_model(mlp_hidden_act="relu2")
+    layer = model.model.layers[0]
+    plan = ModulePlan.from_tree(HymbaQModel.module_tree)
+    wrapper = HymbaQModel.__new__(HymbaQModel)
+    nn.Module.__init__(wrapper)
+    wrapper.__dict__["model"] = model
+    features = _features(layer, plan)
+    generic = BaseQModel.awq_get_modules_for_scaling(wrapper, layer, features, {})
+    kept = wrapper.awq_get_modules_for_scaling(layer, features, {})
+    names = lambda nodes: [get_op_name(layer, node["prev_op"]) for node in nodes]  # noqa: E731
+    assert "moe.experts.0.up_proj" in names(generic)
+    assert names(kept) == [name for name in names(generic) if name != "moe.experts.0.up_proj"]
+    # in_proj is scored on its own output instead of a whole-mixer replay.
+    in_proj = next(node for node in kept if get_op_name(layer, node["prev_op"]) == "input_layernorm")
+    assert in_proj["module2inspect"] is layer.mamba.in_proj
+
+
+@pytest.mark.parametrize("options", [{}, {"num_experts": 3, "num_experts_per_tok": 2},
+                                     {"mlp_hidden_act": "relu2"}])
+def test_owned_hymba_public_awq_scale_search_quantizes_and_reloads(tmp_path, monkeypatch, options):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import PreTrainedTokenizerFast
+
+    from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
+    from gptqmodel.looper import awq_processor
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+    from gptqmodel.quantization.config import AWQConfig
+    from tests.test_hymba_local_port import tiny_model
+
+    # AWQ kernels need 16-column groups: widen the experts' 24-wide inner dim.
+    model = tiny_model(intermediate_size=32, num_memory_tokens=0, **options)
+    model.save_pretrained(tmp_path)
+    PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel(
+        {f"t{i}": i for i in range(37)}, unk_token="t0")), unk_token="t0", pad_token="t0").save_pretrained(tmp_path)
+    qcfg = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=False)
+    wrapper = GPTQModel.load(str(tmp_path), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
+    applied = []
+    original_apply_scale = awq_processor.apply_scale
+
+    def record_apply_scale(module, scales_list, *args, **kwargs):
+        applied.append([(source, list(targets)) for source, targets, _scales, _loss in scales_list])
+        return original_apply_scale(module, scales_list, *args, **kwargs)
+
+    monkeypatch.setattr(awq_processor, "apply_scale", record_apply_scale)
+    calibration = [{"input_ids": torch.tensor([[1, 8, 6, 11, 4, 7, 13, 9]]),
+                    "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
+    layers = wrapper.model.model.layers
+    assert applied == [
+        [(source, targets) for source, targets, _ in _expected_hymba_groups(layer, options)] for layer in layers
+    ]
+    quantized = sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules())
+    per_expert = 3 if options.get("mlp_hidden_act", "silu") == "silu" else 2
+    assert quantized == 3 * (2 + per_expert * options.get("num_experts", 1))
+    with torch.inference_mode():
+        expected = wrapper.model(**calibration[0], use_cache=False).logits
+    assert torch.isfinite(expected).all()
+    saved = tmp_path / "quantized"
+    wrapper.save_quantized(str(saved))
+    reloaded = GPTQModel.load(str(saved), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
+    assert sum(isinstance(module, AwqTorchLinear) for module in reloaded.model.modules()) == quantized
+    with torch.inference_mode():
+        torch.testing.assert_close(reloaded.model(**calibration[0], use_cache=False).logits, expected,
+                                   atol=2e-4, rtol=2e-3)
 
 
 # --------------------------------------------------------------------------- #

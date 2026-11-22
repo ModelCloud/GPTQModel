@@ -4,24 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import logging
+from importlib import import_module
 from typing import Dict, List, Set, Tuple
 
 import torch
 import torch.nn as nn
-from packaging.version import Version
-from transformers import __version__ as transformers_version
-from transformers.activations import GELUActivation, NewGELUActivation
-
-
-if Version(transformers_version) >= Version("4.57.0"):
-    from transformers.activations import GELUTanh
-else:
-    from transformers.activations import PytorchGELUTanh as GELUTanh
-from transformers.models.bloom.modeling_bloom import BloomGelu
-from transformers.models.cohere.modeling_cohere import CohereLayerNorm
-from transformers.models.gemma.modeling_gemma import GemmaRMSNorm
-from transformers.models.gemma2.modeling_gemma2 import Gemma2RMSNorm
-from transformers.models.llama.modeling_llama import LlamaRMSNorm
+from transformers.activations import GELUActivation, GELUTanh, NewGELUActivation
 
 from gptqmodel._rocm_env import running_on_rocm
 from gptqmodel.quantization.awq.modules.act import ScaledActivation
@@ -38,43 +26,58 @@ class UnresolvableGainOffset(RuntimeError):
     """The norm's gain parameterization could not be measured on the live module."""
 
 
-try:
-    from transformers.models.gemma4.modeling_gemma4 import Gemma4RMSNorm
-except Exception:  # pragma: no cover - older transformers builds do not expose Gemma 4 yet
-    Gemma4RMSNorm = None
-
-try:
-    from transformers.models.cohere_compass.modeling_cohere_compass import CohereCompassLayerNorm
-except Exception:  # pragma: no cover - older transformers builds do not expose Cohere Compass yet
-    CohereCompassLayerNorm = None
-
-try:
-    from transformers.models.cohere2.modeling_cohere2 import Cohere2LayerNorm
-except Exception:  # pragma: no cover - older transformers builds do not expose Cohere2 yet
-    Cohere2LayerNorm = None
-
-try:
-    from transformers.models.cohere2_moe.modeling_cohere2_moe import Cohere2MoeLayerNorm
-except Exception:  # pragma: no cover - older transformers builds do not expose Cohere2-MoE yet
-    Cohere2MoeLayerNorm = None
+# Fold sources: framework modules plus the vendored Transformers 5.23 norm and
+# activation classes that definitions load (never ``transformers.models``).
+_VENDORED_FOLD_NORMS = (
+    ("llama", "LlamaRMSNorm"),
+    ("gemma", "GemmaRMSNorm"),
+    ("gemma2", "Gemma2RMSNorm"),
+    ("gemma4", "Gemma4RMSNorm"),
+    ("cohere", "CohereLayerNorm"),
+    ("cohere2", "Cohere2LayerNorm"),
+    ("cohere_compass", "CohereCompassLayerNorm"),
+    ("cohere2_moe", "Cohere2MoeLayerNorm"),
+)
+_VENDORED_FOLD_ACTIVATIONS = (("bloom", "BloomGelu"),)
 
 
-allowed_norms = [nn.LayerNorm, LlamaRMSNorm, GemmaRMSNorm, Gemma2RMSNorm, CohereLayerNorm]
-if Gemma4RMSNorm is not None:
-    allowed_norms.append(Gemma4RMSNorm)
-if CohereCompassLayerNorm is not None:
-    allowed_norms.append(CohereCompassLayerNorm)
-if Cohere2LayerNorm is not None:
-    allowed_norms.append(Cohere2LayerNorm)
-if Cohere2MoeLayerNorm is not None:
-    allowed_norms.append(Cohere2MoeLayerNorm)
+def _vendored(family, name):
+    return getattr(import_module(f"gptqmodel.models.ports.native.{family}.modeling_{family}"), name)
+
+
+allowed_norms = [nn.LayerNorm, *(_vendored(family, name) for family, name in _VENDORED_FOLD_NORMS)]
 allowed_act_fns = [
     nn.GELU,
-    BloomGelu,
     NewGELUActivation,
     GELUTanh,
     GELUActivation,
+    *(_vendored(family, name) for family, name in _VENDORED_FOLD_ACTIVATIONS),
 ]
+
+# The identical Transformers classes (an unsupported model built by
+# Transformers itself) are recognized by class path, without importing them.
+_TRANSFORMERS_FOLD_NORM_PATHS = frozenset(
+    f"transformers.models.{family}.modeling_{family}.{name}" for family, name in _VENDORED_FOLD_NORMS
+)
+_TRANSFORMERS_FOLD_ACTIVATION_PATHS = frozenset(
+    f"transformers.models.{family}.modeling_{family}.{name}" for family, name in _VENDORED_FOLD_ACTIVATIONS
+)
+
+
+def _class_paths(module):
+    return {f"{cls.__module__}.{cls.__qualname__}" for cls in type(module).__mro__}
+
+
+def _is_fold_norm(module) -> bool:
+    return any(isinstance(module, t) for t in allowed_norms) or bool(
+        _class_paths(module) & _TRANSFORMERS_FOLD_NORM_PATHS
+    )
+
+
+def _is_fold_activation(module) -> bool:
+    return any(isinstance(module, t) for t in allowed_act_fns) or bool(
+        _class_paths(module) & _TRANSFORMERS_FOLD_ACTIVATION_PATHS
+    )
 
 
 def is_foldable_source(prev_op: nn.Module) -> bool:
@@ -88,9 +91,9 @@ def is_foldable_source(prev_op: nn.Module) -> bool:
 
     if isinstance(prev_op, nn.Linear):
         return True
-    if any(isinstance(prev_op, t) for t in allowed_act_fns):
+    if _is_fold_activation(prev_op):
         return True
-    is_norm = any(isinstance(prev_op, t) for t in allowed_norms) or "rmsnorm" in str(
+    is_norm = _is_fold_norm(prev_op) or "rmsnorm" in str(
         prev_op.__class__
     ).lower()
     if not is_norm:
@@ -109,7 +112,7 @@ def _is_norm_source(prev_op: nn.Module) -> bool:
     consumers are co-located for the fold.
     """
 
-    if any(isinstance(prev_op, t) for t in allowed_norms):
+    if _is_fold_norm(prev_op):
         return True
     return "rmsnorm" in str(prev_op.__class__).lower()
 
@@ -307,7 +310,7 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
                 # effective scale as the folded weights, so take it back.
                 scales = scale_ln_fcs(prev_op, layers, scales)
 
-            elif any(isinstance(prev_op, t) for t in allowed_act_fns):
+            elif _is_fold_activation(prev_op):
                 new_module = ScaledActivation(prev_op, scales)
                 set_op_by_name(module, prev_op_name, new_module)
                 scale_gelu_fc(prev_op, layers[0], scales)
@@ -469,7 +472,7 @@ def scale_fc_fcs(fc1: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
 
 @torch.inference_mode()
 def scale_gelu_fc(gelu: allowed_act_fns, fc: nn.Linear, scales: torch.Tensor):
-    assert any(isinstance(gelu, t) for t in allowed_act_fns)
+    assert _is_fold_activation(gelu)
     assert isinstance(fc, nn.Linear)
 
     fc.weight.mul_(scales.view(1, -1).to(fc.weight.device))

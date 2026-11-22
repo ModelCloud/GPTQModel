@@ -16,13 +16,14 @@ import shutil
 import threading
 import time
 import weakref
-from functools import partial, wraps
+from functools import lru_cache, partial, wraps
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
+from types import MethodType
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 
 import torch
-import transformers
 
 from ..utils.hf import _compile_keep_in_fp32_matcher
 from ..utils.kernel import KernelConfig, configure_kernel
@@ -44,7 +45,7 @@ else:
 
 import defuser
 from packaging.version import InvalidVersion, Version
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
 
 from ..adapter.adapter import Adapter, normalize_adapter
@@ -87,12 +88,11 @@ from ..utils.hf import (
     get_config_selection_kwargs,
     get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
-    has_native_transformers_causallm_support,
+    has_native_transformers_model_support,
     load_hf_tokenizer,
-    normalize_hf_config_compat,
+    load_model_config,
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
-    prepare_remote_model_init_compat,
     resolve_checkpoint_subfolder,
     resolve_trust_remote_code,
     set_hf_config_dtype,
@@ -113,6 +113,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import (
     apply_no_placement_to_device_map,
     auto_dtype,
+    co_locate_shared_module_aliases,
     convert_gptq_v1_to_v2_format,
     find_config_seq_len,
     find_modules,
@@ -130,7 +131,6 @@ from ..utils.model import (
 )
 from ..utils.torch import (
     _ModelGlobalStateLock,
-    defuser_conversion_scope,
     xla_device_count,
 )
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
@@ -207,7 +207,7 @@ def _runtime_checkpoint_names(model) -> frozenset[str]:
 
 
 def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
-    """Return the key converter the quantized loader should apply.
+    r"""Return the key converter the quantized loader should apply.
 
     A definition may declare an explicit ``checkpoint_key_for_load`` /
     ``checkpoint_key_for_save``. Every other family falls back to its
@@ -1266,7 +1266,7 @@ def _should_print_module_tree() -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 
-def _call_before_model_load(cls, *, model_local_path: str, load_quantized_model: bool) -> None:
+def _call_before_model_load(cls, *, model_local_path: str, load_quantized_model: bool, trust_remote_code: bool = False) -> None:
     """Run a definition's pre-load hook for every load path.
 
     `before_model_load` is a plain method on the definition class, not an
@@ -1278,6 +1278,12 @@ def _call_before_model_load(cls, *, model_local_path: str, load_quantized_model:
     `generate()`/`forward()` on an unquantized model.
     """
 
+    if getattr(cls, "before_model_load_requires_remote_code", False):
+        if not trust_remote_code:
+            return
+        from ..utils.security import require_remote_code_permission
+
+        require_remote_code_permission(trust_remote_code)
     cls.before_model_load(
         cls,
         model_local_path=model_local_path,
@@ -1292,11 +1298,9 @@ def _maybe_print_module_tree(model) -> None:
         print_module_tree(model=model)
 
 
-# `requirements.txt` pins `defuser>=0.0.33`. Older releases do not split the
-# fused 3-D expert tensors of afmoe / flint / granitemoe_swa, so their routed
-# experts stay fused and are silently left unquantized; the only symptom is a
-# "0 layer matches" line in the module-coverage report. 0.0.33 is the release
-# that knows the Inkling 2 Mini expert container and its checkpoint layout.
+# Defuser 0.0.33 adds Inkling 2 Mini expert conversion. It also includes the
+# Afmoe/Flint/GraniteMoeSWA fused-expert conversion, the GLM-4.x router tuple
+# fix and the device-scoped accelerator cache flush from 0.0.32 (#5105).
 DEFUSER_MIN_VERSION = "0.0.33"
 _defuser_version_warning_emitted = False
 
@@ -1335,44 +1339,321 @@ def _check_defuser_version() -> None:
     )
 
 
+# Vendored Transformers 5.23 families live at
+# ``gptqmodel.models.ports.native.<family>.<module>.<Class>``; Defuser keys its
+# runtime patches, expert specs and construction-time replacements by the
+# matching ``transformers.models.<family>.<module>.<Class>`` path.
+_VENDORED_CLASS_PREFIX = "gptqmodel.models.ports.native."
+_DEFUSER_CLASS_PREFIX = "transformers.models."
+
+
+def _defuser_module_path(module_class) -> Optional[str]:
+    """Return Defuser's ``transformers.models`` module for a vendored class, else None."""
+
+    module_path = getattr(module_class, "__module__", "") or ""
+    if not module_path.startswith(_VENDORED_CLASS_PREFIX):
+        return None
+    return _DEFUSER_CLASS_PREFIX + module_path[len(_VENDORED_CLASS_PREFIX):]
+
+
+def _new_defuser_alias(original):
+    alias = type(original.__name__, (original,), {
+        "__module__": _defuser_module_path(original),
+        "__qualname__": original.__qualname__,
+    })
+    # GradientCheckpointingLayer wraps forward on every subclass. Inherit the
+    # vendored forward until Defuser decides whether to replace it.
+    if "forward" in vars(alias):
+        delattr(alias, "forward")
+    return alias
+
+
+def _defuser_bound_forwards(module, state):
+    return {
+        name: method.__func__
+        for name in ("forward", "_old_forward")
+        if isinstance(method := state.get(name), MethodType)
+        and method.__self__ is module
+        and (method.__func__.__module__.startswith("defuser.") or method.__func__ is _routed_experts_forward)
+    }
+
+
+# Defuser's construction-time replacement blocks whose expert loop is
+# ``defuser.modeling.unfused_moe.common.run_routed_experts`` (or the identical
+# Glm4MoeLite loop). GPT-QModel builds the vendored block and converts its
+# experts afterwards, so the converted experts get ``_routed_experts_forward``,
+# which feeds every expert the same token rows in the same order as that loop.
+_ROUTED_EXPERTS_REPLACEMENTS = frozenset({
+    "defuser.modeling.unfused_moe.mixtral.LinearMixtralSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen2_moe.LinearQwen2MoeSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen3_moe.LinearQwen3MoeSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen3_next.LinearQwen3NextSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen3_omni_moe.LinearQwen3OmniMoeThinkerTextSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen3_omni_moe.LinearQwen3OmniMoeTalkerTextSparseMoeBlock",
+    "defuser.modeling.unfused_moe.glm4_moe_lite.LinearGlm4MoeLiteMoE",
+})
+
+
+def _routed_experts_forward(self, hidden_states, top_k_index, top_k_weights):
+    """Run Defuser-converted per-expert linears in the eager routed-loop order.
+
+    Matches ``run_routed_experts`` (and the Transformers eager experts loop):
+    experts are visited in ascending index, each expert receives its token rows
+    ordered by top-k slot and then token (``torch.where`` over the
+    ``[top_k, tokens]`` mask), and weighted outputs are accumulated with
+    ``index_add_``. Calibration statistics that depend on row order (AWQ scale
+    search) therefore stay bit-identical to the replacement block.
+    """
+
+    shape = hidden_states.shape
+    hidden_dim = shape[-1]
+    hidden_states = hidden_states.reshape(-1, hidden_dim)
+    top_k_index = top_k_index.reshape(hidden_states.shape[0], -1)
+    top_k_weights = top_k_weights.reshape(hidden_states.shape[0], -1).to(hidden_states.dtype)
+    final_hidden_states = torch.zeros_like(hidden_states)
+
+    expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
+    expert_hit = torch.nonzero(expert_mask.sum(dim=(-1, -2)), as_tuple=False).flatten()
+    for expert_idx in expert_hit.tolist():
+        expert = getattr(self, str(expert_idx))
+        top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+        current_state = hidden_states[token_idx]
+        if hasattr(expert, "gate_proj"):
+            gate_out = expert.gate_proj(current_state)
+            up_out = expert.up_proj(current_state)
+            if hasattr(self, "_apply_gate"):
+                current = self._apply_gate(torch.cat([gate_out, up_out], dim=-1))
+            else:
+                current = self.act_fn(gate_out) * up_out
+        else:
+            current = self.act_fn(expert.up_proj(current_state))
+        current = expert.down_proj(current) * top_k_weights[token_idx, top_k_pos, None]
+        final_hidden_states.index_add_(0, token_idx, current.to(final_hidden_states.dtype))
+
+    return final_hidden_states.reshape(shape)
+
+
+def _bind_converted_experts_forwards(model, routed_blocks) -> None:
+    """Make every Defuser-converted experts module carry its own forward.
+
+    Defuser unfuses ``@use_experts_implementation`` experts in place and sets
+    ``config._experts_implementation = "linear_loop"``; the class forward then
+    resolves that name in Transformers' ``ALL_EXPERTS_FUNCTIONS`` on every call,
+    which only holds the entry in the process that ran the conversion. Binding
+    the implementation on the instance (as Defuser itself does for its
+    declarative ``experts_defuse`` specs) keeps the converted model
+    self-contained: pickled models load and run in a fresh process, and the
+    instance forward pickles by reference through ``_reduce_defused_module``.
+    """
+
+    from defuser.modeling.moe_experts_interface import LINEAR_LOOP_IMPL, linear_loop_experts_forward
+
+    if not callable(getattr(model, "modules", None)):
+        return
+    routed_experts = {id(getattr(block, "experts", None)) for block in routed_blocks}
+    for module in model.modules():
+        if "forward" in vars(module) or "0" not in module._modules:
+            continue
+        if not hasattr(type(module).forward, "__wrapped__"):
+            continue
+        if getattr(getattr(module, "config", None), "_experts_implementation", None) != LINEAR_LOOP_IMPL:
+            continue
+        forward = _routed_experts_forward if id(module) in routed_experts else linear_loop_experts_forward
+        module.forward = MethodType(forward, module)
+
+
+def _reduce_defused_module(module, protocol):
+    alias = type(module)
+    original = alias.__bases__[0]
+    state = module.__getstate__().copy()
+    forwards = _defuser_bound_forwards(module, state)
+    for name in forwards:
+        del state[name]
+    # Pickle resolves a bound method by attribute name on its owner. Defuser
+    # binds its functions as "forward", so persist the importable functions
+    # and bind them again after the module's state has been loaded.
+    compact_experts = "_compact_expert_repr_installed" in vars(alias)
+    omni = getattr(getattr(alias, "generate", None), "_defuser_qwen3_omni_text_runtime", False)
+    return _new_defused_module, (original, compact_experts, omni), (state, forwards)
+
+
+def _new_defused_module(original, compact_experts, omni):
+    return object.__new__(_restored_defuser_alias(original, compact_experts, omni))
+
+
+@lru_cache(maxsize=128)
+def _restored_defuser_alias(original, compact_experts, omni):
+    # Rebuild the private subclass in a fresh process without inserting it
+    # into a vendored or Transformers module under a synthetic global name.
+    alias = _new_defuser_alias(original)
+    module = object.__new__(alias)
+    if compact_experts:
+        from defuser.modeling.moe_experts_interface import _install_compact_expert_repr
+
+        _install_compact_expert_repr(module)
+    if omni:
+        from defuser.modeling.model_patches import patch_qwen3_omni_text_runtime
+
+        patch_qwen3_omni_text_runtime(module)
+    alias.__module__ = original.__module__
+    alias.__reduce_ex__ = _reduce_defused_module
+    alias.__setstate__ = _set_defused_module_state
+    return alias
+
+
+def _set_defused_module_state(module, state_and_forwards):
+    state, forwards = state_and_forwards
+    type(module).__bases__[0].__setstate__(module, state)
+    for name, forward in forwards.items():
+        setattr(module, name, MethodType(forward, module))
+
+
+class _DefuserClassPathAliases:
+    """Present vendored module classes to Defuser under their Transformers class path.
+
+    Each vendored instance temporarily gets a per-class subclass whose only
+    difference is ``__module__`` (``transformers.models.<family>.<module>``),
+    so every Defuser lookup by class path or class name matches exactly as it
+    does for the Transformers class. On exit an instance whose alias Defuser
+    left untouched gets its vendored class back. Instances with Defuser
+    behavior retain a subclass with a pickle reconstruction recipe.
+    """
+
+    def __init__(self, model):
+        self.model = model
+        self.aliases = {}
+        self.alias_names = {}
+
+    def _modules(self):
+        modules = getattr(self.model, "modules", None)
+        return list(modules()) if callable(modules) else []
+
+    def _alias(self, module_class):
+        alias = self.aliases.get(module_class)
+        if alias is None:
+            alias = _new_defuser_alias(module_class)
+            self.aliases[module_class] = alias
+            self.alias_names[alias] = (module_class, set(vars(alias)))
+        return alias
+
+    def __enter__(self):
+        for module in self._modules():
+            module_class = type(module)
+            if (
+                _defuser_module_path(module_class) is None
+                or module_class.__reduce_ex__ is _reduce_defused_module
+            ):
+                continue
+            module.__class__ = self._alias(module_class)
+        return self
+
+    def __exit__(self, *exc):
+        extended = {
+            alias for alias, (_, names) in self.alias_names.items() if set(vars(alias)) - names
+        }
+        retained = set()
+        for module in self._modules():
+            alias = type(module)
+            entry = self.alias_names.get(alias)
+            if entry is None:
+                continue
+            if alias in extended or _defuser_bound_forwards(module, vars(module)):
+                retained.add(alias)
+            else:
+                module.__class__ = entry[0]
+        for alias in retained:
+            alias.__module__ = self.alias_names[alias][0].__module__
+            alias.__reduce_ex__ = _reduce_defused_module
+            alias.__setstate__ = _set_defused_module_state
+        return False
+
+
 def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     _check_defuser_version()
-    # Defuser's conversion flushes the accelerator cache through
-    # `clear_memory()`, which synchronizes the *current* device when no device
-    # list is supplied. Scope that call to the devices this model actually
-    # occupies so a CPU/meta conversion does not claim cuda:0 on the way to
-    # cuda:1 (#5105).
-    with defuser_conversion_scope(model):
-        converted = defuser.convert_model(model, cleanup_original=cleanup_original)
+    # Defuser >= 0.0.32 flushes only the devices this model occupies, so a
+    # CPU/meta conversion never claims cuda:0 (#5105).
+    with _DefuserClassPathAliases(model):
+        converted = _run_defuser_conversion(cls, model, cleanup_original)
+        routed_blocks = _apply_vendored_construction_replacements(model)
+        _bind_converted_experts_forwards(model, routed_blocks)
 
-        # Defuser gates `convert_model()` on its own model registry. Model types
-        # that GPT-QModel supports through the generic Transformers experts
-        # interface (native Kimi-Linear / MiMo-V2-Flash) have no registry entry,
-        # so run Defuser's generic replacement pass explicitly instead of leaving
-        # the fused 3-D expert parameters unquantized.
-        if not converted and getattr(cls, "defuser_generic_experts", False):
-            from defuser.modeling.update_module import update_module
+    after_conversion = getattr(cls, "after_defuser_conversion", None)
+    # Model-specific finalizers may also normalize metadata that Defuser does
+    # not own. Run them after the conversion attempt even when the installed
+    # Defuser has no matching registration and reports no structural change.
+    if callable(after_conversion):
+        after_conversion(model)
 
-            update_module(model, cleanup_original=cleanup_original)
-            converted = True
+    return converted
 
-        defuser_module_paths = getattr(cls, "defuser_module_paths", ())
-        if defuser_module_paths:
-            for module_path in defuser_module_paths:
-                module, _ = get_module_by_name_prefix(model, module_path)
-                if module is None:
-                    log.warn("Loader: defuser module path `%s` was not found.", module_path)
-                    continue
-                converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
 
-        after_conversion = getattr(cls, "after_defuser_conversion", None)
-        # Model-specific finalizers may also normalize metadata that Defuser does
-        # not own. Run them after the conversion attempt even when the installed
-        # Defuser has no matching registration and reports no structural change.
-        if callable(after_conversion):
-            after_conversion(model)
+def _apply_vendored_construction_replacements(model) -> list:
+    """Give vendored classes Defuser's construction-time block replacements.
 
-        return converted
+    ``defuser.replace_fused_blocks()`` swaps ``transformers.models`` classes
+    (and Transformers' checkpoint conversion mapping) before construction.
+    GPT-QModel never patches Transformers and vendored models are never built
+    from those modules, so the swap is applied here, after construction, under
+    the same class keys (this runs inside ``_DefuserClassPathAliases``). Fused
+    MoE blocks are already split per expert by Defuser's generic experts pass
+    with the replacement block's parameter names; a dense replacement (for
+    example ``Glm4vTextMLP`` -> ``LinearGlm4vTextMLP``) splits ``gate_up_proj``
+    with Defuser's own runtime split, which has the replacement's forward.
+    Returns the MoE blocks whose replacement runs the routed expert loop, so
+    their converted experts can keep that loop's token order.
+    """
+
+    from defuser.model_registry import MODEL_CONFIG, PATCH
+    from defuser.modeling.runtime_defusion import patch_split_gate_up_mlp
+
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    if not callable(getattr(model, "modules", None)):
+        return []
+    # Defuser 0.0.31's replace_fused_blocks consumes pairs of dotted class paths.
+    replaced = {}
+    for original, replacement in MODEL_CONFIG.get(model_type, {}).get(PATCH.REPLACE_MODULE, ()):
+        if not isinstance(original, str) or not isinstance(replacement, str):
+            raise TypeError(f"Defuser replacement entries for {model_type!r} must be pairs of dotted class paths.")
+        replaced[original] = replacement
+    routed_blocks = []
+    if not replaced:
+        return routed_blocks
+    for module in list(model.modules()):
+        module_class = type(module)
+        replacement = replaced.get(f"{module_class.__module__}.{module_class.__name__}")
+        if replacement is None:
+            continue
+        if replacement in _ROUTED_EXPERTS_REPLACEMENTS:
+            routed_blocks.append(module)
+        if isinstance(getattr(module, "gate_up_proj", None), torch.nn.Linear):
+            patch_split_gate_up_mlp(module, variant="standard")
+    return routed_blocks
+
+
+def _run_defuser_conversion(cls, model, cleanup_original: bool) -> bool:
+    converted = defuser.convert_model(model, cleanup_original=cleanup_original)
+
+    # Defuser gates `convert_model()` on its own model registry. Model types
+    # that GPT-QModel supports through the generic Transformers experts
+    # interface (native Kimi-Linear / MiMo-V2-Flash) have no registry entry,
+    # so run Defuser's generic replacement pass explicitly instead of leaving
+    # the fused 3-D expert parameters unquantized.
+    if not converted and getattr(cls, "defuser_generic_experts", False):
+        from defuser.modeling.update_module import update_module
+
+        update_module(model, cleanup_original=cleanup_original)
+        converted = True
+
+    defuser_module_paths = getattr(cls, "defuser_module_paths", ())
+    if defuser_module_paths:
+        for module_path in defuser_module_paths:
+            module, _ = get_module_by_name_prefix(model, module_path)
+            if module is None:
+                log.warn("Loader: defuser module path `%s` was not found.", module_path)
+                continue
+            converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
+
+    return converted
 
 
 # Fused expert projections that Defuser splits from one 3-D tensor into a
@@ -1456,21 +1737,78 @@ def _materialize_meta_expert_linears(model) -> int:
     return moved
 
 
-def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
-    """Detect whether the resolved HF architecture exposes FA2 kernels."""
+def _definition_model_class(definition, config: PretrainedConfig):
+    """Return the model class ``definition`` builds for ``config``, or None.
 
-    if not getattr(config, "architectures", None):
-        return False
+    Resolved from the definition's own loader, never from a checkpoint-supplied
+    name looked up on the ``transformers`` package (``config.architectures`` is
+    checkpoint data and would import an arbitrary Transformers model module).
+    """
 
-    model_class = getattr(transformers, config.architectures[0], None)
+    from transformers.modeling_utils import PreTrainedModel
+
+    from .local import LocalModelLoader, _local_class
+
+    loader = getattr(definition, "loader", None)
+    if not isinstance(loader, LocalModelLoader):
+        # Unsupported model (BaseQModel's Transformers Auto* loader): the class
+        # that Auto* builds for this config type.
+        mapping = getattr(loader, "_model_mapping", None)
+        try:
+            return mapping[type(config)] if mapping is not None else None
+        except (KeyError, ValueError):
+            return None
+
+    target = _local_class(loader.model_class)
+    resolver = getattr(target, "_model_class", None)
+    if callable(resolver):
+        # Native* loaders: the vendored class registered for config.model_type.
+        try:
+            return resolver(config)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(target, type) and issubclass(target, PreTrainedModel):
+        return target
+    # Port factory: the package class its module names for this architecture,
+    # else the vendored class registered for config.model_type.
+    def _package_model(candidate):
+        return (
+            isinstance(candidate, type)
+            and issubclass(candidate, PreTrainedModel)
+            and candidate.__module__.startswith("gptqmodel.")
+        )
+
+    architectures = getattr(config, "architectures", None) or ()
+    name = architectures[0] if architectures and isinstance(architectures[0], str) else None
+    if name is not None and name.isidentifier():
+        found = getattr(import_module(target.__module__), name, None)
+        if _package_model(found):
+            return found
+    from .ports.native.auto import _registry, _resolve
+
+    model_type = getattr(config, "model_type", None)
+    for table in (_registry.CAUSAL_LM, _registry.IMAGE_TEXT_TO_TEXT, _registry.MULTIMODAL_LM, _registry.MODEL):
+        if model_type in table:
+            found = _resolve(table, model_type, "model")
+            if _package_model(found):
+                return found
+    return None
+
+
+def _model_class_supports_flash_attn(model_class) -> bool | None:
     if model_class is None:
-        return False
-
+        return None
     if hasattr(model_class, "_supports_flash_attn_2"):
         return bool(getattr(model_class, "_supports_flash_attn_2"))
     if hasattr(model_class, "_supports_flash_attn"):
         return bool(getattr(model_class, "_supports_flash_attn"))
-    return False
+    return None
+
+
+def _supports_flash_attn_2(definition, config: PretrainedConfig) -> bool:
+    """Detect whether the class ``definition`` builds exposes FA2 kernels."""
+
+    return bool(_model_class_supports_flash_attn(_definition_model_class(definition, config)))
 
 
 def _iter_nested_pretrained_configs(config: PretrainedConfig):
@@ -1940,7 +2278,7 @@ def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remot
     model_config = model.config.to_dict()
     seq_len = find_config_seq_len(
         model_config,
-        ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"],
+        ["max_position_embeddings", "max_seq_len", "seq_length", "n_positions", "multimodal_max_length"],
     )
     model.seqlen = seq_len if seq_len is not None else 4096
 
@@ -2085,18 +2423,8 @@ def check_versions(model_class, requirements: List[str]):
 
 
 def set_dtype_compat(model_init_kwargs: dict, torch_dtype):
-    """
-    Set dtype argument in a version-compatible way for Transformers.
-    See: https://github.com/huggingface/transformers/releases/tag/v4.56.0
-
-    Args:
-        model_init_kwargs (dict): kwargs used to initialize model
-        torch_dtype: torch dtype (e.g. torch.float16)
-    """
-    if Version(transformers.__version__) >= Version("4.56.0"):
-        model_init_kwargs["dtype"] = torch_dtype
-    else:
-        model_init_kwargs["torch_dtype"] = torch_dtype
+    """Set the Transformers 5.23 ``dtype`` model-init argument."""
+    model_init_kwargs["dtype"] = torch_dtype
 
 def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
@@ -2429,27 +2757,18 @@ def ModelLoader(cls):
         model_init_kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
 
         tokenizer_trust_remote_code = model_init_kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
+        config_load_kwargs = {**get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs}
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs_without_internal)
-        # The wrapper owns the processor and auxiliary-file lookup. A nested
-        # checkpoint keeps all of them beside the config and weights, so pass
-        # the resolved directory instead of the repository root. Config,
-        # tokenizer and weight loading keep forwarding ``subfolder`` to
-        # Transformers; this value is only the wrapper's checkpoint root.
-        checkpoint_dir = resolve_checkpoint_subfolder(
-            model_local_path, model_init_kwargs_without_internal.get("subfolder")
+        # Hooks read files directly. Config, processor and writer lookups keep
+        # the repository root and selection kwargs as separate inputs.
+        checkpoint_dir = resolve_checkpoint_subfolder(model_local_path, config_load_kwargs.get("subfolder"))
+        trust_remote_code = resolve_trust_remote_code(
+            model_local_path, trust_remote_code=trust_remote_code, **config_load_kwargs
         )
-        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
 
         model_init_kwargs_without_internal["trust_remote_code"] = trust_remote_code
 
-        config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs_without_internal, **hf_gguf_load_kwargs)
-
-        defuser.replace_fused_blocks(config.model_type)
-
-        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
-        prepare_remote_model_init_compat(
-            model_local_path, config, trust_remote_code=trust_remote_code
-        )
+        config = load_model_config(model_local_path, **model_init_kwargs_without_internal, **hf_gguf_load_kwargs)
 
         from ..utils.mimo import is_mimo_mixed_source
 
@@ -2520,6 +2839,8 @@ def ModelLoader(cls):
                 model_local_path,
                 model_config=config,
                 trust_remote_code=tokenizer_trust_remote_code,
+                # The local port reuses the normalized Tokenicer wrapper.
+                return_tokenicer=True,
                 **_get_tokenizer_load_kwargs(model_init_kwargs),
             )
         else:
@@ -2587,7 +2908,7 @@ def ModelLoader(cls):
                 and native_gguf_qspec.tensor_qtype == _ggml_quantization_type().Q1_0
                 and atten_impl in {None, "auto"}
                 and _is_accelerated_attention_device(resolved_device)
-                and (config.model_type == "qwen3" or _supports_flash_attn_2(config))
+                and (config.model_type == "qwen3" or _supports_flash_attn_2(cls, config))
                 and is_flash_attn_2_available()
             ):
                 hf_model_init_kwargs[ATTN_IMPLEMENTATION] = "flash_attention_2"
@@ -2595,6 +2916,7 @@ def ModelLoader(cls):
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
             _call_before_model_load(
                 cls,
+                trust_remote_code=trust_remote_code,
                 model_local_path=checkpoint_dir,
                 load_quantized_model=False,
             )
@@ -2623,7 +2945,9 @@ def ModelLoader(cls):
                 quantize_config=quantize_config,
                 tokenizer=tokenizer,
                 trust_remote_code=trust_remote_code,
-                model_local_path=checkpoint_dir,
+                model_local_path=model_local_path,
+                processor_load_kwargs=get_config_selection_kwargs(model_init_kwargs),
+                config_load_kwargs=config_load_kwargs,
             )
             _set_paged_attention_safe_cuda_graphs(instance.model)
 
@@ -2654,7 +2978,9 @@ def ModelLoader(cls):
             raise ValueError(f"{cls} only supports desc_act={cls.supports_desc_act}, "
                              f"but quantize_config.desc_act is {quantize_config.desc_act}.")
 
-        native_support = has_native_transformers_causallm_support(model_local_path)
+        native_support = has_native_transformers_model_support(
+            model_local_path, cls.loader, **get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs
+        )
         if cls.require_trust_remote_code and not trust_remote_code and not native_support:
             raise ValueError(
                 f"{pretrained_model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
@@ -2698,6 +3024,7 @@ def ModelLoader(cls):
 
             _call_before_model_load(
                 cls,
+                trust_remote_code=trust_remote_code,
                 model_local_path=checkpoint_dir,
                 load_quantized_model=False,
             )
@@ -2807,7 +3134,7 @@ def ModelLoader(cls):
         )
 
         model_config = model.config.to_dict()
-        seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
+        seq_len_keys = ["max_position_embeddings", "max_seq_len", "seq_length", "n_positions", "multimodal_max_length"]
         config_seq_len = find_config_seq_len(model_config, seq_len_keys)
         if config_seq_len is not None:
             model.seqlen = config_seq_len
@@ -2826,7 +3153,9 @@ def ModelLoader(cls):
             quantize_config=quantize_config,
             tokenizer=tokenizer,
             trust_remote_code=trust_remote_code,
-            model_local_path=checkpoint_dir,
+            model_local_path=model_local_path,
+            processor_load_kwargs=get_config_selection_kwargs(model_init_kwargs),
+            config_load_kwargs=config_load_kwargs,
         )
         _set_paged_attention_safe_cuda_graphs(instance.model)
 
@@ -2969,12 +3298,18 @@ def ModelLoader(cls):
             # The explicit device map determines placement and kernel targets.
             device = auto_select_device(normalize_device_device_map(None, requested_device_map), backend)
 
+        config_load_kwargs = {**get_config_selection_kwargs(kwargs_without_internal), **hf_gguf_load_kwargs}
         model_local_path = get_model_local_path(model_id_or_path, **kwargs_without_internal)
-        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
-        native_support = has_native_transformers_causallm_support(model_local_path)
+        trust_remote_code = resolve_trust_remote_code(
+            model_local_path, trust_remote_code=trust_remote_code, **config_load_kwargs
+        )
 
         """load quantized model from local disk"""
-        if cls.require_trust_remote_code and not trust_remote_code and not native_support:
+        if (
+            cls.require_trust_remote_code
+            and not trust_remote_code
+            and not has_native_transformers_model_support(model_local_path, cls.loader, **config_load_kwargs)
+        ):
             raise ValueError(
                 f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
@@ -3076,20 +3411,14 @@ def ModelLoader(cls):
             "_commit_hash": commit_hash,
             "attn_implementation": attn_implementation,
         }
+        processor_load_kwargs = get_config_selection_kwargs({**kwargs_without_internal, **cached_file_kwargs})
 
         # == step1: prepare configs and file names == #
-        config: PretrainedConfig = AutoConfig.from_pretrained(
+        config: PretrainedConfig = load_model_config(
             model_local_path,
             trust_remote_code=trust_remote_code,
             **cached_file_kwargs,
             **hf_gguf_load_kwargs,
-        )
-
-        defuser.replace_fused_blocks(config.model_type)
-
-        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
-        prepare_remote_model_init_compat(
-            model_local_path, config, trust_remote_code=trust_remote_code
         )
 
         if cls.require_dtype:
@@ -3226,6 +3555,8 @@ def ModelLoader(cls):
                 model_local_path,
                 model_config=config,
                 trust_remote_code=tokenizer_trust_remote_code,
+                # The local port reuses the normalized Tokenicer wrapper.
+                return_tokenicer=True,
                 # The tokenizer must come from the same directory and revision as
                 # the config and weights. A nested checkpoint keeps all of them in
                 # the requested subfolder, so resolving only the weights there would
@@ -3297,7 +3628,9 @@ def ModelLoader(cls):
                 qlinear_kernel=None,
                 load_quantized_model=True,
                 trust_remote_code=trust_remote_code,
-                model_local_path=checkpoint_dir,
+                model_local_path=model_local_path,
+                processor_load_kwargs=processor_load_kwargs,
+                config_load_kwargs=config_load_kwargs,
             )
             instance._runtime_generate = runtime_generate
             _set_paged_attention_safe_cuda_graphs(instance.model)
@@ -3380,22 +3713,12 @@ def ModelLoader(cls):
         with suspend_hf_weight_init():
             _call_before_model_load(
                 cls,
+                trust_remote_code=trust_remote_code,
                 model_local_path=checkpoint_dir,
                 load_quantized_model=True,
             )
 
-            if config.architectures:
-                model_class = getattr(transformers, config.architectures[0], None)
-                if model_class is not None:
-                    # backward-compatible fallback for "_supports_flash_attn" field
-                    if hasattr(model_class, "_supports_flash_attn_2"):
-                        supports_flash_attn = getattr(model_class, "_supports_flash_attn_2")
-                    elif hasattr(model_class, "_supports_flash_attn"):
-                        supports_flash_attn = getattr(model_class, "_supports_flash_attn")
-                else:
-                    supports_flash_attn = None
-            else:
-                supports_flash_attn = None
+            supports_flash_attn = _model_class_supports_flash_attn(_definition_model_class(cls, config))
 
             args = {}
             if supports_flash_attn and selector_device_family(device) in [DEVICE.CUDA, DEVICE.ROCM]:
@@ -3633,7 +3956,7 @@ def ModelLoader(cls):
             model,
             model_save_name,
             format_code,
-            key_converter=_checkpoint_key_converter(cls, model, to_runtime=False),
+            key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
         )
 
         if isinstance(requested_device_map, str) and requested_device_map not in [
@@ -3691,6 +4014,7 @@ def ModelLoader(cls):
 
             device_ids = list(range(num_gpus))
             device_map: Dict[str, str] = {}
+            layers = list(dict.fromkeys(layers))
             mod2name = {m: n for n, m in model.named_modules()}
 
             def assign(mod, device_id):
@@ -3698,7 +4022,7 @@ def ModelLoader(cls):
                     return
                 name = mod2name.get(mod)
                 if name is not None:
-                    device_map[name] = device_strs[device_id]
+                    device_map.setdefault(name, device_strs[device_id])
 
             def default_fallback_device_id() -> int:
                 if device_budgets is None:
@@ -3862,6 +4186,7 @@ def ModelLoader(cls):
                         device_map.setdefault(owner, device_strs[fallback_device])
                     else:
                         log.info(f"Loader: unable to map param '{param_name}' to a module; skipping fallback assignment.")
+            device_map = co_locate_shared_module_aliases(model, device_map)
             # optional logging for debug
             log.info(f"Loader: Built map across {num_gpus} GPU(s), "
                   f"{len(device_map)} entries. First 8: {list(device_map.items())[:8]}")
@@ -4095,7 +4420,7 @@ def ModelLoader(cls):
 
         # == step4: set seqlen == #
         model_config = model.config.to_dict()
-        seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
+        seq_len_keys = ["max_position_embeddings", "max_seq_len", "seq_length", "n_positions", "multimodal_max_length"]
         config_seq_len = find_config_seq_len(model_config, seq_len_keys)
         if config_seq_len is not None:
             model.seqlen = config_seq_len
@@ -4156,8 +4481,10 @@ def ModelLoader(cls):
             qlinear_kernel=qlinear_kernel,
             load_quantized_model=True,
             trust_remote_code=trust_remote_code,
-            model_local_path=checkpoint_dir,
+            model_local_path=model_local_path,
             effective_module_tree=effective_module_tree,
+            processor_load_kwargs=processor_load_kwargs,
+            config_load_kwargs=config_load_kwargs,
         )
         if backend == BACKEND.MLX:
             instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)

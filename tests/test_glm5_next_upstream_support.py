@@ -1,7 +1,6 @@
 # Adapted upstream regressions for this fork's integrated target+MTP loader.
 from types import SimpleNamespace
 
-import pytest
 import torch
 from defuser.model_registry import MODEL_CONFIG
 from torch import nn
@@ -10,12 +9,24 @@ from gptqmodel.models import auto
 from gptqmodel.models.definitions.glm5_next import Glm5NextQModel, _attach_glm5_next_mtp
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 from gptqmodel.utils.model import find_modules
 from gptqmodel.utils.structure import LazyTurtle
 
 
+def _vendored_glm5_next():
+    from gptqmodel.models.ports.native.glm5_next import configuration_glm5_next, modeling_glm5_next
+
+    return SimpleNamespace(
+        Glm5NextConfig=configuration_glm5_next.Glm5NextConfig,
+        Glm5NextTextConfig=configuration_glm5_next.Glm5NextTextConfig,
+        Glm5NextTextModel=modeling_glm5_next.Glm5NextTextModel,
+        Glm5NextForConditionalGeneration=modeling_glm5_next.Glm5NextForConditionalGeneration,
+    )
+
+
 def _tiny_text_config():
-    glm5_next = pytest.importorskip("transformers.models.glm5_next")
+    glm5_next = _vendored_glm5_next()
     return glm5_next.Glm5NextTextConfig(
         vocab_size=64,
         hidden_size=32,
@@ -46,12 +57,10 @@ def _tiny_text_config():
     )
 
 
-def test_glm5_next_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="glm5_next")
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+def test_glm5_next_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["glm5_next"]().save_pretrained(tmp_path)
 
-    assert auto.check_and_get_model_definition("glm-5.3-flash-fixture") is Glm5NextQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is Glm5NextQModel
 
 
 def test_glm5_next_module_tree_preserves_upstream_quantization_boundary():
@@ -106,7 +115,7 @@ def test_glm5_next_quantizes_every_loaded_decoder_layer():
 
 
 def test_glm5_next_defuser_registry_preserves_expert_forward():
-    glm5_next = pytest.importorskip("transformers.models.glm5_next")
+    glm5_next = _vendored_glm5_next()
     assert "glm5_next" in MODEL_CONFIG
     text_model = glm5_next.Glm5NextTextModel(_tiny_text_config()).eval()
 
@@ -157,7 +166,7 @@ def test_glm5_next_defuser_registry_preserves_expert_forward():
 
 
 def test_glm5_next_lazy_turtle_materializes_defused_experts(tmp_path):
-    glm5_next = pytest.importorskip("transformers.models.glm5_next")
+    glm5_next = _vendored_glm5_next()
     config = glm5_next.Glm5NextConfig(
         text_config=_tiny_text_config().to_dict(),
         vision_config={

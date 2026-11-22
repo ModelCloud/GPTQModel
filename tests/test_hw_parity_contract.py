@@ -78,7 +78,8 @@ def test_ada_is_not_promoted_to_hopper():
 def test_paro_launch_table_is_per_family_and_row_banded():
     """Paro keeps its historical tile off-table and measured Ada/RDNA4 tiles."""
 
-    from gptqmodel.quantization.paro.modules.triton import gemm as paro_gemm
+    # The launch table lives in the Triton kernel module, which imports Triton.
+    paro_gemm = pytest.importorskip("gptqmodel.quantization.paro.modules.triton.gemm")
 
     table = paro_gemm._PARO_GEMM_LAUNCH_CONFIGS
     assert "rdna4" in table, "Paro: no measured RDNA4 launch entry"
@@ -129,6 +130,9 @@ def test_gguf_qk_table_is_ada_only_and_rdna4_falls_through():
 
     from gptqmodel.nn_modules.qlinear import gguf_triton
 
+    if not gguf_triton._TRITON_AVAILABLE:
+        # The fixed-tile table is only defined alongside the Triton kernels.
+        pytest.skip("GGUF Triton launch tables require Triton")
     table = gguf_triton._GGUF_SM89_QK_SHAPES
     assert table, "GGUF SM89 table is empty"
     for qtype, bands in table.items():

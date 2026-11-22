@@ -3,11 +3,12 @@ import torch
 
 from gptqmodel import extension
 from gptqmodel.nn_modules.qlinear import marlin as marlin_mod
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 @pytest.mark.skipif(
-    torch.version.hip is not None,
-    reason="NVIDIA CUDA required (Marlin has no HIP kernel)",
+    not requires_nvidia_cuda(),
+    reason="NVIDIA CUDA required (Marlin has no HIP or CPU kernel)",
 )
 def test_marlin_runtime_chain_test():
     """

@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch.nn import functional as F
 
-from gptqmodel.models.inkling2_loop import modeling
+from gptqmodel.models.ports.inkling2_loop import modeling
 
 
 def _inputs(dtype, repeats):

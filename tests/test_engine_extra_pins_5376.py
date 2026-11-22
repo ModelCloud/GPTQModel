@@ -18,10 +18,10 @@ intersect the core floors. `scripts/check_engine_extras.py` runs the same check
 against live PyPI metadata.
 """
 
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
@@ -29,7 +29,7 @@ from packaging.version import Version
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-REPRESENTATIVE_PYTHONS = ("3.10", "3.11", "3.12", "3.13", "3.14")
+REPRESENTATIVE_PYTHONS = ("3.11", "3.12", "3.13", "3.14")
 CORE_PACKAGES = ("torch", "transformers")
 
 # Snapshot of the PyPI metadata that decides these lanes (2026-11-19):
@@ -167,10 +167,11 @@ def candidates(requirement, python_version):
     }
 
 
-def unsatisfied(extras, python_version):
+def unsatisfied(extras, python_version, *, floors=None):
     """Advertised engine requirements with no release inside the core floors."""
 
-    floors = core_floors()[python_version]
+    if floors is None:
+        floors = core_floors()[python_version]
     problems = []
     for extra, requirements in extras.items():
         for raw in requirements:
@@ -220,6 +221,14 @@ def test_core_floors_cover_every_interpreter():
 
 def test_advertised_engine_extras_resolve_on_every_interpreter():
     extras = _advertised_extras()
+    for requirements in extras.values():
+        for raw in requirements:
+            requirement = Requirement(raw)
+            if requirement.name in ENGINE_RELEASES and requirement.marker is not None:
+                assert any(
+                    requirement.marker.evaluate(_environment(version))
+                    for version in REPRESENTATIVE_PYTHONS
+                ), f"{raw} excludes every supported interpreter"
     problems = [
         problem
         for version in REPRESENTATIVE_PYTHONS
@@ -240,5 +249,6 @@ def test_pre_fix_engine_extras_are_rejected(python_version):
 def test_known_compatible_release_is_accepted():
     """Positive control: a combination that resolves must not be rejected."""
 
-    extras = {"vllm": ['vllm>=0.30.0,<0.31; python_version < "3.11"']}
-    assert unsatisfied(extras, "3.10") == []
+    extras = {"vllm": ["vllm>=0.30.0,<0.31"]}
+    floors = {"torch": SpecifierSet(">=2.13.0"), "transformers": SpecifierSet(">=5.23.0,<5.24")}
+    assert unsatisfied(extras, "3.11", floors=floors) == []

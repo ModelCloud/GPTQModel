@@ -37,7 +37,7 @@ def test_lfm3_model_type_selects_definition(monkeypatch, model_type, definition)
     fake_config = SimpleNamespace(model_type=model_type)
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: fake_config)
 
     assert auto.check_and_get_model_definition(f"/tmp/{model_type}") is definition
 
@@ -67,7 +67,7 @@ def test_lfm3_module_tree_covers_conv_attention_and_mlp_paths(definition):
     flat_modules = _flat_layer_modules(definition)
 
     assert definition.layer_modules_strict is False
-    assert definition.require_trust_remote_code is True
+    assert not definition.require_trust_remote_code
     assert definition.rotary_embedding.endswith("rotary_emb")
     # `:!` marks a module that keeps its source dtype, so it is not quantized.
     assert flat_modules == {
@@ -83,17 +83,15 @@ def test_lfm3_module_tree_covers_conv_attention_and_mlp_paths(definition):
     }
 
 
-@pytest.mark.parametrize("definition", [LFM3QModel, LFM3VLQModel, LFM3OmniQModel])
-def test_lfm3_declares_live_sigmoid_gate_and_depthwise_conv(definition):
-    """The live `g_proj`/`conv.conv` leaves must be declared non-quantized.
-
-    The tree used to name the legacy `gate_proj`, so the live sigmoid gate was
-    invisible to AWQ compensation and `conv.conv` stayed undeclared.
-    """
+@pytest.mark.parametrize(("definition", "gate_name"), [
+    (LFM3QModel, "g_proj"), (LFM3VLQModel, "g_proj"), (LFM3OmniQModel, "gate_proj"),
+])
+def test_lfm3_declares_live_sigmoid_gate_and_depthwise_conv(definition, gate_name):
+    """AWQ needs the live gate and depthwise kernel declared in source dtype."""
 
     plan = ModulePlan.from_tree(definition.module_tree)
 
-    gate = plan.find("self_attn.g_proj")
+    gate = plan.find(f"self_attn.{gate_name}")
     assert gate is not None, definition.__name__
     assert gate.quantize is False, definition.__name__
     assert "nosrc" in gate.flags, definition.__name__

@@ -1,0 +1,70 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 1,
+  "chunk_size_feed_forward": 0,
+  "dim_model_base": 256,
+  "dtype": null,
+  "eos_token_id": 2,
+  "head_dim": 64,
+  "hidden_act": "gelu",
+  "hidden_size": 32,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_range": 0.02,
+  "intermediate_size": 32,
+  "is_encoder_decoder": false,
+  "kv_lora_rank": 32,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "max_position_embeddings": 512,
+  "mlp_bias": false,
+  "model_type": "minicpm3",
+  "num_attention_heads": 2,
+  "num_hidden_layers": 2,
+  "num_key_value_heads": 2,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 0,
+  "pretraining_tp": 1,
+  "problem_type": null,
+  "q_lora_rank": 16,
+  "qk_head_dim": 128,
+  "qk_nope_head_dim": 64,
+  "qk_rope_head_dim": 64,
+  "return_dict": true,
+  "rms_norm_eps": 1e-05,
+  "rope_parameters": {
+   "rope_theta": 10000.0,
+   "rope_type": "default"
+  },
+  "scale_depth": 1.4,
+  "scale_emb": 12,
+  "tie_word_embeddings": false,
+  "transformers_version": "5.23.0",
+  "use_cache": true,
+  "v_head_dim": 64,
+  "vocab_size": 99
+ },
+ "config_class": "MiniCPM3Config",
+ "config_module": "configuration_minicpm3",
+ "extra_inputs": {},
+ "float_inputs": {},
+ "model_classes": [
+  [
+   "modeling_minicpm3",
+   "MiniCPM3Model"
+  ],
+  [
+   "modeling_minicpm3",
+   "MiniCPM3ForCausalLM"
+  ]
+ ]
+}

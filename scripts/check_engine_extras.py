@@ -16,7 +16,7 @@ extra cannot be satisfied. It needs network access to PyPI and ``uv`` on PATH.
 Usage:
 
     python3 scripts/check_engine_extras.py
-    python3 scripts/check_engine_extras.py --python-version 3.10 --extra vllm
+    python3 scripts/check_engine_extras.py --python-version 3.11
     python3 scripts/check_engine_extras.py --json
 """
 
@@ -35,7 +35,7 @@ import tomllib
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_PYTHONS = ("3.10", "3.11", "3.12", "3.13", "3.14")
+DEFAULT_PYTHONS = ("3.11", "3.12", "3.13", "3.14")
 DEFAULT_PLATFORM = "x86_64-manylinux_2_35"
 ENGINES = ("vllm", "sglang")
 REPORTED_PINS = ("vllm", "sglang", "torch", "transformers")

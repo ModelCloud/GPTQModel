@@ -5,10 +5,16 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class LongCatFlashQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("longcat_flash").merge(LlamaFusableConfig(), profiles=("gate_up",))
 
     dynamic_expert_index = "n_routed_experts"

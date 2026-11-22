@@ -42,6 +42,32 @@ def source_layer_key(layer, runtime_key, namespace="layers"):
     return f"{namespace}.{layer}.{key}"
 
 
+_TOP_LEVEL_KEYS = {
+    "model.embed_tokens.weight": "embed.weight",
+    "model.norm.weight": "norm.weight",
+    "lm_head.weight": "head.weight",
+}
+
+
+def source_model_key(runtime_key):
+    """Map a ``DeepseekV41ForCausalLM`` (unfused experts) or ``DeepseekV41DSpark`` key.
+
+    DSpark keys carry an ``mtp.`` prefix (``mtp.layers.<stage>.*``). Fused
+    ``experts.gate_up_proj``/``down_proj`` tensors have no single source key; unfuse
+    them first (``DeepSeekV41QModel.convert_model_structure``).
+    """
+    if runtime_key in _TOP_LEVEL_KEYS:
+        return _TOP_LEVEL_KEYS[runtime_key]
+    match = re.fullmatch(r"model\.engram_tables\.(\d+)\.(weight|scale)", runtime_key)
+    if match:
+        return f"layers.{match.group(1)}.engram.embed.{match.group(2)}"
+    match = re.fullmatch(r"(model|mtp)\.layers\.(\d+)\.(.+)", runtime_key)
+    if match is None or match.group(3).endswith(("experts.gate_up_proj", "experts.down_proj")):
+        raise ValueError(f"no V4.1 source key for {runtime_key}")
+    namespace = "layers" if match.group(1) == "model" else "mtp"
+    return source_layer_key(int(match.group(2)), match.group(3), namespace)
+
+
 class V41Source:
     def __init__(self, snapshot):
         self.snapshot = Path(snapshot).resolve()
@@ -124,17 +150,11 @@ class V41Source:
         return packed
 
     def block_config(self, namespace="layers"):
-        from transformers import DeepseekV41Config
+        from ..models.ports.deepseek_v41.configuration_deepseek_v41 import DeepseekV41Config
+
         config = DeepseekV41Config.from_dict(self.config).get_text_config()
         if namespace == "mtp":
-            config.num_hidden_layers = config.num_nextn_predict_layers
-            config.n_routed_experts = config.dspark_n_routed_experts
-            config.num_experts_per_tok = config.dspark_num_experts_per_tok
-            config.compress_ratios = [0] * config.num_hidden_layers
-            config.kv_source_layer_ids = []
-            config.index_source_layer_ids = []
-            config.candidate_source_layer_id = -1
-            config.engram_layer_ids = []
+            config = config.dspark_config()
         elif namespace != "layers":
             raise ValueError("invalid V4.1 block namespace")
         config._experts_implementation = "eager"
@@ -233,18 +253,16 @@ class V41Source:
                 parent.register_buffer(leaf, value)
         # Rotary embedding constants are nonpersistent buffers initialized on meta.
         # Recreate these tiny modules on the execution device from their config.
-        from transformers.models.deepseek_v41.modeling_deepseek_v41 import DeepseekV41RotaryEmbedding
-
         from ..models.definitions.deepseek_v41 import DeepSeekV41RotaryEmbedding
+        from ..models.ports.deepseek_v41.modeling_deepseek_v41 import DeepseekV41RotaryEmbedding
         for name, module in list(block.named_modules()):
             if isinstance(module, DeepseekV41RotaryEmbedding):
                 parent_key, _, leaf = name.rpartition(".")
                 parent = block.get_submodule(parent_key) if parent_key else block
                 with torch.device(device):
                     setattr(parent, leaf, DeepSeekV41RotaryEmbedding(config))
-        from transformers.models.deepseek_v41.modeling_deepseek_v41 import DeepseekV41RMSNorm
-
         from ..models.definitions.deepseek_v41 import DeepSeekV41RMSNorm
+        from ..models.ports.deepseek_v41.modeling_deepseek_v41 import DeepseekV41RMSNorm
 
         for name, module in list(block.named_modules()):
             if isinstance(module, DeepseekV41RMSNorm):

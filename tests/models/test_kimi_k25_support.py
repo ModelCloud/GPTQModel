@@ -20,7 +20,7 @@ class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Kimi-K2.5"  # moonshotai/Kimi-K2.5
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     # TODO, offload is unable to fix by now
     OFFLOAD_TO_DISK = False

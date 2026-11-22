@@ -5,9 +5,15 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class GptNeoQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("gpt_neo").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     pre_lm_head_norm_module = "transformer.ln_f"

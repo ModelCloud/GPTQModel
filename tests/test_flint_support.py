@@ -10,12 +10,11 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.utils.model import find_modules
 
 
-def test_flint_model_definition_is_registered(monkeypatch):
-    from types import SimpleNamespace
+def test_flint_model_definition_is_registered(tmp_path):
+    from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: SimpleNamespace(model_type="flint"))
-    assert auto.check_and_get_model_definition("flint-fixture") is FlintQModel
+    CONFIG_MAPPING["flint"]().save_pretrained(tmp_path)
+    assert auto.check_and_get_model_definition(str(tmp_path)) is FlintQModel
 
 
 def test_flint_model_tree_covers_experts_and_attention_sinks():

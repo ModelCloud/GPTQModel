@@ -302,55 +302,6 @@ def test_qwen2_5_omni_forward_delegates_to_thinker():
     assert result == (("hello",), {"temperature": 0.1}, sentinel)
 
 
-def test_qwen2_5_omni_talker_patch_accepts_next_sequence_length_kwarg():
-    class _BaseTalker:
-        def prepare_inputs_for_generation(
-            self,
-            input_ids,
-            next_sequence_length=None,
-            past_key_values=None,
-            attention_mask=None,
-            inputs_embeds=None,
-            cache_position=None,
-            is_first_iteration=False,
-            **kwargs,
-        ):
-            return {
-                "input_ids": input_ids,
-                "received_next_sequence_length": next_sequence_length,
-                "past_key_values": past_key_values,
-                "attention_mask": attention_mask,
-                "inputs_embeds": inputs_embeds,
-                "cache_position": cache_position,
-                "is_first_iteration": is_first_iteration,
-                **kwargs,
-            }
-
-    class _Talker(_BaseTalker):
-        pass
-
-    base_qwen2_5_omni._patch_qwen2_5_omni_talker_prepare_inputs_for_generation(_Talker)
-
-    model_inputs = _Talker().prepare_inputs_for_generation(
-        input_ids=torch.tensor([[1, 2]]),
-        input_text_ids=torch.tensor([[3, 4]]),
-        past_key_values="pkv",
-        attention_mask=torch.tensor([[1, 1]]),
-        inputs_embeds=torch.randn(1, 2, 4),
-        thinker_reply_part=torch.randn(1, 2, 4),
-        cache_position=torch.tensor([0, 1]),
-        use_cache=True,
-        next_sequence_length=1,
-        is_first_iteration=True,
-    )
-
-    assert model_inputs["received_next_sequence_length"] == 1
-    assert torch.equal(model_inputs["input_ids"], torch.tensor([[1, 2]]))
-    assert torch.equal(model_inputs["input_text_ids"], torch.tensor([[3, 4]]))
-    assert model_inputs["position_ids"] is None
-    assert model_inputs["is_first_iteration"] is True
-
-
 def test_qwen2_5_omni_pre_quantize_hooks_use_thinker_layout():
     loaded_speakers = []
     materialized = []
@@ -439,7 +390,12 @@ def test_load_tokenizer_deprecated_shim_forwards_to_tokenicer():
     assert wrapped.model_config is text_config
 
 
-def test_load_hf_tokenizer_delegates_normalization_to_tokenicer(monkeypatch):
+@pytest.mark.parametrize("bypass", [False, True])
+def test_load_hf_tokenizer_delegates_normalization_to_tokenicer(monkeypatch, bypass):
+    if bypass:
+        monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    else:
+        monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
     native_tokenizer = object()
     model_config = object()
     calls = []
@@ -463,7 +419,7 @@ def test_load_hf_tokenizer_delegates_normalization_to_tokenicer(monkeypatch):
             "/tmp/model",
             {
                 "model_config": model_config,
-                "trust_remote_code": True,
+                "trust_remote_code": bypass,
                 "revision": "test-revision",
             },
         )

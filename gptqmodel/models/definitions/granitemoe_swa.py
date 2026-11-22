@@ -3,6 +3,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -14,6 +15,11 @@ class GraniteMoeSWAQModel(BaseQModel):
     ``gate_proj``/``up_proj``/``down_proj`` Linear modules before GPT-QModel
     walks the tree, and the shared expert MLP stays a plain SwiGLU block.
     """
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
 
     # Per-layer sliding-window dispatch and post-attention sink scaling are not
     # modeled by the current fused qkv/gate_up executor.

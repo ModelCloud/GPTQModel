@@ -3,14 +3,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModel
-
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from .glm4v import Glm4vGPTQ
 
 
 class Glm4vMoeQModel(Glm4vGPTQ):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+    )
+
     fusable = FusableConfig("glm4v_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     dynamic_expert_index = "n_routed_experts"
@@ -50,7 +54,10 @@ class Glm4vMoeQModel(Glm4vGPTQ):
 class Glm4vMoeTextQModel(Glm4vMoeQModel):
     fusable = FusableConfig("glm4v_moe_text").merge(Glm4vMoeQModel.fusable)
 
-    loader = AutoModel
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeModel",
+    )
 
     require_load_processor = False
 

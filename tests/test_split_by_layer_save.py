@@ -142,7 +142,6 @@ def _build_writer(tmp_path):
 def _patch_writer_env(monkeypatch):
     monkeypatch.setattr("gptqmodel.models.writer.get_model_files_size", lambda _: 1)
     monkeypatch.setattr("gptqmodel.models.writer.alias_all_from_turtle_if_meta", lambda *args, **kwargs: None)
-    monkeypatch.setattr("gptqmodel.models.writer.sanitize_model_config", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("gptqmodel.models.writer.sanitize_generation_config_file", lambda *_args, **_kwargs: False)
 
 

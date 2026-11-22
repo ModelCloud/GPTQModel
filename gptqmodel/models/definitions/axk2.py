@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -18,6 +19,11 @@ class AXK2QModel(BaseQModel):
     - Dense MLP fallback on layer 0, sparse AXK2MoE on all other layers.
     - Shared expert and routed experts both use gate_proj/up_proj/down_proj.
     """
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
 
     require_trust_remote_code = False
     require_fast_init = False

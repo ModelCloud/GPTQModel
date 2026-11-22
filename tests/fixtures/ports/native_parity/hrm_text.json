@@ -1,0 +1,67 @@
+{
+ "config": {
+  "H_cycles": 2,
+  "L_bp_cycles": [
+   2
+  ],
+  "L_cycles": 3,
+  "_name_or_path": "",
+  "architectures": null,
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 1,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "embedding_scale": 50.0,
+  "eos_token_id": 2,
+  "head_dim": 16,
+  "hidden_act": "gelu",
+  "hidden_size": 32,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_range": 0.02,
+  "intermediate_size": 32,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "max_position_embeddings": 512,
+  "mlp_bias": false,
+  "model_type": "hrm_text",
+  "num_attention_heads": 2,
+  "num_hidden_layers": 16,
+  "num_layers_per_stack": 2,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 0,
+  "prefix_lm": false,
+  "problem_type": null,
+  "return_dict": true,
+  "rms_norm_eps": 1e-06,
+  "rope_parameters": {
+   "rope_theta": 10000.0,
+   "rope_type": "default"
+  },
+  "tie_word_embeddings": false,
+  "transformers_version": "5.23.0",
+  "use_cache": true,
+  "vocab_size": 99
+ },
+ "config_class": "HrmTextConfig",
+ "config_module": "configuration_hrm_text",
+ "extra_inputs": {},
+ "float_inputs": {},
+ "model_classes": [
+  [
+   "modeling_hrm_text",
+   "HrmTextModel"
+  ],
+  [
+   "modeling_hrm_text",
+   "HrmTextForCausalLM"
+  ]
+ ]
+}

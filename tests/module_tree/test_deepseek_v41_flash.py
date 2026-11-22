@@ -14,8 +14,9 @@ from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 
 from gptqmodel import GPTQModel
-from gptqmodel.models.deepseek_v41.attention import V41AttentionState
 from gptqmodel.models.definitions.deepseek_v41_flash import DeepSeekV41FlashQModel
+from gptqmodel.models.ports.deepseek_v41_flash.attention import V41AttentionState
+from gptqmodel.models.ports.deepseek_v41_flash.modeling import DeepSeekV41FlashForCausalLM
 
 
 @pytest.fixture
@@ -170,6 +171,20 @@ def v41_checkpoint(tmp_path, request):
 @pytest.fixture
 def model(v41_checkpoint):
     return GPTQModel.load(v41_checkpoint, device="cpu")
+
+
+def test_v41_public_load_uses_package_classes(v41_checkpoint, monkeypatch):
+    config_path = v41_checkpoint / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["auto_map"] = {"AutoConfig": "checkpoint.Config", "AutoModelForCausalLM": "checkpoint.Model"}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+
+    model = GPTQModel.load(v41_checkpoint, device="cpu", trust_remote_code=True, code_revision="unused")
+
+    assert isinstance(model, DeepSeekV41FlashQModel)
+    assert type(model.model) is DeepSeekV41FlashForCausalLM
+    assert type(model.model.config) is DeepSeekV41FlashForCausalLM.config_class
 
 
 def test_v41_module_plan_accounts_for_loaded_decoder_weights(model):
@@ -411,7 +426,7 @@ def test_v41_packed_projection_matches_independent_weights_and_retains_packed_st
 @pytest.mark.parametrize("v41_checkpoint", [128], indirect=True)
 def test_v41_cuda_load_runs_packed_projections(v41_checkpoint, monkeypatch):
     from gptqmodel.models._const import DEVICE, normalize_device
-    from gptqmodel.models.deepseek_v41 import layers
+    from gptqmodel.models.ports.deepseek_v41_flash import layers
     from gptqmodel.utils.macaq_triton import TRITON_AVAILABLE
     from gptqmodel.utils.marlin import marlin_runtime_available, marlin_runtime_error
 
@@ -482,7 +497,7 @@ def test_v41_cuda_load_runs_packed_projections(v41_checkpoint, monkeypatch):
 
 
 def test_v41_candidate_order_does_not_depend_on_masked_tail():
-    from gptqmodel.models.deepseek_v41.attention import _candidate_blocks, _rank_entries
+    from gptqmodel.models.ports.deepseek_v41_flash.attention import _candidate_blocks, _rank_entries
 
     scores = torch.tensor([[[3.0, 3.0, 3.0, 1.0, 1.0, -torch.inf, -torch.inf, -torch.inf]]])
     torch.testing.assert_close(_rank_entries(scores, 2), torch.tensor([[[0, 1]]], dtype=torch.int32))
@@ -644,7 +659,7 @@ def test_v41_marlin_backend_requires_cuda(v41_checkpoint):
 
 def test_v41_auto_prefers_native_mx_on_blackwell(monkeypatch):
     from gptqmodel.models._const import DEVICE
-    from gptqmodel.models.deepseek_v41 import checkpoint
+    from gptqmodel.models.ports.deepseek_v41_flash import checkpoint
     from gptqmodel.utils.backend import BACKEND
 
     ampere = torch.device("cuda:1")
@@ -667,7 +682,7 @@ def test_v41_auto_prefers_native_mx_on_blackwell(monkeypatch):
 
 
 def test_v41_hyper_connection_normalizes_before_rounding():
-    from gptqmodel.models.deepseek_v41.layers import V41HyperConnection
+    from gptqmodel.models.ports.deepseek_v41_flash.layers import V41HyperConnection
 
     config = SimpleNamespace(hc_mult=2, hc_eps=1e-6, rms_norm_eps=1e-20, hc_sinkhorn_iters=4, hidden_size=32)
     generator = torch.Generator().manual_seed(609)
@@ -685,7 +700,7 @@ def test_v41_hyper_connection_normalizes_before_rounding():
 
 
 def test_v41_hyper_connection_mixes_input_streams_into_each_output():
-    from gptqmodel.models.deepseek_v41.layers import expand_streams
+    from gptqmodel.models.ports.deepseek_v41_flash.layers import expand_streams
 
     residual = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]])
     hidden = torch.tensor([[[10.0, 20.0]]])
@@ -767,7 +782,7 @@ def test_v41_q4nx_native_routing_matches_expert_order(v41_checkpoint, bits):
     if not torch.cuda.is_available() or torch.version.hip or torch.cuda.get_device_capability() < (8, 0):
         pytest.skip("DeepSeek V4.1 Q4NX routing requires NVIDIA SM80+")
     from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import reconstruct_exl3_tensors
-    from gptqmodel.models.deepseek_v41.exl3 import routed_q4nx
+    from gptqmodel.models.ports.deepseek_v41_flash.exl3 import routed_q4nx
 
     tensors = _replace_v41_experts(v41_checkpoint, bits=bits, all_experts=True)
     model = GPTQModel.load(v41_checkpoint, device="cuda", backend="exl3_exllama_v3")

@@ -34,6 +34,7 @@ from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel
 from gptqmodel.utils import structure as structure_module
 from gptqmodel.utils.structure import LazyTurtle
+from tests.test_ovis_local_port import tiny_config as tiny_ovis_config
 
 
 def _write_checkpoint_index(path: Path, shard_name: str, state_dict: dict[str, torch.Tensor]) -> None:
@@ -530,34 +531,6 @@ def _assert_gemma3_shell_vision_alias_resolution(turtle: LazyTurtle) -> None:
     )
 
 
-def _assert_ovis_shell_vision_alias_resolution(turtle: LazyTurtle) -> None:
-    assert (
-        turtle._resolve_checkpoint_module_path("visual_tokenizer.backbone.head")
-        == "visual_tokenizer.backbone.vision_model.head"
-    )
-    assert (
-        turtle._resolve_checkpoint_tensor_name(
-            "visual_tokenizer",
-            "backbone.head.mlp.fc1.weight",
-        )
-        == "visual_tokenizer.backbone.vision_model.head.mlp.fc1.weight"
-    )
-    assert (
-        turtle._resolve_checkpoint_tensor_name(
-            "visual_tokenizer.backbone",
-            "head.mlp.fc1.weight",
-        )
-        == "visual_tokenizer.backbone.vision_model.head.mlp.fc1.weight"
-    )
-    assert (
-        turtle._resolve_checkpoint_tensor_name(
-            "visual_tokenizer",
-            "backbone.embeddings.patch_embedding.weight",
-        )
-        == "visual_tokenizer.backbone.vision_model.embeddings.patch_embedding.weight"
-    )
-
-
 def _assert_qwen2_vl_alias_resolution(turtle: LazyTurtle) -> None:
     assert turtle._resolve_checkpoint_module_path("model.language_model") == "model"
     assert turtle._resolve_checkpoint_module_path("model.visual") == "visual"
@@ -657,9 +630,7 @@ def test_lazy_turtle_applies_reversed_weight_renamings_with_capturing_groups(tmp
 
 
 def test_inkling2_loop_reverse_map_resolves_message_gates_and_packed_experts(tmp_path):
-    from transformers.conversion_mapping import get_checkpoint_conversion_mapping
-
-    import gptqmodel.models.inkling2_loop  # noqa: F401  (registers the conversion map)
+    from gptqmodel.models.ports.inkling2_loop import Inkling2LoopForConditionalGeneration
 
     checkpoint_tensors = {
         "model.llm.embed_norm.weight": torch.zeros(2),
@@ -681,8 +652,11 @@ def test_inkling2_loop_reverse_map_resolves_message_gates_and_packed_experts(tmp
         tmp_path,
         checkpoint_tensors,
         config=SimpleNamespace(model_type="inkling2_loop"),
-        hf_conversion_map_reversed=LazyTurtle.reverse_hf_conversion_map(
-            get_checkpoint_conversion_mapping("inkling2_loop")
+        hf_conversion_map_reversed=LazyTurtle.infer_hf_conversion_map_reversed(
+            target_model=SimpleNamespace(
+                _checkpoint_conversion_mapping=Inkling2LoopForConditionalGeneration._checkpoint_conversion_mapping,
+            ),
+            model_type="inkling2_loop",
         ),
     )
 
@@ -1750,26 +1724,29 @@ def test_gemma3_definition_hf_conversion_map_reversed_fixes_shell_vision_paths(t
     assert resolved_hf_again[0].source_patterns[0] == r"^model\.vision_tower\.(?!vision_model\.)(.+)$"
 
 
-def test_ovis_definition_hf_conversion_map_reversed_fixes_shell_vision_paths(tmp_path):
-    resolved_hf = OvisQModel.resolve_hf_conversion_map_reversed()
-
-    assert resolved_hf is not None
-
+def test_ovis_owned_vision_shell_materializes_original_checkpoint_keys(tmp_path):
+    with torch.device("meta"):
+        shell = OvisQModel.loader.from_config(tiny_ovis_config("partition-llama"))
+    module_path = "visual_tokenizer.backbone.vision_model.embeddings.patch_embedding"
+    projection = shell.get_submodule(module_path)
+    tensors = {
+        f"{module_path}.{name}": torch.arange(parameter.numel(), dtype=torch.float32).reshape(parameter.shape)
+        for name, parameter in projection.named_parameters()
+    }
+    assert projection.weight.is_meta
     turtle = _build_lazy_turtle(
         tmp_path,
-        {
-            "visual_tokenizer.backbone.vision_model.head.mlp.fc1.weight": torch.zeros(2, 2),
-            "visual_tokenizer.backbone.vision_model.embeddings.patch_embedding.weight": torch.zeros(2, 2),
-        },
-        hf_conversion_map_reversed=resolved_hf,
+        tensors,
+        config=shell.config,
+        hf_conversion_map_reversed=OvisQModel.resolve_hf_conversion_map_reversed(target_model=shell),
+        target_model=shell,
     )
 
-    _assert_ovis_shell_vision_alias_resolution(turtle)
-
-    resolved_hf[0].source_patterns[0] = r"^mutated\.runtime\.(.+)$"
-    resolved_hf_again = OvisQModel.resolve_hf_conversion_map_reversed()
-    assert resolved_hf_again is not None
-    assert resolved_hf_again[0].source_patterns[0] == r"^visual_tokenizer\.backbone\.(?!vision_model\.)(.+)$"
+    turtle.materialize_submodule(
+        target_model=shell, target_submodule=projection, device=torch.device("cpu"), module_path=module_path,
+    )
+    for name, parameter in projection.named_parameters():
+        torch.testing.assert_close(parameter, tensors[f"{module_path}.{name}"], rtol=0, atol=0)
 
 
 def test_lazy_turtle_keeps_module_tree_alias_resolution_for_mixtral(tmp_path):
@@ -2049,67 +2026,23 @@ def test_maybe_create_surfaces_construction_error(tmp_path, monkeypatch):
     assert "'list' object has no attribute 'keys'" in str(excinfo.value)
 
 
-def test_bin_conversion_normalizes_legacy_tied_weights_keys(tmp_path, monkeypatch):
-    """Issue #4093 item 8: normalize list `_tied_weights_keys` before saving."""
-
-    bin_path = tmp_path / "pytorch_model.bin"
-    bin_path.write_bytes(b"placeholder")
-
-    class _LegacyTiedCheckpointModel(nn.Module):
-        _tied_weights_keys = ["lm_head.weight"]
-
-        def __init__(self):
-            super().__init__()
-            self.config = SimpleNamespace(tie_word_embeddings=False)
-
-        @classmethod
-        def from_pretrained(cls, path, **kwargs):
-            del path, kwargs
-            return cls()
-
-        def save_pretrained(self, save_directory, safe_serialization=True):
-            del safe_serialization
-            if not isinstance(self._tied_weights_keys, dict):
-                raise AttributeError("'list' object has no attribute 'keys'")
-            (Path(save_directory) / "model.safetensors").write_bytes(b"")
-
-    monkeypatch.setattr(
-        "gptqmodel.utils.model.get_checkpoints",
-        lambda *args, **kwargs: (False, str(bin_path), None),
-    )
-
-    turtle = LazyTurtle.__new__(LazyTurtle)
-    turtle._model_init_kwargs = {}
-    turtle.config = SimpleNamespace()
-
-    converted = turtle._convert_checkpoint_source_to_safetensors(
-        model_local_path=str(tmp_path),
-        target_model=_LegacyTiedCheckpointModel(),
-    )
-
-    assert (Path(converted) / "model.safetensors").is_file()
-
-
 def _tiny_fallback_family_shells() -> dict:
     """Tiny runtime shells for definitions that infer the HF conversion map.
 
     These definitions declare no ``checkpoint_key_for_load``, so the loader
     derives a source-layout map from the live model. The shells are built from
-    real Transformers configs because the guard compares a converted name
+    the vendored Transformers 5.23 configs because the guard compares a converted name
     against the shell's own parameter and buffer names.
     """
 
-    from transformers import (
-        GPTNeoXConfig,
-        GPTNeoXForCausalLM,
-        Qwen3MoeConfig,
-        Qwen3MoeForCausalLM,
-    )
-    from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
-    from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
-
     from gptqmodel.models.definitions.gpt_neox import GPTNeoXQModel
     from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
+    from gptqmodel.models.ports.native.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
+    from gptqmodel.models.ports.native.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
+    from gptqmodel.models.ports.native.gpt_neox.configuration_gpt_neox import GPTNeoXConfig
+    from gptqmodel.models.ports.native.gpt_neox.modeling_gpt_neox import GPTNeoXForCausalLM
+    from gptqmodel.models.ports.native.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
+    from gptqmodel.models.ports.native.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
 
     torch.manual_seed(0)
     return {

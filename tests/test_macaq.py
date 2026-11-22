@@ -36,7 +36,7 @@ from gptqmodel.quantization import FORMAT, METHOD, MacaqConfig, QuantizeConfig
 from gptqmodel.quantization import macaq as macaq
 from gptqmodel.quantization.config import GGUFConfig, resolve_model_rotation, resolve_quant_format
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.macaq_triton import triton_mxfp4_available
+from gptqmodel.utils.macaq_triton import TRITON_AVAILABLE, triton_mxfp4_available
 
 
 def _device():
@@ -713,7 +713,11 @@ def _quantized_module_pair():
         module.pack(layer, macaq_result=result)
         return module.to(device)
 
-    return layer, result, build(MacaqLinear, BACKEND.MACAQ_TORCH), build(MacaqTritonLinear, BACKEND.MACAQ_TRITON)
+    # MacaqTritonLinear refuses construction without a Triton accelerator; the
+    # torch-only callers must still run on CPU, so the Triton half is ``None``
+    # there (its callers are gated on ``triton_mxfp4_available()``).
+    triton_module = build(MacaqTritonLinear, BACKEND.MACAQ_TRITON) if triton_mxfp4_available() else None
+    return layer, result, build(MacaqLinear, BACKEND.MACAQ_TORCH), triton_module
 
 
 def test_macaq_linear_torch_matches_reference():
@@ -855,6 +859,10 @@ def test_checkpoint_module_config_roundtrips_macaq_kernel():
     assert restored.pre_alpha == 0.7
 
 
+@pytest.mark.skipif(
+    not TRITON_AVAILABLE or not torch.cuda.is_available(),
+    reason="MacaqTritonLinear checkpoint restore requires Triton and a CUDA or ROCm device",
+)
 def test_checkpoint_restores_recorded_macaq_triton_kernel():
     from gptqmodel.looper.checkpoint_modules import packed_module_config, restore_packed_module
 
@@ -1016,6 +1024,7 @@ def test_triton_row_offsets_are_int64_past_2gb():
         torch.cuda.empty_cache()
 
 
+@pytest.mark.skipif(not TRITON_AVAILABLE, reason="MACaQ Triton kernels are only defined with Triton")
 def test_macaq_row_offsets_widen_to_int64():
     """All three row-indexed kernels must widen the program id.
 
@@ -1257,49 +1266,6 @@ def test_macaq_dynamic_false_excludes_modules():
     restored = QuantizeConfig.from_quant_config(payload)
     assert restored.dynamic_get("model.layers.0.mlp.down_proj") is False
     assert restored.dynamic_get("model.layers.0.mlp.up_proj") == {"do_flip": False}
-
-
-@pytest.mark.parametrize("method", ["macaq", "paro", "qqq", "nf12", "tt-blockfloat"])
-def test_transformers_refuses_gptqmodel_only_quant_methods(method):
-    """An unknown HF quant method only warns and random-inits (#4090 item 2)."""
-
-    from transformers.quantizers import auto as hf_quant_auto
-    from transformers.quantizers.auto import AutoHfQuantizer, AutoQuantizationConfig
-
-    from gptqmodel.utils.hf_refusing_quantizer import (
-        GPTQModelRefusingHfQuantizer,
-        GPTQModelRefusingQuantizationConfig,
-    )
-
-    assert hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING[method] is GPTQModelRefusingQuantizationConfig
-    assert hf_quant_auto.AUTO_QUANTIZER_MAPPING[method] is GPTQModelRefusingHfQuantizer
-
-    config = AutoQuantizationConfig.from_dict({"quant_method": method, "bits": 4})
-    assert isinstance(config, GPTQModelRefusingQuantizationConfig)
-    with pytest.raises(ValueError, match="cannot be loaded by `transformers`"):
-        AutoHfQuantizer.from_config(config)
-
-
-def test_hf_from_pretrained_refuses_macaq_checkpoint(tmp_path):
-    from transformers import AutoModelForCausalLM, LlamaConfig
-
-    model_config = LlamaConfig(
-        vocab_size=32,
-        hidden_size=16,
-        intermediate_size=32,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-    )
-    model_config.quantization_config = {
-        "quant_method": "macaq",
-        "bits": 4,
-        "format": "mxfp4_macaq",
-    }
-    model_config.save_pretrained(str(tmp_path))
-
-    with pytest.raises(ValueError, match="MACaQ MXFP4 checkpoints cannot be loaded"):
-        AutoModelForCausalLM.from_pretrained(str(tmp_path), local_files_only=True)
 
 
 # ---------------------------------------------------------------------------

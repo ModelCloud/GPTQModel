@@ -1,0 +1,18 @@
+DeepSeek V4.1 local port for GPT-QModel
+
+Ported from deepseek-ai/DeepSeek-V4.1-Flash at
+314113f8a7dadb388215396ba5fbee2c610a04d6:
+  inference/model.py   (text decoder, dSpark stages, Engram layer)
+  inference/engram.py  (n-gram hash layout and token normalization)
+  inference/kernel.py  (sparse attention and mHC Sinkhorn semantics, re-expressed in PyTorch)
+  config.json          (configuration fields)
+Copyright (c) 2023 DeepSeek. The upstream inference code is distributed under the
+MIT License, reproduced in LICENSE in this directory.
+
+Not ported: inference/vision.py, inference/image_processor.py (vision tower,
+aligner, image-span embeddings), FP8/FP4 GEMM kernels and activation
+fake-quantization, tensor parallelism, inference/generate.py.
+
+Transformers 5.23 API adaptation (configuration, Cache, output capture,
+generation), GPT-QModel runtime module names and regression qualification:
+Copyright 2026 ModelCloud.ai, Apache-2.0.

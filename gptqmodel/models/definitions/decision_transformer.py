@@ -5,9 +5,8 @@
 
 """GPT-QModel support for Decision Transformer offline-RL checkpoints (#4755)."""
 
-from transformers import AutoModel
-
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class DecisionTransformerQModel(BaseQModel):
@@ -26,7 +25,10 @@ class DecisionTransformerQModel(BaseQModel):
     """
 
     # `DecisionTransformerModel` is not a causal LM; `AutoModel` resolves it.
-    loader = AutoModel
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeModel",
+    )
 
     # Decision Transformer checkpoints have no tokenizer to load, and calibration
     # samples are named tensors rather than token ids.

@@ -1,0 +1,75 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "_sliding_window_pattern": 6,
+  "architectures": null,
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "attn_logit_softcapping": null,
+  "bos_token_id": 1,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "eos_token_id": 2,
+  "final_logit_softcapping": null,
+  "head_dim": 16,
+  "hidden_activation": "gelu_pytorch_tanh",
+  "hidden_size": 32,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_range": 0.02,
+  "intermediate_size": 32,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "layer_types": [
+   "full_attention",
+   "sliding_attention"
+  ],
+  "max_position_embeddings": 512,
+  "model_type": "gemma3_text",
+  "num_attention_heads": 2,
+  "num_hidden_layers": 2,
+  "num_key_value_heads": 2,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 0,
+  "problem_type": null,
+  "query_pre_attn_scalar": 256,
+  "return_dict": true,
+  "rms_norm_eps": 1e-06,
+  "rope_parameters": {
+   "full_attention": {
+    "rope_theta": 1000000.0,
+    "rope_type": "default"
+   },
+   "sliding_attention": {
+    "rope_theta": 10000.0,
+    "rope_type": "default"
+   }
+  },
+  "sliding_window": 4096,
+  "tie_word_embeddings": false,
+  "transformers_version": "5.23.0",
+  "use_bidirectional_attention": false,
+  "use_cache": true,
+  "vocab_size": 99
+ },
+ "config_class": "Gemma3TextConfig",
+ "config_module": "configuration_gemma3",
+ "extra_inputs": {},
+ "float_inputs": {},
+ "model_classes": [
+  [
+   "modeling_gemma3",
+   "Gemma3TextModel"
+  ],
+  [
+   "modeling_gemma3",
+   "Gemma3ForCausalLM"
+  ]
+ ]
+}

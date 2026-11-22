@@ -69,7 +69,7 @@ def bounded_kda(function, heads=4):
 
 
 def install_bounded_kda():
-    from transformers.models.glm5_next import modeling_glm5_next as native
+    from gptqmodel.models.ports.native.glm5_next import modeling_glm5_next as native
     if not getattr(native.chunk_kimi_delta_attention, "_gptqmodel_bounded_heads", None):
         native.chunk_kimi_delta_attention = bounded_kda(native.chunk_kimi_delta_attention)
 
@@ -88,7 +88,7 @@ class GlmFlashBF16Source(base.GlmBF16Source):
         self._reader = self._reader_context = self._reader_shard = None
 
     def native_config(self):
-        from transformers.models.glm5_next.configuration_glm5_next import Glm5NextTextConfig
+        from gptqmodel.models.ports.native.glm5_next.configuration_glm5_next import Glm5NextTextConfig
         config = Glm5NextTextConfig.from_dict(self.config)
         config._attn_implementation = "sdpa"
         config._experts_implementation = "eager"
@@ -168,7 +168,7 @@ class GlmFlashBF16Source(base.GlmBF16Source):
         return block
 
     def load_block(self, layer, device="cuda:0", *, include_experts=False):
-        from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextDecoderLayer
+        from gptqmodel.models.ports.native.glm5_next.modeling_glm5_next import Glm5NextTextDecoderLayer
         config = self.native_config()
         if isinstance(layer, bool) or not 0 <= layer < config.num_hidden_layers:
             raise ValueError("Flash target layer outside schedule")

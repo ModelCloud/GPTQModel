@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Dict, Iterable, Optional, Sequence, Tuple
 
 import torch
 from safetensors import safe_open
-from safetensors.torch import save_file
 
 from ..quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
 from ..quantization.config import (
@@ -44,6 +43,7 @@ from ..utils.planar_packing import (
     planar_unpack_cols,
     planar_unpack_rows,
 )
+from ..utils.safe import safetensors_save_file as save_file
 
 
 LOG = logging.getLogger(__name__)
@@ -453,6 +453,8 @@ def _get_compressed_tensors_dependencies() -> dict:
         ) from exc
 
     try:
+        # Policy exception: Auto* build only unsupported (no MODEL_MAP definition)
+        # checkpoints for dequantization; supported ones use their LocalModelLoader.
         from transformers import (
             AutoConfig,
             AutoModel,
@@ -497,23 +499,24 @@ def _discover_compressed_tensors_module_schemes(
     deps: dict,
     trust_remote_code: bool = False,
 ) -> Dict[str, "QuantizationScheme"]:
-    AutoConfig = deps["AutoConfig"]
     init_empty_weights = deps["init_empty_weights"]
     apply_quantization_config = deps["apply_quantization_config"]
     map_module_to_scheme = deps["map_module_to_scheme"]
-    from .hf import normalize_hf_config_compat
+    from ..models.local import local_model_loader
+    from .hf import load_model_config, resolve_trust_remote_code
 
-    config = AutoConfig.from_pretrained(
+    trust_remote_code = resolve_trust_remote_code(model_path, trust_remote_code=trust_remote_code)
+    config = load_model_config(
         model_path, trust_remote_code=trust_remote_code
     )
-    normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
     # ``from_config`` mutates process-global torch state (default dtype,
     # init hooks); serialize it against loads/saves with the shared lock. Its
     # own ``local_torch_dtype`` window takes the global-state writer (#5304).
     from ..models.loader import model_load_lock
 
-    loader_candidates = (
+    local_loader = local_model_loader(config.model_type)
+    loader_candidates = (local_loader,) if local_loader is not None else (
         deps["AutoModelForCausalLM"],
         deps["AutoModelForSeq2SeqLM"],
         deps["AutoModel"],
@@ -534,7 +537,7 @@ def _discover_compressed_tensors_module_schemes(
                         dtype=torch.float32,
                     )
             except Exception as exc:  # pragma: no cover - depends on available loaders
-                loader_errors.append((loader.__name__, exc))
+                loader_errors.append((getattr(loader, "__name__", type(loader).__name__), exc))
                 continue
             else:
                 break

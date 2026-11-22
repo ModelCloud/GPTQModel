@@ -1,19 +1,22 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from types import SimpleNamespace
 
 import pytest
 import torch
 from torch import nn
-from transformers import AutoModelForCausalLM, Qwen3_5TextConfig
+from transformers import Qwen3_5TextConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 
 from gptqmodel.models import auto
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.qwen3_5_text import Qwen3_5TextQModel
 from gptqmodel.models.definitions.zdtaichu5 import ZDTaichu5QModel
+from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.utils.model import MODALITY
+from tests import test_image_fetch
 
 
 def _tiny_qwen35_config():
@@ -61,18 +64,21 @@ def test_zdtaichu5_model_type_registry_and_trust(monkeypatch):
     config = SimpleNamespace(model_type="zdtaichu5_0")
     calls = []
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
+        auto,
+        "load_model_config",
         lambda *args, **kwargs: calls.append((args, kwargs)) or config,
     )
 
     assert auto.check_and_get_model_definition("/tmp/zdtaichu5", trust_remote_code=False) is ZDTaichu5QModel
-    assert calls[-1][1]["trust_remote_code"] is True
+    assert calls[-1][1]["trust_remote_code"] is False
     assert auto.MODEL_MAP["zdtaichu5_0"] is ZDTaichu5QModel
-    assert ZDTaichu5QModel.loader is AutoModelForCausalLM
-    assert ZDTaichu5QModel.require_trust_remote_code is True
+    assert isinstance(ZDTaichu5QModel.loader, LocalModelLoader)
+    assert (
+        ZDTaichu5QModel.loader.model_class
+        == "gptqmodel.models.ports.zdtaichu5.modeling.ZDTaichu5_0_ForConditionalGeneration"
+    )
+    assert ZDTaichu5QModel.require_trust_remote_code is False
     assert ZDTaichu5QModel.require_load_processor is True
 
 
@@ -87,9 +93,13 @@ def test_zdtaichu5_decoder_tree_matches_tiny_qwen35_hybrid_model():
 
     for layer in wrapper.language_model.model.layers:
         if getattr(layer, "linear_attn", None) is not None:
-            assert all(hasattr(layer.linear_attn, name) for name in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"))
+            assert all(
+                hasattr(layer.linear_attn, name) for name in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
+            )
         else:
-            assert all(hasattr(layer.self_attn, name) for name in ("q_norm", "k_norm", "q_proj", "k_proj", "v_proj", "o_proj"))
+            assert all(
+                hasattr(layer.self_attn, name) for name in ("q_norm", "k_norm", "q_proj", "k_proj", "v_proj", "o_proj")
+            )
 
     modules = ZDTaichu5QModel.full_layer_modules(config)
     flattened = {name for block in modules for name in block}
@@ -149,20 +159,27 @@ def test_zdtaichu5_processor_routes_conversations_and_delegates_text(monkeypatch
     assert processor.calls[0][0] == conversation[0]
     assert processor.calls[0][1] == {"return_tensors": "pt"}
 
-    image_video = [[
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": "image.png"},
-                {"type": "video", "video": "video.mp4"},
-                {"type": "text", "text": "compare"},
-            ],
-        }
-    ]]
+    image_video = [
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": "image.png"},
+                    {"type": "video", "video": "video.mp4"},
+                    {"type": "text", "text": "compare"},
+                ],
+            }
+        ]
+    ]
     multimodal = instance.prepare_dataset((sample for sample in image_video))[0]
     assert processor.calls[1][0] == image_video[0]
-    assert {"pixel_values", "pixel_values_videos", "image_grid_thw",
-            "video_grid_thw", "mm_token_type_ids"} <= multimodal.keys()
+    assert {
+        "pixel_values",
+        "pixel_values_videos",
+        "image_grid_thw",
+        "video_grid_thw",
+        "mm_token_type_ids",
+    } <= multimodal.keys()
     assert torch.equal(multimodal["mm_token_type_ids"], torch.tensor([[0, 1, 2]]))
 
     text = [{"input_ids": torch.tensor([[1, 2, 3]]), "attention_mask": torch.ones(1, 3)}]
@@ -231,7 +248,9 @@ def test_zdtaichu5_offload_hook_covers_vision_and_projector(monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("padding", [torch.ones((1, 5), dtype=torch.bool), torch.tensor([[0, 1, 1, 1, 1]], dtype=torch.bool)])
+@pytest.mark.parametrize(
+    "padding", [torch.ones((1, 5), dtype=torch.bool), torch.tensor([[0, 1, 1, 1, 1]], dtype=torch.bool)]
+)
 def test_zdtaichu5_hybrid_replay_masks_match_dense_layers(padding):
     wrapper = _TinyZDTaichuWrapper().eval()
     instance = _definition_instance(wrapper)
@@ -242,7 +261,9 @@ def test_zdtaichu5_hybrid_replay_masks_match_dense_layers(padding):
     def capture_first(module, args, kwargs):
         captured["hidden"] = args[0].detach().clone()
         captured["kwargs"] = instance.capture_first_layer_input_kwargs(
-            args, kwargs, torch.device("cpu"),
+            args,
+            kwargs,
+            torch.device("cpu"),
             {key: value for key, value in kwargs.items() if key != "attention_mask"},
         )
 
@@ -257,9 +278,13 @@ def test_zdtaichu5_hybrid_replay_masks_match_dense_layers(padding):
     try:
         with torch.inference_mode():
             native = instance.run_input_capture(
-                {"input_ids": torch.tensor([[1, 2, 3, 4, 5]]),
-                 "attention_mask": padding, "position_ids": position_ids},
-                use_cache=False, data_device=torch.device("cpu"),
+                {
+                    "input_ids": torch.tensor([[1, 2, 3, 4, 5]]),
+                    "attention_mask": padding,
+                    "position_ids": position_ids,
+                },
+                use_cache=False,
+                data_device=torch.device("cpu"),
             )
     finally:
         for handle in handles:
@@ -287,7 +312,9 @@ def test_zdtaichu5_hybrid_replay_masks_match_dense_layers(padding):
     torch.testing.assert_close(logits, native.logits, rtol=1e-4, atol=1e-5)
 
 
-@pytest.mark.parametrize("mask", [torch.ones((1, 4), dtype=torch.bool), torch.tensor([[0, 1, 1, 1]], dtype=torch.bool)])
+@pytest.mark.parametrize(
+    "mask", [torch.ones((1, 4), dtype=torch.bool), torch.tensor([[0, 1, 1, 1]], dtype=torch.bool)]
+)
 def test_zdtaichu5_capture_preserves_raw_padding_mask(mask):
     instance = _definition_instance()
     instance.__dict__["_zdtaichu5_capture_padding_mask"] = mask
@@ -299,3 +326,58 @@ def test_zdtaichu5_capture_preserves_raw_padding_mask(mask):
         layer_input_kwargs={},
     )
     assert torch.equal(captured["_zdtaichu5_padding_mask"], mask)
+
+
+image_server = test_image_fetch.image_server
+
+
+def test_zdtaichu5_url_images_use_bounded_ssrf_filtered_fetch(monkeypatch, image_server):
+    from gptqmodel.models.ports.zdtaichu5 import vision_utils
+    from gptqmodel.utils.image import ImageFetchError, load_image_from_url
+
+    base, _ = image_server
+    # The default policy refuses loopback destinations instead of calling requests directly.
+    with pytest.raises(ImageFetchError, match="private|loopback"):
+        vision_utils.fetch_image({"image": f"{base}/ok"})
+
+    cap = len(test_image_fetch.PNG) * 2
+    monkeypatch.setattr(vision_utils, "load_image_from_url", lambda url: load_image_from_url(
+        url, allow_private_addresses=True, max_bytes=cap,
+    ))
+    image = vision_utils.fetch_image({"image": f"{base}/ok"})
+    assert image.mode == "RGB" and image.size == (8, 8)
+    with pytest.raises(ImageFetchError, match="byte limit"):
+        vision_utils.fetch_image({"image_url": f"{base}/oversize-streamed"})
+
+
+def test_zdtaichu5_url_videos_are_downloaded_through_bounded_fetch(monkeypatch):
+    from gptqmodel.models.ports.zdtaichu5 import vision_utils
+    from gptqmodel.utils.image import ImageFetchError
+
+    fetched, decoded = [], []
+
+    def fake_bytes(url):
+        fetched.append(url)
+        if "huge" in url:
+            raise ImageFetchError(url, "response exceeded the 16 byte limit")
+        return b"video-bytes"
+
+    def fake_reader(ele):
+        path = ele["video"]
+        with open(path, "rb") as handle:
+            decoded.append((path, handle.read()))
+        return torch.zeros(2, 3, 4, 4, dtype=torch.uint8), {"fps": 2.0}, 2.0
+
+    monkeypatch.setattr(vision_utils, "load_bytes_from_url", fake_bytes)
+    monkeypatch.setattr(vision_utils, "_get_video_backend", lambda: "torchvision")
+    monkeypatch.setitem(vision_utils._VIDEO_BACKENDS, "torchvision", fake_reader)
+    frames, fps, _ = vision_utils.fetch_video({"video": "https://example.invalid/clip.mp4"})
+    assert len(frames) == 2 and fps == 2.0
+    assert fetched == ["https://example.invalid/clip.mp4"]
+    (path, data), = decoded
+    assert data == b"video-bytes" and path.endswith(".mp4")
+    assert not os.path.exists(path)
+
+    with pytest.raises(ImageFetchError, match="byte limit"):
+        vision_utils.fetch_video({"video": "https://example.invalid/huge.mp4"})
+    assert len(decoded) == 1

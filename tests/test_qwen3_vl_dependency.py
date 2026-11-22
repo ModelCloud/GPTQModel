@@ -37,7 +37,7 @@ def test_qwen3_vl_video_missing_dependency_has_install_hint(monkeypatch):
         }
     ]
 
-    with pytest.raises(ImportError, match="pip install qwen-vl-utils"):
+    with pytest.raises(ImportError, match=r"pip install 'gptqmodel\[video\]'"):
         base_qwen3_vl.BaseQwen3VLGPTQ.process_vision_info(messages)
 
 

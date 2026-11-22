@@ -4,12 +4,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from copy import deepcopy
-from importlib import import_module
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Dict
 
-import torch
-from transformers import AutoModel, AutoProcessor, ProcessorMixin
-from transformers.generation.utils import GenerationMixin
+from transformers import ProcessorMixin
 
 from ...utils.audio import process_audio_info
 from ...utils.calibration import batched_conversations
@@ -18,6 +15,7 @@ from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
@@ -25,194 +23,19 @@ from ._vlm_calibration import (
 )
 
 
-class Cache:
-    is_compileable = False
-
-    def __init__(self):
-        super().__init__()
-
-    def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError("Make sure to implement `update` in a subclass.")
-
-    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        raise NotImplementedError("Make sure to implement `get_seq_length` in a subclass.")
-
-    def get_max_cache_shape(self) -> Optional[int]:
-        raise NotImplementedError("Make sure to implement `get_max_cache_shape` in a subclass.")
-
-    def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
-        max_length = self.get_max_cache_shape()
-        previous_seq_length = self.get_seq_length(layer_idx)
-        if max_length is not None and previous_seq_length + new_seq_length > max_length:
-            return max_length - new_seq_length
-        return previous_seq_length
-
-    def reorder_cache(self, beam_idx: torch.LongTensor):
-        for layer_idx in range(len(self.key_cache)):
-            if self.key_cache[layer_idx].numel():
-                device = self.key_cache[layer_idx].device
-                self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(0, beam_idx.to(device))
-            if self.value_cache[layer_idx].numel():
-                device = self.value_cache[layer_idx].device
-                self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(0, beam_idx.to(device))
-
-    @property
-    def seen_tokens(self):
-        if hasattr(self, "_seen_tokens"):
-            return self._seen_tokens
-        else:
-            return None
-
-
-class DynamicCache(Cache):
-    def __init__(self, config=None, _distributed_cache_data: Iterable = None, offloading: bool = False, **kwargs) -> None:
-        super().__init__()
-        self._seen_tokens = 0
-        self.key_cache: List[torch.Tensor] = []
-        self.value_cache: List[torch.Tensor] = []
-        self.offloading = offloading
-
-        if _distributed_cache_data is not None:
-            for key_states, value_states in _distributed_cache_data:
-                self.key_cache.append(key_states)
-                self.value_cache.append(value_states)
-
-    def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
-        if layer_idx < len(self):
-            return (self.key_cache[layer_idx], self.value_cache[layer_idx])
-        else:
-            raise KeyError(f"Cache only has {len(self)} layers, attempted to access layer with index {layer_idx}")
-
-    def __iter__(self):
-        for layer_idx in range(len(self)):
-            yield (self.key_cache[layer_idx], self.value_cache[layer_idx])
-
-    def __len__(self):
-        return len(self.key_cache)
-
-    def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if layer_idx == 0:
-            self._seen_tokens += key_states.shape[-2]
-
-        if key_states is not None:
-            if len(self.key_cache) <= layer_idx:
-                for _ in range(len(self.key_cache), layer_idx):
-                    self.key_cache.append(torch.tensor([]))
-                    self.value_cache.append(torch.tensor([]))
-                self.key_cache.append(key_states)
-                self.value_cache.append(value_states)
-            elif (
-                not self.key_cache[layer_idx].numel()
-            ):
-                self.key_cache[layer_idx] = key_states
-                self.value_cache[layer_idx] = value_states
-            else:
-                self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
-                self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
-
-        return self.key_cache[layer_idx], self.value_cache[layer_idx]
-
-    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        is_empty_layer = (
-            len(self.key_cache) == 0
-            or len(self.key_cache) <= layer_idx
-            or not self.key_cache[layer_idx].numel()
-        )
-        layer_seq_length = self.key_cache[layer_idx].shape[-2] if not is_empty_layer else 0
-        return layer_seq_length
-
-    def get_mask_sizes(self, query_length: int, layer_idx: int = 0) -> Tuple[int, int]:
-        return self.get_seq_length(layer_idx) + query_length, 0
-
-    def get_max_cache_shape(self) -> Optional[int]:
-        return None
-
-    @property
-    def is_sliding(self) -> List[bool]:
-        return [False] * len(self.key_cache)
-
-    def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor], Tuple[torch.Tensor]]:
-        legacy_cache = ()
-        for layer_idx in range(len(self)):
-            legacy_cache += ((self.key_cache[layer_idx], self.value_cache[layer_idx]),)
-        return legacy_cache
-
-    @classmethod
-    def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "DynamicCache":
-        cache = cls()
-        if past_key_values is not None:
-            for layer_idx in range(len(past_key_values)):
-                key_states, value_states = past_key_values[layer_idx]
-                cache.update(key_states, value_states, layer_idx)
-        return cache
-
-    def crop(self, max_length: int):
-        if max_length < 0:
-            max_length = self.get_seq_length() - abs(max_length)
-
-        if self.get_seq_length() <= max_length:
-            return
-
-        self._seen_tokens = max_length
-        for idx in range(len(self.key_cache)):
-            if self.key_cache[idx].numel():
-                self.key_cache[idx] = self.key_cache[idx][..., :max_length, :]
-                self.value_cache[idx] = self.value_cache[idx][..., :max_length, :]
-
-    def batch_split(self, full_batch_size: int, split_size: int) -> List["DynamicCache"]:
-        out = []
-        for i in range(0, full_batch_size, split_size):
-            current_split = DynamicCache()
-            current_split._seen_tokens = self._seen_tokens
-            current_split.key_cache = [tensor[i : i + split_size] for tensor in self.key_cache]
-            current_split.value_cache = [tensor[i : i + split_size] for tensor in self.value_cache]
-            out.append(current_split)
-        return out
-
-    @classmethod
-    def from_batch_splits(cls, splits: List["DynamicCache"]) -> "DynamicCache":
-        cache = cls()
-        for idx in range(len(splits[0])):
-            key_cache = [current.key_cache[idx] for current in splits if current.key_cache[idx].numel()]
-            value_cache = [current.value_cache[idx] for current in splits if current.value_cache[idx].numel()]
-            if key_cache != []:
-                layer_keys = torch.cat(key_cache, dim=0)
-                layer_values = torch.cat(value_cache, dim=0)
-                cache.update(layer_keys, layer_values, idx)
-        return cache
-
-    def batch_repeat_interleave(self, repeats: int):
-        for layer_idx in range(len(self)):
-            self.key_cache[layer_idx] = self.key_cache[layer_idx].repeat_interleave(repeats, dim=0)
-            self.value_cache[layer_idx] = self.value_cache[layer_idx].repeat_interleave(repeats, dim=0)
-
-    def batch_select_indices(self, indices: torch.Tensor):
-        for layer_idx in range(len(self)):
-            self.key_cache[layer_idx] = self.key_cache[layer_idx][indices, ...]
-            self.value_cache[layer_idx] = self.value_cache[layer_idx][indices, ...]
-
-
-def _patch_minicpmo_remote_prepare_inputs_for_generation(remote_module) -> None:
-    remote_module.prepare_inputs_for_generation = GenerationMixin.prepare_inputs_for_generation
-
 class MiniCPMOQModel(BaseQModel):
-    loader = AutoModel
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.minicpm_o.configuration_minicpmo.MiniCPMOConfig",
+        model_class="gptqmodel.models.ports.minicpm_o.modeling_minicpmo.MiniCPMO",
+        processor_class="gptqmodel.models.ports.minicpm_o.processing_minicpmo.MiniCPMOProcessor",
+        tokenizer_class="gptqmodel.models.ports.minicpm_o.tokenization_minicpmo_fast.MiniCPMOTokenizerFast",
+    )
 
     pre_lm_head_norm_module = "llm.model.norm"
 
-    require_trust_remote_code = True
+    require_trust_remote_code = False
+    rotary_embedding = "llm.model.rotary_emb"
+    modules_with_direct_meta_tensors = ["resampler"]
 
     module_tree = [
         "llm",
@@ -225,56 +48,37 @@ class MiniCPMOQModel(BaseQModel):
             # consumes the attention output. Sequential stages made the norm
             # fold into q only and then q into k. The MLP stages were also
             # merged, so `down_proj` shared the gate/up GPTQ subset.
+            # The per-head q/k norms read the q/k outputs, so they precede
+            # their projections here (Qwen3 order): AWQ takes the last entry of
+            # the q/k/v stage as the `o_proj` fold source, which must be v_proj.
             "self_attn": (
+                "q_norm:!",
                 "q_proj:0:in=x",
+                "k_norm:!",
                 "k_proj:0:in=x",
                 "v_proj:0:in=x",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
-        }
+        },
     ]
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
     require_load_processor = True
 
-    def before_model_load(self, model_local_path: str, load_quantized_model: bool):
-        from transformers import cache_utils
-        from transformers.dynamic_module_utils import get_class_from_dynamic_module
-        from transformers.generation import utils
-        cache_utils.Cache = Cache
-        cache_utils.DynamicCache = DynamicCache
-        utils.DynamicCache = DynamicCache
-
-        tts_config_cls = get_class_from_dynamic_module(
-            "configuration_minicpmo.MiniCPMTTSConfig",
-            model_local_path,
-        )
-
-        print("tts_config_cls", tts_config_cls)
-
-        if not hasattr(tts_config_cls, "top_p"):
-            tts_config_cls.top_p = 1.0
-
-        if not hasattr(tts_config_cls, "top_k"):
-            tts_config_cls.top_k = 50
-
-        if not hasattr(tts_config_cls, "repetition_penalty"):
-            tts_config_cls.repetition_penalty = 1.0
-
-        # MiniCPM-o remote code binds `DynamicCache` into module globals at import
-        # time (`from transformers.cache_utils import DynamicCache`). Rebind those
-        # globals as well so the compat cache is used even if the dynamic modules
-        # were imported before this hook ran.
-        remote_model_cls = get_class_from_dynamic_module(
-            "modeling_minicpmo.MiniCPMO",
-            model_local_path,
-        )
-        remote_module = import_module(remote_model_cls.__module__)
-        remote_module.Cache = Cache
-        remote_module.DynamicCache = DynamicCache
-        _patch_minicpmo_remote_prepare_inputs_for_generation(remote_module)
+    def awq_module_replay_inputs(self, module, x, module_kwargs):
+        x, module_kwargs = super().awq_module_replay_inputs(module, x, module_kwargs)
+        # Input capture runs the omni `generate` prefill, so the captured decoder
+        # kwargs carry its DynamicCache. Layer replay already drops it; the AWQ
+        # block replay must too, or every scored scale appends K/V to that cache
+        # and the next replay attends over stale keys (mask/key length mismatch).
+        cache_keys = ("past_key_values", "past_key_value")
+        if any(module_kwargs.get(key) is not None for key in cache_keys):
+            module_kwargs = {key: None if key in cache_keys else value for key, value in module_kwargs.items()}
+            if "use_cache" in module_kwargs:
+                module_kwargs["use_cache"] = False
+        return x, module_kwargs
 
     def pre_quantize_generate_hook_start(self):
         self.shell_module_materialize(self.model.llm.model.embed_tokens, self.quantize_config.device)
@@ -325,11 +129,16 @@ class MiniCPMOQModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=self.tokenizer.tokenizer if self.tokenizer is not None else None,
+        )
 
     @staticmethod
     def _normalize_conversation(
         conversation: list[dict],
+        version: str = "4.5",
     ) -> tuple[list[dict], list, list[int]]:
         normalized = []
         images = []
@@ -350,10 +159,10 @@ class MiniCPMOQModel(BaseQModel):
                 item_type = item.get("type")
                 if item_type == "image":
                     images.append(fetch_image(item))
-                    text_parts.append("<image>./</image>")
+                    text_parts.append("(<image>./</image>)" if str(version) == "2.6" else "<image>./</image>")
                 elif item_type == "audio":
                     audio_parts.append(index)
-                    text_parts.append("<audio>./</audio>")
+                    text_parts.append("(<audio>./</audio>)" if str(version) == "2.6" else "<audio>./</audio>")
                 elif item_type == "text":
                     text_parts.append(item.get("text", ""))
                 else:
@@ -379,7 +188,7 @@ class MiniCPMOQModel(BaseQModel):
         audio_parts = []
 
         for conversation in conversations:
-            normalized, image_inputs, audio_part_inputs = cls._normalize_conversation(conversation)
+            normalized, image_inputs, audio_part_inputs = cls._normalize_conversation(conversation, processor.version)
             audio_inputs = process_audio_info(conversation, use_audio_in_video=False) or []
 
             prompts.append(
@@ -418,9 +227,7 @@ class MiniCPMOQModel(BaseQModel):
                     batch,
                 )
             )
-        return finalize_conversation_batches(
-            calib_data, sort=sort, min_length=min_length, label=label
-        )
+        return finalize_conversation_batches(calib_data, sort=sort, min_length=min_length, label=label)
 
     def move_input_capture_example(self, example, data_device):
         for key, value in example.items():
@@ -429,11 +236,11 @@ class MiniCPMOQModel(BaseQModel):
         return self.finalize_input_capture_example(example)
 
     def run_input_capture(self, example, use_cache: bool, data_device):
-        generation_config = self.model.prepare_generation_config(do_sample=True)
+        generation_config = self.model.prepare_generation_config(do_sample=False, max_new_tokens=1)
         generation_config["use_cache"] = use_cache
 
         return self.model.generate(
             **example,
-            tokenizer=self.model.tokenizer,
+            tokenizer=self.tokenizer.tokenizer,
             **generation_config,
         )

@@ -327,6 +327,13 @@ def test_forward_observes_weight_mutation_and_state_load_clears_metadata():
         name: tensor.detach().clone() for name, tensor in module.state_dict().items()
     }
     first = module(x)
+    # On CPU ``post_init`` compiles ``dequantize_weight`` (#5070), and a traced
+    # graph decodes zero-points inline without publishing the cache. The eager
+    # class method always publishes it, so build the metadata the state load
+    # must clear through it.
+    type(module).dequantize_weight(module)
+    assert module._zeros_cache is not None
+    assert module._g_idx_long_cache is not None
 
     with torch.no_grad():
         module.qweight.add_(1)

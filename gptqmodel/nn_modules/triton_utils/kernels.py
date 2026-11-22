@@ -8,6 +8,8 @@ import triton
 import triton.language as tl
 from torch.amp import custom_bwd, custom_fwd
 
+from gptqmodel.utils.triton_jit import jit as triton_jit
+
 from ...utils.logger import setup_logger
 from ...utils.torch import HAS_XPU
 from . import custom_autotune
@@ -88,7 +90,7 @@ log = setup_logger()
     },
 )
 
-@triton.jit
+@triton_jit
 def quant_matmul_248_kernel(
     a_ptr,
     b_ptr,
@@ -249,7 +251,7 @@ def quant_matmul_248_kernel(
     nearest_power_of_two=True,
 )
 
-@triton.jit
+@triton_jit
 def transpose_quant_matmul_248_kernel(
     a_ptr,
     b_ptr,
@@ -344,7 +346,7 @@ def transpose_quant_matmul_248_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-@triton.jit
+@triton_jit
 def silu(x):
     return x * tl.sigmoid(x)
 

@@ -8,14 +8,19 @@ from typing import List
 import torch
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Xing4_0QModel(BaseQModel):
     """Quantization layout for XingChen-AGI's Xing4.0 MLA/HC MoE model."""
 
-    # Xing4.0 is distributed with configuration and model code in the model repo.
-    require_trust_remote_code = True
+    require_trust_remote_code = False
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.xing4_0.configuration_xing4_0.Xing4_0Config",
+        model_class="gptqmodel.models.ports.xing4_0.modeling_xing4_0.Xing4_0ForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.xing4_0.tokenization_xing4_0.Xing4_0Tokenizer",
+    )
 
     # The first two decoder layers use the dense MLP; later layers use routed
     # experts plus a shared expert.  Keep the tree non-strict for that mix.
@@ -75,6 +80,30 @@ class Xing4_0QModel(BaseQModel):
             },
         },
     ]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        """Drop MLA latent-norm folds whose consumers do not read that norm.
+
+        `q_b_proj` and `kv_b_proj` share one tree block, so the generic planner
+        takes the block's last declared module (`kv_a_layernorm`) as the source
+        for both when the two LoRA ranks are equal. `q_b_proj` reads
+        `q_a_layernorm`, so that fold changes the attention output. A latent
+        group survives only when every consumer reads its source norm.
+        """
+
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        attention = getattr(module, "self_attn", None)
+        readers = {}
+        for norm_name, consumer_name in (("q_a_layernorm", "q_b_proj"), ("kv_a_layernorm", "kv_b_proj")):
+            norm = getattr(attention, norm_name, None)
+            if norm is not None:
+                readers[id(norm)] = getattr(attention, consumer_name, None)
+        return [
+            node
+            for node in nodes
+            if id(node.get("prev_op")) not in readers
+            or all(target is readers[id(node["prev_op"])] for target in node.get("layers") or [])
+        ]
 
     def lm_head_pre_quantize_generate_hook(
         self, inputs: List[List[torch.Tensor]]

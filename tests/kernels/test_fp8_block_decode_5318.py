@@ -42,9 +42,8 @@ pytestmark = [pytest.mark.gpu]
 BLOCK = (128, 128)
 
 
-_TRITON_DECODE_AVAILABLE = fp8_block_triton.triton_fp8_available(
-    torch.device("cuda")
-) and fp8_block_triton.triton_fp8_supports_format(
+_TRITON_CUDA_AVAILABLE = fp8_block_triton.triton_fp8_available(torch.device("cuda"))
+_TRITON_DECODE_AVAILABLE = _TRITON_CUDA_AVAILABLE and fp8_block_triton.triton_fp8_supports_format(
     torch.device("cuda"), "float8_e4m3fn"
 )
 _DECODE_SKIP = pytest.mark.skipif(
@@ -288,6 +287,7 @@ def _all_ones_block_kernel():
     return kernel.eval()
 
 
+@pytest.mark.skipif(not _TRITON_CUDA_AVAILABLE, reason="requires Triton on NVIDIA CUDA")
 def test_block_dispatch_skips_an_operand_the_device_cannot_lower(monkeypatch):
     """#5400: a target without ``fp8e4nv`` must keep the portable block decode.
 
@@ -338,8 +338,7 @@ def test_block_dispatch_skips_an_operand_the_device_cannot_lower(monkeypatch):
     torch.testing.assert_close(output.float(), expected, rtol=2e-3, atol=2e-3)
 
     if not _TRITON_DECODE_AVAILABLE:
-        # Nothing to control against: this host's own target cannot run the
-        # kernel either, which the skip marker above already reports.
+        # This host's own target cannot run the accelerated control either.
         return
 
     # Control: at the host's real capability the same payload still uses the

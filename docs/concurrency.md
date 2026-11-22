@@ -138,14 +138,15 @@ wraps the context.
 
 ## 2. Triton JIT compilation is single-flight and globally serialized
 
-`TritonPatch.apply()` now installs `patch_triton_jit_compile()` in addition to
-the autotuner patch. The wrapper around `JITFunction._do_compile` takes
+GPT-QModel kernels are built with `gptqmodel.utils.triton_jit.jit`, which
+returns a package-owned `JITFunction` subclass (Triton itself is never
+patched; the former `TritonPatch` was removed). Its `_do_compile` takes
 `_TRITON_COMPILE_LOCK`, rechecks the per-device kernel cache for the requested
 specialization key, and compiles only if the key is still missing.
 
 ```mermaid
 flowchart TD
-    A["JITFunction.run misses kernel cache"] --> B["patched_do_compile"]
+    A["JITFunction.run misses kernel cache"] --> B["GPTQModelJITFunction._do_compile"]
     B --> C["acquire _TRITON_COMPILE_LOCK"]
     C --> D{"kernel cache has key"}
     D -- yes --> E["return cached kernel, no compile"]

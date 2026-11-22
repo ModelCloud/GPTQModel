@@ -193,9 +193,14 @@ def _awq_cases():
     ]
 
 
-def _require(device: str) -> None:
+def _require(device: str, name: str = "") -> None:
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is required")
+    if name.endswith("cpu_avx512"):
+        from gptqmodel.utils.cpu_features import avx512_bf16_error, has_avx512_bf16
+
+        if not has_avx512_bf16():
+            pytest.skip(avx512_bf16_error())
 
 
 def _run(module: BaseQuantLinear, x: torch.Tensor) -> torch.Tensor:
@@ -264,7 +269,7 @@ def _assert_state_dict_is_a_checkpoint(
 @pytest.mark.parametrize("case", _gptq_cases(), ids=[case[0] for case in _gptq_cases()])
 def test_gptq_state_dict_round_trip_is_identity(case, on_disk):
     name, build, device = case
-    _require(device)
+    _require(device, name)
 
     module = _as_loaded_from(build(), on_disk).to(device)
     dtype = torch.bfloat16 if name == "torch_fused" else torch.float16
@@ -276,7 +281,7 @@ def test_gptq_state_dict_round_trip_is_identity(case, on_disk):
 @pytest.mark.parametrize("case", _awq_cases(), ids=[case[0] for case in _awq_cases()])
 def test_awq_state_dict_round_trip_is_identity(case):
     name, build, device, dtype = case
-    _require(device)
+    _require(device, name)
 
     # ``eval()`` is required: the CPU int4pack/AVX512 transform only runs
     # outside training, and it is what overwrites the checkpoint tensors.
@@ -309,7 +314,7 @@ def test_awq_cpu_kernels_emit_checkpoint_layout_after_transform(case):
     """
 
     name, build, device, dtype = case
-    _require(device)
+    _require(device, name)
 
     module = build().to(device).eval()
     checkpoint_shape = tuple(module.qweight.shape)
@@ -515,118 +520,6 @@ def test_any_runtime_layout_flag_refuses_checkpoint_write():
     with checkpoint_serialization():
         with pytest.raises(RuntimeError, match="cannot be reconstructed"):
             module.state_dict()
-
-
-def test_transformers_save_pretrained_enters_checkpoint_scope(tmp_path):
-    """Issue #4125 item 1: the HF writer must be on the refusing side.
-
-    PEFT calls ``state_dict()`` read-only, so the runtime-layout kernels refuse
-    only inside ``checkpoint_serialization()``. That made the guard useless for
-    ``PreTrainedModel.save_pretrained()``, which collects ``state_dict()``
-    itself and therefore wrote the private layout with no error.
-    """
-
-    from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedModel
-
-    from gptqmodel.utils.checkpoint_state import is_checkpoint_serialization
-
-    assert getattr(
-        PreTrainedModel.save_pretrained, "_gptqmodel_runtime_layout_guard", False
-    ), "PreTrainedModel.save_pretrained is not wrapped by the runtime-layout guard"
-
-    config = LlamaConfig(
-        vocab_size=32,
-        hidden_size=IN_FEATURES,
-        intermediate_size=IN_FEATURES,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        max_position_embeddings=32,
-        tie_word_embeddings=False,
-    )
-    torch.manual_seed(0)
-    model = LlamaForCausalLM(config).half()
-
-    seen = {}
-    original_state_dict = model.state_dict
-
-    def _recording_state_dict(*args, **kwargs):
-        seen["serializing"] = is_checkpoint_serialization()
-        return original_state_dict(*args, **kwargs)
-
-    model.state_dict = _recording_state_dict
-    model.save_pretrained(str(tmp_path / "probe"))
-    assert seen.get("serializing") is True, (
-        "save_pretrained did not enter checkpoint_serialization(), so a "
-        "runtime-layout kernel would write its private layout without raising"
-    )
-    # The scope must not leak past the call.
-    assert is_checkpoint_serialization() is False
-
-
-@pytest.mark.cuda
-def test_save_pretrained_refuses_runtime_layout_model(tmp_path):
-    """Issue #4125 item 1: ``model.save_pretrained()`` must raise, not write garbage.
-
-    Before this fix an ExLlamaV2/Marlin model saved cleanly and the reloaded
-    directory generated ``' flags flags flags ...'``; Marlin raised a shape
-    error only at load time. Both are now refused at save.
-    """
-
-    from transformers import LlamaConfig, LlamaForCausalLM
-
-    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-    from gptqmodel.utils.marlin import marlin_runtime_available, marlin_runtime_error
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for Marlin")
-    if not marlin_runtime_available(torch.float16):
-        pytest.skip(f"Marlin runtime unavailable: {marlin_runtime_error(torch.float16)}")
-
-    device = "cuda:0"
-    config = LlamaConfig(
-        vocab_size=32,
-        hidden_size=IN_FEATURES,
-        intermediate_size=IN_FEATURES,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        max_position_embeddings=32,
-        tie_word_embeddings=False,
-    )
-    torch.manual_seed(0)
-    model = LlamaForCausalLM(config).half()
-
-    linear, scales, zeros, g_idx = _inputs(group_size=128)
-    source = TorchLinear(
-        bits=BITS,
-        group_size=128,
-        sym=True,
-        desc_act=False,
-        in_features=IN_FEATURES,
-        out_features=OUT_FEATURES,
-        pack_dtype=torch.int32,
-        backend=BACKEND.GPTQ_TORCH,
-        bias=False,
-    )
-    source.pack_original(linear, scales, zeros, g_idx)
-    source._init_wf_unsqueeze_buffers()
-    source.qzero_format(format=2)
-    source._checkpoint_format_on_disk = FORMAT.GPTQ_V2
-    source = _materialize(source).to(device)
-
-    marlin = hf_repack_layer(source, BACKEND.MARLIN, device=device)
-    assert marlin._marlin_repacked
-    model.model.layers[0].self_attn.q_proj = marlin
-
-    with pytest.raises(RuntimeError, match="cannot be reconstructed"):
-        model.save_pretrained(str(tmp_path / "out"))
-
-    # The read-only collection PEFT performs must still work, and it must mark
-    # the payload so any other transport fails loudly on reload.
-    state = model.state_dict()
-    assert state["model.layers.0.self_attn.q_proj.qzeros_format"].item() == 0
-
 
 
 def _torch_transport(state):

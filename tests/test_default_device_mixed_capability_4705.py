@@ -40,6 +40,10 @@ requires_nvidia_capability = pytest.mark.skipif(
 
 def _gpu_capabilities(monkeypatch, capabilities):
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+    # ``auto_select_device`` reads the import-time accelerator flags, so a
+    # CPU-only host must describe the NVIDIA family there as well.
+    monkeypatch.setattr("gptqmodel.utils.importer.HAS_CUDA", True)
+    monkeypatch.setattr("gptqmodel.utils.importer.IS_ROCM", False)
     monkeypatch.setattr(
         "gptqmodel.utils.importer.torch.cuda.get_device_capability",
         lambda device=None: capabilities[torch.device(device).index],

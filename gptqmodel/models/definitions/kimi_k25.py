@@ -5,17 +5,26 @@
 
 from ...utils.model import get_module
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class KimiK25QModel(BaseQModel):
     # Kimi-K2.5 wraps a DeepSeek-V3 text backbone with a vision tower and
     # projector. Quantize the language model and keep the vision path in base.
-    require_trust_remote_code = True
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.kimi_k25.native.Kimi_K25Config",
+        model_class="gptqmodel.models.ports.kimi_k25.native.Kimi_K25ForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.kimi_k25.native.Kimi_K25Processor",
+        tokenizer_class="gptqmodel.models.ports.kimi_k25.tokenization_kimi.TikTokenTokenizer",
+    )
+
+    require_trust_remote_code = False
 
     require_load_processor = True
 
-    pre_lm_head_norm_module = "language_model.model.norm"
+    pre_lm_head_norm_module = "model.language_model.norm"
+    rotary_embedding = "model.language_model.rotary_emb"
 
     dynamic_expert_index = "n_routed_experts"
 
@@ -24,20 +33,25 @@ class KimiK25QModel(BaseQModel):
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     module_tree = [
-        "language_model",
         "model",
+        "language_model",
         "layers",
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:1:in=q_a", "kv_b_proj:1:in=kv_a", "o_proj:2"),
+            "self_attn": (
+                "q_a_layernorm:!", "kv_a_layernorm:!",
+                "q_proj:0:q", "q_a_proj:0:q:in=h", "kv_a_proj_with_mqa:0:k:v:in=h",
+                "q_b_proj:1:q:in=q_a", "kv_b_proj:1:k:v:in=kv_a", "o_proj:2:o",
+            ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
-                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
+                "gate": ("gate:!",),
                 "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                    "#": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
                 },
-                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_experts": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             },
         },
     ]

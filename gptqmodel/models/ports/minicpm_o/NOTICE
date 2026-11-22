@@ -1,0 +1,47 @@
+MiniCPM-o Transformers 5 local port for GPT-QModel
+
+The OpenBMB snapshots carry Apache-2.0 headers and model-card metadata.
+
+Primary snapshots:
+  openbmb/MiniCPM-o-4_5
+  fb09628e98b1f55d8d5b863e0eccfcdd11bff499
+  Copyright 2026 The OpenBMB Team. All rights reserved.
+
+  openbmb/MiniCPM-o-2_6
+  cf0b69a6118cd3b2c90bb37f3f4366e2fba802ab
+  Copyright 2025 The OpenBMB Team. All rights reserved.
+
+The OpenBMB Apache-2.0 license is the repository LICENSE. Original file
+headers and source attributions are preserved. Adaptations for
+Transformers 5 and GPT-QModel are noted in the file headers.
+
+Clean-room TTS codec and sampling components:
+  Copyright 2026 ModelCloud.ai. Apache-2.0.
+  The following components are independent Apache-2.0 implementations
+  written by ModelCloud.ai from a behavioral specification, without
+  reference to any third-party implementation of them. They are compatible
+  with the state_dict layout of the published MiniCPM-o 2.6 checkpoints.
+    tts_26.py: ConvNeXtBlock, GFSQ, DVAEDecoder, DVAE,
+      CustomRepetitionPenaltyLogitsProcessorRepeat, gen_logits,
+      ConditionalChatTTS.generate, ConditionalChatTTS.decode_to_mel_specs,
+      ConditionalChatTTS._init_weights
+    modeling_minicpmo.py: gen_logits (the 4.5 repetition processor is the
+      one defined in tts_26.py)
+
+Transformers / SigLIP / Whisper / Encodec:
+  Copyright 2024 Google AI and The HuggingFace Team. All rights reserved.
+  Apache-2.0. Original copied-from notices remain in the relevant source.
+  The NaViT SigLIP implementation additionally identifies
+  HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit.
+  Runtime decoder classes are imported from installed Transformers 5,
+  rather than copied from an unrelated MiniCPM-V architecture.
+
+The vector-quantize-pytorch FSQ implementation is an installed dependency,
+not vendored code. Its upstream MIT attribution is Copyright (c) 2020
+Phil Wang.
+
+Model weights:
+  No trained tensor payload is included. The published MiniCPM-o
+  checkpoints (OpenBMB), including their TTS/DVAE weights, and any
+  StepAudio2/BigVGAN neural-codec assets are distributed separately by
+  their owners under their own terms.

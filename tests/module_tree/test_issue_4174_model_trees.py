@@ -28,8 +28,25 @@ from gptqmodel.models.definitions.kimi_linear import KimiLinearNativeQModel
 from gptqmodel.models.definitions.llama4 import Llama4QModel, Llama4TextQModel
 from gptqmodel.models.definitions.phi3 import Phi3QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native.auto import AutoConfig as NativeAutoConfig
+from gptqmodel.models.ports.native.phi3.configuration_phi3 import Phi3Config
+from gptqmodel.models.ports.native.phi3.modeling_phi3 import Phi3ForCausalLM
 from gptqmodel.utils.model import get_layers_with_prefixes
+
+
+def _auto_config(model_type, definition=None, **kwargs):
+    """Build the default config with the class the definition's loader expects.
+
+    ``definition`` names the class that will load it when that is not the
+    ``MODEL_MAP`` entry (``auto.py`` dispatches plain ``kimi_linear`` configs to
+    ``KimiLinearNativeQModel``).
+    """
+    loader = getattr(definition or MODEL_MAP.get(model_type), "loader", None)
+    if isinstance(loader, LocalModelLoader) and loader.config_class.startswith("gptqmodel.models.ports.native."):
+        return NativeAutoConfig.for_model(model_type, **kwargs)
+    return transformers.AutoConfig.for_model(model_type, **kwargs)
 
 
 QC = SimpleNamespace(dynamic=None)
@@ -38,7 +55,7 @@ QC = SimpleNamespace(dynamic=None)
 def _build_meta(model_type, config=None):
     definition = MODEL_MAP[model_type]
     if config is None:
-        config = transformers.AutoConfig.for_model(model_type)
+        config = _auto_config(model_type)
     with torch.device("meta"):
         model = definition.loader.from_config(config)
     _convert_model_with_defuser(definition, model, cleanup_original=False)
@@ -87,7 +104,7 @@ def test_voxtral_tree_uses_the_5_22_language_model_root():
 
 
 def _nemotron_moe_config():
-    config = transformers.AutoConfig.for_model("nemotron_h")
+    config = _auto_config("nemotron_h")
     config.num_hidden_layers = 4
     config.layers_block_type = ["linear_attention", "full_attention", "mlp", "moe"]
     return config
@@ -154,7 +171,7 @@ def test_bailing_moe_keeps_the_remote_attention_layout():
 
 
 def _llama4_mixed_config():
-    config = transformers.AutoConfig.for_model("llama4_text")
+    config = _auto_config("llama4_text")
     config.num_hidden_layers = 4
     config.interleave_moe_layer_step = 2
     config.moe_layers = [0, 2]
@@ -189,7 +206,7 @@ def test_llama4_dense_layers_are_declared_next_to_moe():
 
 
 def _llama4_scout_config():
-    config = transformers.AutoConfig.for_model("llama4_text")
+    config = _auto_config("llama4_text")
     config.num_hidden_layers = 2
     config.interleave_moe_layer_step = 1
     config.moe_layers = [0, 1]
@@ -231,7 +248,7 @@ def test_llama4_scout_declares_no_dense_feed_forward_branch():
 
 
 def _gemma4_moe_config():
-    config = transformers.AutoConfig.for_model("gemma4_text")
+    config = _auto_config("gemma4_text")
     config.num_hidden_layers = 2
     config.enable_moe_block = True
     config.num_experts = 8
@@ -274,7 +291,7 @@ def test_gemma4_moe_splits_and_declares_3d_expert_parameters():
 
 def _phi3_longrope_config():
     factors = [1.0] * 48
-    return transformers.Phi3Config(
+    return Phi3Config(
         max_position_embeddings=131072,
         rope_parameters={
             "rope_type": "longrope",
@@ -297,41 +314,32 @@ def test_phi3_longrope_uses_the_same_gate_up_split_as_native():
     assert plan.find("mlp.gate_up_proj") is None
 
 
-class Phi3MLP(nn.Module):
-    """Minimal stand-in for the remote-code `Phi3MLP` class."""
-
-    def __init__(self):
-        super().__init__()
-        self.gate_up_proj = nn.Linear(8, 16, bias=False)
-        self.down_proj = nn.Linear(8, 8, bias=False)
-        self.activation_fn = nn.Identity()
-
-
-class _RemotePhi3Layer(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.mlp = Phi3MLP()
-
-
-class _RemotePhi3Root(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Module()
-        self.model.layers = nn.ModuleList([_RemotePhi3Layer()])
-
-
-def test_phi3_remote_fused_mlp_is_split_before_strict_resolution():
-    model = _RemotePhi3Root()
+def test_phi3_vendored_fused_mlp_is_split_with_the_native_forward():
+    config = Phi3Config(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        pad_token_id=0,
+    )
+    torch.manual_seed(0)
+    model = Phi3ForCausalLM(config).eval()
+    ids = torch.tensor([[1, 5, 9, 3]])
+    with torch.no_grad():
+        reference = model(ids).logits
     plan = ModulePlan.from_tree(Phi3QModel.module_tree)
-
-    # The remote layout exposes only `gate_up_proj`; the declared gate/up
-    # specs miss and strict resolution raises during quantization.
+    # The vendored layout exposes only `gate_up_proj`; the declared gate/up
+    # specs miss and strict resolution would raise during quantization.
     assert plan.find("mlp.gate_up_proj") is None
 
-    Phi3QModel.after_defuser_conversion(model)
+    _convert_model_with_defuser(Phi3QModel, model, cleanup_original=False)
     mlp = model.model.layers[0].mlp
     assert not hasattr(mlp, "gate_up_proj")
-    assert mlp.gate_proj.weight.shape == mlp.up_proj.weight.shape == (8, 8)
+    assert mlp.gate_proj.weight.shape == mlp.up_proj.weight.shape == (32, 16)
+    with torch.no_grad():
+        assert torch.equal(model(ids).logits, reference)
     _assert_plan_resolves(
         plan,
         ("mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"),
@@ -354,7 +362,7 @@ def test_pre_lm_head_norm_resolves_on_the_real_meta_model(model_type, expected):
     definition = MODEL_MAP[model_type]
     assert definition.pre_lm_head_norm_module == expected
 
-    config = transformers.AutoConfig.for_model(model_type)
+    config = _auto_config(model_type)
     with torch.device("meta"):
         model = definition.loader.from_config(config)
 
@@ -399,7 +407,7 @@ def test_kimi_linear_native_has_no_phantom_rotary_path():
     definition = KimiLinearNativeQModel
     assert definition.rotary_embedding is None
 
-    config = transformers.AutoConfig.for_model("kimi_linear")
+    config = _auto_config("kimi_linear", definition=definition)
     with torch.device("meta"):
         model = definition.loader.from_config(config)
     assert not hasattr(model.model, "rotary_emb")

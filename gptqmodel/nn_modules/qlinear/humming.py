@@ -995,5 +995,3 @@ class HummingMXFP4Linear(_HummingKernelMixin, WeightOnlyQuantLinear):
 
 
 __all__ = ["AwqHummingLinear", "HummingFP8Linear", "HummingLinear", "HummingMXFP4Linear"]
-
-

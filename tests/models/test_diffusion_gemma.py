@@ -7,10 +7,10 @@ import os
 import pytest
 import torch
 from model_test import ModelTest
-from transformers import AutoModelForMultimodalLM, DiffusionGemmaConfig
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.models.definitions.diffusion_gemma import DiffusionGemmaQModel
+from gptqmodel.models.ports.native.diffusion_gemma.configuration_diffusion_gemma import DiffusionGemmaConfig
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization.config import CalibrationConfig, GPTQConfig
 
@@ -114,11 +114,19 @@ def _tiny_diffusion_gemma_config():
     )
 
 
-def _assert_tied_decoder_is_quantized(model):
-    encoder_layers = model.model.model.encoder.language_model.layers
-    decoder_layers = model.model.model.decoder.layers
+def _assert_tied_decoder_is_quantized(loaded, source):
+    encoder_layers = loaded.model.model.encoder.language_model.layers
+    decoder_layers = loaded.model.model.decoder.layers
     shared_leaves = 0
-    for encoder_layer, decoder_layer in zip(encoder_layers, decoder_layers):
+    source_layers = source.model.encoder.language_model.layers
+    for source_layer, encoder_layer, decoder_layer in zip(source_layers, encoder_layers, decoder_layers, strict=True):
+        assert decoder_layer.router.proj.weight is encoder_layer.router.proj.weight
+        torch.testing.assert_close(
+            encoder_layer.router.proj.weight,
+            source_layer.router.proj.weight,
+            rtol=0,
+            atol=0,
+        )
         for name, module in encoder_layer.named_modules():
             if not name or not isinstance(module, BaseQuantLinear):
                 continue
@@ -137,7 +145,7 @@ def test_quantized_checkpoint_reloads_with_tied_decoder(tmp_path, monkeypatch):
     resaved = tmp_path / "resaved"
     source.mkdir()
 
-    model = AutoModelForMultimodalLM.from_config(_tiny_diffusion_gemma_config(), dtype=torch.bfloat16)
+    model = DiffusionGemmaQModel.loader.from_config(_tiny_diffusion_gemma_config(), dtype=torch.bfloat16)
     model.save_pretrained(source)
 
     # A config-only fixture has no image/audio processor assets; the processor
@@ -154,7 +162,7 @@ def test_quantized_checkpoint_reloads_with_tied_decoder(tmp_path, monkeypatch):
     quantized.save(str(saved))
 
     loaded = GPTQModel.load(str(saved), device="cpu")
-    _assert_tied_decoder_is_quantized(loaded)
+    _assert_tied_decoder_is_quantized(loaded, model)
 
     output = loaded.model(
         input_ids=torch.tensor([[1, 2, 3, 4]]),
@@ -169,7 +177,7 @@ def test_quantized_checkpoint_reloads_with_tied_decoder(tmp_path, monkeypatch):
     loaded.save(str(resaved))
 
     reloaded = GPTQModel.load(str(resaved), device="cpu")
-    _assert_tied_decoder_is_quantized(reloaded)
+    _assert_tied_decoder_is_quantized(reloaded, model)
     reloaded_output = reloaded.model(
         input_ids=torch.tensor([[1, 2, 3, 4]]),
         attention_mask=torch.ones(1, 4, dtype=torch.long),

@@ -1,0 +1,69 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "activation_function": "silu",
+  "architectures": null,
+  "bos_token_id": 98,
+  "chunk_size_feed_forward": 0,
+  "conv_kernel": 4,
+  "dtype": null,
+  "eos_token_id": 98,
+  "expand": 2,
+  "gradient_checkpointing": false,
+  "hidden_act": "silu",
+  "hidden_size": 32,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_range": 0.1,
+  "intermediate_size": 32,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "layer_norm_epsilon": 1e-05,
+  "mixer_rms_eps": 1e-06,
+  "model_type": "falcon_mamba",
+  "n_positions": 512,
+  "num_hidden_layers": 2,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 98,
+  "problem_type": null,
+  "rescale_prenorm_residual": false,
+  "residual_in_fp32": true,
+  "return_dict": true,
+  "state_size": 16,
+  "tie_word_embeddings": false,
+  "time_step_floor": 0.0001,
+  "time_step_init_scheme": "random",
+  "time_step_max": 0.1,
+  "time_step_min": 0.001,
+  "time_step_rank": 2,
+  "time_step_scale": 1.0,
+  "transformers_version": "5.23.0",
+  "type_vocab_size": 16,
+  "use_associative_scan": true,
+  "use_bias": false,
+  "use_cache": true,
+  "use_conv_bias": true,
+  "use_mambapy": false,
+  "vocab_size": 99
+ },
+ "config_class": "FalconMambaConfig",
+ "config_module": "configuration_falcon_mamba",
+ "extra_inputs": {},
+ "float_inputs": {},
+ "model_classes": [
+  [
+   "modeling_falcon_mamba",
+   "FalconMambaModel"
+  ],
+  [
+   "modeling_falcon_mamba",
+   "FalconMambaForCausalLM"
+  ]
+ ]
+}

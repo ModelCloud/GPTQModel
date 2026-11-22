@@ -202,6 +202,26 @@ def _reject_non_text_row(sample: Any, *, label: str) -> None:
         _raise_non_text_columns(columns, label=label)
 
 
+def processor_prepared_rows(calibration_dataset: Any) -> Optional[list[dict]]:
+    """Return ``calibration_dataset`` as rows the model processor already built.
+
+    A processor-prepared row carries ``input_ids`` together with the
+    multimodal tensors (``pixel_values``, ``grid_thws``, ...) the processor
+    produced, so it is one ready model batch. Only a list or tuple whose every
+    row has that shape qualifies; any other input returns ``None`` and takes
+    the regular split, which rejects a lone multimodal row mixed with others.
+    """
+
+    if not isinstance(calibration_dataset, (list, tuple)) or not calibration_dataset:
+        return None
+    if not all(
+        isinstance(row, Mapping) and "input_ids" in row and _non_text_columns(row)
+        for row in calibration_dataset
+    ):
+        return None
+    return [dict(row) for row in calibration_dataset]
+
+
 def split_calibration_dataset(
     calibration_dataset: Iterable[Any],
     *,
@@ -354,6 +374,7 @@ def prepare_vlm_calibration_dataset(
     preprocess_func: Optional[Callable[[Any], Any]] = None,
     processor: Any = None,
     label: Optional[str] = None,
+    accept_processor_rows: bool = False,
 ) -> list[Any]:
     """Prepare VLM calibration data through the shared #4228/#4308 contract.
 
@@ -370,10 +391,23 @@ def prepare_vlm_calibration_dataset(
     ``prepare_inputs_for_conversations``. Definitions whose input rows are not
     chat conversations pass ``prepare_conversations`` instead; it receives the
     raw non-tokenized rows and returns the prepared batches.
+
+    ``accept_processor_rows`` lets a definition take rows its own processor
+    already produced (see ``processor_prepared_rows``) as ready batches. They
+    follow the conversation contract: ``CalibrationConfig.concat_size`` is
+    rejected and ``sort``/``min_length`` are applied.
     """
 
     label = label or type(model).__name__
     options = dict(options or {})
+
+    if accept_processor_rows:
+        prepared = processor_prepared_rows(calibration_dataset)
+        if prepared is not None:
+            sort, min_length = pop_conversation_calibration_options(options, label=label)
+            return finalize_conversation_batches(
+                prepared, sort=sort, min_length=min_length, label=label
+            )
 
     pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
     if pretokenized is not None:

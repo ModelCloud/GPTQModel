@@ -69,6 +69,12 @@ KERNELS = sorted(
     [*importer.iter_quant_linear_kernels(), TorchQuantEmbeddings, TTNNBlockFloat8Linear],
     key=lambda c: c.__name__,
 )
+# MacaqTritonLinear imports without Triton but its device validation requires
+# it, so the ROCm acceptance half of its contract is only observable with Triton.
+requires_triton = pytest.mark.skipif(
+    not macaq_triton.TRITON_AVAILABLE, reason="MacaqTritonLinear device validation requires Triton"
+)
+_TRITON_VALIDATED_KERNELS = {MacaqTritonLinear}
 
 
 def _platform_restricted_kernels() -> set[str]:
@@ -107,6 +113,7 @@ def hip_runtime(monkeypatch):
     macaq_triton._rdna4_macaq_supported.cache_clear()
 
 
+@requires_triton
 def test_macaq_triton_rejects_mixed_rocm_architectures(hip_runtime, monkeypatch):
     def properties(target=None):
         index = target if isinstance(target, int) else (
@@ -128,9 +135,8 @@ def test_audit_covers_every_registered_kernel():
     # The explicitly reviewed entries must really be platform-restricted; a
     # kernel listed here without a non-Linux platform is a stale classification.
     assert PLATFORM_RESTRICTED_KERNELS <= platform_restricted
-    assert {c.__name__ for c in KERNELS} == (
-        ROCM_KERNELS | CUDA_ONLY_KERNELS | OTHER_KERNELS | platform_restricted
-    )
+    classified = ROCM_KERNELS | CUDA_ONLY_KERNELS | OTHER_KERNELS | platform_restricted
+    assert {c.__name__ for c in KERNELS} == classified
 
 
 def test_platform_restricted_kernels_declare_reachable_families():
@@ -167,7 +173,14 @@ def test_explicit_rocm_family_never_probes_nvidia_capability(monkeypatch, is_roc
     assert importer._device_capability(model_const.DEVICE.ROCM) is None
 
 
-@pytest.mark.parametrize("cls", KERNELS, ids=lambda c: c.__name__)
+@pytest.mark.parametrize(
+    "cls",
+    [
+        pytest.param(c, marks=requires_triton) if c in _TRITON_VALIDATED_KERNELS else c
+        for c in KERNELS
+    ],
+    ids=lambda c: c.__name__,
+)
 @pytest.mark.parametrize("device", [model_const.DEVICE.ROCM, model_const.DEVICE.CUDA, "rocm", "cuda", "cuda:1", torch.device("cuda:1")])
 def test_rocm_device_contract(cls, device, hip_runtime):
     expected = cls.__name__ in ROCM_KERNELS

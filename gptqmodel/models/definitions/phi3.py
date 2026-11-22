@@ -2,68 +2,22 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-from torch import nn
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Phi3QModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     shared_input_verified_model_types = frozenset({"phi3"})
 
     pre_lm_head_norm_module = "model.norm"
-
-    @classmethod
-    def after_defuser_conversion(cls, model):
-        """Split a fused `Phi3MLP.gate_up_proj` left by remote-code checkpoints.
-
-        Phi-3 128k longrope checkpoints load through their repository's remote
-        `modeling_phi3.py`, whose `Phi3MLP` class path is not the installed
-        `transformers.models.phi3.modeling_phi3.Phi3MLP` that Defuser registers.
-        Defuser therefore leaves the fused projection in place while the
-        definition declares `gate_proj`/`up_proj`; with the default strict plan
-        quantization raises. Split the fused weight with the same layout Defuser
-        produces for the native class so both loaders resolve the same tree.
-        """
-
-        for module in list(model.modules()):
-            gate_up = getattr(module, "gate_up_proj", None)
-            if not isinstance(gate_up, nn.Linear):
-                continue
-            if module.__class__.__name__ != "Phi3MLP" or not hasattr(module, "down_proj"):
-                continue
-            if gate_up.out_features % 2:
-                continue
-
-            half = gate_up.out_features // 2
-            weight = gate_up.weight
-            bias = gate_up.bias
-            gate_proj = nn.Linear(
-                gate_up.in_features,
-                half,
-                bias=bias is not None,
-                device=weight.device,
-                dtype=weight.dtype,
-            )
-            up_proj = nn.Linear(
-                gate_up.in_features,
-                half,
-                bias=bias is not None,
-                device=weight.device,
-                dtype=weight.dtype,
-            )
-            gate_weight, up_weight = weight.chunk(2, dim=0)
-            gate_proj.weight = nn.Parameter(gate_weight.clone(), requires_grad=False)
-            up_proj.weight = nn.Parameter(up_weight.clone(), requires_grad=False)
-            if bias is not None:
-                gate_bias, up_bias = bias.chunk(2, dim=0)
-                gate_proj.bias = nn.Parameter(gate_bias.clone(), requires_grad=False)
-                up_proj.bias = nn.Parameter(up_bias.clone(), requires_grad=False)
-
-            module.gate_proj = gate_proj
-            module.up_proj = up_proj
-            del module.gate_up_proj
 
     module_tree = [
         "model",
@@ -78,6 +32,11 @@ class Phi3QModel(BaseQModel):
     ]
 
 class PhiMoEGPTQForCausalLM(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("phimoe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     dynamic_expert_index = "num_local_experts"

@@ -6,6 +6,10 @@ import weakref
 import pytest
 import torch
 
+
+# Every case here exercises a Triton kernel module that imports Triton.
+pytest.importorskip("triton")
+
 import gptqmodel.nn_modules.qlinear.paro_triton as paro_module
 from gptqmodel.quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns
 from gptqmodel.quantization.paro.modules.triton.gemm import (

@@ -1,12 +1,15 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForPreTraining
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class VoxtralGPTQ(BaseQModel):
-    loader = AutoModelForPreTraining
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForPreTraining",
+    )
 
     pre_lm_head_norm_module = ["model.language_model.norm", "model.norm"]
 

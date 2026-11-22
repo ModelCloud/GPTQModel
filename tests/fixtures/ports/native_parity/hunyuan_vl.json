@@ -1,0 +1,141 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "im_end_id": 120119,
+  "im_newline_id": 120121,
+  "im_start_id": 120118,
+  "image_token_id": 5,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "model_type": "hunyuan_vl",
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 0,
+  "problem_type": null,
+  "return_dict": true,
+  "text_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_bias": false,
+   "attention_dropout": 0.0,
+   "bos_token_id": 1,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "eod_token_id": 3,
+   "eos_token_id": 2,
+   "head_dim": 16,
+   "hidden_act": "silu",
+   "hidden_size": 64,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "initializer_range": 0.02,
+   "intermediate_size": 128,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "max_position_embeddings": 128,
+   "model_type": "hunyuan_vl_text",
+   "num_attention_heads": 4,
+   "num_hidden_layers": 2,
+   "num_key_value_heads": 4,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "pad_token_id": 0,
+   "pretraining_tp": 1,
+   "problem_type": null,
+   "return_dict": true,
+   "rms_norm_eps": 1e-05,
+   "rope_parameters": {
+    "mrope_section": [
+     2,
+     2,
+     2,
+     2
+    ],
+    "rope_theta": 10000.0,
+    "rope_type": "default"
+   },
+   "sep_token_id": 4,
+   "tie_word_embeddings": false,
+   "use_cache": true,
+   "vocab_size": 256
+  },
+  "tie_word_embeddings": false,
+  "transformers_version": "5.23.0",
+  "vision_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.0,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "hidden_act": "silu",
+   "hidden_size": 64,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "img_max_token_num": 4096,
+   "intermediate_size": 128,
+   "interpolate_mode": "bilinear",
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "max_image_size": 64,
+   "max_vit_seq_len": 16,
+   "min_image_size": 64,
+   "model_type": "hunyuan_vl_vision",
+   "num_attention_heads": 4,
+   "num_channels": 3,
+   "num_hidden_layers": 2,
+   "num_key_value_heads": 4,
+   "out_hidden_size": 64,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "patch_size": 16,
+   "problem_type": null,
+   "return_dict": true,
+   "rms_norm_eps": 1e-05,
+   "spatial_merge_size": 1,
+   "temporal_patch_size": 1,
+   "text_hidden_size": 64
+  }
+ },
+ "config_class": "HunYuanVLConfig",
+ "config_module": "configuration_hunyuan_vl",
+ "extra_inputs": {},
+ "float_inputs": {
+  "pixel_values": {
+   "dtype": "float32",
+   "shape": [
+    32,
+    768
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_hunyuan_vl",
+   "HunYuanVLModel"
+  ],
+  [
+   "modeling_hunyuan_vl",
+   "HunYuanVLForConditionalGeneration"
+  ]
+ ]
+}

@@ -1128,6 +1128,9 @@ def test_marlin_quant_linear_forward_keeps_bias_wide_and_stored(monkeypatch):
         lambda scales, size_k, size_n, group_size: scales,
     )
     monkeypatch.setattr(marlin_qlinear_module, "marlin_permute_bias", lambda bias: bias)
+    # The per-stream lock workspace keys on the active CUDA stream; this
+    # CPU-shaped module has a single canonical workspace and a faked launch.
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_stream_workspace", lambda module: module.workspace)
     monkeypatch.setattr(
         marlin_qlinear_module,
         "apply_gptq_marlin_linear",

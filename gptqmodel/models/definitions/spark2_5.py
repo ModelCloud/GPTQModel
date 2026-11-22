@@ -4,12 +4,18 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class Spark2_5QModel(BaseQModel):
     """GPTQ definition for Spark-X2.5's hybrid-attention decoder."""
 
-    require_trust_remote_code = True
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.spark2_5.configuration_spark.Spark2_5Config",
+        model_class="gptqmodel.models.ports.spark2_5.modeling_spark.Spark2_5ForCausalLM",
+    )
+    require_trust_remote_code = False
+    fusable = None  # The fusion executor has not been qualified for this architecture.
 
     # Verified by the tiny real-forward case for XHToken/Spark-X2.5-4B.
     shared_input_verified_model_types = frozenset({"spark2_5"})
@@ -17,7 +23,7 @@ class Spark2_5QModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
     # Spark has no rotary-embedding module: it computes RoPE tensors directly
-    # in the remote model's forward method.
+    # in the package-owned model's forward method.
     module_tree = [
         "model",
         "layers",
@@ -39,64 +45,30 @@ class Spark2_5QModel(BaseQModel):
         },
     ]
 
-    def before_model_load(self, model_local_path: str, load_quantized_model: bool):
-        """Adapt Spark's legacy mask-helper keyword names to Transformers 5.x."""
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs=None):
+        """Generic AWQ groups without any fold into ``self_attn.out_proj``.
 
-        del load_quantized_model
-        from functools import wraps
-        from importlib import import_module
+        ``out_proj`` reads the (optionally head-gated) attention output, and the
+        packed ``q_k_v_proj`` output is wider than that, so no producer in the
+        layer can absorb its scale. Without the head gate the declared
+        ``g_proj:!`` is absent and the generic planner falls back to the stale
+        ``input_layernorm`` for ``out_proj``, which is not its input.
+        """
 
-        from transformers.dynamic_module_utils import get_class_from_dynamic_module
-
-        remote_model_cls = get_class_from_dynamic_module(
-            "modeling_spark.Spark2_5Model",
-            model_local_path,
-        )
-        remote_module = import_module(remote_model_cls.__module__)
-
-        for mask_name in ("create_causal_mask", "create_sliding_window_causal_mask"):
-            mask_fn = getattr(remote_module, mask_name, None)
-            if not callable(mask_fn) or getattr(
-                mask_fn, "_gptqmodel_spark_mask_compat", False
-            ):
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        out_proj = getattr(getattr(module, "self_attn", None), "out_proj", None)
+        kept = []
+        for node in nodes:
+            layers = [layer for layer in node.get("layers") or [] if layer is not out_proj]
+            if not layers:
                 continue
-
-            @wraps(mask_fn)
-            def mask_compat(*args, _mask_fn=mask_fn, **kwargs):
-                if "input_embeds" in kwargs and "inputs_embeds" not in kwargs:
-                    kwargs["inputs_embeds"] = kwargs.pop("input_embeds")
-                # Transformers 5.x removed cache_position from these helper
-                # signatures, while Spark's remote forward still forwards it.
-                kwargs.pop("cache_position", None)
-                return _mask_fn(*args, **kwargs)
-
-            mask_compat._gptqmodel_spark_mask_compat = True
-            setattr(remote_module, mask_name, mask_compat)
-
-    def after_model_load(self, model, load_quantized_model: bool = False):
-        """Expose the dtype-only weight view expected by Spark's remote forward."""
-
-        if not load_quantized_model:
-            return model
-
-        import torch
-
-        for layer in model.model.layers:
-            gate_proj = layer.mlp.gate_proj
-            if hasattr(gate_proj, "weight"):
-                continue
-
-            # Spark reads only ``gate_proj.weight.dtype`` to cast activations.
-            # Quantized linear kernels intentionally store qweight/scales rather
-            # than a dense weight, so a zero-sized, unregistered tensor supplies
-            # that dtype without restoring or serializing a dense matrix.
-            compute_dtype = getattr(gate_proj, "compute_dtype", None)
-            if compute_dtype is None:
-                compute_dtype = gate_proj.scales.dtype
-            gate_proj.weight = torch.empty(0, dtype=compute_dtype)
-
-        return model
+            if len(layers) != len(node.get("layers") or []):
+                node = dict(node, layers=layers)
+                search = node.get("_awq_search_layers")
+                if search is not None:
+                    node["_awq_search_layers"] = [layer for layer in search if layer is not out_proj]
+            kept.append(node)
+        return kept
 
 
 __all__ = ["Spark2_5QModel"]
-

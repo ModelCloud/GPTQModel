@@ -171,14 +171,12 @@ def test_looped_families_use_the_shared_capture(qmodel_cls, expected_loops):
 
 
 def _real_capture(qmodel_cls, source: Path, tmp_path: Path, overrides, loops):
-    from transformers import AutoModelForCausalLM
-
     from tests.tiny_remote_models import build_tiny_remote_model
 
     path = build_tiny_remote_model(source, tmp_path / "tiny", overrides)
     if qmodel_cls is OuroQModel:
         OuroQModel.before_model_load(OuroQModel, str(path), False)
-    model = AutoModelForCausalLM.from_pretrained(str(path), trust_remote_code=True).eval()
+    model = qmodel_cls.loader.from_pretrained(str(path)).eval()
     instance = _wrapper(model, qmodel_cls)
     example = {
         "input_ids": torch.randint(4, 128, (1, 16)),

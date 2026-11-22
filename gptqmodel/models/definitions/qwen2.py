@@ -6,10 +6,16 @@
 from __future__ import annotations
 
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from .llama import LlamaQModel
 
 
 class Qwen2QModel(LlamaQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     # Qwen2 keeps the Llama decoder layout (an `x * w` RMSNorm and a
     # post-attention norm that feeds the MLP), so model-wide rotation is
     # exact. The declaration is per model type and is never inherited; see

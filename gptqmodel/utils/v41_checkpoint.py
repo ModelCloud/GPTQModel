@@ -12,8 +12,8 @@ from pathlib import Path
 
 import torch
 from safetensors import safe_open
-from safetensors.torch import save_file
 
+from .safe import safetensors_save_file as save_file
 from .v41_replay import V41ReplayBatch
 
 

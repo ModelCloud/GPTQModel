@@ -48,7 +48,7 @@ def _install_loader_stubs(monkeypatch, *, tokenizer_calls, source_dir, base_conf
     monkeypatch.setattr(loader, "auto_select_device", lambda *_a, **_k: "cpu")
     monkeypatch.setattr(loader, "auto_dtype", lambda *_a, **_k: "float16")
     monkeypatch.setattr(loader, "print_module_tree", lambda *_a, **_k: None)
-    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_a, **_k: base_config)
+    monkeypatch.setattr(loader, "load_model_config", lambda *_a, **_k: base_config)
     monkeypatch.setattr(loader, "load_hf_tokenizer", _fake_load_tokenizer)
     monkeypatch.setattr("gptqmodel.utils.hf.build_shell_model", _fake_build_shell_model)
     monkeypatch.setattr(loader.defuser, "convert_model", _fake_convert_model)

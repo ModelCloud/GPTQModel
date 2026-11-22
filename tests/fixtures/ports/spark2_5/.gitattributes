@@ -1,0 +1,2 @@
+# Keep the pinned upstream generation policy byte-identical, including its one trailing space.
+fixtures/generation_config.json whitespace=-blank-at-eol

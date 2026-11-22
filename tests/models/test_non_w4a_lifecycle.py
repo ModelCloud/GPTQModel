@@ -55,6 +55,7 @@ CASES = [
     ("gptq", torch.bfloat16, "cuda"),
     ("gptq_act_order", torch.bfloat16, "cuda"),
     ("gptq_asym", torch.bfloat16, "cuda"),
+    ("gptq_rotation", torch.bfloat16, "cpu"),
     ("gptq_rotation", torch.bfloat16, "cuda"),
     ("awq", torch.float16, "cuda"),
     ("awq", torch.bfloat16, "cuda"),
@@ -147,6 +148,15 @@ def test_quantize_save_reload_without_activation_policy(tmp_path, monkeypatch, l
     assert len(set(seen)) == 14
     assert torch.isfinite(logits).all()
     assert not hasattr(loaded.model, "_w4a_stream_mode")
+    if lane == "gptq_rotation":
+        # Exercise the embedded config fallback used by single-config exports.
+        (saved / "quantize_config.json").unlink()
+        loaded = GPTQModel.load(str(saved), backend=backend, device=device, dtype=dtype)
+        assert loaded.quantize_config.model_rotation == "hadamard"
+        assert loaded.model.model.layers[0].mlp.down_proj.online_full_had
+        with torch.inference_mode():
+            restored_logits = loaded.model(input_ids=ids, use_cache=False).logits
+        torch.testing.assert_close(restored_logits, logits, rtol=0, atol=0)
     loaded.save(str(exported))
     original_state = load_file(str(saved / "model.safetensors"))
     exported_state = load_file(str(exported / "model.safetensors"))

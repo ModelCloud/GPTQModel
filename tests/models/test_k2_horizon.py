@@ -8,7 +8,7 @@ from gptqmodel.quantization.config import ExpertsRoutingBypass, MoEConfig
 
 class TestK2Horizon(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/K2-Horizon-0.9B"
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 32
     EVAL_TASKS_SLOW = {
@@ -26,7 +26,7 @@ class TestK2Horizon(ModelTest):
 
 class TestK2HorizonMoVA(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/K2-Horizon-MoVA-36B-A4B"
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 4
     DATASET_SIZE_FAST = 32

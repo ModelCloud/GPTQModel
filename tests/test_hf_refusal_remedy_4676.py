@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Refusal messages must name a loader that can read the layout (#4676).
+"""Save-time warnings must name a loader that can read the layout (#4676).
 
-Both the transformers refusal and the save-time compatibility warning used to
-say "load them with ``GPTQModel.load`` or vLLM". The vLLM bridge accepts only
+The save-time compatibility warning used to say "load them with ``GPTQModel.load`` or vLLM". The vLLM bridge accepts only
 ``FORMAT.GPTQ``/``FORMAT.GEMM``, and ``docs/support-matrix.md`` marks vLLM x for
 EXL3, MACaQ, Paro, QQQ, NF12 and GGUF, so following that advice hit a second
 failure. The remedy is now per-method and checked against that matrix.
@@ -24,8 +23,6 @@ from gptqmodel._quant_methods import (
 )
 from gptqmodel.models.writer import hf_compat_warnings
 from gptqmodel.quantization import METHOD
-from gptqmodel.utils.hf_gguf_quantizer import GPTQModelGGUFHfQuantizer
-from gptqmodel.utils.hf_refusing_quantizer import GPTQModelRefusingHfQuantizer
 
 
 pytestmark = [pytest.mark.cpu]
@@ -62,36 +59,6 @@ def test_remedy_runtime_is_the_one_the_support_matrix_marks_supported(method):
     # Feature | GPT-QModel | Transformers | vLLM | SGLang | Lora Training
     assert row[1] == SUPPORTED, f"{row[0]} is not marked supported by GPT-QModel"
     assert row[3] == "x", f"{row[0]} is marked loadable by vLLM"
-
-
-@pytest.mark.parametrize("method", sorted(REFUSED_HF_QUANT_METHOD_REMEDIES))
-def test_refusal_names_a_working_loader(method):
-    with pytest.raises(ValueError) as error:
-        GPTQModelRefusingHfQuantizer(SimpleNamespace(quant_method=method))
-
-    message = str(error.value)
-    assert "cannot be loaded by `transformers`" in message
-    assert "vLLM" not in message
-    assert refused_hf_load_remedy(method) in message
-
-
-def test_no_refusal_suggests_vllm():
-    """Behavioral half of the contract, independent of the remedy table."""
-
-    for method in REFUSED_HF_QUANT_METHODS:
-        with pytest.raises(ValueError) as error:
-            GPTQModelRefusingHfQuantizer(SimpleNamespace(quant_method=method))
-
-        assert "vLLM" not in str(error.value), method
-
-
-def test_packed_gguf_refusal_names_a_working_loader():
-    with pytest.raises(ValueError) as error:
-        GPTQModelGGUFHfQuantizer(SimpleNamespace())
-
-    message = str(error.value)
-    assert "GPTQModel.load" in message
-    assert "vLLM" not in message
 
 
 @pytest.mark.parametrize(

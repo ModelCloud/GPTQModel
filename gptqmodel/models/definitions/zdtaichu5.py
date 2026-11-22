@@ -7,17 +7,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from inspect import signature
 from typing import Any, Dict
 
 import torch
-from transformers import AutoModelForCausalLM, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.attn_mask import normalize_seq_mask
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
+from ..local import LocalModelLoader
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .qwen3_5_text import Qwen3_5TextQModel
 
@@ -37,13 +37,18 @@ class ZDTaichu5QModel(Qwen3_5TextQModel):
     fusable = None  # No qualified executor for this definition.
 
 
-    loader = AutoModelForCausalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.zdtaichu5.configuration.ZDTaichu5_0_Config",
+        model_class="gptqmodel.models.ports.zdtaichu5.modeling.ZDTaichu5_0_ForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.zdtaichu5.processing.ZDTaichu5_0_Processor",
+        tokenizer_class="gptqmodel.models.ports.zdtaichu5.tokenization.ZDTaichu5Tokenizer",
+    )
 
     lm_head = "language_model.lm_head"
     pre_lm_head_norm_module = "language_model.model.norm"
     rotary_embedding = "language_model.model.rotary_emb"
 
-    require_trust_remote_code = True
+    require_trust_remote_code = False
     require_load_processor = True
     layer_modules_strict = False
     support_batch_quantize = False
@@ -116,11 +121,42 @@ class ZDTaichu5QModel(Qwen3_5TextQModel):
             setattr(parent, name, move_to(getattr(parent, name), device=CPU))
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(
+        return self.loader.load_processor(
             self.model_local_path,
-            trust_remote_code=self.trust_remote_code,
-            use_fast=False,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
         )
+
+    def awq_module_replay_inputs(self, module, x, module_kwargs):
+        """Give a DeltaNet scale-search replay the planar keep mask it consumes.
+
+        The Qwen3.5 decoder sits under ``llm_config`` rather than
+        ``text_config``, so the generic token-row packer cannot see that a
+        ``linear_attention`` layer is recurrent and hands it the additive
+        ``[1, 1, T, T]`` attention grid. Every packed row is a kept token, which
+        is exactly the all-keep ``[batch, seq]`` mask the packer builds for a
+        recognised recurrent mixer.
+        """
+
+        x, kwargs = super().awq_module_replay_inputs(module, x, module_kwargs)
+        if getattr(module, "layer_type", None) != "linear_attention":
+            return x, kwargs
+        # Calibration is an uncached prefill; a recurrent cache would advance
+        # on the reference and again on every candidate replay.
+        if any(kwargs.get(key) is not None for key in ("cache_params", "past_key_values")):
+            raise NotImplementedError("ZDTaichu5 DeltaNet AWQ replay requires uncached calibration context")
+        if x.ndim != 3:
+            raise NotImplementedError("ZDTaichu5 DeltaNet AWQ replay requires batch/sequence/hidden inputs")
+        mask = kwargs.get("attention_mask")
+        if torch.is_tensor(mask) and mask.ndim == 2 and tuple(mask.shape) == tuple(x.shape[:2]):
+            return x, kwargs
+        if torch.is_tensor(mask) and mask.ndim == 4:
+            kwargs = dict(kwargs)
+            kwargs["attention_mask"] = torch.ones(x.shape[:2], dtype=torch.bool, device=x.device)
+            return x, kwargs
+        if mask is not None:
+            raise NotImplementedError("ZDTaichu5 DeltaNet AWQ replay requires a planar or packed-grid mask")
+        return x, kwargs
 
     def run_input_capture(self, example, use_cache: bool, data_device):
         """Keep the original 2-D padding mask for hybrid-layer replay."""
@@ -167,34 +203,15 @@ class ZDTaichu5QModel(Qwen3_5TextQModel):
 
     @staticmethod
     def _recurrent_attention_mask(mask_kwargs):
-        try:
-            from transformers.masking_utils import create_recurrent_attention_mask
-        except ImportError:
-            # Transformers versions that first exposed Qwen3.5 may not yet
-            # expose the generic builder. Linear attention consumes the raw
-            # [batch, sequence] keep-mask in that compatibility path. An
-            # all-ones mask is equivalent to ``None`` for the decoder.
-            mask = mask_kwargs["attention_mask"]
-            if torch.is_tensor(mask) and torch.all(mask):
-                return None
-            return mask
+        from transformers.masking_utils import create_recurrent_attention_mask
+
         return create_recurrent_attention_mask(**mask_kwargs)
 
     @staticmethod
-    def _causal_attention_mask(mask_kwargs, cache_position=None):
+    def _causal_attention_mask(mask_kwargs):
         from transformers.masking_utils import create_causal_mask
 
-        kwargs = dict(mask_kwargs)
-        parameters = signature(create_causal_mask).parameters
-        if "cache_position" in parameters:
-            if cache_position is None:
-                inputs_embeds = kwargs["inputs_embeds"]
-                cache_position = torch.arange(
-                    inputs_embeds.shape[1],
-                    device=inputs_embeds.device,
-                )
-            kwargs["cache_position"] = cache_position
-        return create_causal_mask(**kwargs)
+        return create_causal_mask(**mask_kwargs)
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         """Rebuild the mask for each Qwen3.5 linear/full attention block."""
@@ -236,25 +253,9 @@ class ZDTaichu5QModel(Qwen3_5TextQModel):
         block_type = getattr(layer, "block_type", None) or getattr(layer, "layer_type", None)
         linear_attn = getattr(layer, "linear_attn", None)
         if block_type == "linear_attention" or linear_attn is not None:
-            update_mask = getattr(language_model, "_update_linear_attn_mask", None)
-            if callable(update_mask):
-                cache_position = additional_inputs.get("cache_position")
-                if cache_position is None:
-                    cache_position = torch.arange(
-                        hidden_states.shape[1],
-                        device=hidden_states.device,
-                    )
-                additional_inputs["attention_mask"] = update_mask(
-                    padding_mask,
-                    cache_position,
-                )
-                return additional_inputs
             additional_inputs["attention_mask"] = self._recurrent_attention_mask(mask_kwargs)
         elif block_type == "full_attention" or getattr(layer, "self_attn", None) is not None:
-            additional_inputs["attention_mask"] = self._causal_attention_mask(
-                mask_kwargs,
-                cache_position=additional_inputs.get("cache_position"),
-            )
+            additional_inputs["attention_mask"] = self._causal_attention_mask(mask_kwargs)
         return additional_inputs
 
     @staticmethod

@@ -6,13 +6,21 @@
 import torch
 from torch import nn
 
-from ...quantization import METHOD
 from ...utils.torch import as_torch_device
+from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .ovis2_5 import Ovis2_5QModel
 
 
 class Ovis2_6_MoeQModel(Ovis2_5QModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.ovis2_6_moe.configuration_ovis2_6.Ovis2_6_Moe_Config",
+        model_class="gptqmodel.models.ports.ovis2_6_moe.modeling_ovis2_6.Ovis2_6_MoeForCausalLM",
+        processor_class="gptqmodel.models.ports.ovis2_6_moe.processing_ovis2_6.Ovis26Processor",
+    )
+    require_trust_remote_code = False
     dynamic_expert_index = "num_experts"
 
     pre_lm_head_norm_module = "llm.model.norm"
@@ -39,7 +47,7 @@ class Ovis2_6_MoeQModel(Ovis2_5QModel):
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
             },
-        }
+        },
     ]
 
     @staticmethod
@@ -76,8 +84,44 @@ class Ovis2_6_MoeQModel(Ovis2_5QModel):
         self._materialize_missing_vision_post_layernorm(as_torch_device(self.quantize_config.device))
         super().pre_quantize_generate_hook_start()
 
+    def _layer_type_replay_config(self):
+        # The decoder config lives under `llm_config`, not `text_config`. Qwen3-Next
+        # declares per-layer `layer_types`; replay needs them to hand its
+        # Gated DeltaNet mixers a recurrent [batch, seq] mask, not the
+        # full-attention grid.
+        model = self._replay_root_model()
+        config = getattr(model, "config", None)
+        return getattr(config, "llm_config", None) or super()._layer_type_replay_config()
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Ovis2_5QModel keeps its dense decoder on plain AWQ. These Qwen3-MoE and
+        # Qwen3-Next decoders are qualified for the generic planner directly.
+        return BaseQModel.awq_get_modules_for_scaling(self, module, input_feat, module_kwargs)
+
+    def prepare_dataset(self, calibration_dataset, batch_size=1, **kwargs):
+        # Rows the Ovis2.6 processor already built (token ids plus
+        # pixel_values/grid_thws) are ready batches; everything else keeps the
+        # shared VLM contract.
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+            accept_processor_rows=True,
+        )
+
+    @staticmethod
+    def _sanitize_input_ids_for_embeddings(input_ids, **kwargs):
+        return input_ids
+
 
 class Ovis2_6_NextQModel(Ovis2_6_MoeQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.ovis2_6_moe.configuration_ovis2_6.Ovis2_6_Next_Config",
+        model_class="gptqmodel.models.ports.ovis2_6_moe.modeling_ovis2_6.Ovis2_6_NextForCausalLM",
+        processor_class="gptqmodel.models.ports.ovis2_6_moe.processing_ovis2_6.Ovis26Processor",
+    )
     layer_modules_strict = False
 
     module_tree = [
@@ -89,7 +133,7 @@ class Ovis2_6_NextQModel(Ovis2_6_MoeQModel):
             "input_layernorm": ("input_layernorm:!",),
             # Token mixers
             "self_attn": ("q_norm:!", "k_norm:!", "q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-            "linear_attn": ("norm:!", "conv1d:!", "in_proj_qkvz:0", "in_proj_ba:!:0", "out_proj:1"),
+            "linear_attn": ("linear_attn:!", "norm:!", "conv1d:!", "in_proj_qkvz:0", "in_proj_ba:!:0", "out_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             # MLP / MoE
             "mlp:moe": {
@@ -98,7 +142,6 @@ class Ovis2_6_NextQModel(Ovis2_6_MoeQModel):
                 "shared_expert_gate": ("shared_expert_gate:!",),
                 # <-- single (1, N) logic projections should not be quantized
                 "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-
                 # Experts list with dynamic index
                 "experts:0": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
@@ -106,13 +149,3 @@ class Ovis2_6_NextQModel(Ovis2_6_MoeQModel):
             },
         },
     ]
-
-    module_tree_overrides = {
-        METHOD.AWQ: [
-            {
-                "mlp:moe": {
-                    "gate": ("gate",),
-                }
-            }
-        ]
-    }

@@ -8,6 +8,7 @@ import os
 import stat
 import struct
 import threading
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1876,6 +1877,7 @@ def test_sync_all_meta_reports_logbar_progress(monkeypatch):
     shell_model = _HybridWrapper(width=8)
     turtle = LazyTurtle.__new__(LazyTurtle)
     turtle._lock = threading.RLock()
+    turtle._native_fp32_names = weakref.WeakKeyDictionary()
 
     fake_logger = _FakeLogger()
     visited_modules = []
@@ -1944,6 +1946,7 @@ def test_sync_all_meta_throttles_progress_for_large_moe_shell(monkeypatch):
     shell_model.experts = nn.ModuleList(nn.Identity() for _ in range(1000))
     turtle = LazyTurtle.__new__(LazyTurtle)
     turtle._lock = threading.RLock()
+    turtle._native_fp32_names = weakref.WeakKeyDictionary()
     visited_modules = []
 
     def _fake_materialize(self, *, module_path, **_kwargs):

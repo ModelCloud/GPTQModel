@@ -132,9 +132,7 @@ def test_qwen3_omni_prepare_dataset_keeps_image_fields(monkeypatch):
 def test_nemotron_prepare_dataset_keeps_image_fields(monkeypatch):
     processor = _FakeVisionProcessor(
         image_fields={
-            "num_patches": lambda n: torch.ones((n,), dtype=torch.long),
-            "num_tokens": lambda n: torch.ones((n,), dtype=torch.long),
-            "imgs_sizes": lambda n: torch.ones((n, 2), dtype=torch.long),
+            "image_grid_hw": lambda n: torch.ones((n, 2), dtype=torch.long),
         },
     )
     monkeypatch.setattr(NemotronOmniQModel, "load_processor", lambda self: processor)
@@ -143,8 +141,7 @@ def test_nemotron_prepare_dataset_keeps_image_fields(monkeypatch):
     prepared = model.prepare_dataset([_conversation()], batch_size=1)
 
     assert prepared[0]["pixel_values"].shape == (1, 3, 4, 4)
-    for name in ("num_patches", "num_tokens", "imgs_sizes"):
-        assert name in prepared[0]
+    assert prepared[0]["image_grid_hw"].shape == (1, 2)
 
 
 def test_nemotron_batch_quantize_disabled_for_variable_image_sizes():
@@ -190,7 +187,7 @@ class _FakeNemotronModel:
         return None
 
 
-def test_nemotron_multimodal_capture_uses_generate_without_extra_fields():
+def test_nemotron_multimodal_capture_preserves_native_forward_fields():
     wrapper = _make_qmodel(NemotronOmniQModel)
     fake_model = _FakeNemotronModel()
     wrapper.model = fake_model
@@ -200,22 +197,20 @@ def test_nemotron_multimodal_capture_uses_generate_without_extra_fields():
             "input_ids": torch.ones((1, 4), dtype=torch.long, device="cpu"),
             "attention_mask": torch.ones((1, 4), dtype=torch.long, device="cpu"),
             "pixel_values": torch.zeros((1, 3, 4, 4), device="cpu"),
-            "imgs_sizes": torch.ones((1, 2), dtype=torch.long, device="cpu"),
-            "num_patches": torch.ones((1,), dtype=torch.long, device="cpu"),
-            "num_tokens": torch.ones((1,), dtype=torch.long, device="cpu"),
+            "image_grid_hw": torch.ones((1, 2), dtype=torch.long, device="cpu"),
         },
         use_cache=False,
         data_device=torch.device("cpu"),
     )
 
-    assert len(fake_model.generate_calls) == 1
-    call = fake_model.generate_calls[0]
-    assert set(call) == {"input_ids", "attention_mask", "pixel_values", "max_new_tokens"}
-    assert call["max_new_tokens"] == 1
-    assert not fake_model.language_calls
+    assert len(fake_model.language_calls) == 1
+    call = fake_model.language_calls[0]
+    assert set(call) == {"input_ids", "attention_mask", "pixel_values", "image_grid_hw", "use_cache"}
+    assert call["use_cache"] is False
+    assert not fake_model.generate_calls
 
 
-def test_nemotron_text_capture_stays_on_language_model():
+def test_nemotron_text_capture_uses_native_forward():
     wrapper = _make_qmodel(NemotronOmniQModel)
     fake_model = _FakeNemotronModel()
     wrapper.model = fake_model

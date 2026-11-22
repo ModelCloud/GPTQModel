@@ -1,0 +1,6 @@
+{
+  "auto_map": {
+    "AutoProcessor": "processing_phi4mm.Phi4MMProcessor"
+  },
+  "processor_class": "Phi4MMProcessor"
+}

@@ -8,7 +8,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer, models
-from transformers import AutoModelForCausalLM, LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
 from gptqmodel import CalibrationConfig, CPTCConfig, GPTQModel
 from gptqmodel.models._const import DEVICE
@@ -337,7 +337,7 @@ def test_config_format_resolution_and_architecture(monkeypatch):
 
 @pytest.mark.parametrize("pack_on_gpu", (False, True), ids=("cpu-encode", "native-encode"))
 @pytest.mark.parametrize("yaqa", (False, True), ids=("direct", "yaqa"))
-def test_gptqmodel_cptc_save_and_transformers_load(tmp_path, pack_on_gpu, yaqa, request, monkeypatch):
+def test_gptqmodel_cptc_save_reload_and_resave(tmp_path, pack_on_gpu, yaqa, request, monkeypatch):
     dense, quantized = tmp_path / "dense", tmp_path / "quantized"
     config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=128, num_hidden_layers=1,
                          num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=32,
@@ -370,22 +370,25 @@ def test_gptqmodel_cptc_save_and_transformers_load(tmp_path, pack_on_gpu, yaqa, 
     model.save(str(quantized))
 
     load_options = {"device_map": "cpu", "dtype": torch.bfloat16, "local_files_only": True}
-    reloaded = GPTQModel.load(str(quantized), **load_options).model
-    transformers_model = AutoModelForCausalLM.from_pretrained(quantized, **load_options)
-    for loaded in (reloaded, transformers_model):
-        projection = loaded.get_submodule(name)
+    reloaded = GPTQModel.load(str(quantized), **load_options)
+    resaved = tmp_path / "resaved"
+    reloaded.save(str(resaved))
+    restored = GPTQModel.load(str(resaved), **load_options)
+    for loaded in (reloaded, restored):
+        projection = loaded.model.get_submodule(name)
         assert type(projection) is CPTCLinear and projection.bits == 3
         assert projection.yaqa == yaqa
         source = model.model.get_submodule(name)
         for key, tensor in source.state_dict().items():
-            restored = projection.state_dict()[key]
-            assert tensor.dtype == restored.dtype
-            assert torch.equal(tensor, restored)
+            restored_tensor = projection.state_dict()[key]
+            assert tensor.dtype == restored_tensor.dtype
+            assert torch.equal(tensor, restored_tensor)
 
     ids = torch.tensor([[1, 3, 5, 7]])
     with torch.inference_mode():
-        expected = reloaded(input_ids=ids, use_cache=False).logits
-        actual = transformers_model(input_ids=ids, use_cache=False).logits
+        expected = reloaded.model(input_ids=ids, use_cache=False).logits
+        actual = restored.model(input_ids=ids, use_cache=False).logits
+    assert torch.isfinite(expected).all()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     checkpoint = quantized / "model.safetensors"
@@ -399,7 +402,7 @@ def test_gptqmodel_cptc_save_and_transformers_load(tmp_path, pack_on_gpu, yaqa, 
     payload.pop(f"{name}.{deleted}")
     save_file(payload, checkpoint, metadata={"format": "pt"})
     with pytest.raises(ValueError, match=f"Missing required.*{deleted}"):
-        AutoModelForCausalLM.from_pretrained(quantized, **load_options)
+        GPTQModel.load(str(quantized), **load_options)
 
 
 def test_yaqa_partial_trace_and_tile_feedback():

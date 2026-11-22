@@ -48,9 +48,8 @@ from os.path import isdir, join  # noqa: E402
 from typing import Any, Dict, List, Optional, Union  # noqa: E402
 
 import torch  # noqa: E402
-from packaging.version import Version  # noqa: E402
-from transformers import AutoConfig, PreTrainedTokenizerBase  # noqa: E402
-from transformers import __version__ as TRANSFORMERS_VERSION
+from transformers import PreTrainedConfig, PreTrainedTokenizerBase  # noqa: E402
+from transformers import __version__ as TRANSFORMERS_VERSION  # noqa: F401 - banner
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchLinear  # noqa: E402
@@ -67,9 +66,9 @@ from ..utils.env import env_flag  # noqa: E402
 from ..utils.hf import (  # noqa: E402
     get_config_selection_kwargs,
     get_hf_gguf_load_kwargs,
+    load_model_config,
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
-    patch_remote_code_before_config_load,
     resolve_trust_remote_code,
 )
 from ..utils.hub import list_repo_files  # noqa: E402
@@ -255,19 +254,11 @@ from .definitions.zamba import ZambaQModel  # noqa: E402
 from .definitions.zamba2 import Zamba2QModel  # noqa: E402
 
 
-TRANSFORMERS_SUPPORTS_QWEN3_5 = Version(TRANSFORMERS_VERSION) >= Version("5.2.0")
-if TRANSFORMERS_SUPPORTS_QWEN3_5:
-    from .definitions.qwen3_5 import Qwen3_5QModel  # noqa: E402
-    from .definitions.qwen3_5_moe import Qwen3_5_MoeQModel  # noqa: E402
-    from .definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel  # noqa: E402
-    from .definitions.qwen3_5_text import Qwen3_5TextQModel  # noqa: E402
-    from .definitions.zdtaichu5 import ZDTaichu5QModel  # noqa: E402
-else:
-    Qwen3_5QModel = None
-    Qwen3_5_MoeQModel = None
-    Qwen3_5_MoeTextQModel = None
-    Qwen3_5TextQModel = None
-    ZDTaichu5QModel = None
+from .definitions.qwen3_5 import Qwen3_5QModel  # noqa: E402
+from .definitions.qwen3_5_moe import Qwen3_5_MoeQModel  # noqa: E402
+from .definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel  # noqa: E402
+from .definitions.qwen3_5_text import Qwen3_5TextQModel  # noqa: E402
+from .definitions.zdtaichu5 import ZDTaichu5QModel  # noqa: E402
 
 
 MODEL_MAP = {
@@ -482,16 +473,11 @@ MODEL_MAP = {
     "voxtral": VoxtralGPTQ,
 }
 
-if Qwen3_5QModel is not None:
-    MODEL_MAP["qwen3_5"] = Qwen3_5QModel
-    MODEL_MAP["qwen3_5_text"] = Qwen3_5TextQModel
-
-if Qwen3_5_MoeQModel is not None:
-    MODEL_MAP["qwen3_5_moe"] = Qwen3_5_MoeQModel
-    MODEL_MAP["qwen3_5_moe_text"] = Qwen3_5_MoeTextQModel
-
-if ZDTaichu5QModel is not None:
-    MODEL_MAP["zdtaichu5_0"] = ZDTaichu5QModel
+MODEL_MAP["qwen3_5"] = Qwen3_5QModel
+MODEL_MAP["qwen3_5_text"] = Qwen3_5TextQModel
+MODEL_MAP["qwen3_5_moe"] = Qwen3_5_MoeQModel
+MODEL_MAP["qwen3_5_moe_text"] = Qwen3_5_MoeTextQModel
+MODEL_MAP["zdtaichu5_0"] = ZDTaichu5QModel
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
@@ -510,7 +496,7 @@ def _unsupported_quantization_metadata(quantization_config: dict):
     return find_unsupported_metadata(quantization_config)
 
 
-def _is_supported_quantization_config(config: AutoConfig) -> bool:
+def _is_supported_quantization_config(config: PreTrainedConfig) -> bool:
     quantization_config = getattr(config, "quantization_config", None)
     if not isinstance(quantization_config, dict):
         return False
@@ -749,9 +735,8 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
             config_load_kwargs,
             api_name="check_and_get_model_definition",
         )
-    trust_remote_code = resolve_trust_remote_code(model_dir, trust_remote_code=trust_remote_code)
-    patch_remote_code_before_config_load(model_dir)
-    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
+    trust_remote_code = resolve_trust_remote_code(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
+    config = load_model_config(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
     model_type = config.model_type.lower()
 
     definition = select_model_definition(model_type, config)
@@ -1015,7 +1000,7 @@ class GPTQModel:
         if isinstance(model_id_or_path, str):
             model_id_or_path = model_id_or_path.strip()
         requested_trust_remote_code = trust_remote_code
-        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
+        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code, **_get_config_load_kwargs(kwargs))
 
         # normalize config to cfg instance
         if isinstance(quantize_config, Dict):
@@ -1038,8 +1023,7 @@ class GPTQModel:
 
         model_cfg = None
         if not (treat_as_local_path and not isdir(model_id_or_path)):
-            patch_remote_code_before_config_load(model_id_or_path)
-            model_cfg = AutoConfig.from_pretrained(
+            model_cfg = load_model_config(
                 model_id_or_path,
                 trust_remote_code=trust_remote_code,
                 **_get_config_load_kwargs(kwargs),
@@ -1195,8 +1179,8 @@ class GPTQModel:
             "tokenizer_trust_remote_code",
             requested_trust_remote_code,
         )
-        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
-        config = AutoConfig.from_pretrained(
+        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code, **_get_config_load_kwargs(model_init_kwargs))
+        config = load_model_config(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
             **_get_config_load_kwargs(model_init_kwargs),
@@ -1314,7 +1298,7 @@ class GPTQModel:
         )
         requested_trust_remote_code = trust_remote_code
         tokenizer_trust_remote_code = kwargs.pop("tokenizer_trust_remote_code", requested_trust_remote_code)
-        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
+        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code, **_get_config_load_kwargs(kwargs))
         # normalize adapter to instance
         adapter = normalize_adapter(adapter)
 

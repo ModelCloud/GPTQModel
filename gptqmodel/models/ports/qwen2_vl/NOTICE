@@ -1,0 +1,16 @@
+GPT-QModel native Qwen2-VL task adapters
+Copyright 2026 ModelCloud.ai
+SPDX-License-Identifier: Apache-2.0
+
+No Transformers modeling implementation is copied into this package. Runtime
+modeling, configuration, tokenizer, image processor and video processor classes
+are imported directly from the installed Apache-2.0 Transformers distribution.
+The Qwen2-VL implementation credits the Qwen team and Hugging Face Inc.
+
+Pinned Qwen/Qwen2-VL-2B-Instruct (revision 895c3a49bc3fa70a340399125c650a463535e71c)
+configuration, tokenizer and processor metadata are retained as offline test
+fixtures under tests/fixtures/ports/qwen2_vl. Copyright the Qwen team, Alibaba
+Cloud, Apache-2.0. The hf-tiny-v2/tiny-random-Qwen2VLTextModel (revision
+8e524159e711c11ee700c298ed55d773bc95328e) text config and safetensors shape
+metadata describe a public randomly initialized Transformers test artifact, not
+trained model weights. No trained tensor payload is included.

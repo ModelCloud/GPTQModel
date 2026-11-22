@@ -172,8 +172,7 @@ flowchart TD
 ```
 
 The scope wraps every Defuser entry point: the native load and quantize load at
-`gptqmodel/models/loader.py:1101`, the Transformers bridge at
-`gptqmodel/utils/hf_load.py:340`, and the DeepSeek V4 MTP conversion at
+`gptqmodel/models/loader.py:1282` and the DeepSeek V4 MTP conversion at
 `gptqmodel/models/definitions/deepseek_v4.py:353`.
 
 Failure contract:

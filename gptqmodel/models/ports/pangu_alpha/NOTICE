@@ -1,0 +1,15 @@
+PanGu-α architecture: Huawei Noah's Ark Lab, MindSpore Team, and Peng Cheng Laboratory.
+
+Official reference: huawei-noah/Pretrained-Language-Model, PanGu-α directory,
+revision 0598f02d7fc4eaa7b4cbc1e9d7ab18bc875c24f9. The directory carries
+Apache License 2.0 (identical to the repository root LICENSE). The Python tokenizer adapter
+uses the segmentation and whitespace mapping from tokenization_jieba.py.
+That file credits Copyright 2018 The Open AI Team Authors and The HuggingFace Inc. team.
+The pinned test vocabulary asset matches the official tokenizer/vocab.model byte for byte.
+
+The PyTorch decoder implements the official architecture with the published
+2.6B conversion's state-dict and inference interface. The separate
+imoneoi/transformers-pangu and ModelCloud conversion Python was checked for
+compatibility, not vendored. No explicit license was found for that custom
+conversion Python; this notice does not grant or assume a license for it.
+No trained model weights are included or relicensed.

@@ -44,7 +44,7 @@ def test_mimo_v2_model_type_selects_definition(monkeypatch):
     fake_config = SimpleNamespace(model_type="mimo_v2")
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: fake_config)
 
     assert auto.check_and_get_model_definition("/monster/data/model/MiMo-V2.5-Base") is MimoV2QModel
 
@@ -72,7 +72,7 @@ def test_mimo_v2_module_tree_expands_fused_attention_dense_mlp_and_moe_paths():
     )
     flat_modules = {name for block in layer_modules for name in block}
 
-    assert MimoV2QModel.require_trust_remote_code is True
+    assert MimoV2QModel.require_trust_remote_code is False
     assert MimoV2QModel.layer_modules_strict is False
     assert MimoV2QModel.pre_lm_head_norm_module == "model.norm"
     assert MimoV2QModel.rotary_embedding == "model.rotary_emb"

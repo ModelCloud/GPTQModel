@@ -1,0 +1,16 @@
+GPT-QModel package-owned Klear implementation
+
+Adapted from Kwai-Klear/Klear-46B-A2.5B-Base and
+Kwai-Klear/Klear-46B-A2.5B-Instruct, published by the Kwai-Klear team,
+Kuaishou, with Hugging Face model-card metadata declaring Apache-2.0.
+Pinned revisions: Base@ffbbb37654c817052a9c0903747b6fdba1678dc9,
+Instruct@ebb784451bc3981a46ea3c6a865c4eb2a6cf63d6.
+
+Attention, normalization, rotary-position and generation integration follow
+the upstream Klear implementation and Hugging Face Transformers/Qwen patterns.
+Attribution: Kwai-Klear Team; The Qwen team, Alibaba Group;
+the HuggingFace Inc. team. Transformers is licensed under Apache-2.0.
+
+Transformers 5 integration and GPT-QModel tests: Copyright 2026 ModelCloud.ai.
+This is a maintained adaptation, not an unchanged/generated upstream file.
+No checkpoint Python is downloaded or imported by this package at runtime.

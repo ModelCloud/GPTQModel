@@ -1,0 +1,153 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "image_token_id": 57,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "model_type": "idefics2",
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "perceiver_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.0,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "hidden_act": "silu",
+   "hidden_size": 64,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "initializer_range": 0.02,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "model_type": "idefics2_perceiver",
+   "num_key_value_heads": 1,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "problem_type": null,
+   "resampler_depth": 2,
+   "resampler_head_dim": 16,
+   "resampler_n_heads": 2,
+   "resampler_n_latents": 2,
+   "return_dict": true,
+   "rms_norm_eps": 1e-06
+  },
+  "problem_type": null,
+  "return_dict": true,
+  "text_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.0,
+   "bos_token_id": 1,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "eos_token_id": 2,
+   "head_dim": 32,
+   "hidden_act": "silu",
+   "hidden_size": 64,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "image_token_id": 57,
+   "initializer_range": 0.02,
+   "intermediate_size": 56,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "max_position_embeddings": 256,
+   "model_type": "mistral",
+   "num_attention_heads": 2,
+   "num_hidden_layers": 2,
+   "num_key_value_heads": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "pad_token_id": 0,
+   "problem_type": null,
+   "return_dict": true,
+   "rms_norm_eps": 1e-06,
+   "rope_parameters": {
+    "rope_theta": 10000.0,
+    "rope_type": "default"
+   },
+   "sliding_window": 32,
+   "tie_word_embeddings": false,
+   "use_cache": true,
+   "vocab_size": 100
+  },
+  "tie_word_embeddings": false,
+  "transformers_version": "5.23.0",
+  "use_cache": false,
+  "vision_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.1,
+   "chunk_size_feed_forward": 0,
+   "dropout": 0.1,
+   "dtype": null,
+   "hidden_act": "gelu_pytorch_tanh",
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "image_size": 12,
+   "initializer_range": 0.02,
+   "intermediate_size": 32,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_norm_eps": 1e-06,
+   "model_type": "idefics2_vision",
+   "num_attention_heads": 4,
+   "num_channels": 3,
+   "num_hidden_layers": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "patch_size": 12,
+   "problem_type": null,
+   "return_dict": true
+  },
+  "vocab_size": 100
+ },
+ "config_class": "Idefics2Config",
+ "config_module": "configuration_idefics2",
+ "extra_inputs": {},
+ "float_inputs": {
+  "pixel_values": {
+   "dtype": "float32",
+   "shape": [
+    2,
+    2,
+    3,
+    12,
+    12
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_idefics2",
+   "Idefics2ForConditionalGeneration"
+  ]
+ ]
+}

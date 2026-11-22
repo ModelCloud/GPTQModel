@@ -8,6 +8,10 @@ import os
 import pytest
 
 
+# Skip before the env flag is set: gptqmodel refuses to import with
+# GPTQMODEL_USE_MODELSCOPE on and no modelscope package installed.
+pytest.importorskip("modelscope")
+
 os.environ["GPTQMODEL_USE_MODELSCOPE"] = "True"
 from models.model_test import ModelTest  # noqa: E402
 

@@ -17,7 +17,7 @@ class TestMimo(ModelTest):
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 6
     MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride(num_experts_per_tok="all"))

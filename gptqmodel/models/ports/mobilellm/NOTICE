@@ -1,0 +1,20 @@
+GPT-QModel MobileLLM port
+
+This directory is an independent Apache-2.0 implementation of the MobileLLM
+architecture (Meta's "MobileLLM: Optimizing Sub-billion Parameter Language
+Models for On-Device Use Cases", Liu et al., ICML 2024). It was written in a
+clean room from a behavioral specification, without access to the original
+MobileLLM source code, and contains no code from that release.
+
+It is compatible with the configuration and state_dict format of the
+published MobileLLM checkpoints (module and tensor names are interface facts
+kept for checkpoint compatibility). Standard Llama-family building blocks are
+reused from GPT-QModel's vendored Apache-2.0 Transformers v5.23.0 Llama port
+(gptqmodel/models/ports/native/llama).
+
+Copyright 2026 ModelCloud.ai. Licensed under the Apache License, Version 2.0;
+see the repository root LICENSE.
+
+This distribution contains no trained model weights. Published MobileLLM
+weights are distributed by their authors under their own terms, which this
+notice does not change.

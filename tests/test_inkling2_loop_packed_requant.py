@@ -16,8 +16,8 @@ import pytest
 import torch
 from torch import nn
 
-from gptqmodel.models.inkling2_loop import experts as E
-from gptqmodel.models.inkling2_loop.configuration import Inkling2LoopTextConfig
+from gptqmodel.models.ports.inkling2_loop import experts as E
+from gptqmodel.models.ports.inkling2_loop.configuration import Inkling2LoopTextConfig
 from gptqmodel.utils.model import find_modules
 
 
@@ -199,7 +199,7 @@ def test_packed_expert_linear_falls_back_to_dense_bf16_without_kernel(monkeypatc
 
 def test_defused_packed_layers_resolve_quantizable_specs():
     from gptqmodel.models.auto import MODEL_MAP
-    from gptqmodel.models.inkling2_loop import modeling
+    from gptqmodel.models.ports.inkling2_loop import modeling
 
     definition = MODEL_MAP["inkling2_loop"]
     config = _text_config(num_hidden_layers=2, experts_formats=["nvfp4", "mxfp8"])
@@ -262,7 +262,7 @@ def test_after_quantize_declares_the_storage_a_reload_will_build():
         _layer_index_from_name,
         declare_expert_storage,
     )
-    from gptqmodel.models.inkling2_loop import modeling
+    from gptqmodel.models.ports.inkling2_loop import modeling
 
     config = _text_config(num_hidden_layers=2, experts_formats=["nvfp4", "mxfp8"])
     with torch.device("meta"):
@@ -295,7 +295,7 @@ def test_after_quantize_declares_the_storage_a_reload_will_build():
 
 def test_partially_quantized_expert_layer_is_reported_not_saved_mixed():
     from gptqmodel.models.definitions.inkling2_loop import declare_expert_storage
-    from gptqmodel.models.inkling2_loop import modeling
+    from gptqmodel.models.ports.inkling2_loop import modeling
 
     config = _text_config(num_hidden_layers=1, experts_formats=["nvfp4"])
     with torch.device("meta"):
@@ -436,8 +436,9 @@ def test_refusion_rejects_a_quantized_leaf():
 def test_checkpoint_conversion_reverses_into_clean_save_keys():
     """`save_pretrained` reverts the mapping; the reverse must yield checkpoint keys."""
 
-    from gptqmodel.models.inkling2_loop.conversion import MAPPING
+    from gptqmodel.models.ports.inkling2_loop.conversion import build_checkpoint_mapping
 
+    mapping = build_checkpoint_mapping()
     cases = {
         "model.llm.embed.weight": "model.language_model.embed_tokens.weight",
         "model.llm.unembed.weight": "lm_head.weight",
@@ -454,12 +455,12 @@ def test_checkpoint_conversion_reverses_into_clean_save_keys():
     }
     for checkpoint_key, runtime_key in cases.items():
         forward = checkpoint_key
-        for rule in MAPPING:
+        for rule in mapping:
             forward, _ = rule.rename_source_key(forward)
         assert forward == runtime_key, checkpoint_key
 
         back = forward
-        for rule in MAPPING:
+        for rule in mapping:
             back, _ = rule.reverse_transform().rename_source_key(back)
         assert back == checkpoint_key, runtime_key
 
@@ -493,7 +494,7 @@ def test_defuser_leaves_a_packed_checkpoint_payload_untouched():
 
     import defuser
 
-    from gptqmodel.models.inkling2_loop.configuration import Inkling2LoopConfig
+    from gptqmodel.models.ports.inkling2_loop.configuration import Inkling2LoopConfig
 
     config = Inkling2LoopConfig(
         text_config={

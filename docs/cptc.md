@@ -31,9 +31,7 @@ can change the bit rate or exclude layers. For the installed PyTorch runtime,
 `cuda:0` is the execution device on both NVIDIA and AMD. Use `device="cpu"`
 for CPU quantization. A shallower trellis reduces the encoder's state count.
 
-Importing `gptqmodel` also registers the CPTC checkpoint loader for
-`transformers.AutoModelForCausalLM.from_pretrained`. Both entry points load
-the same safetensors checkpoint.
+Load CPTC safetensors checkpoints with `GPTQModel.load`.
 
 ## YAQA calibration
 
@@ -87,7 +85,7 @@ flowchart TD
     C --> D["quantize_weight normalizes blocks and calls viterbi_encode"]
     D -->|Finite weights| P["pack_states and save_quantized write the CPTC payload"]
     D -->|Nonfinite weights| E
-    P --> L["GPTQModel.load or HFCPTCQuantizer creates CPTCLinear"]
+    P --> L["GPTQModel.load creates CPTCLinear"]
     L -->|Complete payload| F["CPTCLinear.post_init checks layout"]
     L -->|Missing packed fields| E
     F -->|Malformed layout| E
@@ -100,7 +98,7 @@ flowchart TD
 | --- | --- | --- |
 | Format resolution | `gptqmodel/quantization/config.py:10013` resolves supported checkpoint methods. | `METHOD.CPTC` resolves to `CPTCConfig` and `FORMAT.CPTC`. |
 | Weight-only packing | `gptqmodel/looper/weight_only_processor.py:110` selects direct pack for GGUF, BitsAndBytes, and NF12. | CPTC joins direct pack and encodes on the selected worker device. |
-| Transformers load | `gptqmodel/utils/hf_load.py:554` finds packed modules from `.qweight` or `.nf12_packed`. | The registered CPTC quantizer uses `.cptc_packed` and verifies the CPTC payload keys. |
+| Checkpoint load | The native loader verifies the buffers declared by each quantized kernel. | CPTC declares `.cptc_packed`, `.cptc_table`, `.cptc_coeffs`, and `.cptc_scale_bits` as required. |
 
 For each output row, the input axis is divided into contiguous blocks and
 the last block is padded with zeros. Each block stores `block_size * bits / 8`

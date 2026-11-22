@@ -1,0 +1,22 @@
+Mage-VL package-owned Transformers 5 port
+
+Adapted from Microsoft, microsoft/Mage-VL, revision
+d88b153285f1633a61b2f693c59c8576693af185:
+https://huggingface.co/microsoft/Mage-VL/tree/d88b153285f1633a61b2f693c59c8576693af185
+
+Copyright (c) 2026 Microsoft.
+The pinned checkpoint model card declares Apache-2.0. The Apache-2.0
+license text is preserved in LICENSE. Microsoft's linked source repository,
+https://github.com/microsoft/Mage, contains an MIT license, preserved
+verbatim in LICENSE.MIT from revision ebe8581c2b28581ee204e94685b23dc5f65b3437.
+
+GPT-QModel adaptations copyright (c) 2026 ModelCloud.ai.
+Adaptations select package-owned model/config/processor classes, adapt
+current Transformers generation and image-processor interfaces, retain
+lazy tensor materialization, and enforce explicit optional-codec boundaries.
+
+The implementation uses installed Transformers Qwen3 decoder and SigLIP
+MLP components, installed native Qwen tokenizer/image processing, PyTorch,
+NumPy and Pillow. Their licenses remain with their respective packages.
+No trained model weights, neural codec scripts/checkpoints, or StreamMind
+safetensors are distributed in this package.

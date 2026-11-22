@@ -7,9 +7,15 @@ from ..base import BaseQModel
 
 # GLM is HF-ied ChatGLM and marked by -HF suffix in THUDM hf repos
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class GlmQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig(("glm", "glm4")).merge(LlamaFusableConfig(), profiles=("qkv",))
 
     # q/k/v receive the same post-norm hidden state and gate/up the same MLP input,

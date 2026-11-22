@@ -20,6 +20,8 @@ from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.ports.native.auto import AutoConfig as NativeAutoConfig
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
 
 
@@ -54,6 +56,8 @@ def _config(model_type: str, shared_intermediate_size: int | None = None):
             num_experts_per_tok=2,
             shared_intermediate_size=shared_intermediate_size,
         )
+    if isinstance(MODEL_MAP[model_type].loader, LocalModelLoader):
+        return NativeAutoConfig.for_model(model_type, **kwargs)
     return transformers.AutoConfig.for_model(model_type, **kwargs)
 
 

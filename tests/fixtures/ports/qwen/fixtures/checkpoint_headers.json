@@ -1,0 +1,77 @@
+{
+  "Qwen-14B": {
+    "tensor_key_ranges": [
+      ["lm_head.weight", [], {"dtype": "BF16", "shape": [152064, 5120]}],
+      ["transformer.h.{}.attn.c_attn.bias", ["0-39"], {"dtype": "BF16", "shape": [15360]}],
+      ["transformer.h.{}.attn.c_attn.weight", ["0-39"], {"dtype": "BF16", "shape": [15360, 5120]}],
+      ["transformer.h.{}.attn.c_proj.weight", ["0-39"], {"dtype": "BF16", "shape": [5120, 5120]}],
+      ["transformer.h.{}.ln_1.weight", ["0-39"], {"dtype": "BF16", "shape": [5120]}],
+      ["transformer.h.{}.ln_2.weight", ["0-39"], {"dtype": "BF16", "shape": [5120]}],
+      ["transformer.h.{}.mlp.c_proj.weight", ["0-39"], {"dtype": "BF16", "shape": [5120, 13696]}],
+      ["transformer.h.{}.mlp.w1.weight", ["0-39"], {"dtype": "BF16", "shape": [13696, 5120]}],
+      ["transformer.h.{}.mlp.w2.weight", ["0-39"], {"dtype": "BF16", "shape": [13696, 5120]}],
+      ["transformer.ln_f.weight", [], {"dtype": "BF16", "shape": [5120]}],
+      ["transformer.wte.weight", [], {"dtype": "BF16", "shape": [152064, 5120]}]
+    ]
+  },
+  "Qwen-1_8B": {
+    "tensor_key_ranges": [
+      ["lm_head.weight", [], {"dtype": "BF16", "shape": [151936, 2048]}],
+      ["transformer.h.{}.attn.c_attn.bias", ["0-23"], {"dtype": "BF16", "shape": [6144]}],
+      ["transformer.h.{}.attn.c_attn.weight", ["0-23"], {"dtype": "BF16", "shape": [6144, 2048]}],
+      ["transformer.h.{}.attn.c_proj.weight", ["0-23"], {"dtype": "BF16", "shape": [2048, 2048]}],
+      ["transformer.h.{}.ln_1.weight", ["0-23"], {"dtype": "BF16", "shape": [2048]}],
+      ["transformer.h.{}.ln_2.weight", ["0-23"], {"dtype": "BF16", "shape": [2048]}],
+      ["transformer.h.{}.mlp.c_proj.weight", ["0-23"], {"dtype": "BF16", "shape": [2048, 5504]}],
+      ["transformer.h.{}.mlp.w1.weight", ["0-23"], {"dtype": "BF16", "shape": [5504, 2048]}],
+      ["transformer.h.{}.mlp.w2.weight", ["0-23"], {"dtype": "BF16", "shape": [5504, 2048]}],
+      ["transformer.ln_f.weight", [], {"dtype": "BF16", "shape": [2048]}],
+      ["transformer.wte.weight", [], {"dtype": "BF16", "shape": [151936, 2048]}]
+    ]
+  },
+  "Qwen-72B": {
+    "tensor_key_ranges": [
+      ["lm_head.weight", [], {"dtype": "BF16", "shape": [152064, 8192]}],
+      ["transformer.h.{}.attn.c_attn.bias", ["0-79"], {"dtype": "BF16", "shape": [24576]}],
+      ["transformer.h.{}.attn.c_attn.weight", ["0-79"], {"dtype": "BF16", "shape": [24576, 8192]}],
+      ["transformer.h.{}.attn.c_proj.weight", ["0-79"], {"dtype": "BF16", "shape": [8192, 8192]}],
+      ["transformer.h.{}.ln_1.weight", ["0-79"], {"dtype": "BF16", "shape": [8192]}],
+      ["transformer.h.{}.ln_2.weight", ["0-79"], {"dtype": "BF16", "shape": [8192]}],
+      ["transformer.h.{}.mlp.c_proj.weight", ["0-79"], {"dtype": "BF16", "shape": [8192, 24576]}],
+      ["transformer.h.{}.mlp.w1.weight", ["0-79"], {"dtype": "BF16", "shape": [24576, 8192]}],
+      ["transformer.h.{}.mlp.w2.weight", ["0-79"], {"dtype": "BF16", "shape": [24576, 8192]}],
+      ["transformer.ln_f.weight", [], {"dtype": "BF16", "shape": [8192]}],
+      ["transformer.wte.weight", [], {"dtype": "BF16", "shape": [152064, 8192]}]
+    ]
+  },
+  "Qwen-7B": {
+    "tensor_key_ranges": [
+      ["lm_head.weight", [], {"dtype": "BF16", "shape": [151936, 4096]}],
+      ["transformer.h.{}.attn.c_attn.bias", ["0-31"], {"dtype": "BF16", "shape": [12288]}],
+      ["transformer.h.{}.attn.c_attn.weight", ["0-31"], {"dtype": "BF16", "shape": [12288, 4096]}],
+      ["transformer.h.{}.attn.c_proj.weight", ["0-31"], {"dtype": "BF16", "shape": [4096, 4096]}],
+      ["transformer.h.{}.ln_1.weight", ["0-31"], {"dtype": "BF16", "shape": [4096]}],
+      ["transformer.h.{}.ln_2.weight", ["0-31"], {"dtype": "BF16", "shape": [4096]}],
+      ["transformer.h.{}.mlp.c_proj.weight", ["0-31"], {"dtype": "BF16", "shape": [4096, 11008]}],
+      ["transformer.h.{}.mlp.w1.weight", ["0-31"], {"dtype": "BF16", "shape": [11008, 4096]}],
+      ["transformer.h.{}.mlp.w2.weight", ["0-31"], {"dtype": "BF16", "shape": [11008, 4096]}],
+      ["transformer.ln_f.weight", [], {"dtype": "BF16", "shape": [4096]}],
+      ["transformer.wte.weight", [], {"dtype": "BF16", "shape": [151936, 4096]}]
+    ]
+  },
+  "Qwen-7B-Chat": {
+    "tensor_key_ranges": [
+      ["lm_head.weight", [], {"dtype": "BF16", "shape": [151936, 4096]}],
+      ["transformer.h.{}.attn.c_attn.bias", ["0-31"], {"dtype": "BF16", "shape": [12288]}],
+      ["transformer.h.{}.attn.c_attn.weight", ["0-31"], {"dtype": "BF16", "shape": [12288, 4096]}],
+      ["transformer.h.{}.attn.c_proj.weight", ["0-31"], {"dtype": "BF16", "shape": [4096, 4096]}],
+      ["transformer.h.{}.ln_1.weight", ["0-31"], {"dtype": "BF16", "shape": [4096]}],
+      ["transformer.h.{}.ln_2.weight", ["0-31"], {"dtype": "BF16", "shape": [4096]}],
+      ["transformer.h.{}.mlp.c_proj.weight", ["0-31"], {"dtype": "BF16", "shape": [4096, 11008]}],
+      ["transformer.h.{}.mlp.w1.weight", ["0-31"], {"dtype": "BF16", "shape": [11008, 4096]}],
+      ["transformer.h.{}.mlp.w2.weight", ["0-31"], {"dtype": "BF16", "shape": [11008, 4096]}],
+      ["transformer.ln_f.weight", [], {"dtype": "BF16", "shape": [4096]}],
+      ["transformer.wte.weight", [], {"dtype": "BF16", "shape": [151936, 4096]}]
+    ]
+  }
+}

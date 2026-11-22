@@ -7,24 +7,13 @@ from gptqmodel.models import auto
 from gptqmodel.models.definitions.qwen3_vl import Qwen3_VL_MoeQModel
 
 
-def test_qwen3_vl_moe_registry_and_module_tree(monkeypatch):
-    fake_config = SimpleNamespace(model_type="qwen3_vl_moe")
-    monkeypatch.setattr(
-        auto,
-        "resolve_trust_remote_code",
-        lambda _path, trust_remote_code=False: trust_remote_code,
-    )
-    monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
-        lambda *_args, **_kwargs: fake_config,
-    )
+def test_qwen3_vl_moe_registry_and_module_tree(tmp_path):
+    from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
+
+    CONFIG_MAPPING["qwen3_vl_moe"]().save_pretrained(tmp_path)
 
     assert auto.MODEL_MAP["qwen3_vl_moe"] is Qwen3_VL_MoeQModel
-    assert (
-        auto.check_and_get_model_definition("qwen3-vl-moe-fixture")
-        is Qwen3_VL_MoeQModel
-    )
+    assert auto.check_and_get_model_definition(str(tmp_path)) is Qwen3_VL_MoeQModel
 
 
 def test_qwen3_vl_moe_module_tree_expands_all_experts():

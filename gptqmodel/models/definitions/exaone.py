@@ -4,11 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class ExaOneQModel(BaseQModel):
-    # exaone requires custom model code
-    require_trust_remote_code = True
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.exaone.configuration_exaone.ExaoneConfig",
+        model_class="gptqmodel.models.ports.exaone.modeling_exaone.ExaoneForCausalLM",
+    )
 
     pre_lm_head_norm_module = "transformer.ln_f"
 

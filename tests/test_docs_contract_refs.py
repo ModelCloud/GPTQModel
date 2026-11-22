@@ -61,11 +61,11 @@ CONTRACT_REFS = (
      "_decoder_fp8_scale_semantics", SYMBOL_CITATION),
     ("docs/fusion-planner.md", "gptqmodel/models/fusion.py", "_share_operands", 525),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
-     "_normalize_gguf_config", 977),
+     "_normalize_gguf_config", SYMBOL_CITATION),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
-     "_gguf_bits_spec_from_format_value", 907),
+     "_gguf_bits_spec_from_format_value", SYMBOL_CITATION),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
-     "_gguf_bits_from_components", 948),
+     "_gguf_bits_from_components", SYMBOL_CITATION),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/protocol.py",
      "_resolve_gguf_public_format", 1381),
     # `awq_processor.py` keeps growing (the #4880 replay packing added ~70
@@ -115,7 +115,7 @@ CONTRACT_REFS = (
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/utils/model.py",
      "simple_dispatch_model", SYMBOL_CITATION),
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/nn_modules/qlinear/torch.py",
-     "_gptq_gemm_uniform_group_for_current_g_idx", 1114),
+     "_gptq_gemm_uniform_group_for_current_g_idx", SYMBOL_CITATION),
 )
 
 PYTHON_BLOCK = re.compile(r"```python\n(.*?)```", re.S)

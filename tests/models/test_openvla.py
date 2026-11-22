@@ -5,8 +5,6 @@
 
 import os
 import os.path
-import sys
-import types
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,24 +13,17 @@ from model_test import ModelTest
 from ovis import image_to_test_dataset
 from PIL import Image
 from torch import nn
-from transformers import AutoModelForImageTextToText
-from transformers.generation.utils import GenerationMixin
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.openvla import OpenVLAQModel
-from gptqmodel.utils.hf import (
-    _bridge_legacy_vision2seq_remote_code,
-    _patch_prismatic_remote_code,
-    _TimmVersionCompatProxy,
-    prepare_remote_model_init_compat,
-)
+from gptqmodel.models.local import LocalModelLoader
 
 
 def test_openvla_model_type_selects_definition(monkeypatch):
     fake_config = SimpleNamespace(model_type="openvla")
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: fake_config)
 
     assert auto.check_and_get_model_definition("/tmp/openvla-7b") is OpenVLAQModel
 
@@ -45,7 +36,8 @@ def test_openvla_module_tree_covers_llama_decoder_paths():
     flat_modules = {name for block in layer_modules for name in block}
 
     assert OpenVLAQModel.layer_modules_strict is True
-    assert OpenVLAQModel.require_trust_remote_code is True
+    assert not OpenVLAQModel.require_trust_remote_code
+    assert isinstance(OpenVLAQModel.loader, LocalModelLoader)
     assert OpenVLAQModel.require_load_processor is True
     assert OpenVLAQModel.support_batch_quantize is False
     assert OpenVLAQModel.lm_head == "language_model.lm_head"
@@ -192,134 +184,9 @@ def test_get_calib_dataset_dispatches_openvla(monkeypatch):
     assert calls == {"n_sample": 20}
 
 
-class _FakeFeaturizer(nn.Module):
-    def forward(self, pixel_values):
-        # timm >= 1.0 returns a list even for a single requested layer.
-        return [pixel_values * 2]
-
-
-def _fake_prismatic_module(module_name: str) -> types.ModuleType:
-    module = types.ModuleType(module_name)
-
-    class PrismaticForConditionalGeneration:
-        def __init__(self, config):
-            self.config = config
-            self.language_model = nn.Identity()
-            self.post_init()
-
-        def post_init(self):
-            self.init_weights()
-
-        def init_weights(self):
-            self.tie_weights(recompute_mapping=False)
-
-        def tie_weights(self):
-            pass
-
-    class PrismaticVisionBackbone(nn.Module):
-        def __init__(self, use_fused_vision_backbone, image_sizes, timm_model_ids, timm_override_act_layers):
-            super().__init__()
-            self.use_fused_vision_backbone = use_fused_vision_backbone
-            self.featurizer = _FakeFeaturizer()
-            self.fused_featurizer = _FakeFeaturizer() if use_fused_vision_backbone else None
-
-    class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
-        pass
-
-    for remote_cls in (PrismaticForConditionalGeneration, PrismaticVisionBackbone, OpenVLAForActionPrediction):
-        remote_cls.__module__ = module_name
-
-    module.PrismaticForConditionalGeneration = PrismaticForConditionalGeneration
-    module.PrismaticVisionBackbone = PrismaticVisionBackbone
-    module.OpenVLAForActionPrediction = OpenVLAForActionPrediction
-    module.timm = SimpleNamespace(__version__="1.0.29", create_model=lambda *args, **kwargs: "created")
-    return module
-
-
-def test_patch_prismatic_remote_code_shims_timm_for_modern_versions(monkeypatch):
-    module_name = "gptqmodel_test_prismatic_remote"
-    module = _fake_prismatic_module(module_name)
-    monkeypatch.setitem(sys.modules, module_name, module)
-
-    _patch_prismatic_remote_code(module)
-
-    assert isinstance(module.timm, _TimmVersionCompatProxy)
-    assert module.timm.__version__ == "0.9.16"
-    assert module.timm.create_model("vit") == "created"
-
-    vision_backbone = module.PrismaticVisionBackbone(True, [224, 224], ["a", "b"], [None, None])
-    pixel_values = torch.ones(1, 3, 4, 4)
-    assert torch.equal(vision_backbone.featurizer.forward(pixel_values), pixel_values * 2)
-    assert torch.equal(vision_backbone.fused_featurizer.forward(pixel_values), pixel_values * 2)
-
-
-def test_bridge_legacy_vision2seq_registers_with_image_text_auto_class(monkeypatch):
-    module_name = "gptqmodel_test_prismatic_bridge"
-    module = _fake_prismatic_module(module_name)
-    monkeypatch.setitem(sys.modules, module_name, module)
-
-    class _FakeOpenVLAConfig:
-        model_type = "openvla"
-
-    config = _FakeOpenVLAConfig()
-    original_cls = module.OpenVLAForActionPrediction
-
-    bridged = _bridge_legacy_vision2seq_remote_code(original_cls, config)
-
-    assert bridged is not original_cls
-    assert issubclass(bridged, original_cls)
-    assert issubclass(bridged, GenerationMixin)
-    assert bridged.__name__ == "OpenVLAForActionPrediction"
-    assert AutoModelForImageTextToText._model_mapping[_FakeOpenVLAConfig] is bridged
-
-    # The legacy `_supports_sdpa` property must resolve before `language_model` exists.
-    instance = object.__new__(bridged)
-    assert instance._supports_sdpa is True
-
-    # Bridging is idempotent and reuses the registered class.
-    assert _bridge_legacy_vision2seq_remote_code(original_cls, config) is bridged
-
-
-def test_prepare_remote_model_init_compat_bridges_legacy_vision2seq_auto_map(monkeypatch):
-    module_name = "gptqmodel_test_prismatic_init_compat"
-    module = _fake_prismatic_module(module_name)
-    monkeypatch.setitem(sys.modules, module_name, module)
-
-    import transformers.dynamic_module_utils as dynamic_module_utils
-
-    monkeypatch.setattr(
-        dynamic_module_utils,
-        "get_class_from_dynamic_module",
-        lambda class_ref, model_id, **kwargs: module.OpenVLAForActionPrediction,
-    )
-
-    class _FakeOpenVLAConfig:
-        model_type = "openvla"
-        auto_map = {
-            "AutoConfig": "configuration_prismatic.OpenVLAConfig",
-            "AutoModelForVision2Seq": "modeling_prismatic.OpenVLAForActionPrediction",
-        }
-
-    config = _FakeOpenVLAConfig()
-
-    prepare_remote_model_init_compat("/tmp/fake-openvla-7b", config, trust_remote_code=True)
-
-    bridged = AutoModelForImageTextToText._model_mapping[_FakeOpenVLAConfig]
-    assert issubclass(bridged, module.OpenVLAForActionPrediction)
-    assert issubclass(bridged, GenerationMixin)
-
-    # The generic tie_weights shim accepts the transformers 5.x kwargs.
-    instance = object.__new__(bridged)
-    instance.language_model = nn.Identity()
-    instance.tie_weights(recompute_mapping=False)
-
-    # `_patch_prismatic_remote_code` was applied through the auto_map bridge.
-    assert isinstance(module.timm, _TimmVersionCompatProxy)
-
-
 class TestOpenVLA(ModelTest):
     NATIVE_MODEL_ID = "openvla/openvla-7b"
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
 
     def test_openvla(self):
         with self.model_compat_test_context():

@@ -231,3 +231,54 @@ def test_awq_bypass_replay_scales_every_expert(tmp_path: Path, monkeypatch, capl
         if "plain-quantization fallback" in record.getMessage()
     ]
     assert fallback_messages == []
+
+
+def test_all_experts_replay_keeps_the_block_signature():
+    """The bypass replay wrapper must not look like a `**kwargs` forward.
+
+    `_prepare_module_forward` synthesizes `position_ids` for a catch-all
+    forward (#4891). A bare `(hidden_states, **kwargs)` wrapper around a
+    `forward(hidden_states)` MoE block was read that way, so the replay
+    passed `position_ids` into Qwen3-MoE's sparse block and raised.
+    """
+
+    import inspect
+    from types import SimpleNamespace
+
+    import torch
+    from torch import nn
+
+    from gptqmodel.looper.awq_processor import _forward_accepts_var_kwargs
+    from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
+
+    class Expert(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = nn.Linear(4, 8, bias=False)
+            self.up_proj = nn.Linear(4, 8, bias=False)
+            self.down_proj = nn.Linear(8, 4, bias=False)
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.experts = nn.ModuleList([Expert(), Expert()])
+
+        def forward(self, hidden_states):
+            return hidden_states * 2
+
+    block = Block()
+    calls = []
+    for expert in block.experts:
+        expert.gate_proj.register_forward_pre_hook(lambda module, args: calls.append(module))
+    processor = AWQProcessor.__new__(AWQProcessor)
+    processor.gptq_model = SimpleNamespace()
+    targets = [(f"experts.{index}.gate_proj", expert.gate_proj) for index, expert in enumerate(block.experts)]
+    hidden = torch.randn(3, 4)
+    with processor._all_experts_replay_forward(GateUpDownMoELifecycleHooks(), block, block.experts, targets):
+        assert list(inspect.signature(block.forward).parameters) == ["hidden_states"]
+        assert not _forward_accepts_var_kwargs(block)
+        assert processor._sanitize_kwargs({"position_ids": torch.arange(3)}, block) == {}
+        torch.testing.assert_close(block(hidden), hidden * 2)
+    # The wrapper really ran: every replayed expert saw the block input.
+    assert calls == [expert.gate_proj for expert in block.experts]
+    assert list(inspect.signature(block.forward).parameters) == ["hidden_states"]

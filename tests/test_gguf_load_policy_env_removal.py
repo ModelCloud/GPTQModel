@@ -4,8 +4,10 @@
 
 ``GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER``, ``..._TORCH_LOADER``,
 ``..._DEQUANT_DEVICE`` and ``..._DEQUANT_MAX_BYTES`` decided which parser ran,
-which device the dense import dequantized on, and how much transient memory one
-chunk could take. Two processes with the same public call options therefore
+which device GGUF tensors dequantized on, and how much transient memory one
+chunk could take. (``..._TORCH_LOADER`` selected a direct dense import that
+redirected Transformers' GGUF loader; it was removed with every other
+Transformers patch.) Two processes with the same public call options therefore
 could load the same checkpoint along different code paths. The replacement
 fields live on ``KernelConfig`` (and the shared ``RuntimeConfig`` adapter), and
 these tests pin that the environment no longer participates.
@@ -14,7 +16,6 @@ these tests pin that the environment no longer participates.
 from __future__ import annotations
 
 import struct
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -22,7 +23,6 @@ import torch
 
 import gptqmodel
 from gptqmodel.models import loader
-from gptqmodel.utils import hf as hf_utils
 from gptqmodel.utils import internal_gguf
 from gptqmodel.utils.kernel import KernelConfig, get_kernel_config, reset_kernel_config
 
@@ -88,9 +88,8 @@ def test_native_quantized_loader_is_on_by_default_and_ignores_environment(monkey
     # The retired variables are reported, never honoured.
     assert loader._native_quantized_loader_enabled() is True
     assert internal_gguf.native_quantized_loader_enabled() is True
-    # No dequant device was requested, so the dense import keeps the NumPy path.
+    # No dequant device was requested, so dequantization keeps the NumPy path.
     assert internal_gguf._resolve_torch_dequant_device() is None
-    assert internal_gguf.torch_dequant_loader_enabled() is False
 
 
 def test_native_quantized_loader_policy_selects_the_parser(tmp_path, monkeypatch):
@@ -160,83 +159,6 @@ def test_dequant_chunk_bytes_policy_controls_the_chunk_size(monkeypatch):
         KernelConfig(gguf_dequant_chunk_bytes=0)
 
 
-def test_torch_dequant_loader_policy_drives_the_dense_import(monkeypatch):
-    class _Processor:
-        def __init__(self, *, config):
-            self.config = config
-
-        @staticmethod
-        def process(*, weights, name, tensor_key_mapping, parsed_parameters):
-            del tensor_key_mapping, parsed_parameters
-            return SimpleNamespace(weights=torch.as_tensor(weights), name=name)
-
-    class _GgufUtils:
-        TensorProcessor = _Processor
-        TENSOR_PROCESSORS = {}
-
-        @staticmethod
-        def get_gguf_hf_weights_map(model_to_load, processor):
-            del model_to_load, processor
-            return {"blk.0.attn_q.weight": "model.layers.0.self_attn.q_proj.weight"}
-
-        @staticmethod
-        def tqdm(iterable, **_kwargs):
-            return iterable
-
-    calls = []
-    tensor = SimpleNamespace(
-        name="blk.0.attn_q.weight",
-        tensor_type=internal_gguf.GGMLQuantizationType.F32,
-        data=np.zeros((1, 4), dtype=np.float32),
-    )
-
-    def _parse(*_args, return_tensors, **_kwargs):
-        calls.append(return_tensors)
-        if not return_tensors:
-            return {"config": {"model_type": internal_gguf.MODEL_ARCH_QWEN3}}
-        return {"variant": "original"}
-
-    monkeypatch.setattr(internal_gguf, "GGUFReader", lambda _path: SimpleNamespace(tensors=[tensor]))
-    monkeypatch.setattr(
-        internal_gguf,
-        "dequantize_to_torch",
-        lambda data, _qtype, *, device=None, dtype=None: torch.zeros((1, 4), device=device, dtype=dtype),
-    )
-    monkeypatch.setenv("GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER", "1")
-
-    def _run(policy):
-        return hf_utils._load_gguf_checkpoint_torch_direct(
-            gguf_utils=_GgufUtils,
-            original_load_gguf_checkpoint=_parse,
-            gguf_checkpoint_path="bonsai.gguf",
-            return_tensors=True,
-            model_to_load=object(),
-            policy=policy,
-        )
-
-    # The retired variable does not enable the direct loader on its own.
-    assert _run(KernelConfig()) == {"variant": "original"}
-    assert calls == [True]
-
-    # Explicit policy: the direct loader converts once, on the configured device.
-    direct = _run(KernelConfig(gguf_torch_dequant_loader=True, gguf_dequant_device="cpu"))
-    assert calls == [True, False]
-    loaded = direct["tensors"]["model.layers.0.self_attn.q_proj.weight"]
-    assert isinstance(loaded, torch.Tensor)
-    assert loaded.device.type == "cpu"
-
-
-def test_torch_dequant_loader_resolution_and_explicit_disable():
-    assert internal_gguf.torch_dequant_loader_enabled(KernelConfig()) is False
-    assert internal_gguf.torch_dequant_loader_enabled(
-        KernelConfig(gguf_dequant_device="cpu")
-    ) is True
-    # An explicit value wins over the device-derived default.
-    assert internal_gguf.torch_dequant_loader_enabled(
-        KernelConfig(gguf_torch_dequant_loader=False, gguf_dequant_device="cpu")
-    ) is False
-
-
 @pytest.mark.parametrize("device", ["", "foo", "xpu", "meta"])
 def test_invalid_dequant_device_is_rejected(device):
     with pytest.raises((TypeError, ValueError)):
@@ -278,7 +200,8 @@ def test_retired_gguf_env_vars_warn_and_have_no_effect(monkeypatch):
     assert warned == set(RETIRED)
     text = "\n".join(calls)
     assert "KernelConfig.gguf_native_quantized_loader" in text
-    assert "KernelConfig.gguf_torch_dequant_loader" in text
+    # The direct dense import redirected Transformers' loader; it is gone.
+    assert "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER is retired and has no effect; the feature was removed" in text
     assert "KernelConfig.gguf_dequant_device" in text
     assert "KernelConfig.gguf_dequant_chunk_bytes" in text
     # The same call options resolve to the same policy with every variable set.
@@ -340,6 +263,7 @@ def test_public_load_uses_the_kernel_policy_to_choose_the_gguf_parser(tmp_path, 
             self.config = model.config
             self.quantized = False
             self.quantize_config = None
+            self._config_load_kwargs = _kwargs.get("config_load_kwargs")
 
     class _Inner:
         @staticmethod
@@ -362,7 +286,7 @@ def test_public_load_uses_the_kernel_policy_to_choose_the_gguf_parser(tmp_path, 
     monkeypatch.setattr(loader, "load_hf_tokenizer", lambda *_a, **_k: object())
     monkeypatch.setattr(loader, "print_module_tree", lambda *_a, **_k: None)
     monkeypatch.setattr(loader.defuser, "replace_fused_blocks", lambda *_a, **_k: None)
-    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_a, **_k: _Config())
+    monkeypatch.setattr(loader, "load_model_config", lambda *_a, **_k: _Config())
     monkeypatch.setattr(
         DummyQModel,
         "from_quantized",
@@ -379,7 +303,14 @@ def test_public_load_uses_the_kernel_policy_to_choose_the_gguf_parser(tmp_path, 
         checkpoint,
         quantize_config=None,
         kernel=KernelConfig(gguf_native_quantized_loader=False),
+        revision="pinned-source",
+        local_files_only=True,
     )
     assert len(redirected) == 1
     assert result.quantized is False
     assert dense_calls[0]["kwargs"]["gguf_file"] == "qwen3-q8_0.gguf"
+    assert result._config_load_kwargs == {
+        "revision": "pinned-source",
+        "local_files_only": True,
+        "gguf_file": "qwen3-q8_0.gguf",
+    }

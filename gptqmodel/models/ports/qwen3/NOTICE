@@ -1,0 +1,21 @@
+GPT-QModel native Qwen3 binding and Marin release qualification
+Copyright 2026 ModelCloud.ai
+
+The adapter imports native Transformers Qwen3Config, Qwen3ForCausalLM,
+Qwen2Tokenizer and TokenizersBackend. It contains no copied checkpoint Python or model implementation.
+Native Transformers sources: Copyright 2025 The Qwen Team and HuggingFace Inc.
+Those sources are Apache-2.0.
+
+Pinned Qwen3-0.6B metadata and tokenizer fixtures originate with the Qwen Team,
+Alibaba Cloud. Its Apache-2.0 LICENSE and model card are pinned, unchanged,
+as test assets.
+
+Pinned Marin-32B metadata and tokenizer fixtures originate with the Marin
+community. The retained upstream model card declares Apache-2.0 for code and
+model and credits stanford-crfm/marin-tokenizer, whose vocabulary matches Llama 3.
+No separate license file is included in that pinned Marin checkpoint. The
+original model card and all metadata are pinned, unchanged, as test assets.
+Dataset licenses described in that card are separate from this software binding;
+no training data or trained model payloads are redistributed here.
+
+Every test asset has a pinned source revision and SHA-256 in tests/fixtures/ports/upstream.json.

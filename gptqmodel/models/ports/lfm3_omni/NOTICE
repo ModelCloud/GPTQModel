@@ -1,0 +1,16 @@
+LFM3 Omni package-owned adaptation for GPT-QModel.
+
+Pinned upstream: LiquidAI/LFM3-Omni-2B
+Revision: 21d75123f86c1f7ffb4bef1ea202710c4e7ebe67
+https://huggingface.co/LiquidAI/LFM3-Omni-2B/tree/21d75123f86c1f7ffb4bef1ea202710c4e7ebe67
+
+Upstream Python source notices: Copyright 2026 The HuggingFace Team.
+All original Apache License 2.0 headers are retained in derived Python files.
+The upstream repository's LFM Open License v1.0 is preserved in LICENSE
+(the title's trailing space was removed).
+No claim is made that the repository-level Apache license replaces those terms.
+
+Modified for GPT-QModel by ModelCloud.ai: definition-owned local class selection,
+closed component-config selection, native Transformers LFM2 audio encoder,
+portable PyTorch convolution execution, local media/codec loading, load-scoped
+codec key conversion and qualification against Transformers 5.23.0.

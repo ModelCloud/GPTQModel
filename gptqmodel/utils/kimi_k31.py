@@ -39,6 +39,9 @@ class KimiK31Source(KimiK3EXL3Source):
                 "Kimi K3.1 calibration executes the pinned reference decoder; "
                 "pass trust_remote_code=True to opt in."
             )
+        from gptqmodel.utils.security import require_remote_code_permission
+
+        require_remote_code_permission(trust_remote_code)
         self.snapshot = Path(snapshot).resolve()
         self.config = json.loads((self.snapshot / "config.json").read_text())
         if (self.snapshot.name != REVISION or self.config.get("model_type") != "kimi_k31"

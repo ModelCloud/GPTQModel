@@ -8,13 +8,16 @@ import inspect
 import torch
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class TeleChat2QModel(BaseQModel):
-    # telechat2 requires custom model code
-    require_trust_remote_code = True
-    # telechat2 requires float16
-    require_dtype = torch.float16
+    loader = LocalModelLoader(
+        "gptqmodel.models.ports.telechat2.configuration_telechat2.Telechat2Config",
+        "gptqmodel.models.ports.telechat2.modeling_telechat2.Telechat2ForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.telechat2.tokenization_telechat2.TelechatTokenizerFactory",
+    )
+    fusable = None
 
     pre_lm_head_norm_module = "transformer.ln_f"
 
@@ -34,17 +37,25 @@ class TeleChat2QModel(BaseQModel):
         }
     ]
 
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        # `key_value` interleaves K and V per KV head, so its output rows are not
+        # the `dense` input channels even when the widths happen to match.
+        unsafe = {id(getattr(getattr(module, "self_attention", None), "key_value", None))}
+        if getattr(module, "apply_residual_connection_post_layernorm", False):
+            # The residual is the norm output itself; a norm fold would rescale it.
+            unsafe.update(id(getattr(module, name, None)) for name in ("input_layernorm", "post_attention_layernorm"))
+        return [node for node in nodes if id(node.get("prev_op")) not in unsafe]
+
     def awq_module_replay_inputs(self, module, x, module_kwargs):
         """Give TeleChat2's attention replay the arguments its forward requires.
 
         AWQ scores the ``query``/``key_value`` scaling group by replaying their
-        common parent, ``TelechatAttention``. Its forward signature is
-        ``(hidden_states, residual, attention_mask, ...)``, but the activation
-        capture only records the Linears' input, so the replay raised
-        ``TypeError: missing 'residual' and 'attention_mask'``. The residual is
-        an additive constant shared by the reference and candidate outputs, so
-        using the block input is enough for the scale search; a full causal
-        bool mask matches the calibration replay (no padding).
+        common parent, ``TelechatAttention``, whose forward signature is
+        ``(hidden_states, residual, attention_mask, ...)``. The residual is an
+        additive constant shared by the reference and candidate outputs, so the
+        block input is enough for the scale search; a full causal bool mask
+        matches the calibration replay (no padding).
         """
 
         x, module_kwargs = super().awq_module_replay_inputs(module, x, module_kwargs)

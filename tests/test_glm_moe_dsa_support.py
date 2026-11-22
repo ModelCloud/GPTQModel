@@ -14,6 +14,7 @@ from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4MTPQuantizationModel
 from gptqmodel.models.definitions.glm_moe_dsa import GlmMoeDsaQModel
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 from gptqmodel.utils.exl3_router_candidates import learned_router_ranked_choices
 from gptqmodel.utils.structure import LazyTurtle, alias_from_turtle_for_submodule
 
@@ -117,14 +118,12 @@ def _build_lazy_turtle(tmp_path: Path, model: GlmMoeDsaForCausalLM) -> LazyTurtl
     return source
 
 
-@pytest.mark.parametrize("model_path", ["/tmp/glm-5", "/tmp/glm-5.1"])
-def test_glm_moe_dsa_model_type_selects_definition_for_glm5_variants(monkeypatch, model_path):
-    fake_config = SimpleNamespace(model_type="glm_moe_dsa")
+@pytest.mark.parametrize("variant", ["glm-5", "glm-5.1"])
+def test_glm_moe_dsa_model_type_selects_definition_for_glm5_variants(variant, tmp_path):
+    model_path = tmp_path / variant
+    CONFIG_MAPPING["glm_moe_dsa"]().save_pretrained(model_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition(model_path) is GlmMoeDsaQModel
+    assert auto.check_and_get_model_definition(str(model_path)) is GlmMoeDsaQModel
 
 
 def test_glm5_and_glm5_1_share_same_upstream_modeling_signature():

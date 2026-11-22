@@ -4,11 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class BrumbyQModel(BaseQModel):
-    require_trust_remote_code = True
-    require_pkgs = ["retention>=1.0.7"]
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.brumby.configuration_brumby.BrumbyConfig",
+        model_class="gptqmodel.models.ports.brumby.modeling_brumby.BrumbyForCausalLM",
+    )
 
     pre_lm_head_norm_module = "model.norm"
 
@@ -35,24 +38,3 @@ class BrumbyQModel(BaseQModel):
             ),
         },
     ]
-
-    def before_model_load(self, model_local_path: str, load_quantized_model: bool):
-        from transformers.dynamic_module_utils import get_class_from_dynamic_module
-        cls = get_class_from_dynamic_module(
-            "modeling_brumby.BrumbyRotaryEmbedding",
-            model_local_path,
-        )
-        if not hasattr(cls, "compute_default_rope_parameters"):
-            from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-            def compute_default_rope_parameters(self, config):
-                return ROPE_INIT_FUNCTIONS["linear"](config)
-
-            cls.compute_default_rope_parameters = compute_default_rope_parameters
-
-    def after_model_load(self, model, load_quantized_model=False):
-        if hasattr(model, "config") and hasattr(model.config, "use_cache"):
-            model.config.use_cache = False
-        generation_config = getattr(model, "generation_config", None)
-        if generation_config is not None and hasattr(generation_config, "use_cache"):
-            generation_config.use_cache = False
-        return model

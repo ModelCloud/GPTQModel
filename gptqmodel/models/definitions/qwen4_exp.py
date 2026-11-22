@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -15,7 +15,12 @@ class Qwen4ExpQModel(BaseQModel):
     fusable = FusableConfig("qwen4_exp").merge(LlamaFusableConfig(), profiles=("qkv",))
 
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
     require_load_processor = True
     layer_modules_strict = False
 
@@ -99,7 +104,10 @@ class Qwen4ExpTextQModel(Qwen4ExpQModel):
 
 
     # Text-only checkpoints use the causal-LM loader and have no processor.
-    loader = AutoModelForCausalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     require_load_processor = False
 
     # The text model stores its decoder directly under ``model`` rather than

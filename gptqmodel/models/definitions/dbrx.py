@@ -4,9 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
-# placer=holder only as dbrx original models are not supported
-# supported dbrx_converted models can be found on https://hf.co/ModelCloud
 class DbrxQModel(BaseQModel):
-    info = {"notes": "Dbrx is only supported using defused/converted models on https://hf.co/ModelCloud with `trust_remote_code=True`"}
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
+    info = {"notes": "Use a defused `dbrx_converted` checkpoint from https://hf.co/ModelCloud with the package-owned loader."}
+

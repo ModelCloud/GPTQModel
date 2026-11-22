@@ -107,13 +107,13 @@ flowchart LR
 | `env_flag("GPTQMODEL_FP32_ACCUM")` | `gemm_awq.py:30`, `gemm_awq_triton.py:32`, `quantization/awq/**/gemm.py:28`, `quantization/paro/**/gemm.py:32` | `KernelConfig.fp32_accum` |
 | `os.getenv("GPTQMODEL_AWQ_TRITON_SCHEDULE")` at import | `quantization/awq/modules/triton/scheduler.py:27` | `KernelConfig.awq_triton_schedule` |
 | `GPTQMODEL_GGUF_FUSED_*`, `GGUF_CPP_NATIVE_MATMUL`, `GGUF_CPP_THREADS` | `qlinear/gguf.py:1197-1215`, `qlinear/gguf_cpp.py:445,1190` | `KernelConfig.gguf_*` |
-| `GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER`, `..._TORCH_LOADER`, `..._DEQUANT_DEVICE`, `..._DEQUANT_MAX_BYTES` | `models/loader.py`, `utils/hf.py:699`, `utils/internal_gguf.py:281,314` | `KernelConfig.gguf_native_quantized_loader`, `gguf_torch_dequant_loader`, `gguf_dequant_device`, `gguf_dequant_chunk_bytes` |
+| `GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER`, `..._TORCH_LOADER`, `..._DEQUANT_DEVICE`, `..._DEQUANT_MAX_BYTES` | `models/loader.py`, `utils/hf.py:699`, `utils/internal_gguf.py:281,314` | `KernelConfig.gguf_native_quantized_loader`, `gguf_dequant_device`, `gguf_dequant_chunk_bytes`; `..._TORCH_LOADER` has none (the direct-to-Torch dense import was removed) |
 | `GPTQMODEL_PARO_*` behaviour switches | `qlinear/paro.py:53-66`, `paro_triton.py:66-70`, `quantization/paro/**` | `KernelConfig.paro_*` |
 | `GPTQMODEL_PARO_ROTATE_AUTOTUNE_*` timing knobs | `gptqmodel_ext/paro/rotation.cu` | internal constants; `KernelConfig.paro_rotate_autotune` / `_cta_m` / `_row_pad` select behaviour |
 | `GPTQMODEL_BITSANDBYTES_*`, `GPTQMODEL_BNB_TRITON`, `GPTQMODEL_DISABLE_BITBLAS` | `qlinear/bitsandbytes.py:49,57`, `bitsandbytes_triton.py:109`, `bitblas.py:115` | `KernelConfig.bitsandbytes_*`, `disable_bitblas` |
 | `GPTQMODEL_GSQ_DISABLE_*_RELAXATION` | `quantization/gsq_cuda_relaxation.py:400-403` | `KernelConfig.gsq_disable_*` |
 | `GPTQMODEL_EXL3_*` | `exl3_lib/quantize.py:136`, `exllamav3_processor.py:127-130`, `utils/exl3_capture_*.py` | `KernelConfig.exl3_*` |
-| `GPTQMODEL_ROCM_QUANT_BLAS`, `GPTQMODEL_NO_ROCM_LLC` | `utils/rocm.py`, `rocm_llc.py:414` | `KernelConfig.rocm_quant_blas`, `rocm_llc` |
+| `GPTQMODEL_ROCM_QUANT_BLAS`, `GPTQMODEL_NO_ROCM_LLC` | `utils/rocm.py`, `rocm_llc.py:414` | `KernelConfig.rocm_quant_blas`; `GPTQMODEL_NO_ROCM_LLC` has no replacement (the torch patch was removed) |
 | `GPTQMODEL_FLOATX_CPU_THREADS`, `GPTQMODEL_MAX_PACKERS`, `GPTQMODEL_CPU_WORKERS`, `GPTQMODEL_CUDA_WORKERS` | `dtype.py:166`, `utils/model.py:1493`, `__init__.py:394,411` | `KernelConfig.floatx_cpu_threads`, `max_packers`, `cpu_workers`, `cuda_workers` |
 | `GPTQMODEL_CPU_BF16X3`, `GPTQMODEL_EXL3_CPU_BF16X3` | `utils/cpu_features.py:17,103`, `nn_modules/exllamav3_torch.py:35,46` | `KernelConfig.cpu_bf16x3_matmul` |
 | `GPTQMODEL_FLOATX_CPU_DISABLE_AVX2`, `_AVX512` read inside `floatx_cpu.cpp` | `gptqmodel_ext/floatx_cpu.cpp:371-386` | `dequantize_fp8_cpu` / `dequantize_fp4_cpu` `simd_level` argument |
@@ -236,9 +236,8 @@ representation, not another machine's kernel tuning.
 | `gguf_fused_chunk_bytes` | `33554432` | Transient-memory budget for one K chunk. |
 | `gguf_cpp_native_matmul` | `None` | Force the native ggml matmul on or off. `None` follows capability. |
 | `gguf_cpp_threads` | `None` | Native ggml CPU thread count. `None` follows torch. |
-| `gguf_native_quantized_loader` | `True` | Parse a single-layout GGUF checkpoint with the native reader instead of the dense Transformers import. |
-| `gguf_torch_dequant_loader` | `None` | Dense import converts GGUF tensors straight to Torch. `None` follows `gguf_dequant_device`. |
-| `gguf_dequant_device` | `None` | Torch device (`cpu` or `cuda[INDEX]`) for that conversion. `None` keeps the reference NumPy path. |
+| `gguf_native_quantized_loader` | `True` | Parse a single-layout GGUF checkpoint with the native reader instead of the dense Transformers import (which needs the `gguf` package). |
+| `gguf_dequant_device` | `None` | Torch device (`cpu` or `cuda[INDEX]`) for GPT-QModel's own GGUF dequantization. `None` keeps the reference NumPy path. |
 | `gguf_dequant_chunk_bytes` | `268435456` | Transient-memory budget for one sign-only NumPy conversion chunk. |
 
 ### Paro
@@ -333,12 +332,11 @@ flowchart LR
 | Field | Default | Effect |
 | --- | --- | --- |
 | `rocm_quant_blas` | `None` | `None` keeps the reproducible `rocblas` pin; `"hipblaslt"` opts into torch's default; `""`/`0`/`off`/`default` skip the pin. Any other value raises `ValueError`. |
-| `rocm_llc` | `True` | Last-level-cache back-port for torch. |
 
 `rocm_quant_blas` selects the quantization BLAS backend. `None` keeps the
 reproducible `rocblas` default; `"hipblaslt"` opts into torch's hipBLASLt
-default and is faster but not reproducible across processes. `rocm_llc` controls
-the last-level-cache back-port for torch.
+default and is faster but not reproducible across processes. The former
+`rocm_llc` torch back-port was removed: GPT-QModel never patches torch.
 
 ### Threads
 

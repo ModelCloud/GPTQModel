@@ -106,9 +106,11 @@ def test_list_valued_norm_path_resolves_without_nesting():
     """C1: a list declaration must not be wrapped again or used as a string."""
 
     instance = _bare(Qwen2VLQModel, _module_with_path("model.language_model.norm"))
+    # The third entry is the headless `qwen2_vl_text` layout (norm at the root).
     assert instance._pre_lm_head_norm_candidates() == [
         "model.language_model.norm",
         "language_model.norm",
+        "norm",
     ]
     assert instance.norm_module_names(skip=("no-match",)) == ["model.language_model.norm"]
 

@@ -6,6 +6,12 @@
 import tempfile
 import unittest
 
+import pytest
+
+
+# Evaluation runs through the optional Evalution package (tests/eval.py).
+pytest.importorskip("evalution")
+
 from tests.eval import evaluate, get_eval_task_metrics
 
 

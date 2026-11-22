@@ -19,13 +19,12 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import transformers
-from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native.auto import AutoConfig as NativeAutoConfig
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
 
 
@@ -97,7 +96,7 @@ FULL_LAYER_OWNERS = {
 
 
 def _tiny_config():
-    config = transformers.AutoConfig.for_model(MODEL_TYPE)
+    config = NativeAutoConfig.for_model(MODEL_TYPE)
     config.vocab_size = 64
     config.hidden_size = 128
     config.intermediate_size = 256
@@ -150,9 +149,6 @@ def _missing_specs(specs: tuple[str, ...], resolved: set[str]) -> list[str]:
 
 @pytest.fixture(scope="module")
 def hybrid_case():
-    if MODEL_TYPE not in CONFIG_MAPPING:
-        pytest.skip("Installed Transformers has no 'olmo_hybrid' implementation")
-
     config = _tiny_config()
     definition = MODEL_MAP[MODEL_TYPE]
     with torch.device("meta"):

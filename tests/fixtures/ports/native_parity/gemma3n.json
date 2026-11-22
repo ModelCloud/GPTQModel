@@ -1,0 +1,82 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "chunk_size_feed_forward": 0,
+  "conf_attention_chunk_size": 4,
+  "conf_attention_context_left": 5,
+  "conf_attention_context_right": 0,
+  "conf_attention_logit_cap": 50.0,
+  "conf_conv_kernel_size": 3,
+  "conf_num_attention_heads": 4,
+  "conf_num_hidden_layers": 2,
+  "conf_reduction_factor": 4,
+  "conf_residual_weight": 0.5,
+  "dtype": null,
+  "gradient_clipping": 10000000000.0,
+  "hidden_size": 32,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "input_feat_size": 32,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "model_type": "gemma3n_audio",
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "problem_type": null,
+  "return_dict": true,
+  "rms_norm_eps": 1e-06,
+  "sscp_conv_channel_size": [
+   16,
+   8
+  ],
+  "sscp_conv_group_norm_eps": 0.001,
+  "sscp_conv_kernel_size": [
+   [
+    3,
+    3
+   ],
+   [
+    3,
+    3
+   ]
+  ],
+  "sscp_conv_stride_size": [
+   [
+    2,
+    2
+   ],
+   [
+    2,
+    2
+   ]
+  ],
+  "transformers_version": "5.23.0",
+  "vocab_offset": 262272,
+  "vocab_size": 128
+ },
+ "config_class": "Gemma3nAudioConfig",
+ "config_module": "configuration_gemma3n",
+ "extra_inputs": {},
+ "float_inputs": {
+  "audio_mel": {
+   "dtype": "float32",
+   "shape": [
+    2,
+    48,
+    32
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_gemma3n",
+   "Gemma3nAudioEncoder"
+  ]
+ ]
+}

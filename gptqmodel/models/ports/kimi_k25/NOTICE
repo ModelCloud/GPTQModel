@@ -1,0 +1,20 @@
+Kimi-K2.5 native Transformers binding and pinned tokenizer
+
+tokenization_kimi.py, tool_declaration_ts.py and LICENSE
+derive from moonshotai/Kimi-K2.5 at revision
+4d01dfe0332d63057c186e0b262165819efb6611, Copyright (c) 2026 Moonshot AI.
+They retain the accompanying Modified MIT License, including its commercial
+display requirement. See LICENSE.
+
+tokenization_kimi.py uses bytes_to_unicode from Hugging Face Transformers
+(transformers.convert_slow_tokenizer, Apache License 2.0); no copy is kept.
+
+native.py adapts Hugging Face Transformers 5.23.0 Kimi-K2.5 native classes,
+Copyright 2026 The HuggingFace Team, licensed under Apache License 2.0.
+The native decoder, generation, cache, vision layers and tensor conversion
+rules remain provided by Transformers; no checkpoint Python is imported.
+
+GPT-QModel adapter code: Copyright 2026 ModelCloud.ai, Apache License 2.0.
+Tokenizer assets are qualification fixtures under tests/fixtures/kimi_k25,
+with their own pinned NOTICE and Moonshot LICENSE. They are not runtime
+package data or a runtime vocabulary fallback.

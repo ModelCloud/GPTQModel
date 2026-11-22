@@ -1,0 +1,18 @@
+{
+  "tensor_key_ranges": [
+    ["lm_head.weight", [], {"dtype": "BF16", "shape": [151936, 1024]}],
+    ["model.embed_tokens.weight", [], {"dtype": "BF16", "shape": [151936, 1024]}],
+    ["model.layers.{}.input_layernorm.weight", ["0-27"], {"dtype": "BF16", "shape": [1024]}],
+    ["model.layers.{}.mlp.down_proj.weight", ["0-27"], {"dtype": "BF16", "shape": [1024, 3072]}],
+    ["model.layers.{}.mlp.gate_proj.weight", ["0-27"], {"dtype": "BF16", "shape": [3072, 1024]}],
+    ["model.layers.{}.mlp.up_proj.weight", ["0-27"], {"dtype": "BF16", "shape": [3072, 1024]}],
+    ["model.layers.{}.post_attention_layernorm.weight", ["0-27"], {"dtype": "BF16", "shape": [1024]}],
+    ["model.layers.{}.self_attn.k_norm.weight", ["0-27"], {"dtype": "BF16", "shape": [128]}],
+    ["model.layers.{}.self_attn.k_proj.weight", ["0-27"], {"dtype": "BF16", "shape": [1024, 1024]}],
+    ["model.layers.{}.self_attn.o_proj.weight", ["0-27"], {"dtype": "BF16", "shape": [1024, 2048]}],
+    ["model.layers.{}.self_attn.q_norm.weight", ["0-27"], {"dtype": "BF16", "shape": [128]}],
+    ["model.layers.{}.self_attn.q_proj.weight", ["0-27"], {"dtype": "BF16", "shape": [2048, 1024]}],
+    ["model.layers.{}.self_attn.v_proj.weight", ["0-27"], {"dtype": "BF16", "shape": [1024, 1024]}],
+    ["model.norm.weight", [], {"dtype": "BF16", "shape": [1024]}]
+  ]
+}

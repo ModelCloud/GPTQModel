@@ -1,5 +1,9 @@
+import importlib
+import importlib.util
 import os
+import sys
 import time
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +12,26 @@ import torch
 import gptqmodel.nn_modules.qlinear.gemm_awq as gemm_awq
 import gptqmodel.nn_modules.qlinear.gemm_awq_triton as gemm_awq_triton
 from gptqmodel.utils.logger import render_table
+
+
+HAS_TRITON = importlib.util.find_spec("triton") is not None
+
+_TRITON_GEMM_MODULE = "gptqmodel.quantization.awq.modules.triton.gemm"
+
+
+def _triton_gemm_module(monkeypatch):
+    """Return the module ``AwqGemmTritonFn`` imports its kernels from.
+
+    The dispatch under test replaces both kernel entry points with fakes, so
+    it does not need Triton. On a host without Triton the real module cannot
+    be imported; stand in an empty module for the duration of the test.
+    """
+
+    if HAS_TRITON:
+        return importlib.import_module(_TRITON_GEMM_MODULE)
+    stub = types.ModuleType(_TRITON_GEMM_MODULE)
+    monkeypatch.setitem(sys.modules, _TRITON_GEMM_MODULE, stub)
+    return stub
 
 
 def _fake_quant_tensors(in_features: int = 32, out_features: int = 8, group_size: int = 32):
@@ -35,16 +59,9 @@ def _patch_backend(monkeypatch, backend: str, calls):
 
         monkeypatch.setattr(gemm_awq_triton, "awq_dequantize_triton", fake_dequant, raising=False)
         monkeypatch.setattr(gemm_awq_triton, "awq_gemm_triton", fake_gemm, raising=False)
-        monkeypatch.setattr(
-            "gptqmodel.quantization.awq.modules.triton.gemm.awq_dequantize_triton",
-            fake_dequant,
-            raising=False,
-        )
-        monkeypatch.setattr(
-            "gptqmodel.quantization.awq.modules.triton.gemm.awq_gemm_triton",
-            fake_gemm,
-            raising=False,
-        )
+        triton_gemm = _triton_gemm_module(monkeypatch)
+        monkeypatch.setattr(triton_gemm, "awq_dequantize_triton", fake_dequant, raising=False)
+        monkeypatch.setattr(triton_gemm, "awq_gemm_triton", fake_gemm, raising=False)
 
         return gemm_awq_triton.AwqGemmTritonFn
 

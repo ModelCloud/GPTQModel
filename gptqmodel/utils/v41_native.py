@@ -6,9 +6,11 @@ dtype. The kernel module is supplied by the caller from an authenticated source.
 
 import torch
 from torch import nn
-from transformers.models.deepseek_v41.modeling_deepseek_v41 import (
+
+from ..models.ports.deepseek_v41.modeling_deepseek_v41 import (
     DeepseekV41Attention,
     DeepseekV41Indexer,
+    dspark_joint_ring,
     select_candidate_blocks,
 )
 
@@ -135,17 +137,6 @@ class V41NativeAttention(DeepseekV41Attention):
         grouped = output.reshape(batch, length, self.config.o_groups, -1)
         return self.o_b_proj(self.o_a_proj(grouped).flatten(2)), None
 
-
-
-
-def dspark_joint_ring(main_kv, anchors, window_size):
-    """Gather independent reference-order rings from one already-projected prefix."""
-    slots = torch.arange(window_size, device=main_kv.device)
-    history = anchors[:, None] - ((anchors[:, None] - slots) % window_size)
-    valid = history >= 0
-    window = main_kv[0, history.clamp_min(0)].masked_fill(~valid[..., None], 0)
-    indices = slots[None].expand(anchors.numel(), -1).masked_fill(~valid, -1)
-    return window, indices
 
 
 class V41NativeDSparkAttention(DeepseekV41Attention):

@@ -116,7 +116,7 @@ def hf_rope_tables(config, positions: int):
     reproduced rather than re-derived.
     """
 
-    from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+    from ..models.ports.native.llama.modeling_llama import LlamaRotaryEmbedding
 
     rotary = LlamaRotaryEmbedding(config)
     probe = torch.zeros(1, 1, dtype=torch.float32)
@@ -207,11 +207,10 @@ def load_tt_llama_weights(checkpoint_dir: str):
     each norm name to its (dense, unquantized) weight.
     """
 
-    from transformers import AutoConfig
-
+    from ..models.ports.native.auto import NativeConfig
     from .tt_blockfloat_quant import load_hf_state_dict
 
-    config = AutoConfig.from_pretrained(checkpoint_dir)
+    config = NativeConfig.from_pretrained(checkpoint_dir)
     qcfg = getattr(config, "quantization_config", None) or {}
     if not isinstance(qcfg, dict):
         qcfg = dict(qcfg)

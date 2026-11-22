@@ -460,6 +460,14 @@ class TestModelDefinitions:
     def test_every_definition_yields_consistent_plan(self, model_type):
         model_cls = MODEL_MAP[model_type]
         cfg = SimpleNamespace(model_type=model_type)
+        if model_type == "interns1":
+            from gptqmodel.models.ports.interns1.configuration_interns1 import InternS1Config
+
+            cfg = InternS1Config()
+        elif model_type == "internvl_chat":
+            from gptqmodel.models.ports.internvl_chat.configuration_internvl_chat import InternVLChatConfig
+
+            cfg = InternVLChatConfig()
         if isinstance(model_cls.dynamic_expert_index, str):
             setattr(cfg, model_cls.dynamic_expert_index, 2)
         plan = model_cls.shared_input_plan(cfg, QC)

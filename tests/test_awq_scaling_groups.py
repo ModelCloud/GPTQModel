@@ -13,7 +13,6 @@ still reproduces its own consumer.
 
 import dataclasses
 import importlib
-from pathlib import Path
 
 import pytest
 import torch
@@ -31,6 +30,12 @@ from gptqmodel.quantization.awq.utils.module import get_op_name
 # module and class are resolved from MODEL_MAP, so adding a model type here
 # automatically tracks its registered definition.
 FAMILY_MODEL_TYPES = [
+    "agnes",
+    "exaone",
+    "grinmoe",
+    "hymba",
+    "internlm2",
+    "internvl_chat",
     # Dense decoder families.
     "llama",
     "mistral",
@@ -74,9 +79,7 @@ FAMILY_MODEL_TYPES = [
     "gemma4",
     "gemma4_unified",
     "nemotron_h",
-    # Remote-code families from issue #4093 items 1-2. Their definitions live in
-    # the checkpoint's own code, so the tiny config is derived from the local
-    # checkpoint config.json instead of `AutoConfig.for_model`.
+    # Package-owned ports from issue #4093 items 1-2.
     "instella",
     "k2_horizon",
     # Issue #4121 item 7: PanGu's top-query layer reads `custom_query` instead
@@ -116,33 +119,6 @@ _BASE_CONFIG = {
     "pad_token_id": 0,
     "eos_token_id": 1,
     "bos_token_id": 0,
-}
-
-# Architectures that only exist in a checkpoint's remote code. The values are
-# the fixtures used to build the tiny model; the invariant is skipped with a
-# precise reason when a fixture is absent.
-REMOTE_CODE_MODEL_PATHS = {
-    "instella": "/monster/data/model/Instella-3B-Instruct",
-    "k2_horizon": "/monster/data/model/K2-Horizon-0.9B",
-    "gpt_pangu": "/monster/data/model/pangu_alpha_2_6B",
-}
-
-# Remote-code configs whose decoder fields are not named like `_BASE_CONFIG`'s.
-# PanGu spells the layer/head counts `num_layers` / `num_heads`.
-REMOTE_CODE_MODEL_OVERRIDES = {
-    "gpt_pangu": {
-        "vocab_size": 128,
-        "hidden_size": 64,
-        "intermediate_size": 256,
-        "num_layers": 2,
-        "num_heads": 4,
-        "max_position_embeddings": 64,
-        "layer_norm_epsilon": 1e-5,
-        "activation_function": "gelu",
-        "bos_token_id": 1,
-        "eos_token_id": 2,
-        "pad_token_id": 0,
-    },
 }
 
 # Composite (text + vision) configs keep the decoder under `text_config`; the
@@ -223,8 +199,42 @@ def _field_names(config):
 
 
 def _tiny_config(model_type):
-    if model_type in REMOTE_CODE_MODEL_PATHS:
-        return _tiny_remote_config(model_type)
+    if model_type in {"exaone", "grinmoe", "hymba", "instella", "internlm2", "internvl_chat"}:
+        return importlib.import_module(f"tests.test_{model_type}_local_port").tiny_config()
+    if model_type == "k2_horizon":
+        from tests.test_k2_horizon_local_port import variant_config
+
+        return variant_config("yarn")
+    if model_type == "agnes":
+        # The CPU decoder invariant must not import the image/video test suite:
+        # that suite requires torchvision, which is optional for text execution.
+        from gptqmodel.models.ports.agnes.configuration_agnes import (
+            AgnesConfig,
+            AgnesTextConfig,
+            AgnesVisionConfig,
+        )
+
+        return AgnesConfig(
+            text_config=AgnesTextConfig(
+                vocab_size=64, hidden_size=16, num_hidden_layers=2, intermediate_size=32,
+                parallel_ffn_intermediate_size=12, num_attention_heads=2, num_key_value_heads=1,
+                head_dim=8, linear_num_key_heads=1, linear_num_value_heads=2,
+                linear_key_head_dim=4, linear_value_head_dim=4, linear_conv_kernel_dim=3,
+                layer_types=["agnes_delta_attention", "agnes_global_attention"],
+                rope_parameters={"rope_type": "default", "rope_theta": 10000.0,
+                                 "partial_rotary_factor": 1.0, "mrope_section": [2, 1, 1]},
+                pad_token_id=0, eos_token_id=None,
+            ),
+            vision_config=AgnesVisionConfig(
+                depth=1, hidden_size=16, intermediate_size=24, num_heads=2, out_hidden_size=16,
+                patch_size=2, temporal_patch_size=1, spatial_merge_size=2, num_position_embeddings=16,
+            ),
+            image_token_id=60, video_token_id=61, vision_start_token_id=62, vision_end_token_id=63,
+        )
+    if model_type == "gpt_pangu":
+        from tests.test_pangu_alpha_local_port import tiny_config
+
+        return tiny_config()
     if model_type in COMPOSITE_TEXT_CONFIG_FAMILIES:
         return _tiny_composite_config(model_type)
     base = AutoConfig.for_model(model_type)
@@ -292,44 +302,6 @@ def _tiny_config(model_type):
                 raise
 
 
-def _tiny_remote_config(model_type):
-    """Build a tiny config from a checkpoint whose architecture is remote code."""
-
-    model_path = Path(REMOTE_CODE_MODEL_PATHS[model_type])
-    if not model_path.is_dir():
-        pytest.skip(f"local {model_type} fixture is unavailable: {model_path}")
-
-    config = AutoConfig.from_pretrained(
-        model_path,
-        trust_remote_code=True,
-        local_files_only=True,
-    )
-    for key, value in _BASE_CONFIG.items():
-        if hasattr(config, key):
-            setattr(config, key, value)
-    for key, value in REMOTE_CODE_MODEL_OVERRIDES.get(model_type, {}).items():
-        setattr(config, key, value)
-    # K2's attention width is `num_attention_heads * head_dim`, which is wider
-    # than `hidden_size` (2048 vs 1536 on the 0.9B checkpoint). Mirror that so
-    # `o_proj` does not accidentally match the norm width and merge with it.
-    tiny_head_dim = 16 if model_type == "k2_horizon" else 8
-    for key in ("head_dim", "rotary_dim", "rope_head_dim"):
-        if hasattr(config, key):
-            setattr(config, key, tiny_head_dim)
-    # Per-layer lists must describe the tiny layer count, not the checkpoint's.
-    if hasattr(config, "num_key_value_heads_per_layer"):
-        config.num_key_value_heads_per_layer = [4] * config.num_hidden_layers
-    if hasattr(config, "mlp_only_layers"):
-        config.mlp_only_layers = list(range(config.num_hidden_layers))
-    config._attn_implementation = "eager"
-    # The invariant compares logits before/after a fold; a bf16 tiny model
-    # would report the dtype's own rounding (~8e-3) instead of fold error.
-    for dtype_attr in ("dtype", "torch_dtype"):
-        if hasattr(config, dtype_attr):
-            setattr(config, dtype_attr, torch.float32)
-    return config
-
-
 def _tiny_composite_config(model_type):
     """Tiny decoder for a composite (text + vision) checkpoint config.
 
@@ -369,11 +341,12 @@ def _in_features(module):
 
 
 def _vocab_size(config) -> int:
-    """Vocabulary size of the decoder, which composite configs keep in `text_config`."""
+    """Resolve native and legacy-wrapper decoder vocabularies."""
 
-    text_config = getattr(config, "text_config", None)
-    if text_config is not None and hasattr(text_config, "vocab_size"):
-        return int(text_config.vocab_size)
+    for name in ("text_config", "llm_config"):
+        text_config = getattr(config, name, None)
+        if text_config is not None and hasattr(text_config, "vocab_size"):
+            return int(text_config.vocab_size)
     return int(config.vocab_size)
 
 
@@ -416,9 +389,12 @@ def _features(layer, plan):
 def _tiny_model(model_type):
     qmodel_cls = MODEL_MAP[model_type]
     torch.manual_seed(0)
-    hf_model = AutoModelForCausalLM.from_config(
-        _tiny_config(model_type), trust_remote_code=True
-    ).eval()
+    if model_type in {"agnes", "exaone", "gpt_pangu", "grinmoe", "hymba", "instella", "internlm2", "internvl_chat", "k2_horizon"}:
+        hf_model = qmodel_cls.loader.from_config(_tiny_config(model_type)).eval()
+    else:
+        hf_model = AutoModelForCausalLM.from_config(
+            _tiny_config(model_type), trust_remote_code=True
+        ).eval()
     try:
         from gptqmodel.models.loader import _convert_model_with_defuser
 
@@ -474,17 +450,19 @@ def _worst_relative_change(hf_model, ids, layer, groups):
         consumers = node.get("_scale_consumers") or []
         consumer_map = {prev_name: consumers} if consumers else None
         with torch.no_grad():
-            before = hf_model(ids).logits.clone()
+            before = hf_model(input_ids=ids).logits.clone()
         apply_scale(layer, [(prev_name, layer_names, scales, None)], consumer_map=consumer_map)
         with torch.no_grad():
-            after = hf_model(ids).logits
+            after = hf_model(input_ids=ids).logits
         worst = max(worst, float((after - before).norm() / before.norm()))
         apply_scale(layer, [(prev_name, layer_names, 1.0 / scales, None)], consumer_map=consumer_map)
     return worst
 
 
 # Families whose decoder layer has no foldable AWQ group and is quantized plainly.
-PLAIN_QUANTIZATION_FAMILIES = {"codegen", "gpt2", "minimax"}
+PLAIN_QUANTIZATION_FAMILIES = {
+    "gpt_pangu", "codegen", "gpt2", "nemotron_h",
+}
 
 # Hybrid SSM families whose decoder forward resolves Mamba-2 scan kernels through
 # `transformers`' hub-kernel fallback. When that decorator selects CUDA-only
@@ -574,7 +552,7 @@ def test_scaling_groups_preserve_decoder_layer_output(family):
         worst = max(worst, _worst_relative_change(hf_model, ids, layer, groups))
 
     if family in PLAIN_QUANTIZATION_FAMILIES:
-        assert worst < 1e-5, f"{family}: AWQ scaling changed the layer output by {worst:.3e}"
+        assert not saw_group, f"{family}: expected plain quantization"
         return
     assert saw_group, f"{family}: no AWQ scaling groups were built"
     assert worst < 1e-5, f"{family}: AWQ scaling changed the layer output by {worst:.3e}"
@@ -588,7 +566,6 @@ MOE_SHARED_FAMILIES = [
     "hy_v3",
     "solar_open",
     "deepseek_v2",
-    "deepseek_v4",
     "qwen2_moe",
 ]
 
@@ -694,8 +671,9 @@ def test_excluded_projection_is_never_a_fold_source(family):
                 f"layers={[get_op_name(layer, m) for m in node['layers']]}"
             )
     # `falcon_mamba` declares every projection `:nosrc`, so it has no Linear
-    # source at all and is quantized plainly.
-    assert checked or family in PLAIN_QUANTIZATION_FAMILIES or family == "falcon_mamba", family
+    # source at all and is quantized plainly. Apertus and LFM3 text fold
+    # only through input norms for the tested layouts.
+    assert checked or family in PLAIN_QUANTIZATION_FAMILIES or family in {"falcon_mamba", "apertus", "lfm3"}, family
 
 
 # Jamba's Mamba-2 mixer resolves its scan/conv kernels through
@@ -768,7 +746,7 @@ def test_jamba_never_folds_x_proj_scale_into_excluded_dt_proj(jamba_torch_mixer)
         apply_scale(layer, [(source, targets, scales, None)])
         try:
             with torch.no_grad():
-                after = hf_model(ids).logits
+                after = hf_model(input_ids=ids).logits
             relative = float((after - before).norm() / before.norm())
             assert relative < 1e-5, f"jamba: folding {source} -> {targets} changed the logits by {relative:.3e}"
             assert torch.equal(layer.mamba.dt_proj.weight, dt_proj_before), (

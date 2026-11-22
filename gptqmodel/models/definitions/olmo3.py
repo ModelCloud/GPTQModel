@@ -9,6 +9,7 @@ from ...utils.device import get_device
 from ...utils.model import get_module_by_name_prefix, move_to, nested_move_to
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 def _prepare_olmo3_replay_kwargs(model_def, layer, layer_input, additional_inputs, target_device):
@@ -51,6 +52,11 @@ def _prepare_olmo3_replay_kwargs(model_def, layer, layer_input, additional_input
 
 
 class Olmo3QModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("olmo3").merge(LlamaFusableConfig())
 
     pre_lm_head_norm_module = "model.norm"
