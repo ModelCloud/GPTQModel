@@ -3266,6 +3266,8 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         return qweight.to(dtype=self.pack_dtype)
 
+    @t.no_grad()
+    @t.inference_mode(False)
     def pack_original(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
         with threadpool_limits(limits=1):
             # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?

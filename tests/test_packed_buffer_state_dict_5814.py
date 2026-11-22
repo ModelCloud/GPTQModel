@@ -84,6 +84,23 @@ def test_packing_inside_ambient_inference_mode_stays_mutable(pack_impl):
         assert not getattr(module, name).is_inference(), name
 
 
+@pytest.mark.parametrize("assign", [False, True])
+@pytest.mark.parametrize("pack_impl", ["block", "original"])
+def test_ambient_inference_packing_accepts_a_state_dict_copy(pack_impl, assign):
+    # #5919 removed the inference-mode override from the original packer, so a
+    # module packed inside ``torch.inference_mode()`` kept inference tensors and
+    # an ordinary copy failed before the module ever ran a forward.
+    target = _pack(_quant(), 1.0, pack_impl, inference=True)
+    source = _pack(_quant(), 2.0, pack_impl)
+
+    target.load_state_dict(source.state_dict(), assign=assign)
+
+    for name in BUFFERS:
+        torch.testing.assert_close(
+            getattr(target, name), getattr(source, name), rtol=0, atol=0
+        )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="pack_gpu needs a CUDA device")
 def test_pack_gpu_leaves_mutable_checkpoint_buffers():
     module = TorchLinear(
