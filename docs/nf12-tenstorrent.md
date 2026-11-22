@@ -156,12 +156,37 @@ occupy 477,749,758 canonical bytes, from 635,797,504 logical BF16 bytes, with
 54,807 escape groups. The 144 target matrices together use 1,868,602,944
 canonical bytes. Rank-one vision parameters and normalization gains are BF16.
 
+### Resident weights and operator scratch
+
+| Device DRAM for weights | Matched BF16 bytes | TTNN NF12 bytes | TT-XLA NF12 bytes |
+| --- | ---: | ---: | ---: |
+| Token embedding | 926,318,592 | 695,461,184 | 695,463,936 |
+| LM head | 926,318,592 | 695,392,000 | 695,394,304 |
+| Vision matrices (142) | 635,830,272 | 477,752,896 | 477,933,568 |
+| Total (144 matrices) | 2,488,467,456 | 1,868,606,080 | 1,868,791,808 |
+| Weight reduction | | 24.91% | 24.90% |
+
+These tensor allocations include page alignment and K padding for the patch
+projection. They exclude rank-one parameters, activations, and runtime allocator
+reservations. The scratch figures below are program allocations, exclusive of
+runtime and allocator overhead.
+
+| Operator scratch | TTNN NF12 | TT-XLA NF12 | Matched BF16 |
+| --- | ---: | ---: | ---: |
+| Gather circular buffer per worker | 2,752 B | 4,224 B | — |
+| LM head circular buffers per worker at M=1 | 17,920 B | 17,920 B | 17,920 B |
+| LM head circular buffers per worker at M=128 or 256 | 30,208 B | 30,208 B | 30,208 B |
+| LM head temporary DRAM beyond activations and results | 0 B | 0 B | 0 B |
+| Q projection temporary FP32 DRAM at M=65 | 393,216 B | 393,216 B | 393,216 B |
+| MLP expansion temporary FP32 DRAM at M=65 | 1,572,864 B | 1,572,864 B | 1,572,864 B |
+
 ## Checkpoint kernel measurements
 
 Latency is synchronized wall time, median and p95 of eight samples after one
 warmup. Timed native calls take resident activations and weights. TT-XLA pays
-the PJRT launch, shape operations, and a host output read that forces completion. `GB/s` for linear uses one logical weight
-stream per call. It measures effective bandwidth, including the compute cost
+the PJRT launch, shape operations, and a host output read that forces
+completion. With eight samples, p95 is the slowest sample. `GB/s` for linear
+uses one logical weight stream per call. It measures effective bandwidth, including the compute cost
 and any additional reads. Gather and decode bandwidth use logical output bytes.
 
 ### Native TTNN LM head
@@ -196,35 +221,37 @@ throughout the contraction.
 
 ### TT-XLA LM head
 
-| M | NF12 ms median / p95 | BF16 ms median / p95 | NF12 GB/s | Scaled RMSE |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 348.17 / 349.74 | 12.22 / 351.84 | 2.00 | 0.001072 |
-| 4 | 352.62 / 370.00 | 14.76 / 357.97 | 1.97 | 0.001073 |
-| 8 | 358.57 / 361.00 | 23.64 / 362.89 | 1.94 | 0.001067 |
-| 16 | 370.18 / 370.89 | 27.22 / 374.43 | 1.88 | 0.001058 |
-| 32 | 349.58 / 352.06 | 15.82 / 354.80 | 1.99 | 0.001063 |
-| 128 | 401.26 / 404.67 | 78.76 / 409.31 | 1.73 | 0.001067 |
-| 256 | 807.24 / 1143.87 | 140.73 / 835.06 | 0.86 | 0.001068 |
+| M | NF12 ms median / p95 | BF16 ms median / p95 | NF12 / BF16 effective GB/s |
+| ---: | ---: | ---: | ---: |
+| 1 | 363.18 / 364.32 | 10.94 / 368.58 | 1.91 / 84.69 |
+| 4 | 365.29 / 365.84 | 12.88 / 370.77 | 1.90 / 71.94 |
+| 8 | 367.93 / 368.60 | 15.49 / 372.93 | 1.89 / 59.82 |
+| 16 | 373.39 / 375.28 | 22.30 / 379.06 | 1.86 / 41.53 |
+| 32 | 364.19 / 366.85 | 12.32 / 369.79 | 1.91 / 75.16 |
+| 128 | 393.79 / 395.63 | 66.33 / 408.32 | 1.77 / 13.97 |
+| 256 | 799.95 / 2,182.73 | 134.26 / 831.92 | 0.87 / 6.90 |
 
 ### TT-XLA token embedding
 
 | IDs | NF12 µs median / p95 | BF16 µs median / p95 |
 | --- | ---: | ---: |
-| one | 991 / 1598 | 517 / 1083 |
-| repeat | 9353 / 11764 | 3606 / 8672 |
-| contiguous | 9404 / 15835 | 4816 / 7875 |
-| scattered | 1335 / 1970 | 802 / 2941 |
+| one | 418 / 854 | 195 / 470 |
+| repeat | 395 / 601 | 137 / 233 |
+| contiguous | 663 / 802 | 195 / 278 |
+| scattered | 494 / 612 | 291 / 567 |
 
 ### Representative vision linears
 
-| Checkpoint projection | M | Native TTNN NF12 / BF16 ms | TT-XLA NF12 / BF16 ms |
-| --- | ---: | ---: | ---: |
-| Patch projection | 64 | 2.54 / 0.24 | 2.34 / 0.43 |
-| Q projection with bias | 65 | 2.09 / 0.27 | 2.13 / 0.93 |
-| MLP expansion with bias | 65 | 5.00 / 1.45 | 4.59 / 1.76 |
-| MLP contraction with bias | 65 | 6.95 / 0.45 | 7.00 / 0.94 |
-| Merger input | 16 | 14.74 / 1.36 | 12.99 / 0.85 |
-| Merger output | 16 | 7.08 / 0.53 | 12.80 / 0.73 |
+Values are median / p95.
+
+| Checkpoint projection | M | TTNN NF12 ms | TTNN BF16 ms | TT-XLA NF12 ms | TT-XLA BF16 ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Patch projection | 64 | 2.54 / 5.78 | 0.24 / 0.42 | 2.30 / 2.46 | 0.37 / 2.12 |
+| Q projection with bias | 65 | 2.09 / 2.86 | 0.27 / 0.48 | 2.11 / 2.48 | 0.75 / 1.77 |
+| MLP expansion with bias | 65 | 5.00 / 5.01 | 1.45 / 4.21 | 4.41 / 4.91 | 1.54 / 4.14 |
+| MLP contraction with bias | 65 | 6.95 / 7.45 | 0.45 / 3.26 | 6.97 / 8.39 | 0.84 / 6.65 |
+| Merger input | 16 | 14.74 / 15.66 | 1.36 / 2.06 | 13.09 / 13.29 | 0.83 / 12.95 |
+| Merger output | 16 | 7.08 / 7.78 | 0.53 / 0.65 | 13.12 / 13.83 | 0.69 / 12.96 |
 
 Both runtimes verified every logical row of the token table and LM head,
 and every row of the seven representative vision matrices. All 21 linear
@@ -236,9 +263,14 @@ Across the head samples, top-1, top-5 and top-10 overlap were at least
 K-reduction order. Native reuse of up to four activation tiles reduced
 weight decoding at that shape and kept scratch bounded.
 
-TT-XLA resident bytes were 695,463,936 for the token table and 695,394,304
-for the head. Its 2,048-row head decode measured 9.50 ms median and
-9.89 ms p95, including the host read.
+| LM-head decode-only workload | Native TTNN median / p95 | TT-XLA median / p95 |
+| --- | ---: | ---: |
+| 2,048 rows × 2,304 BF16 values | 5.05 / 5.34 ms | 6.22 / 6.78 ms |
+| Effective output bandwidth | 1.87 GB/s | 1.52 GB/s |
+
+At M=256 the one-activation-tile schedule took 1,657.75 ms on TTNN and
+2,883.01 ms on TT-XLA. Reusing each decoded tile for up to four activation
+tiles reduced the medians to 407.05 ms and 799.95 ms, respectively.
 
 ## Mixed-runtime model validation
 
@@ -248,11 +280,11 @@ expert operations on CPU. Each paired run kept the released NVFP4/MXFP8
 expert payloads fixed. The handoff variant with BF4_B/BF8_B experts needs
 its corresponding checkpoint to establish equivalent model-level results.
 
-| Native TTNN input | Patch blocks | Patch scaled RMSE | Block 0 scaled RMSE | 23-block scaled RMSE | Merged 2,304-wide token scaled RMSE |
+| Vision input, both backends | Patch blocks | Patch scaled RMSE | Block 0 scaled RMSE | 23-block scaled RMSE | Merged 2,304-wide token scaled RMSE |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| square | 4 | 0.001068 | 0.001998 | 0.009038 | 0.009444 |
-| rectangle | 6 | 0.001079 | 0.001874 | 0.009472 | 0.008421 |
-| processor pair | 10 | 0.0002383 | 0.003551 | 0.01432 | 0.0245 |
+| square | 4 | 0.001068 | 0.002049 | 0.008138 | 0.009500 |
+| rectangle | 6 | 0.001079 | 0.001746 | 0.008450 | 0.008290 |
+| processor pair | 10 | 0.0002383 | 0.003008 | 0.01596 | 0.03507 |
 
 Position sums matched bitwise for all three inputs. The processor case sent
 two differently sized images through one vision forward. On each backend,
@@ -262,7 +294,10 @@ HiFi4 arithmetic, K-reduction order, bias and output conversion for both paths.
 Against CPU BF16, the processor-pair difference starts in the patch projection
 and grows through the tower.
 
-| Native TTNN logits | Max abs | Scaled RMSE | Top-1 / 5 / 10 overlap | KLD | BF16 / NF12 PPL |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| text | 0.09505 | 0.0007206 | 100.00% / 100.00% / 100.00% | 1.9454e-05 | 182.2207 / 182.2977 |
-| image | 7.59959 | 0.0944021 | 100.00% / 92.00% / 92.00% | 0.0366887 | 6715.163 / 6506.864 |
+Initial image tests also exposed a GPT-QModel checkpoint-loading bug. The
+vision tower loaded an empty non-persistent axial rotary buffer from its meta
+placeholder, with no initializer to restore the frequency values. The code now
+rebuilds the buffer from the vision config in `_init_weights`. A checkpoint
+save-and-load regression checks the expected column and row phases. The table
+above was measured after that fix. The earlier image logit measurements varied
+with the uninitialized buffer and have been withdrawn.
