@@ -83,9 +83,13 @@ class LFM3QModel(BaseQModel):
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Search only the two input norms. The generic planner compensates
-        # the source-dtype sigmoid gate when folding the attention input norm.
-        sources = (module.ffn_norm, module.operator_norm)
+        # A conv layer has no attention gate, so folding both of its input
+        # norms is neutral. An attention layer's ``operator_norm`` feeds the
+        # gated q/k/v projections; compensating that fold rewrites the
+        # non-quantized ``gate_proj``, so only ``ffn_norm`` is folded there.
+        sources = (module.ffn_norm,)
+        if not module.is_attention_layer:
+            sources = (module.ffn_norm, module.operator_norm)
         return [
             node for node in super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
             if node["prev_op"] in sources

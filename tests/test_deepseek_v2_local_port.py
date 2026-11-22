@@ -139,8 +139,7 @@ def test_routing_matches_independent_legacy_oracle(method, normalize, top_k):
     expected = scores.gather(1, indices)
     if top_k > 1 and normalize:
         expected = expected / (expected.sum(-1, keepdim=True) + 1e-20)
-    else:
-        expected *= 3.7
+    expected *= 3.7
     got_logits, weights, got_indices = router(x)
     order = weights.argsort(-1, descending=True)
     torch.testing.assert_close(got_logits, logits, rtol=0, atol=0)
@@ -149,9 +148,9 @@ def test_routing_matches_independent_legacy_oracle(method, normalize, top_k):
 
 
 @pytest.mark.parametrize("method", ["greedy", "group_limited_greedy"])
-@pytest.mark.parametrize("scale", [1.0, 1e40, 1e-46])
+@pytest.mark.parametrize("scale", [1.0, 3.7, 1e-30])
 @torch.inference_mode()
-def test_normalized_routing_ignores_even_extreme_finite_scale(method, scale):
+def test_normalized_routing_applies_finite_scale(method, scale):
     hf_model = model(topk_method=method, norm_topk_prob=True, routed_scaling_factor=scale)
     router = hf_model.model.layers[1].mlp.gate
     x = torch.randn(2, 5, 24)
@@ -164,18 +163,38 @@ def test_normalized_routing_ignores_even_extreme_finite_scale(method, scale):
         candidates[~allowed] = 0
     indices = candidates.argsort(-1, descending=True)[:, :2]
     expected = candidates.gather(1, indices)
-    expected /= expected.sum(-1, keepdim=True) + 1e-20
+    expected = expected / (expected.sum(-1, keepdim=True) + 1e-20) * scale
     got_logits, weights, got_indices = router(x)
     order = weights.argsort(-1, descending=True)
     torch.testing.assert_close(got_logits, logits, rtol=0, atol=0)
     assert torch.isfinite(weights).all()
     assert torch.equal(got_indices.gather(1, order), indices)
-    torch.testing.assert_close(weights.gather(1, order), expected, rtol=0, atol=0)
+    torch.testing.assert_close(weights.gather(1, order), expected, rtol=1e-5, atol=0)
     ids = torch.tensor([[1, 4, 7, 9, 12]])
-    reference = model(topk_method=method, norm_topk_prob=True, routed_scaling_factor=1.0)
     actual = hf_model(ids, use_cache=False).logits
     assert torch.isfinite(actual).all()
-    torch.testing.assert_close(actual, reference(ids, use_cache=False).logits, rtol=0, atol=0)
+    if scale == 1.0:
+        reference = model(topk_method=method, norm_topk_prob=True, routed_scaling_factor=1.0)
+        torch.testing.assert_close(actual, reference(ids, use_cache=False).logits, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("method", ["greedy", "group_limited_greedy"])
+@torch.inference_mode()
+def test_normalized_routing_matches_native_selection_with_scale(method):
+    scale = 3.7
+    native = NativeModel(tiny_config(topk_method=method, norm_topk_prob=True, routed_scaling_factor=scale)).eval()
+    actual = model(topk_method=method, norm_topk_prob=True, routed_scaling_factor=scale)
+    assert native.load_state_dict(actual.state_dict()).missing_keys == []
+    torch.manual_seed(0)
+    x = torch.randn(2, 5, 24)
+    native_logits, native_weights, native_indices = native.model.layers[1].mlp.gate(x)
+    actual_logits, actual_weights, actual_indices = actual.model.layers[1].mlp.gate(x)
+    torch.testing.assert_close(actual_logits, native_logits, rtol=0, atol=0)
+    assert torch.equal(actual_indices, native_indices)
+    # Transformers 5.23 does not renormalize. Compare against the native
+    # selection and scale after applying the legacy normalization step.
+    expected = native_weights / (native_weights.sum(dim=-1, keepdim=True) + 1e-20) * scale
+    torch.testing.assert_close(actual_weights, expected, rtol=1e-6, atol=1e-7)
 
 
 @pytest.mark.parametrize("return_dict,stage,q_rank,dtype,routed,freq", [
