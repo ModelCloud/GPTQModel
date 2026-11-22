@@ -56,7 +56,7 @@ def _vision(tower, inputs):
     pos_sums = []
     merge = tower.config.spatial_merge_size
     for _, h, w in inputs["image_grid_thw"].tolist():
-        indices, weights = _bilinear_taps(h * merge, w * merge, tower.embeddings.grid_size)
+        indices, weights = _bilinear_taps(h * merge, w * merge, tower.embeddings.grid_size, merge)
         pos_sums.append((tower.embeddings.position_embedding(indices) * weights[:, :, None]).sum(1))
     parts["position"] = torch.cat(pos_sums).bfloat16()
     parts["hidden"] = out.last_hidden_state
@@ -68,11 +68,12 @@ def _logits(model, ids, inputs):
     return model(input_ids=ids, use_cache=False, **inputs).logits
 
 
-def _logit_errors(output, oracle, ids):
+def _logit_errors(output, oracle, ids, image_token):
     expected = oracle.log_softmax(-1)
     actual = output.log_softmax(-1)
-    want_ppl = F.cross_entropy(oracle[:, :-1].flatten(0, 1), ids[:, 1:].flatten()).exp()
-    got_ppl = F.cross_entropy(output[:, :-1].flatten(0, 1), ids[:, 1:].flatten()).exp()
+    targets = ids[:, 1:].flatten().masked_fill(ids[:, 1:].flatten() == image_token, -100)
+    want_ppl = F.cross_entropy(oracle[:, :-1].flatten(0, 1), targets).exp()
+    got_ppl = F.cross_entropy(output[:, :-1].flatten(0, 1), targets).exp()
     return {
         **_errors(output, oracle),
         "kld": float((expected.exp() * (expected - actual)).sum(-1).mean()),
@@ -130,7 +131,7 @@ def main():
                 }), flush=True)
             for name, (ids, inputs, expected) in paired.items():
                 actual = _logits(model, ids, inputs)
-                print(json.dumps({"logits": name, **_logit_errors(actual, expected, ids)}), flush=True)
+                print(json.dumps({"logits": name, **_logit_errors(actual, expected, ids, model.config.image_token_id)}), flush=True)
 
 
 if __name__ == "__main__":

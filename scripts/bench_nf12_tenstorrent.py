@@ -51,14 +51,14 @@ def _errors(output, oracle):
 
 def _measure(op, sync, repeats, byte_count):
     out = op()
-    sync()
+    sync(out)
     samples = []
     for _ in range(repeats):
         del out
         sync()
         start = time.perf_counter_ns()
         out = op()
-        sync()
+        sync(out)
         samples.append((time.perf_counter_ns() - start) / 1000)
     median = statistics.median(samples)
     return out, {
@@ -77,7 +77,7 @@ def _runtime(backend, chip):
         ttnn = import_ttnn()
         mesh = open_mesh(device_id=chip, owner="nf12-benchmark")
         try:
-            yield TTNNNF12, mesh.device, ttnn.to_torch, lambda: ttnn.synchronize_device(mesh.device)
+            yield TTNNNF12, mesh.device, ttnn.to_torch, lambda _output=None: ttnn.synchronize_device(mesh.device)
         finally:
             close_mesh(owner="nf12-benchmark")
     else:
@@ -90,7 +90,14 @@ def _runtime(backend, chip):
         if xr.device_type() != "TT":
             raise RuntimeError("Launch the TT-XLA benchmark with PJRT_DEVICE=TT")
         device = torch_xla.device(chip)
-        yield TTXLANF12, device, torch.Tensor.cpu, lambda: torch_xla.sync(wait=True)
+        def complete(output=None):
+            if output is None:
+                torch_xla.sync(wait=True)
+            else:
+                # Force this specific lazy result to complete. Marking an XLA
+                # step alone can time only submission for inference tensors.
+                output.cpu()
+        yield TTXLANF12, device, torch.Tensor.cpu, complete
 
 
 def _embedding(w, name, runtime, backend, repeats, *, exhaustive=False):

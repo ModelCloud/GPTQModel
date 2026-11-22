@@ -23,7 +23,7 @@ host activations in both backends. Native operations also expose
 TT-XLA linear accepts XLA tensors, and its gather accepts CPU signed IDs or
 device int32 IDs. The model's remaining operators run where the model is placed.
 
-| Site | Dense forward at `465290e6f` | With the opt-in installer |
+| Site | Dense forward at `0071b1aa0` | With the opt-in installer |
 | --- | --- | --- |
 | Token embedding and RMS gain | `gptqmodel/models/inkling2_loop/modeling.py:876` | `_NF12Embedding` runs gather and calls the existing `embed_norm` |
 | LM head, valid vocabulary crop, softcap | `gptqmodel/models/inkling2_loop/modeling.py:1315` | `_NF12Linear` supplies BF16 logits to the existing crop and FP32 softcap |
@@ -140,7 +140,7 @@ reservations. TT-XLA rounds each packed stream to a 4,096-byte page.
 
 Latency is synchronized wall time, median and p95 of eight samples after one
 warmup. Timed native calls take resident activations and weights. TT-XLA pays
-the PJRT launch and shape operations. `GB/s` for linear uses one logical weight
+the PJRT launch, shape operations, and a host output read that forces completion. `GB/s` for linear uses one logical weight
 stream per call. It measures effective bandwidth, including the compute cost
 and any additional reads. Gather and decode bandwidth use logical output bytes.
 
