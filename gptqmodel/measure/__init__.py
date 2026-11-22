@@ -26,7 +26,7 @@ from .metrics import (
     topk_overlap,
 )
 from .report import MeasurementReport
-from .runner import MeasurementError, build_token_rows, measure_models
+from .runner import MeasurementError, TokenWindow, build_token_rows, measure_models
 
 
 __all__ = [
@@ -40,6 +40,7 @@ __all__ = [
     "PPLConfig",
     "RMSEConfig",
     "TOPKConfig",
+    "TokenWindow",
     "build_token_rows",
     "fuse",
     "kl_divergence",

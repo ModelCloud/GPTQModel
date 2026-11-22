@@ -112,6 +112,32 @@ GradedThresholdConfig(
 - Without grades at all, `report.overall` is `None` and `report.passed` is
   `None`: "measured" never reads as "passed".
 
+## Sliding windows
+
+PPL scores every next-token transition in a row exactly once. A row longer than
+`window` is sliced into windows, and each window carries a scoring mask over its
+tokens: only targets the row has not scored yet are marked, so overlap is used
+as model context and never counts a transition twice.
+
+The effective step is capped at `window - 1`. A window of `w` tokens can score
+at most `w - 1` transitions, and stepping further would drop the transition at
+each seam. Capping it keeps one token of context across every boundary, so
+`stride=0`, `stride=window`, and overlapping strides all cover the same
+transitions. `build_token_rows()` returns these `TokenWindow` objects; passing
+plain `[1, tokens]` tensors to `measure_models()` still means "score every
+transition in this row".
+
+```python
+from gptqmodel.measure import PPLConfig, build_token_rows
+
+windows = build_token_rows(tokenizer, texts, window=512, stride=256)
+# each window: .input_ids [1, tokens], .score_mask [1, tokens]
+```
+
+A position-local model is the regression for this: its logits do not depend on
+the window, so changing `window` or `stride` must not change PPL.
+
+
 ## Batching and reproducibility
 
 Default `batch=1`, and that default is the reproducible one. In bfloat16 the

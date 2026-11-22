@@ -58,11 +58,17 @@ def mean_negative_log_likelihood(
     *,
     ignore_index: Optional[int] = None,
     attention_mask: Optional[torch.Tensor] = None,
+    score_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[float, int]:
     """``(sum of -log p(token), number of scored tokens)`` over next-token pairs.
 
     Returned as a sum and a count rather than a mean so several batches can be
     accumulated without weighting mistakes.
+
+    ``attention_mask`` marks real tokens so padding is not scored. ``score_mask``
+    is the window's own coverage mask: position ``j`` is True when ``j`` is a
+    target this window is responsible for. Overlapping windows pass their mask
+    so a target shared as context by a later window is not counted twice.
     """
 
     shifted_logits, targets = _shifted(logits, input_ids)
@@ -87,6 +93,15 @@ def mean_negative_log_likelihood(
                 f"input_ids {tuple(input_ids.shape)}"
             )
         keep &= attention_mask[:, 1:].bool()
+    if score_mask is not None:
+        # A target belongs to exactly one window. Windows overlap for context,
+        # not to score the same transition again.
+        if score_mask.shape != input_ids.shape:
+            raise ValueError(
+                f"score_mask {tuple(score_mask.shape)} does not match "
+                f"input_ids {tuple(input_ids.shape)}"
+            )
+        keep &= score_mask[:, 1:].bool()
     picked = picked[keep]
     if picked.numel() == 0:
         return 0.0, 0
