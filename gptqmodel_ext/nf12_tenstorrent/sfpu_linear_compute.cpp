@@ -54,6 +54,10 @@ void kernel_main() {
 #endif
 
     compute_kernel_hw_startup<SrcOrder::Reverse>(activation, decoded, output);
+    if constexpr (!dense) {
+        // Set the SFPU configuration on every worker, even after another kernel used it.
+        MATH(SFPU_UNARY_INIT(unused));
+    }
     for (uint32_t m = 0; m < m_tiles; m += m_group) {
         const uint32_t live = m + m_group <= m_tiles ? m_group : m_tiles - m;
         cb_wait_front(activation, m_group * k_tiles);

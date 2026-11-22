@@ -17,6 +17,9 @@ void kernel_main() {
     const uint32_t blocks = get_arg_val<uint32_t>(0);
 
     compute_kernel_hw_startup(src, dst);
+    if constexpr (!dense) {
+        MATH(SFPU_UNARY_INIT(unused));
+    }
     copy_init(src);
     for (uint32_t block = 0; block < blocks; ++block) {
         cb_wait_front(src, inputs);
