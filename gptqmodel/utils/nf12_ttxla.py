@@ -57,7 +57,7 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
                     tuple(shapes[1]), (1, round_up(m, 32)), (round_up(m, 32), k)]
         expected_dtypes = ("si32", "si32", "si32", "bf16")
         tasks = round_up(m, 32) // 32 * (k // 32)
-        cbs = [_cb(24, "UInt32", 1536 + 128 + 2048 + 8 * 64)]
+        cbs = [_cb(24, "UInt32", 128 + 128 + 2 * 2048 + 16 * 64)]
         kernels = [("gather_xla", "noc", [0, 1, 2, 3], [k, tasks])]
     elif op == "linear":
         nt, kt, mt = round_up(n, 32) // 32, k // 32, round_up(m, 32) // 32
@@ -202,19 +202,27 @@ def _blackhole_device(device):
 class TTXLANF12:
     """Single-chip packed weights for the Tenstorrent PJRT backend."""
 
-    def __init__(self, device, descriptor, weight):
+    def __init__(self, device, descriptor, weight, *, row_major=False):
         device = _blackhole_device(device)
         verify_nf12(descriptor, weight)
         _install_resolver()
         self.device = device
         self.descriptor = descriptor
-        self.packed = _tiled_words(weight.packed.view(torch.int32)).to(device)
+        self.row_major = row_major
+        if row_major:
+            from .nf12_codec import rowmajor_pack_cpu
+
+            packed, escapes = rowmajor_pack_cpu(weight.packed, weight.escapes, weight.exp_base)
+        else:
+            packed, escapes = weight.packed, weight.escapes
+        self.packed = _tiled_words(packed.view(torch.int32)).to(device)
         # The Torch/XLA lazy cache can reuse an executable for equal operand
         # shapes even when frontend attributes differ. Read per-weight values
         # from memory so two matrices can safely use the same executable.
         header = torch.zeros(16, dtype=torch.int32)
         header[:3] = torch.tensor([weight.exp_base, descriptor.logical_shape[0], weight.shape[0] // 16])
-        escape_stream = torch.cat((header, weight.escapes.view(torch.int32).flatten()))
+        header[3] = int(row_major)
+        escape_stream = torch.cat((header, escapes.view(torch.int32).flatten()))
         self.escapes = _tiled_words(escape_stream).to(device)
 
     @property
@@ -262,6 +270,8 @@ class TTXLANF12:
         return tiles.reshape(-1, 32).to(self.device)
 
     def linear(self, x, bias=None, *, baseline=None, m_block=4):
+        if self.row_major:
+            raise ValueError("The TT-XLA NF12 row-major layout supports embedding only")
         n, k = self.descriptor.logical_shape
         padded_n, padded_k = self.descriptor.padded_shape
         if x.device != self.device or x.dtype != torch.bfloat16 or not x.ndim or x.shape[-1] != k:

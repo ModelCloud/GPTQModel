@@ -105,10 +105,10 @@ def _runtime(backend, chip):
         yield TTXLANF12, device, torch.Tensor.cpu, complete
 
 
-def _embedding(w, name, runtime, backend, repeats, *, exhaustive=False):
+def _embedding(w, name, runtime, backend, repeats, *, exhaustive=False, row_major=False):
     make, device, copy, sync = runtime
     descriptor, packed = prepare_nf12(w, name)
-    layer = make(device, descriptor, packed)
+    layer = make(device, descriptor, packed, row_major=True) if row_major else make(device, descriptor, packed)
     rows = len(w)
     if backend == "ttnn":
         import ttnn
@@ -149,11 +149,13 @@ def _embedding(w, name, runtime, backend, repeats, *, exhaustive=False):
             full, atom_read = _measure(lambda: layer.gather_device(resident, index.numel(), full_atoms=True),
                                        sync, repeats, index.numel() * w.shape[1] * 2)
             _same(copy(full)[:, :w.shape[1]].reshape_as(out), out)
+        column_block_bytes = 128 if row_major else 192 if backend == "ttnn" else 2 * 1536
         print(json.dumps({
             "op": "embedding", "tensor": name, "case": label, "ids": index.numel(), "shape": list(w.shape),
             "packed_bytes": descriptor.packed_bytes, "resident_bytes": layer.resident_bytes,
             "resident_ids_on_both_paths": True,
-            "canonical_bytes_per_uncached_row": (192 if backend == "ttnn" else 2 * 1536) * padded_k // 64,
+            "layout": "row_major" if row_major else "canonical",
+            "packed_read_bytes_per_uncached_row": column_block_bytes * padded_k // 64,
             "bf16_gather": baseline, "full_atoms": atom_read, **measured,
         }), flush=True)
     if exhaustive:
@@ -214,14 +216,14 @@ def _linear(w, name, runtime, backend, repeats, sizes, *, bias=None, exhaustive=
     return descriptor
 
 
-def _smoke(runtime, backend, repeats):
+def _smoke(runtime, backend, repeats, *, row_major=False):
     w = torch.randn(545, 129).bfloat16()
     # Fill an entire canonical lane group at a nonzero vocabulary slice.
     raw = torch.tensor([0, -32768, 1, -32767, 32640, -128, 32641, -63], dtype=torch.int16)
     special = w.view(torch.int16)
     special[32, [0, 1, 8, 9]] = raw[[0, 1, 4, 5]]
     special[40, [0, 1, 8, 9]] = raw[[2, 3, 6, 7]]
-    _embedding(w, "synthetic.special", runtime, backend, repeats, exhaustive=True)
+    _embedding(w, "synthetic.special", runtime, backend, repeats, exhaustive=True, row_major=row_major)
     w = torch.randn(97, 97).bfloat16() * 0.03125
     _linear(w, "synthetic.linear", runtime, backend, repeats, [1, 67, 160])
     _linear(w, "synthetic.bias", runtime, backend, repeats, [4, 128], bias=torch.randn(len(w)).bfloat16() * 0.03125)
@@ -262,7 +264,7 @@ def _smoke(runtime, backend, repeats):
     print(json.dumps({"op": "cache_reuse", "distinct_exponent_bases": True}), flush=True)
 
 
-def _checkpoint(path, runtime, backend, repeats, exhaustive, *, lm_head_only=False, embedding_only=False):
+def _checkpoint(path, runtime, backend, repeats, exhaustive, *, lm_head_only=False, embedding_only=False, row_major=False):
     weight_map = json.loads((path / "model.safetensors.index.json").read_text())["weight_map"]
     embedding = "model.llm.embed.weight"
     lm_head = "model.llm.unembed.weight"
@@ -289,7 +291,7 @@ def _checkpoint(path, runtime, backend, repeats, exhaustive, *, lm_head_only=Fal
                 bias = shard.get_tensor(bias_key) if bias_key in weight_map else None
                 _linear(w, name, runtime, backend, repeats, sizes, bias=bias, exhaustive=exhaustive)
             else:
-                _embedding(w, name, runtime, backend, repeats, exhaustive=exhaustive)
+                _embedding(w, name, runtime, backend, repeats, exhaustive=exhaustive, row_major=row_major)
 
 
 def _package_version(name):
@@ -306,6 +308,7 @@ def main():
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--exhaustive", action="store_true", help="Check every logical embedding row on the device")
+    parser.add_argument("--row-major-embedding", action="store_true", help="Use row-major NF12 for embedding tables")
     selected = parser.add_mutually_exclusive_group()
     selected.add_argument("--lm-head-only", action="store_true", help="Benchmark only the Inkling LM head")
     selected.add_argument("--embedding-only", action="store_true", help="Benchmark only the Inkling token embedding")
@@ -314,16 +317,18 @@ def main():
         parser.error("--repeats must be positive")
     if (args.lm_head_only or args.embedding_only) and args.checkpoint is None:
         parser.error("--lm-head-only and --embedding-only require --checkpoint")
+    if args.row_major_embedding and args.backend != "ttxla":
+        parser.error("--row-major-embedding currently requires --backend ttxla")
     torch.set_num_threads(6)
     torch.manual_seed(12)
     print(json.dumps({"backend": args.backend, "chip": args.chip, "repeats": args.repeats, "torch": torch.__version__,
                       "pjrt_plugin": _package_version("pjrt-plugin-tt")}), flush=True)
     with torch.inference_mode(), _runtime(args.backend, args.chip) as runtime:
         if args.checkpoint is None:
-            _smoke(runtime, args.backend, args.repeats)
+            _smoke(runtime, args.backend, args.repeats, row_major=args.row_major_embedding)
         else:
             _checkpoint(args.checkpoint, runtime, args.backend, args.repeats, args.exhaustive,
-                        lm_head_only=args.lm_head_only, embedding_only=args.embedding_only)
+                        lm_head_only=args.lm_head_only, embedding_only=args.embedding_only, row_major=args.row_major_embedding)
 
 
 if __name__ == "__main__":
