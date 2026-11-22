@@ -85,26 +85,33 @@ class TTNNNF12:
         ttnn = import_ttnn()
         return ttnn.allocate_tensor_on_device(ttnn.Shape(shape), dtype, layout, self.device, ttnn.DRAM_MEMORY_CONFIG)
 
+    def _validate_device_tensor(self, tensor, shape, dtype, layout, name):
+        ttnn = import_ttnn()
+        if (tuple(tensor.shape) != tuple(shape) or tensor.dtype != dtype or tensor.layout != layout
+                or tensor.device() != self.device or tensor.memory_config() != ttnn.DRAM_MEMORY_CONFIG):
+            raise ValueError(f"Unexpected NF12 {name} DRAM tensor shape, format, or device")
+
     def upload_ids(self, ids, padding_idx=None):
         ttnn = import_ttnn()
         ids = normalize_ids(ids, self.descriptor.logical_shape[0], padding_idx).flatten()
         ids = torch.nn.functional.pad(ids, (0, round_up(len(ids), 16) - len(ids)), value=-1)
         return self._upload(ids.reshape(-1, 16), ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
 
-    def gather_device(self, ids, count):
+    def gather_device(self, ids, count, *, full_atoms=False):
         """Take DRAM pages of 16 normalized int32 IDs and return BF16 rows."""
         ttnn = import_ttnn()
         n, _ = self.descriptor.logical_shape
         _, k = self.descriptor.padded_shape
-        if count <= 0 or tuple(ids.shape) != ((round_up(count, 16) // 16), 16):
-            raise ValueError("Unexpected NF12 ID page shape")
+        if count <= 0:
+            raise ValueError("NF12 expects at least one ID")
+        self._validate_device_tensor(ids, (round_up(count, 16) // 16, 16), ttnn.int32, ttnn.ROW_MAJOR_LAYOUT, "ID")
         output = self._allocate((count, k), ttnn.bfloat16, ttnn.ROW_MAJOR_LAYOUT)
         tensors = [self.packed, self.escapes, ids, output]
         addresses = [tensor.buffer_address() for tensor in tensors]
         cores, assignments = _cores(ttnn, self.device, count * (k // 64))
         reader = _kernel(
             ttnn, "gather", ttnn.ReaderConfigDescriptor(), cores, assignments,
-            (n, k // 64, self.exp_base), tensors, lambda start, end: [*addresses, start, end],
+            (n, k // 64, self.exp_base, int(full_atoms)), tensors, lambda start, end: [*addresses, start, end],
         )
         program = ttnn.ProgramDescriptor(
             kernels=[reader], semaphores=[], cbs=[_cb(ttnn, cores, 24, ttnn.uint32, _GATHER_SCRATCH)],
@@ -134,7 +141,8 @@ class TTNNNF12:
         ttnn = import_ttnn()
         n, _ = self.descriptor.logical_shape
         padded_n, _ = self.descriptor.padded_shape
-        if bias.ndim != 1 or len(bias) != n or bias.dtype not in (torch.bfloat16, torch.float32):
+        if (bias.ndim != 1 or len(bias) != n or bias.dtype not in (torch.bfloat16, torch.float32)
+                or bias.device.type != "cpu"):
             raise ValueError("Native NF12 bias must be BF16 or FP32 [N]")
         padded = torch.nn.functional.pad(bias.float(), (0, round_up(padded_n, 32) - n))
         return self._upload(padded[None, :], ttnn.float32, ttnn.TILE_LAYOUT)
@@ -154,9 +162,16 @@ class TTNNNF12:
         """Run one fixed K-reduction schedule on NF12 or a matched BF16 twin."""
         ttnn = import_ttnn()
         n, k = self.descriptor.padded_shape
-        if not 1 <= m_block <= 4 or x.shape[1] != k or x.shape[0] % 32:
+        if not 1 <= m_block <= 4 or not x.shape[0] or x.shape[0] % 32:
             raise ValueError("Unexpected NF12 activation tile shape or M block")
+        self._validate_device_tensor(x, (x.shape[0], k), ttnn.bfloat16, ttnn.TILE_LAYOUT, "activation")
         m_tiles, k_tiles, n_tiles = x.shape[0] // 32, k // 32, round_up(n, 32) // 32
+        if bias is not None:
+            self._validate_device_tensor(bias, (1, n_tiles * 32), ttnn.float32, ttnn.TILE_LAYOUT, "bias")
+        if baseline is not None:
+            self._validate_device_tensor(
+                baseline, (n_tiles * k_tiles, 32, 32), ttnn.bfloat16, ttnn.TILE_LAYOUT, "BF16 baseline",
+            )
         m_block = min(m_block, m_tiles)
         dense = baseline is not None
         w = baseline if dense else self.packed

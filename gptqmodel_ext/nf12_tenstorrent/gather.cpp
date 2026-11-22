@@ -6,7 +6,8 @@ void kernel_main() {
     constexpr uint32_t n = get_compile_time_arg_val(0);
     constexpr uint32_t blocks = get_compile_time_arg_val(1);
     constexpr uint32_t base = get_compile_time_arg_val(2);
-    constexpr auto packed_args = TensorAccessorArgs<3>();
+    constexpr bool full_atoms = get_compile_time_arg_val(3) != 0;
+    constexpr auto packed_args = TensorAccessorArgs<4>();
     constexpr auto escape_args = TensorAccessorArgs<packed_args.next_compile_time_args_offset()>();
     constexpr auto ids_args = TensorAccessorArgs<escape_args.next_compile_time_args_offset()>();
     constexpr auto out_args = TensorAccessorArgs<ids_args.next_compile_time_args_offset()>();
@@ -38,9 +39,19 @@ void kernel_main() {
                 row[col] = 0;
             }
         } else {
-            noc_async_read_page(id / 16 * blocks + kb, packed, atom_addr);
+            const uint32_t atom_id = id / 16 * blocks + kb;
+            uint32_t lane_start = 4 * (id % 8);
+            if constexpr (full_atoms) {
+                noc_async_read_page(atom_id, packed, atom_addr);
+            } else {
+                // Four consecutive lanes of each plane occupy one 64-byte NoC unit.
+                for (uint32_t plane = 0; plane < 3; ++plane) {
+                    const uint32_t offset = plane * 512;
+                    noc_async_read(packed.get_noc_addr(atom_id, offset + lane_start * 16), atom_addr + offset, 64);
+                }
+                lane_start = 0;
+            }
             noc_async_read_barrier();
-            const uint32_t lane_start = 4 * (id % 8);
             const uint32_t slot = id % 16 >= 8 ? 2 : 0;
             for (uint32_t face = 0; face < 4; ++face) {
                 for (uint32_t t = 0; t < 4; ++t) {

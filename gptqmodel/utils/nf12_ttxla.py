@@ -195,6 +195,9 @@ class TTXLANF12:
             raise ValueError("TT-XLA NF12 bias must be BF16 or FP32 [N] on the packed weight's device")
         if not 1 <= m_block <= 4:
             raise ValueError("NF12 M block must be in [1, 4]")
+        if baseline is not None and (baseline.shape != (round_up(padded_n, 32) * padded_k // 32, 32)
+                                     or baseline.dtype != torch.bfloat16 or baseline.device != self.device):
+            raise ValueError("Unexpected TT-XLA NF12 baseline shape, dtype, or device")
         if not x.numel():
             return x.new_empty((*x.shape[:-1], n))
         rows = x.reshape(-1, k)

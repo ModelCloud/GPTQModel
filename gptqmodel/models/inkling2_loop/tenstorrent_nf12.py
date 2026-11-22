@@ -40,10 +40,9 @@ class _NF12Linear(ForwardDtypeLockMixin, nn.Module):
 
 
 class _NF12Embedding(nn.Module):
-    def __init__(self, source, layer, xla):
+    def __init__(self, source, layer):
         super().__init__()
         self.layer = layer
-        self.xla = xla
         self.num_embeddings = source.num_embeddings
         self.embedding_dim = source.embedding_dim
         self.padding_idx = source.padding_idx
@@ -124,8 +123,10 @@ def install_inkling2_nf12(
             weight = read_nf12(path, descriptor)
 
         layer = executor(device, descriptor, weight)
-        adapter = _NF12Linear if isinstance(source, nn.Linear) else _NF12Embedding
-        replacements[name] = adapter(source, layer, backend == "ttxla")
+        if isinstance(source, nn.Linear):
+            replacements[name] = _NF12Linear(source, layer, backend == "ttxla")
+        else:
+            replacements[name] = _NF12Embedding(source, layer)
         descriptors[weight_name] = descriptor
     for name, module in replacements.items():
         model.set_submodule(name, module)

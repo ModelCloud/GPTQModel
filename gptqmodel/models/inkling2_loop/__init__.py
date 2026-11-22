@@ -29,6 +29,7 @@ from .modeling import (
     Inkling2LoopPreTrainedModel,
     Inkling2LoopTextModel,
 )
+from .tenstorrent_nf12 import install_inkling2_nf12
 from .vision import Inkling2LoopVisionModel
 
 
@@ -55,4 +56,5 @@ __all__ = [
     "Inkling2LoopTextModel",
     "Inkling2LoopVisionConfig",
     "Inkling2LoopVisionModel",
+    "install_inkling2_nf12",
 ]
