@@ -27,7 +27,11 @@ returns the original BF16 output shape for the existing vocabulary crop and
 FP32 softcap.
 
 For TT-XLA, start a separate process with `PJRT_DEVICE=TT`, use
-`torch_xla.device(0)`, and pass `backend="ttxla"`. The model adapters accept
+`torch_xla.device(0)`, and pass `backend="ttxla"`. Select the fast bias-free
+head on the bundled Blackhole runtime with `ttxla_lm_head="sfpu"`. Its packed
+planes and sparse metadata form the single resident `nf12-tt-sfpu-pjrt-int32-v1`
+layout. One PJRT executable handles all token blocks with fixed per-worker L1.
+The model adapters accept
 host activations in both backends. Native operations also expose
 `TTNNNF12.gather_device` and `TTNNNF12.linear_device` for TTNN tensors. The
 TT-XLA linear accepts XLA tensors, and its gather accepts CPU signed IDs or
@@ -196,6 +200,7 @@ using the following source revisions and SFPI 7.96.0.
 | Source development component | Revision or status |
 | --- | --- |
 | PyTorch main | `65e101a3cc8242711ae1cb467ed6cde097135821`, installed as 2.16.0a0 |
+| Torchvision main | `4174d08e42fb04453a373a1208bb086913347adf`, built and installed with the source PyTorch ABI |
 | TT-Metal / TTNN main | `2a1236fa6e78c49d61986e403d1fe09dd1b981cb`, editable TTNN installed and tested |
 | TT-XLA main | `fdc3b7773674081b8f8c0698de3400d8d899dc8f`, uses its own TT-MLIR and TT-Metal source pins |
 | Tenstorrent PyTorch/XLA default branch | `a3fb00817690c82bef596c74243a213986c358a4`, TorchGen fails against PyTorch main because the fork registers removed operators such as `qr` |
@@ -471,7 +476,10 @@ executable cache.
 
 The packed output matched BF16 bit-for-bit. The median speedup was 1.126×.
 This benchmark uses the bundled development runtime in the manifest and its
-low-level Blackhole kernel headers.
+low-level Blackhole kernel headers. An independent 40-sample run on chip 1
+measured 7.365 / 8.738 ms packed and 8.057 / 8.799 ms matched BF16. The
+installed TT-XLA head also matched the BF16 bits and the model's FP32 crop
+and softcap at M=1 and M=33.
 
 ```bash
 PJRT_DEVICE=TT PYTHONPATH=. python scripts/bench_nf12_sfpu_xla.py --chip 0 \
