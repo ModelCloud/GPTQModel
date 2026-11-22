@@ -9,7 +9,7 @@ from types import ModuleType
 
 
 _SOURCE = Path(__file__).resolve().parents[1] / "gptqmodel/nn_modules/qlinear/mlx_nf12.py"
-_ROWS = (1, 4, 8, 12, 13, 16)
+_ROWS = (1, 4, 8, 12, 13, 16, 17, 31, 33, 65, 128)
 _OUT_FEATURES = (16, 48, 512, 528, 1024, 1040, 2048, 2064, 2080, 2096)
 
 
@@ -53,3 +53,15 @@ def test_nf12_short_row_dispatch_covers_partial_output_threads():
                 assert tile_rows * (grid_m - 1) < rows <= tile_rows * grid_m
                 assert 1 <= blocks * splits <= 8
                 assert (grid_n - 1) * blocks < out_features // 16 <= grid_n * blocks
+
+
+def test_nf12_prefill_routes_respect_hardware_and_activation_precision(monkeypatch):
+    module, core = _load_module()
+    for accelerated in (False, True):
+        monkeypatch.setattr(module, "_has_accelerated_tensorops", lambda: accelerated)
+        for dtype in (core.float16, core.bfloat16):
+            assert module._linear_route(32, 128, 2048, dtype) == ("tensor" if accelerated else "decode")
+            assert module._linear_route(64, 4096, 4160, dtype) == ("tensor" if accelerated else "decode")
+            assert module._linear_route(129, 4096, 4160, dtype) == "decode"
+        assert module._linear_route(32, 128, 2048, core.float32) == "simd"
+        assert module._linear_route(32, 4096, 2048, core.float32) == "decode"
