@@ -37,6 +37,28 @@ def test_signed_ids_before_narrowing():
     assert actual.tolist() == [-1, 0, 16, -1, -1, -1, -1]
 
 
+def test_sfpu_transcode_offsets_and_verifies_source_bits():
+    from gptqmodel.utils.nf12_ttnn_sfpu import _pack_four, _to_tiles, _transcode
+
+    base = 60
+    words = torch.randint(0, 256, (544, 128), generator=torch.Generator().manual_seed(56), dtype=torch.int32)
+    words |= 0x3e00
+    words[511, :2] = torch.tensor([0, 0x7f83])
+    words[512, :2] = torch.tensor([0x8000, 0xff80])
+    source = words.to(torch.int16).view(torch.bfloat16)
+    descriptor, weight = prepare_nf12(source, "lm_head.weight", exp_base=base)
+
+    packed, (headers, patches) = _transcode(descriptor, weight)
+    direct, (direct_headers, direct_patches) = _pack_four(_to_tiles(words).transpose(-2, -1).contiguous(), base)
+    assert torch.equal(packed, direct.to(torch.uint16))
+    assert torch.equal(headers, direct_headers)
+    assert torch.equal(patches, direct_patches)
+    assert patches.flatten()[:4].bitwise_right_shift(12).tolist() == [0, 0x7f83, 0x8000, 0xff80]
+
+    with pytest.raises(ValueError, match="source hash mismatch"):
+        _transcode(dataclasses.replace(descriptor, source_sha256="0" * 64), weight)
+
+
 @pytest.mark.parametrize("suffix", ["linear.16.64.1.57.1", "linear.16.64.1.57.1.0.0"])
 def test_ttxla_artifact_rejects_wrong_number_of_fields(suffix):
     from gptqmodel.utils.nf12_ttxla import _PREFIX, _artifact

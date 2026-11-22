@@ -17,38 +17,10 @@ import torch
 from bench_nf12_tenstorrent import _errors, _measure, _same
 from safetensors import safe_open
 
-from gptqmodel.utils.nf12_tenstorrent import prepare_nf12, round_up
+from gptqmodel.utils.nf12_tenstorrent import prepare_nf12
 from gptqmodel.utils.nf12_ttnn import TTNNNF12, _cb, _cores, _kernel
+from gptqmodel.utils.nf12_ttnn_sfpu import _linear_operation, _pack_four, _to_tiles
 from gptqmodel.utils.ttnn_runtime import import_ttnn
-
-
-def _to_tiles(matrix):
-    n, k = matrix.shape
-    return matrix.reshape(n // 32, 32, k // 32, 32).permute(0, 2, 1, 3).reshape(-1, 32, 32)
-
-
-def _pack_four(tiles, base):
-    assert tiles.dtype == torch.int32
-    assert tiles.shape[0] % 4 == 0
-    delta = ((tiles >> 8) & 0x7f) - base
-    escaped = (delta < 0) | (delta > 7)
-    high = (delta.clamp(0, 7) | ((tiles >> 12) & 8)).reshape(-1, 4, 32, 32)
-    low = (tiles & 0xff).reshape_as(high)
-    a, b, c, d = high.unbind(1)
-    planes = torch.stack((low[:, 0] | (low[:, 1] << 8), low[:, 2] | (low[:, 3] << 8),
-                          a | (b << 4) | (c << 8) | (d << 12)), dim=1).reshape(-1, 32, 32)
-    block, tile, row, col = escaped.reshape_as(high).nonzero(as_tuple=True)
-    if not len(block):
-        return planes, ()
-
-    # Each patch names a physical slot in four 32 x 32 tiles and its raw BF16 word.
-    slot = (row // 16 * 2 + col // 16) * 256 + row % 16 * 16 + col % 16
-    patches = ((tiles.reshape_as(high)[block, tile, row, col] << 12) | (tile * 1024 + slot)).int()
-    counts = torch.bincount(block, minlength=high.shape[0])
-    offsets = counts.cumsum(0) - counts
-    headers = torch.stack((offsets, counts), dim=1).int().flatten()
-    return planes, tuple(torch.nn.functional.pad(data, (0, round_up(len(data), 16) - len(data))).reshape(-1, 16)
-                         for data in (headers, patches))
 
 
 def _decode(ttnn, device, words, blocks, base, *, dense, metadata):
@@ -124,37 +96,6 @@ def _exercise(ttnn, device, copy, sync, size, repeats, checkpoint, special):
     _same(copy(output), weight)
     print(json.dumps({"kind": "canonical_decode", "shape": list(weight.shape), "input_bytes": layer.resident_bytes,
                       "output_bytes": output_bytes, **result}), flush=True)
-
-
-def _linear_operation(ttnn, device, words, activation, n, k, base, *, dense, metadata, prefetch_groups):
-    output = ttnn.allocate_tensor_on_device(ttnn.Shape((32, n)), ttnn.bfloat16, ttnn.TILE_LAYOUT,
-                                           device, ttnn.DRAM_MEMORY_CONFIG)
-    cores, assignments = _cores(ttnn, device, n // 32)
-    k_tiles = k // 32
-    geometry = (k_tiles, int(dense))
-    reader = _kernel(ttnn, "sfpu_linear_reader", ttnn.ReaderConfigDescriptor(), cores, assignments,
-                     (*geometry, prefetch_groups), [words, activation],
-                     lambda start, end: [words.buffer_address(), activation.buffer_address(), start, end])
-    compute = _kernel(ttnn, "sfpu_linear_compute", ttnn.ComputeConfigDescriptor(fp32_dest_acc_en=True),
-                      cores, assignments, (*geometry, base), (), lambda start, end: [end - start])
-    metadata_addresses = [tensor.buffer_address() for tensor in metadata]
-    writer = _kernel(ttnn, "sfpu_linear_writer", ttnn.WriterConfigDescriptor(), cores, assignments,
-                     (*geometry, int(bool(metadata))), [output, *metadata],
-                     lambda start, end: [output.buffer_address(), start, end, *metadata_addresses])
-    weight_views = [ttnn.CBFormatDescriptor(buffer_index=2, data_format=ttnn.bfloat16, page_size=2048)]
-    if not dense:
-        weight_views.append(ttnn.CBFormatDescriptor(buffer_index=16, data_format=ttnn.uint16, page_size=2048))
-    buffers = [
-        _cb(ttnn, cores, 1, ttnn.bfloat16, 2048, k_tiles),
-        ttnn.CBDescriptor(total_size=k_tiles * 2048, core_ranges=cores, format_descriptors=weight_views),
-        _cb(ttnn, cores, 17, ttnn.bfloat16, 2048, 2),
-    ]
-    if not dense:
-        buffers.append(_cb(ttnn, cores, 0, ttnn.uint16, 2048, min(prefetch_groups * 6, k_tiles // 4 * 3)))
-    if metadata:
-        buffers.append(_cb(ttnn, cores, 24, ttnn.uint32, 128))
-    program = ttnn.ProgramDescriptor(kernels=[reader, compute, writer], semaphores=[], cbs=buffers)
-    return lambda: ttnn.generic_op([words, activation, *metadata, output], program)
 
 
 def _measure_linear_pair(calls, sync, repeats):
