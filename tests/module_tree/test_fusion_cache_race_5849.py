@@ -12,6 +12,7 @@ thread, and resumes it; the paired barrier case repeats the same clear before
 two concurrent forwards.
 """
 
+import sys
 import threading
 import types
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +25,11 @@ from gptqmodel.models.fusion import FusionDecision, _FusionGroup
 from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8Linear
 from gptqmodel.quantization import FORMAT
 
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="TorchInt8Linear has no darwin implementation",
+)
 
 IN_FEATURES, OUT_FEATURES, GROUP_SIZE = 256, 64, 32
 ORACLE = 128.0
