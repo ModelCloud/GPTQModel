@@ -214,8 +214,6 @@ shape thresholds come from [NF12 PR #13](https://github.com/dphnAI/nf12/pull/13)
 | 1–4 tokens | SIMD dot products | SIMD dot products |
 | 5–16 tokens | Register MMA | TensorOps for eligible 16-token calls, otherwise register MMA |
 | 17 or more tokens | Sliced decode and MLX matmul | TensorOps for eligible FP16 and BF16 prefill, register MMA for narrow FP32 routers, otherwise sliced decode and MLX matmul |
-| Embedding lookup | One group processes up to eight IDs with serial row traversal | Shared packed decode, with width tiles for at least 1024 IDs and 4096 columns |
-| Tied output head | No packed projection on the embedding module | `MlxNF12Embedding.as_linear` uses the same packed table and dispatch as linear |
 
 ```mermaid
 flowchart TD
@@ -236,21 +234,73 @@ SIMD group decodes a BF16 tile and feeds it directly to the matrix units.
 The kernel preserves FP16 or BF16 activation storage, reduces split-K in FP32
 in a fixed order and applies bias before rounding. Narrow router projections
 with fewer than 512 outputs are eligible at 17–128 tokens and 2048–8192 inputs.
+On M5 Ultra, selected projections use 32- or 64-output TensorOps tiles and
+tune the SIMD group count and split-K to the shape. The tiles still read the
+canonical 16 × 64 packed super-atoms.
 FP32 router prefill uses register MMA to preserve the activation mantissa.
 The decode fallback uses temporary
 slices of up to 64 MiB per slice, using BF16 math for matching BF16 activations
 and bias and FP32 operands otherwise.
 
-Embedding lookup uses the same bit-exact NF12 decoder, reading only the groups
-for each indexed row and returning +0 for out-of-range IDs. The inline Metal
-TensorOps library provides matrix multiply and convolution. Indexed lookup
-uses one custom compute kernel, including escape handling. Both paths retain
-only the packed table and its metadata.
-
 MACaQ folds its diagonal pre-scale and 32-wide block Hadamard into one Metal
 dispatch instead of a multiply plus a batched matmul, which removes an
 intermediate activation buffer and one dispatch per layer at the token counts
 that matter for decode and small-batch prefill.
+
+### NF12 embedding layouts on MLX Metal
+
+| Weight use | Canonical embedding path | Layout selected by `from_weight` on M5 Ultra |
+| --- | --- | --- |
+| Tied token embedding and output head | One shared 16 × 64 table | One shared 16 × 64 table, with `as_linear` for the output head |
+| Untied token embedding | 16 × 64 | Row-major blocks of 64 columns, with a separate output head |
+
+Lookups read all columns of a handful of token rows, often at scattered
+vocabulary positions. A row-major block holds 64 columns of one row in 96
+contiguous bytes. The Metal gather uses those blocks to avoid loading packed
+groups shared with other rows. A vocabulary projection reads every output row
+and works on neighboring rows together. The 16 × 64 format lets a SIMD group
+load and decode those rows cooperatively for TensorOps. Keep that format for
+all linear weights, including untied output heads.
+
+Use `MlxNF12Embedding.from_weight` with a canonical
+`gptqmodel_nf12.NF12Weight` and pass `tied=True` if the model calls the embedding
+module's `as_linear` method for logits.
+
+```python
+from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Embedding
+
+# Each weight is a canonical gptqmodel_nf12.NF12Weight.
+shared = MlxNF12Embedding.from_weight(tied_weight, tied=True)
+untied = MlxNF12Embedding.from_weight(input_weight, tied=False)
+
+token_vectors = untied(token_ids)
+logits = shared.as_linear(hidden_states)
+```
+
+```mermaid
+flowchart TD
+    W[Canonical NF12Weight] --> F[MlxNF12Embedding.from_weight]
+    F --> R{"Untied on M5 Ultra?"}
+    R -->|Yes| P[rowmajor_pack_cpu]
+    P --> G[Row-major Metal gather]
+    G -->|as_linear requested| E[Raise ValueError]
+    R -->|No| C[Canonical Metal gather]
+    C -->|Shared table used for logits| L[as_linear]
+```
+
+The untied path repacks once at load time and retains a single packed table
+plus the split escape records, including any extra records for metadata that
+collides with the escape marker. Other Metal devices use canonical storage.
+Both gather variants return BF16 and give a `+0.0` row for an out-of-range ID.
+They use a custom Metal gather kernel. TensorOps is used in eligible
+projections. The row-major layout is runtime storage. Keep canonical tensors
+for checkpoint interchange. Dense embeddings keep their original loading path.
+
+On an M5 Ultra, five synthetic NF12 tables with widths of 2,048 to 8,192
+columns were **1.50×** faster at 2,048 random IDs on geometric mean, with a
+range of **1.43–1.70×** versus the canonical gather on `main`. At one or 32
+IDs, geometric mean latency was within 2%. For a 128,256 × 4,096 table,
+the one-time CPU repack and MLX transfer took about 0.71 seconds.
 
 ### Measured Metal result
 

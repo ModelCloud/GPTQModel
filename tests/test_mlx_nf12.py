@@ -232,31 +232,46 @@ def test_nf12_mlx_embedding_matches_the_table():
 @pytest.mark.parametrize(("width", "count", "id_dtype"), [
     (320, 9, mx.int64), (4096, 1025, mx.int32),
 ])
+@pytest.mark.parametrize("row_major", [False, True])
 @requires_metal
-def test_nf12_embedding_preserves_escapes_and_full_width_ids(width, count, id_dtype):
-    from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Embedding
+def test_nf12_embedding_preserves_escapes_and_full_width_ids(monkeypatch, width, count, id_dtype, row_major):
+    from gptqmodel.nn_modules.qlinear import mlx_nf12
     from gptqmodel.utils import nf12_codec
+    from gptqmodel_nf12 import NF12Weight
 
+    if row_major and not mlx_nf12._is_m5_ultra():
+        pytest.skip("NF12 row-major dispatch is tuned for M5 Ultra")
+    if not row_major:
+        monkeypatch.setattr(mlx_nf12, "_is_m5_ultra", lambda: False)
     weight = torch.full((48, width), -0.5, dtype=torch.bfloat16)
+    weight[8] = 0.5  # Its all-zero metadata collides with the row-major escape marker.
     weight[:2, :4].view(torch.int16)[:] = torch.tensor([-32768, 1, 0x7F80, 0x7FC1], dtype=torch.int16)
-    packed, escapes, exp_base = nf12_codec.encode(weight)
-    table = MlxNF12Embedding(num_embeddings=48, embedding_dim=width, num_escapes=len(escapes))
-    table.packed, table.escapes = mx.array(packed.numpy()), mx.array(escapes.numpy())
-    table.exp_base = mx.array([exp_base], dtype=mx.uint8)
+    packed, escapes, exp_base = nf12_codec.encode(weight, exp_base=63)
+    table = mlx_nf12.MlxNF12Embedding.from_weight(NF12Weight(packed, escapes, exp_base), tied=False)
+    assert table.row_major is row_major
     indices = torch.arange(count) % 48
     indices[-3:] = torch.tensor([-1, 48, 2**32 + 1 if id_dtype == mx.int64 else 47])
     valid = (indices >= 0) & (indices < 48)
     expected = torch.zeros((count, width), dtype=torch.int16)
     expected[valid] = weight.view(torch.int16)[indices[valid]]
 
-    actual = table(mx.array(indices.numpy(), dtype=id_dtype))
-    assert actual.dtype == mx.bfloat16
-    np.testing.assert_array_equal(np.array(actual.view(mx.int16)), expected.numpy())
+    for lookup in (table, mx.compile(table)):
+        actual = lookup(mx.array(indices.numpy(), dtype=id_dtype))
+        assert actual.dtype == mx.bfloat16
+        np.testing.assert_array_equal(np.array(actual.view(mx.int16)), expected.numpy())
     assert table(mx.array([], dtype=id_dtype)).shape == (0, width)
+    assert set(table.parameters()) == {"packed", "escapes", "exp_base"}
+    assert table.packed.nbytes == packed.nbytes
+    if row_major:
+        assert table.escapes.shape[1] == 4
+        assert table.escapes.shape[0] > 2 * len(escapes)
+        with pytest.raises(ValueError, match="canonical"):
+            table.as_linear(mx.zeros((1, width), dtype=mx.bfloat16))
 
 
 @pytest.mark.parametrize(("rows", "n", "k", "dtype"), [
     (32, 128, 2048, mx.bfloat16), (32, 528, 2048, mx.bfloat16),
+    (32, 2064, 4096, mx.bfloat16), (64, 2064, 4096, mx.float16),
     (31, 4112, 4160, mx.float16), (65, 4096, 4160, mx.bfloat16),
 ])
 @requires_metal
@@ -323,17 +338,14 @@ def test_nf12_fp32_router_preserves_mantissa_bits():
 def test_nf12_tied_embedding_projects_from_packed_table():
     from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Embedding
     from gptqmodel.utils import nf12_codec
+    from gptqmodel_nf12 import NF12Weight
 
     # Row lookup and the tied projection consume one packed representation.
     weight = torch.full((528, 2048), 0.5, dtype=torch.bfloat16)
     weight[3, 1] = -16
     packed, escapes, exp_base = nf12_codec.encode(weight)
-    table = MlxNF12Embedding(num_embeddings=528, embedding_dim=2048, num_escapes=len(escapes))
-    # Empty escape buffers are represented by the harmless placeholder.
-    table.packed = mx.array(packed.numpy())
-    if len(escapes):
-        table.escapes = mx.array(escapes.numpy())
-    table.exp_base = mx.array([exp_base], dtype=mx.uint8)
+    table = MlxNF12Embedding.from_weight(NF12Weight(packed, escapes, exp_base), tied=True)
+    assert not table.row_major
     x = torch.zeros((2, 16, 2048), dtype=torch.bfloat16)
     x[..., :2] = 1
     expected = (x.double() @ weight.double().T).to(torch.bfloat16).float().numpy()
@@ -344,6 +356,36 @@ def test_nf12_tied_embedding_projects_from_packed_table():
         np.testing.assert_array_equal(np.array(actual.astype(mx.float32)), expected)
     np.testing.assert_array_equal(np.array(table(mx.array([3])).astype(mx.float32)), weight[3:4].float().numpy())
     assert set(table.parameters()) == {"packed", "escapes", "exp_base"}
+
+
+@pytest.mark.parametrize("tied", [True, False])
+@requires_metal
+def test_nf12_embedding_in_mlx_llama(tied):
+    from mlx_lm.models.llama import Model, ModelArgs
+
+    from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Embedding
+    from gptqmodel.utils.nf12_codec import encode
+    from gptqmodel_nf12 import NF12Weight
+
+    args = ModelArgs(
+        model_type="llama", vocab_size=128, hidden_size=64, intermediate_size=128,
+        num_hidden_layers=1, num_attention_heads=4, rms_norm_eps=1e-5, tie_word_embeddings=tied,
+    )
+    mx.random.seed(7)
+    model = Model(args)
+    model.set_dtype(mx.bfloat16)
+    weight = ((torch.arange(128 * 64) % 31 - 15) / 256).reshape(128, 64).to(torch.bfloat16)
+    model.model.embed_tokens.weight = mx.array(weight.float().numpy()).astype(mx.bfloat16)
+    ids = mx.array([[17, 0, 127, 8]])
+    expected = model(ids)
+    mx.eval(expected)
+
+    model.model.embed_tokens = MlxNF12Embedding.from_weight(NF12Weight(*encode(weight)), tied=tied)
+    actual = model(ids)
+    assert actual.shape == (1, 4, 128)
+    assert actual.dtype == mx.bfloat16
+    np.testing.assert_allclose(np.array(actual.astype(mx.float32)), np.array(expected.astype(mx.float32)),
+                               rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.parametrize(("dtype", "bias_dtype"), [
