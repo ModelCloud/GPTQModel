@@ -5,11 +5,18 @@
 #include "api/compute/pack.h"
 #include "api/compute/tile_move_copy.h"
 
+#include "program.h"
+
 void kernel_main() {
-    constexpr uint32_t k_tiles = get_compile_time_arg_val(0);
-    constexpr uint32_t m_tiles = get_compile_time_arg_val(1);
-    constexpr uint32_t m_block = get_compile_time_arg_val(2);
+    constexpr uint32_t k_tiles = NF12_CONFIG(0);
+    constexpr uint32_t m_tiles = NF12_CONFIG(1);
+    constexpr uint32_t m_block = NF12_CONFIG(2);
+    #ifdef NF12_PJRT
+    NF12_RANGE(NF12_CONFIG(3), 0, 0);
+    const uint32_t n_count = end - start;
+#else
     const uint32_t n_count = get_arg_val<uint32_t>(0);
+#endif
     compute_kernel_hw_startup<SrcOrder::Reverse>(1, 0, 16);
     matmul_init(1, 0);
     for (uint32_t nt = 0; nt < n_count; ++nt) {

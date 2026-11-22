@@ -5,9 +5,9 @@
 template <typename Packed, typename Escapes>
 inline void decode_tile(
     uint32_t nt, uint32_t kt, uint32_t dst, uint32_t scratch, const Packed& packed, const Escapes& escapes) {
-    constexpr uint32_t n_atoms = get_compile_time_arg_val(0);
-    constexpr uint32_t k_tiles = get_compile_time_arg_val(1);
-    constexpr uint32_t base = get_compile_time_arg_val(4);
+    constexpr uint32_t n_atoms = NF12_CONFIG(0);
+    constexpr uint32_t k_tiles = NF12_CONFIG(1);
+    constexpr uint32_t base = NF12_CONFIG(4);
     auto* tile = reinterpret_cast<volatile uint16_t*>(dst);
     const auto* atom = reinterpret_cast<volatile const uint32_t*>(scratch);
     const uint32_t first_face = 2 * (kt % 2);
@@ -22,7 +22,7 @@ inline void decode_tile(
             }
             continue;
         }
-        noc_async_read_page(nb * (k_tiles / 2) + kt / 2, packed, scratch);
+        read_atom(nb * (k_tiles / 2) + kt / 2, packed, scratch);
         noc_async_read_barrier();
         for (uint32_t f = 0; f < 2; ++f) {
             for (uint32_t lane = 0; lane < 32; ++lane) {
@@ -45,18 +45,17 @@ inline void decode_tile(
 }
 
 void kernel_main() {
-    constexpr uint32_t k_tiles = get_compile_time_arg_val(1);
-    constexpr uint32_t m_tiles = get_compile_time_arg_val(2);
-    constexpr uint32_t m_block = get_compile_time_arg_val(3);
-    constexpr bool dense = get_compile_time_arg_val(5) != 0;
-    constexpr auto x_args = TensorAccessorArgs<6>();
+    constexpr uint32_t k_tiles = NF12_CONFIG(1);
+    constexpr uint32_t m_tiles = NF12_CONFIG(2);
+    constexpr uint32_t m_block = NF12_CONFIG(3);
+    constexpr bool dense = NF12_CONFIG(5) != 0;
+    constexpr auto x_args = TensorAccessorArgs<NF12_ACCESSORS(6)>();
     constexpr auto w_args = TensorAccessorArgs<x_args.next_compile_time_args_offset()>();
     constexpr auto escape_args = TensorAccessorArgs<w_args.next_compile_time_args_offset()>();
-    const auto x = TensorAccessor(x_args, get_arg_val<uint32_t>(0), 2048);
-    const auto w = TensorAccessor(w_args, get_arg_val<uint32_t>(1), dense ? 2048 : 1536);
-    const auto escapes = TensorAccessor(escape_args, get_arg_val<uint32_t>(2), 64);
-    const uint32_t start = get_arg_val<uint32_t>(3);
-    const uint32_t end = get_arg_val<uint32_t>(4);
+    const auto x = TensorAccessor(x_args, NF12_ADDRESS(0), 2048);
+    const auto w = TensorAccessor(w_args, NF12_ADDRESS(1), dense ? 2048 : NF12_PACKED_PAGE);
+    const auto escapes = TensorAccessor(escape_args, NF12_ADDRESS(2), NF12_ESCAPE_PAGE);
+    NF12_RANGE(NF12_CONFIG(6), 3, 4);
     const uint32_t scratch = get_write_ptr(24);
 
     for (uint32_t nt = start; nt < end; ++nt) {

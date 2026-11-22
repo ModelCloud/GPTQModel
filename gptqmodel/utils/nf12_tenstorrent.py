@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 import torch
 
@@ -120,3 +122,18 @@ def normalize_ids(ids: torch.Tensor, n: int, padding_idx: int | None = None):
             raise ValueError("padding_idx is outside the NF12 embedding table")
         valid = valid & (ids != padding_idx % n)
     return torch.where(valid, ids, -1).to(torch.int32)
+
+
+_KERNELS = Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "nf12_tenstorrent"
+
+
+@lru_cache(maxsize=None)
+def kernel_source(name):
+    source = (_KERNELS / f"{name}.cpp").read_text()
+    if name in {"gather", "gather_xla", "linear_reader"}:
+        source = (_KERNELS / "decode.h").read_text() + "\n" + source
+    return source.replace('#include "program.h"', (_KERNELS / "program.h").read_text())
+
+
+def round_up(value, multiple):
+    return (value + multiple - 1) // multiple * multiple

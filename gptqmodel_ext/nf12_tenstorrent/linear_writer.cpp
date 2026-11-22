@@ -3,14 +3,22 @@
 
 #include "api/dataflow/dataflow_api.h"
 
+#include "program.h"
+
 void kernel_main() {
-    constexpr uint32_t n_tiles = get_compile_time_arg_val(0);
-    constexpr uint32_t m_tiles = get_compile_time_arg_val(1);
-    constexpr uint32_t tile_bytes = get_compile_time_arg_val(2);
+    constexpr uint32_t n_tiles = NF12_CONFIG(0);
+    constexpr uint32_t m_tiles = NF12_CONFIG(1);
+    constexpr uint32_t tile_bytes = NF12_CONFIG(2);
+    #ifdef NF12_PJRT
+    constexpr auto x_args = TensorAccessorArgs<NF12_ACCESSORS(3)>();
+    constexpr auto w_args = TensorAccessorArgs<x_args.next_compile_time_args_offset()>();
+    constexpr auto escape_args = TensorAccessorArgs<w_args.next_compile_time_args_offset()>();
+    constexpr auto args = TensorAccessorArgs<escape_args.next_compile_time_args_offset()>();
+#else
     constexpr auto args = TensorAccessorArgs<3>();
-    const auto out = TensorAccessor(args, get_arg_val<uint32_t>(0), tile_bytes);
-    const uint32_t start = get_arg_val<uint32_t>(1);
-    const uint32_t end = get_arg_val<uint32_t>(2);
+#endif
+    const auto out = TensorAccessor(args, NF12_ADDRESS(0), tile_bytes);
+    NF12_RANGE(n_tiles, 1, 2);
     for (uint32_t nt = start; nt < end; ++nt) {
         for (uint32_t mt = 0; mt < m_tiles; ++mt) {
             cb_wait_front(16, 1);

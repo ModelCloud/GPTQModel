@@ -5,29 +5,13 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-from pathlib import Path
-
 import torch
 
-from .nf12_tenstorrent import normalize_ids, verify_nf12
+from .nf12_tenstorrent import kernel_source, normalize_ids, verify_nf12, round_up
 from .ttnn_runtime import import_ttnn
 
-_KERNELS = Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "nf12_tenstorrent"
 _GATHER_SCRATCH = 1536 + 64 + 128 + 16 * 64
 _LINEAR_SCRATCH = 1536 + 64 * 64
-
-
-@lru_cache(maxsize=None)
-def kernel_source(name):
-    source = (_KERNELS / f"{name}.cpp").read_text()
-    if name in {"gather", "linear_reader"}:
-        return (_KERNELS / "decode.h").read_text() + "\n" + source
-    return source
-
-
-def _round_up(value, multiple):
-    return (value + multiple - 1) // multiple * multiple
 
 
 def _cores(ttnn, device, tasks):
@@ -84,7 +68,7 @@ class TTNNNF12:
         words = weight.packed.reshape(-1, 1536).view(torch.uint32)
         escapes = weight.escapes
         if len(escapes) % 4 or not len(escapes):
-            escapes = torch.nn.functional.pad(escapes, (0, 0, 0, max(4, _round_up(len(escapes), 4)) - len(escapes)))
+            escapes = torch.nn.functional.pad(escapes, (0, 0, 0, max(4, round_up(len(escapes), 4)) - len(escapes)))
         self.packed = self._upload(words, ttnn.uint32, ttnn.ROW_MAJOR_LAYOUT)
         self.escapes = self._upload(escapes.reshape(-1, 32).view(torch.uint32), ttnn.uint32, ttnn.ROW_MAJOR_LAYOUT)
 
@@ -103,7 +87,7 @@ class TTNNNF12:
     def upload_ids(self, ids, padding_idx=None):
         ttnn = import_ttnn()
         ids = normalize_ids(ids, self.descriptor.logical_shape[0], padding_idx).flatten()
-        ids = torch.nn.functional.pad(ids, (0, _round_up(len(ids), 16) - len(ids)), value=-1)
+        ids = torch.nn.functional.pad(ids, (0, round_up(len(ids), 16) - len(ids)), value=-1)
         return self._upload(ids.reshape(-1, 16), ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
 
     def gather_device(self, ids, count):
@@ -111,7 +95,7 @@ class TTNNNF12:
         ttnn = import_ttnn()
         n, _ = self.descriptor.logical_shape
         _, k = self.descriptor.padded_shape
-        if count <= 0 or tuple(ids.shape) != ((_round_up(count, 16) // 16), 16):
+        if count <= 0 or tuple(ids.shape) != ((round_up(count, 16) // 16), 16):
             raise ValueError("Unexpected NF12 ID page shape")
         output = self._allocate((count, k), ttnn.bfloat16, ttnn.ROW_MAJOR_LAYOUT)
         tensors = [self.packed, self.escapes, ids, output]
@@ -142,7 +126,7 @@ class TTNNNF12:
         _, k = self.descriptor.padded_shape
         if x.dtype != torch.bfloat16 or x.ndim != 2 or x.shape[1] != logical_k or x.device.type != "cpu":
             raise ValueError("Native NF12 expects CPU BF16 activations [M, logical K]")
-        padded = torch.nn.functional.pad(x, (0, k - logical_k, 0, _round_up(len(x), 32) - len(x)))
+        padded = torch.nn.functional.pad(x, (0, k - logical_k, 0, round_up(len(x), 32) - len(x)))
         return self._upload(padded, ttnn.bfloat16, ttnn.TILE_LAYOUT)
 
     def upload_bias(self, bias):
@@ -151,7 +135,7 @@ class TTNNNF12:
         padded_n, _ = self.descriptor.padded_shape
         if bias.ndim != 1 or len(bias) != n or bias.dtype not in (torch.bfloat16, torch.float32):
             raise ValueError("Native NF12 bias must be BF16 or FP32 [N]")
-        padded = torch.nn.functional.pad(bias.float(), (0, _round_up(padded_n, 32) - n))
+        padded = torch.nn.functional.pad(bias.float(), (0, round_up(padded_n, 32) - n))
         return self._upload(padded[None, :], ttnn.float32, ttnn.TILE_LAYOUT)
 
     def upload_baseline(self, weight):
@@ -160,7 +144,7 @@ class TTNNNF12:
         padded_n, padded_k = self.descriptor.padded_shape
         if weight.shape != (n, k) or weight.dtype != torch.bfloat16:
             raise ValueError("Matched baseline expects the original BF16 weight")
-        padded = torch.nn.functional.pad(weight, (0, padded_k - k, 0, _round_up(padded_n, 32) - n))
+        padded = torch.nn.functional.pad(weight, (0, padded_k - k, 0, round_up(padded_n, 32) - n))
         # Store [N tile, K tile] page order, with each page in [K, N] face order.
         tiled = padded.reshape(-1, 32, padded_k // 32, 32).permute(0, 2, 3, 1).contiguous()
         return self._upload(tiled.reshape(-1, 32, 32), ttnn.bfloat16, ttnn.TILE_LAYOUT)
@@ -171,7 +155,7 @@ class TTNNNF12:
         n, k = self.descriptor.padded_shape
         if not 1 <= m_block <= 4 or x.shape[1] != k or x.shape[0] % 32:
             raise ValueError("Unexpected NF12 activation tile shape or M block")
-        m_tiles, k_tiles, n_tiles = x.shape[0] // 32, k // 32, _round_up(n, 32) // 32
+        m_tiles, k_tiles, n_tiles = x.shape[0] // 32, k // 32, round_up(n, 32) // 32
         m_block = min(m_block, m_tiles)
         dense = baseline is not None
         w = baseline if dense else self.packed

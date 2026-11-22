@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "api/dataflow/dataflow_api.h"
+#include "program.h"
 
 struct Group {
     uint32_t meta;
@@ -15,11 +16,33 @@ inline Group load_group(const volatile uint32_t* atom, uint32_t face, uint32_t l
 }
 
 template <typename Accessor>
+inline void read_atom(uint32_t atom, const Accessor& packed, uint32_t dst) {
+#ifdef NF12_PJRT
+    // Canonical bytes run across consecutive INT32 tiles (4096-byte pages).
+    const uint32_t offset = atom * 1536;
+    const uint32_t page = offset / 4096;
+    const uint32_t within = offset % 4096;
+    const uint32_t part = within <= 4096 - 1536 ? 1536 : 4096 - within;
+    noc_async_read(packed.get_noc_addr(page, within), dst, part);
+    if (part < 1536) {
+        noc_async_read(packed.get_noc_addr(page + 1), dst + part, 1536 - part);
+    }
+#else
+    noc_async_read_page(atom, packed, dst);
+#endif
+}
+
+template <typename Accessor>
 inline void fetch_escape(const Group& group, const Accessor& escapes, uint32_t dst) {
     if (group.meta == 0) {
         // Escape pages contain four canonical 16-byte entries. A full page
         // keeps the DRAM/L1 transfer aligned on Blackhole.
+#ifdef NF12_PJRT
+        const uint32_t offset = (group.low0 / 4) * 64;
+        noc_async_read(escapes.get_noc_addr(offset / 4096, offset % 4096), dst, 64);
+#else
         noc_async_read_page(group.low0 / 4, escapes, dst);
+#endif
     }
 }
 
