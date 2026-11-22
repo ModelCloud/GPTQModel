@@ -111,3 +111,13 @@ def test_ttxla_sfpu_artifact_requires_base_tag_and_one_weight_slab():
     multirow = [(96, 128), *shapes[1:3], (96, 128)]
     multiple_tiles = json.loads(_artifact(_PREFIX + "sfpu_linear.128.128.65.56.1.0", args[0], multirow, *args[2:]))
     assert multiple_tiles["cb_configs"] == resolved["cb_configs"]
+
+    grouped = list(multirow)
+    grouped[2] = (1, *grouped[2])
+    group_id = _PREFIX + "sfpu_linear.128.128.65.56.1.2"
+    with pytest.raises(ValueError, match="geometry"):
+        _artifact(group_id, args[0], multirow, *args[2:])
+    group_buffers = json.loads(_artifact(group_id, args[0], grouped, *args[2:]))["cb_configs"]
+    expected = {cb["buffer_index"]: cb["total_size"] for cb in multiple_tiles["cb_configs"]}
+    expected[1] *= 2
+    assert {cb["buffer_index"]: cb["total_size"] for cb in group_buffers} == expected

@@ -41,11 +41,17 @@ def _pack_xla_planes(planes, patches, base):
     return packed, pad(carried, (0, 0, 0, height - carried.shape[0]))
 
 
-def _launch(activation, words, metadata, n, base, groups=1):
+def _launch(activation, words, metadata, n, base, groups=1, *, activation_tiles=1):
     m, k = activation.shape
     out = torch.empty((m, n), dtype=torch.bfloat16, device=activation.device)
-    return _call("sfpu_linear", (n, k, m, base, groups, int(words.dtype == torch.bfloat16)),
-                 (activation, words, metadata), out)
+    if activation_tiles not in (1, 2, 4, 8) or activation_tiles > m // 32:
+        raise ValueError("The TT-XLA SFPU activation group must fit the padded input")
+    group_tag = activation_tiles.bit_length() - 1
+    # The lazy compiler can ignore custom-call attributes for equal shapes.
+    # Singleton axes tag this schedule without changing the metadata bytes.
+    meta = metadata.reshape((1,) * group_tag + tuple(metadata.shape)) if group_tag else metadata
+    flag = (group_tag << 1) | int(words.dtype == torch.bfloat16)
+    return _call("sfpu_linear", (n, k, m, base, groups, flag), (activation, words, meta), out)
 
 
 class TTXLASFPUNF12Head:

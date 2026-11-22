@@ -15,12 +15,15 @@ void write_results(const Output& output, uint32_t start, uint32_t end, const App
 #ifdef NF12_PJRT
     constexpr uint32_t n_tiles = NF12_CONFIG(3);
     constexpr uint32_t m_tiles = NF12_CONFIG(4);
+    constexpr uint32_t m_group = NF12_CONFIG(5);
 #else
     constexpr uint32_t n_tiles = 0;
     constexpr uint32_t m_tiles = 1;
+    constexpr uint32_t m_group = 1;
 #endif
 
-    for (uint32_t m = 0; m < m_tiles; ++m) {
+    for (uint32_t m = 0; m < m_tiles; m += m_group) {
+        const uint32_t live = m + m_group <= m_tiles ? m_group : m_tiles - m;
         for (uint32_t n = start; n < end; ++n) {
             if constexpr (!dense) {
                 // The raw UInt16 producer and the BF16 consumer share one L1 slab.
@@ -34,23 +37,25 @@ void write_results(const Output& output, uint32_t start, uint32_t end, const App
                 cb_push_back(decoded, k_tiles);
 #endif
             }
-            cb_wait_front(final_cb, 1);
-            const uint32_t tile_address = get_read_ptr(final_cb);
-            if constexpr (single_row) {
-                const uint32_t row_address = get_write_ptr(25);
-                auto* row = reinterpret_cast<volatile uint32_t*>(row_address);
-                const auto* tile = reinterpret_cast<volatile const uint32_t*>(tile_address);
-                // Copy the first row of each upper BF16 face as raw words.
-                for (uint32_t word = 0; word < 8; ++word) {
-                    row[word] = tile[word];
-                    row[8 + word] = tile[128 + word];
+            for (uint32_t local_m = 0; local_m < live; ++local_m) {
+                cb_wait_front(final_cb, 1);
+                const uint32_t tile_address = get_read_ptr(final_cb);
+                if constexpr (single_row) {
+                    const uint32_t row_address = get_write_ptr(25);
+                    auto* row = reinterpret_cast<volatile uint32_t*>(row_address);
+                    const auto* tile = reinterpret_cast<volatile const uint32_t*>(tile_address);
+                    // Copy the first row of each upper BF16 face as raw words.
+                    for (uint32_t word = 0; word < 8; ++word) {
+                        row[word] = tile[word];
+                        row[8 + word] = tile[128 + word];
+                    }
+                    noc_async_write_page(n, output, row_address);
+                } else {
+                    noc_async_write_page((m + local_m) * n_tiles + n, output, tile_address);
                 }
-                noc_async_write_page(n, output, row_address);
-            } else {
-                noc_async_write_page(m * n_tiles + n, output, tile_address);
+                noc_async_write_barrier();
+                cb_pop_front(final_cb, 1);
             }
-            noc_async_write_barrier();
-            cb_pop_front(final_cb, 1);
             if constexpr (!dense) {
                 cb_pop_front(decoded_raw, k_tiles);
             }

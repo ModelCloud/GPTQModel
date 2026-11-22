@@ -84,19 +84,23 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
     elif op == "sfpu_linear":
         nt, kt = n // 32, k // 32
         mt = round_up(m, 32) // 32
-        dense = bool(flag)
+        if not 0 <= flag < 8:
+            raise ValueError("Unexpected TT-XLA SFPU LM-head schedule flag")
+        dense = bool(flag & 1)
+        group_tag = flag >> 1
+        m_group = 1 << group_tag
         metadata = tuple(shapes[2])
         if (m <= 0 or n <= 0 or n % 32 or k <= 0 or k % 128 or m_block < 1 or kt // 4 % m_block
-                or not 0 <= base <= 120 or flag not in (0, 1) or len(metadata) != 2
-                or metadata[1] != 32 or metadata[0] % 128 != base
-                or metadata[0] * 32 < round_up(nt * kt // 2, 16)):
+                or not 0 <= base <= 120 or metadata[:-2] != (1,) * group_tag or len(metadata) != 2 + group_tag
+                or metadata[-1] != 32 or metadata[-2] % 128 != base
+                or metadata[-2] * 32 < round_up(nt * kt // 2, 16) or m_group > mt):
             raise ValueError("Unexpected TT-XLA SFPU LM-head geometry or exponent base")
         w_shape = (nt * kt * 32, 32) if dense else (round_up(nt * (kt // 4) * 1536, 1024) // 32, 32)
         expected = [(mt * 32, k), w_shape, metadata, (mt * 32, n)]
         expected_dtypes = ("bf16", "bf16" if dense else "si32", "si32", "bf16")
         tasks = nt
         cbs = [
-            _cb(1, "BFloat16", 2048, kt),
+            _cb(1, "BFloat16", 2048, m_group * kt),
             _cb(2, "BFloat16", 2048, kt if dense else 1),
             _cb(17, "BFloat16", 2048, 2),
         ]
@@ -107,9 +111,9 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
                 _cb(24, "UInt32", 128),
             ]
         kernels = [
-            ("sfpu_linear_reader", "noc", [1, 0], [kt, int(dense), m_block, nt, mt]),
-            ("sfpu_linear_writer", "noc", [3] if dense else [3, 2], [kt, int(dense), int(not dense), nt, mt]),
-            ("sfpu_linear_compute", "compute", [], [kt, int(dense), base, nt, mt]),
+            ("sfpu_linear_reader", "noc", [1, 0], [kt, int(dense), m_block, nt, mt, m_group]),
+            ("sfpu_linear_writer", "noc", [3] if dense else [3, 2], [kt, int(dense), int(not dense), nt, mt, m_group]),
+            ("sfpu_linear_compute", "compute", [], [kt, int(dense), base, nt, mt, m_group]),
         ]
     else:
         raise ValueError(f"Unknown TT-XLA NF12 operation {op}")

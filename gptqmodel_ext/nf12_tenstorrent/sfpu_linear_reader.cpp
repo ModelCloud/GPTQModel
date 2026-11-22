@@ -24,21 +24,25 @@ void kernel_main() {
     NF12_RANGE(NF12_CONFIG(3), 2, 3);
 #ifdef NF12_PJRT
     constexpr uint32_t m_tiles = NF12_CONFIG(4);
+    constexpr uint32_t m_group = NF12_CONFIG(5);
 #else
     constexpr uint32_t m_tiles = 1;
+    constexpr uint32_t m_group = 1;
 #endif
 
     constexpr uint32_t block_tiles = dense ? 4 : 3;
     constexpr uint32_t prefetch_tiles = block_tiles * prefetch_groups;
     constexpr auto weight_cb = dense ? decoded_cb : packed_cb;
-    for (uint32_t m = 0; m < m_tiles; ++m) {
-        cb_reserve_back(activation_cb, k_tiles);
+    for (uint32_t m = 0; m < m_tiles; m += m_group) {
+        const uint32_t live = m + m_group <= m_tiles ? m_group : m_tiles - m;
+        cb_reserve_back(activation_cb, m_group * k_tiles);
         const uint32_t activation_address = get_write_ptr(activation_cb);
-        for (uint32_t k = 0; k < k_tiles; ++k) {
-            noc_async_read_page(m * k_tiles + k, input, activation_address + k * 2048);
+        for (uint32_t tile = 0; tile < live * k_tiles; ++tile) {
+            noc_async_read_page(m * k_tiles + tile, input, activation_address + tile * 2048);
         }
         noc_async_read_barrier();
-        cb_push_back(activation_cb, k_tiles);
+        // Keep the circular buffer wrapped at its fixed capacity on a short last group.
+        cb_push_back(activation_cb, m_group * k_tiles);
 
         for (uint32_t n = start; n < end; ++n) {
             for (uint32_t group = 0; group < k_tiles / 4; group += prefetch_groups) {

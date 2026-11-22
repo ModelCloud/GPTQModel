@@ -58,11 +58,17 @@ def main():
     parser.add_argument("--repeats", type=int, default=8)
     parser.add_argument("--rows", type=int, default=1, help="Logical activation rows, padded to 32 on device")
     parser.add_argument("--prefetch-groups", type=int, default=1)
+    parser.add_argument("--activation-tiles", type=int, nargs="+", choices=(1, 2, 4, 8), default=[1],
+                        help="Number of 32-row activation tiles to reuse each decoded K slab across")
+    parser.add_argument("--profile-readback", action="store_true", help="Also time completion by reading only one output value")
     args = parser.parse_args()
     if args.size <= 0 or args.size % 32 or (args.checkpoint is None and args.size % 128):
         parser.error("Use a positive multiple of 128 for synthetic weights or 32 for checkpoint weights")
     if min(args.prefetch_groups, args.repeats, args.rows) < 1:
         parser.error("Prefetch groups, repeats and rows must be positive")
+    m_tiles = round_up(args.rows, 32) // 32
+    if max(args.activation_tiles) > m_tiles:
+        parser.error("Activation tile group must fit the 32-row-padded input")
 
     torch.set_num_threads(3)
     base, weight = _weight(args.size, args.checkpoint, False)
@@ -75,34 +81,48 @@ def main():
     with torch.inference_mode(), _runtime("ttxla", args.chip) as (_, device, copy, sync):
         _install_resolver()
         x = torch.randn((args.rows, k), generator=torch.Generator().manual_seed(54)).bfloat16()
-        activation = F.pad(x, (0, 0, 0, round_up(args.rows, 32) - args.rows)).to(device)
-        measurements = []
+        activation = F.pad(x, (0, 0, 0, m_tiles * 32 - args.rows)).to(device)
         for exponent, weights in ((base, weight),) if args.checkpoint else ((base, weight), (base - 1, weight / 2)):
             packed, dense, metadata = _operands(weights, exponent, device)
-            def launch(w, groups):
-                return _launch(activation, w, metadata, n, exponent, groups)[:args.rows]
+            def launch(w, groups, tile_group):
+                return _launch(activation, w, metadata, n, exponent, groups, activation_tiles=tile_group)[:args.rows]
 
-            calls = (partial(launch, dense, 1), partial(launch, packed, args.prefetch_groups))
-            outputs, times = _measure_pair(calls, sync, args.repeats)
-            dense_cpu, packed_cpu = (copy(out) for out in outputs)
-            _same(dense_cpu, packed_cpu)
-            oracle = _errors(packed_cpu, F.linear(x.float(), weights.float()).bfloat16())
-            assert oracle["scaled_rmse"] <= 0.002, oracle
             kt = k // 32
-            shared_l1 = 2048 * (2 * kt + 2)
-            for label, weight_bytes, l1_bytes, (median, p95) in zip(
-                ("matched_bf16_linear", "sfpu_linear"),
-                (weights.nbytes, packed.nbytes + round_up(metadata.shape[0], 32) * 128),
-                (shared_l1, shared_l1 + 2048 * (1 + min(args.prefetch_groups * 6, kt // 4 * 3)) + 128),
-                times,
-                strict=True,
-            ):
-                measurements.append({"kind": label, "shape": [n, k], "exp_base": exponent, "m": args.rows,
-                                     "weight_bytes": weight_bytes, "l1_bytes_per_worker": l1_bytes,
-                                     "median_us": median, "p95_us": p95, "effective_GBps": weight_bytes / median / 1000,
-                                     "torch_fp32_oracle": oracle})
-        for record in measurements:
-            print(json.dumps({**record, "matched_linear_exact": True}), flush=True)
+            anchor = None
+            for tile_group in args.activation_tiles:
+                calls = (partial(launch, dense, 1, tile_group), partial(launch, packed, args.prefetch_groups, tile_group))
+                outputs, times = _measure_pair(calls, sync, args.repeats)
+                dense_cpu, packed_cpu = (copy(out) for out in outputs)
+                _same(dense_cpu, packed_cpu)
+                if anchor is None:
+                    anchor = dense_cpu
+                    oracle = _errors(packed_cpu, F.linear(x.float(), weights.float()).bfloat16())
+                    assert oracle["scaled_rmse"] <= 0.002, oracle
+                else:
+                    _same(anchor, dense_cpu)
+                profile = ({}, {})
+                if args.profile_readback:
+                    # This forces execution of the same full-output Generic and
+                    # copies one value to the host. A step marker alone can time
+                    # only submission on the bundled TT-XLA inference path.
+                    small = tuple(lambda call=call: call()[:1, :1] for call in calls)
+                    scalars, small_times = _measure_pair(small, sync, args.repeats)
+                    for scalar in scalars:
+                        _same(copy(scalar), anchor[:1, :1])
+                    profile = tuple({"single_value_completion_median_us": median,
+                                     "single_value_completion_p95_us": p95} for median, p95 in small_times)
+                shared_l1 = 2048 * ((tile_group + 1) * kt + 2)
+                for label, weight_bytes, l1_bytes, (median, p95), completion in zip(
+                    ("matched_bf16_linear", "sfpu_linear"),
+                    (weights.nbytes, packed.nbytes + round_up(metadata.shape[0], 32) * 128),
+                    (shared_l1, shared_l1 + 2048 * (1 + min(args.prefetch_groups * 6, kt // 4 * 3)) + 128),
+                    times, profile, strict=True,
+                ):
+                    print(json.dumps({"kind": label, "shape": [n, k], "exp_base": exponent, "m": args.rows,
+                                      "activation_tiles": tile_group, "weight_passes": math.ceil(m_tiles / tile_group),
+                                      "weight_bytes": weight_bytes, "l1_bytes_per_worker": l1_bytes,
+                                      "median_us": median, "p95_us": p95, "effective_GBps": weight_bytes / median / 1000,
+                                      "torch_fp32_oracle": oracle, "matched_linear_exact": True, **completion}), flush=True)
 
 
 if __name__ == "__main__":
