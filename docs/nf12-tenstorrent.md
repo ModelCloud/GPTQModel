@@ -20,11 +20,9 @@ close_mesh(owner="inkling-nf12")
 On source-main TTNN, pass `native_lm_head="sfpu"` to select the fast bias-free
 LM head. The installer verifies the original BF16 hash while transcoding the
 canonical NF12 input in bounded host slabs. It uploads one copy of the versioned
-`nf12-tt-sfpu-planes-v1` layout with its sparse escape metadata. The token
-embedding and vision layers use the canonical representation. The head runs
-each activation block of up to 32 rows through the same resident weight and
-returns the original BF16 output shape for the existing vocabulary crop and
-FP32 softcap.
+`nf12-tt-sfpu-planes-v1` layout with its sparse escape metadata. The head
+stages up to eight 32-row activation tiles and returns the requested BF16
+output shape for the existing vocabulary crop and FP32 softcap.
 
 For TT-XLA, start a separate process with `PJRT_DEVICE=TT`, use
 `torch_xla.device(0)`, and pass `backend="ttxla"`. Select the fast bias-free
@@ -36,6 +34,9 @@ host activations in both backends. Native operations also expose
 `TTNNNF12.gather_device` and `TTNNNF12.linear_device` for TTNN tensors. The
 TT-XLA linear accepts XLA tensors, and its gather accepts CPU signed IDs or
 device int32 IDs. The model's remaining operators run where the model is placed.
+Pass `embedding_layout="row_major"` on either backend to use the same
+embedding-only row encoding as CUDA and RDNA. Token and vision position
+tables derive one resident packed copy from the verified canonical checkpoint.
 
 | Site | Dense forward in the Inkling port | With the opt-in installer |
 | --- | --- | --- |
@@ -299,6 +300,26 @@ bias-free outputs. The bias path adds 4,096 bytes of circular buffering and a
 transient FP32 output matrix. The bias-free path uses L1 for decoded tiles
 throughout the contraction.
 
+### Shared row-major embedding layout
+
+The [CUDA and RDNA embedding format](nf12-row-major-embedding.md) places
+one row's codes and low bytes together in 96 bytes per 64 columns. The host
+transcode matches that format byte-for-byte before Tenstorrent's transport
+padding. A zero metadata pair selects four BF16 values from the split escape
+table. Blackhole reads two adjacent blocks in one aligned 192-byte transfer
+when the row stride permits. This takes 3,456 packed bytes before escapes for
+one uncached token row, versus 4,608 BF16 bytes. Native canonical gather
+asks for 6,912 bytes for the same row before escapes.
+
+The full token table occupies 695,461,184 resident bytes on native TTNN and
+695,463,936 bytes in TT-XLA's INT32 page layout. The dense weight occupies
+926,318,592 bytes. TT-XLA groups the reads for each output tile across the
+requested IDs and uses 16,512 bytes of L1 scratch per worker at K=2,304.
+The native kernel uses 5,568 bytes per worker for the tuned one-ID schedule
+and 24,832 bytes for the general 32-ID schedule. Its repeated-ID schedule
+reads one packed row for all 32 outputs. The [native benchmark](nf12-tenstorrent-row-embedding.md)
+records the synchronized latency and the exact row checks.
+
 ### TT-XLA LM head
 
 | M | NF12 ms median / p95 | BF16 ms median / p95 | NF12 / BF16 effective GB/s |
@@ -518,6 +539,12 @@ and 256-row cases use eight interleaved samples. The 257-row tail case uses
 two. The selected host path matched repeated results including padded final
 groups, singleton tails and batched activation shapes.
 
+On chip 2 the uninitialized SFPU changed 1,822 live results in the vocabulary
+range assigned to one worker. Rotating worker assignments moved the mismatch
+to its new range. With explicit SFPU initialization, the released head
+matched the reference bit-for-bit at M=1, 128, and 256. The 16-sample M=256
+medians were 4.208 ms for grouped NF12 and 3.179 ms for grouped BF16.
+
 ```bash
 TT_VISIBLE_DEVICES=3 TT_MESH_GRAPH_DESC_PATH=/path/to/p150_mesh_graph_descriptor.textproto \
   PYTHONPATH=. python scripts/bench_nf12_sfpu_decode.py --chip 0 --size 201024 \
@@ -553,9 +580,25 @@ At M=256 on chip 0, eight synchronized launches measured 123.91 / 137.64 ms
 NF12 and 126.54 / 134.62 ms matched BF16. Both paths used eight K-slab
 passes, produced bit-identical results, and included host completion.
 
+The grouped head reads each weight slab once for eight activation tiles.
+The per-worker circular buffers reserve 1,345,664 bytes for NF12 and 1,331,200
+for matched BF16. Both M=256 schedules produce identical BF16 logits. The
+single-value test runs the full head and reads just one value to force PJRT
+completion. Reading the entire 102,924,288-byte result dominates host time.
+
+| Chip 0, M=256, 16 synchronized samples | NF12 median / p95 | Matched BF16 median / p95 |
+| --- | ---: | ---: |
+| Eight weight passes, single-value completion | 25.411 / 34.489 ms | 34.461 / 37.026 ms |
+| One weight pass, single-value completion | 5.814 / 7.435 ms | 6.559 / 7.412 ms |
+| One weight pass, full readback | 107.346 / 108.732 ms | 107.998 / 113.102 ms |
+| One weight pass, full readback, independent run | 112.230 / 118.795 ms | 112.125 / 117.840 ms |
+
 ```bash
 PJRT_DEVICE=TT PYTHONPATH=. python scripts/bench_nf12_sfpu_xla.py --chip 0 \
   --size 201024 --checkpoint /path/to/Inkling-2-Mini --repeats 40
+PJRT_DEVICE=TT PYTHONPATH=. python scripts/bench_nf12_sfpu_xla.py --chip 0 \
+  --size 201024 --checkpoint /path/to/Inkling-2-Mini --rows 256 \
+  --repeats 16 --activation-tiles 1 8 --profile-readback
 ```
 
 ## Inkling expert routing
