@@ -481,6 +481,10 @@ measured 7.365 / 8.738 ms packed and 8.057 / 8.799 ms matched BF16. The
 installed TT-XLA head also matched the BF16 bits and the model's FP32 crop
 and softcap at M=1 and M=33.
 
+At M=256 on chip 0, eight synchronized launches measured 123.91 / 137.64 ms
+NF12 and 126.54 / 134.62 ms matched BF16. Both paths used eight K-slab
+passes, produced bit-identical results, and included host completion.
+
 ```bash
 PJRT_DEVICE=TT PYTHONPATH=. python scripts/bench_nf12_sfpu_xla.py --chip 0 \
   --size 201024 --checkpoint /path/to/Inkling-2-Mini --repeats 40
