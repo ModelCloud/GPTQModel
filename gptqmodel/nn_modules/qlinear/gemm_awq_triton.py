@@ -24,12 +24,9 @@ from ...quantization.awq.modules.triton.scheduler import (
 )
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
+from ...utils.kernel import get_kernel_config, resolve_kernel_config
 from ...utils.torch import HAS_XPU
-
-
-# Shared runtime default: prefer accuracy first unless the user explicitly opts out.
-FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
+from ._compile_support import COMPILE_LEVEL
 
 
 def _cuda_graph_capturing(device: torch.device) -> bool:
@@ -85,7 +82,10 @@ class AwqGemmTritonFn(torch.autograd.Function):
         request = prefer_backend if isinstance(prefer_backend, dict) else {}
         # Keep the biased sum wide even when low-precision accumulation was
         # requested: rounding the GEMM first can turn a finite sum into inf.
-        fp32_accum = bias is not None or bool(request.get("fp32_accum", FP32_ACCUM))
+        requested_fp32_accum = request.get("fp32_accum")
+        if requested_fp32_accum is None:
+            requested_fp32_accum = get_kernel_config().fp32_accum
+        fp32_accum = bias is not None or bool(requested_fp32_accum)
         if qzeros.ndim != 2 or scales.ndim != 2 or qzeros.shape[0] <= 0:
             raise ValueError("AWQ Triton qzeros/scales must be non-empty rank-2 tensors")
         if K % qzeros.shape[0] or scales.shape[0] != qzeros.shape[0]:
@@ -131,7 +131,17 @@ class AwqGemmTritonFn(torch.autograd.Function):
             if bias is not None:
                 out = (out + bias.float()).to(x.dtype)
 
-        out = out.reshape(out_shape)
+        # Never hand autograd a reshape view of this Function's own output: an
+        # in-place update on such a view is forbidden (#4974). The 2-D result
+        # is already an owned allocation, so only a batched, autograd-tracked
+        # result needs the leading dimensions back and a materialized view. An
+        # untracked result (inference mode or a forward with no grad-requiring
+        # input) accepts an in-place update on the view, and copying it would
+        # add a full-output kernel to every batched forward (#5086).
+        if out.shape != out_shape:
+            out = out.reshape(out_shape)
+            if any(ctx.needs_input_grad):
+                out = out.clone()
         if not capturing:
             mark_awq_triton_plan_warmed(
                 plan, M=rows, N=N, K=K, group_size=actual_group_size,
@@ -198,7 +208,17 @@ class AwqGEMMTritonLinear(AWQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
 
+    # The biased paths add the checkpoint bias to an FP32 product, so the
+    # buffer keeps its stored width at load time.
+    MODEL_DTYPE_BUFFERS = ()
+
     QUANT_TYPE = "awq_gemm_triton"
+
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: dynamo breaks in
+    # AwqGemmTritonFn.forward on the host-side plan selection / capture query,
+    # but an explicit eager CUDA-graph capture succeeds with matching output.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -229,7 +249,11 @@ class AwqGEMMTritonLinear(AWQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ):
-        fp32_accum = bool(kwargs.pop("fp32_accum", FP32_ACCUM))
+        kernel = resolve_kernel_config(kwargs.get("kernel") or kwargs.get("backend"))
+        requested_fp32_accum = kwargs.pop("fp32_accum", None)
+        fp32_accum = bool(
+            kernel.fp32_accum if requested_fp32_accum is None else requested_fp32_accum
+        )
         schedule_mode = kwargs.pop(
             "schedule_mode", kwargs.pop("awq_triton_schedule_mode", None)
         )
@@ -250,7 +274,13 @@ class AwqGEMMTritonLinear(AWQuantLinear):
             register_buffers=register_buffers,
             **kwargs)
         self.fp32_accum = fp32_accum
-        self.awq_triton_schedule_mode = schedule_mode
+        # ``KernelConfig.awq_triton_schedule`` is a dispatch *mode* ("auto" or
+        # "legacy"). Resolve it from this module's own policy snapshot so a
+        # per-load ``AwqTritonConfig(schedule=...)`` is honored; only an
+        # explicit ``schedule=`` plan or mapping may occupy the plan slot.
+        self.awq_triton_schedule_mode = (
+            self.kernel.awq_triton_schedule if schedule_mode is None else schedule_mode
+        )
         self.awq_triton_schedule = schedule
 
     def post_init(self):
@@ -303,7 +333,7 @@ class AwqGEMMTritonLinear(AWQuantLinear):
                     self.bias,
                     self.out_features,
                     {
-                        "fp32_accum": getattr(self, "fp32_accum", FP32_ACCUM),
+                        "fp32_accum": self.fp32_accum,
                         "schedule_mode": getattr(self, "awq_triton_schedule_mode", None),
                         "schedule": getattr(self, "awq_triton_schedule", None),
                         "training": self.training,

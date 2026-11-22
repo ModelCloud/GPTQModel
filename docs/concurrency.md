@@ -89,6 +89,48 @@ forward with the GGUF/bitsandbytes scope as A: chunk precisions
 `bf16, bf16, none, none` and 5/5 forwards differing from the all-BF16x3
 reference. After the change all four chunks stay `bf16` and 0/5 differ.
 
+The three switches are also part of dynamo's `GLOBAL_STATE` guard: a trace
+snapshots them when it starts and writes them back when it ends. The depth-0
+transitions therefore take the model-global-state writer
+(`model_global_state_write_guard()`), which excludes in-flight compiled calls
+and their traces, so a trace in another thread cannot restore the user's value
+mid-window (issue #5390). The writer is held for the switch only, never for the
+whole quantization. A caller that is already inside a compiled call holds the
+shared side and skips it instead of deadlocking.
+
+A *raw* ``torch.compile`` call is the residual case: only the package's
+``torch_compile()`` wrapper takes the reader, so a trace started by a caller's
+own ``torch.compile`` runs outside it. When such a trace started before the
+guard, its exit writes the pre-guard precision back while the guard is still
+active:
+
+```
+ieee        # inside the guard, after the switch
+tf32        # the raw trace ended; the guard is still inside
+```
+
+The writer cannot exclude a trace that never takes the lock, and dynamo
+exposes no in-flight-trace signal to wait on, so the guard cannot close this
+window itself. Coordinate instead: let the raw trace finish before
+``quantize()``, or compile through
+``gptqmodel/utils/torch.py:torch_compile()``, whose calls hold the reader for
+the whole call including the trace. Serial and package-compiled runs stay
+IEEE; only a raw trace straddling the guard entry can restore the caller's
+precision (issue #5612).
+
+The lock cannot fix the other half of that hazard: "am I being traced" itself.
+`torch.compiler.is_compiling()` reads a module-level flag that the compile
+session sets for the whole process, so every eager thread in the process sees
+`True` while *any* thread compiles (#5427). Kernels that took their trace-only
+branch on that signal (NF12's exponent-base cache fill, the `optimize()` proxy's
+eager short-circuit, the `_awq_shifts`/`ret_idx` caches) therefore degraded or
+crashed whenever an unrelated thread compiled. Every call site now goes through
+`utils/torch.py:dynamo_is_compiling()`, which uses
+`torch.compiler.is_dynamo_compiling()`: a constant `False` in eager code that
+dynamo folds to `True` inside the traced frame, so another thread's session
+cannot leak in. `torch.compiler.is_exporting()` is folded in for export, which
+is process-scoped but single-threaded.
+
 The guards stay scoped where they are entered. #4092 narrows
 `quant_blas_backend` to the Hessian/linalg phase; the counting works for that
 placement too, because it depends only on entry and exit, not on which phase
@@ -96,14 +138,15 @@ wraps the context.
 
 ## 2. Triton JIT compilation is single-flight and globally serialized
 
-`TritonPatch.apply()` now installs `patch_triton_jit_compile()` in addition to
-the autotuner patch. The wrapper around `JITFunction._do_compile` takes
+GPT-QModel kernels are built with `gptqmodel.utils.triton_jit.jit`, which
+returns a package-owned `JITFunction` subclass (Triton itself is never
+patched; the former `TritonPatch` was removed). Its `_do_compile` takes
 `_TRITON_COMPILE_LOCK`, rechecks the per-device kernel cache for the requested
 specialization key, and compiles only if the key is still missing.
 
 ```mermaid
 flowchart TD
-    A["JITFunction.run misses kernel cache"] --> B["patched_do_compile"]
+    A["JITFunction.run misses kernel cache"] --> B["GPTQModelJITFunction._do_compile"]
     B --> C["acquire _TRITON_COMPILE_LOCK"]
     C --> D{"kernel cache has key"}
     D -- yes --> E["return cached kernel, no compile"]
@@ -131,6 +174,45 @@ which launch through the same `JITFunction.run` path.
 | Autotuner state | thread-local `nargs`/`best_config`, locked cache | unchanged |
 | JIT compile | unsynchronized, one compile per missing thread | `_single_flight_triton_compile` under `_TRITON_COMPILE_LOCK` |
 | Cold-start cost | concurrent compiles race | cold compiles run one at a time; the first caller pays the compile, the rest wait and reuse it |
+
+### Autotuner single-flight futures resolve on every owner exit
+
+`_get_config_for_key` publishes one `CacheFuture` per tuning key and collapses
+concurrent misses for that key onto it. The owner used to call
+`prune_configs()` *before* entering the `try/finally` that sets
+`future.event` and removes the future from `_cache_futures`. A pruning
+exception therefore escaped with the future still pending: every waiter parked
+on `future.event.wait()` with no timeout, and every same-key retry reused the
+unresolved future. The exception was catchable; the hang was not.
+
+Pruning now runs inside the owner-finalization scope, so every exit path
+resolves the future and removes the key.
+
+```mermaid
+flowchart TD
+    A["_get_config_for_key"] --> B{"_cache has key"}
+    B -- yes --> C["return cached config"]
+    B -- no --> D{"_cache_futures has key"}
+    D -- yes --> E["waiter: future.event.wait"]
+    E --> F{"future.error set"}
+    F -- yes --> G["raise future.error"]
+    F -- no --> H["return future.config"]
+    D -- no --> I["owner: publish CacheFuture"]
+    I --> J["try: prune_configs"]
+    J -- "raises" --> K["except BaseException: future.error = exc"]
+    J -- ok --> L["benchmark, disk cache, store best config"]
+    L --> M["return best config"]
+    K --> N["finally: future.event.set"]
+    M --> N
+    N --> O["finally: _cache_futures.pop key"]
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Owner scope | `prune_configs` outside the `try` (`utils/nogil_patcher.py:355` at `461b42023`) | `prune_configs` inside the owner `try` |
+| Pruning exception | future retained, Event unset, `error` unset | `future.error` set, Event set, key popped |
+| Same-key retry | reuses the pending future and blocks forever | becomes a new owner and completes |
+| Waiter | `future.event.wait()` with no timeout | wakes on success or re-raises the owner error |
 
 ## 3. Dynamo guard failures fall back to eager
 
@@ -174,7 +256,8 @@ assertion escaped and aborted a forward that raced another thread's
 `ModelLoader.from_pretrained` and `ModelLoader.from_quantized` are wrapped with
 `_serialized_model_load` (`gptqmodel/models/loader.py`), which holds
 `_MODEL_LOAD_LOCK` (an `RLock`) for the whole construction. transformers'
-`from_pretrained` saves, sets and restores `torch.set_default_dtype`
+`from_pretrained` opens a `local_torch_dtype` window that saves, sets and
+restores `torch.set_default_dtype`
 (`transformers/modeling_utils.py`) and builds parameters through meta-device and
 no-init contexts; `from_config` does the same for the quantized shell. Those are
 process-global, so two overlapping loads interleave them and hand back models
@@ -192,6 +275,123 @@ flowchart TD
     E --> B
     I --> D
 ```
+
+Compiled calls do **not** take `_MODEL_LOAD_LOCK`. They take the shared reader
+side of a separate process-global reader/writer lock
+(`_MODEL_GLOBAL_STATE_LOCK`, `gptqmodel/models/loader.py`). The exclusive
+writer side belongs to transformers' `local_torch_dtype` window itself
+(`model_global_state_lock()`): package import calls
+`install_model_global_state_dtype_guard()`
+(`gptqmodel/utils/torch.py`), which wraps that context manager so the writer is
+acquired when the window opens and released when it closes. Construction call
+sites do not take the writer, so the window cannot be widened to a load's weight
+I/O (#5304).
+
+Dynamo's `preserve_global_state` saves and restores the default dtype around
+every trace, and its `GLOBAL_STATE` guard re-reads it on every call. A call that
+re-traces inside a load's bf16 window would restore bf16 after the load restored
+fp32, or fail the load's invariant check (#5127). Holding the load lock for the
+first call only was not enough (#5209); holding it for every call serialized all
+compiled forwards and stalled them for a whole load (#5268). Holding the writer
+around each construction *call* was still wrong for a dense load: that is the
+entire `from_pretrained` body -- weight I/O, dtype casts, device placement,
+packing and kernel post-init -- and stalled every optimized forward for the
+whole load, tens of seconds for a 7B model (#5304). The writer therefore belongs
+to `local_torch_dtype`, the only place that mutates the process-global dtype.
+
+```mermaid
+flowchart LR
+    A["thread 1: load"] --> B["_MODEL_LOAD_LOCK<br/>whole load"]
+    B --> C["weight I/O, dtype casts,<br/>device placement"]
+    C --> D["local_torch_dtype: global-state writer<br/>(default dtype window)"]
+    D --> E["packing, kernel post-init"]
+    E --> F["assert_loaded_model_state"]
+    G["thread 2: compiled call"] --> H["global-state reader"]
+    H --> I["compiled forward"]
+    D -. "excludes" .-> H
+    C -. "does not exclude" .-> H
+    E -. "does not exclude" .-> H
+```
+
+On the reported host a warm `optimize()`d decode step (a 1B GPTQ 4-bit
+checkpoint) measured 16 ms p50 and 20 ms baseline max. With the load in another
+thread the writer was held for 1.50 s of a 1.92 s dense `GPTQModel.load`, and
+the worst decode step was 1516 ms. With the window-scoped writer the same
+measurement is 21 ms of writer hold and the load body overlaps the decode loop;
+the remaining spikes (106-190 ms) are the load's own host work on a
+free-threaded interpreter, not the writer (the dtype window excludes them for
+its 21 ms only).
+
+### Construction is exclusive for every class-wide patch (#5421)
+
+`local_torch_dtype` is only one of the process-global contexts a construction
+opens. `PreTrainedModel.get_init_context` also opens `init.no_tie_weights()`,
+which replaces `PreTrainedModel.tie_weights` for **every** class, and
+`apply_patches()`, which swaps registered classes in every transformers module.
+Neither held the writer, so a plain `from_pretrained` in another thread could
+disable tying while a GPT-QModel shell was building or re-tying its head. A
+quantized load of a tied checkpoint (the checkpoint stores only
+`model.embed_tokens.weight`) then failed with
+`does not provide tensors for 1 non-quantized parameter(s): lm_head.weight`.
+
+The tie that matters for a quantized load is the post-load one: the shell is
+built with weight init suspended (`suspend_hf_weight_init`), so `post_init`
+does not tie anything and `_tie_weights_after_checkpoint_load` is the only
+call that binds `lm_head`. It ran outside the writer too, which is why guarding
+only the construction window did not close the failure.
+
+The writer now belongs to the construction and to every consumer of those
+patches, not only to the dtype window:
+
+- `PreTrainedModel.get_init_context` prepends the writer to the returned
+  context list. `ContextManagers` enters the list in order through an
+  `ExitStack`, so the writer is acquired before `no_tie_weights` /
+  `apply_patches` and released after them.
+- `PreTrainedModel._from_config` holds it for the whole `from_config`
+  construction, which opens `apply_patches` outside `get_init_context` and may
+  have no dtype window at all.
+- `init.no_tie_weights` and `apply_patches` take it themselves, so a direct
+  use of either patch is exclusive even on a transformers version without
+  `get_init_context`.
+- `_tie_weights_after_checkpoint_load` takes it around the tie, so a foreign
+  window cannot turn that call into a no-op.
+- The default-dtype value a load captures and the one it compares against in
+  `assert_loaded_model_state` are both read under the writer, so a correct load
+  is not rejected as a "corrupted state" because another thread's window was
+  open at that instant.
+
+```mermaid
+flowchart TD
+    A["thread 1: GPTQModel.load"] --> B["_MODEL_LOAD_LOCK<br/>whole load"]
+    B --> C["from_config: global-state writer<br/>init-context group"]
+    C --> D["weight I/O, packing"]
+    D --> E["_tie_weights_after_checkpoint_load<br/>global-state writer"]
+    E --> F["assert_loaded_model_state<br/>dtype read under writer"]
+    G["thread 2: user from_pretrained"] --> H["get_init_context<br/>global-state writer"]
+    H --> I["no_tie_weights / apply_patches<br/>inside the writer"]
+    I --> J["cls(config): construction"]
+    H -. "excludes C and E" .-> C
+    H -. "excludes C and E" .-> E
+    K["thread 3: compiled forward"] --> L["global-state reader"]
+    C -. "excludes L only while<br/>construction runs" .-> L
+    D -. "does not exclude" .-> L
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| `local_torch_dtype` window | writer | writer (unchanged) |
+| `get_init_context` group (`no_tie_weights`, `apply_patches`, meta device) | no writer | writer prepended to the context list |
+| `_from_config` construction | writer only when a dtype is given | writer for the whole construction |
+| `init.no_tie_weights` / `apply_patches` themselves | no writer | writer for the patch window |
+| post-load tie (`_tie_weights_after_checkpoint_load`) | no writer; skipped inside a foreign window | writer; waits for the foreign window |
+| load default-dtype capture and check | bare `torch.get_default_dtype()` | both read under the writer |
+
+The writer is still held for construction only -- not for a load's weight I/O,
+packing or kernel post-init -- so the #5304 contract is unchanged.
+
+A load also no longer calls `torch._dynamo.reset()`, which used to discard other
+models' compiled frames and crash a concurrent forward. See
+[torch compile fallback](torch-compile-fallback.md).
 
 `quantize()` itself is not serialized: once a model is loaded, overlapping
 quantization stays supported (section 1).
@@ -279,10 +479,17 @@ and defaults to 1.
 | Caller already selected BF16x3, or oneDNN refuses the switch | `cpu_bf16x3_scope` yields without counting; nothing to restore |
 | Restore raises | swallowed; the quantization result is already computed |
 | Triton compile raises | lock is released; the next miss retries the compile |
+| Triton autotuner pruning raises | future error is set, waiters re-raise it, the key is removed, and the next call retries |
 | Triton cache already populated | no lock, no compile |
 | Dynamo guard fails on a user frame | exception propagates; no double execution |
 | `fullgraph=True` capture failure | exception propagates; no silent fallback |
 | Two `GPTQModel.load()` calls overlap | the second waits, then builds; both models are consistent |
+| A first `TorchLinear` compile overlaps a load | the compile waits for the load lock, then traces with fp32; steady-state forwards stay lock-free |
+| A dense `GPTQModel.load()` overlaps an `optimize()`d forward | the forward waits only for the load's `local_torch_dtype` window, not for weight I/O (#5304) |
+| A construction site forgets to take the writer | impossible: the writer is inside the init-context group and `_from_config`, not at the call site |
+| A user `from_pretrained` runs while a GPT-QModel load builds or ties its shell | the load waits for the foreign construction window; the head stays tied (#5421) |
+| A load ends while another thread's dtype window is open | the invariant compares the settled default dtype; no false "corrupted state" (#5421) |
+| A construction site runs on a transformers version without `get_init_context` | `local_torch_dtype` and the guarded patches still take the writer |
 | A load leaves a mixed dtype, a meta tied weight, or a changed default dtype | `RuntimeError`; the corrupted model is never returned |
 | A float32 parameter is declared by `_keep_in_fp32_modules` / `_keep_in_fp32_modules_strict` | exempt from the dtype checks; still must be materialized |
 | A float32 parameter is *not* declared, or a declared module is left in a half dtype | `RuntimeError`; the corrupted model is never returned |
@@ -290,8 +497,11 @@ and defaults to 1.
 
 ## Validation
 
-The regressions are covered by `tests/test_concurrency_guards.py`,
+The regressions are covered by `tests/test_compile_load_scope_5304.py`,
+`tests/test_quantize_load_global_state_5301.py`,
+`tests/test_compile_lock_scope_5268.py`, `tests/test_concurrency_guards.py`,
 `tests/test_load_state_assertions.py`, `tests/test_concurrent_load.py`,
+`tests/test_construction_global_state_5421.py`,
 `tests/test_hf_init_guard.py`, `tests/test_triton_patch_api.py`,
 `tests/test_awq_triton_cold_jit.py`, and `tests/test_torch_compile_fallback.py`.
 The cold-JIT test runs a child process
@@ -316,11 +526,19 @@ Measured on 2026-11-15 with the ROCm 10.1 R9700 (`gfx1201`) venv and the CUDA
 | BF16x3 race, 30 trials, `PYTHON_GIL=1` | 2/30 forwards differ | 0/30 forwards differ |
 | Concurrent dense loads of Qwen2.5-0.5B and Qwen3-0.6B at fp16, 6 rounds, `PYTHON_GIL=0` | 6/6 rounds corrupted (an earlier run: 5/6) | 0/6 rounds corrupted |
 | Same loads, 6 rounds, `PYTHON_GIL=1` | 5/6 rounds corrupted (an earlier run: 6/6) | 0/6 rounds corrupted |
+| Tied-checkpoint load next to a plain `from_pretrained` loop, 20 loads (2026-11-19) | 7 failed: 5 default-dtype flips, 2 missing `lm_head.weight` | 0 failed |
+| Same race, 40 loads | not measured (the 20-load run already failed) | 0 failed |
 
 The 268/504 count is this host's reproduction; the issue measured 177-210 of
 794 on its checkpoint layout. Both counts are the same defect: the second
 quantize's later layers ran on the backend selected by the first quantize's
 restore.
+
+The #5421 rows use a 16-layer GPTQ 4-bit checkpoint whose shard stores only
+`model.embed_tokens.weight` (the normal tied-save layout) and a dense
+`from_pretrained` in another thread. The deterministic regression is
+`tests/test_construction_global_state_5421.py`, which holds each foreign
+window open until the test releases it instead of relying on the race.
 
 The BF16x3 numbers use a CPU host with AVX512-BF16 and the
 `Llama-3.2-1B-Instruct-EXL3-W4-ALL` checkpoint: a 2048-wide

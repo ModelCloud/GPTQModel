@@ -39,7 +39,7 @@ class BACKEND(str, Enum):
     # Marlin kernels
     # A single backend covers both Marlin sub-kernels. The quantization method
     # and checkpoint format select the concrete GPTQ or AWQ implementation.
-    MARLIN = "marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
+    MARLIN = "marlin"  # marlin reduce ops, fp32 by default; controlled by KernelConfig.marlin_fp32
 
     # Machete kernels
     # A single backend covers both Machete sub-kernels. The quantization method
@@ -50,6 +50,14 @@ class BACKEND(str, Enum):
     # A single backend covers both Swordfish sub-kernels. The quantization
     # method and checkpoint format select the concrete GPTQ or AWQ implementation.
     SWORDFISH = "swordfish"  # Blackwell (sm100/sm110) w4a16/w8a16 GEMM kernel
+
+    # Humming kernels
+    # Humming is an external JIT-compiled CUDA GEMM library for W<8-bit weights
+    # (github.com/vllm-project/humming, PyPI `humming-kernels`). It is the same
+    # optional dependency vLLM and SGLang consume, so nothing is vendored here.
+    # A single backend covers both the GPTQ and AWQ sub-kernels; the checkpoint
+    # method/format selects the concrete implementation.
+    HUMMING = "humming"  # SM75+ w2/w4/w8 a16 GEMM (dense; 3/5/6/7-bit layouts unsupported)
 
     # QQQ kernels
     QQQ = "qqq"  # marlin-based qqq kernel
@@ -69,9 +77,9 @@ class BACKEND(str, Enum):
     AWQ_BITBLAS = "awq_bitblas"
     AWQ_EXLLAMA_V2 = "awq_exllama_v2"
 
-    # ParoQuant kernels
-    PAROQUANT_CUDA = "paroquant_cuda"
-    PAROQUANT_TRITON = "paroquant_triton"
+    # Paro kernels
+    PARO_CUDA = "paro_cuda"
+    PARO_TRITON = "paro_triton"
 
     # FP8 kernels
     FP8_TORCH = "fp8_torch"
@@ -82,6 +90,7 @@ class BACKEND(str, Enum):
 
     # NF12 (NyoomFloat12) lossless 12-bit BF16 weights
     NF12 = "nf12"
+    CPTC = "cptc"
 
     # MACaQ MXFP4 kernels
     MACAQ_TORCH = "macaq_torch"
@@ -119,7 +128,13 @@ class BACKEND(str, Enum):
     TORCH_FUSED_AWQ = "torch_fused_awq"
     TORCH_AWQ = "torch_awq"
     BITBLAS_AWQ = "bitblas_awq"
-    PARO = "paroquant"
+    PARO = "paro"
+
+
+#: Backends that own Tenstorrent chips through TT-Metal instead of the PJRT
+#: runtime. They stage checkpoint tensors on CPU and upload packed weights on
+#: demand, so device selection and host staging must treat them alike.
+NATIVE_TTNN_BACKENDS = frozenset({BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_BF8})
 
 
 class PROFILE(str, Enum):
@@ -154,8 +169,8 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.BITBLAS_AWQ: BACKEND.AWQ_BITBLAS,
         BACKEND.EXLLAMA_V2: BACKEND.AWQ_EXLLAMA_V2,
     },
-    "paroquant": {
-        BACKEND.PARO: BACKEND.PAROQUANT_CUDA,
+    "paro": {
+        BACKEND.PARO: BACKEND.PARO_CUDA,
     },
     "fp8": {
         BACKEND.TORCH: BACKEND.FP8_TORCH,
@@ -169,6 +184,9 @@ _LEGACY_BACKEND_BY_METHOD = {
     },
     "nf12": {
         BACKEND.TORCH: BACKEND.NF12,
+    },
+    "cptc": {
+        BACKEND.TORCH: BACKEND.CPTC,
     },
     "macaq": {
         BACKEND.TORCH: BACKEND.MACAQ_TORCH,
@@ -201,6 +219,8 @@ _LEGACY_BACKEND_ALIASES = {
     "awq_machete": BACKEND.MACHETE,
     "gptq_swordfish": BACKEND.SWORDFISH,
     "awq_swordfish": BACKEND.SWORDFISH,
+    "gptq_humming": BACKEND.HUMMING,
+    "awq_humming": BACKEND.HUMMING,
 }
 
 _PROFILE_BY_INDEX = {
@@ -222,6 +242,11 @@ def normalize_backend(
     *,
     quant_method: Optional[Union[str, Any]] = None,
 ) -> Optional[BACKEND]:
+    # Imported lazily: configs depend on the enum and normalization rules.
+    from .backend_config import BackendConfig
+
+    if isinstance(backend, BackendConfig):
+        backend = backend.backend
     if backend is None:
         return None
 
@@ -276,20 +301,49 @@ def awq_gemm_pack_backend(
     return BACKEND.AWQ_GEMM
 
 
-def awq_gemv_pack_backend(*, is_rocm: bool) -> BACKEND:
-    """Return the AWQ GEMV backend used to pack quantized weights.
+def awq_gemv_pack_backend(*, device_type: str = "cuda", is_rocm: bool) -> BACKEND:
+    """Return the AWQ GEMV backend used to pack and run quantized weights.
 
     The native AWQ GEMV extension (``gemv_forward``/``gemmv2_forward``) is
     CUDA-only: its sources include ``cuda_fp16.h`` and CUDA-only inline asm, and
     its hipified warp-sync reduction rejects wave32.  ``AWQ_GEMV_TRITON`` reads
     the identical packed GEMV layout with a portable Triton kernel, so ROCm
-    packs with that kernel instead of selecting a CUDA-only class.
+    packs with that kernel instead of selecting a CUDA-only class.  A CPU-only
+    host has neither accelerator kernel; it packs and runs with the portable
+    Torch GEMV reader (``AwqGEMVTorchLinear``) so ``quantize()`` -> ``save()``
+    still produces the requested GEMV checkpoint (issue #4554).
 
     Args:
+        device_type: Runtime type of the quantization device (``"cuda"``,
+            ``"rocm"``, ``"cpu"``, ...).
         is_rocm: Whether the CUDA namespace is backed by the HIP runtime.
     """
 
+    if device_type == "cpu":
+        return BACKEND.AWQ_TORCH
     return BACKEND.AWQ_GEMV_TRITON if is_rocm else BACKEND.AWQ_GEMV
+
+
+def awq_gemv_fast_pack_backend(*, device_type: str = "cuda", is_rocm: bool) -> BACKEND:
+    """Return the AWQ GEMV_FAST / LLM_AWQ backend used to pack the weights.
+
+    The native GEMV_FAST extension (``gemv_fast_forward_decode`` /
+    ``gemm_fast_forward_prefill``) is CUDA-only: hipcc rejects its sources, so
+    ROCm has never had a backend for these two layouts (issue #5109). The
+    portable Torch readers (``AwqGEMVFastTorchLinear``/``LLMAwqTorchLinear``)
+    read and write the identical interleaved INT16 layout, so a host without
+    the extension packs with ``BACKEND.AWQ_TORCH`` instead of refusing before
+    calibration. That mirrors what #4753 did for a CPU-only host.
+
+    Args:
+        device_type: Runtime type of the quantization device (``"cuda"``,
+            ``"rocm"``, ``"cpu"``, ...).
+        is_rocm: Whether the CUDA namespace is backed by the HIP runtime.
+    """
+
+    if device_type == "cpu" or is_rocm:
+        return BACKEND.AWQ_TORCH
+    return BACKEND.AWQ_GEMV_FAST
 
 
 def backend_for_activation(activation_mode: Optional[str], backend: Optional[BACKEND]) -> Optional[BACKEND]:

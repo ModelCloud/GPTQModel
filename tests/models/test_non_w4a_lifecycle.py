@@ -12,7 +12,7 @@ from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.looper import gptq_processor
 from gptqmodel.models import writer
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
@@ -55,6 +55,7 @@ CASES = [
     ("gptq", torch.bfloat16, "cuda"),
     ("gptq_act_order", torch.bfloat16, "cuda"),
     ("gptq_asym", torch.bfloat16, "cuda"),
+    ("gptq_rotation", torch.bfloat16, "cpu"),
     ("gptq_rotation", torch.bfloat16, "cuda"),
     ("awq", torch.float16, "cuda"),
     ("awq", torch.bfloat16, "cuda"),
@@ -114,7 +115,7 @@ def test_quantize_save_reload_without_activation_policy(tmp_path, monkeypatch, l
 
     monkeypatch.setattr(wrapper, "shell_module_materialize", record_materialize)
     calibration = ["a fox runs under the moon " * 3, "the moon a fox " * 5]
-    wrapper.quantize(None if method == "rtn" else calibration, batch_size=1, backend=backend)
+    wrapper.quantize(CalibrationConfig(dataset=None if method == "rtn" else calibration, batch_size=1), backend=backend)
     if lazy:
         assert materialized
         if method != "rtn":  # RTN materializes weights without StageInputsCapture.
@@ -147,6 +148,15 @@ def test_quantize_save_reload_without_activation_policy(tmp_path, monkeypatch, l
     assert len(set(seen)) == 14
     assert torch.isfinite(logits).all()
     assert not hasattr(loaded.model, "_w4a_stream_mode")
+    if lane == "gptq_rotation":
+        # Exercise the embedded config fallback used by single-config exports.
+        (saved / "quantize_config.json").unlink()
+        loaded = GPTQModel.load(str(saved), backend=backend, device=device, dtype=dtype)
+        assert loaded.quantize_config.model_rotation == "hadamard"
+        assert loaded.model.model.layers[0].mlp.down_proj.online_full_had
+        with torch.inference_mode():
+            restored_logits = loaded.model(input_ids=ids, use_cache=False).logits
+        torch.testing.assert_close(restored_logits, logits, rtol=0, atol=0)
     loaded.save(str(exported))
     original_state = load_file(str(saved / "model.safetensors"))
     exported_state = load_file(str(exported / "model.safetensors"))
@@ -174,16 +184,16 @@ def test_ordinary_gptq_dequantization_preserves_bias_contract(dtype, bias):
     model.proj.scales.copy_(torch.arange(1, 5)[:, None] / 8.)
     if bias:
         model.proj.bias.copy_(torch.linspace(-1, 1, 128))
-    expected_bias = model.proj.bias.half() if bias else None
+    expected_bias = model.proj.bias.to(dtype) if bias else None
     # Independently unpack the repeated hexadecimal fixture and apply the
     # four group scales; do not use the implementation's dequantizer as oracle.
     rows = torch.arange(128)
-    weight = (rows.remainder(8) * ((rows // 32 + 1) / 8.)).half()[:, None].expand(128, 128)
-    x = torch.linspace(-1, 1, 128).half()[None]
+    weight = (rows.remainder(8) * ((rows // 32 + 1) / 8.)).to(dtype)[:, None].expand(128, 128)
+    x = torch.linspace(-1, 1, 128).to(dtype)[None]
     expected = torch.nn.functional.linear(x, weight.T, expected_bias)
     dequantize_model(model)
     assert type(model.proj) is torch.nn.Linear
     assert (model.proj.bias is not None) == bias
-    assert model.proj.weight.dtype == torch.float16
+    assert model.proj.weight.dtype == dtype
     assert not hasattr(model.config, "quantization_config")
     torch.testing.assert_close(model.proj(x), expected, rtol=0, atol=0)

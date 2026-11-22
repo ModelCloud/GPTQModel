@@ -163,7 +163,7 @@ def _final_norm_forward(self, hidden_states: torch.Tensor | W4AActivation) -> to
 
 def _attention_forward(self, hidden_states: W4AActivation, position_embeddings=None,
                        attention_mask=None, past_key_values=None, **kwargs):
-    from transformers.models.llama.modeling_llama import (
+    from gptqmodel.models.ports.native.llama.modeling_llama import (
         ALL_ATTENTION_FUNCTIONS,
         apply_rotary_pos_emb,
         eager_attention_forward,

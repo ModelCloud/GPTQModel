@@ -21,7 +21,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from gptqmodel.quantization.awq.modules.triton import gemm as awq_gemm_mod
 from gptqmodel.quantization.awq.modules.triton.scheduler import (
     _VERIFIED_4090_FP16_RULES,
     _VERIFIED_4090_PROFILE,
@@ -211,6 +210,10 @@ def test_kernel_rejects_non_fp16_input():
     scales = torch.zeros(1, 64, dtype=torch.bfloat16)
     qzeros = torch.zeros(1, 8, dtype=torch.int32)
     inputs = torch.zeros(4, 64, dtype=torch.bfloat16)
+    # The kernel module needs Triton; the plan-table cases in this file do not.
+    pytest.importorskip("triton")
+    from gptqmodel.quantization.awq.modules.triton import gemm as awq_gemm_mod
+
     with pytest.raises(ValueError, match="float16"):
         awq_gemm_mod.awq_gemm_triton(inputs, qweight, scales, qzeros, 1)
 

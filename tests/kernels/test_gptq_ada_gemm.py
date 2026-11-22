@@ -8,24 +8,33 @@ The oracle decodes the packed int32 words with Torch integer shifts and
 accumulates in FP64; it never calls the Triton kernel.
 """
 
+import importlib.util
+
 import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear import torch as torch_linear_mod
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.nn_modules.triton_utils.gptq_gemm import (
-    _DEFAULT_LAUNCH,
-    _LAUNCH_CONFIGS,
-    GemmLaunch,
-    gate_limits,
-    gate_max_out_features,
-    gptq_gemm,
-    launch_config,
-    split_k_for,
-    tile_for_m,
-)
 from gptqmodel.utils import arch
-from tests.kernels._gptq_gemm_pre_rewrite import pre_rewrite_gptq_gemm
+
+
+# The fused kernels (and the pre-rewrite reference) import Triton; the launch
+# tables they share with ``TorchLinear`` are only reachable through them.
+HAS_TRITON = importlib.util.find_spec("triton") is not None
+if HAS_TRITON:
+    from gptqmodel.nn_modules.triton_utils.gptq_gemm import (
+        _DEFAULT_LAUNCH,
+        _LAUNCH_CONFIGS,
+        GemmLaunch,
+        gate_limits,
+        gate_max_out_features,
+        gptq_gemm,
+        launch_config,
+        split_k_for,
+        tile_for_m,
+    )
+    from tests.kernels._gptq_gemm_pre_rewrite import pre_rewrite_gptq_gemm
+requires_triton = pytest.mark.skipif(not HAS_TRITON, reason="Triton is not installed")
 
 
 TOL = 2e-3
@@ -55,6 +64,7 @@ requires_ada = pytest.mark.skipif(not _is_ada_host(), reason="Ada (SM 8.9) CUDA 
 # CPU-only: launch table, gate constants and dispatch predicates.
 # --------------------------------------------------------------------------- #
 
+@requires_triton
 def test_ada_launch_entry_is_measured_tile():
     cfg = launch_config("sm_89")
     assert cfg == launch_config((8, 9))
@@ -70,26 +80,31 @@ def test_ada_launch_entry_is_measured_tile():
     assert launch_config("sm_120") == _LAUNCH_CONFIGS["blackwell"]
 
 
+@requires_triton
 @pytest.mark.parametrize(
     ("arch_id", "expected"),
     [
-        ("sm_89", GemmLaunch(16, 32, 128, 4, 2, 64, 0, 0, True, True)),
-        ((8, 9), GemmLaunch(16, 32, 128, 4, 2, 64, 0, 0, True, True)),
-        ("sm_100", GemmLaunch(16, 32, 128, 4, 2, 64, 0, 0, True, True)),
-        ("sm_120", GemmLaunch(16, 32, 128, 4, 2, 64, 0, 0, True, True)),
-        ("gfx950", GemmLaunch(16, 16, 256, 4, 2, 16, 5120, 0)),
-        ("gfx1201", GemmLaunch(32, 32, 256, 4, 2, 16, 17408, 0)),
-        ("gfx942", _DEFAULT_LAUNCH),
-        ("sm_80", _DEFAULT_LAUNCH),
-        ("sm_90", _DEFAULT_LAUNCH),
-        ("", _DEFAULT_LAUNCH),
-        (None, _DEFAULT_LAUNCH),
+        ("sm_89", (16, 32, 128, 4, 2, 64, 0, 0, True, True)),
+        ((8, 9), (16, 32, 128, 4, 2, 64, 0, 0, True, True)),
+        ("sm_100", (16, 32, 128, 4, 2, 64, 0, 0, True, True)),
+        ("sm_120", (16, 32, 128, 4, 2, 64, 0, 0, True, True)),
+        ("gfx950", (16, 16, 256, 4, 2, 16, 5120, 0)),
+        ("gfx1201", (32, 32, 256, 4, 2, 16, 17408, 0)),
+        ("gfx942", None),
+        ("sm_80", None),
+        ("sm_90", None),
+        ("", None),
+        (None, None),
     ],
 )
 def test_gemm_launch_routes_every_family(arch_id, expected):
+    # Expected launches are built here, not at collection, because the table
+    # lives in the Triton kernel module. ``None`` means the portable default.
+    expected = _DEFAULT_LAUNCH if expected is None else GemmLaunch(*expected)
     assert launch_config(arch_id) == expected
 
 
+@requires_triton
 def test_ada_gate_and_dtypes():
     assert gate_limits("sm_89") == ADA_GATE
     assert gate_limits((8, 9)) == ADA_GATE
@@ -155,12 +170,13 @@ def _fake_cuda_ada(monkeypatch, capability=(8, 9)):
 @pytest.mark.parametrize(
     ("capability", "expect_fused", "expect_gate", "expect_out_cap", "expect_dtypes"),
     [
-        ((8, 9), True, ADA_GATE, 0, {"float16", "bfloat16"}),
+        # The fused gate is read from the Triton kernel's launch table.
+        pytest.param((8, 9), True, ADA_GATE, 0, {"float16", "bfloat16"}, marks=requires_triton),
         ((8, 0), False, (0, 0), 0, set()),
         ((8, 6), False, (0, 0), 0, set()),
         ((9, 0), False, (0, 0), 0, set()),
-        ((10, 0), True, BLACKWELL_GATE, 0, {"float16", "bfloat16"}),
-        ((12, 0), True, BLACKWELL_GATE, 0, {"float16", "bfloat16"}),
+        pytest.param((10, 0), True, BLACKWELL_GATE, 0, {"float16", "bfloat16"}, marks=requires_triton),
+        pytest.param((12, 0), True, BLACKWELL_GATE, 0, {"float16", "bfloat16"}, marks=requires_triton),
     ],
 )
 def test_module_dispatch_follows_capability(
@@ -197,6 +213,7 @@ def test_ada_has_no_output_width_cap(monkeypatch):
     assert wide._rocm_gemm_out_features_supported(x_stub) is True
 
 
+@requires_triton
 def test_ada_has_no_in_features_cap(monkeypatch):
     device = _fake_cuda_ada(monkeypatch)
     x_stub = type("X", (), {"device": device})()
@@ -442,6 +459,7 @@ def test_ada_forward_retains_no_dense_weight_at_scale():
 # Bitwise / split-K contracts.
 # --------------------------------------------------------------------------- #
 
+@requires_triton
 def test_ada_tile_for_m_bands():
     cfg = launch_config("sm_89")
     assert tile_for_m(cfg, 1) == (16, 32)
@@ -457,6 +475,7 @@ def test_ada_tile_for_m_bands():
         assert tile_for_m(fixed, 64) == (fixed.block_m, fixed.block_n)
 
 
+@requires_triton
 def test_ada_split_k_selection():
     assert split_k_for(2, 4096) == 8
     assert split_k_for(16, 14336) == 8
@@ -468,6 +487,7 @@ def test_ada_split_k_selection():
     assert split_k_for(2, 4090) == 1
 
 
+@requires_triton
 @requires_ada
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -507,6 +527,7 @@ def test_ada_split_off_is_bitwise_equal_to_pre_rewrite_kernel(
     assert new_visible.dtype == dtype
 
 
+@requires_triton
 @requires_ada
 @pytest.mark.cuda
 def test_ada_auto_split_k_is_deterministic():
@@ -526,6 +547,7 @@ def test_ada_auto_split_k_is_deterministic():
     assert torch.equal(first, second)
 
 
+@requires_triton
 @requires_ada
 @pytest.mark.cuda
 @pytest.mark.parametrize("desc_act", [False, True])

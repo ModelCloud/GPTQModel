@@ -380,6 +380,57 @@ flowchart TD
     style SKIP fill:#ffa39e
 ```
 
+### Shared decoder declarations across variants
+
+A multimodal wrapper that embeds a language backbone must publish the *same*
+layer inventory as the backbone definition. The wrapper changes the decoder
+prefix, not the layers, so a locally retyped copy is a silent inventory fork:
+the wrapper keeps quantizing, the compiler still accepts the tree, and every
+leaf the copy forgot stays in the source dtype with no error.
+
+`NemotronOmniQModel` was such a copy. It re-declared `mixer` only, so the routed
+experts, shared experts, top-k router and SSM convolution of
+`language_model.backbone.layers.*` were undeclared (issue #4355).
+
+```mermaid
+flowchart TD
+    DECL["NEMOTRON_H_LAYER_MODULES<br/>declared once in nemotron_h.py"] --> H["NemotronHQModel.module_tree<br/>model.layers"]
+    DECL --> O["NemotronOmniQModel.module_tree<br/>language_model.backbone.layers"]
+    H --> HP["ModulePlan.from_tree"]
+    O --> OP["ModulePlan.from_tree"]
+    HP --> HQ["routed/shared experts, router, conv declared"]
+    OP --> OQ["same inventory at the Omni prefix"]
+    COPY["local retyped mixer-only dict"] --> BAD["experts undeclared<br/>stay in source dtype, no error"]
+    style BAD fill:#ffa39e,stroke:#a8071a
+    style DECL fill:#d9f7be,stroke:#237804
+```
+
+The same declaration also carries the AWQ policy, so the two definitions cannot
+disagree about fold sources:
+
+| Leaf | Flags | Why |
+| --- | --- | --- |
+| `mixer.up_proj` | `:3:nosrc` | `down_proj(relu2(up_proj(x)))`; `relu2` is not positively homogeneous |
+| `mixer.shared_experts.up_proj` | `:0:nosrc` | the shared expert MLP is the same assertion |
+| `mixer.experts.#.up_proj` | `:0:nosrc` | the routed expert MLP is the same assertion |
+| `mixer.gate`, `mixer.conv1d` | `:!` | checkpoint-owned, not quantizable Linears |
+| `mixer.experts:moe` | `moe` | routed-expert container for `#` expansion |
+
+`test_nemotron_omni_reuses_the_nemotron_h_layer_declaration` pins object
+identity, so a future local copy fails immediately instead of silently
+unquantizing the experts. `test_nemotron_omni_*` also resolves the real remote
+decoder layers and re-runs the fold-preservation invariant there.
+
+#### Before and after
+
+| Aspect | Before | After |
+| --- | --- | --- |
+| Omni layer inventory | local mixer-only `dict` at `nemotron_omni.py:38-56` | shared `NEMOTRON_H_LAYER_MODULES` |
+| Declared projections per layer | 9 | 267 at 128 routed experts (9 + 2 shared + 2 x 128 routed) |
+| Routed expert entries | 0 | 258 (2 x 129 blocks, incl. `#`) |
+| Router / conv | undeclared | `:!` |
+| Omni fold sources | inherited none | the same `:nosrc` set as Nemotron-H |
+
 ### Checkpoint weight coverage
 
 The tree is also the oracle for every checkpoint-owned weight inside a decoder
@@ -439,14 +490,9 @@ configs on `meta` and asserts every decoder weight owner resolves through
 instead of inheriting `LlamaQModel.module_tree`. On the unpatched tree the same
 test fails 13 cases with undeclared owners; on the patched tree it passes 21.
 
-DeepSeek-V4.1-Flash is not included: its checkpoint declares
-`model_type=deepseek_v41`, but the verified Transformers 5.22.1 environment and
-GPT-QModel registry have no corresponding entry. Its checkpoint now provides
-reference inference code; that is not a registered Transformers/GPT-QModel
-loader. The test activates when upstream config support lands instead of
-relabeling V4-Flash as V4.1. See the pinned
-[V4.1 checkpoint inventory](deepseek-v41-module-inventory.md) for the current
-evidence and remaining work.
+GPT-QModel registers DeepSeek V4.1 Flash separately as `deepseek_v41`.
+`test_deepseek_v41_flash.py` checks the module plan against the loaded decoder
+weights and scales for all attention layouts. [V4.1 checkpoint inventory](deepseek-v41-module-inventory.md)
 
 ### Rotation
 
@@ -558,3 +604,4 @@ tagging every definition would allow the map to be deleted.
 | `tests/module_tree/test_parallel_branch_calibration.py` | concurrent branches are calibrated on their own inputs; an unreachable branch fails loudly |
 | `tests/test_afmoe_support.py`, `tests/test_k2_horizon_support.py` | real MoE definitions resolve without name overrides |
 | `tests/module_tree/test_flash_model_tree_consumption.py` | real Flash-family meta models: quantizable specs, every checkpoint weight owner, roles, MoE hooks, looper helpers, Ripple custom code |
+| `tests/module_tree/test_nemotron_h_model_tree.py` | Nemotron-H and Omni share one decoder declaration; the Omni inventory resolves on the remote `language_model.backbone` decoder and keeps the fold-preservation invariant |

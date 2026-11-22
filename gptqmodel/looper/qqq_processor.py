@@ -13,16 +13,15 @@ from torch.nn import Module
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
-    LoopProcessor,
     ProcessorLifecycleConfig,
     bind_resolved_module_config,
     get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
+from ..looper.shared_input import SharedInputCaptureProcessor
 from ..models import BaseQModel
 from ..models._const import DEVICE
 from ..models.writer import (
@@ -36,19 +35,26 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..nn_modules.qlinear.qqq import QQQ_ROCM_UNSUPPORTED, QQQLinear, QQQTorchLinear
-from ..quantization.config import METHOD, QuantizeConfig, apply_scalar_module_overrides, resolve_quant_format
+from ..quantization.config import (
+    METHOD,
+    CalibrationConfig,
+    QuantizeConfig,
+    apply_scalar_module_overrides,
+    resolve_quant_format,
+)
 from ..quantization.qqq import QQQ
 from ..utils.backend import BACKEND
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, move_to, pack_module
+from ..utils.model import create_quant_module, install_quant_module, move_to, pack_module
+from ..utils.module_locks import parent_module_lock
 from ..utils.rocm import IS_ROCM
 from ..utils.torch import CPU
 
 
 log = setup_logger()
 
-class QQQProcessor(LoopProcessor):
+class QQQProcessor(SharedInputCaptureProcessor):
     """Captures activations and quantizes modules with the QQQ workflow."""
 
     lifecycle = ProcessorLifecycleConfig(
@@ -73,6 +79,7 @@ class QQQProcessor(LoopProcessor):
             calibration=calibration,
             forward=forward,
         )
+        self._init_shared_input_capture()
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
@@ -90,14 +97,15 @@ class QQQProcessor(LoopProcessor):
         must follow the same declaration or ``quantize()`` leaves a model whose
         first forward raises ``NotImplementedError``.
         """
-        if self.requested_backend == BACKEND.QQQ_TORCH or sys.platform == "darwin":
+        requested_backend = getattr(self, "requested_backend", BACKEND.AUTO)
+        if requested_backend == BACKEND.QQQ_TORCH or sys.platform == "darwin":
             return QQQTorchLinear, BACKEND.QQQ_TORCH
         # QQQ's Marlin-derived W4A8 kernel is CUDA-only in practice; its JIT
         # extension uses CUDA inline PTX that hipcc cannot compile for gfx120*.
         # An explicit BACKEND.QQQ request on ROCm is a user error, so report it
         # here rather than failing later inside the pack/forward path.
         if IS_ROCM:
-            if self.requested_backend == BACKEND.QQQ:
+            if requested_backend == BACKEND.QQQ:
                 raise NotImplementedError(QQQ_ROCM_UNSUPPORTED)
             return QQQTorchLinear, BACKEND.QQQ_TORCH
         device = self.qcfg.device
@@ -111,7 +119,7 @@ class QQQProcessor(LoopProcessor):
             return QQQTorchLinear, BACKEND.QQQ_TORCH
 
         if not QQQLinear.supports_dtype(dtype):
-            if self.requested_backend == BACKEND.QQQ:
+            if requested_backend == BACKEND.QQQ:
                 raise NotImplementedError(
                     f"QQQ (BACKEND.QQQ) only supports `{QQQLinear.SUPPORTS_DTYPES}` "
                     f"activations; the model dtype is `{dtype}`. Use "
@@ -125,6 +133,46 @@ class QQQProcessor(LoopProcessor):
 
         raise NotImplementedError("QQQProcessor's calibration_dataset cannot be modified")
 
+    def _validate_module_shape(self, module: NamedModule) -> None:
+        """Reject a module the selected QQQ kernel cannot pack.
+
+        QQQ's kernels tile both the contraction and the output axis
+        (``IN_OUTPUT_FEATURES_DIVISIBLE_BY``), but that contract was only
+        enforced inside ``create_quant_module`` during finalize, i.e. after the
+        whole calibration had run. A FalconMamba/Mamba ``x_proj`` (8192 -> 288)
+        therefore lost an entire 7B calibration to a shape error that could be
+        reported in the first layer (issue #4567). Unlike AWQ, no QQQ kernel
+        accepts an arbitrary width, so the run fails here instead of leaving the
+        module dense by surprise.
+        """
+
+        state = getattr(module, "state", None) or {}
+        if state.get("capture_only"):
+            # Forward-only capture modules are never packed, so their shape
+            # does not have to satisfy the kernel tile contract.
+            return
+        in_features = int(getattr(module, "in_features", 0) or 0)
+        out_features = int(getattr(module, "out_features", 0) or 0)
+        if in_features <= 0 or out_features <= 0:
+            return
+        weight = getattr(module, "weight", None)
+        dtype = weight.dtype if isinstance(weight, torch.Tensor) else None
+        kernel, _backend = self._quant_linear_kernel(dtype)
+        tiles = getattr(kernel, "IN_OUTPUT_FEATURES_DIVISIBLE_BY", None) or ()
+        if not tiles:
+            return
+        if any(
+            in_features % thread_k == 0 and out_features % thread_n == 0
+            for thread_k, thread_n in tiles
+        ):
+            return
+        raise ValueError(
+            f"QQQ cannot pack module `{module.full_name}`: {in_features} -> {out_features} "
+            f"does not satisfy any {kernel.__name__}.IN_OUTPUT_FEATURES_DIVISIBLE_BY tile "
+            f"{tuple(tiles)}. Exclude it with a `-:` dynamic rule, or quantize with a "
+            "backend whose kernel supports this shape."
+        )
+
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Builds the per-module QQQ task after applying dynamic overrides."""
 
@@ -132,6 +180,9 @@ class QQQProcessor(LoopProcessor):
         if resolved_cfg.excluded:
             return
         bind_resolved_module_config(module, resolved_cfg)
+        # Fail on the first un-packable module instead of in finalize, after
+        # every layer was calibrated (issue #4567).
+        self._validate_module_shape(module)
 
         qcfg_clone = copy.deepcopy(self.qcfg)
         apply_scalar_module_overrides(qcfg_clone, resolved_cfg)
@@ -176,13 +227,26 @@ class QQQProcessor(LoopProcessor):
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the QQQ task."""
 
+        if self.shared_input_leader(name) is not None:
+            def skip(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+                """Follower of a shared-input group: the leader collects this Hessian."""
+
+                del inp, out
+            return skip
+
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             """Records one activation batch for QQQ statistics accumulation."""
 
             # gptq is mutable.
             q = self.tasks[name]  # noqa: F821
-            q.add_batch(inp[0].data, out.data)  # noqa: F821
+            q.add_batch(self.calibration_rows(inp[0].data), out.data)  # noqa: F821
         return tmp
+
+    def _shared_input_task_enabled(self, task: QQQ) -> bool:
+        # QQQ's GSQ path consumes its own calibration moments rather than the
+        # GPTQ-style Hessian, so a plain H copy would not make the follower
+        # numerically equal to an independent capture.
+        return not getattr(task, "_gsq_enabled", False)
 
     def process(
         self,
@@ -322,7 +386,7 @@ class QQQProcessor(LoopProcessor):
             logger=log,
             module_name=module_label,
         ):
-            create_quant_module(
+            qmodule = create_quant_module(
                 name=module.full_name,
                 linear_cls=quant_linear_cls,
                 bits=self.qcfg.runtime_bits,
@@ -339,10 +403,15 @@ class QQQProcessor(LoopProcessor):
                 backend=backend,
                 register_buffers=False,
                 resolved_module_config=get_resolved_module_config(module),
+                install=False,
             )
 
+        if qmodule is None:
+            raise RuntimeError(
+                f"QQQProcessor: module `{module.full_name}` resolved to an excluded "
+                "quant config but still reached packing."
+            )
         # pack module
-        qmodule = model.model.get_submodule(module.full_name)
         qModules = (
             {module.full_name: qmodule}
             if isinstance(qmodule, quant_linear_cls)
@@ -371,6 +440,11 @@ class QQQProcessor(LoopProcessor):
         with self.lock:
             self.result_pop(module.full_name)
 
+        # Publish the packed kernel with one assignment; installing it before
+        # packing left an unusable projection behind when packing was
+        # interrupted (issue #5089).
+        with parent_module_lock(module.full_name):
+            install_quant_module(model.model, module.full_name, qmodule)
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):

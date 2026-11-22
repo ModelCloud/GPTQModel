@@ -10,6 +10,8 @@ import triton
 import triton.language as tl
 from torch.amp import custom_bwd, custom_fwd
 
+from gptqmodel.utils.triton_jit import jit as triton_jit
+
 from ...utils.arch import normalize_arch, tuning_family
 from ...utils.torch import HAS_XPU
 from ..qlinear._numerics import matmul_fp32_reduce
@@ -80,7 +82,7 @@ def launch_config(arch=None) -> DequantLaunch:
     return _DEQUANT_LAUNCH_CONFIGS.get(tuning_family(name), _DEFAULT_DEQUANT_LAUNCH)
 
 
-@triton.jit
+@triton_jit
 def dequant_kernel(
     g_idx_ptr,
     scales_ptr,

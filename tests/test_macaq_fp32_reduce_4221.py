@@ -63,6 +63,9 @@ def test_macaq_triton_w4a16_tail_uses_fp32_reduce(monkeypatch):
         seen.append(x.dtype)
         return linear_fp32_reduce(x, weight_arg, bias)
 
+    # The Triton dequant is the only Triton launch in this path and is replaced
+    # here, so the availability gate is lifted to observe the Torch tail on CPU.
+    monkeypatch.setattr(macaq_triton, "TRITON_AVAILABLE", True)
     monkeypatch.setattr(macaq_triton, "dequant_w4_to_bf16", lambda packed, scales: weight)
     monkeypatch.setattr(macaq_triton, "linear_fp32_reduce", tracked)
     x = torch.randn(2, in_features, dtype=torch.bfloat16)

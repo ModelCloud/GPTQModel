@@ -24,8 +24,11 @@ from gptqmodel._alloc_conf import (
     ALLOC_CONF_ENV_VARS,
     DEFAULT_ALLOC_CONF,
     alloc_conf_configured,
+    allocator_max_split_bytes,
     apply_default_alloc_conf,
+    clamp_budget_below_allocator_split,
     default_alloc_conf,
+    max_split_bytes_from_conf,
 )
 
 
@@ -51,12 +54,57 @@ def test_default_is_installed_when_unset(clean_alloc_env):
     if expected == DEFAULT_ALLOC_CONF:
         assert "expandable_segments:True" in DEFAULT_ALLOC_CONF
     else:
-        assert "expandable_segments" not in expected
+        assert "expandable_segments:True" not in expected
 
 
 def test_second_call_is_a_no_op(clean_alloc_env):
     assert apply_default_alloc_conf() == default_alloc_conf()
     assert apply_default_alloc_conf() is None
+
+
+@pytest.mark.parametrize(
+    ("conf", "expected"),
+    [
+        (None, None),
+        ("expandable_segments:True", None),
+        ("max_split_size_mb:256,garbage_collection_threshold:0.7", 256 << 20),
+        (" garbage_collection_threshold:0.7 , max_split_size_mb:128 ", 128 << 20),
+        ("max_split_size_mb:0", None),
+        ("max_split_size_mb:not-a-number", None),
+    ],
+)
+def test_max_split_bytes_from_conf(conf, expected):
+    assert max_split_bytes_from_conf(conf) == expected
+
+
+def test_clamp_budget_below_allocator_split(monkeypatch):
+    # No cap (the CUDA default with expandable segments): untouched.
+    monkeypatch.setattr(
+        "gptqmodel._alloc_conf.allocator_max_split_bytes", lambda: None
+    )
+    assert clamp_budget_below_allocator_split(256 << 20) == 256 << 20
+
+    # A 256 MiB split cap: the default workspace lands in the unsplittable
+    # last 2 MiB below the cap, so it is clamped with headroom.
+    monkeypatch.setattr(
+        "gptqmodel._alloc_conf.allocator_max_split_bytes", lambda: 256 << 20
+    )
+    assert clamp_budget_below_allocator_split(256 << 20) == 254 << 20
+    # Smaller explicit budgets are preserved.
+    assert clamp_budget_below_allocator_split(64 << 20) == 64 << 20
+    # The floor keeps a pathological cap from producing a zero budget.
+    monkeypatch.setattr(
+        "gptqmodel._alloc_conf.allocator_max_split_bytes", lambda: 1 << 20
+    )
+    assert clamp_budget_below_allocator_split(256 << 20) == 1 << 20
+
+
+def test_allocator_max_split_reads_effective_settings(monkeypatch):
+    monkeypatch.setattr(
+        "gptqmodel._alloc_conf._effective_alloc_conf",
+        lambda: "max_split_size_mb:256,garbage_collection_threshold:0.7",
+    )
+    assert allocator_max_split_bytes() == 256 << 20
 
 
 @pytest.mark.parametrize("name", ALLOC_CONF_ENV_VARS)

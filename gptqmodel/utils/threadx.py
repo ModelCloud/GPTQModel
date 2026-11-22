@@ -30,7 +30,7 @@ from ..utils import torch as torch_utils
 from ..utils.ctx import ctx
 from ..utils.device_telemetry import capture_device_telemetry
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_NPU, torch_empty_cache_any
+from ..utils.torch import HAS_NPU, accelerator_context_claimed, torch_empty_cache_any
 
 
 log = setup_logger()
@@ -395,6 +395,101 @@ class _WorkerWarmupState:
 # executed under the device’s read lock; GC acquires the writer lock to keep
 # memory management steps from interleaving with tasks.
 
+def split_intraop_threads(worker_count: int, total: Optional[int] = None) -> int:
+    """Return the Torch intra-op pool size for one pool worker.
+
+    ``worker_count`` is the number of pool threads that can run parallel
+    regions concurrently; ``total`` is the process-wide intra-op budget
+    (defaults to ``torch.get_num_threads()``). Splitting the budget keeps the
+    sum of the workers' OpenMP teams within the process pool instead of
+    multiplying it by the worker count (issue #4356).
+
+    A minimum of one thread is always returned: when the pool has more workers
+    than the budget, each worker still needs a valid team.
+    """
+
+    if total is None:
+        total = torch.get_num_threads()
+    count = max(1, int(worker_count))
+    return max(1, int(total) // count)
+
+
+_INTRAOP_SCOPE_LOCK = threading.RLock()
+
+
+def _restore_global_intraop_threads(ambient: int) -> None:
+    """Restore the process-global intra-op budget from a helper thread.
+
+    ``torch.set_num_threads`` rewrites the calling thread's intra-op ICV as
+    well as the process-global value, so a worker cannot restore the global
+    itself without undoing the budget it just installed. This short-lived
+    thread changes only the global, which is the value later threads read when
+    they initialize their own team (#4796).
+    """
+
+    for _ in range(3):
+        try:
+            with torch_utils.model_global_state_write_guard():
+                torch.set_num_threads(int(ambient))
+            return
+        except Exception:  # pragma: no cover - defensive
+            continue
+    log.warn.once(
+        "Could not restore the process intra-op thread count to %s; threads "
+        "created later may inherit the pool worker budget.",
+        ambient,
+    )
+
+
+def install_worker_intraop_threads(target: Optional[int]) -> None:
+    """Give the calling pool worker its own intra-op team, leaving the process alone.
+
+    libtorch reads the process-global ``num_threads`` only when a thread
+    initializes its intra-op team, at its first ATen call. Installing the
+    worker budget with ``torch.set_num_threads`` for the duration of a task
+    therefore pinned every thread whose first torch op ran while a task was
+    active, for the rest of that thread's life (#4796). Instead each worker
+    installs the budget once, at startup, and the global is restored
+    immediately from a helper thread: this worker keeps its team, every other
+    thread keeps reading the ambient value, and pool tasks never touch the
+    global at all. The pool waits for that install before construction
+    returns, so the transient value is only visible to threads that start
+    while the pool itself is being built.
+    """
+
+    if target is None or int(target) <= 0:
+        return
+    target = int(target)
+
+    with _INTRAOP_SCOPE_LOCK:
+        ambient = torch.get_num_threads()
+        if ambient == target:
+            return
+        try:
+            # ``num_threads`` is part of dynamo's GLOBAL_STATE guard, so a
+            # trace in another thread may restore the value it captured
+            # when the trace started (#5390). Hold the writer for the
+            # transient write so no in-flight trace straddles it.
+            with torch_utils.model_global_state_write_guard():
+                torch.set_num_threads(target)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warn.once(
+                "Could not set intra-op threads to %s for this pool worker (%s); "
+                "the worker keeps the inherited pool.",
+                target,
+                exc,
+            )
+            return
+        restorer = threading.Thread(
+            target=_restore_global_intraop_threads,
+            args=(ambient,),
+            name="threadx-intraop-restore",
+            daemon=True,
+        )
+        restorer.start()
+        restorer.join()
+
+
 class _DeviceWorker:
     """
     Single worker thread bound to one device.
@@ -414,14 +509,28 @@ class _DeviceWorker:
         inference_mode: bool = False,
         cpu_core: Optional[int] = None,
         warmup_plan: Optional[Tuple[_WorkerWarmupState, ...]] = None,
+        intraop_threads: Optional[int] = None,
+        on_task_cancelled: Optional[Callable[[str], None]] = None,
         *,
         key_override: Optional[str] = None,
     ):
         self.device = device
         self.rwlock = rwlock
         self._on_task_finished = on_task_finished
+        # A task cancelled while it sat in the queue never runs, so it releases
+        # its in-flight slot without advancing the completion counters. The
+        # fallback keeps direct constructions (tests, older callers) working.
+        self._on_task_cancelled = on_task_cancelled or on_task_finished
         self._on_worker_exit = on_worker_exit
         self._pending_warmups = warmup_plan or ()
+        # Torch/OpenMP intra-op budget for work executed on this thread.
+        # ``None`` leaves the spawning thread's pool untouched.
+        self._intraop_threads = intraop_threads
+        # A worker thread exists as soon as the pool is built, but the CUDA
+        # context is created only when the worker first activates its device.
+        # Keeping activation lazy lets the pool skip devices whose warmup was
+        # not requested (see `DeviceThreadPool(warmup_devices=...)`).
+        self._device_activated = False
 
         if key_override is not None:
             self.key = key_override
@@ -434,6 +543,10 @@ class _DeviceWorker:
         self._inference_mode = inference_mode
         self._target_cpu_core = cpu_core
         self._affinity_applied = False
+        # Set once the intra-op budget is installed and the process-global
+        # value is ambient again, so the pool can avoid handing back control
+        # (or running tasks) during that transient window (#4796).
+        self._intraop_ready = threading.Event()
         self._thread = threading.Thread(target=self._run, name=self.name, daemon=True)
         self._thread.start()
         if DEBUG_ON: log.debug(f"Spawned worker '{self.name}' for {self.key}")
@@ -441,6 +554,12 @@ class _DeviceWorker:
     def submit(self, fn: Callable[..., Any], /, *args, **kwargs) -> Future:
         """
         Enqueue a callable and return a Future that resolves with its result/exception.
+
+        The future follows the `concurrent.futures` state contract: it stays
+        PENDING until this worker starts the task, so `cancel()` succeeds only
+        while the task is still queued, and the worker then skips it. Once the
+        task is running, `cancel()` returns False and the future is resolved
+        with the task's result or exception.
         """
         fut = Future()
         self._q.put((True, fn, args, kwargs, fut))
@@ -503,6 +622,14 @@ class _DeviceWorker:
             warmup_state.run(device=self.device, rwlock=self.rwlock)
         self._pending_warmups = ()
 
+    def _ensure_device_activated(self) -> None:
+        """Activate this worker's device once, on first real work."""
+
+        if self._device_activated:
+            return
+        _activate_thread_device(self.device)
+        self._device_activated = True
+
     def _run(self):
         """
         Main loop: pull tasks, set device context, execute, mark completion, and
@@ -512,8 +639,15 @@ class _DeviceWorker:
         Workers default to inference mode for throughput but individual tasks
         may override via `inference_mode`.
         """
-        self._apply_cpu_affinity()
-        _activate_thread_device(self.device)
+        # Install the worker's intra-op budget once, before this thread's first
+        # ATen call, so tasks run with it while the process-global value stays
+        # ambient for every other thread (#4796). The event is set even when
+        # startup fails so the pool does not block on a dead worker.
+        try:
+            self._apply_cpu_affinity()
+            install_worker_intraop_threads(self._intraop_threads)
+        finally:
+            self._intraop_ready.set()
         # Exit on the sentinel, not on `_stop`. `stop()` enqueues its sentinel
         # after every task the pool already accepted, so reaching the sentinel
         # means the queue is drained and every accepted future is resolved.
@@ -525,9 +659,29 @@ class _DeviceWorker:
                 if not is_task:
                     if DEBUG_ON: log.debug(f"{self.name}: sentinel received; queue drained, exiting")
                     break
+                # Move PENDING -> RUNNING before doing any work. A future the
+                # caller cancelled while it sat in this queue must not run:
+                # executing it burns a device slot and leaves the side effects
+                # of work the caller already abandoned. The transition also
+                # makes `cancel()` return False for the rest of the task, so a
+                # caller that tries to cancel mid-run cannot cause the result
+                # or the exception below to be dropped.
+                try:
+                    started = fut.set_running_or_notify_cancel()
+                except BaseException as exc:  # pragma: no cover - future state bug
+                    if DEBUG_ON: log.debug(f"{self.name}: future transition failed: {exc!r}")
+                    started = False
+                if not started:
+                    # The task never ran, so release its in-flight slot without
+                    # counting a completion; queue order for the tasks around
+                    # it is preserved because this item is consumed in place.
+                    self._on_task_cancelled(self.key)
+                    if DEBUG_ON: log.debug(f"{self.name}: task cancelled before start; skipped")
+                    continue
                 if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
 
                 try:
+                    self._ensure_device_activated()
                     self._run_warmup()
                 except BaseException as exc:
                     # Warmup runs on the worker thread before the task. Report
@@ -536,8 +690,7 @@ class _DeviceWorker:
                     # shared warmup state caches the error, so later tasks on
                     # this worker fail with the same exception.
                     self._on_task_finished(self.key)
-                    if not fut.cancelled():
-                        fut.set_exception(exc)
+                    fut.set_exception(exc)
                     if DEBUG_ON: log.debug(f"{self.name}: warmup exception: {exc!r}")
                     continue
 
@@ -547,7 +700,7 @@ class _DeviceWorker:
                 )
                 use_inference = self._inference_mode if override_inference is None else bool(override_inference)
 
-                # Tasks take a **read** lock so janitor's write lock can't interleave
+                # Tasks take a **read** lock so janitor's write lock can't interleave.
                 with ctx(self.rwlock.reader(), _device_ctx(self.device)):
                     inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
                     with inference_ctx:
@@ -557,14 +710,12 @@ class _DeviceWorker:
                 # Counters must be updated before resolving futures to prevent
                 # tests reading stats mid-transition and seeing stale totals.
                 self._on_task_finished(self.key)
-                if not fut.cancelled():
-                    fut.set_result(result)
+                fut.set_result(result)
                 if DEBUG_ON: log.debug(f"{self.name}: task done")
             except BaseException as exc:
                 # Even on exception we must decrement inflight and update totals.
                 self._on_task_finished(self.key)
-                if not fut.cancelled():
-                    fut.set_exception(exc)
+                fut.set_exception(exc)
                 if DEBUG_ON: log.debug(f"{self.name}: task exception: {exc!r}")
             finally:
                 self._q.task_done()
@@ -592,17 +743,25 @@ class _SyncWorker:
         on_task_finished: Callable[[str], None],
         on_worker_exit: Callable[[str, "_SyncWorker"], None],
         inference_mode: bool = False,
+        on_task_cancelled: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.key = key
         self.device = device
         self.rwlock = rwlock
         self._on_task_finished = on_task_finished
+        self._on_task_cancelled = on_task_cancelled or on_task_finished
         self._on_worker_exit = on_worker_exit
         self._inference_mode = inference_mode
         self.name = f"DPWorker-{key}#sync"
 
     def submit(self, fn: Callable[..., Any], /, *args, cuda_event=None, **kwargs) -> Future:
         fut = Future()
+        # Same future-state contract as `_DeviceWorker`: a cancelled future is
+        # skipped, and a task that starts is resolved even if the caller tries
+        # to cancel it concurrently.
+        if not fut.set_running_or_notify_cancel():
+            self._on_task_cancelled(self.key)
+            return fut
         try:
             event = cuda_event
             override_inference = _pop_public_kwarg(
@@ -617,12 +776,10 @@ class _SyncWorker:
                         event.synchronize()
                     result = fn(*args, **kwargs)
             self._on_task_finished(self.key)
-            if not fut.cancelled():
-                fut.set_result(result)
+            fut.set_result(result)
         except BaseException as exc:
             self._on_task_finished(self.key)
-            if not fut.cancelled():
-                fut.set_exception(exc)
+            fut.set_exception(exc)
         return fut
 
     def stop(self) -> None:
@@ -664,8 +821,10 @@ class DeviceThreadPool:
         include_cpu: bool = True,
         inference_mode: bool = False,
         warmups: Optional[Dict[str, WarmupTask]] = None,
+        warmup_devices: Optional[Iterable[DeviceLike]] = None,
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
+        intraop_threads_per_worker: Optional[int] = None,
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
         gc_min_interval_seconds: float = 0.0,  # throttle janitor passes
         pin_cpu_workers: bool = False,
@@ -686,6 +845,13 @@ class DeviceThreadPool:
                 - '<alias>:<parent>': N   -> virtual pool sharing locks with parent device
                   (CUDA/NPU parents must include an explicit index, e.g. 'alias:cuda:0')
               Unspecified devices default to 1 worker each.
+            intraop_threads_per_worker: Torch intra-op pool size applied to
+                every worker thread before it runs its first task or warmup.
+                ``None`` splits ``torch.get_num_threads()`` across this pool's
+                workers, so each worker owns a bounded OpenMP team instead of
+                duplicating the process-wide team; ``0`` keeps the pool
+                inherited from the spawning thread. See
+                `docs/device-thread-pool-intraop-budget.md`.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
             warmups: optional mapping from device family (e.g. 'cuda') to a
                 `WarmupTask`. Each warmup callable receives `(device, ctx)`,
@@ -694,6 +860,11 @@ class DeviceThreadPool:
                 physical device with `ctx=DEVICE`, then once per worker thread
                 with `ctx=THREAD`. A special key 'default' applies when no
                 family-specific warmup is found.
+            warmup_devices: optional device allow-list for the eager warmup
+                kicked at construction. Devices not listed still get worker
+                threads and can receive work, but their CUDA/XPU/NPU context is
+                not created and their warmup is deferred until the first task.
+                None warms every discovered accelerator (historical behavior).
             gc_min_interval_seconds: minimum interval between GC passes. Values <= 0 disable throttling.
             pin_cpu_workers: bind CPU device workers to individual CPU cores when
                 affinity APIs are available. Defaults to False so CPU tasks may
@@ -718,6 +889,13 @@ class DeviceThreadPool:
             if include_cpu:
                 discovered.append(torch.device("cpu"))
             devices = discovered
+
+        # ``devices`` is declared as an ``Iterable`` and is traversed several
+        # times below (affinity planning, the default intra-op budget, worker
+        # registration). A one-shot iterator such as a generator would be
+        # exhausted by the first pass and the pool would register no workers,
+        # so materialize it once up front (#4476).
+        devices = tuple(devices)
 
         # Locks and device registry (keyed by "type[:index]" strings like 'cuda:0').
         self._locks: Dict[str, _RWLock] = {}
@@ -770,7 +948,19 @@ class DeviceThreadPool:
         self._device_smi_failures: Set[str] = set()
 
         self._inference_mode = bool(inference_mode)
+        # ``None`` asks for the process intra-op budget to be split across this
+        # pool's workers (resolved once the worker table is known); ``0`` keeps
+        # the spawning thread's pool on every worker.
+        self._intraop_threads_request = (
+            None if intraop_threads_per_worker is None else int(intraop_threads_per_worker)
+        )
+        self._intraop_threads_per_worker: Optional[int] = (
+            self._intraop_threads_request if (self._intraop_threads_request or 0) > 0 else None
+        )
         self._worker_warmups = self._normalize_worker_warmups(warmups)
+        self._warmup_device_keys: Optional[Set[str]] = None
+        if warmup_devices is not None:
+            self._warmup_device_keys = {self._key(_coerce_device(device)) for device in warmup_devices}
         self._device_warmup_lock = threading.Lock()
         self._device_warmup_states: Dict[str, _WorkerWarmupState] = {}
 
@@ -808,6 +998,21 @@ class DeviceThreadPool:
             pin_cpu_workers=pin_cpu_workers,
             pin_accelerator_workers=pin_accelerator_workers,
         )
+
+        if self._intraop_threads_request is None:
+            pool_workers = 0
+            seen_devices: Set[str] = set()
+            for raw_dev in devices:
+                dev = _coerce_device(raw_dev)
+                if dev.type not in ("cuda", "xpu", "npu", "mps", "cpu"):
+                    continue
+                key = self._key(dev)
+                if key in seen_devices:
+                    continue
+                seen_devices.add(key)
+                pool_workers += int(max(1, self._resolve_workers_for_device(dev, base_workers)))
+            pool_workers += sum(int(max(1, count)) for _, count in virtual_workers.values())
+            self._intraop_threads_per_worker = split_intraop_threads(max(1, pool_workers))
 
         # Eagerly build workers, locks, inflight tracking, and counters.
         for d in devices:
@@ -933,6 +1138,26 @@ class DeviceThreadPool:
 
         self._family_keys = fam_map
 
+    def set_warmup_devices(self, warmup_devices: Optional[Iterable[DeviceLike]]) -> None:
+        """Replace the eager-warmup allow-list of a retained pool.
+
+        Worker threads and their installed kernel policy survive a load, but the
+        allow-list is consumed only by the one-shot warmup submitted at
+        construction. A retained pool must apply this load's filtered pool for
+        the echoed no-op warmups; devices outside it stay unactivated.
+        """
+
+        if warmup_devices is None:
+            keys = None
+        else:
+            keys = {self._key(_coerce_device(device)) for device in warmup_devices}
+        # A freshly built pool already submitted these warmups in __init__;
+        # resubmitting them would only enqueue duplicate no-ops.
+        if keys == self._warmup_device_keys:
+            return
+        self._warmup_device_keys = keys
+        self._kick_worker_warmups()
+
     def _kick_worker_warmups(self) -> None:
         """
         Start accelerator warmups during pool construction instead of blocking
@@ -947,6 +1172,8 @@ class DeviceThreadPool:
             return
         for key in self._ordered_keys:
             if self._devices_by_key[key].type not in ("cuda", "xpu", "npu", "mps"):
+                continue
+            if self._warmup_device_keys is not None and key not in self._warmup_device_keys:
                 continue
             for worker in self._worker_groups.get(key, ()):
                 # The no-op runs through the worker's normal completion path,
@@ -1123,13 +1350,25 @@ class DeviceThreadPool:
             device=dev,
             rwlock=self._locks[key],
             on_task_finished=self._on_task_finished,
+            on_task_cancelled=self._on_task_cancelled,
             on_worker_exit=self._on_worker_exit,
             name=name,
             inference_mode=self._inference_mode,
             cpu_core=cpu_core,
             warmup_plan=warmup_plan,
+            intraop_threads=self._intraop_threads_per_worker,
             key_override=key,
         )
+        # A worker publishes its budget to the process-global intra-op value
+        # for a moment while installing it. Do not return from construction
+        # (or start running tasks) until it has restored the ambient value, so
+        # threads started after the pool exists cannot latch the worker budget.
+        if not w._intraop_ready.wait(timeout=60):
+            log.warn.once(
+                "Pool worker %s did not install its intra-op budget within 60s; "
+                "threads started now may inherit it.",
+                name or key,
+            )
         return w
 
     def _on_worker_exit(self, key: str, worker: _DeviceWorker) -> None:
@@ -1162,6 +1401,13 @@ class DeviceThreadPool:
         """
         Asynchronously schedule work on the given device; returns a Future.
         Optional (CUDA): pass `cuda_event=` to ensure work waits for the recorded event.
+
+        The returned future can be cancelled with `future.cancel()` until a
+        worker starts the task. A task cancelled while still queued is skipped
+        without calling `fn`; it keeps its position in the queue, so the tasks
+        submitted before and after it are neither reordered nor dropped. Once
+        the task is running, `cancel()` returns False and the future resolves
+        with the task's result or exception.
         """
         key = self._resolve_device_key(device)
         dev = self._devices_by_key[key]
@@ -1742,6 +1988,18 @@ class DeviceThreadPool:
             if self._inflight[key] == 0:
                 cv.notify_all()
 
+    def _on_task_cancelled(self, key: str) -> None:
+        """
+        Release the slot of a task that was cancelled before its worker started.
+
+        The task never ran, so it must not advance the completion counters that
+        drive the janitor's GC thresholds or ``stats()``. In-flight still has to
+        drop: ``wait()`` and the shutdown drain track accepted work, and a
+        cancelled task is resolved -- as cancelled -- without producing a
+        result, so leaving its slot marked would hang both waiters.
+        """
+        self._mark_finished(key)
+
     def _on_task_finished(self, key: str) -> None:
         """
         Called at the end of every task (success or failure). Updates counters
@@ -2153,8 +2411,10 @@ class DeviceThreadPool:
                     self._last_consumed_gc_generation = max(self._last_consumed_gc_generation, current_generation)
                 continue
 
-            # A single trigger runs a full accelerator sweep so memory pressure is
-            # normalized across all active devices under the janitor's exclusive pass.
+            # A trigger runs a full sweep over the devices that actually hold a
+            # context so memory pressure is normalized across the active pool.
+            # `empty_cache` creates the primary context of an untouched device,
+            # which claimed an excluded GPU the run never used (issue #4653).
             sweep_targets: List[str] = []
             seen_targets: Set[str] = set()
             for candidate in self._ordered_keys:
@@ -2165,6 +2425,8 @@ class DeviceThreadPool:
                 if dev is None or dev.type not in ("cuda", "xpu", "npu", "mps"):
                     continue
                 if physical not in self._locks:
+                    continue
+                if not accelerator_context_claimed(dev.type, dev.index):
                     continue
                 seen_targets.add(physical)
                 sweep_targets.append(physical)

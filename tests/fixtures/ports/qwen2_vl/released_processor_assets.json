@@ -1,0 +1,58 @@
+{
+  "repo": "Qwen/Qwen2-VL-2B-Instruct",
+  "revision": "895c3a49bc3fa70a340399125c650a463535e71c",
+  "sha256": {
+    "tokenizer.json": "cb63a0a23eef3d5b01063a9880a1925a65aaf4d1591d519910ee3527852950a0",
+    "tokenizer_config.json": "ff5c4fd898fe8c39591eb70e5d39d2782802d4204d6ae9ba1223252f354842a0",
+    "preprocessor_config.json": "b5eaad0c2815f07631535dcc58f3c462b0d73693638ad21d19f3c50820eae1cc",
+    "chat_template.json": "ad60d90252ed0b0705ba14e2d0ad0fec0beac1ea955642b54059b36052d8bc96"
+  },
+  "oracles": [
+    {
+      "text": "Hello \u4e16\u754c\n  123",
+      "ids": [
+        9707,
+        220,
+        99489,
+        198,
+        220,
+        220,
+        16,
+        17,
+        18
+      ]
+    },
+    {
+      "text": "<|im_start|>assistant\nA cat.<|im_end|>",
+      "ids": [
+        151644,
+        77091,
+        198,
+        32,
+        8251,
+        13,
+        151645
+      ]
+    },
+    {
+      "text": "Caf\u00e9 \u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac \u0627\u0644\u0639\u0631\u0628\u064a\u0629 \ud83d\ude3a",
+      "ids": [
+        34,
+        2577,
+        963,
+        7851,
+        243,
+        33486,
+        33486,
+        41424,
+        33269,
+        29762,
+        67337,
+        74134,
+        129071,
+        26525,
+        118
+      ]
+    }
+  ]
+}

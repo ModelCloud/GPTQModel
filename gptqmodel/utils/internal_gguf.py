@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from collections import OrderedDict
 from enum import IntEnum
 from typing import Any, Literal, NamedTuple, TypeVar, Union
@@ -21,13 +20,10 @@ from ..nn_modules.qlinear.gguf import (
     _dequantize_sign_only_torch,
     _quantize_gguf_tensor_numpy,
 )
+from .kernel import KernelConfig, resolve_kernel_config
 
 
 __version__ = "0.19.0"
-_INTERNAL_GGUF_DEQUANT_DEVICE_ENV = "GPTQMODEL_INTERNAL_GGUF_DEQUANT_DEVICE"
-_INTERNAL_GGUF_DEQUANT_MAX_BYTES_ENV = "GPTQMODEL_INTERNAL_GGUF_DEQUANT_MAX_BYTES"
-_INTERNAL_GGUF_DEQUANT_DEFAULT_MAX_BYTES = 256 * 1024 * 1024
-_INTERNAL_GGUF_QUANTIZED_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER"
 
 GGUF_MAGIC = 0x46554747
 GGUF_VERSION = 3
@@ -73,6 +69,7 @@ class GGMLQuantizationType(IntEnum):
     Q1_0 = 41
     Q1_0_g128 = Q1_0
     Q2_0 = 42
+    F8_E4M3 = 43
 
 
 class GGUFEndian(IntEnum):
@@ -132,6 +129,8 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.NVFP4: (64, 4 + 32),
     GGMLQuantizationType.Q1_0: (128, 2 + 16),
     GGMLQuantizationType.Q2_0: (64, 2 + 16),
+    # ggml 1.0 added the OCP FP8 E4M3 scalar type (ggml/include/ggml.h: 43).
+    GGMLQuantizationType.F8_E4M3: (1, 1),
 }
 _TORCH_SIGN_ONLY_QTYPES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.Q1_0: GGML_QUANT_SIZES[GGMLQuantizationType.Q1_0],
@@ -227,11 +226,14 @@ def quantize(data: np.ndarray, qtype: GGMLQuantizationType) -> np.ndarray:
     return _quantize_gguf_tensor_numpy(np.asarray(data), GGMLQuantizationType(int(qtype)))
 
 
-def native_quantized_loader_enabled() -> bool:
-    raw = os.getenv(_INTERNAL_GGUF_QUANTIZED_LOADER_ENV)
-    if raw is None:
-        return True
-    return str(raw).strip().lower() not in {"", "0", "false", "off", "no"}
+def native_quantized_loader_enabled(policy: KernelConfig | None = None) -> bool:
+    """Report whether the native quantized checkpoint parser is selected.
+
+    The choice is a ``KernelConfig`` field, never an environment variable.
+    ``None`` reads the policy the current load installed.
+    """
+    resolved = resolve_kernel_config(policy)
+    return bool(resolved.gguf_native_quantized_loader)
 
 
 def _reader_field_value(reader: "GGUFReader", key: str):
@@ -277,27 +279,31 @@ def inspect_quantized_checkpoint(
     )
 
 
-def _resolve_torch_dequant_device() -> torch.device | None:
-    raw = os.getenv(_INTERNAL_GGUF_DEQUANT_DEVICE_ENV)
-    if raw is None or raw.strip() == "":
+def _resolve_torch_dequant_device(policy: KernelConfig | None = None) -> torch.device | None:
+    """Return the configured Torch dequant target, or ``None`` for the NumPy path.
+
+    An unusable target (an accelerator this process cannot address) is rejected
+    rather than silently downgraded: the caller asked for that device, and a
+    silent fallback to CPU changes the memory and dtype path of the same load.
+    """
+    resolved = resolve_kernel_config(policy)
+    raw = resolved.gguf_dequant_device
+    if raw is None:
         return None
 
-    try:
-        device = torch.device(raw.strip())
-    except Exception:
-        return None
-
+    device = torch.device(raw)
     if device.type == "cuda":
         if not torch.cuda.is_available():
-            return None
+            raise RuntimeError(
+                f"KernelConfig.gguf_dequant_device={raw!r} requests a CUDA device, but this "
+                "process has no available CUDA device."
+            )
         if device.index is not None and device.index >= torch.cuda.device_count():
-            return None
-        return device
-
-    if device.type == "cpu":
-        return device
-
-    return None
+            raise RuntimeError(
+                f"KernelConfig.gguf_dequant_device={raw!r} names a device ordinal outside the "
+                f"{torch.cuda.device_count()} device(s) this process can address."
+            )
+    return device
 
 
 def _resolve_torch_dequant_chunk_rows(
@@ -305,17 +311,13 @@ def _resolve_torch_dequant_chunk_rows(
     packed_row_bytes: int,
     block_size: int,
     type_size: int,
+    policy: KernelConfig | None = None,
 ) -> int:
     output_row_bytes = packed_row_bytes // type_size * block_size * np.dtype(np.float32).itemsize
     if output_row_bytes <= 0:
         return 1
 
-    raw_limit = os.getenv(_INTERNAL_GGUF_DEQUANT_MAX_BYTES_ENV)
-    try:
-        byte_limit = int(raw_limit) if raw_limit is not None else _INTERNAL_GGUF_DEQUANT_DEFAULT_MAX_BYTES
-    except ValueError:
-        byte_limit = _INTERNAL_GGUF_DEQUANT_DEFAULT_MAX_BYTES
-
+    byte_limit = resolve_kernel_config(policy).gguf_dequant_chunk_bytes
     return max(1, byte_limit // output_row_bytes)
 
 
@@ -325,6 +327,7 @@ def _dequantize_sign_only_torch_to_numpy(
     block_size: int,
     type_size: int,
     device: torch.device,
+    policy: KernelConfig | None = None,
 ) -> np.ndarray:
     rows = np.asarray(data, dtype=np.uint8)
     if rows.shape[-1] % type_size != 0:
@@ -341,6 +344,7 @@ def _dequantize_sign_only_torch_to_numpy(
         packed_row_bytes=packed_cols,
         block_size=block_size,
         type_size=type_size,
+        policy=policy,
     )
 
     for start in range(0, flat_rows.shape[0], chunk_rows):
@@ -394,9 +398,14 @@ def dequantize_to_torch(
     return tensor.contiguous()
 
 
-def dequantize(data: np.ndarray, qtype: GGMLQuantizationType) -> np.ndarray:
+def dequantize(
+    data: np.ndarray,
+    qtype: GGMLQuantizationType,
+    *,
+    policy: KernelConfig | None = None,
+) -> np.ndarray:
     resolved_qtype = GGMLQuantizationType(int(qtype))
-    device = _resolve_torch_dequant_device()
+    device = _resolve_torch_dequant_device(policy)
     sign_only_info = _TORCH_SIGN_ONLY_QTYPES.get(resolved_qtype)
     if device is not None and sign_only_info is not None:
         block_size, type_size = sign_only_info
@@ -405,6 +414,7 @@ def dequantize(data: np.ndarray, qtype: GGMLQuantizationType) -> np.ndarray:
             block_size=block_size,
             type_size=type_size,
             device=device,
+            policy=policy,
         )
 
     return _dequantize_gguf_tensor_numpy(np.asarray(data), resolved_qtype)
@@ -709,11 +719,6 @@ class GGUFReader:
         self.tensors = tensors
 
 
-def install_runtime():
-    sys.modules["gguf"] = sys.modules[__name__]
-    return sys.modules["gguf"]
-
-
 __all__ = [
     "GGML_QUANT_SIZES",
     "GGMLQuantizationType",
@@ -731,7 +736,6 @@ __all__ = [
     "dequantize_to_torch",
     "get_tensor_name_map",
     "inspect_quantized_checkpoint",
-    "install_runtime",
     "native_quantized_loader_enabled",
     "quant_shape_to_byte_shape",
     "quantize",

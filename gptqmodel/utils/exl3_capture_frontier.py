@@ -20,12 +20,11 @@ from typing import Any, Callable, Iterable
 import torch
 import xxhash
 from safetensors.torch import load_file as load_safetensors_file
-from safetensors.torch import save_file as save_safetensors_file
 
 from .exl3_error_ledger import routed_expert_identity, routed_expert_processor_layer
+from .safe import safetensors_save_file as save_safetensors_file
 
 
-CAPTURE_FRONTIER_ENV = "GPTQMODEL_EXL3_CAPTURE_FRONTIER"
 CAPTURE_FRONTIER_SCHEMA = "ds4rt.exl3-capture-frontier"
 CAPTURE_FRONTIER_SCHEMA_VERSION = 1
 CAPTURE_FRONTIER_CONTRACT = (
@@ -741,7 +740,6 @@ class EXL3CaptureFrontierStore:
 
 __all__ = [
     "CAPTURE_FRONTIER_CONTRACT",
-    "CAPTURE_FRONTIER_ENV",
     "EXL3CaptureDescriptor",
     "EXL3CaptureFrontierError",
     "EXL3CaptureFrontierStore",

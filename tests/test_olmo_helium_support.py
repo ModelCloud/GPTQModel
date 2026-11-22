@@ -8,21 +8,18 @@ import pytest
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.llama import LlamaQModel
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
 
 CASES = [("olmo", "Olmo"), ("helium", "Helium")]
 
 
 @pytest.mark.parametrize("model_type,_prefix", CASES)
-def test_registry_selects_llama_definition(model_type, _prefix, monkeypatch):
-    fake_config = SimpleNamespace(model_type=model_type)
-
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda path: None)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+def test_registry_selects_llama_definition(model_type, _prefix, tmp_path):
+    CONFIG_MAPPING[model_type]().save_pretrained(tmp_path)
 
     assert auto.MODEL_MAP[model_type] is LlamaQModel
-    assert auto.check_and_get_model_definition(f"/tmp/{model_type}", trust_remote_code=True) is LlamaQModel
+    assert auto.check_and_get_model_definition(str(tmp_path), trust_remote_code=True) is LlamaQModel
 
 
 @pytest.mark.parametrize("model_type,prefix", CASES)

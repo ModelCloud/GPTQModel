@@ -20,8 +20,15 @@ On ROCm 10.1 / gfx1201 ``expandable_segments:True`` combined with
 ``torch.cuda.empty_cache()`` corrupts ordinary Torch results (wrong rows, or
 ``hipErrorIllegalAddress``) while the VMM segments are released and remapped.
 GPT-QModel empties the cache throughout quantization, so ROCm gets a default
-without ``expandable_segments``; the other two knobs are unchanged. CUDA keeps
-the historical value.
+that only disables ``expandable_segments`` and leaves every other allocator
+setting at Torch's default.
+
+On CUDA ``expandable_segments`` is the knob that removes the fragmentation
+cliff, and it is the only one that survives: pinning ``max_split_size_mb`` to
+256 MiB caps the block size the allocator may split, so a freed 256 MiB block
+cannot serve the next layer's slightly smaller request and GPTQ's per-layer
+Hessian/workspace churn maps new pages instead of reusing the cache. See
+``DEFAULT_ALLOC_CONF`` for the measurements.
 """
 
 from __future__ import annotations
@@ -32,20 +39,46 @@ import warnings
 from ._rocm_env import running_on_rocm
 
 
-DEFAULT_ALLOC_CONF = (
-    "expandable_segments:True,"
-    "max_split_size_mb:256,"
-    "garbage_collection_threshold:0.7"
-)
+#: CUDA default: expandable segments alone.
+#:
+#: ``max_split_size_mb:256`` used to be pinned here too, on top of
+#: ``expandable_segments:True``. That caps the largest block the allocator is
+#: willing to split, so the per-layer Hessian/workspace churn during GPTQ keeps
+#: mapping new pages instead of reusing the cache: *reserved* memory grows per
+#: layer while *active* memory stays flat. Measured on an RTX 4090 (issue
+#: #4389), Llama-3.2-1B GPTQ 4-bit, same calibration, peak allocated 1.23 GiB:
+#:
+#:   default (expandable + 256 MiB split cap + gc)  peak reserved 5.40 GiB
+#:   expandable_segments:True only                  peak reserved 1.67 GiB
+#:   no expandable segments                         peak reserved 2.55 GiB
+#:
+#: ``garbage_collection_threshold`` is dropped instead of paired with a memory
+#: fraction: it is a ratio of the device's *total* memory, so 0.7 only starts a
+#: collection above ~33 GiB on a 48 GiB card. A GPTQ run never approaches that,
+#: and capping the process with a memory fraction would trade the reservation
+#: for OOMs.
+DEFAULT_ALLOC_CONF = "expandable_segments:True"
 
-#: ROCm default: same fragmentation knobs, but never ``expandable_segments``.
+#: ROCm default: Torch's own settings plus the one exclusion below.
 #:
 #: The ROCm/Torch VMM path releases and remaps segments on ``empty_cache()``,
 #: and a subsequent kernel can read stale/incorrect pages. Measured on a
 #: R9700 (gfx1201, torch 2.16.0.dev+rocm10.1): a 2097152x16 matmul recomputed
 #: with ``empty_cache()`` between reps returned up to 4.5M wrong rows with
 #: ``expandable_segments:True`` and 0 with ``False``.
-ROCM_DEFAULT_ALLOC_CONF = "max_split_size_mb:256,garbage_collection_threshold:0.7"
+#:
+#: Nothing else is pinned. ``max_split_size_mb:256`` used to be here, and it
+#: has the same effect as on CUDA (#4389): a request below the cap cannot be
+#: served from a free block at or above it, so a layer whose working set churns
+#: around the cap maps a new segment instead of reusing the freed one. The
+#: per-layer ``empty_cache()`` that #4313 added only runs between layers, so it
+#: cannot reclaim the waste inside one layer, and MACaQ never calls it. One
+#: 14336x4096 MACaQ layer peaked at 5258 MiB reserved with the cap and 4466 MiB
+#: without it, for the same 4224 MiB peak allocated and identical tensors
+#: (issue #5072). ``garbage_collection_threshold`` is dropped too: it is a
+#: ratio of the device's total memory and never fires without a memory
+#: fraction, so it only looked like it helped; the cap was the whole effect.
+ROCM_DEFAULT_ALLOC_CONF = "expandable_segments:False"
 
 # ``PYTORCH_CUDA_ALLOC_CONF`` is the historical name; ``PYTORCH_ALLOC_CONF`` is
 # the generic alias understood by newer releases. Set both so the default holds
@@ -68,10 +101,21 @@ HIP_ALLOC_CONF_ENV_VAR = "PYTORCH_HIP_ALLOC_CONF"
 LARGE_HESSIAN_ALLOC_CONF = "backend:cudaMallocAsync"
 
 
-def default_alloc_conf() -> str:
-    """Return the default allocator configuration for the running Torch build."""
+def default_alloc_conf(backend: str | None = None) -> str:
+    """Return the default allocator configuration for *backend*.
 
-    return ROCM_DEFAULT_ALLOC_CONF if running_on_rocm() else DEFAULT_ALLOC_CONF
+    ``backend`` is ``"cuda"`` or ``"rocm"``. ``None`` (the default) detects the
+    running Torch build, which is what the import-time hook uses; passing a
+    name makes the policy testable without a device.
+    """
+
+    if backend is None:
+        backend = "rocm" if running_on_rocm() else "cuda"
+    if backend == "rocm":
+        return ROCM_DEFAULT_ALLOC_CONF
+    if backend == "cuda":
+        return DEFAULT_ALLOC_CONF
+    raise ValueError(f"unknown allocator backend: {backend!r}")
 
 
 def alloc_conf_env_vars() -> tuple[str, ...]:
@@ -148,6 +192,99 @@ def allocator_backend() -> str | None:
         return None
 
 
+def _effective_alloc_conf() -> str | None:
+    """The allocator settings Torch is actually running with, if known.
+
+    Torch parses the settings once, when the caching allocator is created. The
+    private ``_accelerator_getAllocatorSettings`` accessor returns that parsed
+    value (including a runtime ``_set_allocator_settings`` call) on releases
+    that expose it. Older releases only have the environment, so fall back to
+    the same precedence Torch uses: the HIP-only alias first on ROCm, then
+    ``PYTORCH_ALLOC_CONF`` before the legacy ``PYTORCH_CUDA_ALLOC_CONF``.
+    """
+
+    try:
+        import torch
+
+        getter = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
+        if getter is not None:
+            parsed = getter()
+            if parsed:
+                return parsed
+    except Exception:  # pragma: no cover - private API may be absent or fail
+        pass
+
+    if running_on_rocm():
+        value = os.environ.get(HIP_ALLOC_CONF_ENV_VAR)
+        if value:
+            return value
+    for name in ALLOC_CONF_ENV_VARS:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
+def max_split_bytes_from_conf(conf: str | None) -> int | None:
+    """Parse ``max_split_size_mb`` from an allocator settings string.
+
+    ``None`` means unlimited (Torch's default): every block may be split.
+    ``0`` is the documented "disable the cap" spelling, so it is unlimited too.
+    """
+
+    if not conf:
+        return None
+    for item in conf.split(","):
+        key, separator, value = item.partition(":")
+        if not separator or key.strip() != "max_split_size_mb":
+            continue
+        try:
+            megabytes = int(value.strip())
+        except ValueError:
+            return None
+        if megabytes <= 0:
+            return None
+        return megabytes << 20
+    return None
+
+
+def allocator_max_split_bytes() -> int | None:
+    """Largest block size the active caching allocator will split, in bytes.
+
+    A request below this size cannot be served from a free block at or above
+    it, so a workspace sized just under the cap maps a new segment for every
+    caller instead of reusing the cache. ``None`` means the allocator splits
+    every block (the CUDA default with expandable segments).
+    """
+
+    return max_split_bytes_from_conf(_effective_alloc_conf())
+
+
+def clamp_budget_below_allocator_split(
+    budget: int,
+    *,
+    headroom: int = 2 << 20,
+) -> int:
+    """Keep a scratch-workspace budget below the allocator's split cap.
+
+    The caching allocator rounds a segment up to a 2 MiB multiple and refuses
+    to serve a request smaller than ``max_split_size`` from a free block at or
+    above it. A workspace that lands in the last 2 MiB below the cap therefore
+    allocates a fresh segment for every module: reserved VRAM grows with the
+    module count while active memory stays flat. Sizing below ``cap - headroom``
+    keeps the segment itself splittable, so the next module reuses it.
+
+    This only bounds chunking; every candidate is still evaluated over the same
+    axes, so clip-search results are unchanged. Without a configured split cap
+    the budget is returned untouched.
+    """
+
+    cap = allocator_max_split_bytes()
+    if cap is None:
+        return budget
+    return min(budget, max(1 << 20, cap - headroom))
+
+
 def large_hessian_alloc_hint() -> str | None:
     """Actionable hint for an OOM that only the native allocator would hit."""
 
@@ -167,10 +304,13 @@ __all__ = [
     "HIP_ALLOC_CONF_ENV_VAR",
     "LARGE_HESSIAN_ALLOC_CONF",
     "ROCM_DEFAULT_ALLOC_CONF",
+    "allocator_max_split_bytes",
     "allocator_backend",
     "alloc_conf_env_vars",
     "alloc_conf_configured",
     "apply_default_alloc_conf",
+    "clamp_budget_below_allocator_split",
     "default_alloc_conf",
     "large_hessian_alloc_hint",
+    "max_split_bytes_from_conf",
 ]

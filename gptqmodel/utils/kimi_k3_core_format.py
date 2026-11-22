@@ -14,7 +14,7 @@ import re
 import torch
 from torch import nn
 
-from .kimi_k3 import KimiK3Source
+from .kimi_k3 import KimiK3Source, fit_checkpoint_parameter
 
 
 _HESSIAN_CONTRACT = "signed-block-hadamard-congruence-fp64-v1"
@@ -224,10 +224,7 @@ class KimiK3EXL3Source(KimiK3Source):
             routed = key.startswith("block_sparse_moe.experts.")
             if (experts_only and (not routed or not parameter.is_meta)) or (not include_experts and routed):
                 continue
-            tensor = self.decoded(prefix + key, device)
-            if tuple(tensor.shape) != tuple(parameter.shape):
-                if not (key == "self_attn.A_log" and tensor.ndim == 1 and tensor.numel() >= parameter.numel()):
-                    raise ValueError(f"checkpoint parameter geometry differs: {prefix + key}")
+            tensor = fit_checkpoint_parameter(prefix + key, self.decoded(prefix + key, device), parameter)
             parent, _, leaf = key.rpartition(".")
             target = block.get_submodule(parent) if parent else block
             target._parameters[leaf] = nn.Parameter(tensor, requires_grad=False)

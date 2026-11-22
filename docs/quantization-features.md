@@ -8,9 +8,9 @@ model behind.
 | Feature | Entry point | Contract |
 | --- | --- | --- |
 | GPTQ `dynamic` `-:` exclusions | `save_quantized` / `GPTQModel.load` | The saved checkpoint declares the exact quantized module set so Optimum does not build uninitialized layers for excluded modules. |
-| Endpoint requantize | `GPTQModel.requantize(embed_quant_mode=...)` | The endpoint module is re-resolved from the model tree before its forward and before replay; no detached META source is materialized. |
+| Endpoint requantize | `GPTQModel.requantize(embed_quant_mode=...)` | The endpoint module is re-resolved from the model tree before its forward and before replay; no detached META source is materialized. A fresh `quantize()` refuses `INPUT`/`BOTH` and refuses `OUTPUT`/`BOTH` on a tied head before calibration ([details](embed-endpoint-quantize.md)). |
 | Post-quant EoRA | `GPTQModel.adapter.generate` | The generator runs on dense native weights; checkpoint `-:` rules are honored by the dequantize stage. |
-| Rotation | `GPTQModel.quantize(rotation=...)` | Only `llama` and `qwen2` opt in; every other definition fails with a `ValueError` before any weight is rotated, as do unsupported widths. |
+| Rotation | `QuantizeConfig(rotation=...)` | Only `llama` and `qwen2` opt in; every other definition fails with a `ValueError` before any weight is rotated, as do unsupported widths. |
 | Staged GSQ | `train_stage_update` | Losses reduce in FP32 and a nonfinite step raises a Python error instead of a device-side assert. |
 
 ## 1. GPTQ `dynamic` `-:` exclusions and plain HF loading
@@ -72,6 +72,13 @@ stateDiagram-v2
 subset passes. The second read is what keeps the replay from forwarding the
 released AUTO_NF12 wrapper, whose packed buffers are empty by then.
 
+The endpoint flow is requantize-only: a fresh `quantize()` starts from a
+LazyTurtle shell, not a loaded quantized endpoint. `INPUT`/`BOTH` and a tied
+`OUTPUT`/`BOTH` are refused before calibration; `OUTPUT` on an untied head and
+`requantize()` on a loaded checkpoint keep their existing behavior. The
+before/after flow and failure paths are in
+[embed-endpoint-quantize.md](embed-endpoint-quantize.md).
+
 ## 3. Post-quant EoRA
 
 The EoRA generator needs dense native weights twice: to build `w - wq` and to
@@ -113,7 +120,7 @@ half-rotated model.
 
 ```mermaid
 flowchart TD
-    A["quantize(rotation=...)"] --> M["validate_rotation_model_support"]
+    A["QuantizeConfig(rotation=...)"] --> M["validate_rotation_model_support"]
     M -- "not opted in" --> N["ValueError naming the model and supported model types<br/>no weights modified"]
     M -- "opted in" --> B["validate_rotation_dimensions"]
     B --> C{"hadamard_supported(hidden_size)<br/>and hadamard_supported(intermediate_size)"}

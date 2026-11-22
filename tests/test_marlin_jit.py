@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from shutil import copy2, which
 
@@ -239,20 +240,20 @@ def test_marlin_extra_cuda_cflags_skip_static_global_template_stub_when_nvcc_is_
     assert "-static-global-template-stub=true" not in flags
 
 
-def test_marlin_capability_checks_allow_sm75_but_reject_sm70(monkeypatch):
+def test_marlin_capability_checks_require_sm80(monkeypatch):
     monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
     monkeypatch.setattr(const_module, "IS_ROCM", False)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args, **kwargs: (7, 5))
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args, **kwargs: (8, 0))
 
-    assert marlin_utils._marlin_capability_supported(7, 5) is True
+    assert marlin_utils._marlin_capability_supported(8, 0) is True
     assert marlin_utils._marlin_environment_error() == ""
     assert marlin_utils._validate_marlin_device_support() is True
 
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args, **kwargs: (7, 0))
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args, **kwargs: (7, 5))
 
-    assert marlin_utils._marlin_capability_supported(7, 0) is False
-    assert "compute capability >= 7.5" in marlin_utils._marlin_environment_error()
+    assert marlin_utils._marlin_capability_supported(7, 5) is False
+    assert "compute capability >= 8.0" in marlin_utils._marlin_environment_error()
     assert marlin_utils._validate_marlin_device_support() is False
 
 
@@ -494,24 +495,24 @@ def test_awq_marlin_auto_selection_keeps_tile_padding_opt_in(monkeypatch):
     assert aligned.out_features == 128
 
 
-def test_marlin_quant_linear_validate_device_allows_sm75(monkeypatch):
+def test_marlin_quant_linear_validate_device_allows_sm80(monkeypatch):
     monkeypatch.setattr(marlin_qlinear_module, "IS_ROCM", False)
     monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
     monkeypatch.setattr(const_module, "IS_ROCM", False)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=0: (7, 5))
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=0: (8, 0))
 
     marlin_qlinear_module.MarlinLinear.validate_device(marlin_qlinear_module.DEVICE.CUDA)
 
 
-def test_marlin_quant_linear_validate_device_rejects_pre_turing(monkeypatch):
+def test_marlin_quant_linear_validate_device_rejects_turing(monkeypatch):
     monkeypatch.setattr(marlin_qlinear_module, "IS_ROCM", False)
     monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
     monkeypatch.setattr(const_module, "IS_ROCM", False)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=0: (7, 0))
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=0: (7, 5))
 
-    with pytest.raises(NotImplementedError, match="compute capability >= 7.5"):
+    with pytest.raises(NotImplementedError, match="compute capability >= 8.0"):
         marlin_qlinear_module.MarlinLinear.validate_device(marlin_qlinear_module.DEVICE.CUDA)
 
 
@@ -596,8 +597,8 @@ def test_marlin_runtime_device_validation_rejects_cpu(monkeypatch):
         )
 
 
-def test_sm75_turing_contract_is_present_in_marlin_sources():
-    marlin_root = marlin_utils._marlin_root()
+def test_marlin_sources_have_no_turing_path():
+    marlin_root = marlin_utils._ensure_generated_marlin_kernels()
     gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
     generator_py = (marlin_root / "generate_kernels.py").read_text(encoding="utf-8")
     template_h = (marlin_root / "marlin_template.h").read_text(encoding="utf-8")
@@ -606,43 +607,22 @@ def test_sm75_turing_contract_is_present_in_marlin_sources():
         encoding="utf-8"
     )
 
-    assert "requires CUDA_ARCH >= 7.5" in gemm_cu
-    assert "major_capability == 7 && minor_capability == 5" in gemm_cu
-    assert "stages = 2;" in gemm_cu
-    assert "Turing only supports float16 dense Marlin kernels." in gemm_cu
-    assert 'stage_values.insert(0, 2)' in generator_py
-    assert "constexpr bool use_fp16_accum" in template_h
-    assert "__CUDA_ARCH__ == 750" in mma_h
-    assert "m16n8k8.row.col.f16.f16.f16.f16" in mma_h
-    assert "compute capability >= 7.5" in qlinear_py
-    assert "GPTQ Marlin on compute capability 7.5" in qlinear_py
-    assert "requires dtype=torch.float16." in qlinear_py
-
-
-def test_stage2_dense_four_bit_tiles_stay_in_sync_between_selector_and_codegen():
-    marlin_root = marlin_utils._ensure_generated_marlin_kernels()
-    gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
-    generator_py = (marlin_root / "generate_kernels.py").read_text(encoding="utf-8")
-    kernel_u4 = (marlin_root / "kernel_fp16_ku4.cu").read_text(encoding="utf-8")
-    kernel_u4b8 = (marlin_root / "kernel_fp16_ku4b8.cu").read_text(encoding="utf-8")
-    kernel_nvfp4 = (marlin_root / "kernel_fp16_kfe2m1f.cu").read_text(encoding="utf-8")
-
-    assert "kIsStage2FourBitTile" in gemm_cu
-    assert "THREAD_M_BLOCKS * 2 <= THREAD_K_BLOCKS" in gemm_cu
-    assert "stages == 2 && num_bits == 4" in gemm_cu
-    assert "thread_m_blocks * 2 > th_config.thread_k / 16" in gemm_cu
-    assert "_is_4bit_weight" in generator_py
-    assert "stage_value == 2" in generator_py
-
-    invalid_stage2_tile = ", 256, 4, 16, 4, false, 2,"
-    valid_stage2_tile = ", 256, 2, 16, 4, false, 2,"
-
-    assert invalid_stage2_tile not in kernel_u4
-    assert invalid_stage2_tile not in kernel_u4b8
-    assert invalid_stage2_tile not in kernel_nvfp4
-    assert valid_stage2_tile in kernel_u4
-    assert valid_stage2_tile in kernel_u4b8
-    assert valid_stage2_tile in kernel_nvfp4
+    # Marlin requires sm_80+: kernels compile to stubs below it and the host rejects older GPUs.
+    assert "__CUDA_ARCH__ < 800" in template_h
+    assert "requires CUDA_ARCH >= 8.0" in gemm_cu
+    assert "major_capability >= 8" in gemm_cu
+    assert "_MARLIN_MIN_CAPABILITY = (8, 0)" in qlinear_py
+    # The sm_75 path (m16n8k8 MMA, FP16 accumulation, 2-stage pipeline) is gone.
+    for source in (gemm_cu, generator_py, template_h, mma_h, qlinear_py):
+        assert "__CUDA_ARCH__ == 750" not in source
+        assert "use_fp16_accum" not in source
+        assert "Turing" not in source
+    assert "m16n8k8" not in mma_h
+    assert "stages == 2" not in gemm_cu
+    for kernel_file in marlin_root.glob("kernel_*.cu"):
+        # Generated instantiations end with ``STAGES, GROUP_BLOCKS, IS_ZP_FLOAT>``.
+        assert "pipe_stages" in kernel_file.read_text(encoding="utf-8")
+        assert not re.search(r", (true|false), 2, -?\d+, (true|false)>", kernel_file.read_text(encoding="utf-8")), kernel_file.name
 
 
 def test_mxfp8_contract_is_present_in_marlin_sources():
@@ -848,7 +828,10 @@ def test_marlin_quant_linear_post_init_pads_weight_scales_and_bias(monkeypatch):
     assert module.out_features == 200
     assert module.qweight.shape == (20, 512)
     assert module.scales.shape == (10, 256)
-    assert module.bias.shape == (256,)
+    # The registered bias is checkpoint state: post_init records the tile
+    # padding and the launch derivation applies it per call.
+    assert module.bias.shape == (200,)
+    assert module._marlin_bias_padding == (200, 256)
     assert module._marlin_tile_padding == (256, 320)
     assert captured == {
         "qweight": ((40, 256), 320, 256, torch.float16),
@@ -994,7 +977,8 @@ def test_awq_marlin_quant_linear_post_init_pads_packed_tensors(monkeypatch):
     assert module.qweight.shape == (20, 512)
     assert module.scales.shape == (10, 256)
     assert module.qzeros.shape == (10, 32)
-    assert module.bias.shape == (256,)
+    assert module.bias.shape == (200,)
+    assert module._marlin_bias_padding == (200, 256)
     assert module._marlin_tile_padding == (256, 320)
     assert captured == {
         "qweight": ((320, 32), 320, 256, 4, torch.float16),
@@ -1117,7 +1101,7 @@ def test_awq_marlin_quant_linear_registers_nonpersistent_runtime_state(monkeypat
     assert runtime_names.isdisjoint(module.state_dict())
 
 
-def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):
+def test_marlin_quant_linear_forward_keeps_bias_wide_and_stored(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
@@ -1144,6 +1128,9 @@ def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):
         lambda scales, size_k, size_n, group_size: scales,
     )
     monkeypatch.setattr(marlin_qlinear_module, "marlin_permute_bias", lambda bias: bias)
+    # The per-stream lock workspace keys on the active CUDA stream; this
+    # CPU-shaped module has a single canonical workspace and a faked launch.
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_stream_workspace", lambda module: module.workspace)
     monkeypatch.setattr(
         marlin_qlinear_module,
         "apply_gptq_marlin_linear",
@@ -1176,12 +1163,14 @@ def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):
 
     out = module(torch.randn(2, 128, dtype=torch.bfloat16))
 
+    # The kernel adds the bias to its FP32 accumulator, so the launch operand
+    # is FP32 while the stored buffer keeps the checkpoint width.
     assert captured == {
         "input_dtype": torch.bfloat16,
         "scale_dtype": torch.bfloat16,
-        "bias_dtype": torch.bfloat16,
+        "bias_dtype": torch.float32,
     }
-    assert module.bias.dtype == torch.bfloat16
+    assert module.bias.dtype == torch.float16
     assert out.dtype == torch.bfloat16
 
 
@@ -1288,7 +1277,9 @@ def test_marlin_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
         ).to(device)
         with torch.no_grad():
             module.qweight.copy_(torch.randint(0, 16, module.qweight.shape, device=device, dtype=torch.int32))
-            module.g_idx.copy_(torch.arange(module.in_features, device=device, dtype=torch.int32))
+            # ``desc_act=False`` and one group of ``in_features``: every column
+            # belongs to group 0, so ``arange(k) // group_size`` is all zeros.
+            module.g_idx.copy_(torch.zeros(module.in_features, device=device, dtype=torch.int32))
             module.scales.copy_(torch.ones_like(module.scales, device=device))
             module.qzeros.copy_(torch.zeros_like(module.qzeros, device=device))
         module.post_init()

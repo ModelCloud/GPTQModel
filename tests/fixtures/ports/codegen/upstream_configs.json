@@ -1,0 +1,22 @@
+{
+  "codegen-350M-mono": {
+    "revision": "d9107f71cca463240db1143f4a75a927a27fcb27",
+    "config": {"n_embd": 1024, "n_head": 16, "n_layer": 20, "rotary_dim": 32}
+  },
+  "codegen2-1B_P": {
+    "revision": "47f05cd3c1b357745fbead74202fc1efe87b6d25",
+    "config": {"n_embd": 2048, "n_head": 16, "n_layer": 16, "rotary_dim": 64, "head_dim": 128}
+  },
+  "codegen2-3_7B_P": {
+    "revision": "2999b8fc740371db5923ef6f8ec1b74cfb9b4900",
+    "config": {"n_embd": 4096, "n_head": 16, "n_layer": 16, "rotary_dim": 64, "head_dim": 256}
+  },
+  "codegen2-7B_P": {
+    "revision": "b3d2f281d860402d5e7acc3c2c466098ccc0b482",
+    "config": {"n_embd": 4096, "n_head": 16, "n_layer": 32, "rotary_dim": 64}
+  },
+  "codegen2-16B_P": {
+    "revision": "14bcc89999feb32d9ee3c51388aa4d8ac134124d",
+    "config": {"n_embd": 6144, "n_head": 24, "n_layer": 34, "rotary_dim": 64}
+  }
+}

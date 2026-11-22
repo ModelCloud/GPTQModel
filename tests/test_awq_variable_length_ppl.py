@@ -23,7 +23,7 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig, RTNConfig
@@ -111,7 +111,7 @@ def _perplexity(model, chunks: torch.Tensor, device: torch.device) -> float:
 def _quantize_and_measure(model_path, quantize_config, calibration, chunks, tmp_path, label) -> float:
     device = torch.device("cuda:0")
     model = GPTQModel.load(model_path, quantize_config=quantize_config, dtype=torch.float16)
-    model.quantize(calibration, batch_size=1, calibration_sort="desc")
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, sort="desc"))
 
     save_path = tmp_path / label
     model.save(str(save_path))
@@ -200,7 +200,7 @@ def test_awq_quantize_with_batch_size_greater_than_one(tmp_path):
     )
     save_path = tmp_path / "awq-batch-size-4"
     try:
-        model.quantize(calibration, batch_size=4)
+        model.quantize(CalibrationConfig(dataset=calibration, batch_size=4))
         quantized = model.model.model.layers[0].self_attn.q_proj
         assert isinstance(quantized, BaseQuantLinear), type(quantized)
         model.save(str(save_path))

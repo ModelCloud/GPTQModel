@@ -1,6 +1,8 @@
 #pragma once
 
 #include "codebook.cuh"
+#include "q4nx.cuh"
+#include "r4nx.cuh"
 #include "../frag.cuh"
 #include "../bitfield.cuh"
 
@@ -253,10 +255,140 @@ __device__ __forceinline__ void dq8_aligned_4bits_bfe64(const uint32_t* ptr, int
     frag1[1] = decode_3inst_2<cb>(w6, w7);
 }
 
-template <int bits, int cb>
+// Adapted from ExLlamaV3 v1.6.7 (8c593e4), copyright TurboDerp and contributors, MIT.
+// Half-integer bitrate KA + 0.5 (mul1 codebook): positions alternate KA and KA + 1 bits (odd positions carry the
+// extra bit), so 8 consecutive positions starting at an even index take 8 * KA + 4 bits and a lane's window
+// ends are fixed. Two groups of four windows, each spanning 18 + 3 * KA <= 27 bits = at most two 32-bit words:
+// one funnel shift per group, the other three windows derived by shifting the 32-bit result
+template <int KA, int cb>
+__device__ __forceinline__ void dq8_half(const uint32_t* ptr, int t_offset, FragB& frag0, FragB& frag1)
+{
+    constexpr int bits2 = 2 * KA + 1;                       // bits per two positions
+    constexpr int words = 4 * bits2;                        // uint32 per 256-weight tile
+    constexpr int gspan = 18 + 3 * KA;                      // bits spanned by four windows
+    const int e7 = ((t_offset >> 1) + 4) * bits2 + 128 * bits2;   // end bit of window 7 (+ one tile for the wrap)
+    const int e3 = e7 - 2 * bits2;                                // end bit of window 3
+    uint32_t w0, w1, w2, w3, w4, w5, w6, w7;
+    {
+        int hi = (e7 - 1) / 32, lo = (e7 - gspan) / 32, s = (hi + 1) * 32 - e7;
+        uint32_t a = ptr[lo % words], b = ptr[hi % words];
+        w7 = fshift(b, a, s); w6 = w7 >> (KA + 1); w5 = w6 >> KA; w4 = w5 >> (KA + 1);
+    }
+    {
+        int hi = (e3 - 1) / 32, lo = (e3 - gspan) / 32, s = (hi + 1) * 32 - e3;
+        uint32_t a = ptr[lo % words], b = ptr[hi % words];
+        w3 = fshift(b, a, s); w2 = w3 >> (KA + 1); w1 = w2 >> KA; w0 = w1 >> (KA + 1);
+    }
+    half2 d0d1 = decode_3inst_2<cb>(w0 & 0xffff, w1 & 0xffff);
+    half2 d2d3 = decode_3inst_2<cb>(w2 & 0xffff, w3 & 0xffff);
+    half2 d4d5 = decode_3inst_2<cb>(w4 & 0xffff, w5 & 0xffff);
+    half2 d6d7 = decode_3inst_2<cb>(w6 & 0xffff, w7 & 0xffff);
+    frag0[0] = d0d1;
+    frag0[1] = d2d3;
+    frag1[0] = d4d5;
+    frag1[1] = d6d7;
+}
+
+// Q4NX fragment decode adapted from AlexBrandes/vllm, csrc/exl3/codec_q4n.cuh
+// (ff413b2df19718342e02d9763f161d69afce7b4a), with Qubitium's 3.5 bpw
+// extension. The shared-memory and warp-register paths decode the same
+// integer values and normalize after FP32 accumulation.
+template <int KV>
+__device__ __forceinline__ void dq_q4nx_window(uint32_t window, FragB& frag0, FragB& frag1)
+{
+    constexpr int state_bits = 32 - KV;
+    const half offset = __ushort_as_half(0xe40f);  // -(1024 + 15)
+    const half2 center = __halves2half2(offset, offset);
+
+    #pragma unroll
+    for (int j = 0; j < 2; ++j)
+    {
+        const uint32_t state = (window >> ((1 - j) * KV)) & ((1u << state_bits) - 1);
+        const uint32_t sums = q4nx_nibble_sums(state);
+        const uint32_t lo = __byte_perm(sums, 0x6464u, 0x5140);
+        const uint32_t hi = __byte_perm(sums, 0x6464u, 0x5342);
+        const half2 low_pair = __halves2half2(__ushort_as_half(lo), __ushort_as_half(lo >> 16));
+        const half2 high_pair = __halves2half2(__ushort_as_half(hi), __ushort_as_half(hi >> 16));
+        FragB& frag = j == 0 ? frag0 : frag1;
+        frag[0] = __hadd2(low_pair, center);
+        frag[1] = __hadd2(high_pair, center);
+    }
+}
+
+template <int KV>
+__device__ __forceinline__ void dq_q4nx(const uint32_t* ptr, int lane, FragB& frag0, FragB& frag1)
+{
+    const int start = (2 * lane + 2) * KV - 32;
+    const int shift = start & 31;
+    const uint32_t first = start < 0 ? 0 : ptr[start / 32];
+    const uint32_t second = shift ? ptr[(start + 32) / 32] : 0;
+    dq_q4nx_window<KV>(__funnelshift_l(second, first, shift), frag0, frag1);
+}
+
+// R4NX decodes four weights per state from the signed bytes of a single
+// 32-bit product. XOR with 0x80 per byte turns a signed byte into its
+// non-negative biased form (u ^ 0x80), which 0x6400 + (u ^ 0x80) == 1024 +
+// (u ^ 0x80) maps exactly into binary16 for the whole [0, 255] range.
+// Subtracting 1152 then leaves the signed byte value. Both steps are exact in
+// binary16, and EXL3_R4NX_ALPHA is exactly representable there, so the half2
+// multiply rounds identically to the FP32 oracle multiply followed by a cast.
+__device__ __forceinline__ half2 dq_r4nx_pair(uint32_t product, uint32_t selector)
+{
+    const half2_uint32 biased((r4nx_byte_pair(product, selector) ^ 0x00800080u) + 0x64006400u);
+    const half2 center = __half2half2(__ushort_as_half(0x6480));  // 1152.0
+    const half2 alpha = __half2half2(__float2half_rn(EXL3_R4NX_ALPHA));
+    return __hmul2(__hsub2(biased.as_half2, center), alpha);
+}
+
+template <int KV>
+__device__ __forceinline__ void dq_r4nx_window(uint32_t window, FragB& frag0, FragB& frag1)
+{
+    constexpr int state_bits = 32 - KV;
+    constexpr uint32_t state_mask = (1u << state_bits) - 1u;
+    // The first state of the window is the earlier step (higher bits).
+    const uint32_t first = (window >> KV) & state_mask;
+    const uint32_t second = window & state_mask;
+    const uint32_t p0 = r4nx_product(first);
+    const uint32_t p1 = r4nx_product(second);
+    frag0[0] = dq_r4nx_pair(p0, EXL3_R4NX_PAIR_01);
+    frag0[1] = dq_r4nx_pair(p0, EXL3_R4NX_PAIR_23);
+    frag1[0] = dq_r4nx_pair(p1, EXL3_R4NX_PAIR_01);
+    frag1[1] = dq_r4nx_pair(p1, EXL3_R4NX_PAIR_23);
+}
+
+template <int KV>
+__device__ __forceinline__ void dq_r4nx(const uint32_t* ptr, int lane, FragB& frag0, FragB& frag1)
+{
+    // Same 32-bit window as dq_q4nx: two consecutive states ending at
+    // 2 * (lane + 1) * KV bits into the tile stream, zero-prefixed for the
+    // first lane when KV < 16.
+    const int start = (2 * lane + 2) * KV - 32;
+    const int shift = start & 31;
+    const uint32_t first = start < 0 ? 0 : ptr[start / 32];
+    const uint32_t second = shift ? ptr[(start + 32) / 32] : 0;
+    dq_r4nx_window<KV>(__funnelshift_l(second, first, shift), frag0, frag1);
+}
+
+template <int bits, int cb, bool half_k = false>
 __device__ __forceinline__ void dq_dispatch(const uint32_t* ptr, int idx, FragB& frag0, FragB& frag1)
 {
-    if constexpr (bits == 1)
+    if constexpr (cb == EXL3_Q4NX_CODEBOOK)
+    {
+        constexpr int KV = 4 * bits + 2 * half_k;
+        static_assert(q4nx_supports_step_bits(KV));
+        dq_q4nx<KV>(ptr, idx >> 3, frag0, frag1);
+    }
+    else if constexpr (cb == EXL3_R4NX_CODEBOOK)
+    {
+        constexpr int KV = 4 * bits + 2 * half_k;
+        static_assert(r4nx_supports_step_bits(KV));
+        dq_r4nx<KV>(ptr, idx >> 3, frag0, frag1);
+    }
+    else if constexpr (half_k)
+    {
+        dq8_half<bits, cb>(ptr, idx, frag0, frag1);
+    }
+    else if constexpr (bits == 1)
     {
         dq8_aligned_1bit<cb>(ptr, idx, frag0, frag1);
     }

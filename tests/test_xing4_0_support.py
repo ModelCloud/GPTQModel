@@ -10,23 +10,15 @@ from gptqmodel.models import auto
 from gptqmodel.models.definitions.xing4_0 import Xing4_0QModel
 
 
-def test_xing4_0_registry_and_loader_contract(monkeypatch):
-    fake_config = SimpleNamespace(model_type="xing4_0")
-    monkeypatch.setattr(
-        auto,
-        "resolve_trust_remote_code",
-        lambda _path, trust_remote_code=False: trust_remote_code,
-    )
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda _path: None)
-    monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
-        lambda *_args, **_kwargs: fake_config,
-    )
+def test_xing4_0_registry_and_loader_contract(tmp_path):
+    from gptqmodel.models.ports.xing4_0.configuration_xing4_0 import Xing4_0Config
+
+    Xing4_0Config().save_pretrained(tmp_path)
 
     assert auto.MODEL_MAP["xing4_0"] is Xing4_0QModel
-    assert auto.check_and_get_model_definition("xing4-fixture", trust_remote_code=True) is Xing4_0QModel
-    assert Xing4_0QModel.require_trust_remote_code is True
+    for trust in (False, True):
+        assert auto.check_and_get_model_definition(str(tmp_path), trust_remote_code=trust) is Xing4_0QModel
+    assert Xing4_0QModel.require_trust_remote_code is False
     assert Xing4_0QModel.require_fast_init is True
     assert Xing4_0QModel.layer_modules_strict is False
     assert Xing4_0QModel.dynamic_expert_index == "n_routed_experts"
@@ -86,7 +78,9 @@ def test_xing4_0_lm_head_hook_reduces_hyperconnection_streams():
     qmodel = object.__new__(Xing4_0QModel)
     nn.Module.__init__(qmodel)
     qmodel.model = _Root()
-    qmodel.quantize_config = SimpleNamespace(device=torch.device("cpu"))
+    qmodel.quantize_config = SimpleNamespace(
+        device=torch.device("cpu"), activation_mode=None
+    )
     stream_4d = torch.arange(24, dtype=torch.float32).square().reshape(1, 2, 3, 4)
     stream_3d = torch.arange(8, dtype=torch.float32).reshape(1, 2, 4)
     inputs = [[stream_4d.clone(), stream_3d.clone()]]

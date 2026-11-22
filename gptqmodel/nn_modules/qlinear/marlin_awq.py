@@ -33,11 +33,13 @@ from ...utils.marlin import (
     marlin_permute_scales,
     marlin_runtime_available,
     marlin_runtime_error,
+    marlin_stream_workspace,
     marlin_validate_runtime_device,
     replace_parameter,
 )
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
@@ -71,8 +73,20 @@ class AwqMarlinLinear(AWQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
 
+    # The Marlin evaluator adds the bias to its FP32 accumulator before the
+    # visible cast, so the buffer keeps its checkpoint width instead of
+    # following the model dtype at load time.
+    MODEL_DTYPE_BUFFERS = ()
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_marlin"
+
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The Marlin
+    # custom op reached through ``apply_awq_marlin_linear`` has no fake/meta
+    # kernel, so ``torch.compile`` stops at EAGER.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     # num_bits -> type
     TYPE_MAP = {
@@ -119,6 +133,9 @@ class AwqMarlinLinear(AWQuantLinear):
             adapter=adapter,
             register_buffers=False,
             **kwargs)
+
+        # Same reduction policy as GPTQ Marlin (`MarlinConfig(fp32=...)`).
+        self.fp32 = self.kernel.marlin_fp32
 
         if register_buffers:
             self.register_parameter(
@@ -270,8 +287,10 @@ class AwqMarlinLinear(AWQuantLinear):
                 + marlin_runtime_error(self.compute_dtype)
             )
 
-        # Allocate marlin workspace
+        # Allocate marlin workspace. Each CUDA stream that runs this module
+        # gets its own zeroed copy of these lock counters (#4683).
         self.workspace = marlin_make_workspace_new(device)
+        self._marlin_stream_workspaces = {}
 
         # group_size=K and group_size=-1 both mean one channelwise group.
         marlin_group_size = (
@@ -346,9 +365,11 @@ class AwqMarlinLinear(AWQuantLinear):
         self.g_idx_sort_indices = torch.empty(0, dtype=torch.int, device=device)
 
         if hasattr(self, "bias") and self.bias is not None:
-            self.bias.data = marlin_permute_bias(
-                marlin_pad_dim(self.bias, self.out_features, padded_n)
-            )
+            # The kernel addresses the bias in its padded tile order, so the
+            # launch operand is derived per call (``_kernel_bias``) instead of
+            # replacing the registered buffer. ``self.bias`` therefore keeps
+            # the checkpoint width and order.
+            self._marlin_bias_padding = (self.out_features, padded_n)
 
         # AWQ words are now repacked and permuted into Marlin's runtime layout;
         # the original checkpoint tensors are no longer recoverable.
@@ -369,6 +390,27 @@ class AwqMarlinLinear(AWQuantLinear):
                 )
         super()._save_to_state_dict(destination, prefix, keep_vars)
 
+    def _kernel_bias(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        """Return the FP32, tile-ordered bias operand for this call.
+
+        ``self.bias`` keeps the checkpoint width and order; the padded,
+        Marlin-permuted FP32 operand exists only for this launch.
+        """
+
+        bias = self.bias
+        if bias is None:
+            return None
+        if bias.device != x.device:
+            bias = bias.to(device=x.device)
+        source, padded = getattr(
+            self, "_marlin_bias_padding", (self.out_features, self.out_features)
+        )
+        if bias.dtype != torch.float32:
+            bias = bias.to(dtype=torch.float32)
+        if bias.shape != (source,):
+            bias = bias.reshape(-1)
+        return marlin_permute_bias(marlin_pad_dim(bias, source, padded))
+
     def forward(self, x: torch.Tensor):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
@@ -382,8 +424,8 @@ class AwqMarlinLinear(AWQuantLinear):
         if self.scales.dtype != x.dtype:
             self.scales.data = self.scales.data.to(x.dtype)
 
-        if self.bias is not None and self.bias.dtype != x.dtype:
-            self.bias.data = self.bias.data.to(x.dtype)
+        bias = self._kernel_bias(x)
+        workspace = marlin_stream_workspace(self)
 
         # Aligned layers retain the original decode-sensitive call path.
         if self._marlin_tile_padding is None:
@@ -394,11 +436,12 @@ class AwqMarlinLinear(AWQuantLinear):
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
-                workspace=self.workspace,
+                workspace=workspace,
                 quant_type=self.weight_type,
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
-                bias=self.bias,
+                bias=bias,
+                use_fp32_reduce=self.fp32,
             )
         else:
             out = apply_awq_marlin_linear_padded(
@@ -409,11 +452,12 @@ class AwqMarlinLinear(AWQuantLinear):
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
-                workspace=self.workspace,
+                workspace=workspace,
                 quant_type=self.weight_type,
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
-                bias=self.bias,
+                bias=bias,
+                use_fp32_reduce=self.fp32,
             )
 
         if self.adapter:

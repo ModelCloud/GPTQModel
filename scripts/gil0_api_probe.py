@@ -42,7 +42,13 @@ ITERS = 4
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Probes that must only run once, on the main thread (process-global state).
-SINGLE_SHOT = {"torch.cuda.CUDAGraph + torch.cuda.graph"}
+SINGLE_SHOT = {
+    "torch.cuda.CUDAGraph + torch.cuda.graph",
+    # Mutates libtorch's process-global num_threads and then checks a fresh
+    # caller thread; concurrent probe invocations would observe each other's
+    # scopes rather than this invocation's post-task state.
+    "torch.set_num_threads (per worker)",
+}
 
 
 def _gpu_count() -> int:
@@ -138,10 +144,97 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         finally:
             os.unlink(path)
 
+    class _CudaArrayExporter:
+        def __init__(self, owner: torch.Tensor) -> None:
+            self.owner = owner
+            self.__cuda_array_interface__ = {
+                "shape": tuple(owner.shape),
+                "typestr": "|u1",
+                "data": (owner.data_ptr(), False),
+                "strides": None,
+                "version": 3,
+            }
+
+    def cuda_array_interface_view() -> bool:
+        """``GGUFCudaKernel`` exposes its ggml weight buffer this way (#4387)."""
+        owner = torch.randint(0, 256, (257, 144), dtype=torch.uint8, device="cuda")
+        exporter = _CudaArrayExporter(owner)
+        with torch.inference_mode(False):
+            view = torch.as_tensor(exporter, device=owner.device)
+        del exporter
+        same = view.data_ptr() == owner.data_ptr() and not view.is_inference()
+        torch.cuda.current_stream().synchronize()
+        return same and torch.equal(view.cpu(), owner.cpu())
+
     def generator_roundtrip() -> bool:
         generator = torch.Generator(device="cuda")
         generator.manual_seed(1234)
         return bool(torch.randn(64, generator=generator, device="cuda").abs().sum().item() > 0)
+
+    def set_num_threads_thread_local() -> bool:
+        """Split the intra-op budget across workers and re-enter it twice.
+
+        ``DeviceThreadPool`` scopes ``torch.set_num_threads`` to each task so
+        each OpenMP team is bounded (issue #4356) without changing the process
+        budget for threads created afterwards (issue #4601). The probe checks
+        the new value inside the worker and a nested thread, then checks that a
+        fresh thread created by the caller sees the original budget.
+        """
+
+        from gptqmodel.utils.threadx import _scoped_intraop_threads, split_intraop_threads
+
+        caller_before = torch.get_num_threads()
+        target = split_intraop_threads(8, 8)
+        if target != 1:
+            raise AssertionError(f"split_intraop_threads(8, 8) returned {target}")
+        if split_intraop_threads(4, 8) != 2:
+            raise AssertionError("split_intraop_threads(4, 8) did not return 2")
+
+        state: Dict[str, int] = {}
+
+        def worker() -> None:
+            with _scoped_intraop_threads(target):
+                state["worker"] = torch.get_num_threads()
+                matrix = torch.randn(256, 256)
+                state["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
+
+                child: Dict[str, int] = {}
+
+                def nested() -> None:
+                    child["value"] = torch.get_num_threads()
+                    child["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
+
+                thread = threading.Thread(target=nested)
+                thread.start()
+                thread.join()
+                state["child"] = child["value"]
+                state["child_finite"] = child["sum_finite"]
+
+        with ThreadPoolExecutor(max_workers=THREADS) as pool:
+            list(pool.map(lambda _: worker(), range(THREADS)))
+
+        if state["worker"] != target or state["child"] != target:
+            raise AssertionError(f"worker saw {state['worker']}, nested thread saw {state['child']}")
+        if not (state["sum_finite"] and state["child_finite"]):
+            raise AssertionError("matmul produced non-finite values under a split intra-op pool")
+        fresh: Dict[str, int] = {}
+
+        def fresh_thread() -> None:
+            fresh["value"] = torch.get_num_threads()
+
+        thread = threading.Thread(target=fresh_thread)
+        thread.start()
+        thread.join()
+        if fresh["value"] != caller_before:
+            raise AssertionError(
+                f"worker set_num_threads leaked into a new caller thread: "
+                f"{caller_before} -> {fresh['value']}"
+            )
+        if torch.get_num_threads() != caller_before:
+            raise AssertionError(
+                f"worker set_num_threads leaked into the caller: {caller_before} -> {torch.get_num_threads()}"
+            )
+        return True
 
     def cpu_autocast_override() -> bool:
         x = torch.full((1, 32), 1000.0)
@@ -824,9 +917,9 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
     affine_fit_lock = threading.Lock()
     affine_fit_next_device = [0]
 
-    def paroquant_affine_fit() -> bool:
+    def paro_affine_fit() -> bool:
         """Qualify reduced-precision extrema, grid fitting and pseudo quantization."""
-        from gptqmodel.quantization.paroquant.optimization import _calc_affine_qparams, pseudo_quantize_dequant
+        from gptqmodel.quantization.paro.optimization import _calc_affine_qparams, pseudo_quantize_dequant
 
         with affine_fit_lock:
             if not hasattr(affine_fit_thread, "device"):
@@ -951,6 +1044,53 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError("concurrent NF12 prefill gate returned wrong values")
         return True
 
+    cptc_lock = threading.Lock()
+    cptc_thread = threading.local()
+    cptc_state = {}
+    cptc_next_device = 0
+
+    def cptc_ops() -> bool:
+        from gptqmodel.quantization.cptc import CPTCSpec, decode_weight, quantize_weight
+        from gptqmodel.utils.cptc import native_ops
+
+        nonlocal cptc_next_device
+        spec = CPTCSpec()
+
+        def pack(device):
+            rng = torch.Generator().manual_seed(230)
+            weight = torch.randn((16, 128), generator=rng)
+            return quantize_weight(weight, spec, device=device)
+
+        with cptc_lock:
+            if not hasattr(cptc_thread, "device"):
+                cptc_thread.device = torch.device("cuda", cptc_next_device % 2)
+                cptc_next_device += 1
+                cptc_thread.stream = torch.cuda.Stream(device=cptc_thread.device)
+            device = cptc_thread.device
+            torch.cuda.set_device(device)
+            ops = native_ops(device)
+            if ops is None:
+                raise AssertionError("CPTC native extension is unavailable")
+            if device not in cptc_state:
+                cptc_state[device] = pack(device)
+
+        with torch.cuda.stream(cptc_thread.stream):
+            result = pack(device)
+            expected = decode_weight(*result, spec, 128)
+            args = (*(tensor.to(device) for tensor in result), spec.bits, spec.trellis_depth, spec.shift)
+            decoded = ops.decode(*args, 128)
+            x = torch.zeros((1, 128), dtype=torch.bfloat16, device=device)
+            x[0, 0] = 1
+            output = ops.mma(x, *args)
+            decoded = decoded.cpu()
+            output = output.cpu()
+        cptc_thread.stream.synchronize()
+        if not all(torch.equal(a, b) for a, b in zip(result, cptc_state[device])):
+            raise AssertionError("concurrent CPTC encoder changed checkpoint bytes or scales")
+        if not torch.equal(decoded, expected) or not torch.equal(output.flatten(), expected[:, 0]):
+            raise AssertionError("concurrent CPTC decoder or MMA changed output")
+        return True
+
     probes: Dict[str, Callable[[], Any]] = {
         "torch.cuda.is_available": torch.cuda.is_available,
         "torch.cuda.device_count": torch.cuda.device_count,
@@ -961,6 +1101,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "gptqmodel.p2p.allocator_guard": p2p_allocator_guard,
         "torch.cuda.set_device": set_device_isolation,
         "gptqmodel_nf12.ops": nf12_ops,
+        "CPTC native ops": cptc_ops,
         "gptqmodel_nf12_hip.embedding": nf12_hip_embedding,
         "MACaQ Triton W4A4": macaq_triton_w4a4,
         "MACaQ compiled flips ROCm": macaq_compiled_flips_rocm,
@@ -971,7 +1112,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "AWQ tiled dequantize_gemm": awq_tiled_dequantize,
         "GPTQ FP16 scale storage guard": gptq_scale_storage_guard,
         "GPTQ weight scale floor": gptq_weight_scale_floor,
-        "ParoQuant affine fit": paroquant_affine_fit,
+        "Paro affine fit": paro_affine_fit,
         "VPTQ deterministic segment sum": vptq_segment_sum,
         "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
@@ -990,6 +1131,9 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.set_rng_state_all": rng_roundtrip,
         "torch.cuda.can_device_access_peer": lambda: bool(torch.cuda.can_device_access_peer(0, 1)),
         "torch.cuda.is_initialized": lambda: bool(torch.cuda.is_initialized()),
+        "torch._C._cuda_hasPrimaryContext": lambda: bool(
+            getattr(torch._C, "_cuda_hasPrimaryContext", lambda index: True)(0)
+        ),
         "torch.cuda.is_current_stream_capturing": lambda: bool(torch.cuda.is_current_stream_capturing()),
         "torch.cuda.get_arch_list": lambda: len(torch.cuda.get_arch_list()),
         "torch.cuda.CUDAGraph + torch.cuda.graph": graph_capture,
@@ -1008,6 +1152,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.eye": lambda: torch.eye(256, device="cuda"),
         "torch.tensor": lambda: torch.tensor([1.0, 2.0, 3.0], device="cuda"),
         "torch.as_tensor": lambda: torch.as_tensor([1.0, 2.0], device="cuda"),
+        "torch.as_tensor (__cuda_array_interface__ view)": cuda_array_interface_view,
         "torch.from_numpy": lambda: torch.from_numpy(__import__("numpy").arange(16)),
         "torch.zeros_like": lambda: torch.zeros_like(t(64)),
         "torch.ones_like": lambda: torch.ones_like(t(64)),
@@ -1050,6 +1195,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.is_autocast_enabled + torch.autocast (CPU)": cpu_autocast_override,
         "torch.is_autocast_enabled + torch.autocast (CUDA)": cuda_autocast_disable,
         "torch.get_autocast_dtype + torch.autocast (CUDA)": cuda_autocast_dtype,
+        "torch.set_num_threads (per worker)": set_num_threads_thread_local,
     }
     return probes
 
@@ -1065,13 +1211,14 @@ def _requires_two_gpus(name: str) -> bool:
             or name.endswith("can_device_access_peer") or name.startswith("gptqmodel_nf12.")
             or name in (
                 "gptqmodel_nf12_hip.embedding",
+                "CPTC native ops",
                 "MACaQ Triton W4A4",
                 "MACaQ compiled flips ROCm",
                 "AWQ FP32 dequantize_gemm",
                 "AWQ tiled dequantize_gemm",
                 "GPTQ FP16 scale storage guard",
                 "GPTQ weight scale floor",
-                "ParoQuant affine fit",
+                "Paro affine fit",
                 "VPTQ deterministic segment sum",
             ))
 

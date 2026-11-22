@@ -1,36 +1,52 @@
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
+import pytest
 import torch
-import transformers
 from torch import nn
-from transformers import AutoModel
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.locateanything import LocateAnythingQModel
+from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.ports.locateanything.configuration_locateanything import LocateAnythingConfig
 from gptqmodel.quantization import QuantizeConfig
-from gptqmodel.utils.hf import normalize_hf_config_compat, prepare_remote_model_init_compat
+from gptqmodel.utils.hf import load_model_config
 from gptqmodel.utils.model import MODALITY
 
 
-def test_locateanything_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="locateanything")
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code: True)
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda path: None)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+@pytest.fixture
+def owned_config_dir(tmp_path):
+    config = LocateAnythingConfig(
+        text_config={"rope_parameters": {"rope_type": "default", "rope_theta": 1_000_000.0}},
+        attn_implementation="eager",
+        auto_map={"AutoConfig": "forbidden.Config", "AutoModel": "forbidden.Model"},
+    )
+    config.save_pretrained(tmp_path)
+    return tmp_path
+
+
+def test_locateanything_model_type_selects_definition(owned_config_dir, monkeypatch):
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    monkeypatch.setattr(
+        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+        lambda *_args, **_kwargs: pytest.fail("Package-owned selection imported checkpoint Python"),
+    )
 
     assert (
         auto.check_and_get_model_definition(
-            "/tmp/LocateAnything-3B",
+            owned_config_dir,
             trust_remote_code=True,
+            local_files_only=True,
         )
         is LocateAnythingQModel
     )
 
 
 def test_locateanything_definition_contract():
-    assert LocateAnythingQModel.loader is AutoModel
-    assert LocateAnythingQModel.require_trust_remote_code is True
+    assert isinstance(LocateAnythingQModel.loader, LocalModelLoader)
+    assert LocateAnythingQModel.loader.config_class.endswith(".configuration_locateanything.LocateAnythingConfig")
+    assert LocateAnythingQModel.loader.model_class.endswith(".modeling_locateanything.LocateAnythingForConditionalGeneration")
+    assert LocateAnythingQModel.loader.processor_class.endswith(".processing_locateanything.LocateAnythingProcessor")
+    assert LocateAnythingQModel.require_trust_remote_code is False
     assert LocateAnythingQModel.require_load_processor is False
     assert LocateAnythingQModel.out_of_model_tensors == {
         "files": [
@@ -55,85 +71,43 @@ def test_locateanything_definition_contract():
     ]
 
 
-def test_locateanything_config_restores_remote_qwen_rope_theta():
-    text_config = SimpleNamespace(
-        rope_parameters={"rope_type": "default", "rope_theta": 1_000_000.0},
-    )
-    config = SimpleNamespace(
-        model_type="locateanything",
-        text_config=text_config,
+@pytest.mark.parametrize("implementation", ["eager", "sdpa", "magi"])
+def test_locateanything_config_owns_rope_and_attention_policy(implementation):
+    config = LocateAnythingConfig(
+        text_config={"rope_parameters": {"rope_type": "default", "rope_theta": 1_000_000.0}},
         rope_parameters={"rope_type": "default", "rope_theta": 10_000.0},
+        attn_implementation=implementation,
     )
 
-    normalize_hf_config_compat(config, trust_remote_code=True)
+    assert config.text_config.rope_parameters["rope_theta"] == 1_000_000.0
+    expected = "sdpa" if implementation == "magi" else implementation
+    assert config._attn_implementation == expected
+    assert config.text_config._attn_implementation == expected
+    assert config.vision_config._attn_implementation == expected
 
-    assert text_config.rope_theta == 1_000_000.0
 
-
-def test_locateanything_remote_attention_compat(monkeypatch):
-    calls = []
-    module_root = "transformers_modules.fake_locateanything"
-    outer_module = ModuleType(f"{module_root}.modeling_locateanything")
-    qwen_module = ModuleType(f"{module_root}.modeling_qwen2")
-
-    class DummyOuterModel:
-        _supports_flash_attn_2 = True
-
-        def __init__(self):
-            self.config = SimpleNamespace(
-                model_type="locateanything",
-                vision_config=SimpleNamespace(_attn_implementation="eager"),
-                text_config=SimpleNamespace(_attn_implementation="eager"),
-            )
-
-        def _check_and_adjust_attn_implementation(self, implementation, is_init_check=False):
-            calls.append((implementation, is_init_check))
-            return implementation
-
-    class DummyQwenBase:
-        _supports_flash_attn_2 = True
-
-    class DummyQwenForCausalLM(DummyQwenBase):
-        pass
-
-    DummyOuterModel.__module__ = outer_module.__name__
-    DummyQwenBase.__module__ = qwen_module.__name__
-    DummyQwenForCausalLM.__module__ = qwen_module.__name__
-    outer_module.DummyOuterModel = DummyOuterModel
-    qwen_module.DummyQwenBase = DummyQwenBase
-    qwen_module.DummyQwenForCausalLM = DummyQwenForCausalLM
-
-    monkeypatch.setitem(sys.modules, outer_module.__name__, outer_module)
-    monkeypatch.setitem(sys.modules, qwen_module.__name__, qwen_module)
-    monkeypatch.setattr(transformers.utils, "is_flash_attn_2_available", lambda: True)
+@pytest.mark.parametrize("trust_remote_code", [False, True])
+@pytest.mark.parametrize("bypass", [None, "0", "1"])
+def test_locateanything_remote_compat_cannot_override_owned_config(
+    owned_config_dir, monkeypatch, trust_remote_code, bypass,
+):
+    if bypass is None:
+        monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
+    else:
+        monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", bypass)
     monkeypatch.setattr(
         "transformers.dynamic_module_utils.get_class_from_dynamic_module",
-        lambda class_ref, model_id_or_path, **kwargs: DummyOuterModel,
+        lambda *_args, **_kwargs: pytest.fail("Package-owned config imported checkpoint Python"),
     )
-    config = SimpleNamespace(
-        model_type="locateanything",
-        auto_map={"AutoModel": "modeling_locateanything.DummyOuterModel"},
+    config = load_model_config(
+        owned_config_dir, trust_remote_code=trust_remote_code,
+        local_files_only=True, attn_implementation="eager",
     )
+    assert config._attn_implementation == "eager"
 
-    prepare_remote_model_init_compat("/tmp/LocateAnything-3B", config, trust_remote_code=True)
-    model = DummyOuterModel()
-    results = [
-        model._check_and_adjust_attn_implementation(
-            requested,
-            is_init_check=True,
-            allow_all_kernels=False,
-        )
-        for requested in ("eager", "flash_attention_2")
-    ]
-
-    assert results == ["sdpa", "sdpa"]
-    assert calls == [("sdpa", True), ("sdpa", True)]
-    assert model.config.vision_config._attn_implementation == "sdpa"
-    assert model.config.text_config._attn_implementation == "sdpa"
-    assert DummyOuterModel._supports_flash_attn is True
-    assert DummyQwenBase._supports_flash_attn is True
-    assert DummyQwenForCausalLM._supports_flash_attn is True
-    assert getattr(DummyOuterModel, "_gptqmodel_attn_adjust_kwargs_patch", False) is True
+    assert type(config) is LocateAnythingConfig
+    assert config._attn_implementation == "eager"
+    assert config.text_config.rope_parameters["rope_theta"] == 1_000_000.0
 
 
 def _fake_model_tree():
@@ -165,7 +139,7 @@ def test_locateanything_keeps_multimodal_modules_in_base_dtype():
     }
 
 
-def test_locateanything_prepare_dataset_uses_remote_processor(monkeypatch):
+def test_locateanything_prepare_dataset_uses_declared_processor(monkeypatch):
     calls = []
 
     class FakeProcessor:
@@ -182,6 +156,7 @@ def test_locateanything_prepare_dataset_uses_remote_processor(monkeypatch):
             return {"input_ids": torch.tensor([[1, 2]])}
 
     qmodel = object.__new__(LocateAnythingQModel)
+    nn.Module.__init__(qmodel)
     monkeypatch.setattr(qmodel, "load_processor", lambda: FakeProcessor())
     messages = [{"role": "user", "content": [{"type": "image", "image": "url"}]}]
 

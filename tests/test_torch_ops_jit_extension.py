@@ -1093,6 +1093,170 @@ def test_torch_ops_jit_extension_appends_detected_cuda_include_paths(monkeypatch
     ]
 
 
+def _fake_two_arch_cuda_host(monkeypatch):
+    """Make the arch-list helper see sm_89 + sm_120 without touching a GPU."""
+
+    monkeypatch.setattr(cpp_module.torch.version, "cuda", "13.0")
+    monkeypatch.setattr(cpp_module.torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(
+        cpp_module.torch.cuda,
+        "get_device_capability",
+        lambda device_index=0: (12, 0) if device_index == 0 else (8, 9),
+    )
+    monkeypatch.setattr(cpp_module.torch.cuda, "get_arch_list", lambda: ["sm_89", "sm_120"])
+
+
+def test_exllamav3_prepare_build_env_does_not_leak_arch_list(monkeypatch):
+    """EXL3 build preparation must not rewrite the process-wide JIT cache key."""
+
+    from gptqmodel.exllamav3 import ext as exllamav3_ext
+    from gptqmodel.utils.marlin import _MARLIN_FP16_TORCH_OPS_EXTENSION as marlin_ext
+
+    monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
+    _fake_two_arch_cuda_host(monkeypatch)
+
+    marlin_build_root = marlin_ext.build_root()
+    exllamav3_ext._prepare_build_env()
+
+    assert "TORCH_CUDA_ARCH_LIST" not in os.environ
+    assert marlin_ext.build_root() == marlin_build_root
+
+
+def test_exllamav3_import_does_not_set_arch_list_env():
+    """Importing EXL3 must not mutate the environment before any build starts."""
+
+    script = """
+import os
+import torch
+
+torch.version.cuda = "13.0"
+torch.cuda.device_count = lambda: 2
+torch.cuda.get_device_capability = lambda index=0: (12, 0) if index == 0 else (8, 9)
+torch.cuda.get_arch_list = lambda: ["sm_89", "sm_120"]
+
+import gptqmodel.exllamav3.ext as ext
+
+assert "TORCH_CUDA_ARCH_LIST" not in os.environ, os.environ.get("TORCH_CUDA_ARCH_LIST")
+ext._prepare_build_env()
+assert "TORCH_CUDA_ARCH_LIST" not in os.environ, os.environ.get("TORCH_CUDA_ARCH_LIST")
+print("ok")
+"""
+    env = os.environ.copy()
+    env.pop("TORCH_CUDA_ARCH_LIST", None)
+    repo_root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "ok" in result.stdout
+
+
+def test_exllamav3_arch_list_scope_restores_unset_env(monkeypatch):
+    """The EXL3 arch override must disappear again when the build scope exits."""
+
+    from gptqmodel.exllamav3.util.arch_list import scoped_arch_list_env
+
+    monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
+    _fake_two_arch_cuda_host(monkeypatch)
+
+    with scoped_arch_list_env():
+        # Numeric ordering puts "+PTX" on the highest architecture.
+        assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9;12.0+PTX"
+
+    assert "TORCH_CUDA_ARCH_LIST" not in os.environ
+
+
+def test_exllamav3_arch_list_scope_preserves_preexisting_env(monkeypatch):
+    """A caller-provided arch list must be left exactly as it was."""
+
+    from gptqmodel.exllamav3.util.arch_list import scoped_arch_list_env
+
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.0")
+    _fake_two_arch_cuda_host(monkeypatch)
+
+    with scoped_arch_list_env():
+        assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.0"
+
+    assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.0"
+
+
+def test_exllamav3_arch_list_scope_restores_on_exception(monkeypatch):
+    """A failed EXL3 build must still restore the previous environment."""
+
+    from gptqmodel.exllamav3.util.arch_list import scoped_arch_list_env
+
+    monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
+    _fake_two_arch_cuda_host(monkeypatch)
+
+    try:
+        with scoped_arch_list_env():
+            assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9;12.0+PTX"
+            raise RuntimeError("build failed")
+    except RuntimeError as exc:
+        assert str(exc) == "build failed"
+    else:
+        raise AssertionError("expected scoped_arch_list_env() to propagate the build failure")
+
+    assert "TORCH_CUDA_ARCH_LIST" not in os.environ
+
+
+def test_exllamav3_arch_list_scope_does_not_clobber_concurrent_value(monkeypatch):
+    """Restoring must not overwrite a value another thread installed meanwhile."""
+
+    from gptqmodel.exllamav3.util.arch_list import scoped_arch_list_env
+
+    monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
+    _fake_two_arch_cuda_host(monkeypatch)
+
+    with scoped_arch_list_env():
+        assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9;12.0+PTX"
+
+        def install_other_value():
+            os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
+
+        other = threading.Thread(target=install_other_value)
+        other.start()
+        other.join()
+
+    assert os.environ["TORCH_CUDA_ARCH_LIST"] == "9.0"
+
+
+def test_torch_ops_jit_extension_restores_build_env_scope_on_compile_failure(monkeypatch, tmp_path):
+    """The extension loader must run the build scope for exactly the compile call."""
+
+    import contextlib
+
+    events = []
+
+    @contextlib.contextmanager
+    def build_env_scope():
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("exit")
+
+    loader = _make_loader(tmp_path, requires_cuda=True, build_env_scope=build_env_scope)
+    monkeypatch.setattr(loader, "_ops_available", lambda: False)
+    monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        cpp_module,
+        "load",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("compile failed")),
+    )
+
+    assert loader.load() is False
+    assert events == ["enter", "exit"]
+
+
 def test_torch_ops_jit_extension_merges_visible_capability_into_compile_override(monkeypatch, tmp_path):
     """Guard CUDA JIT builds so manual arch overrides still compile for the visible GPU."""
 

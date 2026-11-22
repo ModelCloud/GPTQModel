@@ -13,8 +13,9 @@ from torch import nn
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
+from ...quantization.awq.utils.packing_utils import reverse_awq_order, source_weight_out_in, unpack_awq
 from ...utils.backend import BACKEND
+from ._compile_support import COMPILE_LEVEL
 from .bitblas import (
     BITBLAS_OPTIMIZE_FEATURES,
     BITBLAS_PROPAGATE_WEIGHTS,
@@ -45,6 +46,12 @@ class AWQBitBlasKernel(BitblasBaseQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     QUANT_TYPE = "awq_bitblas"
+
+    # bitblas is not installed here. The inherited BitBLAS forward reads
+    # `data_ptr()` on the host (so no CUDA-graph capture) and dispatches a
+    # generated matmul without a fake/meta kernel, so dynamo breaks.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     def __init__(
         self,
@@ -124,7 +131,7 @@ class AWQBitBlasKernel(BitblasBaseQuantLinear):
         scales = scales.t().contiguous()
         zeros = zeros.t().contiguous()
 
-        weight = linear.weight.detach().contiguous()
+        weight = source_weight_out_in(linear).contiguous()
         group_idx = torch.arange(self.in_features, device=weight.device, dtype=torch.int64) // self.group_size
         maxq = (1 << self.bits) - 1
 

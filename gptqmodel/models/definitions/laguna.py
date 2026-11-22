@@ -5,10 +5,16 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class LagunaQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     # Laguna has a dense first MLP layer and sparse MoE layers after that.
     fusable = FusableConfig("laguna").merge(LlamaFusableConfig(), profiles=("qkv",))
 

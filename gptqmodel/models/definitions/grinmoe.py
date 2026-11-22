@@ -4,12 +4,15 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import W1W3W2MoELifecycleHooks
 
 
 class GrinMoeQModel(BaseQModel):
-    # grin moe requires custom model code
-    require_trust_remote_code = True
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.grinmoe.configuration_grinmoe.GRINMoEConfig",
+        model_class="gptqmodel.models.ports.grinmoe.modeling_grinmoe.GRINMoEForCausalLM",
+    )
 
     dynamic_expert_index = "num_local_experts"
 

@@ -4,7 +4,6 @@
 
 import json
 import math
-import shutil
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -15,13 +14,14 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast
 
 import gptqmodel.models.loader as loader_module
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
-from gptqmodel.models.definitions.mimo_v2 import _compatible_mask
+from gptqmodel.models.ports.mimo_v2.configuration_mimo_v2 import MiMoV2Config
+from gptqmodel.models.ports.mimo_v2.modeling_mimo_v2 import MiMoV2ForCausalLM
 from gptqmodel.quantization.config import (
     AutoModuleDecoderConfig,
     AWQConfig,
@@ -30,6 +30,7 @@ from gptqmodel.quantization.config import (
     QuantizeConfig,
 )
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 @pytest.fixture
@@ -46,8 +47,7 @@ def make_source(
     path: Path, tp: int, dtype: torch.dtype = torch.bfloat16
 ) -> tuple[torch.nn.Module, dict]:
     path.mkdir()
-    for file in (Path(__file__).parent / "fixtures/mimo_v2").glob("*.py"):
-        shutil.copyfile(file, path / file.name)
+    # auto_map names checkpoint Python that does not exist: the package-owned port must load.
     config = {
         "model_type": "mimo_v2",
         "architectures": ["MiMoV2ForCausalLM"],
@@ -135,16 +135,12 @@ def make_source(
         eos_token="<eos>",
         unk_token="<unk>",
     ).save_pretrained(path)
-    hf_config = AutoConfig.from_pretrained(path, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_config(
+    hf_config = MiMoV2Config.from_pretrained(path)
+    model = MiMoV2ForCausalLM._from_config(
         hf_config,
-        trust_remote_code=True,
-        torch_dtype=dtype,
+        dtype=dtype,
         attn_implementation="eager",
     ).eval()
-    modeling = __import__(type(model).__module__, fromlist=["create_causal_mask"])
-    for name in ("create_causal_mask", "create_sliding_window_causal_mask"):
-        setattr(modeling, name, _compatible_mask(getattr(modeling, name)))
     torch.manual_seed(123)
     weights, scales, dense = {}, {}, {}
     for name, parameter in model.state_dict().items():
@@ -228,8 +224,6 @@ def make_source(
     model.load_state_dict(dense)
     return model, {
         **auxiliary,
-        "visual.weight": weights["visual.weight"],
-        "audio_encoder.weight": weights["audio_encoder.weight"],
         "model.layers.0.mlp.up_proj.weight": dense["model.layers.0.mlp.up_proj.weight"],
     }
 
@@ -254,7 +248,7 @@ def test_mimo_cpu_gptq_roundtrip(
     cpu_threads: None,
 ) -> None:
     # The lazy loader's virtual pool requires two CPU workers, even on CI VMs.
-    monkeypatch.setenv("GPTQMODEL_CPU_WORKERS", "2")
+    configure_kernel(KernelConfig(cpu_workers=2))
     if dtype == "auto":
         # A host accelerator must not override the explicit CPU quantization device.
         select_device = loader_module.auto_select_device
@@ -358,10 +352,12 @@ def test_mimo_cpu_gptq_roundtrip(
     monkeypatch.setattr(GPTQ, "quantize", record_quantize)
     calibration = [torch.randint(4, 128, (1, 16)).tolist()[0] for _ in range(4)]
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.GPTQ_TORCH,
-        calibration_data_min_length=1,
     )
     assert captured_batches == [len(calibration)]
     assert model.quant_log

@@ -1,6 +1,6 @@
 # Rotation model support
 
-Model-wide rotation (`GPTQModel.quantize(rotation="hadamard" | "random")`)
+Model-wide rotation (`QuantizeConfig(rotation="hadamard" | "random")`)
 fuses decoder norms into the adjacent projections and rotates the residual
 stream. The fold is only an identity transform for a specific decoder layout,
 so the feature is an explicit per-model-type opt-in rather than a check on the
@@ -37,19 +37,81 @@ own opt-in.
 
 ```mermaid
 flowchart TD
-    A["quantize(rotation=...)"] --> B{"resolve_model_rotation(qcfg)"}
+    A["QuantizeConfig(rotation=...)"] --> B{"resolve_model_rotation(qcfg)"}
     B -->|"None"| Z["no rotation"]
-    B -->|"hadamard / random"| C["validate_rotation_model_support(self)"]
-    C --> D{"rotation_supported(self)"}
+    B -->|"hadamard / random"| C["validate_rotation_format(qcfg)"]
+    C -->|"non-GPTQ format"| E0["ValueError: config, format,<br/>supported layouts<br/>no weights modified"]
+    C -->|"GPTQ / GPTQ_V2"| D0["validate_rotation_model_support(self)"]
+    D0 --> D{"rotation_supported(self)"}
     D -->|"no"| E["ValueError: model class, model_type,<br/>supported model types<br/>no weights modified"]
     D -->|"yes"| F["validate_rotation_dimensions"]
     F -->|"unsupported width"| G["ValueError: names the dimension<br/>no weights modified"]
-    F -->|"ok"| H["fuse_layer_norms"]
-    H --> I["rotate_model"]
-    I --> J["rotation backend check"]
+    F -->|"ok"| H["rotation backend check"]
+    H --> R["QuantizationRunPlan.build<br/>+ checkpoint gate"]
+    R -->|"unsupported checkpoint chain"| E1["NotImplementedError<br/>no weights modified"]
+    R --> P["_prepare_calibration_before_rotation"]
+    P -->|"dataset None / empty /<br/>all rows dropped / bad row"| E2["ValueError<br/>no weights modified"]
+    P -->|"prepared batches"| I["fuse_layer_norms"]
+    I --> J["rotate_model"]
+    J --> K["processors reuse the prepared batches"]
     style E fill:#fde2e1,stroke:#dc2626
+    style E0 fill:#fde2e1,stroke:#dc2626
+    style E1 fill:#fde2e1,stroke:#dc2626
+    style E2 fill:#fde2e1,stroke:#dc2626
     style G fill:#fde2e1,stroke:#dc2626
 ```
+
+## Calibration validation
+
+The rotation above is destructive: it unties the embeddings, fuses the norms
+and rotates the weights in place, and the online Hadamard a rotated
+`down_proj` needs is installed only by `_setup_rotation_online_had` at the end
+of a successful run. A calibration-data error raised after the rotation
+therefore left the in-session model rotated without that Hadamard, and a retry
+on the same object fused and rotated it a second time, silently quantizing
+from the broken state (#4935).
+
+`BaseQModel._prepare_calibration_before_rotation` now runs the checks that
+`LoopProcessor.__init__` applies (`dataset is None`, an empty input, and an
+empty prepared dataset after the `min_length` filter) plus the model's own
+`prepare_dataset` before `fuse_layer_norms`/`rotate_model`. It returns the
+prepared batches, `quantize()` passes them to `_quantize_with_calibration`,
+and the processors bind `_already_prepared_calibration_dataset` so the corpus
+is tokenized once, not twice. `QuantizationRunPlan.build` and the checkpoint
+gate moved up with it, so an unsupported checkpoint chain cannot leave a
+rotated model either. Weight-only configs (`run_plan.weight_only`) and
+`rotation=None` are untouched.
+
+Measured on the regression model (`tests/test_rotation_validate_first_4935.py`:
+one-layer fp32 Llama, `hidden_size=32`, `intermediate_size=64`,
+`GPTQConfig(bits=4, group_size=32, rotation="hadamard")`, `dataset=None`):
+
+| Step | `main` | With this fix |
+| --- | --- | --- |
+| Failed call changes the input embedding | yes | no |
+| FP logits max abs diff after the failed call | `0.0391` | `0.0000` |
+| Failed call + valid retry vs a first-time run | `16/40` state tensors differ | `0/40` |
+| `model.layers.0.mlp.down_proj.qweight` | `100%` of elements differ | identical |
+| `model.embed_tokens.weight` | `98.4%` of elements differ | identical |
+| Successful run checkpoint (`state_dict` bytes) | baseline | bit-identical |
+
+## Checkpoint-format gate
+
+`rotation` is a base-class field, so every config accepted it, but only the
+GPTQ layouts have a kernel that applies the online Hadamard the rotated weights
+need. `from_quantized` already refused a rotated checkpoint whose format is not
+GPTQ/GPTQ_V2, so a non-GPTQ run quantized a rotated model with kernels that
+ignored the transform (FP8 nll 21.05 -> 30.20, AWQ 21.59 -> 30.68) and saved a
+checkpoint that could not be loaded.
+
+`validate_rotation_format` now rejects the option in
+`BaseQuantizeConfig.__post_init__` (and in `EXL3Config.__post_init__`, which
+does not call the base hook), naming the config, the resolved format and the two
+supported layouts. `quantize()` runs the same check again before
+`fuse_layer_norms`/`rotate_model`, and the backend check moved up with it, so a
+refused run leaves the model exactly as loaded (#4666). MACaQ keeps its own
+per-layer `rotation`: `MacaqConfig.model_rotation` is `None`, so the model-wide
+gate does not apply.
 
 The opt-in decision itself:
 
@@ -69,7 +131,7 @@ flowchart TD
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| Admission | `isinstance(self, (LlamaQModel, Qwen2QModel))` at `gptqmodel/models/base.py:2127` on `main` | `validate_rotation_model_support(self)` at `gptqmodel/models/base.py:2169` |
+| Admission | `isinstance(self, (LlamaQModel, Qwen2QModel))` at `gptqmodel/models/base.py:2127` on `main` | `validate_rotation_model_support(self)` at `gptqmodel/models/base.py:226` |
 | Declaration | None; the Python class was the contract | `supports_rotation = frozenset({...})` on the definition (`llama.py:20`, `qwen2.py:17`) |
 | Lookup | Class hierarchy, so every `LlamaQModel` subclass passed | Own `__dict__` only, so subclasses do not inherit it |
 | Error text | "rotation only supports: llama/qwen2 model" while 19 direct subclasses passed | Names the rejected class and `model_type`, then lists `llama, qwen2` |
@@ -123,6 +185,11 @@ own neutral-rotation case.
 | `rotation` on a new `LlamaQModel` subclass | inherited admission | rejected until it declares `supports_rotation` |
 | `rotation` on `llama`/`qwen2` | worked | still works; neutral-rotation test asserts < `1e-3` |
 | `rotation` with an unsupported width | `ValueError` from `validate_rotation_dimensions` | unchanged |
+| `rotation` with `CalibrationConfig()` (`dataset=None`) | model rotated, then `ValueError` | `ValueError` before mutation |
+| `rotation` with `dataset=[]` | model rotated, then `ValueError` | `ValueError` before mutation |
+| `rotation` where every row is at/under `min_length` | model rotated, then `ValueError` | `ValueError` before mutation |
+| `rotation` with an unsupported row type | model rotated, then `ValueError` | `ValueError` before mutation |
+| Retry after any of the above | fuses/rotates twice, silently | identical to a first-time run |
 
 ## Measured before/after
 

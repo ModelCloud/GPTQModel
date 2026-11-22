@@ -15,6 +15,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
+from ..utils.kernel import get_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.torch import HAS_NPU
 
@@ -113,7 +114,15 @@ def decode_e8m0_scale(scale: torch.Tensor) -> torch.Tensor:
     else:
         raise TypeError(f"E8M0 scale must use uint8 or float8_e8m0fnu storage, got {scale.dtype}.")
     exponent = encoded.to(torch.int32) - 127
-    decoded = torch.ldexp(torch.ones_like(encoded, dtype=torch.float32), exponent)
+    # ``pow(2, exponent)`` rather than ``ldexp``: ``torch.ldexp`` launches on
+    # the *current* device and faults with an illegal memory access when its
+    # inputs live on another GPU (#5263). ``2**exponent`` is bit-exact for the
+    # whole E8M0 range, including the denormal 2**-127 that ``exp2`` rounds one
+    # ulp low on CUDA.
+    # The exponent is widened to float32 first: a Python float base with an
+    # *integer* tensor follows the process default dtype, so a concurrent fp16
+    # ``from_pretrained`` would decode most scales to 0/inf (#5297).
+    decoded = torch.pow(2.0, exponent.to(torch.float32))
     return torch.where(encoded == 255, torch.full_like(decoded, float("nan")), decoded)
 
 
@@ -163,12 +172,9 @@ def is_fp4_packed_dtype(dtype: torch.dtype) -> bool:
 
 
 def _cpu_floatx_threads(numel: Optional[int] = None, *, enable_large_threads: bool = False) -> int:
-    raw = os.environ.get("GPTQMODEL_FLOATX_CPU_THREADS", "").strip()
     default_value = 32 if enable_large_threads and numel is not None and numel >= 64 * 1024 * 1024 else 8
-    try:
-        value = int(raw) if raw else default_value
-    except ValueError:
-        value = default_value
+    configured = get_kernel_config().floatx_cpu_threads
+    value = configured if configured is not None else default_value
     return max(1, min(value, 32, os.cpu_count() or 1))
 
 
@@ -211,7 +217,7 @@ def _prefer_reference_fp8_cpu(
         return False
     if target_dtype not in _TARGET_DTYPE_CODES:
         return False
-    if os.environ.get("GPTQMODEL_FLOATX_CPU_FORCE_NATIVE_FP8", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if get_kernel_config().floatx_cpu_native_fp8:
         return False
 
     standard_fp8_dtypes = tuple(
@@ -796,6 +802,7 @@ def dequantize_f8_e4m3(
                     _TARGET_DTYPE_CODES[target_dtype],
                     int(format_code),
                     _cpu_floatx_threads(tensor.numel(), enable_large_threads=enable_large_threads),
+                    get_kernel_config().floatx_cpu_simd_level,
                 )
 
     return _dequantize_f8_reference(
@@ -866,6 +873,7 @@ def dequantize_f4_e2m1(
                 axis is None,
                 _TARGET_DTYPE_CODES[target_dtype],
                 _cpu_floatx_threads(source.numel() * 2),
+                get_kernel_config().floatx_cpu_simd_level,
             )
 
     return _dequantize_f4_reference(

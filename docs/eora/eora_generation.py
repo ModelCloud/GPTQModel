@@ -18,14 +18,13 @@ import os
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 # -- end do not touch
 
 
 # from models.model_test import ModelTest  # noqa: E402
 from eora_calibration_data_construction import construct_c4, construct_mmlu
 
-from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
@@ -74,7 +73,7 @@ if __name__ == '__main__':
     desc_act = True
     rank = args.eora_rank
     batch_size = 1
-    calibration_dataset_concat_size = 0  # disable
+    calibration_dataset_concat_size = None  # disable
 
     if args.quant_save_path is not None:
         quant_path = args.quant_save_path
@@ -93,7 +92,7 @@ if __name__ == '__main__':
 
     eora = Lora(
         # for quant, path is save path. for load, it is loading path
-        path=os.path.join(quant_path, eora_path),
+        path=eora_path,
         rank=rank,
     )
 
@@ -111,19 +110,23 @@ if __name__ == '__main__':
 
     if args.eora_dataset == "c4":
         model.quantize(
-            calibration=calibration_dataset,
-            batch_size=batch_size,
-            calibration_concat_size=calibration_dataset_concat_size,
+            CalibrationConfig(
+                dataset=calibration_dataset,
+                batch_size=batch_size,
+                concat_size=calibration_dataset_concat_size,
+            ),
         )  #
     else:
 
         eora_calibration_dataset = construct_mmlu()
 
         model.quantize(
-            calibration=calibration_dataset,
-            batch_size=batch_size,
-            calibration_concat_size=calibration_dataset_concat_size,
-            adapter_calibration_dataset=eora_calibration_dataset
+            CalibrationConfig(
+                dataset=calibration_dataset,
+                batch_size=batch_size,
+                concat_size=calibration_dataset_concat_size,
+                adapter_dataset=eora_calibration_dataset,
+            ),
         )  #
 
 

@@ -46,12 +46,15 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from gptqmodel import CalibrationConfig
+from gptqmodel.quantization.awq.utils.packing_utils import AWQ_ORDER
 from gptqmodel.quantization.dtype import (
     available_float8_dtype_names,
     dequantize_f4_e2m1,
     dequantize_fp8,
 )
 from gptqmodel.utils.model_dequant import dequantize_model
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 try:
@@ -63,8 +66,13 @@ except Exception:
 pytestmark = [pytest.mark.model, pytest.mark.slow, pytest.mark.gpu]
 
 
-def pack_cols(values: torch.Tensor, bits: int = 4) -> torch.Tensor:
-    """Pack per-column low-bit values into int32 words."""
+def pack_cols(values: torch.Tensor, bits: int = 4, order=None) -> torch.Tensor:
+    """Pack per-column low-bit values into int32 words.
+
+    ``order`` permutes the codes inside each packed word. AWQ GEMM stores the
+    ``[0, 2, 4, 6, 1, 3, 5, 7]`` interleave (``AWQ_ORDER``); the natural order
+    is only correct for layouts that do not apply ``reverse_awq_order``.
+    """
 
     if values.dtype != torch.int32:
         values = values.to(torch.int32)
@@ -77,10 +85,11 @@ def pack_cols(values: torch.Tensor, bits: int = 4) -> torch.Tensor:
     packed_cols = cols // pack_factor
     packed = torch.zeros(rows, packed_cols, dtype=torch.int32)
     mask = (1 << bits) - 1
-    for col in range(cols):
-        group = col // pack_factor
-        shift = (col % pack_factor) * bits
-        packed[:, group] |= (values[:, col] & mask) << shift
+    for group in range(packed_cols):
+        base = group * pack_factor
+        for position in range(pack_factor):
+            source = base + (order[position] if order is not None else position)
+            packed[:, group] |= (values[:, source] & mask) << (position * bits)
     return packed
 
 
@@ -253,8 +262,8 @@ def test_dequantize_model_awq(tmp_path):
     scales = torch.rand(rows, cols, dtype=torch.float32) * 0.5 + 0.5
     bias = torch.randn(cols, dtype=torch.float32)
 
-    packed_weight = pack_cols(weight_values)
-    packed_zero = pack_cols(zero_values)
+    packed_weight = pack_cols(weight_values, order=AWQ_ORDER)
+    packed_zero = pack_cols(zero_values, order=AWQ_ORDER)
 
     shard_name = "awq.safetensors"
     save_file(
@@ -496,7 +505,7 @@ class TestModelSave(unittest.TestCase):
             self.pretrained_model_id,
             quantize_config=quantize_config,
         )
-        model.quantize(self.calibration_dataset, batch_size=1)
+        model.quantize(CalibrationConfig(dataset=self.calibration_dataset, batch_size=1))
         with tempfile.TemporaryDirectory() as tmp_dir_name:
             model.save(tmp_dir_name)
 
@@ -508,6 +517,8 @@ class TestModelSave(unittest.TestCase):
                 self.assertNotIn('model.rotary_emb.inv_freq', f.keys())
 
     def test_moe(self):
+        if not requires_nvidia_cuda():
+            self.skipTest("AUTO selects a portable kernel instead of Marlin on ROCm")
         quantize_config = QuantizeConfig(
             fallback=None,
         )
@@ -518,7 +529,7 @@ class TestModelSave(unittest.TestCase):
         )
 
         assert len(self.calibration_dataset) == 1
-        model.quantize(self.calibration_dataset, batch_size=1)
+        model.quantize(CalibrationConfig(dataset=self.calibration_dataset, batch_size=1))
 
         with tempfile.TemporaryDirectory() as tmp_dir_name:
             model.save(tmp_dir_name)
@@ -725,5 +736,7 @@ def test_is_supported_quantization_config_rejects_kv_cache_quantization():
         }
     )
 
-    with pytest.raises(ValueError, match="activation quantized models"):
+    # KV-cache quantization is not activation quantization; the message has to
+    # say which one the checkpoint asked for.
+    with pytest.raises(ValueError, match="quantize the KV cache"):
         _is_supported_quantization_config(config)

@@ -15,12 +15,13 @@ import unittest  # noqa: E402
 
 from transformers import AutoTokenizer  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear.bitblas import BitBLASLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear  # noqa: E402
+from tests.accelerator_gates import requires_nvidia_cuda  # noqa: E402
 from tests.eval import evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 
 
@@ -68,6 +69,8 @@ class TestBits(unittest.TestCase):
         cls.backends = [BACKEND.MARLIN]
 
     def test_bits(self):
+        if not requires_nvidia_cuda():
+            self.skipTest("Triton/Marlin kernels are CUDA-only")
         # quantize
         model_id = "/monster/data/model/Qwen2.5-0.5B-Instruct"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -98,7 +101,7 @@ class TestBits(unittest.TestCase):
             model_id,
             quantize_config=quantize_config,
         )
-        model.quantize(calibration_dataset, backend=quant_backend)
+        model.quantize(CalibrationConfig(dataset=calibration_dataset), backend=quant_backend)
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(
                 tmp_dir,

@@ -12,8 +12,8 @@ from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 def test_minimax_m2_model_types_select_definition(monkeypatch):
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
     monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
+        auto,
+        "load_model_config",
         lambda *args, **kwargs: SimpleNamespace(model_type="minimax_m2"),
     )
 
@@ -27,7 +27,7 @@ def test_minimax_m2_module_tree_targets_defused_expert_projections():
     moe_tree = tree["mlp:moe"]
 
     assert "block_sparse_moe" not in tree
-    assert "e_score_correction_bias" not in moe_tree
+    assert moe_tree["e_score_correction_bias"] == ("e_score_correction_bias:!",)
     assert moe_tree["gate"] == ("gate:!",)
     assert moe_tree["experts"]["#"] == ("gate_proj:0", "up_proj:0", "down_proj:1")
     assert isinstance(MiniMaxM2GPTQ.moe_lifecycle_hooks, GateUpDownMoELifecycleHooks)

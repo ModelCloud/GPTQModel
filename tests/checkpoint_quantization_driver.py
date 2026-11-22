@@ -40,7 +40,6 @@ def main():
             "gptq",
             "awq",
             "rtn",
-            "fp8",
             "gguf",
             "bitsandbytes",
             "qqq",
@@ -82,13 +81,13 @@ def main():
         }
         for _ in range(4)
     ]
+    from gptqmodel import CalibrationConfig
     from gptqmodel.adapter.adapter import Lora
     from gptqmodel.quantization import FORMAT, METHOD
     from gptqmodel.quantization.config import (
         AWQConfig,
         BitsAndBytesConfig,
         EXL3Config,
-        FP8Config,
         GGUFConfig,
         ParoConfig,
         QQQConfig,
@@ -98,7 +97,6 @@ def main():
     config_class = {
         "awq": AWQConfig,
         "rtn": RTNConfig,
-        "fp8": FP8Config,
         "gguf": GGUFConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "qqq": QQQConfig,
@@ -109,7 +107,6 @@ def main():
         "gptq": {"method": METHOD.GPTQ, "format": FORMAT.GPTQ, "bits": 4},
         "awq": {"method": METHOD.AWQ, "format": FORMAT.GEMM, "bits": 4},
         "rtn": {"bits": 4},
-        "fp8": {"bits": 8},
         "gguf": {"bits": "q4_0"},
         "bitsandbytes": {"bits": 4},
         "qqq": {"bits": 4},
@@ -137,14 +134,18 @@ def main():
             else 32,
             desc_act=False,
         )
+    if args.format in {"gemv", "llm-awq"}:
+        # The native GEMV/LLM-AWQ kernels reject the generic group_size=32 at
+        # quantize time (GEMV accepts 64/128, LLM-AWQ only 128). These formats
+        # were never valid with 32; the fixture used to fail before it ran.
+        method_settings.update(group_size=128)
     if args.format == "gemv_fast":
         method_settings.update(group_size=128, pack_dtype=torch.int16)
     backend = {
-        "fp8": BACKEND.FP8_TORCH,
         "gguf": BACKEND.GGUF_TORCH,
         "bitsandbytes": BACKEND.BITSANDBYTES,
         "qqq": BACKEND.QQQ,
-        "paro": BACKEND.PAROQUANT_TRITON,
+        "paro": BACKEND.PARO_TRITON,
         "exl3": BACKEND.EXL3_EXLLAMA_V3,
     }.get(args.method, BACKEND.TORCH)
     if args.format in {"gemv", "gemv_fast"}:
@@ -317,10 +318,12 @@ def main():
     CheckpointExtension.on_boundary = boundary
     try:
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=backend,
-            calibration_data_min_length=1,
             checkpoint=None
             if args.mode == "baseline"
             else CheckpointConfig(args.checkpoint),

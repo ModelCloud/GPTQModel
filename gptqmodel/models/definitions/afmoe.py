@@ -7,16 +7,21 @@ from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class AfMoeQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     # allow dynamic expert index for layer_modules so we don't need to write out 64 layers here
     # config.num_experts contains the actual expert count used for index
     fusable = FusableConfig("afmoe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     dynamic_expert_index = "num_experts"
 
-    require_trust_remote_code = True
     layer_modules_strict = False
 
     pre_lm_head_norm_module = "model.norm"
@@ -32,7 +37,10 @@ class AfMoeQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             # `o_proj` reads `attn * sigmoid(gate_proj(x))`; the gate makes
             # gate_proj's output non-homogeneous, so it is not o_proj's source.
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1", "gate_proj:0:nosrc"),
+            "self_attn": (
+                "q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1", "gate_proj:0:nosrc",
+                "q_norm:!", "k_norm:!",
+            ),
             # Both post-attention and post-MLP norms consume a branch output
             # before the residual add, so neither feeds the next projection.
             "post_attention_layernorm": ("post_attention_layernorm:!:postnorm",),
@@ -46,8 +54,8 @@ class AfMoeQModel(BaseQModel):
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
             },
-            # Layer 0 has a dense MLP (gate_proj/up_proj/down_proj); the
-            # remaining layers route through mlp.experts. Missing on MoE layers,
+            # The first num_dense_layers use gate_proj/up_proj/down_proj;
+            # later layers route through mlp.experts. Missing on MoE layers,
             # which is fine because layer_modules_strict=False.
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
             "post_mlp_layernorm": ("post_mlp_layernorm:!:postnorm",),

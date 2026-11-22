@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import threading
 import time
 import traceback
@@ -24,7 +25,7 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX hosts fall back to process-local locking
     fcntl = None
 
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -33,6 +34,7 @@ import pcre
 import torch
 from torch.utils.cpp_extension import CUDA_HOME, _get_build_directory, _get_cuda_arch_flags, load
 
+from .arch import normalize_arch
 from .env import env_flag
 from .jit_compile_baselines import get_jit_compile_baseline_seconds
 from .logger import setup_logger
@@ -79,7 +81,7 @@ _NVCC_VERSION_LOCK = threading.Lock()
 _NVCC_VERSION_CACHE: tuple[int, int] | None = None
 # Default NVCC internal threading for JIT builds. This is based on clean-build
 # timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
-# the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
+# the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and Paro.
 _DEFAULT_NVCC_THREADS = "8"
 _GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
 _TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"
@@ -170,6 +172,18 @@ def _nvcc_path() -> Optional[str]:
     if os.path.isfile(candidate):
         return candidate
     return None
+
+
+def cuda_toolkit_available() -> bool:
+    """Whether a CUDA toolkit ``nvcc`` is resolvable for a JIT build.
+
+    Mirrors the resolution the extension builder uses (``CUDA_HOME``, then
+    ``PATH``, then the conventional install location), so callers can gate on
+    the same toolkit the library will actually compile with instead of a
+    stricter ``PATH``-only probe.
+    """
+
+    return _nvcc_path() is not None
 
 
 def _nvcc_text(*args: str) -> str:
@@ -397,6 +411,26 @@ def _path_is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _replace_staged_tree(source_root: Path, target_root: Path) -> None:
+    """Replace *target_root* with an exact copy of *source_root*.
+
+    A merge copy (``dirs_exist_ok=True``) refreshes files that still exist but
+    never removes files deleted from the authoritative tree. A deleted header
+    therefore stayed visible to the staged compiler and its obsolete contents
+    stayed in the cache fingerprint. Build the copy aside and swap it in so the
+    staged generation is exactly the current source tree.
+    """
+
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    temp_root = Path(tempfile.mkdtemp(prefix=f".{target_root.name}.tmp-", dir=target_root.parent))
+    try:
+        shutil.copytree(source_root, temp_root, dirs_exist_ok=True)
+        shutil.rmtree(target_root, ignore_errors=True)
+        os.replace(temp_root, target_root)
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 def _torch_ops_file_lock_timeout_seconds() -> float:
     """Resolve how long one process waits on another's in-flight JIT build."""
 
@@ -577,6 +611,62 @@ def detected_cuda_wheel_include_paths() -> list[str]:
             if candidate.is_dir():
                 include_paths.append(str(candidate))
     return _dedupe_path_strings(include_paths)
+
+
+def detected_cuda_wheel_library_paths() -> list[str]:
+    """Discover CUDA runtime libraries shipped via NVIDIA Python wheels.
+
+    CUDA 13 moved the math libraries out of the toolkit into per-component
+    wheels (``nvidia/cu13/lib/libcublas.so.13``). A host that installs CUDA
+    that way has the library but not the unversioned ``libcublas.so``
+    development symlink, so ``-lcublas`` fails to link even though the kernel
+    is buildable.
+    """
+
+    if IS_ROCM:
+        return []
+
+    try:
+        import nvidia  # type: ignore
+    except Exception:
+        return []
+
+    library_paths: list[str] = []
+    for base_text in getattr(nvidia, "__path__", []):
+        base_path = Path(base_text)
+        candidate_paths = list(base_path.glob("cu*/lib"))
+        candidate_paths.extend(base_path.glob("*/lib"))
+        for candidate in sorted(candidate_paths):
+            if candidate.is_dir():
+                library_paths.append(str(candidate))
+    return _dedupe_path_strings(library_paths)
+
+
+def resolve_cuda_library(name: str) -> Optional[str]:
+    """Absolute path of a CUDA math library, or ``None`` when it is not found.
+
+    ``-l<name>`` only links when the development symlink (``libcublas.so``)
+    exists. Prefer the toolkit copy when it is complete, then the NVIDIA wheel
+    copy, and accept the versioned ``lib<name>.so.<major>`` when that is all
+    the host installed.
+    """
+
+    search_roots: list[Path] = []
+    if CUDA_HOME:
+        search_roots.extend(
+            [Path(CUDA_HOME) / "lib64", Path(CUDA_HOME) / "lib"]
+        )
+    search_roots.extend(Path(path) for path in detected_cuda_wheel_library_paths())
+
+    for root in search_roots:
+        candidate = root / f"lib{name}.so"
+        if candidate.is_file():
+            return str(candidate)
+    for root in search_roots:
+        for candidate in sorted(root.glob(f"lib{name}.so.*")):
+            if candidate.is_file():
+                return str(candidate)
+    return None
 
 
 def _resolve_local_include_path(
@@ -1008,6 +1098,77 @@ def resolved_cuda_arch_flags() -> list[str]:
     return _effective_cuda_arch_flags(merge_visible_caps=True)
 
 
+def _normalize_rocm_arch_list(value: str) -> list[str]:
+    """Canonicalize a ``PYTORCH_ROCM_ARCH`` value.
+
+    Torch turns spaces into ``;`` and splits on ``;`` before emitting one
+    ``--offload-arch`` per entry, so mirror that split and sort/dedupe the
+    result. Target feature suffixes (``:xnack+``/``:sramecc-``) are preserved:
+    torch passes them to hipcc verbatim, so they change the emitted code
+    objects and must not collapse two builds onto one cache key.
+    """
+
+    targets = {
+        token.strip().lower()
+        for token in value.replace(" ", ";").split(";")
+        if token.strip()
+    }
+    return sorted(targets)
+
+
+def _visible_rocm_arch_list() -> list[str]:
+    """Return the sorted, suffix-stripped ``gcnArchName`` of the visible devices.
+
+    This mirrors torch's ``_get_rocm_arch_flags`` fallback when
+    ``PYTORCH_ROCM_ARCH`` is unset. A host without a visible GPU, or a device
+    that cannot report properties, contributes nothing instead of raising: the
+    cache key must still be computable.
+    """
+
+    try:
+        if not torch.cuda.is_available():
+            return []
+        device_count = torch.cuda.device_count()
+    except Exception:
+        return []
+
+    targets: set[str] = set()
+    for device_index in range(device_count):
+        try:
+            properties = torch.cuda.get_device_properties(device_index)
+        except Exception:
+            continue
+        arch = normalize_arch(getattr(properties, "gcnArchName", None))
+        if arch:
+            targets.add(arch)
+    return sorted(targets)
+
+
+def _hip_cache_fingerprint_payload(hip_version: str) -> list[str]:
+    """Return the HIP target payload for the JIT cache key.
+
+    ``PYTORCH_ROCM_ARCH`` wins because torch passes it to hipcc verbatim;
+    otherwise torch compiles for every visible device's ``gcnArchName``. The
+    payload is sorted so device enumeration order cannot fork the cache, and it
+    replaces the CUDA capability pair, which cannot tell ROCm targets apart.
+    """
+
+    payload = ["cuda_ext=1", f"hip={hip_version}"]
+    override = os.getenv("PYTORCH_ROCM_ARCH")
+    if override:
+        targets = _normalize_rocm_arch_list(override)
+    else:
+        targets = _visible_rocm_arch_list()
+
+    if targets:
+        payload.append(f"rocm_arch_list={';'.join(targets)}")
+    else:
+        # Keep a stable marker so a key built without a target is never
+        # mistaken for a key built for a real one.
+        payload.append("rocm_arch_list=none")
+    return payload
+
+
 def torch_cxx11_abi_flag() -> int:
     """Return the ABI mode local JIT extensions must match for this torch build."""
 
@@ -1159,6 +1320,7 @@ class TorchOpsJitExtension:
         verbose_env: Optional[str] = None,
         requires_cuda: bool = False,
         merge_visible_cuda_arch_override: bool = True,
+        build_env_scope: Optional[Callable[[], AbstractContextManager]] = None,
         binary_names: Optional[Sequence[str]] = None,
         python_abi_dependent: bool | None = None,
         torch_stable_abi_target: tuple[int, int] | None = None,
@@ -1180,6 +1342,10 @@ class TorchOpsJitExtension:
         self.verbose_env = verbose_env
         self.requires_cuda = bool(requires_cuda)
         self.merge_visible_cuda_arch_override = bool(merge_visible_cuda_arch_override)
+        # Optional process-environment scope installed only around the
+        # torch cpp_extension.load() call, so an extension can pass build
+        # overrides without leaking them to other JIT extensions.
+        self.build_env_scope = build_env_scope
         self.binary_names = tuple(binary_names or (name,))
         self.python_abi_dependent = python_abi_dependent
         self.torch_stable_abi_target = tuple(torch_stable_abi_target) if torch_stable_abi_target else None
@@ -1229,7 +1395,12 @@ class TorchOpsJitExtension:
         return cuda_include_paths_with_fallback(include_paths)
 
     def _staging_root(self) -> Path:
-        """Writable directory that receives a copy of the HIP kernel sources."""
+        """Writable directory that receives a copy of the HIP kernel sources.
+
+        The path is shared by every fingerprint of this extension, so it is
+        written only while holding the cross-process build lock (see
+        ``_stage_hip_sources``).
+        """
 
         return self.base_build_root() / "_src"
 
@@ -1255,6 +1426,12 @@ class TorchOpsJitExtension:
         checkout but outside the staged source root (for example Machete's
         ``gptqmodel_ext`` headers) are staged too, because hipify rewrites
         every header under its include roots.
+
+        The staged tree is replaced with an exact copy of the authoritative
+        tree, never merged into it, so a deleted header disappears from the
+        staged generation. Callers must run this only while holding the
+        cross-process build lock: another process sharing the cache must not
+        overwrite ``_src`` while a build is compiling it.
         """
 
         resolved_sources = [str(source) for source in sources]
@@ -1300,8 +1477,7 @@ class TorchOpsJitExtension:
                     f"{self.display_name}: the JIT build root `{staging_root}` is inside the "
                     f"source tree `{source_root}`; choose a build root outside the checkout."
                 )
-            staging_root.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(source_root, staging_root, dirs_exist_ok=True)
+            _replace_staged_tree(source_root, staging_root)
 
         def staged(path: Path) -> Path | None:
             try:
@@ -1324,22 +1500,31 @@ class TorchOpsJitExtension:
             if resolved.exists() and _path_is_within(resolved, checkout):
                 # An include root inside the checkout outside the staged source
                 # root is still hipified in place; stage it under the cache.
-                # Refresh on every call: the cache fingerprint hashes the
-                # *staged* copy, so a stale stage would hide a header edit and
-                # reuse a binary built against the old header.
+                # The cache fingerprint hashes the authoritative tree, so this
+                # exact replacement keeps the staged headers (including
+                # deletions) aligned with the key that selected this build.
                 external = staging_root / "_checkout" / resolved.relative_to(checkout)
-                external.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(resolved, external, dirs_exist_ok=True)
+                _replace_staged_tree(resolved, external)
                 staged_includes.append(str(external))
                 continue
             staged_includes.append(include)
         return staged_sources, _dedupe_path_strings(staged_includes)
 
-    def _resolved_sources_and_include_paths(self) -> tuple[list[str], list[str]]:
-        """Resolve sources and includes, staging HIP sources when requested."""
+    def _resolved_source_inputs(self) -> tuple[list[str], list[str]]:
+        """Resolve sources and includes without writing a staged copy."""
 
         sources = self._resolve_sequence(self.sources)
         include_paths = self._resolved_extra_include_paths()
+        return sources, include_paths
+
+    def _resolved_sources_and_include_paths(self) -> tuple[list[str], list[str]]:
+        """Resolve sources and includes, staging HIP sources when requested.
+
+        This writes the shared staging directory and must therefore run while
+        holding the cross-process build lock.
+        """
+
+        sources, include_paths = self._resolved_source_inputs()
         return self._stage_hip_sources(sources, include_paths)
 
     def _with_stable_abi_target(self, flags: Sequence[str]) -> list[str]:
@@ -1601,10 +1786,16 @@ class TorchOpsJitExtension:
         )
 
     def _cache_fingerprint(self) -> str:
-        """Hash the effective op surface and source metadata to avoid stale cache reuse."""
+        """Hash the effective op surface and authoritative source graph.
+
+        This is read-only: it never stages sources. Hashing the authoritative
+        tree (rather than a mutable staged copy) means a deleted include changes
+        the key, and computing a fingerprint cannot overwrite another process's
+        in-flight staged build.
+        """
 
         payload: list[str] = [self.name, self.namespace, *self.required_ops]
-        sources, include_paths = self._resolved_sources_and_include_paths()
+        sources, include_paths = self._resolved_source_inputs()
         extra_cflags = self._resolved_extra_cflags()
         extra_cuda_cflags = self._resolved_extra_cuda_cflags()
         python_abi_dependent, torch_stable_abi = self._resolved_abi_flags(sources, include_paths)
@@ -1632,10 +1823,19 @@ class TorchOpsJitExtension:
         return digest[:16]
 
     def _cuda_cache_fingerprint_payload(self) -> list[str]:
-        """Capture the effective CUDA target set so cached binaries stay device-compatible."""
+        """Capture the effective CUDA/ROCm target set so cached binaries stay device-compatible."""
 
         if not self.requires_cuda:
             return ["cuda_ext=0"]
+
+        hip_version = getattr(torch.version, "hip", None)
+        if hip_version:
+            # hipcc ignores ``TORCH_CUDA_ARCH_LIST`` and the coarse
+            # ``get_device_capability()`` pair cannot distinguish gfx1200 from
+            # gfx1201 (or gfx908 from gfx90a). ``PYTORCH_ROCM_ARCH``, else the
+            # visible devices' ``gcnArchName``, is what torch compiles for, so
+            # it has to identify the cached binary (#4815).
+            return _hip_cache_fingerprint_payload(str(hip_version))
 
         payload = ["cuda_ext=1"]
         override = os.getenv("TORCH_CUDA_ARCH_LIST")
@@ -1993,7 +2193,6 @@ class TorchOpsJitExtension:
                 return True
             if self._load_attempted and not force_rebuild:
                 return self._load_result
-            build_root = self.build_root()
             base_build_root = self.base_build_root()
 
             lock_timeout_seconds = self._build_lock_timeout_seconds()
@@ -2011,6 +2210,11 @@ class TorchOpsJitExtension:
                     log.warning("%s", self._last_error)
                     setup_logger().info(f"{self.display_name}: JIT build lock wait timed out; using fallback path.")
                     return False
+
+                # Compute the fingerprint only after the lock is held so the
+                # build directory and the staged sources compiled below name
+                # the same source snapshot.
+                build_root = self.build_root()
 
                 if force_rebuild and base_build_root.exists():
                     setup_logger().info(f"{self.display_name}: clearing cached JIT extension at `{base_build_root}`.")
@@ -2071,7 +2275,9 @@ class TorchOpsJitExtension:
                         # expansion; never mutate TORCH_CUDA_ARCH_LIST for the
                         # duration of a multi-minute JIT build.
                         kwargs["extra_cuda_cflags"] = [*extra_cuda_cflags, *arch_flags]
-                    load(**kwargs)
+                    build_env_scope = self.build_env_scope
+                    with build_env_scope() if build_env_scope is not None else nullcontext():
+                        load(**kwargs)
                     build_invocation_succeeded = True
                 except Exception as exc:  # pragma: no cover - build depends on host toolchain
                     elapsed = time.perf_counter() - started

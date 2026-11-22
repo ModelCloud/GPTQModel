@@ -1,0 +1,7380 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Paro test coverage adapted from the Paro paper and public project:
+# https://arxiv.org/html/2511.10645v2
+# https://github.com/z-lab/paroquant
+
+"""Unit tests for Paro config, optimizer, and lifecycle invariants."""
+
+import copy
+import inspect
+import sys
+import threading
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+import torch.nn.functional as F
+
+import gptqmodel.looper.paro_processor as paro_processor_module
+import gptqmodel.utils.paro as paro_utils_module
+import gptqmodel.utils.paro_benchmark as paro_benchmark_module
+from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.looper.input_cache import InputCache
+from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
+from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.looper.paro_processor import ParoProcessor
+from gptqmodel.looper.stage_layer import _capture_pristine_group_context
+from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
+from gptqmodel.nn_modules.qlinear.paro import ParoLinear
+from gptqmodel.quantization.config import FORMAT, METHOD, CalibrationConfig, ParoConfig, QuantizeConfig
+from gptqmodel.quantization.paro import optimization as paro_optimization
+from gptqmodel.quantization.paro.optimization import (
+    GroupLinearQuantizer,
+    _apply_rotation,
+    _ParoOptimLinear,
+    build_random_rotation_buffers,
+    optimize_paro_linear,
+    pseudo_quantize_dequant,
+)
+from gptqmodel.utils.backend import BACKEND
+from gptqmodel.utils.importer import get_kernel_for_backend
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
+from gptqmodel.utils.paro import (
+    _rotation_launch_config,
+    apply_paro_rotation,
+    apply_paro_rotation_reference,
+    build_identity_rotation_buffers,
+    clear_paro_rotation_autotune_cache,
+    clear_paro_rotation_extension_cache,
+    is_identity_rotation,
+    prewarm_paro_rotation_extension,
+)
+from gptqmodel.utils.paro_benchmark import make_paro_config
+from gptqmodel.utils.rocm import IS_ROCM
+
+
+@pytest.fixture(autouse=True)
+def _isolate_paro_autotune_cache(tmp_path, monkeypatch):
+    """Keep launch-autotune tests off the user's persistent cache."""
+
+    monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path))
+
+
+def _default_resolved_module_config(_module_name):
+    """Resolved dynamic config used by the synthetic processor tests."""
+
+    return SimpleNamespace(get=lambda _key=None, default=None, sub_key=None: default)
+
+
+def test_paro_quantize_config_dispatches_constructor():
+    """Guard that Paro config fields survive direct construction."""
+    cfg = QuantizeConfig(
+        quant_method=METHOD.PARO,
+        format=FORMAT.PARO,
+        bits=4,
+        group_size=128,
+        krot=8,
+    )
+
+    assert cfg.quant_method == METHOD.PARO
+    assert cfg.format == FORMAT.PARO
+    assert cfg.krot == 8
+    # #5306: 128 rows cost +0.44% Llama-3.2-1B PPL even with the stage LRs
+    # scaled from the 64-row reference, so the default stays at 64.
+    assert cfg.opt_batch_size == 64
+    assert cfg.opt_optimizer == "adamw"
+    assert cfg.opt_weight_decay == pytest.approx(0.01)
+    assert cfg.opt_betas == pytest.approx((0.9, 0.95))
+    assert cfg.opt_eps == pytest.approx(1e-10)
+    assert cfg.opt_amsgrad is False
+    assert cfg.opt_sgd_momentum == pytest.approx(0.0)
+    assert cfg.opt_sgd_dampening == pytest.approx(0.0)
+    assert cfg.opt_sgd_nesterov is False
+    assert cfg.opt_scope == "module"
+    assert cfg.opt_stage_impl == "fast"
+    assert cfg.opt_pair_impl == "fast"
+    assert cfg.opt_quantizer_impl == "reference"
+    assert cfg.opt_stage_cudagraph is True
+    assert cfg.opt_gradient_checkpointing is False
+    assert cfg.opt_best_state_dtype == "fp32"
+    assert cfg.opt_train_on_noisy_inputs is False
+    assert cfg.opt_channel_scale_clamp_min == 1e-2
+    assert cfg.opt_channel_scale_clamp_max == 1e2
+    assert cfg.export_quant_method() == METHOD.PARO
+
+
+def test_paro_quantize_config_enables_gradient_checkpointing_by_default_for_layer_scope():
+    """Layer scope should opt into activation checkpointing by default because it is the only measured memory win."""
+
+    cfg = ParoConfig(
+        bits=4,
+        group_size=128,
+        opt_scope="layer",
+    )
+
+    assert cfg.opt_gradient_checkpointing is True
+
+
+def test_paro_quantize_config_from_external_payload_round_trips():
+    """Guard import/export of Paro metadata from serialized payloads."""
+    cfg = QuantizeConfig.from_quant_config(
+        {
+            "quant_method": "paro",
+            "bits": 4,
+            "group_size": 128,
+            "krot": 8,
+            "meta": {
+                "opt_rotation_epochs": 10,
+                "opt_finetune_epochs": 10,
+                "opt_train_samples": 2048,
+                "opt_validation_samples": 64,
+                "opt_batch_size": 16,
+                "opt_rotation_lr": 0.05,
+                "opt_weight_lr": 1e-5,
+                "opt_quantizer_lr": 1e-6,
+                "opt_pair_ratio": 0.5,
+                "opt_seed": 0,
+                "opt_optimizer": "sgd",
+                "opt_weight_decay": 0.02,
+                "opt_betas": [0.8, 0.9],
+                "opt_eps": 1e-8,
+                "opt_amsgrad": True,
+                "opt_sgd_momentum": 0.85,
+                "opt_sgd_dampening": 0.0,
+                "opt_sgd_nesterov": True,
+                "opt_fused_rotation": False,
+                "opt_gradient_checkpointing": False,
+                "opt_stage_cudagraph": False,
+                "opt_amp": False,
+                "opt_best_state_dtype": "fp16",
+                "opt_train_on_noisy_inputs": True,
+                "opt_scope": "compute_block",
+                "opt_stage_impl": "reference",
+                "opt_pair_impl": "fast",
+                "opt_quantizer_impl": "reference",
+                "opt_channel_scale_clamp_min": 0.02,
+                "opt_channel_scale_clamp_max": 50.0,
+            },
+        }
+    )
+
+    assert isinstance(cfg, ParoConfig)
+    assert cfg.quant_method == METHOD.PARO
+    assert cfg.format == FORMAT.PARO
+    assert cfg.krot == 8
+    assert cfg.opt_rotation_epochs == 10
+    assert cfg.opt_finetune_epochs == 10
+    assert cfg.opt_train_samples == 2048
+    assert cfg.opt_validation_samples == 64
+    assert cfg.opt_batch_size == 16
+    assert cfg.opt_rotation_lr == 0.05
+    assert cfg.opt_weight_lr == 1e-5
+    assert cfg.opt_quantizer_lr == 1e-6
+    assert cfg.opt_pair_ratio == 0.5
+    assert cfg.opt_seed == 0
+    assert cfg.opt_optimizer == "sgd"
+    assert cfg.opt_weight_decay == pytest.approx(0.02)
+    assert cfg.opt_betas == pytest.approx((0.8, 0.9))
+    assert cfg.opt_eps == pytest.approx(1e-8)
+    assert cfg.opt_amsgrad is True
+    assert cfg.opt_sgd_momentum == pytest.approx(0.85)
+    assert cfg.opt_sgd_dampening == pytest.approx(0.0)
+    assert cfg.opt_sgd_nesterov is True
+    assert cfg.opt_fused_rotation is False
+    assert cfg.opt_gradient_checkpointing is False
+    assert cfg.opt_stage_cudagraph is False
+    assert cfg.opt_amp is False
+    assert cfg.opt_best_state_dtype == "fp16"
+    assert cfg.opt_train_on_noisy_inputs is True
+    assert cfg.opt_scope == "compute_block"
+    assert cfg.opt_stage_impl == "reference"
+    assert cfg.opt_pair_impl == "fast"
+    assert cfg.opt_quantizer_impl == "reference"
+    assert cfg.opt_channel_scale_clamp_min == 0.02
+    assert cfg.opt_channel_scale_clamp_max == 50.0
+    assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
+    assert cfg.to_dict()["meta"]["opt_gradient_checkpointing"] is False
+    assert cfg.to_dict()["meta"]["opt_stage_cudagraph"] is False
+    assert cfg.to_dict()["meta"]["opt_amp"] is False
+    assert cfg.to_dict()["meta"]["opt_best_state_dtype"] == "fp16"
+    assert cfg.to_dict()["meta"]["opt_train_on_noisy_inputs"] is True
+    assert cfg.to_dict()["meta"]["opt_scope"] == "compute_block"
+    assert cfg.to_dict()["meta"]["opt_stage_impl"] == "reference"
+    assert cfg.to_dict()["meta"]["opt_pair_impl"] == "fast"
+    assert cfg.to_dict()["meta"]["opt_quantizer_impl"] == "reference"
+    assert cfg.to_dict()["meta"]["opt_channel_scale_clamp_min"] == 0.02
+    assert cfg.to_dict()["meta"]["opt_channel_scale_clamp_max"] == 50.0
+    assert cfg.to_dict()["meta"]["opt_optimizer"] == "sgd"
+    assert cfg.to_dict()["meta"]["opt_weight_decay"] == pytest.approx(0.02)
+    assert cfg.to_dict()["meta"]["opt_betas"] == [0.8, 0.9]
+    assert cfg.to_dict()["meta"]["opt_eps"] == pytest.approx(1e-8)
+    assert cfg.to_dict()["meta"]["opt_amsgrad"] is True
+    assert cfg.to_dict()["meta"]["opt_sgd_momentum"] == pytest.approx(0.85)
+    assert cfg.to_dict()["meta"]["opt_sgd_dampening"] == pytest.approx(0.0)
+    assert cfg.to_dict()["meta"]["opt_sgd_nesterov"] is True
+
+
+def test_paro_quantize_config_rejects_invalid_scale_clamp_range():
+    """Guard that Paro scale-clamp overrides remain numerically valid."""
+    with pytest.raises(ValueError, match="scale clamp bounds must be positive"):
+        ParoConfig(
+            bits=4,
+            group_size=128,
+            opt_channel_scale_clamp_min=0.0,
+            opt_channel_scale_clamp_max=10.0,
+        )
+
+    with pytest.raises(ValueError, match="opt_channel_scale_clamp_min"):
+        ParoConfig(
+            bits=4,
+            group_size=128,
+            opt_channel_scale_clamp_min=10.0,
+            opt_channel_scale_clamp_max=10.0,
+        )
+
+
+def test_paro_quantize_config_rejects_invalid_opt_scope():
+    """Guard that Paro optimize-scope selection stays within supported modes."""
+    with pytest.raises(ValueError, match="opt_scope"):
+        ParoConfig(
+            bits=4,
+            group_size=128,
+            opt_scope="block",
+        )
+
+
+def test_paro_quantize_config_rejects_invalid_opt_optimizer():
+    """Guard that Paro optimizer selection stays within supported modes."""
+    with pytest.raises(ValueError, match="opt_optimizer"):
+        ParoConfig(
+            bits=4,
+            group_size=128,
+            opt_optimizer="lion",
+        )
+
+
+def test_paro_quantize_config_rejects_invalid_best_state_dtype():
+    """Guard best-state snapshot compression against unsupported dtype strings."""
+    with pytest.raises(ValueError, match="opt_best_state_dtype"):
+        ParoConfig(
+            bits=4,
+            group_size=128,
+            opt_best_state_dtype="int8",
+        )
+
+
+def test_paro_best_state_snapshot_batches_one_copy_per_dtype_group(monkeypatch):
+    """Guard the best-state snapshot so it stays one batched copy per dtype group."""
+    weight = torch.arange(12, dtype=torch.float32).view(3, 4)
+    bias = torch.linspace(-1.0, 1.0, steps=3, dtype=torch.float32)
+    index = torch.arange(6, dtype=torch.int32).view(2, 3)
+    mask = torch.tensor([[True, False, True], [False, True, False]])
+    live = {"weight": weight, "bias": bias, "index": index, "mask": mask}
+    model = SimpleNamespace(state_dict=lambda: dict(live))
+
+    batches = []
+    foreach_copy = torch._foreach_copy_
+
+    def counting_foreach_copy(destinations, sources):
+        batches.append([tuple(tensor.shape) for tensor in destinations])
+        return foreach_copy(destinations, sources)
+
+    monkeypatch.setattr(torch, "_foreach_copy_", counting_foreach_copy)
+
+    snapshot = paro_optimization._snapshot_model_state(model, target_dtype=torch.float16)
+
+    # One batch per (device, dtype) group: the float pair, the int buffer and the mask.
+    assert batches == [[(3, 4), (3,)], [(2, 3)], [(2, 3)]]
+    assert list(snapshot) == ["weight", "bias", "index", "mask"]
+    assert snapshot["weight"].dtype == torch.float16
+    assert snapshot["bias"].dtype == torch.float16
+    assert snapshot["index"].dtype == torch.int32
+    assert snapshot["mask"].dtype == torch.bool
+    assert torch.equal(snapshot["weight"], weight.to(torch.float16))
+    assert torch.equal(snapshot["bias"], bias.to(torch.float16))
+    assert torch.equal(snapshot["index"], index)
+    assert torch.equal(snapshot["mask"], mask)
+    assert all(not tensor.requires_grad for tensor in snapshot.values())
+
+    # A snapshot has to be immune to later in-place updates of the live state.
+    weight.zero_()
+    bias.add_(1.0)
+    assert not torch.equal(snapshot["weight"], weight.to(torch.float16))
+    assert not torch.equal(snapshot["bias"], bias.to(torch.float16))
+
+    # Without a target dtype the snapshot keeps every source dtype as-is.
+    plain = paro_optimization._snapshot_model_state(model)
+    assert plain["weight"].dtype == torch.float32
+    assert plain["index"].dtype == torch.int32
+    assert plain["mask"].dtype == torch.bool
+
+
+def test_paro_quantize_config_rejects_invalid_optimizer_hyperparameters():
+    """Guard optimizer hyperparameter validation against invalid stage settings."""
+    with pytest.raises(ValueError, match="opt_betas"):
+        ParoConfig(
+            bits=4,
+            group_size=128,
+            opt_betas=(0.9,),
+        )
+
+    with pytest.raises(ValueError, match="opt_eps"):
+        ParoConfig(
+            bits=4,
+            group_size=128,
+            opt_eps=0.0,
+        )
+
+    with pytest.raises(ValueError, match="opt_sgd_nesterov"):
+        ParoConfig(
+            bits=4,
+            group_size=128,
+            opt_sgd_nesterov=True,
+        )
+
+    with pytest.raises(ValueError, match="opt_sgd_dampening"):
+        ParoConfig(
+            bits=4,
+            group_size=128,
+            opt_sgd_momentum=0.9,
+            opt_sgd_dampening=0.1,
+            opt_sgd_nesterov=True,
+        )
+
+
+def test_paro_benchmark_config_preserves_opt_scope():
+    """Benchmark helpers should propagate the requested optimization scope."""
+    cfg = make_paro_config(dynamic={}, opt_scope="compute_block")
+
+    assert cfg.quant_method == METHOD.PARO
+    assert cfg.opt_scope == "compute_block"
+    assert cfg.opt_gradient_checkpointing is False
+
+
+@pytest.mark.parametrize(
+    ("opt_scope", "requested", "expected_config", "expected_label"),
+    [
+        ("module", False, False, False),
+        ("module", True, True, True),
+        ("layer", True, True, False),
+    ],
+)
+def test_paro_benchmark_fused_opt_rotation_is_not_a_noop(
+    monkeypatch, opt_scope, requested, expected_config, expected_label
+):
+    """The benchmark toggle must reach the config and the reported result row."""
+    captured = {}
+
+    class _FakeTimer:
+        def snapshot(self):
+            return {}
+
+    class _FakeModel:
+        tokenizer = None
+        quant_region_timer = _FakeTimer()
+        model = torch.nn.Module()
+
+        def quantize(self, *args, **kwargs):
+            return {}
+
+        def save(self, _path):
+            pass
+
+        def named_modules(self):
+            return []
+
+    def fake_load(_path, quantize_config=None, **_kwargs):
+        captured["qcfg"] = quantize_config
+        return _FakeModel()
+
+    monkeypatch.setattr(paro_benchmark_module.GPTQModel, "load", fake_load)
+    monkeypatch.setattr(paro_benchmark_module, "load_nm_calibration", lambda _rows: [])
+    monkeypatch.setattr(
+        paro_benchmark_module,
+        "_run_evalution_path_eval",
+        lambda **_kwargs: ({}, 0.0),
+    )
+    monkeypatch.setattr(
+        paro_benchmark_module,
+        "_load_eval_helpers",
+        lambda: (None, lambda _result: "", lambda _result: {}),
+    )
+
+    result = paro_benchmark_module._run_paro_case(
+        model_path="unused",
+        dynamic={},
+        calibration_rows=1,
+        calibration_concat_size=1,
+        quant_batch_size=1,
+        eval_batch_size=1,
+        eval_max_rows=None,
+        eval_model_args=None,
+        eval_suite_kwargs=None,
+        sym=True,
+        fused_opt_rotation=requested,
+        opt_scope=opt_scope,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=1,
+        opt_train_samples=1,
+        opt_validation_samples=1,
+        opt_batch_size=1,
+        run_kernel_bench=False,
+    )
+
+    assert captured["qcfg"].opt_fused_rotation is expected_config
+    assert result["fused_opt_rotation"] is expected_label
+
+
+def test_paro_quantize_config_preserves_explicit_gradient_checkpointing_override():
+    """Explicit checkpointing overrides must win over the scope-derived default."""
+
+    layer_cfg = ParoConfig(
+        bits=4,
+        group_size=128,
+        opt_scope="layer",
+        opt_gradient_checkpointing=False,
+    )
+    compute_block_cfg = ParoConfig(
+        bits=4,
+        group_size=128,
+        opt_scope="compute_block",
+        opt_gradient_checkpointing=True,
+    )
+
+    assert layer_cfg.opt_gradient_checkpointing is False
+    assert compute_block_cfg.opt_gradient_checkpointing is True
+
+
+def test_paro_rotation_toggle_uses_explicit_argument(monkeypatch):
+    """Guard that the config-backed fused toggle controls the rotation path."""
+    x = torch.randn(4, 8, dtype=torch.float32)
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=1,
+        dtype=torch.float32,
+    )
+    theta = theta.clone().requires_grad_(True)
+
+    calls = []
+
+    def fake_fused_rotation(x, pairs, theta, *, scales, group_size):
+        del pairs, theta, scales, group_size
+        calls.append("fused")
+        return x + 123.0
+
+    monkeypatch.setattr(paro_optimization, "apply_paro_rotation_autograd", fake_fused_rotation)
+
+    reference_out = _apply_rotation(
+        x,
+        pairs,
+        theta,
+        scales=channel_scales,
+        group_size=8,
+        fused_rotation=False,
+    )
+    assert calls == []
+    torch.testing.assert_close(reference_out, x, atol=0, rtol=0)
+
+    fused_out = _apply_rotation(
+        x,
+        pairs,
+        theta,
+        scales=channel_scales,
+        group_size=8,
+        fused_rotation=True,
+    )
+    assert calls == ["fused"]
+    torch.testing.assert_close(fused_out, x + 123.0)
+    default_out = _apply_rotation(x, pairs, theta, scales=channel_scales, group_size=8)
+    assert calls == ["fused", "fused"]
+    torch.testing.assert_close(default_out, fused_out)
+
+
+def test_paro_fused_rotation_uses_forward_only_path_without_grad_inputs(monkeypatch):
+    """Guard that inactive rotation grads do not route through the autograd wrapper."""
+    x = torch.randn(4, 8, dtype=torch.float32)
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=1,
+        dtype=torch.float32,
+    )
+
+    calls = []
+
+    def fake_forward_only(x, pairs, theta, *, scales, group_size):
+        del pairs, theta, scales, group_size
+        calls.append("forward")
+        return x + 1.0
+
+    def fake_autograd(x, pairs, theta, *, scales, group_size):
+        del pairs, theta, scales, group_size
+        calls.append("autograd")
+        return x + 2.0
+
+    monkeypatch.setattr(paro_optimization, "apply_paro_rotation", fake_forward_only)
+    monkeypatch.setattr(paro_optimization, "apply_paro_rotation_autograd", fake_autograd)
+
+    out = _apply_rotation(
+        x,
+        pairs,
+        theta,
+        scales=channel_scales,
+        group_size=8,
+        fused_rotation=True,
+    )
+    torch.testing.assert_close(out, x + 1.0)
+    assert calls == ["forward"]
+
+    calls.clear()
+    theta = theta.clone().requires_grad_(True)
+    out = _apply_rotation(
+        x,
+        pairs,
+        theta,
+        scales=channel_scales,
+        group_size=8,
+        fused_rotation=True,
+    )
+    torch.testing.assert_close(out, x + 2.0)
+    assert calls == ["autograd"]
+
+
+@pytest.mark.parametrize(
+    ("device_type", "is_rocm", "expected_use_amp"),
+    [
+        ("cpu", False, False),
+        ("cuda", False, True),
+        ("cuda", True, False),
+    ],
+)
+def test_paro_fast_stage_matches_reference_amp_eval_flag(
+    monkeypatch, device_type, is_rocm, expected_use_amp
+):
+    """Guard that the fast stage resolves the auto AMP default per device/platform like reference."""
+    calls = []
+
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1))
+
+    class _FakeTensor:
+        def __init__(self, kind: str):
+            self.device = SimpleNamespace(type=kind)
+
+    def fake_evaluate(_model, _inputs, _targets, *, use_amp=False):
+        calls.append(use_amp)
+        return 0.0
+
+    monkeypatch.setattr(paro_optimization, "IS_ROCM", is_rocm)
+    monkeypatch.setattr(paro_optimization, "_evaluate_model", fake_evaluate)
+
+    train_loss, val_loss = paro_optimization._run_stage_gptqmodel(
+        model=_DummyModel(),
+        inputs_train=_FakeTensor(device_type),
+        targets_train=_FakeTensor(device_type),
+        inputs_val=_FakeTensor(device_type),
+        targets_val=_FakeTensor(device_type),
+        param_groups=[],
+        epochs=0,
+        batch_size=16,
+    )
+
+    assert train_loss == 0.0
+    assert val_loss == 0.0
+    assert calls == [expected_use_amp, expected_use_amp]
+
+
+@pytest.mark.parametrize(
+    ("is_rocm", "use_amp", "expected_use_amp"),
+    [
+        (False, None, True),
+        (False, False, False),
+        (False, True, True),
+        (True, None, False),
+        (True, False, False),
+        (True, True, True),
+    ],
+)
+def test_paro_fast_stage_honors_explicit_amp_override_on_cuda(
+    monkeypatch, is_rocm, use_amp, expected_use_amp
+):
+    """Guard that explicit `opt_amp` wins on CUDA and that `None` auto-skips AMP on ROCm."""
+    calls = []
+
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1))
+
+    class _FakeTensor:
+        def __init__(self, kind: str):
+            self.device = SimpleNamespace(type=kind)
+
+    def fake_evaluate(_model, _inputs, _targets, *, use_amp=False):
+        calls.append(use_amp)
+        return 0.0
+
+    monkeypatch.setattr(paro_optimization, "IS_ROCM", is_rocm)
+    monkeypatch.setattr(paro_optimization, "_evaluate_model", fake_evaluate)
+
+    train_loss, val_loss = paro_optimization._run_stage_gptqmodel(
+        model=_DummyModel(),
+        inputs_train=_FakeTensor("cuda"),
+        targets_train=_FakeTensor("cuda"),
+        inputs_val=_FakeTensor("cuda"),
+        targets_val=_FakeTensor("cuda"),
+        param_groups=[],
+        epochs=0,
+        batch_size=16,
+        use_amp=use_amp,
+    )
+
+    assert train_loss == 0.0
+    assert val_loss == 0.0
+    assert calls == [expected_use_amp, expected_use_amp]
+
+
+@pytest.mark.parametrize(
+    "stage_runner_name",
+    ["_run_stage_gptqmodel_impl", "_run_stage_gptqmodel"],
+)
+def test_paro_stage_skips_dead_pre_epoch_train_eval(monkeypatch, stage_runner_name):
+    """Guard that a stage never pays for a train-split eval the first epoch overwrites."""
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([[1.0]], dtype=torch.float32))
+
+        def forward(self, x):
+            return x @ self.weight
+
+        def reset_masked_angles(self):
+            return None
+
+    class _FakeRows:
+        def __init__(self, rows: int):
+            self.device = SimpleNamespace(type="cpu")
+            self.shape = (rows, 1)
+
+    train_inputs = _FakeRows(rows=2)
+    train_targets = _FakeRows(rows=2)
+    val_inputs = _FakeRows(rows=1)
+    val_targets = _FakeRows(rows=1)
+    train_input_batches = [
+        torch.tensor([[1.0]], dtype=torch.float32),
+        torch.tensor([[2.0]], dtype=torch.float32),
+    ]
+    train_target_batches = [
+        torch.tensor([[0.0]], dtype=torch.float32),
+        torch.tensor([[0.0]], dtype=torch.float32),
+    ]
+
+    def fake_chunk_rows(rows, batch_size):
+        del batch_size
+        if rows is train_inputs:
+            return train_input_batches
+        if rows is train_targets:
+            return train_target_batches
+        raise AssertionError("unexpected rows object")
+
+    seen_splits = []
+
+    def fake_evaluate(_model, inputs, _targets, *, use_amp=False):
+        del use_amp
+        seen_splits.append("train" if inputs is train_inputs else "val")
+        return 0.0
+
+    monkeypatch.setattr(paro_optimization, "_chunk_rows", fake_chunk_rows)
+    monkeypatch.setattr(paro_optimization, "_evaluate_model", fake_evaluate)
+
+    model = _TinyModel()
+    epochs = 2
+    getattr(paro_optimization, stage_runner_name)(
+        model=model,
+        inputs_train=train_inputs,
+        targets_train=train_targets,
+        inputs_val=val_inputs,
+        targets_val=val_targets,
+        param_groups=[{"params": [model.weight], "lr": 0.1}],
+        epochs=epochs,
+        batch_size=1,
+        optimizer_name="adamw",
+    )
+
+    # The train split must not be evaluated before the loop: the first epoch
+    # assigns `last_train_loss` before anything reads it, so such a call is a
+    # full forward pass plus a device sync that no caller can observe.
+    # `_run_stage_gptqmodel` additionally seeds `best_val_loss` with a real
+    # validation pass, which is why the validation count is a lower bound.
+    assert "train" not in seen_splits
+    assert seen_splits.count("val") >= epochs
+
+
+def test_paro_chunk_rows_covers_every_row_exactly_once():
+    """Guard #5246: a larger step batch must still replay the full row budget.
+
+    #5246 recovers the post-#5175 quantize speed by replaying the same 2048-row
+    calibration budget in fewer, larger optimizer steps. The speedup is only
+    correct while every epoch still visits each sampled row exactly once: a
+    chunker that skipped or duplicated rows would silently shrink or reweight
+    the calibration set. `_chunk_rows` is the single place that decides the
+    row split, so pin its coverage contract for divisible, ragged and
+    oversized step batches.
+    """
+
+    rows = torch.arange(2048, dtype=torch.float32).unsqueeze(1)
+    for batch_size in (1, 63, 64, 128, 160, 2047, 2048, 4096):
+        batches = list(paro_optimization._chunk_rows(rows, batch_size))
+        replayed = torch.cat(batches, dim=0)
+        assert torch.equal(replayed, rows), f"row coverage changed at batch_size={batch_size}"
+        assert all(batch.shape[0] <= batch_size for batch in batches)
+
+
+def test_paro_stage_runs_one_step_per_chunk_and_covers_each_epoch():
+    """Guard #5246: the step batch sets the step count, not the row coverage.
+
+    The stage must run exactly ``ceil(rows / batch_size)`` optimizer steps per
+    epoch, and the rows handed to those steps must concatenate back to the
+    full training budget in order. This is the invariant the #5246 speedup
+    relies on: fewer steps, identical data.
+    """
+
+    class _RowRecorder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.eye(2, dtype=torch.float32))
+            self.train_batches = []
+
+        def forward(self, x):
+            if x.shape[0] == batch_size:
+                self.train_batches.append(x.detach().clone())
+            return x @ self.weight
+
+        def reset_masked_angles(self):
+            return None
+
+    rows = 2048
+    epochs = 2
+    batch_size = 128
+    inputs = torch.arange(rows, dtype=torch.float32).unsqueeze(1).repeat(1, 2)
+    targets = inputs.clone()
+    model = _RowRecorder()
+
+    paro_optimization._run_stage_gptqmodel_impl(
+        model=model,
+        inputs_train=inputs,
+        targets_train=targets,
+        inputs_val=inputs[:4],
+        targets_val=targets[:4],
+        param_groups=[{"params": [model.weight], "lr": 0.1}],
+        epochs=epochs,
+        batch_size=batch_size,
+        optimizer_name="adamw",
+    )
+
+    steps_per_epoch = rows // batch_size
+    assert len(model.train_batches) == epochs * steps_per_epoch
+    for epoch in range(epochs):
+        epoch_rows = torch.cat(
+            model.train_batches[epoch * steps_per_epoch : (epoch + 1) * steps_per_epoch],
+            dim=0,
+        )
+        assert torch.equal(epoch_rows, inputs)
+
+
+def test_paro_fold_epoch_loss_matches_host_fp64_fold():
+    """The device-side fold must reproduce the host fp64 accumulation it replaces."""
+    losses = [
+        torch.tensor(0.1, dtype=torch.float32),
+        torch.tensor(1e-8, dtype=torch.float32),
+        torch.tensor(-3.5, dtype=torch.float32),
+        torch.tensor(12345.678, dtype=torch.float32),
+    ]
+
+    accumulator = paro_optimization._fold_epoch_loss(None, losses[0])
+    assert isinstance(accumulator, torch.Tensor)
+    assert accumulator.dtype == torch.float64
+    assert accumulator.item() == float(losses[0])
+
+    for loss in losses[1:]:
+        accumulator = paro_optimization._fold_epoch_loss(accumulator, loss)
+
+    # Same order, same IEEE-754 binary64 adds: the epoch total is bitwise equal
+    # to the per-step `float(loss.item())` host sum the fold removes.
+    assert accumulator.item() == sum(float(loss) for loss in losses)
+    assert accumulator.device.type == losses[0].device.type
+
+
+def test_paro_fold_epoch_loss_accumulates_in_place_without_touching_the_step_loss():
+    """Guard the per-step fold against paying a cast-plus-add kernel pair per step."""
+    accumulator = paro_optimization._fold_epoch_loss(None, torch.tensor(1.5, dtype=torch.float32))
+    assert accumulator.dtype == torch.float64
+    total_before = accumulator.item()
+
+    step_loss = torch.tensor(2.5, dtype=torch.float32)
+    returned = paro_optimization._fold_epoch_loss(accumulator, step_loss)
+
+    # In-place: the stage loop reassigns the fold result, so folding into the
+    # accumulator the loop already owns removes one kernel per optimizer step.
+    assert returned is accumulator
+    assert accumulator.item() == total_before + float(step_loss)
+    assert step_loss.item() == 2.5
+
+    # An fp64 step loss must not make the accumulator alias the live loss, which
+    # would let the next in-place fold write through to it.
+    fp64_step_loss = torch.tensor(1.25, dtype=torch.float64)
+    fp64_accumulator = paro_optimization._fold_epoch_loss(None, fp64_step_loss)
+    paro_optimization._fold_epoch_loss(fp64_accumulator, torch.tensor(1.0, dtype=torch.float64))
+    assert fp64_step_loss.item() == 1.25
+
+
+def test_paro_group_layer_evaluation_folds_batches_with_one_readback(monkeypatch):
+    """Guard the grouped validation pass against a device sync per validation batch.
+
+    The pass folded each batch with ``float(loss.item())``, which drains the device
+    once per batch. The fold now stays on the device in fp64 and is read back once,
+    so a multi-batch pass costs a single sync for the same fp64 total.
+    """
+    processor = object.__new__(ParoProcessor)
+    step_losses = [0.5, 1.5, 3.0]
+    losses = iter([torch.tensor(value, dtype=torch.float32) for value in step_losses])
+
+    def fake_forward_group_batch(layer, *, batch_index, input_batch, input_kwargs, attention_mask, position_ids):
+        del layer, batch_index, input_batch, input_kwargs, attention_mask, position_ids
+        return torch.zeros(2, 4)
+
+    def fake_prepare_group_target(target, *, device, dtype):
+        del target, device, dtype
+        return torch.zeros(2, 4)
+
+    def fake_smooth_l1_loss(preds, target):
+        del preds, target
+        return next(losses)
+
+    processor._forward_group_batch = fake_forward_group_batch
+    processor._prepare_group_target = fake_prepare_group_target
+    monkeypatch.setattr(paro_processor_module.F, "smooth_l1_loss", fake_smooth_l1_loss)
+
+    readbacks = []
+    original_item = torch.Tensor.item
+
+    def counting_item(self):
+        readbacks.append(self)
+        return original_item(self)
+
+    monkeypatch.setattr(torch.Tensor, "item", counting_item)
+
+    value = processor._evaluate_group_layer(
+        torch.nn.Module(),
+        input_batches=[[torch.zeros(2, 4)] for _ in step_losses],
+        input_kwargs_batches=[{} for _ in step_losses],
+        target_batches=[torch.zeros(2, 4) for _ in step_losses],
+        position_ids=[None for _ in step_losses],
+        attention_masks=[None for _ in step_losses],
+        use_amp=False,
+    )
+
+    assert len(readbacks) == 1
+    assert value == sum(step_losses) / len(step_losses)
+
+
+def test_paro_streamed_group_evaluation_folds_batches_with_one_readback(monkeypatch):
+    """Guard the streamed grouped validation pass against a device sync per batch."""
+    processor = object.__new__(ParoProcessor)
+    batches = [
+        paro_processor_module._ParoReplayBatch(
+            inputs=[torch.zeros(2, 4)],
+            input_kwargs={},
+            target=torch.zeros(2, 6),
+            position_ids=None,
+            attention_mask=None,
+            row_count=2,
+        )
+        for _ in range(4)
+    ]
+    step_losses = [0.25, 0.5, 1.0, 2.0]
+    losses = iter([torch.tensor(value, dtype=torch.float32) for value in step_losses])
+
+    def fake_forward_replay_batch(layer, *, replay_batch, cache_kwargs):
+        del layer, replay_batch, cache_kwargs
+        return torch.zeros(2, 6)
+
+    def fake_prepare_group_target(target, *, device, dtype, cache=False):
+        del target, device, dtype, cache
+        return torch.zeros(2, 6)
+
+    def fake_smooth_l1_loss(preds, target):
+        del preds, target
+        return next(losses)
+
+    processor._forward_replay_batch = fake_forward_replay_batch
+    processor._prepare_group_target = fake_prepare_group_target
+    monkeypatch.setattr(paro_processor_module.F, "smooth_l1_loss", fake_smooth_l1_loss)
+
+    readbacks = []
+    original_item = torch.Tensor.item
+
+    def counting_item(self):
+        readbacks.append(self)
+        return original_item(self)
+
+    monkeypatch.setattr(torch.Tensor, "item", counting_item)
+
+    value = processor._evaluate_group_layer_streamed(
+        torch.nn.Module(),
+        replay_batches=batches,
+        use_amp=False,
+        target_device=torch.device("cpu"),
+    )
+
+    assert len(readbacks) == 1
+    assert value == sum(step_losses) / len(step_losses)
+
+
+def test_paro_backward_scalar_loss_reuses_one_seed_and_matches_tensor_backward():
+    """Guard the scalar backward against materialising a ones_like seed per step."""
+    paro_optimization._SCALAR_BACKWARD_SEEDS.clear()
+    x = torch.randn(4, 3, dtype=torch.float64, requires_grad=True)
+    reference = x.detach().clone().requires_grad_(True)
+
+    paro_optimization._backward_scalar_loss((x * 2.0).sum())
+    seed_key = (x.device, torch.float64, ())
+    seed = paro_optimization._SCALAR_BACKWARD_SEEDS[seed_key]
+    assert seed.shape == () and seed.dtype == torch.float64
+    assert torch.equal(seed, torch.ones((), dtype=torch.float64))
+
+    # The second step reuses the very same tensor: that reuse is the saved fill.
+    paro_optimization._backward_scalar_loss((x * 3.0).sum())
+    assert paro_optimization._SCALAR_BACKWARD_SEEDS[seed_key] is seed
+    # The engine only reads the seed, so a reused seed must still be all ones.
+    assert torch.equal(seed, torch.ones((), dtype=torch.float64))
+
+    (reference * 2.0).sum().backward()
+    (reference * 3.0).sum().backward()
+    assert torch.equal(x.grad, reference.grad)
+
+
+def test_paro_backward_scalar_loss_keeps_the_tensor_backward_fallback():
+    """A loss the seed cache cannot serve must keep plain `Tensor.backward()` semantics."""
+    paro_optimization._SCALAR_BACKWARD_SEEDS.clear()
+
+    # Non-scalar losses raise exactly what `Tensor.backward()` raises.
+    vector = torch.randn(3, requires_grad=True) * 2.0
+    with pytest.raises(RuntimeError):
+        paro_optimization._backward_scalar_loss(vector)
+    assert not paro_optimization._SCALAR_BACKWARD_SEEDS
+
+    # A loss that does not require grad keeps the eager error instead of a seed.
+    frozen = torch.tensor(1.0)
+    with pytest.raises(RuntimeError):
+        paro_optimization._backward_scalar_loss(frozen)
+    assert not paro_optimization._SCALAR_BACKWARD_SEEDS
+
+    # A one-element non-0-dim output is still scalar enough for autograd.
+    x = torch.randn(2, dtype=torch.float64, requires_grad=True)
+    paro_optimization._backward_scalar_loss((x * 4.0).sum().reshape(1))
+    assert torch.equal(x.grad, torch.full_like(x, 4.0))
+    assert (x.device, torch.float64, (1,)) in paro_optimization._SCALAR_BACKWARD_SEEDS
+
+    # A duck-typed loss double keeps its own `backward` instead of the seed path.
+    class _StandIn:
+        def __init__(self):
+            self.calls = 0
+
+        def backward(self):
+            self.calls += 1
+
+    stand_in = _StandIn()
+    paro_optimization._backward_scalar_loss(stand_in)
+    assert stand_in.calls == 1
+
+
+@pytest.mark.parametrize(
+    "stage_runner_name",
+    ["_run_stage_gptqmodel_impl", "_run_stage_reference"],
+)
+def test_paro_stage_defers_train_loss_readback_to_epoch_end(monkeypatch, stage_runner_name):
+    """Guard that no optimizer step pays for a host readback of that step's loss.
+
+    `epoch_loss += float(loss.item())` synchronizes the stream once per
+    optimizer step, and Paro runs one step per calibration batch on a
+    launch-bound stage, so the running total must stay on the device until the
+    epoch closes.
+    """
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([[1.0, 1.0]], dtype=torch.float32))
+
+        def forward(self, x):
+            return x * self.weight
+
+        def reset_masked_angles(self):
+            return None
+
+    class _FakeRows:
+        def __init__(self, rows: int):
+            self.device = SimpleNamespace(type="cpu")
+            self.shape = (rows, 2)
+
+    train_inputs = _FakeRows(rows=2)
+    train_targets = _FakeRows(rows=2)
+    val_inputs = _FakeRows(rows=1)
+    val_targets = _FakeRows(rows=1)
+    train_input_batches = [
+        torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+        torch.tensor([[2.0, 2.0]], dtype=torch.float32),
+    ]
+    train_target_batches = [
+        torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+    ]
+
+    def fake_chunk_rows(rows, batch_size):
+        del batch_size
+        if rows is train_inputs:
+            return train_input_batches
+        if rows is train_targets:
+            return train_target_batches
+        raise AssertionError("unexpected rows object")
+
+    def fake_evaluate(_model, _inputs, _targets, *, use_amp=False):
+        del use_amp
+        return 0.0
+
+    step_losses = []
+    original_smooth_l1 = paro_optimization.F.smooth_l1_loss
+
+    def recording_smooth_l1(preds, targets):
+        loss = original_smooth_l1(preds, targets)
+        step_losses.append(loss)
+        return loss
+
+    readbacks = []
+    original_item = torch.Tensor.item
+
+    def recording_item(self):
+        readbacks.append(self)
+        return original_item(self)
+
+    monkeypatch.setattr(paro_optimization, "_chunk_rows", fake_chunk_rows)
+    monkeypatch.setattr(paro_optimization, "_evaluate_model", fake_evaluate)
+    monkeypatch.setattr(paro_optimization.F, "smooth_l1_loss", recording_smooth_l1)
+    monkeypatch.setattr(torch.Tensor, "item", recording_item)
+
+    model = _TinyModel()
+    epochs = 2
+    train_loss, _val_loss = getattr(paro_optimization, stage_runner_name)(
+        model=model,
+        inputs_train=train_inputs,
+        targets_train=train_targets,
+        inputs_val=val_inputs,
+        targets_val=val_targets,
+        param_groups=[{"params": [model.weight], "lr": 0.1}],
+        epochs=epochs,
+        batch_size=1,
+        optimizer_name="adamw",
+    )
+
+    assert len(step_losses) == epochs * len(train_input_batches)
+    # A step loss is a private per-batch value: reading it back forces a device
+    # sync that the epoch total makes redundant.
+    assert not any(readback is loss for readback in readbacks for loss in step_losses)
+
+    last_epoch_losses = step_losses[-len(train_input_batches) :]
+    expected = sum(float(loss.detach()) for loss in last_epoch_losses) / len(last_epoch_losses)
+    assert train_loss == expected
+
+
+def test_paro_evaluate_model_keeps_loss_inside_cuda_autocast(monkeypatch):
+    """Guard the PR-18 fix so validation loss stays inside the CUDA autocast region."""
+    state = {"autocast_active": False, "loss_saw_autocast": None}
+
+    @contextmanager
+    def fake_autocast(device_type: str):
+        assert device_type == "cuda"
+        previous = state["autocast_active"]
+        state["autocast_active"] = True
+        try:
+            yield
+        finally:
+            state["autocast_active"] = previous
+
+    class _FakeInput:
+        def __init__(self):
+            self.device = SimpleNamespace(type="cuda")
+
+        def numel(self):
+            return 1
+
+    class _DummyModel(torch.nn.Module):
+        def forward(self, _inputs):
+            return torch.tensor([1.0], dtype=torch.float32)
+
+    def fake_loss(preds, targets):
+        del preds, targets
+        state["loss_saw_autocast"] = state["autocast_active"]
+        return torch.tensor(0.25, dtype=torch.float32)
+
+    monkeypatch.setattr(torch.amp, "autocast", fake_autocast)
+    monkeypatch.setattr(paro_optimization.F, "smooth_l1_loss", fake_loss)
+
+    loss = paro_optimization._evaluate_model(
+        _DummyModel(),
+        _FakeInput(),
+        torch.tensor([0.0], dtype=torch.float32),
+        use_amp=True,
+    )
+
+    assert loss == 0.25
+    assert state["loss_saw_autocast"] is True
+
+
+@pytest.mark.parametrize(
+    ("is_rocm", "expect_amp"),
+    [
+        (False, True),
+        (True, False),
+    ],
+)
+def test_paro_fast_stage_uses_cuda_amp_training(monkeypatch, is_rocm, expect_amp):
+    """Guard the fast-stage AMP default: historical CUDA AMP on, ROCm auto off."""
+    state = {"autocast_active": False, "loss_saw_autocast": []}
+    scaler_events = []
+
+    @contextmanager
+    def fake_autocast(device_type: str):
+        assert expect_amp, "ROCm auto default must not enable autocast"
+        assert device_type == "cuda"
+        previous = state["autocast_active"]
+        state["autocast_active"] = True
+        try:
+            yield
+        finally:
+            state["autocast_active"] = previous
+
+    class _FakeScaler:
+        def __init__(self, *, enabled: bool):
+            scaler_events.append(("init", enabled))
+            self.enabled = enabled
+
+        def scale(self, loss):
+            scaler_events.append(("scale", self.enabled))
+
+            class _ScaledLoss:
+                def __init__(self, wrapped_loss):
+                    self.wrapped_loss = wrapped_loss
+
+                def backward(self):
+                    scaler_events.append(("backward", self.wrapped_loss.detach().item()))
+                    self.wrapped_loss.backward()
+
+            return _ScaledLoss(loss)
+
+        def step(self, optimizer):
+            scaler_events.append(("step", self.enabled))
+            optimizer.step()
+
+        def update(self):
+            scaler_events.append(("update", self.enabled))
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([[1.0]], dtype=torch.float32))
+
+        def forward(self, x):
+            return x @ self.weight
+
+        def reset_masked_angles(self):
+            return None
+
+    class _FakeRows:
+        def __init__(self, rows: int):
+            self.device = SimpleNamespace(type="cuda")
+            self.shape = (rows, 1)
+
+    train_inputs = _FakeRows(rows=2)
+    train_targets = _FakeRows(rows=2)
+    val_inputs = _FakeRows(rows=1)
+    val_targets = _FakeRows(rows=1)
+
+    train_input_batches = [torch.tensor([[1.0]], dtype=torch.float32), torch.tensor([[2.0]], dtype=torch.float32)]
+    train_target_batches = [torch.tensor([[0.0]], dtype=torch.float32), torch.tensor([[0.0]], dtype=torch.float32)]
+
+    def fake_chunk_rows(rows, batch_size):
+        del batch_size
+        if rows is train_inputs:
+            return train_input_batches
+        if rows is train_targets:
+            return train_target_batches
+        raise AssertionError("unexpected rows object")
+
+    def fake_evaluate(_model, _inputs, _targets, *, use_amp=False):
+        assert use_amp is expect_amp
+        return 0.0
+
+    original_loss = paro_optimization.F.smooth_l1_loss
+
+    def wrapped_loss(preds, targets):
+        state["loss_saw_autocast"].append(state["autocast_active"])
+        return original_loss(preds, targets)
+
+    monkeypatch.setattr(paro_optimization, "_chunk_rows", fake_chunk_rows)
+    monkeypatch.setattr(paro_optimization, "_evaluate_model", fake_evaluate)
+    monkeypatch.setattr(paro_optimization.F, "smooth_l1_loss", wrapped_loss)
+    monkeypatch.setattr(torch.amp, "autocast", fake_autocast)
+    monkeypatch.setattr(torch.amp, "GradScaler", _FakeScaler)
+    monkeypatch.setattr(paro_optimization, "IS_ROCM", is_rocm)
+
+    model = _TinyModel()
+    train_loss, val_loss = paro_optimization._run_stage_gptqmodel(
+        model=model,
+        inputs_train=train_inputs,
+        targets_train=train_targets,
+        inputs_val=val_inputs,
+        targets_val=val_targets,
+        param_groups=[{"params": [model.weight], "lr": 0.1}],
+        epochs=1,
+        batch_size=1,
+    )
+
+    assert train_loss >= 0.0
+    assert val_loss == 0.0
+    assert state["loss_saw_autocast"] == [expect_amp, expect_amp]
+    assert scaler_events[0] == ("init", expect_amp)
+    assert [event[0] for event in scaler_events[1:]] == [
+        "scale",
+        "backward",
+        "step",
+        "update",
+        "scale",
+        "backward",
+        "step",
+        "update",
+    ]
+    assert all(event[1] is expect_amp for event in scaler_events if event[0] != "backward")
+    assert all(event[1] >= 0.0 for event in scaler_events if event[0] == "backward")
+
+
+def test_paro_fast_pair_builder_emits_disjoint_matchings():
+    """Guard the fast pair builder so each rotation remains kernel-legal."""
+    pairs, masks = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=3,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+
+    assert pairs.shape == (3, 8)
+    assert masks.shape == (3, 4)
+    assert torch.count_nonzero(masks).item() == 0
+
+    seen_edges = set()
+    for rotation_pairs in pairs.view(3, 4, 2).tolist():
+        used_channels = set()
+        for left, right in rotation_pairs:
+            assert left != right
+            assert left not in used_channels
+            assert right not in used_channels
+            used_channels.add(left)
+            used_channels.add(right)
+            edge = tuple(sorted((left, right)))
+            assert edge not in seen_edges
+            seen_edges.add(edge)
+
+
+def test_paro_optim_forward_matches_pseudo_weight_contract():
+    """Guard the stage-time forward rewrite against the original pseudo-weight contract."""
+    torch.manual_seed(0)
+    weight = torch.randn((16, 8), dtype=torch.float32)
+    inputs = torch.randn((5, 8), dtype=torch.float32)
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=3,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    model = _ParoOptimLinear(
+        weight,
+        None,
+        bits=4,
+        group_size=8,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    with torch.no_grad():
+        model.theta.uniform_(-0.2, 0.2)
+        model.channel_scales_opt.uniform_(0.8, 1.2)
+    model.init_quantizer()
+
+    expected = F.linear(inputs, model.pseudo_weight(), model.bias)
+    actual = model(inputs)
+
+    torch.testing.assert_close(actual, expected, atol=2e-6, rtol=1e-5)
+
+
+def test_paro_optim_forward_matches_pseudo_weight_contract_for_rank3():
+    """Guard grouped/layer optimization forwards that pass [batch, seq, hidden] activations."""
+    torch.manual_seed(0)
+    weight = torch.randn((16, 8), dtype=torch.float32)
+    inputs = torch.randn((2, 3, 8), dtype=torch.float32)
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=3,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    model = _ParoOptimLinear(
+        weight,
+        None,
+        bits=4,
+        group_size=8,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    with torch.no_grad():
+        model.theta.uniform_(-0.2, 0.2)
+        model.channel_scales_opt.uniform_(0.8, 1.2)
+    model.init_quantizer()
+
+    expected = F.linear(inputs, model.pseudo_weight(), model.bias)
+    actual = model(inputs)
+
+    torch.testing.assert_close(actual, expected, atol=2e-6, rtol=1e-5)
+
+
+def test_paro_materialized_sym_scale_ste_matches_legacy_gradients():
+    """Guard the stage2 symmetric quantizer rewrite against the legacy STE math."""
+    torch.manual_seed(0)
+    group_size = 8
+    bits = 4
+    qmin = -(2 ** (bits - 1))
+    qmax = 2 ** (bits - 1) - 1
+
+    weight = torch.randn((6, group_size), dtype=torch.float32, requires_grad=True)
+    scale = (torch.rand((6, 1), dtype=torch.float32) + 0.1).requires_grad_()
+
+    legacy_scale = scale.clone().detach().requires_grad_(True)
+    legacy_weight = weight.clone().detach().requires_grad_(True)
+    legacy_scale_safe = paro_optimization._clamp_ste(legacy_scale, min_value=1e-5, max_value=1e5)
+    legacy_quant = paro_optimization._clamp_ste(
+        paro_optimization._round_ste(legacy_weight / legacy_scale_safe),
+        qmin,
+        qmax,
+    )
+    legacy_output = (legacy_quant * legacy_scale_safe).reshape_as(legacy_weight)
+
+    actual_output = pseudo_quantize_dequant(
+        weight,
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        scale=scale,
+        use_ste=True,
+    )
+
+    torch.testing.assert_close(actual_output, legacy_output, atol=0, rtol=0)
+
+    legacy_output.sum().backward()
+    actual_output.sum().backward()
+
+    torch.testing.assert_close(weight.grad, legacy_weight.grad, atol=0, rtol=0)
+    torch.testing.assert_close(scale.grad, legacy_scale.grad, atol=0, rtol=0)
+
+
+def _ste_boundary_grid(dtype: torch.dtype) -> torch.Tensor:
+    """Deterministic rounding/clamp boundary values for the straight-through estimators."""
+    finfo = torch.finfo(dtype)
+    values = [
+        -3.5,
+        -2.5,
+        -1.5,
+        -0.5,
+        -0.0,
+        0.0,
+        0.5,
+        1.5,
+        2.5,
+        3.5,
+        -0.5000001,
+        -0.4999999,
+        0.4999999,
+        0.5000001,
+        -1.5000001,
+        -1.4999999,
+        1.4999999,
+        1.5000001,
+        -2.0,
+        -1.0,
+        -0.25,
+        0.25,
+        1.0,
+        2.0,
+        1024.0,
+        -1024.0,
+        float(finfo.eps),
+        -float(finfo.eps),
+        float(finfo.tiny),
+        -float(finfo.tiny),
+        float(finfo.max),
+        -float(finfo.max),
+    ]
+    return torch.tensor(values, dtype=dtype)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_paro_ste_helpers_match_rounding_oracle(dtype):
+    """Guard the autograd-node STEs against the intended round/clamp arithmetic.
+
+    The oracle is the intended arithmetic (a plain ``round``/``clamp``) evaluated
+    independently of the helpers. The legacy ``(f(x) - x).detach() + x`` algebra is
+    deliberately *not* used as the oracle: ``f(x) - x`` cancels catastrophically
+    when ``|x|`` is large relative to the clamp bound, so the legacy form returns
+    wrong values (``clamp(3.4e38, 0, 15)`` evaluates to ``0`` in bfloat16 while the
+    intended result is ``15``). The detach form is still compared so the guards
+    record that the helpers are exact where the legacy algebra is exact and no
+    worse anywhere else.
+    """
+    values = _ste_boundary_grid(dtype)
+    upstream = torch.linspace(-1.5, 1.5, values.numel(), dtype=dtype).reshape_as(values)
+
+    actual_x = values.clone().requires_grad_(True)
+    legacy_x = values.clone().requires_grad_(True)
+    actual_round = paro_optimization._round_ste(actual_x)
+    legacy_round = (legacy_x.round() - legacy_x).detach() + legacy_x
+    assert torch.equal(actual_round.detach(), values.round())
+    assert torch.equal(actual_round.detach(), legacy_round.detach())
+    (actual_round_grad,) = torch.autograd.grad(actual_round, actual_x, grad_outputs=upstream)
+    (legacy_round_grad,) = torch.autograd.grad(legacy_round, legacy_x, grad_outputs=upstream)
+    assert torch.equal(actual_round_grad, legacy_round_grad)
+    assert torch.equal(actual_round_grad, upstream)
+
+    bounds = [
+        (0.0, 15.0),
+        (-7.0, 7.0),
+        (None, 7.0),
+        (-7.0, None),
+        (float(torch.finfo(dtype).tiny), float(torch.finfo(dtype).max)),
+    ]
+    for min_value, max_value in bounds:
+        if min_value is not None and max_value is not None:
+            endpoints = torch.tensor([min_value, max_value], dtype=dtype)
+            step = torch.nextafter(endpoints, torch.full_like(endpoints, float("inf")))
+            values = torch.cat((values, endpoints, step, -step))
+            upstream = torch.linspace(-1.5, 1.5, values.numel(), dtype=dtype).reshape_as(values)
+
+        actual_x = values.clone().requires_grad_(True)
+        legacy_x = values.clone().requires_grad_(True)
+        actual_clamp = paro_optimization._clamp_ste(actual_x, min_value, max_value)
+        legacy_clamp = (legacy_x.clamp(min_value, max_value) - legacy_x).detach() + legacy_x
+        oracle_clamp = values.clamp(min_value, max_value)
+        assert torch.equal(actual_clamp.detach(), oracle_clamp)
+        (actual_clamp_grad,) = torch.autograd.grad(actual_clamp, actual_x, grad_outputs=upstream)
+        (legacy_clamp_grad,) = torch.autograd.grad(legacy_clamp, legacy_x, grad_outputs=upstream)
+        assert torch.equal(actual_clamp_grad, legacy_clamp_grad)
+        assert torch.equal(actual_clamp_grad, upstream)
+
+    # Regression guard for the defect the autograd-node form removes: the legacy
+    # detach algebra cancels catastrophically once |x| dominates the clamp bound.
+    large = torch.tensor([float(torch.finfo(dtype).max)], dtype=dtype)
+    legacy_large = (large.clamp(0.0, 15.0) - large).detach() + large
+    expected_large = torch.full_like(large, 15.0)
+    assert torch.equal(paro_optimization._clamp_ste(large.clone(), 0.0, 15.0), expected_large)
+    assert not torch.equal(legacy_large, expected_large)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Paro STE launch accounting requires CUDA.")
+def test_paro_ste_helpers_emit_fewer_kernels_than_detach_algebra():
+    """Guard the launch-count win that motivates the autograd-node STEs."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    base = torch.randn(4096, 512, device=device)
+
+    def _kernel_count(step) -> int:
+        step()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            step()
+            torch.cuda.synchronize()
+        return sum(1 for event in prof.events() if event.device_type.name == "CUDA")
+
+    def _detach_algebra() -> None:
+        value = base.clone().requires_grad_(True)
+        rounded = (value.round() - value).detach() + value
+        clamped = (rounded.clamp(0.0, 15.0) - rounded).detach() + rounded
+        (clamped * clamped).sum().backward()
+
+    def _autograd_node() -> None:
+        value = base.clone().requires_grad_(True)
+        rounded = paro_optimization._round_ste(value)
+        clamped = paro_optimization._clamp_ste(rounded, 0.0, 15.0)
+        (clamped * clamped).sum().backward()
+
+    assert _kernel_count(_autograd_node) < _kernel_count(_detach_algebra)
+
+
+def test_paro_transformed_weight_folds_channel_scales_into_rotation():
+    """Guard that the transform is still defined as ``rotate(weight * channel_scales)``.
+
+    ``transformed_weight`` hands the channel scales to the rotation instead of
+    materializing a scaled copy of the full weight first. The reference rotation
+    applies a per-column scale to its input, so both spellings have to agree on
+    the value and on every parameter gradient.
+    """
+    torch.manual_seed(0)
+    weight = torch.randn((16, 8), dtype=torch.float32)
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=3,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    model = _ParoOptimLinear(
+        weight,
+        None,
+        bits=4,
+        group_size=8,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    with torch.no_grad():
+        model.theta.uniform_(-0.2, 0.2)
+        model.channel_scales_opt.uniform_(0.8, 1.2)
+
+    channel_scales = model._safe_channel_scales(use_ste=True)
+    expected = _apply_rotation(
+        model.weight * channel_scales,
+        model.pairs,
+        model.theta,
+        scales=None,
+        group_size=8,
+        fused_rotation=False,
+    )
+    actual = model.transformed_weight(use_ste=True, channel_scales=channel_scales)
+
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Paro fused rotation requires CUDA.")
+def test_paro_transformed_weight_fused_scale_fold_matches_premultiplied_path():
+    """Guard the fused path against the pre-multiplied formulation it replaces.
+
+    The fused rotation kernel already multiplies each loaded element by its
+    channel scale, so feeding it the raw weight is the same arithmetic as
+    scaling the full weight first and rotating with unit scales. The two forms
+    have to agree bitwise on the forward value and on the weight, angle, and
+    channel-scale gradients, otherwise the launch the fold removes is not free.
+    """
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    for out_features, in_features in ((896, 896), (128, 896), (896, 4864)):
+        weight = torch.randn((out_features, in_features), dtype=torch.float32) * 0.02
+        pairs, theta_mask = build_random_rotation_buffers(
+            in_features=in_features,
+            group_size=128,
+            krot=8,
+            pair_ratio=0.5,
+            seed=0,
+            device=device,
+        )
+        model = _ParoOptimLinear(
+            weight,
+            None,
+            bits=4,
+            group_size=128,
+            quantizer_sym=True,
+            pairs=pairs,
+            theta_mask=theta_mask,
+            fused_rotation=True,
+        )
+        with torch.no_grad():
+            model.theta.uniform_(-0.2, 0.2)
+            model.channel_scales_opt.uniform_(0.8, 1.2)
+
+        actual = model.transformed_weight(use_ste=True)
+        actual_grads = torch.autograd.grad(
+            actual.pow(2).sum(),
+            [model.weight, model.theta, model.channel_scales_opt],
+        )
+
+        premultiplied_scales = model._safe_channel_scales(use_ste=True)
+        expected = paro_optimization.apply_paro_rotation_autograd(
+            model.weight * premultiplied_scales,
+            model.pairs,
+            model.theta,
+            scales=None,
+            group_size=128,
+        )
+        expected_grads = torch.autograd.grad(
+            expected.pow(2).sum(),
+            [model.weight, model.theta, model.channel_scales_opt],
+        )
+
+        assert torch.equal(actual, expected)
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            assert torch.equal(actual_grad, expected_grad)
+
+
+def test_paro_fused_affine_ste_dispatch_gates():
+    """Guard the conditions under which the fused asymmetric STE engages."""
+    weight = torch.randn(16, 8, dtype=torch.float32, requires_grad=True)
+    scale = torch.rand(16, 1, dtype=torch.float32, requires_grad=True)
+    zero_point = torch.randn(16, 1, dtype=torch.float32, requires_grad=True)
+
+    def _dispatch(w, s, z):
+        return paro_optimization._affine_quant_dequant_ste_fused(
+            w,
+            s,
+            z,
+            bits=4,
+            group_size=8,
+        )
+
+    # The fused node is a CUDA fast path; CPU tensors keep the eager reference.
+    assert _dispatch(weight, scale, zero_point) is None
+
+    if not torch.cuda.is_available():
+        return
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    weight = weight.detach().to(device).requires_grad_(True)
+    scale = scale.detach().to(device).requires_grad_(True)
+    zero_point = zero_point.detach().to(device).requires_grad_(True)
+
+    assert _dispatch(weight, scale, zero_point) is not None
+    # Non-float32 qparams would change the reference rounding, so they fall back.
+    assert _dispatch(weight, scale.half(), zero_point.half()) is None
+    # Only the per-group (groups, 1) qparam layout reproduces the reference sums.
+    assert _dispatch(weight, scale.reshape(-1), zero_point) is None
+    assert _dispatch(weight, scale, zero_point.reshape(1, -1)) is None
+    # A detached graph has nothing to fuse for.
+    assert _dispatch(weight.detach(), scale.detach(), zero_point.detach()) is None
+    # A value-only call has no graph to fuse either, but with Triton it still
+    # takes the fused forward instead of the composed reference's ten launches.
+    with torch.no_grad():
+        value_only = _dispatch(weight, scale, zero_point)
+    if paro_optimization._get_triton_affine_kernels() is None:
+        assert value_only is None
+    else:
+        assert value_only is not None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Paro fused affine STE requires CUDA.")
+def test_paro_fused_affine_ste_matches_composed_reference():
+    """Guard the fused asymmetric STE against the composed reference graph.
+
+    The oracle is the composed graph spelled out in this test (the same algebra
+    the reference branch of ``pseudo_quantize_dequant`` evaluates) driven through
+    autograd. The forward value and the weight, scale, and zero-point gradients
+    all have to agree bitwise, and the zero-point gradient has to stay an
+    explicit zero so the optimizer still sees the parameter.
+    """
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    for shape, bits, group_size in (
+        ((896, 896), 4, 128),
+        ((128, 896), 4, 128),
+        ((896, 4864), 4, 128),
+        ((4864, 896), 3, 128),
+    ):
+        qmin, qmax = 0, 2**bits - 1
+        groups = shape[0] * shape[1] // group_size
+        weight = torch.randn(shape, device=device, dtype=torch.float32) * 0.02
+        scale = torch.rand(groups, 1, device=device, dtype=torch.float32) * 0.01 + 1e-3
+        zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32) * 0.3
+        upstream = torch.randn(shape, device=device, dtype=torch.float32)
+
+        def _composed(w, s, z, group_size=group_size, qmin=qmin, qmax=qmax):
+            view = w.reshape(-1, group_size)
+            bounded = paro_optimization._clamp_ste(s, min_value=1e-5, max_value=1e5)
+            round_zero = paro_optimization._clamp_ste(-paro_optimization._round_ste(z), qmin, qmax)
+            quant = paro_optimization._round_ste(view / bounded) + round_zero
+            quant = paro_optimization._clamp_ste(quant, qmin, qmax)
+            return ((quant - round_zero) * bounded).reshape_as(w)
+
+        expected_weight = weight.clone().requires_grad_(True)
+        expected_scale = scale.clone().requires_grad_(True)
+        expected_zero_point = zero_point.clone().requires_grad_(True)
+        expected = _composed(expected_weight, expected_scale, expected_zero_point)
+        expected_grads = torch.autograd.grad(
+            expected,
+            [expected_weight, expected_scale, expected_zero_point],
+            grad_outputs=upstream,
+        )
+
+        actual_weight = weight.clone().requires_grad_(True)
+        actual_scale = scale.clone().requires_grad_(True)
+        actual_zero_point = zero_point.clone().requires_grad_(True)
+        actual = paro_optimization.pseudo_quantize_dequant(
+            actual_weight,
+            bits=bits,
+            group_size=group_size,
+            sym=False,
+            scale=actual_scale,
+            zero_point_float=actual_zero_point,
+            use_ste=True,
+        )
+        assert "AffineQuantDequant" in type(actual.grad_fn).__name__
+        actual_grads = torch.autograd.grad(
+            actual,
+            [actual_weight, actual_scale, actual_zero_point],
+            grad_outputs=upstream,
+        )
+
+        assert torch.equal(actual, expected)
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            assert torch.equal(actual_grad, expected_grad)
+        assert torch.equal(actual_grads[2], torch.zeros_like(zero_point))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Paro fused affine STE launch accounting requires CUDA.")
+def test_paro_fused_affine_ste_emits_fewer_kernels_than_composed_reference():
+    """Guard the launch-count win that motivates the fused asymmetric STE."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    shape = (896, 896)
+    bits, group_size = 4, 128
+    qmin, qmax = 0, 2**bits - 1
+    groups = shape[0] * shape[1] // group_size
+    weight = torch.randn(shape, device=device, dtype=torch.float32)
+    scale = torch.rand(groups, 1, device=device, dtype=torch.float32)
+    zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32)
+
+    def _kernel_count(step) -> int:
+        step()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            step()
+            torch.cuda.synchronize()
+        return sum(1 for event in prof.events() if event.device_type.name == "CUDA")
+
+    def _fused() -> None:
+        w = (weight.clone() * 0.02).requires_grad_(True)
+        s = (scale.clone() + 1e-3).requires_grad_(True)
+        z = (zero_point.clone() * 0.3).requires_grad_(True)
+        out = paro_optimization.pseudo_quantize_dequant(
+            w,
+            bits=bits,
+            group_size=group_size,
+            sym=False,
+            scale=s,
+            zero_point_float=z,
+            use_ste=True,
+        )
+        out.sum().backward()
+
+    def _composed() -> None:
+        w = (weight.clone() * 0.02).requires_grad_(True)
+        s = (scale.clone() + 1e-3).requires_grad_(True)
+        z = (zero_point.clone() * 0.3).requires_grad_(True)
+        view = w.reshape(-1, group_size)
+        bounded = paro_optimization._clamp_ste(s, min_value=1e-5, max_value=1e5)
+        round_zero = paro_optimization._clamp_ste(-paro_optimization._round_ste(z), qmin, qmax)
+        quant = paro_optimization._round_ste(view / bounded) + round_zero
+        quant = paro_optimization._clamp_ste(quant, qmin, qmax)
+        ((quant - round_zero) * bounded).sum().backward()
+
+    assert _kernel_count(_fused) < _kernel_count(_composed)
+
+
+def _paro_triton_affine_ste():
+    """Return the Triton affine STE module, or skip when Triton is not installed."""
+    return pytest.importorskip("gptqmodel.quantization.paro.modules.triton.affine_ste")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Paro Triton affine STE requires CUDA.")
+def test_paro_triton_affine_ste_matches_composed_reference():
+    """Guard both Triton affine STE nodes against the composed reference graph.
+
+    The fused forward runs in one kernel, so every floating point step has to
+    keep the reference rounding: round-to-nearest division, round-half-to-even
+    quantization, and the reference clamp order. The oracle is the composed
+    graph spelled out here, and the forward value plus the weight, scale, and
+    zero-point gradients all have to agree bitwise for the Triton backward and
+    for the hybrid node that keeps the torch elementwise backward.
+    """
+    triton_ste = _paro_triton_affine_ste()
+    if not triton_ste.affine_quant_dequant_ste_available():
+        pytest.skip("Triton affine STE kernels are unavailable on this host.")
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    for shape, bits, group_size in (
+        ((896, 896), 4, 128),
+        ((128, 896), 4, 128),
+        ((896, 4864), 4, 128),
+        ((4864, 896), 3, 128),
+    ):
+        qmin, qmax = 0, 2**bits - 1
+        groups = shape[0] * shape[1] // group_size
+        weight = torch.randn(shape, device=device, dtype=torch.float32) * 0.02
+        scale = torch.rand(groups, 1, device=device, dtype=torch.float32) * 0.01 + 1e-3
+        zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32) * 0.3
+        upstream = torch.randn(shape, device=device, dtype=torch.float32)
+
+        def _composed(w, s, z, group_size=group_size, qmin=qmin, qmax=qmax):
+            view = w.reshape(-1, group_size)
+            bounded = paro_optimization._clamp_ste(s, min_value=1e-5, max_value=1e5)
+            round_zero = paro_optimization._clamp_ste(-paro_optimization._round_ste(z), qmin, qmax)
+            quant = paro_optimization._round_ste(view / bounded) + round_zero
+            quant = paro_optimization._clamp_ste(quant, qmin, qmax)
+            return ((quant - round_zero) * bounded).reshape_as(w)
+
+        expected_weight = weight.clone().requires_grad_(True)
+        expected_scale = scale.clone().requires_grad_(True)
+        expected_zero_point = zero_point.clone().requires_grad_(True)
+        expected = _composed(expected_weight, expected_scale, expected_zero_point)
+        expected_grads = torch.autograd.grad(
+            expected,
+            [expected_weight, expected_scale, expected_zero_point],
+            grad_outputs=upstream,
+        )
+
+        for node in (triton_ste._AffineQuantDequantTritonSTE, triton_ste._AffineQuantDequantHybridSTE):
+            actual_weight = weight.clone().requires_grad_(True)
+            actual_scale = scale.clone().requires_grad_(True)
+            actual_zero_point = zero_point.clone().requires_grad_(True)
+            actual = node.apply(actual_weight, actual_scale, actual_zero_point, qmin, qmax, group_size)
+            actual_grads = torch.autograd.grad(
+                actual,
+                [actual_weight, actual_scale, actual_zero_point],
+                grad_outputs=upstream,
+            )
+
+            assert torch.equal(actual, expected), (shape, node.__name__)
+            for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+                assert torch.equal(actual_grad, expected_grad), (shape, node.__name__)
+            assert torch.equal(actual_grads[2], torch.zeros_like(zero_point))
+
+
+def test_paro_triton_affine_ste_dispatch_and_kill_switch():
+    """Guard the availability probe, the kill switch, and the routed node."""
+    triton_ste = _paro_triton_affine_ste()
+    weight = torch.randn(16, 8, dtype=torch.float32, requires_grad=True)
+    scale = torch.rand(16, 1, dtype=torch.float32, requires_grad=True)
+    zero_point = torch.randn(16, 1, dtype=torch.float32, requires_grad=True)
+
+    if not torch.cuda.is_available():
+        # The kernels are CUDA-only; a host without a GPU must still report
+        # availability consistently with the dispatch helper.
+        assert triton_ste.affine_quant_dequant_ste_available() in (True, False)
+        return
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    weight = weight.detach().to(device).requires_grad_(True)
+    scale = scale.detach().to(device).requires_grad_(True)
+    zero_point = zero_point.detach().to(device).requires_grad_(True)
+    previous_kernel_config = get_kernel_config()
+    try:
+        configure_kernel(KernelConfig(paro_affine_ste_triton=False))
+        assert not triton_ste.affine_quant_dequant_ste_available()
+        assert (
+            triton_ste.affine_quant_dequant_ste(weight, scale, zero_point, qmin=0, qmax=15, group_size=8) is None
+        )
+        # The optimization entry point falls back to the torch fused node.
+        fallback = paro_optimization.pseudo_quantize_dequant(
+            weight,
+            bits=4,
+            group_size=8,
+            sym=False,
+            scale=scale,
+            zero_point_float=zero_point,
+            use_ste=True,
+        )
+        assert "_AffineQuantDequantSTEBackward" in type(fallback.grad_fn).__name__
+    finally:
+        configure_kernel(previous_kernel_config)
+
+    routed = paro_optimization.pseudo_quantize_dequant(
+        weight,
+        bits=4,
+        group_size=8,
+        sym=False,
+        scale=scale,
+        zero_point_float=zero_point,
+        use_ste=True,
+    )
+    assert "AffineQuantDequant" in type(routed.grad_fn).__name__
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Paro Triton affine STE requires CUDA.")
+def test_paro_triton_affine_ste_emits_fewer_kernels_than_torch_fused():
+    """Guard the launch-count win that motivates the fused Triton kernels."""
+    triton_ste = _paro_triton_affine_ste()
+    if not triton_ste.affine_quant_dequant_ste_available():
+        pytest.skip("Triton affine STE kernels are unavailable on this host.")
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    shape = (896, 896)
+    bits, group_size = 4, 128
+    qmin, qmax = 0, 2**bits - 1
+    groups = shape[0] * shape[1] // group_size
+    weight = torch.randn(shape, device=device, dtype=torch.float32)
+    scale = torch.rand(groups, 1, device=device, dtype=torch.float32)
+    zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32)
+
+    def _kernel_count(step) -> int:
+        step()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            step()
+            torch.cuda.synchronize()
+        return sum(1 for event in prof.events() if event.device_type.name == "CUDA")
+
+    def _run(node) -> None:
+        w = (weight.clone() * 0.02).requires_grad_(True)
+        s = (scale.clone() + 1e-3).requires_grad_(True)
+        z = (zero_point.clone() * 0.3).requires_grad_(True)
+        node.apply(w, s, z, qmin, qmax, group_size).sum().backward()
+
+    torch_count = _kernel_count(lambda: _run(paro_optimization._AffineQuantDequantSTE))
+    triton_count = _kernel_count(lambda: _run(triton_ste._AffineQuantDequantTritonSTE))
+    hybrid_count = _kernel_count(lambda: _run(triton_ste._AffineQuantDequantHybridSTE))
+
+    assert triton_count < torch_count
+    assert hybrid_count < torch_count
+    assert triton_count <= hybrid_count
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Paro Triton affine STE requires CUDA.")
+def test_paro_triton_affine_ste_value_only_forward():
+    """Guard the value-only Triton forward used by the no-grad replay evaluations.
+
+    The calibration loop evaluates the replayed model under ``torch.no_grad()``
+    once per epoch, so those calls have no graph to fuse but still pay the
+    composed reference's ten launches each. They take the fused forward instead,
+    and the value has to stay bitwise identical.
+    """
+    triton_ste = _paro_triton_affine_ste()
+    if not triton_ste.affine_quant_dequant_ste_available():
+        pytest.skip("Triton affine STE kernels are unavailable on this host.")
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    for shape, bits, group_size in (
+        ((896, 896), 4, 128),
+        ((896, 4864), 4, 128),
+        ((4864, 896), 3, 128),
+    ):
+        qmin, qmax = 0, 2**bits - 1
+        groups = shape[0] * shape[1] // group_size
+        weight = torch.randn(shape, device=device, dtype=torch.float32) * 0.02
+        scale = torch.rand(groups, 1, device=device, dtype=torch.float32) * 0.01 + 1e-3
+        zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32) * 0.3
+        with torch.no_grad():
+            expected = paro_optimization.pseudo_quantize_dequant(
+                weight,
+                bits=bits,
+                group_size=group_size,
+                sym=False,
+                scale=scale,
+                zero_point_float=zero_point,
+                use_ste=False,
+            )
+            actual = triton_ste.affine_quant_dequant_ste_forward(
+                weight,
+                scale,
+                zero_point,
+                qmin=qmin,
+                qmax=qmax,
+                group_size=group_size,
+            )
+        assert actual is not None
+        assert torch.equal(actual, expected)
+
+    shape, bits, group_size = (896, 4864), 4, 128
+    groups = shape[0] * shape[1] // group_size
+    weight = torch.randn(shape, device=device, dtype=torch.float32)
+    scale = torch.rand(groups, 1, device=device, dtype=torch.float32)
+    zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32)
+
+    def _kernel_count(step) -> int:
+        step()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            step()
+            torch.cuda.synchronize()
+        return sum(1 for event in prof.events() if event.device_type.name == "CUDA")
+
+    def _value_only() -> None:
+        with torch.no_grad():
+            triton_ste.affine_quant_dequant_ste_forward(
+                weight,
+                scale,
+                zero_point,
+                qmin=0,
+                qmax=2**bits - 1,
+                group_size=group_size,
+            )
+
+    def _composed() -> None:
+        with torch.no_grad():
+            paro_optimization.pseudo_quantize_dequant(
+                weight,
+                bits=bits,
+                group_size=group_size,
+                sym=False,
+                scale=scale,
+                zero_point_float=zero_point,
+                use_ste=False,
+            )
+
+    assert _kernel_count(_value_only) < _kernel_count(_composed)
+
+
+def test_paro_large_train_quant_compile_dispatch(monkeypatch):
+    """Guard that only large CUDA training-time quant calls route into the compiled helper."""
+    class _FakeWeight:
+        def __init__(self, numel: int, device_type: str = "cuda"):
+            self._numel = numel
+            self.device = SimpleNamespace(type=device_type)
+
+        def numel(self) -> int:
+            return self._numel
+
+    monkeypatch.setattr(paro_optimization, "_PARO_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL", 16)
+    monkeypatch.setattr(paro_optimization, "_get_large_train_quant_compile", lambda: lambda *_args, **_kwargs: "compiled")
+    monkeypatch.setattr(paro_optimization, "pseudo_quantize_dequant", lambda *_args, **_kwargs: "eager")
+
+    assert (
+        paro_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(32),
+            bits=4,
+            group_size=8,
+            sym=True,
+        )
+        == "compiled"
+    )
+    assert (
+        paro_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(8),
+            bits=4,
+            group_size=8,
+            sym=True,
+        )
+        == "eager"
+    )
+    assert (
+        paro_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(32),
+            bits=4,
+            group_size=8,
+            sym=False,
+        )
+        == "compiled"
+    )
+    assert (
+        paro_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(32, device_type="cpu"),
+            bits=4,
+            group_size=8,
+            sym=True,
+        )
+        == "eager"
+    )
+
+    assert (
+        paro_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(32), bits=4, group_size=8, sym=False, compile_quant=False,
+        )
+        == "eager"
+    )
+
+
+def test_paro_large_train_quant_compile_falls_back_on_failure(monkeypatch):
+    """A rejected compiled call must degrade to eager instead of aborting the lifecycle."""
+    class _FakeWeight:
+        def __init__(self, numel: int, device_type: str = "cuda"):
+            self._numel = numel
+            self.device = SimpleNamespace(type=device_type)
+
+        def numel(self) -> int:
+            return self._numel
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("simulated dynamo failure")
+
+    monkeypatch.setattr(paro_optimization, "_PARO_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL", 16)
+    monkeypatch.setattr(paro_optimization, "_LARGE_TRAIN_QUANT_COMPILE_DISABLED", False)
+    monkeypatch.setattr(paro_optimization, "_get_large_train_quant_compile", lambda: _boom)
+    monkeypatch.setattr(paro_optimization, "pseudo_quantize_dequant", lambda *_args, **_kwargs: "eager")
+
+    with pytest.warns(UserWarning):
+        assert (
+            paro_optimization._maybe_compile_large_train_quant(
+                _FakeWeight(32),
+                bits=4,
+                group_size=8,
+                sym=True,
+            )
+            == "eager"
+        )
+    assert paro_optimization._LARGE_TRAIN_QUANT_COMPILE_DISABLED is True
+    # The rest of the process must skip the compiled path entirely.
+    assert (
+        paro_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(32),
+            bits=4,
+            group_size=8,
+            sym=True,
+        )
+        == "eager"
+    )
+
+
+def test_paro_stage_cudagraph_gate_requires_real_cuda_tensor():
+    """Guard that CUDA-graph replay only activates for real CUDA tensor stages."""
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones((2, 4), dtype=torch.float32))
+            self.fused_rotation = True
+
+    class _FakeRows:
+        def __init__(self, device_type: str):
+            self.shape = (2048, 4)
+            self.device = SimpleNamespace(type=device_type, index=0 if device_type == "cuda" else None)
+
+    model = _DummyModel()
+    real_cpu_rows = torch.ones((2048, 4), dtype=torch.float32)
+    fake_cuda_rows = _FakeRows("cuda")
+
+    assert paro_optimization._should_use_paro_stage_cudagraph(model, inputs_train=real_cpu_rows, batch_size=64) is False
+    assert paro_optimization._should_use_paro_stage_cudagraph(model, inputs_train=fake_cuda_rows, batch_size=64) is False
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Paro ROCm capture gate needs a real CUDA tensor.")
+@pytest.mark.parametrize("stage_cudagraph", [None, True, False])
+def test_paro_stage_cudagraph_gate_skips_rocm_capture(monkeypatch, stage_cudagraph):
+    """Guard that ROCm hosts never capture: hipBLASLt deadlocks instead of raising."""
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones((2, 4), dtype=torch.float32))
+            self.fused_rotation = True
+
+    model = _DummyModel()
+    rows = torch.ones((2048, 4), dtype=torch.float32, device="cuda")
+
+    # Everything the gate asks for is satisfied here, so the ROCm flag is the
+    # only thing that can decide the result.
+    monkeypatch.setattr(paro_optimization, "IS_ROCM", False)
+    assert (
+        paro_optimization._should_use_paro_stage_cudagraph(
+            model, inputs_train=rows, batch_size=64, stage_cudagraph=stage_cudagraph
+        )
+        is (stage_cudagraph is not False)
+    )
+
+    monkeypatch.setattr(paro_optimization, "IS_ROCM", True)
+    assert (
+        paro_optimization._should_use_paro_stage_cudagraph(
+            model, inputs_train=rows, batch_size=64, stage_cudagraph=stage_cudagraph
+        )
+        is False
+    )
+
+
+def test_paro_stage_cudagraph_falls_back_to_eager_on_runtime_error(monkeypatch):
+    """Guard that a CUDA-graph stage failure restores model state and reruns eagerly."""
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([[1.0]], dtype=torch.float32))
+            self.fused_rotation = True
+
+        def reset_masked_angles(self):
+            return None
+
+    model = _DummyModel()
+    call_order = []
+
+    def fake_impl(*, model, **kwargs):
+        del kwargs
+        call_order.append(model)
+        return 1.25, 2.5
+
+    def fake_cudagraph(*, model, **kwargs):
+        del kwargs
+        call_order.append(("graph", model))
+        raise RuntimeError("graph failed at runtime")
+
+    monkeypatch.setattr(paro_optimization, "_should_use_paro_stage_cudagraph", lambda *args, **kwargs: True)
+    monkeypatch.setattr(paro_optimization, "_run_stage_gptqmodel_cudagraph", fake_cudagraph)
+    monkeypatch.setattr(paro_optimization, "_run_stage_gptqmodel_impl", fake_impl)
+
+    train_loss, val_loss = paro_optimization._run_stage_gptqmodel(
+        model=model,
+        inputs_train=torch.ones((2, 1), dtype=torch.float32),
+        targets_train=torch.zeros((2, 1), dtype=torch.float32),
+        inputs_val=torch.ones((1, 1), dtype=torch.float32),
+        targets_val=torch.zeros((1, 1), dtype=torch.float32),
+        param_groups=[],
+        epochs=1,
+        batch_size=1,
+    )
+
+    assert (train_loss, val_loss) == (1.25, 2.5)
+    assert call_order == [("graph", model), model]
+
+
+def test_optimize_paro_linear_forwards_stage_cudagraph(monkeypatch):
+    """Guard that explicit CUDA-graph policy is forwarded into both optimization stages."""
+    stage_cudagraph_calls = []
+    original_run_stage = paro_optimization._run_stage
+
+    def spy_run_stage(*, stage_cudagraph=None, **kwargs):
+        stage_cudagraph_calls.append(stage_cudagraph)
+        return original_run_stage(stage_cudagraph=stage_cudagraph, **kwargs)
+
+    monkeypatch.setattr(paro_optimization, "_run_stage", spy_run_stage)
+
+    weight = torch.randn((8, 8), dtype=torch.float32)
+    inputs = torch.randn((64, 8), dtype=torch.float32)
+
+    result = optimize_paro_linear(
+        weight=weight,
+        bias=None,
+        inputs=inputs,
+        bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        pair_ratio=0.5,
+        train_rows=32,
+        val_rows=16,
+        batch_size=16,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=0,
+        fused_rotation=True,
+        stage_cudagraph=False,
+        stage_impl="fast",
+        pair_impl="fast",
+        quantizer_impl="reference",
+    )
+
+    assert result.val_loss >= 0.0
+    assert stage_cudagraph_calls == [False, False]
+
+
+def test_optimize_paro_linear_forwards_optimizer_name(monkeypatch):
+    """Guard that the selected stage optimizer is forwarded into both optimization stages."""
+    optimizer_name_calls = []
+    original_run_stage = paro_optimization._run_stage
+
+    def spy_run_stage(*, optimizer_name="adamw", **kwargs):
+        optimizer_name_calls.append(optimizer_name)
+        return original_run_stage(optimizer_name=optimizer_name, **kwargs)
+
+    monkeypatch.setattr(paro_optimization, "_run_stage", spy_run_stage)
+
+    weight = torch.randn((8, 8), dtype=torch.float32)
+    inputs = torch.randn((64, 8), dtype=torch.float32)
+
+    result = optimize_paro_linear(
+        weight=weight,
+        bias=None,
+        inputs=inputs,
+        bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        pair_ratio=0.5,
+        train_rows=32,
+        val_rows=16,
+        batch_size=16,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=0,
+        optimizer_name="sgd",
+        fused_rotation=True,
+        stage_cudagraph=False,
+        stage_impl="fast",
+        pair_impl="fast",
+        quantizer_impl="reference",
+    )
+
+    assert result.val_loss >= 0.0
+    assert optimizer_name_calls == ["sgd", "sgd"]
+
+
+def test_optimize_paro_linear_forwards_best_state_dtype(monkeypatch):
+    """Guard that explicit best-state snapshot dtype policy is forwarded into both optimization stages."""
+    best_state_dtype_calls = []
+    original_run_stage = paro_optimization._run_stage
+
+    def spy_run_stage(*, best_state_dtype="fp32", **kwargs):
+        best_state_dtype_calls.append(best_state_dtype)
+        return original_run_stage(best_state_dtype=best_state_dtype, **kwargs)
+
+    monkeypatch.setattr(paro_optimization, "_run_stage", spy_run_stage)
+
+    weight = torch.randn((8, 8), dtype=torch.float32)
+    inputs = torch.randn((64, 8), dtype=torch.float32)
+
+    result = optimize_paro_linear(
+        weight=weight,
+        bias=None,
+        inputs=inputs,
+        bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        pair_ratio=0.5,
+        train_rows=32,
+        val_rows=16,
+        batch_size=16,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=0,
+        fused_rotation=True,
+        stage_cudagraph=False,
+        best_state_dtype="fp16",
+        stage_impl="fast",
+        pair_impl="fast",
+        quantizer_impl="reference",
+    )
+
+    assert result.val_loss >= 0.0
+    assert best_state_dtype_calls == ["fp16", "fp16"]
+
+
+def test_optimize_paro_linear_supports_sgd_optimizer():
+    """Guard the direct Paro path against rejecting valid SGD hyperparameters."""
+    weight = torch.randn((16, 16), dtype=torch.float32)
+    inputs = torch.randn((96, 16), dtype=torch.float32)
+
+    result = optimize_paro_linear(
+        weight=weight,
+        bias=None,
+        inputs=inputs,
+        bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        pair_ratio=0.5,
+        train_rows=64,
+        val_rows=32,
+        batch_size=16,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-4,
+        quantizer_lr=1e-4,
+        seed=0,
+        optimizer_name="sgd",
+        optimizer_weight_decay=0.02,
+        sgd_momentum=0.85,
+        sgd_dampening=0.0,
+        sgd_nesterov=True,
+        fused_rotation=False,
+        stage_cudagraph=False,
+        stage_impl="fast",
+        pair_impl="fast",
+        quantizer_impl="reference",
+    )
+
+    assert result.val_loss >= 0.0
+    assert result.pseudo_weight.shape == weight.shape
+
+
+def test_paro_run_stage_only_enables_active_gradients(monkeypatch):
+    """Guard that each stage only backpropagates through the parameters it optimizes."""
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=1,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    model = _ParoOptimLinear(
+        torch.randn((8, 8), dtype=torch.float32),
+        torch.randn((8,), dtype=torch.float32),
+        bits=4,
+        group_size=8,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    original_flags = {name: param.requires_grad for name, param in model.named_parameters()}
+    seen_flags = {}
+
+    def fake_stage_impl(**kwargs):
+        del kwargs
+        seen_flags.update({name: param.requires_grad for name, param in model.named_parameters()})
+        return 0.0, 0.0
+
+    monkeypatch.setattr(paro_optimization, "_run_stage_gptqmodel", fake_stage_impl)
+
+    paro_optimization._run_stage(
+        model=model,
+        inputs_train=torch.randn((4, 8), dtype=torch.float32),
+        targets_train=torch.randn((4, 8), dtype=torch.float32),
+        inputs_val=torch.randn((2, 8), dtype=torch.float32),
+        targets_val=torch.randn((2, 8), dtype=torch.float32),
+        param_groups=[
+            {"params": [model.channel_scales_opt], "lr": 0.05},
+            {"params": [model.theta], "lr": 0.05},
+        ],
+        epochs=1,
+        batch_size=2,
+        stage_impl="fast",
+    )
+
+    assert seen_flags["theta"] is True
+    assert seen_flags["channel_scales_opt"] is True
+    assert seen_flags["weight"] is False
+    assert seen_flags["bias"] is False
+    assert {name: param.requires_grad for name, param in model.named_parameters()} == original_flags
+
+
+def test_paro_is_not_aliased_to_a_transformers_gptq_quantizer():
+    """Paro is loaded by GPT-QModel, not through transformers' GPTQ path.
+
+    Issue #4074 item 3: mapping `quant_method="paro"` to HF's `GPTQConfig`
+    renamed the method to `gptq`, so optimum kernel selection rejected the
+    checkpoint with a FORMAT/METHOD mismatch. GPT-QModel never registers into
+    transformers, so transformers must not know the name at all: a Paro
+    checkpoint loads only through `GPTQModel.load`.
+    """
+    from transformers.quantizers import auto as hf_quant_auto
+
+    assert "paro" not in hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING
+    assert "paro" not in hf_quant_auto.AUTO_QUANTIZER_MAPPING
+
+
+def test_paro_kernel_mapping_uses_paro_backend():
+    """Guard backend dispatch so Paro does not silently fall back to AWQ."""
+    from gptqmodel.nn_modules.qlinear.paro import ParoLinear
+
+    assert (
+        get_kernel_for_backend(BACKEND.PARO_CUDA, METHOD.PARO, FORMAT.PARO)
+        is ParoLinear
+    )
+
+
+def test_paro_kernel_mapping_uses_paro_triton_backend():
+    """Guard Triton backend dispatch for Paro-specific runtime modules."""
+    pytest.importorskip("triton")
+    from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
+
+    assert (
+        get_kernel_for_backend(BACKEND.PARO_TRITON, METHOD.PARO, FORMAT.PARO)
+        is ParoTritonLinear
+    )
+
+
+def test_paro_identity_rotation_buffers_preserve_input():
+    """Guard the identity buffer builder used by no-op and fallback paths."""
+    x = torch.randn(3, 128, dtype=torch.float16)
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=128,
+        group_size=128,
+        krot=8,
+        dtype=torch.float16,
+    )
+
+    rotated = apply_paro_rotation_reference(
+        x,
+        pairs,
+        theta,
+        scales=channel_scales,
+        group_size=128,
+    )
+
+    torch.testing.assert_close(rotated, x, atol=0, rtol=0)
+
+
+class _ScalarReadRecorder(torch.utils._python_dispatch.TorchDispatchMode):
+    def __init__(self) -> None:
+        self.scalar_reads = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if str(func).startswith("aten._local_scalar_dense"):
+            self.scalar_reads += 1
+        return func(*args, **(kwargs or {}))
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    ("theta", "channel_scales", "expected"),
+    [
+        (None, None, True),
+        (None, "ones", True),
+        (None, "nonidentity", False),
+        ("zeros", None, True),
+        ("zeros", "ones", True),
+        ("zeros", "nonidentity", False),
+        ("nonzero", None, False),
+        ("nonzero", "ones", False),
+        ("nonzero", "nonidentity", False),
+    ],
+)
+def test_paro_identity_predicate_matches_reference_and_reads_once(
+    device, theta, channel_scales, expected
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    theta_tensor = None
+    if theta is not None:
+        theta_tensor = torch.zeros(8, device=device, dtype=torch.float32)
+        if theta == "nonzero":
+            theta_tensor[3] = 0.25
+
+    scales_tensor = None
+    if channel_scales is not None:
+        scales_tensor = torch.ones(16, device=device, dtype=torch.float16)
+        if channel_scales == "nonidentity":
+            scales_tensor[7] = 1.5
+
+    recorder = _ScalarReadRecorder()
+    with recorder:
+        actual = is_identity_rotation(theta_tensor, scales_tensor)
+
+    assert actual is expected
+    if theta is None and channel_scales is None:
+        expected_reads = 0
+    elif device == "cpu" and theta == "zeros" and channel_scales is not None:
+        expected_reads = 2
+    else:
+        expected_reads = 1
+    assert recorder.scalar_reads == expected_reads
+
+
+def test_paro_module_default_rotation_buffers_are_identity():
+    """Guard fresh runtime modules against invalid all-zero pair buffers."""
+    module = ParoLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        register_buffers=True,
+    )
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=module.in_features,
+        group_size=module.group_size,
+        krot=module.krot,
+        dtype=module.theta.dtype,
+    )
+
+    assert torch.equal(module.pairs, pairs)
+    assert torch.equal(module.theta, theta)
+    assert torch.equal(module.channel_scales, channel_scales)
+
+
+def test_paro_processor_is_not_awq_subclass():
+    """Guard the dedicated lifecycle split from AWQ requested by the user."""
+    assert not issubclass(ParoProcessor, AWQProcessor)
+
+
+def test_paro_processor_resets_reused_module_buckets_per_layer():
+    """Guard against cross-layer activation reuse for repeated relative module names."""
+    processor = object.__new__(ParoProcessor)
+    processor.lock = threading.Lock()
+    processor.tasks = {}
+
+    processor._ensure_task_bucket("mlp.gate_proj", layer_index=0)
+    processor.tasks["mlp.gate_proj"]["inputs"].append(torch.randn(1, 8))
+    processor._ensure_task_bucket("mlp.gate_proj", layer_index=0)
+    assert len(processor.tasks["mlp.gate_proj"]["inputs"]) == 1
+
+    processor._ensure_task_bucket("mlp.gate_proj", layer_index=1)
+    assert processor.tasks["mlp.gate_proj"]["layer_index"] == 1
+    assert processor.tasks["mlp.gate_proj"]["inputs"] == []
+
+
+def test_paro_processor_groups_common_llama_compute_blocks():
+    """Guard the planned compute_block optimizer buckets for attention and MLP projections."""
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="compute_block")
+
+    state = SimpleNamespace(
+        modules={
+            "self_attn.q_proj": SimpleNamespace(name="self_attn.q_proj"),
+            "self_attn.k_proj": SimpleNamespace(name="self_attn.k_proj"),
+            "self_attn.v_proj": SimpleNamespace(name="self_attn.v_proj"),
+            "self_attn.o_proj": SimpleNamespace(name="self_attn.o_proj"),
+            "mlp.gate_proj": SimpleNamespace(name="mlp.gate_proj"),
+            "mlp.up_proj": SimpleNamespace(name="mlp.up_proj"),
+            "mlp.down_proj": SimpleNamespace(name="mlp.down_proj"),
+        }
+    )
+
+    groups = processor._optimization_groups_for_layer(state)
+
+    assert [(label, [module.name for module in modules]) for label, modules in groups] == [
+        ("attn_o", ["self_attn.o_proj"]),
+        ("attn_qkv", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]),
+        ("mlp_down", ["mlp.down_proj"]),
+        ("mlp_gate_up", ["mlp.gate_proj", "mlp.up_proj"]),
+    ]
+
+
+def test_paro_processor_module_scope_seed_uses_full_module_name():
+    """Guard module scope against collapsing different layer linears onto one archetype seed."""
+    full_name_a = "model.layers.0.self_attn.q_proj"
+    full_name_b = "model.layers.0.block.self_attn.q_proj"
+
+    module_scope = object.__new__(ParoProcessor)
+    module_scope.qcfg = SimpleNamespace(opt_scope="module", opt_seed=3141592653)
+    assert module_scope._module_seed(0, full_name_a) != module_scope._module_seed(0, full_name_b)
+
+    grouped_scope = object.__new__(ParoProcessor)
+    grouped_scope.qcfg = SimpleNamespace(opt_scope="compute_block", opt_seed=3141592653)
+    assert grouped_scope._module_seed(0, full_name_a) == grouped_scope._module_seed(0, full_name_b)
+
+
+def test_paro_prewarm_rotation_extension_skips_unsupported_configs(monkeypatch):
+    """Guard the explicit prewarm helper so startup only pays for real fused-kernel cases."""
+    calls = []
+
+    # Patch the seam `prewarm_paro_rotation_extension` actually calls. Patching
+    # the extension object's `load` only worked while the module global
+    # `_ROTATION_EXTENSION_READY` was still False: once any earlier test in the
+    # session loaded the extension, `_load_rotation_extension()` short-circuits
+    # on that flag and never reaches `.load` (#5430).
+    monkeypatch.setattr(
+        paro_utils_module,
+        "_load_rotation_extension",
+        lambda: calls.append("load") or True,
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    assert prewarm_paro_rotation_extension(fused_rotation=False, group_size=128, krot=8) is False
+    assert prewarm_paro_rotation_extension(fused_rotation=True, group_size=64, krot=8) is False
+    assert prewarm_paro_rotation_extension(fused_rotation=True, group_size=128, krot=4) is False
+    assert (
+        prewarm_paro_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device=torch.device("cpu"),
+        )
+        is False
+    )
+    assert prewarm_paro_rotation_extension(fused_rotation=True, group_size=128, krot=8) is True
+    assert calls == ["load"]
+
+
+def test_paro_prewarm_reports_true_when_the_extension_is_already_loaded(monkeypatch):
+    """A prewarm after an earlier load must succeed without probing or rebuilding (#5430).
+
+    This is the process state that made the config-gating test above fail: a
+    real fused rotation ran earlier in the session, so the module global is
+    already True and the loader returns before touching the JIT extension.
+    """
+    probes = []
+
+    monkeypatch.setattr(paro_utils_module, "_ROTATION_EXTENSION_READY", True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        paro_utils_module,
+        "_extension_api",
+        lambda: SimpleNamespace(is_available=lambda name: probes.append(name) or True),
+    )
+
+    assert prewarm_paro_rotation_extension(fused_rotation=True, group_size=128, krot=8) is True
+    assert probes == []
+
+
+def test_paro_clear_rotation_extension_cache_delegates_to_shared_loader(monkeypatch):
+    """Guard the public cache-clear helper so benchmarks can force fresh torch.ops rebuilds."""
+
+    calls = []
+    monkeypatch.setattr(
+        paro_utils_module._PARO_ROTATION_EXTENSION,
+        "clear_cache",
+        lambda: calls.append("clear"),
+    )
+
+    clear_paro_rotation_extension_cache()
+
+    assert calls == ["clear"]
+
+
+def test_paro_has_no_environment_variable_reads():
+    """Paro runtime choices come from KernelConfig, never env vars (AGENTS.md).
+
+    The fused-rotation autotune knobs used to be read from
+    ``GPTQMODEL_PARO_ROTATE_AUTOTUNE_*`` in ``rotation.cu``, which made a
+    code path selectable outside the config object. They are internal constants
+    now; only ``KernelConfig.paro_rotate_*`` selects behaviour.
+    """
+
+    repo_root = Path(__file__).resolve().parents[1]
+    sources = [
+        *sorted((repo_root / "gptqmodel_ext" / "paro").glob("*.cu")),
+        *sorted((repo_root / "gptqmodel_ext" / "paro").glob("*.cuh")),
+        *sorted((repo_root / "gptqmodel_ext" / "paro").glob("*.cpp")),
+        *sorted((repo_root / "gptqmodel_ext" / "paro").glob("*.h")),
+    ]
+    read_tokens = ("getenv", "environ")
+    offenders = []
+    for path in sources:
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if "GPTQMODEL_PARO_" in line and any(token in line for token in read_tokens):
+                offenders.append(f"{path.relative_to(repo_root)}:{lineno}: {line.strip()}")
+
+    assert sources, "expected Paro extension sources"
+    assert not offenders, "environment-variable behaviour switches remain:\n" + "\n".join(offenders)
+
+    for name in (
+        "GPTQMODEL_PARO_ROTATE_AUTOTUNE_WARMUP",
+        "GPTQMODEL_PARO_ROTATE_AUTOTUNE_ITERS",
+        "GPTQMODEL_PARO_ROTATE_AUTOTUNE_REPEATS",
+        "GPTQMODEL_PARO_ROTATE_AUTOTUNE_TARGET_MS",
+        "GPTQMODEL_PARO_ROTATE_AUTOTUNE_MIN_SPEEDUP_PCT",
+        "GPTQMODEL_PARO_ROTATE_AUTOTUNE_MIN_SPEEDUP_US",
+    ):
+        assert all(name not in path.read_text() for path in sources), name
+
+
+def test_paro_rotation_launch_config_honors_config_overrides(monkeypatch):
+    """Guard manual launch-shape overrides so benchmarking can pin one kernel variant."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro launch-config path.")
+
+    configure_kernel(KernelConfig(paro_rotate_cta_m=16, paro_rotate_row_pad=0))
+
+    assert prewarm_paro_rotation_extension(
+        fused_rotation=True,
+        group_size=128,
+        krot=8,
+        device=torch.device("cuda"),
+    )
+
+    cta_m, row_pad = _rotation_launch_config(torch.empty((1, 128), device="cuda", dtype=torch.float16))
+    assert (cta_m, row_pad) == (16, 0)
+
+
+def test_paro_rotation_launch_config_autotunes_once_per_shape(tmp_path, monkeypatch):
+    """Guard fused rotation autotune so one native shape plan is cached and reused."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro launch-config path.")
+
+    # Isolate the persistent launch cache so a warm user cache cannot seed the
+    # in-process cache and skip the native autotune this test measures.
+    monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path))
+    clear_paro_rotation_autotune_cache()
+    configure_kernel(KernelConfig(paro_rotate_autotune=True))
+
+    assert prewarm_paro_rotation_extension(
+        fused_rotation=True,
+        group_size=128,
+        krot=8,
+        device=torch.device("cuda"),
+    )
+
+    x = torch.empty((32, 128), device="cuda", dtype=torch.float16)
+    pairs = torch.zeros((8, 128), device="cuda", dtype=torch.int16)
+    theta = torch.zeros((8, 64), device="cuda", dtype=torch.float16)
+    scales = torch.ones((1, 128), device="cuda", dtype=torch.float16)
+    x_other = torch.empty((64, 128), device="cuda", dtype=torch.float16)
+
+    assert paro_utils_module._rotation_autotune_cache_size() == 0
+    first = _rotation_launch_config(x, pairs, theta, scales=scales, group_size=128)
+    assert first in {(4, 0), (4, 2), (8, 0), (8, 2), (16, 0), (16, 2)}
+    assert paro_utils_module._rotation_autotune_cache_size() == 1
+    second = _rotation_launch_config(x, pairs, theta, scales=scales, group_size=128)
+    third = _rotation_launch_config(x_other, pairs, theta, scales=scales, group_size=128)
+
+    assert second == first
+    assert third in {(4, 0), (4, 2), (8, 0), (8, 2), (16, 0), (16, 2)}
+    assert paro_utils_module._rotation_autotune_cache_size() == 2
+    clear_paro_rotation_autotune_cache()
+    assert paro_utils_module._rotation_autotune_cache_size() == 0
+
+
+def test_paro_rotation_launch_config_serializes_concurrent_autotune(tmp_path, monkeypatch):
+    """Guard free-threaded launch autotune so one cold shape is measured once at a time."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro launch-config path.")
+
+    # A warm user cache would seed the in-process cache and bypass the fake op.
+    monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path))
+    clear_paro_rotation_autotune_cache()
+    monkeypatch.setattr(paro_utils_module, "_load_rotation_extension", lambda: True)
+    monkeypatch.setattr(paro_utils_module, "_rotation_requested_launch", lambda: (-2, -2))
+
+    state_lock = threading.Lock()
+    result_lock = threading.Lock()
+    calls = {"launch": 0, "active": 0, "max_active": 0}
+    results = []
+    failures = []
+
+    def fake_launch_config(x, krot, has_scale, group_size, cta_m, row_pad):
+        del x, krot, has_scale, group_size, cta_m, row_pad
+        with state_lock:
+            calls["launch"] += 1
+            calls["active"] += 1
+            calls["max_active"] = max(calls["max_active"], calls["active"])
+        try:
+            time.sleep(0.05)
+            return (8, 2)
+        finally:
+            with state_lock:
+                calls["active"] -= 1
+
+    def fake_op(name):
+        if name == "launch_config":
+            return fake_launch_config
+        raise AssertionError(f"unexpected op lookup: {name}")
+
+    monkeypatch.setattr(paro_utils_module._PARO_ROTATION_EXTENSION, "op", fake_op)
+
+    x = torch.empty((32, 128), device="cuda", dtype=torch.float16)
+    pairs = torch.zeros((8, 128), device="cuda", dtype=torch.int16)
+    theta = torch.zeros((8, 64), device="cuda", dtype=torch.float16)
+    scales = torch.ones((1, 128), device="cuda", dtype=torch.float16)
+    start_barrier = threading.Barrier(4)
+
+    def worker():
+        try:
+            start_barrier.wait()
+            resolved = _rotation_launch_config(x, pairs, theta, scales=scales, group_size=128)
+            with result_lock:
+                results.append(resolved)
+        except BaseException as exc:  # pragma: no cover - test should fail below instead.
+            with result_lock:
+                failures.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert results == [(8, 2)] * 4
+    assert calls["launch"] == 1
+    assert calls["max_active"] == 1
+
+    clear_paro_rotation_autotune_cache()
+
+
+def test_paro_rotation_helper_reuses_resolved_autotune_launch(monkeypatch):
+    """Guard the fused helper so autotune resolves once and steady-state runs explicitly."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro launch-config path.")
+
+    clear_paro_rotation_autotune_cache()
+    monkeypatch.setattr(paro_utils_module, "_load_rotation_extension", lambda: True)
+    monkeypatch.setattr(paro_utils_module, "_rotation_requested_launch", lambda: (-2, -2))
+
+    calls = {"launch": 0, "rotate": 0, "configs": []}
+
+    def fake_launch_config(x, krot, has_scale, group_size, cta_m, row_pad):
+        del x, krot, has_scale, group_size, cta_m, row_pad
+        calls["launch"] += 1
+        return (16, 2)
+
+    def fake_rotate(x, pairs, theta, scales, group_size, cta_m, row_pad, reverse=0):
+        del pairs, theta, scales, group_size
+        calls["rotate"] += 1
+        calls["configs"].append((cta_m, row_pad, int(reverse)))
+        return x.clone()
+
+    def fake_op(name):
+        if name == "launch_config":
+            return fake_launch_config
+        if name == "rotate":
+            return fake_rotate
+        raise AssertionError(f"unexpected op lookup: {name}")
+
+    monkeypatch.setattr(paro_utils_module._PARO_ROTATION_EXTENSION, "op", fake_op)
+
+    x = torch.randn((32, 128), device="cuda", dtype=torch.float16)
+    pairs = torch.zeros((8, 128), device="cuda", dtype=torch.int16)
+    theta = torch.zeros((8, 64), device="cuda", dtype=torch.float16)
+    scales = torch.ones((1, 128), device="cuda", dtype=torch.float16)
+
+    first = apply_paro_rotation(x, pairs, theta, scales=scales, group_size=128)
+    second = apply_paro_rotation(x, pairs, theta, scales=scales, group_size=128)
+
+    assert torch.equal(first, x)
+    assert torch.equal(second, x)
+    assert calls["launch"] == 1
+    assert calls["rotate"] == 2
+    assert calls["configs"] == [(16, 2, 0), (16, 2, 0)]
+
+    clear_paro_rotation_autotune_cache()
+    third = apply_paro_rotation(x, pairs, theta, scales=scales, group_size=128)
+
+    assert torch.equal(third, x)
+    assert calls["launch"] == 2
+    assert calls["rotate"] == 3
+    assert calls["configs"][-1] == (16, 2, 0)
+
+
+def test_paro_processor_prewarm_runtime_runs_once(monkeypatch):
+    """Guard startup prewarm so the looper does not retry the fused extension every layer."""
+    calls = []
+
+    monkeypatch.setattr(
+        paro_processor_module,
+        "prewarm_paro_rotation_extension",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_fused_rotation=True, group_size=128, krot=8)
+    processor._runtime_prewarmed = False
+
+    processor.prewarm_runtime()
+    processor.prewarm_runtime()
+
+    assert len(calls) == 1
+    assert calls[0] == {
+        "fused_rotation": True,
+        "group_size": 128,
+        "krot": 8,
+    }
+
+
+def test_paro_processor_grouped_modes_capture_pristine_context_outside_subset_forward():
+    """Guard grouped modes against treating early-stopped subset forwards as full-layer targets."""
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="compute_block")
+    assert processor.uses_grouped_optimization() is True
+    assert processor.capture_layer_forward_context_during_subset() is False
+
+    processor.qcfg = SimpleNamespace(opt_scope="layer")
+    assert processor.uses_grouped_optimization() is True
+    assert processor.capture_layer_forward_context_during_subset() is False
+
+    processor.qcfg = SimpleNamespace(opt_scope="module")
+    assert processor.uses_grouped_optimization() is False
+    assert processor.capture_layer_forward_context_during_subset() is False
+
+
+def test_paro_processor_disables_stage_cudagraph_for_module_scope_loop():
+    """Guard module scope against CUDA-graph private-pool growth across many linear optimizations."""
+    processor = object.__new__(ParoProcessor)
+
+    processor.qcfg = SimpleNamespace(opt_scope="module", opt_stage_cudagraph=True)
+    assert processor._module_scope_stage_cudagraph_enabled() is False
+
+    processor.qcfg = SimpleNamespace(opt_scope="module", opt_stage_cudagraph=False)
+    assert processor._module_scope_stage_cudagraph_enabled() is False
+
+    processor.qcfg = SimpleNamespace(opt_scope="compute_block", opt_stage_cudagraph=True)
+    assert processor._module_scope_stage_cudagraph_enabled() is True
+
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_stage_cudagraph=True)
+    assert processor._module_scope_stage_cudagraph_enabled() is True
+
+
+def test_paro_processor_module_quantize_forces_stage_cudagraph_off(monkeypatch):
+    """Guard the full model module loop against per-linear CUDA-graph pool retention."""
+    stage_cudagraph_calls = []
+    optimizer_name_calls = []
+    optimizer_kwargs_calls = []
+
+    def fake_optimize_paro_linear(*, weight, stage_cudagraph=None, optimizer_name="adamw", **kwargs):
+        stage_cudagraph_calls.append(stage_cudagraph)
+        optimizer_name_calls.append(optimizer_name)
+        optimizer_kwargs_calls.append(kwargs)
+        zeros = torch.zeros((weight.shape[0], weight.shape[1] // 128), dtype=weight.dtype)
+        return SimpleNamespace(
+            train_loss=0.0,
+            val_loss=0.0,
+            pseudo_weight=weight.detach().clone(),
+            pack_weight=weight.detach().clone(),
+            q_scales=torch.ones_like(zeros),
+            q_zeros=torch.zeros_like(zeros, dtype=torch.int32),
+            pairs=torch.zeros((1, weight.shape[1]), dtype=torch.int16),
+            theta=torch.zeros((1, weight.shape[1] // 2), dtype=weight.dtype),
+            channel_scales=torch.ones((1, weight.shape[1]), dtype=weight.dtype),
+        )
+
+    monkeypatch.setattr(paro_processor_module, "optimize_paro_linear", fake_optimize_paro_linear)
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="module",
+        opt_stage_cudagraph=True,
+        dynamic_get=lambda _name, _field, default=None: default,
+        resolve_module_config=_default_resolved_module_config,
+        runtime_bits=4,
+        group_size=128,
+        sym=True,
+        krot=8,
+        opt_pair_ratio=0.25,
+        gsq=None,
+        opt_train_samples=128,
+        opt_validation_samples=32,
+        opt_batch_size=16,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=1,
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_seed=0,
+        opt_optimizer="sgd",
+        opt_weight_decay=0.02,
+        opt_betas=(0.8, 0.9),
+        opt_eps=1e-8,
+        opt_amsgrad=True,
+        opt_sgd_momentum=0.85,
+        opt_sgd_dampening=0.0,
+        opt_sgd_nesterov=True,
+        opt_fused_rotation=True,
+        opt_best_state_dtype="fp16",
+        opt_stage_impl="fast",
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+    )
+    processor.calculate_w_wq_diff = False
+    processor.lock = threading.Lock()
+
+    module = SimpleNamespace(
+        name="self_attn.q_proj",
+        full_name="model.layers.0.self_attn.q_proj",
+        layer_index=0,
+        weight=torch.nn.Parameter(torch.randn((8, 128), dtype=torch.float32)),
+        bias=None,
+        state={},
+    )
+
+    processor._quantize_one_module(module, torch.randn((32, 128), dtype=torch.float32))
+
+    assert stage_cudagraph_calls == [False]
+    assert optimizer_name_calls == ["sgd"]
+    assert len(optimizer_kwargs_calls) == 1
+    forwarded_kwargs = optimizer_kwargs_calls[0]
+    assert forwarded_kwargs["bias"] is None
+    assert isinstance(forwarded_kwargs["inputs"], torch.Tensor)
+    assert tuple(forwarded_kwargs["inputs"].shape) == (32, 128)
+    assert forwarded_kwargs["bits"] == 4
+    assert forwarded_kwargs["group_size"] == 128
+    assert forwarded_kwargs["sym"] is True
+    assert forwarded_kwargs["krot"] == 8
+    assert forwarded_kwargs["pair_ratio"] == pytest.approx(0.25)
+    assert forwarded_kwargs["train_rows"] == 128
+    assert forwarded_kwargs["val_rows"] == 32
+    assert forwarded_kwargs["batch_size"] == 16
+    assert forwarded_kwargs["rotation_epochs"] == 1
+    assert forwarded_kwargs["finetune_epochs"] == 1
+    assert forwarded_kwargs["rotation_lr"] == pytest.approx(0.05)
+    assert forwarded_kwargs["weight_lr"] == pytest.approx(1e-5)
+    assert forwarded_kwargs["quantizer_lr"] == pytest.approx(1e-6)
+    assert isinstance(forwarded_kwargs["seed"], int)
+    assert forwarded_kwargs["optimizer_weight_decay"] == pytest.approx(0.02)
+    assert forwarded_kwargs["optimizer_betas"] == pytest.approx((0.8, 0.9))
+    assert forwarded_kwargs["optimizer_eps"] == pytest.approx(1e-8)
+    assert forwarded_kwargs["optimizer_amsgrad"] is True
+    assert forwarded_kwargs["sgd_momentum"] == pytest.approx(0.85)
+    assert forwarded_kwargs["sgd_dampening"] == pytest.approx(0.0)
+    assert forwarded_kwargs["sgd_nesterov"] is True
+    assert forwarded_kwargs["fused_rotation"] is True
+    assert forwarded_kwargs["gradient_checkpointing"] is False
+    assert forwarded_kwargs["best_state_dtype"] == "fp16"
+    assert forwarded_kwargs["stage_impl"] == "fast"
+    assert forwarded_kwargs["pair_impl"] == "fast"
+    assert forwarded_kwargs["quantizer_impl"] == "reference"
+    assert forwarded_kwargs["scale_clamp_min"] == pytest.approx(1e-2)
+    assert forwarded_kwargs["scale_clamp_max"] == pytest.approx(1e2)
+
+
+def test_paro_processor_layer_scope_live_path_is_dense_only():
+    """Guard the official-like live layer path for dense decoder layers only."""
+    dense_modules = [
+        SimpleNamespace(name="self_attn.q_proj"),
+        SimpleNamespace(name="self_attn.k_proj"),
+        SimpleNamespace(name="self_attn.v_proj"),
+        SimpleNamespace(name="self_attn.o_proj"),
+        SimpleNamespace(name="mlp.gate_proj"),
+        SimpleNamespace(name="mlp.up_proj"),
+        SimpleNamespace(name="mlp.down_proj"),
+    ]
+    moe_modules = [
+        SimpleNamespace(name="self_attn.q_proj"),
+        SimpleNamespace(name="mlp.experts.0.gate_up_proj"),
+        SimpleNamespace(name="mlp.experts.0.down_proj"),
+    ]
+
+    assert ParoProcessor._supports_live_layer_scope(dense_modules) is True
+    assert ParoProcessor._supports_live_layer_scope(moe_modules) is False
+
+
+@pytest.mark.parametrize(
+    ("opt_scope", "expected_capture"),
+    [
+        ("module", False),
+        ("compute_block", True),
+        ("layer", True),
+    ],
+)
+def test_paro_processor_enables_layer_context_capture_only_for_grouped_scopes(opt_scope, expected_capture):
+    """Guard module scope against retaining pristine layer IO it never consumes."""
+    processor = ParoProcessor(
+        tokenizer=None,
+        qcfg=ParoConfig(bits=4, group_size=128, opt_scope=opt_scope),
+        calibration=CalibrationConfig(),
+        gptq_model=None,
+        model=None,
+    )
+
+    assert processor.forward.capture_layer_context is expected_capture
+
+
+@pytest.mark.parametrize(
+    ("opt_scope", "opt_gradient_checkpointing", "expected"),
+    [
+        ("module", None, False),
+        ("compute_block", None, False),
+        ("layer", None, True),
+        ("module", True, True),
+        ("layer", False, False),
+    ],
+)
+def test_paro_processor_resolves_gradient_checkpointing_by_scope(opt_scope, opt_gradient_checkpointing, expected):
+    """Processor runtime should mirror the config default and explicit override semantics."""
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope=opt_scope,
+        opt_gradient_checkpointing=opt_gradient_checkpointing,
+    )
+
+    assert processor._gradient_checkpointing_enabled() is expected
+
+
+def test_paro_processor_skips_pristine_layer_clone_for_layer_scope():
+    """Guard layer scope against retaining an unused pristine layer clone on CPU."""
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="layer")
+    processor._layer_states = {}
+    processor._layer_states_lock = threading.Lock()
+
+    layer = torch.nn.Linear(4, 4, bias=False)
+    processor.receive_pristine_layer_module(layer_index=0, layer_module=layer)
+
+    assert processor._layer_states == {}
+
+
+def test_paro_processor_routes_non_module_units_through_group_optimizer():
+    """Guard that compute_block/layer modes now use grouped optimization instead of raising."""
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="compute_block")
+    processor.fallback = True
+    processor.lock = threading.Lock()
+    processor.tasks = {}
+    processor.calculate_w_wq_diff = False
+    processor._log_quant_result = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    layer = torch.nn.Module()
+    layer.self_attn = torch.nn.Module()
+    layer.self_attn.q_proj = torch.nn.Linear(8, 8, bias=False)
+    layer.self_attn.k_proj = torch.nn.Linear(8, 8, bias=False)
+    layer.self_attn.v_proj = torch.nn.Linear(8, 8, bias=False)
+
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+    processor._layer_input_features = lambda _state: {  # type: ignore[method-assign]
+        q_proj.name: torch.randn(4, 8),
+        k_proj.name: torch.randn(4, 8),
+        v_proj.name: torch.randn(4, 8),
+    }
+
+    observed_groups = []
+
+    def fake_optimize_group(state, group_modules):
+        del state
+        observed_groups.append([module.name for module in group_modules])
+        results = {}
+        for module in group_modules:
+            weight = module.weight.data.detach()
+            results[module.name] = SimpleNamespace(
+                pseudo_weight=weight + 1.0,
+                pack_weight=weight + 2.0,
+                q_scales=torch.ones((weight.shape[0], max(1, weight.shape[1] // 8)), dtype=weight.dtype),
+                q_zeros=torch.zeros((weight.shape[0], max(1, weight.shape[1] // 8)), dtype=torch.int32),
+                pairs=torch.zeros((1, 8), dtype=torch.int16),
+                theta=torch.zeros((1, weight.shape[1] // 2), dtype=weight.dtype),
+                channel_scales=torch.ones((1, weight.shape[1]), dtype=weight.dtype),
+            )
+        return results, 0.25
+
+    processor._optimize_group = fake_optimize_group  # type: ignore[method-assign]
+
+    state = SimpleNamespace(
+        quantized=False,
+        modules={q_proj.name: q_proj, k_proj.name: k_proj, v_proj.name: v_proj},
+        layer_inputs=[[torch.randn(1, 2, 8)]],
+        layer_outputs=[[torch.randn(1, 2, 8)]],
+        pending_modules=set(),
+        processed_subsets={0},
+        subset_total=1,
+    )
+
+    original_q_weight = q_proj.weight.data.clone()
+    processor._quantize_layer(layer_index=0, state=state)
+
+    assert observed_groups == [["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]]
+    torch.testing.assert_close(q_proj.weight.data, original_q_weight + 1.0)
+    assert state.quantized is True
+    assert state.modules == {}
+    assert state.pending_modules == set()
+    assert state.processed_subsets == set()
+
+
+def test_paro_processor_compute_block_scope_flushes_cuda_cache_between_groups(monkeypatch):
+    """Guard compute_block scope against carrying allocator cache forward between grouped passes when offload is on."""
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="compute_block", offload_to_disk=True)
+    processor.fallback = True
+    processor.lock = threading.Lock()
+    processor.tasks = {}
+    processor.calculate_w_wq_diff = False
+    processor._log_quant_result = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    layer = torch.nn.Module()
+    layer.self_attn = torch.nn.Module()
+    layer.self_attn.q_proj = torch.nn.Linear(8, 8, bias=False)
+    layer.self_attn.k_proj = torch.nn.Linear(8, 8, bias=False)
+    layer.self_attn.v_proj = torch.nn.Linear(8, 8, bias=False)
+
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+    processor._layer_input_features = lambda _state: {  # type: ignore[method-assign]
+        q_proj.name: torch.randn(4, 8),
+        k_proj.name: torch.randn(4, 8),
+        v_proj.name: torch.randn(4, 8),
+    }
+
+    def fake_optimize_group(state, group_modules):
+        del state
+        results = {}
+        for module in group_modules:
+            weight = module.weight.data.detach()
+            results[module.name] = SimpleNamespace(
+                pseudo_weight=weight + 1.0,
+                pack_weight=weight + 2.0,
+                q_scales=torch.ones((weight.shape[0], max(1, weight.shape[1] // 8)), dtype=weight.dtype),
+                q_zeros=torch.zeros((weight.shape[0], max(1, weight.shape[1] // 8)), dtype=torch.int32),
+                pairs=torch.zeros((1, 8), dtype=torch.int16),
+                theta=torch.zeros((1, weight.shape[1] // 2), dtype=weight.dtype),
+                channel_scales=torch.ones((1, weight.shape[1]), dtype=weight.dtype),
+            )
+        return results, 0.25
+
+    processor._optimize_group = fake_optimize_group  # type: ignore[method-assign]
+
+    empty_cache_calls = []
+    monkeypatch.setattr(
+        paro_processor_module,
+        "torch_empty_cache",
+        lambda device=None, gc=True, sync=False: empty_cache_calls.append(
+            {"device": device, "gc": gc, "sync": sync}
+        ),
+    )
+
+    state = SimpleNamespace(
+        quantized=False,
+        modules={q_proj.name: q_proj, k_proj.name: k_proj, v_proj.name: v_proj},
+        layer_inputs=[[torch.randn(1, 2, 8)]],
+        layer_outputs=[[torch.randn(1, 2, 8)]],
+        pending_modules=set(),
+        processed_subsets={0},
+        subset_total=1,
+    )
+
+    processor._quantize_layer(layer_index=0, state=state)
+
+    assert empty_cache_calls == [{"device": torch.device("cpu"), "gc": False, "sync": True}]
+
+
+def test_paro_processor_layer_scope_falls_back_to_clone_for_expert_like_groups(monkeypatch):
+    """Guard expert-like layer groups against accidentally taking the dense live path."""
+    import gptqmodel.looper.paro_processor as paro_processor_module
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="layer",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=0,
+        opt_finetune_epochs=0,
+    )
+    state = SimpleNamespace()
+    group_modules = [
+        SimpleNamespace(name="self_attn.q_proj"),
+        SimpleNamespace(name="mlp.experts.0.gate_up_proj"),
+    ]
+
+    live_calls = []
+    clone_calls = []
+
+    def fake_live(_state, _modules):
+        live_calls.append(True)
+        return {}, 0.0
+
+    processor._optimize_live_layer = fake_live  # type: ignore[method-assign]
+
+    def _fake_optim_module():
+        return SimpleNamespace(
+            channel_scales_opt=torch.nn.Parameter(torch.ones(1)),
+            theta=torch.nn.Parameter(torch.zeros(1)),
+            weight=torch.nn.Parameter(torch.ones(1, 1)),
+            quantizer=None,
+            init_quantizer=lambda: None,
+        )
+
+    def fake_build_group_optim_layer(_state, _modules):
+        clone_calls.append(True)
+        return torch.nn.Linear(4, 4, bias=False), {
+            module.name: _fake_optim_module() for module in _modules
+        }
+
+    processor._build_group_optim_layer = fake_build_group_optim_layer  # type: ignore[method-assign]
+    processor._group_dataset_for_device = lambda *_args, **_kwargs: ([], [], [], [], [], [], [], [], [], [])  # type: ignore[method-assign]
+    processor._run_group_stage = lambda *args, **kwargs: (0.0, 0.0)  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        paro_processor_module,
+        "_result_from_model",
+        lambda _optim_module, **_kwargs: SimpleNamespace(ok=True),
+    )
+
+    results, val_loss = processor._optimize_group(state, group_modules)
+
+    assert live_calls == []
+    assert clone_calls == [True]
+    assert set(results) == {"self_attn.q_proj", "mlp.experts.0.gate_up_proj"}
+    assert val_loss == 0.0
+
+
+def test_paro_processor_captures_first_layer_forward_context():
+    """Guard that grouped optimization modes keep the original float layer IO once."""
+    processor = object.__new__(ParoProcessor)
+    processor._layer_states = {}
+    processor._layer_states_lock = threading.Lock()
+
+    first_inputs = [[torch.randn(1, 4)]]
+    first_kwargs = [{"attention_mask": torch.ones((1, 4), dtype=torch.int64)}]
+    first_outputs = [[torch.randn(1, 4)]]
+    second_inputs = [[torch.randn(1, 4)]]
+    second_kwargs = [{"attention_mask": torch.zeros((1, 4), dtype=torch.int64)}]
+    second_outputs = [[torch.randn(1, 4)]]
+
+    processor.receive_layer_forward_context(
+        layer_index=0,
+        layer_inputs=first_inputs,
+        layer_input_kwargs=first_kwargs,
+        layer_outputs=first_outputs,
+        subset_index=0,
+        subset_total=2,
+    )
+    processor.receive_layer_forward_context(
+        layer_index=0,
+        layer_inputs=second_inputs,
+        layer_input_kwargs=second_kwargs,
+        layer_outputs=second_outputs,
+        subset_index=1,
+        subset_total=2,
+    )
+
+    state = processor._get_layer_state(0)
+    assert state.layer_inputs is first_inputs
+    assert state.layer_input_kwargs is first_kwargs
+    assert state.layer_outputs is first_outputs
+    assert state.subset_total == 2
+
+
+def test_paro_processor_group_clean_inputs_seed_from_input_cache():
+    """Guard grouped clean targets against aliasing the noisy replay cache."""
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_train_on_noisy_inputs=True)
+    processor._input_cache_lock = threading.RLock()
+    clean_inputs = [[torch.randn(1, 4)]]
+    noisy_inputs = [[torch.randn(1, 4)]]
+    cache = InputCache(
+        layer_inputs=clean_inputs,
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    processor.receive_input_cache(cache)
+
+    assert processor.inputs_cache.layer_inputs is clean_inputs
+    assert processor.clean_group_layer_inputs(layer_index=0, layer_inputs=noisy_inputs) is clean_inputs
+
+
+def test_paro_processor_group_clean_inputs_default_to_noisy_stream():
+    """Guard default grouped behavior against enabling train-on-noisy-inputs implicitly."""
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_train_on_noisy_inputs=False)
+    processor._input_cache_lock = threading.RLock()
+    clean_inputs = [[torch.randn(1, 4)]]
+    noisy_inputs = [[torch.randn(1, 4)]]
+    processor.receive_input_cache(
+        InputCache(
+            layer_inputs=clean_inputs,
+            layer_input_kwargs=[{}],
+            position_ids=[None],
+            attention_masks=[None],
+        )
+    )
+
+    assert processor.clean_group_layer_inputs(layer_index=0, layer_inputs=noisy_inputs) is noisy_inputs
+
+
+def test_paro_processor_group_capture_uses_pristine_module_and_clean_inputs_for_targets():
+    """Guard grouped capture so targets come from the untouched module on the clean stream."""
+
+    class _PristineLayer(torch.nn.Module):
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            return x + 1.0
+
+    class _HookedLikeLayer(torch.nn.Module):
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            return x + 100.0
+
+    class _DummyPB:
+        def manual(self):
+            return self
+
+        def set(self, **kwargs):
+            del kwargs
+            return self
+
+        def title(self, _value):
+            return self
+
+        def subtitle(self, _value):
+            return self
+
+        def draw(self):
+            return self
+
+        def close(self):
+            return None
+
+    class _DummyLog:
+        def pb(self, _iterable):
+            return _DummyPB()
+
+    class _DummyLooper:
+        def _resolve_batch_total(self, _num_batches, layer_inputs):
+            return len(layer_inputs)
+
+        def _collect_row_counts(self, layer_inputs):
+            return [1 for _ in layer_inputs]
+
+        def _run_forward_batches(
+            self,
+            *,
+            module,
+            processor,
+            layer_inputs,
+            layer_input_kwargs,
+            position_ids,
+            attention_masks,
+            cur_layer_device,
+            is_lm_head_module,
+            shared_kv_cache_dict,
+            layer_index,
+            need_outputs,
+            reuse_kv,
+            progress_pb,
+            progress_title,
+            progress_stage,
+            progress_rows_per_batch,
+            progress_total_rows,
+            force_serial,
+            preserve_module_devices,
+            apply_moe_config,
+        ):
+            del (
+                processor,
+                position_ids,
+                attention_masks,
+                cur_layer_device,
+                is_lm_head_module,
+                shared_kv_cache_dict,
+                layer_index,
+                need_outputs,
+                reuse_kv,
+                progress_pb,
+                progress_title,
+                progress_stage,
+                progress_rows_per_batch,
+                progress_total_rows,
+                force_serial,
+                preserve_module_devices,
+                apply_moe_config,
+            )
+            outputs = []
+            for batch_inputs, batch_kwargs in zip(layer_inputs, layer_input_kwargs):
+                outputs.append([module(batch_inputs[0], **batch_kwargs)])
+            return outputs
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_train_on_noisy_inputs=True)
+    processor._layer_states = {}
+    processor._layer_states_lock = threading.Lock()
+    processor._input_cache_lock = threading.RLock()
+
+    clean_inputs = [[torch.tensor([[1.0]])]]
+    noisy_inputs = [[torch.tensor([[3.0]])]]
+    clean_cache = InputCache(
+        layer_inputs=clean_inputs,
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+    processor.receive_input_cache(clean_cache)
+
+    _capture_pristine_group_context(
+        _DummyLooper(),
+        processor=processor,
+        module=_HookedLikeLayer(),
+        pristine_module=_PristineLayer(),
+        subset_plans=[SimpleNamespace()],
+        layer_inputs=noisy_inputs,
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        layer_descriptor="model.layers.0",
+        full={},
+        log=_DummyLog(),
+        region_timer=None,
+    )
+
+    state = processor._get_layer_state(0)
+    assert state.layer_inputs is noisy_inputs
+    torch.testing.assert_close(state.layer_outputs[0][0], torch.tensor([[2.0]]))
+    torch.testing.assert_close(processor.clean_group_layer_inputs(layer_index=1, layer_inputs=noisy_inputs)[0][0], torch.tensor([[2.0]]))
+
+
+def test_paro_processor_group_capture_advances_clean_stream_without_subset_plans():
+    """Guard clean/noisy replay semantics for grouped layers that are dynamically skipped."""
+
+    class _ToyLayer(torch.nn.Module):
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            return x + 5.0
+
+    class _DummyPB:
+        def manual(self):
+            return self
+
+        def set(self, **kwargs):
+            del kwargs
+            return self
+
+        def title(self, _value):
+            return self
+
+        def subtitle(self, _value):
+            return self
+
+        def draw(self):
+            return self
+
+        def close(self):
+            return None
+
+    class _DummyLog:
+        def pb(self, _iterable):
+            return _DummyPB()
+
+    class _DummyLooper:
+        def _resolve_batch_total(self, _num_batches, layer_inputs):
+            return len(layer_inputs)
+
+        def _collect_row_counts(self, layer_inputs):
+            return [1 for _ in layer_inputs]
+
+        def _run_forward_batches(self, **kwargs):
+            layer_inputs = kwargs["layer_inputs"]
+            module = kwargs["module"]
+            layer_input_kwargs = kwargs["layer_input_kwargs"]
+            return [[module(batch[0], **batch_kwargs)] for batch, batch_kwargs in zip(layer_inputs, layer_input_kwargs)]
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_train_on_noisy_inputs=True)
+    processor._layer_states = {}
+    processor._layer_states_lock = threading.Lock()
+    processor._input_cache_lock = threading.RLock()
+    processor.receive_input_cache(
+        InputCache(
+            layer_inputs=[[torch.tensor([[2.0]])]],
+            layer_input_kwargs=[{}],
+            position_ids=[None],
+            attention_masks=[None],
+        )
+    )
+
+    noisy_inputs = [[torch.tensor([[9.0]])]]
+    _capture_pristine_group_context(
+        _DummyLooper(),
+        processor=processor,
+        module=_ToyLayer(),
+        pristine_module=None,
+        subset_plans=[],
+        layer_inputs=noisy_inputs,
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        layer_descriptor="model.layers.0",
+        full={},
+        log=_DummyLog(),
+        region_timer=None,
+    )
+
+    state = processor._get_layer_state(0)
+    assert state.layer_inputs is None
+    assert state.layer_outputs is None
+    torch.testing.assert_close(processor.clean_group_layer_inputs(layer_index=1, layer_inputs=noisy_inputs)[0][0], torch.tensor([[7.0]]))
+
+
+def test_paro_quantize_layer_clears_stored_forward_context():
+    """Guard that transient grouped-optimization IO snapshots do not leak across layers."""
+    module = SimpleNamespace(
+        name="mlp.gate_proj",
+        full_name="model.layers.0.mlp.gate_proj",
+        weight=SimpleNamespace(data=torch.randn(8, 8)),
+        bias=None,
+    )
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="module")
+    processor.fallback = True
+    processor.lock = threading.Lock()
+    processor.tasks = {"mlp.gate_proj": {"inputs": [torch.randn(1, 8)], "layer_index": 0}}
+    processor._layer_input_features = lambda _state: {"mlp.gate_proj": torch.randn(4, 8)}
+    processor._quantize_one_module = lambda named_module, feat: (0.0, float(feat.numel() > 0))  # type: ignore[method-assign]
+    processor._log_quant_result = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    state = SimpleNamespace(
+        quantized=False,
+        modules={"mlp.gate_proj": module},
+        pending_modules=set(),
+        processed_subsets={0},
+        pristine_layer_module=torch.nn.Linear(8, 8, bias=False),
+        prepared_group_source_module=torch.nn.Linear(8, 8, bias=False),
+        prepared_group_source_module_by_device={"cpu": torch.nn.Linear(8, 8, bias=False)},
+        layer_inputs=[[torch.randn(1, 8)]],
+        layer_input_kwargs=[{"attention_mask": torch.ones((1, 8), dtype=torch.int64)}],
+        layer_outputs=[[torch.randn(1, 8)]],
+        grouped_dataset=("cached",),
+        grouped_dataset_by_device={"cpu": ("cached",)},
+        subset_total=1,
+    )
+
+    processor._quantize_layer(layer_index=0, state=state)
+
+    assert state.quantized is True
+    assert state.modules == {}
+    assert state.pending_modules == set()
+    assert state.processed_subsets == set()
+    assert state.layer_inputs is None
+    assert state.layer_input_kwargs is None
+    assert state.layer_outputs is None
+    assert state.pristine_layer_module is None
+    assert state.prepared_group_source_module is None
+    assert state.prepared_group_source_module_by_device is None
+    assert state.grouped_dataset is None
+    assert state.grouped_dataset_by_device is None
+    assert state.subset_total is None
+    assert processor.tasks["mlp.gate_proj"]["inputs"] == []
+
+
+def test_paro_processor_builds_group_optim_layer_clone():
+    """Guard that compute_block/layer modes can swap selected modules into a cloned float layer."""
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(_attn_implementation="sdpa")
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+    class _ToyMlp(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(8, 8, bias=False)
+            self.up_proj = torch.nn.Linear(8, 8, bias=False)
+            self.down_proj = torch.nn.Linear(8, 8, bias=False)
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+            self.mlp = _ToyMlp()
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer().half()
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="compute_block",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        dynamic_get=_dynamic_get,
+        resolve_module_config=_default_resolved_module_config,
+    )
+
+    state = SimpleNamespace(layer_module=layer)
+    layer_clone, optim_modules = processor._build_group_optim_layer(state, [q_proj, k_proj])
+
+    assert layer_clone is not layer
+    assert isinstance(layer.self_attn.q_proj, torch.nn.Linear)
+    assert isinstance(layer.self_attn.k_proj, torch.nn.Linear)
+    assert isinstance(layer_clone.self_attn.q_proj, _ParoOptimLinear)
+    assert isinstance(layer_clone.self_attn.k_proj, _ParoOptimLinear)
+    assert isinstance(layer_clone.self_attn.v_proj, torch.nn.Linear)
+    assert set(optim_modules) == {"self_attn.q_proj", "self_attn.k_proj"}
+    assert layer_clone.self_attn.q_proj.weight.dtype == torch.float32
+    assert layer_clone.self_attn.k_proj.weight.dtype == torch.float32
+    assert layer_clone.self_attn.config._attn_implementation == "eager"
+
+
+def test_paro_processor_builds_group_optim_layer_from_pristine_snapshot():
+    """Guard grouped clones against inheriting HookedLinear-style mutations from the live layer."""
+
+    class _HookedLike(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.randn(8, 8))
+
+        def forward(self, x):
+            return x
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(_attn_implementation="sdpa")
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    pristine_layer = _ToyLayer().half()
+    live_layer = copy.deepcopy(pristine_layer)
+    live_layer.self_attn.o_proj = _HookedLike()
+
+    q_proj = NamedModule(
+        live_layer.self_attn.q_proj,
+        "self_attn.q_proj",
+        "model.layers.0.self_attn.q_proj",
+        0,
+    )
+    k_proj = NamedModule(
+        live_layer.self_attn.k_proj,
+        "self_attn.k_proj",
+        "model.layers.0.self_attn.k_proj",
+        0,
+    )
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="compute_block",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        dynamic_get=_dynamic_get,
+        resolve_module_config=_default_resolved_module_config,
+    )
+
+    state = SimpleNamespace(
+        layer_module=live_layer,
+        pristine_layer_module=pristine_layer,
+    )
+    layer_clone, _optim_modules = processor._build_group_optim_layer(state, [q_proj, k_proj])
+
+    assert isinstance(layer_clone.self_attn.q_proj, _ParoOptimLinear)
+    assert isinstance(layer_clone.self_attn.k_proj, _ParoOptimLinear)
+    assert isinstance(layer_clone.self_attn.o_proj, torch.nn.Linear)
+    assert not isinstance(layer_clone.self_attn.o_proj, _HookedLike)
+
+
+def test_paro_processor_reuses_cached_group_source_clone():
+    """Guard grouped clone preparation against rebuilding from a later-mutated pristine snapshot."""
+
+    class _HookedLike(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.randn(8, 8))
+
+        def forward(self, x):
+            return x
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(_attn_implementation="sdpa")
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    pristine_layer = _ToyLayer().half()
+    live_layer = copy.deepcopy(pristine_layer)
+    q_proj = NamedModule(
+        live_layer.self_attn.q_proj,
+        "self_attn.q_proj",
+        "model.layers.0.self_attn.q_proj",
+        0,
+    )
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="compute_block",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        dynamic_get=_dynamic_get,
+        resolve_module_config=_default_resolved_module_config,
+    )
+
+    state = SimpleNamespace(
+        layer_module=live_layer,
+        pristine_layer_module=pristine_layer,
+        prepared_group_source_module=None,
+    )
+    processor._build_group_optim_layer(state, [q_proj])
+    assert state.prepared_group_source_module is not None
+
+    state.pristine_layer_module.self_attn.o_proj = _HookedLike()
+    layer_clone, _optim_modules = processor._build_group_optim_layer(state, [q_proj])
+
+    assert isinstance(layer_clone.self_attn.o_proj, torch.nn.Linear)
+    assert not isinstance(layer_clone.self_attn.o_proj, _HookedLike)
+
+
+def test_paro_processor_reuses_cached_group_source_clone_per_device():
+    """Guard grouped clone preparation against repeating the same device-local source setup."""
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(_attn_implementation="sdpa")
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer().half()
+    q_proj = NamedModule(
+        layer.self_attn.q_proj,
+        "self_attn.q_proj",
+        "model.layers.0.self_attn.q_proj",
+        0,
+    )
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="compute_block",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        dynamic_get=_dynamic_get,
+        resolve_module_config=_default_resolved_module_config,
+    )
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        prepared_group_source_module=None,
+        prepared_group_source_module_by_device=None,
+    )
+    processor._build_group_optim_layer(state, [q_proj])
+    cached_source = state.prepared_group_source_module_by_device["cpu"]
+
+    processor._build_group_optim_layer(state, [q_proj])
+
+    assert state.prepared_group_source_module is not None
+    assert state.prepared_group_source_module_by_device is not None
+    assert state.prepared_group_source_module_by_device["cpu"] is cached_source
+
+
+def test_paro_processor_device_group_source_cache_is_compute_block_only():
+    """Guard grouped source-device caching so whole-layer mode keeps the simpler one-shot path."""
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(_attn_implementation="sdpa")
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer().half()
+    q_proj = NamedModule(
+        layer.self_attn.q_proj,
+        "self_attn.q_proj",
+        "model.layers.0.self_attn.q_proj",
+        0,
+    )
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="layer",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        dynamic_get=_dynamic_get,
+        resolve_module_config=_default_resolved_module_config,
+    )
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        prepared_group_source_module=None,
+        prepared_group_source_module_by_device=None,
+    )
+    processor._build_group_optim_layer(state, [q_proj])
+
+    assert state.prepared_group_source_module is not None
+    assert state.prepared_group_source_module_by_device is None
+
+
+def test_paro_processor_caches_group_dataset_split():
+    """Guard grouped dataset slicing against recomputing the same train/val split every group."""
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=4, opt_validation_samples=2)
+    processor.inputs_cache = SimpleNamespace(position_ids=[], attention_masks=[])
+
+    inputs = [[torch.randn(1, 4)], [torch.randn(1, 4)]]
+    outputs = [[torch.randn(1, 4)], [torch.randn(1, 4)]]
+    state = SimpleNamespace(
+        layer_inputs=inputs,
+        layer_input_kwargs=[{}, {}],
+        layer_outputs=outputs,
+        grouped_dataset=None,
+    )
+
+    first = processor._group_dataset_from_state(state)
+    assert state.grouped_dataset is first
+
+    state.layer_inputs = []
+    state.layer_input_kwargs = []
+    state.layer_outputs = []
+    second = processor._group_dataset_from_state(state)
+
+    assert second is first
+
+
+def test_paro_processor_merges_equivalent_group_optimizer_param_groups():
+    """Guard grouped AdamW setup against spawning redundant one-parameter optimizer groups."""
+    p1 = torch.nn.Parameter(torch.randn(4))
+    p2 = torch.nn.Parameter(torch.randn(4))
+    p3 = torch.nn.Parameter(torch.randn(4))
+    processor = object.__new__(ParoProcessor)
+
+    groups = processor._normalize_group_optimizer_param_groups(
+        [
+            {"params": [p1], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+            {"params": [p2], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+            {"params": [p1], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+            {"params": [p3], "lr": 1e-5, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+        ]
+    )
+
+    assert len(groups) == 2
+    assert groups[0]["params"] == [p1, p2]
+    assert groups[1]["params"] == [p3]
+
+
+def test_paro_processor_group_adamw_uses_merged_groups(monkeypatch):
+    """Guard grouped optimizer setup against re-expanding merged parameter buckets."""
+    processor = object.__new__(ParoProcessor)
+    param_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    param = torch.nn.Parameter(torch.randn(4, device=param_device))
+    calls = []
+
+    class _FakeOptimizer:
+        def __init__(self):
+            self.param_groups = [{"params": [param], "lr": 0.05}]
+
+    def fake_adamw(param_groups, **kwargs):
+        calls.append((param_groups, kwargs.copy()))
+        return _FakeOptimizer()
+
+    monkeypatch.setattr(torch.optim, "AdamW", fake_adamw)
+    optimizer = processor._build_group_adamw(
+        [{"params": [param], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}],
+        device=torch.device("cuda"),
+    )
+
+    assert isinstance(optimizer, _FakeOptimizer)
+    expected_kwargs = {"fused": True} if torch.cuda.is_available() else {}
+    expected_param_group = {
+        "params": [param],
+        "lr": 0.05,
+        "weight_decay": 0.01,
+        "betas": (0.9, 0.95),
+        "eps": 1e-10,
+        "amsgrad": False,
+    }
+    assert calls == [([expected_param_group], expected_kwargs)]
+
+
+def test_paro_stage_merges_identical_optimizer_param_groups():
+    """Guard the live stage path against paying one AdamW call per one-tensor group."""
+    channel_scales = torch.nn.Parameter(torch.randn(4))
+    theta = torch.nn.Parameter(torch.randn(4))
+    weight = torch.nn.Parameter(torch.randn(4))
+
+    groups = paro_optimization._normalize_optimizer_param_groups(
+        [
+            {"params": [channel_scales], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+            {"params": [theta], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+            {"params": [weight], "lr": 1e-5, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+        ]
+    )
+
+    assert len(groups) == 2
+    assert groups[0]["params"] == [channel_scales, theta]
+    assert groups[1]["params"] == [weight]
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"lr": 0.051},
+        {"weight_decay": 0.02},
+        {"betas": (0.9, 0.96)},
+        {"eps": 1e-9},
+        {"amsgrad": True},
+        {"momentum": 0.5},
+        {"dampening": 0.1},
+        {"nesterov": True},
+    ],
+)
+def test_paro_stage_group_merge_requires_identical_hyperparameters(override):
+    """Guard the merge from folding groups AdamW would update with different scalars."""
+    first = torch.nn.Parameter(torch.randn(4))
+    second = torch.nn.Parameter(torch.randn(4))
+    base = {"lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}
+
+    groups = paro_optimization._normalize_optimizer_param_groups(
+        [
+            {"params": [first], **base},
+            {"params": [second], **{**base, **override}},
+        ]
+    )
+
+    assert len(groups) == 2
+    assert groups[0]["params"] == [first]
+    assert groups[1]["params"] == [second]
+
+
+def test_paro_stage_group_merge_keeps_distinct_device_dtype_signatures_apart():
+    """Guard the merge from changing how many fused calls a mixed-dtype group list makes."""
+    fp32_param = torch.nn.Parameter(torch.randn(4, dtype=torch.float32))
+    fp16_param = torch.nn.Parameter(torch.randn(4, dtype=torch.float16))
+    base = {"lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}
+
+    groups = paro_optimization._normalize_optimizer_param_groups(
+        [
+            {"params": [fp32_param], **base},
+            {"params": [fp16_param], **base},
+        ]
+    )
+
+    assert len(groups) == 2
+    assert groups[0]["params"] == [fp32_param]
+    assert groups[1]["params"] == [fp16_param]
+
+
+def test_paro_merged_group_adamw_step_is_bitwise_identical():
+    """Guard that folding identical groups leaves every parameter update bitwise unchanged."""
+    torch.manual_seed(7)
+    optimizer_kwargs = {"lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}
+    initial = [torch.randn(16) for _ in range(2)]
+    grads = [torch.randn(16) * 1e-3 for _ in range(2)]
+
+    split_params = [torch.nn.Parameter(seed.clone()) for seed in initial]
+    merged_params = [torch.nn.Parameter(seed.clone()) for seed in initial]
+    split_optimizer = torch.optim.AdamW([{"params": [param], **optimizer_kwargs} for param in split_params])
+    merged_groups = paro_optimization._normalize_optimizer_param_groups(
+        [{"params": [param], **optimizer_kwargs} for param in merged_params]
+    )
+    assert len(merged_groups) == 1
+    merged_optimizer = torch.optim.AdamW(merged_groups)
+
+    for _ in range(3):
+        for param, grad in zip(split_params, grads):
+            param.grad = grad.clone()
+        for param, grad in zip(merged_params, grads):
+            param.grad = grad.clone()
+        split_optimizer.step()
+        merged_optimizer.step()
+
+    for split_param, merged_param in zip(split_params, merged_params):
+        assert torch.equal(split_param, merged_param)
+
+
+def test_paro_stage_angle_reset_skips_fill_for_fully_packed_layout(monkeypatch):
+    """Guard the per-step angle reset against launching a no-op fill on packed layouts."""
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=256,
+        group_size=128,
+        krot=4,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    # The default Paro layout packs `pair_ratio * group_size` pairs exactly,
+    # so every rotation row is fully populated and no angle slot is a dummy.
+    assert torch.count_nonzero(theta_mask).item() == 0
+
+    model = _ParoOptimLinear(
+        torch.randn(8, 256),
+        None,
+        bits=4,
+        group_size=128,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    assert model._theta_mask_active is False
+
+    fills = []
+    real_masked_fill = torch.Tensor.masked_fill_
+
+    def counting_masked_fill(self, *args, **kwargs):
+        fills.append(tuple(self.shape))
+        return real_masked_fill(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "masked_fill_", counting_masked_fill)
+    with torch.no_grad():
+        model.theta.fill_(1.0)
+    model.reset_masked_angles()
+
+    assert fills == []
+    assert torch.equal(model.theta, torch.ones_like(model.theta))
+
+
+def test_paro_stage_angle_reset_masks_padded_pairs():
+    """Guard the padded-pair reset that keeps dummy angles at zero during optimization."""
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=256,
+        group_size=128,
+        krot=4,
+        pair_ratio=0.5,
+        seed=1,
+        device=torch.device("cpu"),
+    )
+    theta_mask = theta_mask.clone()
+    theta_mask[0, 0] = True
+    theta_mask[2, 5] = True
+
+    model = _ParoOptimLinear(
+        torch.randn(8, 256),
+        None,
+        bits=4,
+        group_size=128,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    assert model._theta_mask_active is True
+
+    with torch.no_grad():
+        model.theta.fill_(1.0)
+    model.reset_masked_angles()
+
+    assert torch.equal(model.theta[theta_mask], torch.zeros_like(model.theta[theta_mask]))
+    assert torch.equal(model.theta[~theta_mask], torch.ones_like(model.theta[~theta_mask]))
+
+
+def test_paro_processor_group_adamw_falls_back_when_fused_cuda_is_unsupported(monkeypatch):
+    """Guard grouped CUDA optimizer setup against fused AdamW support gaps."""
+
+    processor = object.__new__(ParoProcessor)
+    param_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    param = torch.nn.Parameter(torch.randn(4, device=param_device))
+    calls = []
+
+    class _FakeOptimizer:
+        def __init__(self):
+            self.param_groups = [{"params": [param], "lr": 0.05}]
+
+    def fake_adamw(param_groups, **kwargs):
+        calls.append(kwargs.copy())
+        if kwargs.get("fused"):
+            raise TypeError("fused unsupported")
+        return _FakeOptimizer()
+
+    monkeypatch.setattr(torch.optim, "AdamW", fake_adamw)
+    optimizer = processor._build_group_adamw(
+        [{"params": [param], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}],
+        device=torch.device("cuda"),
+    )
+
+    assert isinstance(optimizer, _FakeOptimizer)
+    expected = [{"fused": True}, {}] if torch.cuda.is_available() else [{}]
+    assert calls == expected
+
+
+def test_paro_processor_group_optimizer_uses_selected_sgd(monkeypatch):
+    """Guard grouped optimizer setup against ignoring the selected stage optimizer."""
+    processor = object.__new__(ParoProcessor)
+    param_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    param = torch.nn.Parameter(torch.randn(4, device=param_device))
+    calls = []
+
+    class _FakeOptimizer:
+        def __init__(self):
+            self.param_groups = [{"params": [param], "lr": 0.05}]
+
+    def fake_sgd(param_groups, **kwargs):
+        calls.append((param_groups, kwargs.copy()))
+        return _FakeOptimizer()
+
+    monkeypatch.setattr(torch.optim, "SGD", fake_sgd)
+    optimizer = processor._build_group_optimizer(
+        [
+            {
+                "params": [param],
+                "lr": 0.05,
+                "weight_decay": 0.01,
+                "momentum": 0.85,
+                "dampening": 0.0,
+                "nesterov": True,
+            }
+        ],
+        device=torch.device("cuda"),
+        optimizer_name="sgd",
+    )
+
+    assert isinstance(optimizer, _FakeOptimizer)
+    expected_kwargs = {"fused": True} if torch.cuda.is_available() else {}
+    expected_param_group = {
+        "params": [param],
+        "lr": 0.05,
+        "weight_decay": 0.01,
+        "momentum": 0.85,
+        "dampening": 0.0,
+        "nesterov": True,
+    }
+    assert calls == [([expected_param_group], expected_kwargs)]
+
+
+def test_paro_processor_group_adamw_passes_amsgrad(monkeypatch):
+    """Guard grouped AdamW setup against dropping optimizer-specific hyperparameters."""
+    processor = object.__new__(ParoProcessor)
+    param_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    param = torch.nn.Parameter(torch.randn(4, device=param_device))
+    calls = []
+
+    class _FakeOptimizer:
+        def __init__(self):
+            self.param_groups = [{"params": [param], "lr": 0.05}]
+
+    def fake_adamw(param_groups, **kwargs):
+        calls.append(kwargs.copy())
+        return _FakeOptimizer()
+
+    monkeypatch.setattr(torch.optim, "AdamW", fake_adamw)
+    optimizer = processor._build_group_optimizer(
+        [{"params": [param], "lr": 0.05, "weight_decay": 0.01, "amsgrad": True}],
+        device=torch.device("cuda"),
+        optimizer_name="adamw",
+    )
+
+    assert isinstance(optimizer, _FakeOptimizer)
+    expected = [{"fused": True}] if torch.cuda.is_available() else [{}]
+    assert calls == expected
+
+
+def test_paro_processor_group_stage_skips_redundant_initial_train_eval(monkeypatch):
+    """Guard grouped stage timing against paying an extra full train-set eval before epoch 1."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, **_kwargs):
+            return self.linear(x)
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_stage_impl="fast")
+    processor.gptq_model = None
+    processor.model = None
+    calls = []
+
+    def fake_evaluate(*_args, **_kwargs):
+        calls.append("eval")
+        return 0.0
+
+    monkeypatch.setattr(processor, "_evaluate_group_layer", fake_evaluate)
+    layer = _ToyLayer()
+    input_batch = [[torch.randn(2, 4)]]
+    target_batch = [[torch.randn(2, 4)]]
+
+    processor._run_group_stage(
+        layer,
+        optim_modules={},
+        input_batches_train=input_batch,
+        input_kwargs_train=[{}],
+        target_batches_train=target_batch,
+        position_ids_train=[None],
+        attention_masks_train=[None],
+        input_batches_val=input_batch,
+        input_kwargs_val=[{}],
+        target_batches_val=target_batch,
+        position_ids_val=[None],
+        attention_masks_val=[None],
+        param_groups=[{"params": [layer.linear.weight], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}],
+        epochs=1,
+    )
+
+    assert calls == ["eval"]
+
+
+def test_paro_processor_group_stage_defers_best_state_snapshot_until_first_val(monkeypatch):
+    """Guard grouped stage setup against cloning the full layer before the first val result exists."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+            self.state_dict_calls = 0
+
+        def forward(self, x, **_kwargs):
+            return self.linear(x)
+
+        def state_dict(self, *args, **kwargs):
+            self.state_dict_calls += 1
+            return super().state_dict(*args, **kwargs)
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_stage_impl="fast")
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    input_batch = [[torch.randn(2, 4)]]
+    target_batch = [[torch.randn(2, 4)]]
+
+    processor._run_group_stage(
+        layer,
+        optim_modules={},
+        input_batches_train=input_batch,
+        input_kwargs_train=[{}],
+        target_batches_train=target_batch,
+        position_ids_train=[None],
+        attention_masks_train=[None],
+        input_batches_val=input_batch,
+        input_kwargs_val=[{}],
+        target_batches_val=target_batch,
+        position_ids_val=[None],
+        attention_masks_val=[None],
+        param_groups=[{"params": [layer.linear.weight], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}],
+        epochs=1,
+    )
+
+    assert layer.state_dict_calls == 1
+
+
+def test_paro_processor_group_dataset_for_device_caches_per_device():
+    """Guard grouped dataset replay so repeated requests on the same device reuse one cached copy."""
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=8, opt_validation_samples=8)
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[torch.randn(1, 4)]],
+        layer_input_kwargs=[{"position_ids": None}],
+        position_ids=[torch.arange(4).unsqueeze(0)],
+        attention_masks=[None],
+    )
+    state = SimpleNamespace(
+        layer_inputs=[[torch.randn(1, 4)]],
+        layer_input_kwargs=[{"position_ids": None}],
+        layer_outputs=[[torch.randn(1, 4)]],
+        grouped_dataset=None,
+        grouped_dataset_by_device=None,
+    )
+
+    first = processor._group_dataset_for_device(state, torch.device("cpu"))
+    second = processor._group_dataset_for_device(state, torch.device("cpu"))
+
+    assert first is second
+    assert state.grouped_dataset is not None
+    assert state.grouped_dataset_by_device is not None
+    assert state.grouped_dataset_by_device["cpu"] is first
+
+
+def test_paro_processor_replay_batches_cache_cpu_splits():
+    """Guard layer-scope replay batches so they stay on CPU and cache their train/val split."""
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=4, opt_validation_samples=2)
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[torch.randn(2, 4)] for _ in range(3)],
+        layer_input_kwargs=[{} for _ in range(3)],
+        position_ids=[None, None, None],
+        attention_masks=[None, None, None],
+    )
+    state = SimpleNamespace(
+        layer_inputs=[[torch.randn(2, 4)] for _ in range(3)],
+        layer_input_kwargs=[{} for _ in range(3)],
+        layer_outputs=[[torch.randn(2, 4)] for _ in range(3)],
+        replay_batches=None,
+    )
+
+    first_train, first_val = processor._replay_batches_from_state(state)
+    second_train, second_val = processor._replay_batches_from_state(state)
+
+    assert first_train is second_train
+    assert first_val is second_val
+    assert len(first_train) == 2
+    assert len(first_val) == 1
+    assert all(batch.inputs[0].device.type == "cpu" for batch in first_train + first_val)
+    assert all(batch.target.device.type == "cpu" for batch in first_train + first_val)
+    if torch.cuda.is_available():
+        assert all(batch.inputs[0].is_pinned() for batch in first_train + first_val)
+        assert all(batch.target.is_pinned() for batch in first_train + first_val)
+
+
+def test_paro_processor_replay_batches_strip_inference_tensors():
+    """Replay-cache tensors must be recreated outside inference mode before layer training."""
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=2, opt_validation_samples=1)
+
+    with torch.inference_mode():
+        cached_input = torch.randn(2, 4)
+        cached_kwarg = torch.randn(2, 4)
+        cached_output = torch.randn(2, 4)
+        cached_pos = torch.arange(4).unsqueeze(0)
+        cached_mask = torch.ones(1, 4)
+
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[cached_input]],
+        layer_input_kwargs=[{"cache_position": cached_kwarg}],
+        position_ids=[cached_pos],
+        attention_masks=[cached_mask],
+    )
+    state = SimpleNamespace(
+        layer_inputs=[[cached_input]],
+        layer_input_kwargs=[{"cache_position": cached_kwarg}],
+        layer_outputs=[[cached_output]],
+        replay_batches=None,
+    )
+
+    train_batches, val_batches = processor._replay_batches_from_state(state)
+    replay_batch = train_batches[0]
+
+    assert not replay_batch.inputs[0].is_inference()
+    assert not replay_batch.input_kwargs["cache_position"].is_inference()
+    assert not replay_batch.target.is_inference()
+    assert replay_batch.position_ids is not None
+    assert replay_batch.attention_mask is not None
+    assert not replay_batch.position_ids.is_inference()
+    assert not replay_batch.attention_mask.is_inference()
+    assert len(train_batches) == 1
+    assert len(val_batches) == 1
+
+
+def test_paro_processor_layer_shard_loader_normalizes_inference_inputs():
+    """Materialized replay batches must hand autograd normal tensors even if cache input is inference-mode."""
+
+    class _ToyNorm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4))
+
+        def forward(self, hidden_states):
+            return self.weight * hidden_states.to(hidden_states.dtype)
+
+    with torch.inference_mode():
+        replay_batch = paro_processor_module._ParoReplayBatch(
+            inputs=[torch.randn(2, 4)],
+            input_kwargs={},
+            target=torch.randn(2, 4),
+            position_ids=None,
+            attention_mask=None,
+            row_count=2,
+        )
+
+    loader = paro_processor_module._LayerShardLoader(
+        [replay_batch],
+        target_device=torch.device("cpu"),
+        shard_batches=1,
+    )
+    materialized_batch = next(loader.iter_shards())[0]
+    layer = _ToyNorm()
+
+    assert not materialized_batch.inputs[0].is_inference()
+    assert not materialized_batch.target.is_inference()
+
+    with torch.inference_mode(False), torch.enable_grad():
+        output = layer(materialized_batch.inputs[0])
+
+    assert output.shape == materialized_batch.inputs[0].shape
+
+
+def test_paro_processor_group_checkpoint_normalizes_inference_inputs():
+    """Grouped checkpoint training must rebuild inference-mode inputs into autograd-safe tensors."""
+
+    processor = object.__new__(ParoProcessor)
+    processor._gradient_checkpointing_enabled = lambda: True
+
+    captured = {}
+    layer_scale = torch.nn.Parameter(torch.tensor(2.0))
+
+    def _fake_forward_group_batch(
+        layer,
+        *,
+        batch_index,
+        input_batch,
+        input_kwargs,
+        attention_mask,
+        position_ids,
+    ):
+        captured["inputs_inference"] = [tensor.is_inference() for tensor in input_batch]
+        captured["kwargs_inference"] = paro_processor_module._value_has_inference_tensor(input_kwargs)
+        captured["mask_inference"] = attention_mask.is_inference() if attention_mask is not None else False
+        captured["pos_inference"] = position_ids.is_inference() if position_ids is not None else False
+        return input_batch[0] * layer_scale
+
+    processor._forward_group_batch = _fake_forward_group_batch
+
+    with torch.inference_mode():
+        input_batch = [torch.randn(2, 4)]
+        input_kwargs = {"cache_position": torch.arange(4)}
+        attention_mask = torch.ones(1, 4)
+        position_ids = torch.arange(4).unsqueeze(0)
+
+    output = processor._forward_group_batch_train(
+        object(),
+        batch_index=0,
+        input_batch=input_batch,
+        input_kwargs=input_kwargs,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+    )
+    output.sum().backward()
+
+    assert captured["inputs_inference"] == [False]
+    assert captured["kwargs_inference"] is False
+    assert captured["mask_inference"] is False
+    assert captured["pos_inference"] is False
+    assert layer_scale.grad is not None
+
+
+@pytest.mark.parametrize("replay_mode", ["group", "streamed_cached", "streamed_uncached"])
+@pytest.mark.parametrize("with_grad", [False, True])
+def test_paro_muse_glimmer_replay_matches_dense_forward_and_gradients(
+    replay_mode, with_grad
+):
+    configuration = pytest.importorskip("transformers.models.muse_glimmer.configuration_muse_glimmer")
+    modeling = pytest.importorskip("transformers.models.muse_glimmer.modeling_muse_glimmer")
+    from gptqmodel.models.definitions.muse_glimmer import MuseGlimmerQModel
+
+    torch.manual_seed(0)
+    config = configuration.MuseGlimmerTextConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=4,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        layer_types=["sliding_attention"] * 3 + ["full_attention"],
+        layer_rope_theta=[500000.0] * 3 + [0],
+        sliding_window=2,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    config._attn_implementation = "eager"
+    model = modeling.MuseGlimmerTextModel(config).eval()
+    root = torch.nn.Module()
+    root.model = torch.nn.Module()
+    root.model.language_model = model
+    qmodel = object.__new__(MuseGlimmerQModel)
+    torch.nn.Module.__init__(qmodel)
+    qmodel.model = root
+    processor = object.__new__(ParoProcessor)
+    processor.gptq_model = qmodel
+    processor.model = root
+
+    input_ids = torch.tensor([[1, 3, 4, 5, 6]])
+    position_ids = torch.arange(input_ids.shape[1]).unsqueeze(0)
+    dense_input = model.embed_tokens(input_ids).detach().requires_grad_(with_grad)
+    replay_input = dense_input.detach().clone().requires_grad_(with_grad)
+    with torch.set_grad_enabled(with_grad):
+        dense_output = model(inputs_embeds=dense_input, use_cache=False).last_hidden_state
+        hidden_states = replay_input
+        input_kwargs = {
+            "position_embeddings": model.rotary_emb(hidden_states, position_ids),
+        }
+        for layer in model.layers:
+            if replay_mode == "group":
+                hidden_states = processor._forward_group_batch(
+                    layer,
+                    batch_index=0,
+                    input_batch=[hidden_states],
+                    input_kwargs=input_kwargs,
+                    attention_mask=None,
+                    position_ids=position_ids,
+                )
+            else:
+                replay_batch = paro_processor_module._ParoReplayBatch(
+                    inputs=[hidden_states],
+                    input_kwargs=input_kwargs,
+                    target=torch.empty(0),
+                    position_ids=position_ids,
+                    attention_mask=None,
+                    row_count=input_ids.numel(),
+                )
+                hidden_states = processor._forward_replay_batch(
+                    layer,
+                    replay_batch=replay_batch,
+                    cache_kwargs=replay_mode == "streamed_cached",
+                )
+        replay_output = model.norm(hidden_states)
+        torch.testing.assert_close(replay_output, dense_output, rtol=0, atol=0)
+
+        if with_grad:
+            parameters = tuple(model.layers.parameters())
+            loss_weights = torch.randn_like(dense_output)
+            dense_gradients = torch.autograd.grad(
+                (dense_output * loss_weights).sum(), (dense_input, *parameters)
+            )
+            replay_gradients = torch.autograd.grad(
+                (replay_output * loss_weights).sum(), (replay_input, *parameters)
+            )
+            for actual, expected in zip(replay_gradients, dense_gradients):
+                torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("cache", [False, True])
+def test_paro_processor_replay_hook_metadata_is_normalized_and_layer_specific(cache):
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self, scale):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1))
+            self.scale = scale
+
+        def forward(self, x, scale, **_kwargs):
+            return x * self.weight * scale
+
+    calls = []
+
+    def prepare_layer_replay_kwargs(layer, layer_input, additional_inputs, target_device):
+        calls.append(layer)
+        assert layer_input[0] is x
+        assert target_device == x.device
+        assert additional_inputs["use_cache"] is False
+        with torch.inference_mode():
+            scale = torch.tensor(layer.scale, device=target_device)
+        return {**additional_inputs, "scale": scale}
+
+    processor = object.__new__(ParoProcessor)
+    processor.gptq_model = SimpleNamespace(
+        prepare_layer_replay_kwargs=prepare_layer_replay_kwargs,
+    )
+    processor.model = None
+    x = torch.ones(1, 2, 4)
+    input_kwargs = {}
+    layers = [_ToyLayer(2.0), _ToyLayer(3.0)]
+    for layer in layers:
+        for _ in range(2):
+            kwargs = processor._prepare_group_forward_kwargs(
+                layer,
+                x=x,
+                input_kwargs=input_kwargs,
+                attention_mask=None,
+                position_ids=None,
+                cache=cache,
+            )
+            assert not kwargs["scale"].is_inference()
+            output = layer(x, **kwargs)
+            torch.testing.assert_close(output, x * layer.scale)
+            output.sum().backward()
+            kwargs["scale"] = None
+        torch.testing.assert_close(layer.weight.grad, torch.tensor([16 * layer.scale]))
+
+    assert calls == (layers if cache else [layers[0], layers[0], layers[1], layers[1]])
+    assert input_kwargs == {}
+
+
+def test_paro_processor_cached_group_position_ids_are_autograd_safe():
+    """Generated position-id cache entries must stay reusable outside worker inference mode."""
+
+    processor = object.__new__(ParoProcessor)
+
+    with torch.inference_mode():
+        cached = processor._cached_group_position_ids(
+            device=torch.device("cpu"),
+            batch_dim=2,
+            seq_len=4,
+        )
+
+    assert not cached.is_inference()
+    assert processor._cached_group_position_ids(device=torch.device("cpu"), batch_dim=2, seq_len=4) is cached
+
+
+def test_paro_processor_cached_rotary_embeddings_are_autograd_safe():
+    """Rotary cache entries created during inference replay must not leak inference tensors into training."""
+
+    class _ToyRotary(torch.nn.Module):
+        def forward(self, x, position_ids):
+            pos = position_ids.unsqueeze(-1).to(dtype=x.dtype)
+            return x + pos, x - pos
+
+    processor = object.__new__(ParoProcessor)
+    rotary = _ToyRotary()
+
+    with torch.inference_mode():
+        x = torch.randn(1, 4, 8)
+        position_ids = torch.arange(4).unsqueeze(0)
+        cached = processor._cached_group_rotary_position_embeddings(
+            rotary=rotary,
+            x=x,
+            position_ids=position_ids,
+            rotary_device=torch.device("cpu"),
+        )
+
+    assert not paro_processor_module._value_has_inference_tensor(cached)
+
+    with torch.inference_mode(False), torch.enable_grad():
+        q = torch.randn(1, 4, 8, requires_grad=True)
+        cos, sin = processor._cached_group_rotary_position_embeddings(
+            rotary=rotary,
+            x=x,
+            position_ids=position_ids,
+            rotary_device=torch.device("cpu"),
+        )
+        loss = (q * cos).sum() + (q * sin).sum()
+        loss.backward()
+
+    assert q.grad is not None
+
+
+def test_paro_processor_layer_shard_loader_reuses_metadata_tensors():
+    """Guard streamed layer replay so shared position/mask tensors can stay cached on one device."""
+
+    if not torch.cuda.is_available():
+        return
+
+    cpu_pos = torch.arange(8).unsqueeze(0)
+    cpu_mask = torch.ones(1, 8)
+    if not cpu_pos.is_pinned():
+        cpu_pos = cpu_pos.pin_memory()
+    if not cpu_mask.is_pinned():
+        cpu_mask = cpu_mask.pin_memory()
+
+    replay_batch = paro_processor_module._ParoReplayBatch(
+        inputs=[torch.randn(1, 8).pin_memory()],
+        input_kwargs={},
+        target=torch.randn(1, 8).pin_memory(),
+        position_ids=cpu_pos,
+        attention_mask=cpu_mask,
+        row_count=1,
+    )
+    metadata_cache = {}
+
+    loader_a = paro_processor_module._LayerShardLoader(
+        [replay_batch],
+        target_device=torch.device("cuda"),
+        shard_batches=1,
+        metadata_cache=metadata_cache,
+    )
+    loader_b = paro_processor_module._LayerShardLoader(
+        [replay_batch],
+        target_device=torch.device("cuda"),
+        shard_batches=1,
+        metadata_cache=metadata_cache,
+    )
+
+    batch_a = next(loader_a.iter_shards())[0]
+    batch_b = next(loader_b.iter_shards())[0]
+
+    assert batch_a.position_ids is batch_b.position_ids
+    assert batch_a.attention_mask is batch_b.attention_mask
+    assert batch_a.target is not batch_b.target
+
+
+def test_paro_processor_group_best_state_tracks_only_active_prefixes():
+    """Guard grouped best-state snapshots against cloning untouched layer state."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.a = torch.nn.Linear(4, 4, bias=False)
+            self.b = torch.nn.Linear(4, 4, bias=False)
+
+    processor = object.__new__(ParoProcessor)
+    layer = _ToyLayer()
+    original_b = layer.b.weight.detach().clone()
+
+    best_state = processor._snapshot_group_best_state(layer, active_prefixes=("a",))
+
+    assert sorted(best_state.keys()) == ["a.weight"]
+
+    with torch.no_grad():
+        layer.a.weight.zero_()
+        layer.b.weight.fill_(7.0)
+
+    processor._restore_group_best_state(layer, best_state=best_state)
+
+    assert torch.allclose(layer.a.weight, best_state["a.weight"])
+    assert torch.allclose(layer.b.weight, torch.full_like(layer.b.weight, 7.0))
+    assert not torch.allclose(layer.b.weight, original_b)
+
+
+def test_paro_processor_group_best_state_can_snapshot_to_cpu():
+    """Guard streamed layer checkpoints so best-state snapshots can live off device."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.a = torch.nn.Linear(4, 4, bias=False)
+            self.b = torch.nn.Linear(4, 4, bias=False)
+
+    processor = object.__new__(ParoProcessor)
+    layer = _ToyLayer()
+
+    best_state = processor._snapshot_group_best_state(
+        layer,
+        active_prefixes=("a",),
+        target_device=torch.device("cpu"),
+    )
+
+    assert sorted(best_state.keys()) == ["a.weight"]
+    assert all(tensor.device.type == "cpu" for tensor in best_state.values())
+
+
+def test_paro_processor_group_best_state_can_cast_float_snapshots_without_touching_int_buffers():
+    """Guard grouped best-state compression so float tensors shrink without corrupting integer buffers."""
+
+    class _ToyBranch(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.randn(4, 4, dtype=torch.float32))
+            self.register_buffer("index", torch.tensor([1, 2], dtype=torch.int32))
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.a = _ToyBranch()
+            self.b = _ToyBranch()
+
+    processor = object.__new__(ParoProcessor)
+    layer = _ToyLayer()
+
+    best_state = processor._snapshot_group_best_state(
+        layer,
+        active_prefixes=("a",),
+        target_device=torch.device("cpu"),
+        target_dtype=torch.bfloat16,
+    )
+
+    assert sorted(best_state.keys()) == ["a.index", "a.weight"]
+    assert best_state["a.weight"].dtype == torch.bfloat16
+    assert best_state["a.index"].dtype == torch.int32
+
+
+def test_paro_quantize_config_accepts_torch_float16_best_state_dtype():
+    """Guard direct config construction so torch.float16 snapshots serialize as fp16."""
+    cfg = ParoConfig(
+        bits=4,
+        group_size=128,
+        opt_best_state_dtype=torch.float16,
+    )
+
+    assert cfg.opt_best_state_dtype == "fp16"
+
+
+def test_paro_best_state_dtype_resolves_explicit_fp16():
+    """Guard explicit fp16 snapshot selection."""
+    resolved = paro_optimization._resolve_best_state_snapshot_dtype(
+        best_state_dtype="fp16",
+        device=torch.device("cuda"),
+    )
+
+    assert resolved == torch.float16
+
+
+def test_paro_best_state_dtype_resolves_explicit_bf16():
+    """Guard explicit bf16 snapshot selection after removing the auto policy."""
+    resolved = paro_optimization._resolve_best_state_snapshot_dtype(
+        best_state_dtype="bf16",
+        device=torch.device("cuda"),
+    )
+
+    assert resolved == torch.bfloat16
+
+
+def test_paro_best_state_dtype_defaults_to_fp32():
+    """Guard the no-auto default so missing best-state dtype configuration stays on fp32."""
+    resolved = paro_optimization._resolve_best_state_snapshot_dtype(
+        best_state_dtype=None,
+        device=torch.device("cpu"),
+    )
+
+    assert resolved == torch.float32
+
+
+def test_paro_processor_caches_group_forward_signature_flags(monkeypatch):
+    """Guard grouped replay kwargs against repeated forward-signature introspection."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None):
+            del attention_mask, position_ids
+            return self.linear(x)
+
+    processor = object.__new__(ParoProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    signature_calls = []
+    original_signature = inspect.signature
+
+    def counting_signature(obj):
+        signature_calls.append(obj)
+        return original_signature(obj)
+
+    monkeypatch.setattr(inspect, "signature", counting_signature)
+
+    kwargs_a = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(2, 4),
+        input_kwargs={},
+        attention_mask=torch.ones(1, 2),
+        position_ids=torch.arange(2).unsqueeze(0),
+    )
+    kwargs_b = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(2, 4),
+        input_kwargs={},
+        attention_mask=torch.ones(1, 2),
+        position_ids=torch.arange(2).unsqueeze(0),
+    )
+
+    assert len(signature_calls) == 1
+    assert kwargs_a.keys() == kwargs_b.keys()
+    assert processor._group_forward_signature_cache[type(layer)] == (True, False, True)
+
+
+def test_paro_processor_caches_group_forward_base_kwargs(monkeypatch):
+    """Guard grouped replay kwargs against repeated nested device moves for the same cached dict."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None):
+            del attention_mask, position_ids
+            return self.linear(x)
+
+    processor = object.__new__(ParoProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    move_calls = []
+    original_nested_move_to = paro_processor_module.nested_move_to
+
+    def counting_nested_move_to(value, *, device):
+        move_calls.append((type(value).__name__, str(device)))
+        return original_nested_move_to(value, device=device)
+
+    monkeypatch.setattr(paro_processor_module, "nested_move_to", counting_nested_move_to)
+    shared_kwargs = {"foo": {"bar": torch.randn(1)}}
+
+    kwargs_a = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(2, 4),
+        input_kwargs=shared_kwargs,
+        attention_mask=torch.ones(1, 2),
+        position_ids=torch.arange(2).unsqueeze(0),
+    )
+    kwargs_b = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(2, 4),
+        input_kwargs=shared_kwargs,
+        attention_mask=torch.ones(1, 2),
+        position_ids=torch.arange(2).unsqueeze(0),
+    )
+
+    assert len(move_calls) == 1
+    assert kwargs_a.keys() == kwargs_b.keys()
+    assert torch.allclose(kwargs_a["foo"]["bar"], kwargs_b["foo"]["bar"])
+
+
+def test_paro_processor_caches_full_group_forward_kwargs(monkeypatch):
+    """Guard grouped replay kwargs against recomputing rotary-derived inputs for identical batches."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None, position_embeddings=None):
+            del attention_mask, position_ids, position_embeddings
+            return self.linear(x)
+
+    class _FakeRotary(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, x, position_ids):
+            self.calls += 1
+            return x + position_ids.unsqueeze(-1).to(dtype=x.dtype)
+
+    processor = object.__new__(ParoProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    rotary = _FakeRotary()
+
+    monkeypatch.setattr(processor, "_get_root_rotary", lambda: rotary)
+    monkeypatch.setattr(processor, "_get_rotary_for_device", lambda device: rotary)
+    monkeypatch.setattr(processor, "_get_rotary_device", lambda module, fallback=None: torch.device("cpu"))
+
+    x = torch.randn(1, 2, 4)
+    attention_mask = torch.ones(1, 2)
+    position_ids = torch.arange(2).unsqueeze(0)
+    shared_kwargs = {}
+
+    kwargs_a = processor._prepare_group_forward_kwargs(
+        layer,
+        x=x,
+        input_kwargs=shared_kwargs,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+    )
+    kwargs_b = processor._prepare_group_forward_kwargs(
+        layer,
+        x=x,
+        input_kwargs=shared_kwargs,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+    )
+
+    assert rotary.calls == 1
+    assert kwargs_a is not kwargs_b
+    assert kwargs_a.keys() == kwargs_b.keys()
+    assert torch.allclose(kwargs_a["position_embeddings"], kwargs_b["position_embeddings"])
+
+
+def test_paro_processor_caches_rotary_position_embeddings_across_distinct_inputs(monkeypatch):
+    """Guard streamed grouped replay against recomputing HF rotary embeddings for identical ids/device/dtype."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None, position_embeddings=None):
+            del attention_mask, position_ids, position_embeddings
+            return self.linear(x)
+
+    class _FakeLlamaRotaryEmbedding(torch.nn.Module):
+        __module__ = "transformers.models.llama.modeling_llama"
+
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, x, position_ids):
+            self.calls += 1
+            base = position_ids.unsqueeze(-1).to(device=x.device, dtype=x.dtype)
+            return (base.cos(), base.sin())
+
+    processor = object.__new__(ParoProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    rotary = _FakeLlamaRotaryEmbedding()
+
+    monkeypatch.setattr(processor, "_get_root_rotary", lambda: rotary)
+    monkeypatch.setattr(processor, "_get_rotary_for_device", lambda device: rotary)
+    monkeypatch.setattr(processor, "_get_rotary_device", lambda module, fallback=None: torch.device("cpu"))
+
+    shared_position_ids = torch.arange(4).unsqueeze(0)
+
+    kwargs_a = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(1, 4, 4),
+        input_kwargs={},
+        attention_mask=torch.ones(1, 4),
+        position_ids=shared_position_ids,
+        cache=False,
+    )
+    kwargs_b = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(1, 4, 4),
+        input_kwargs={},
+        attention_mask=torch.ones(1, 4),
+        position_ids=shared_position_ids,
+        cache=False,
+    )
+
+    assert rotary.calls == 1
+    assert torch.allclose(kwargs_a["position_embeddings"][0], kwargs_b["position_embeddings"][0])
+    assert torch.allclose(kwargs_a["position_embeddings"][1], kwargs_b["position_embeddings"][1])
+
+
+def test_paro_processor_caches_generated_position_ids():
+    """Guard grouped replay against rebuilding deterministic synthetic position ids."""
+
+    processor = object.__new__(ParoProcessor)
+
+    first = processor._cached_group_position_ids(device=torch.device("cpu"), batch_dim=2, seq_len=8)
+    second = processor._cached_group_position_ids(device=torch.device("cpu"), batch_dim=2, seq_len=8)
+    third = processor._cached_group_position_ids(device=torch.device("cpu"), batch_dim=1, seq_len=8)
+
+    assert first is second
+    assert third is not first
+    assert first.shape == (2, 8)
+    assert third.shape == (1, 8)
+
+
+def test_paro_processor_streamed_group_forward_kwargs_skip_redundant_moves(monkeypatch):
+    """Guard streamed layer replay against recursively re-moving already device-ready kwargs."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None):
+            del attention_mask, position_ids
+            return self.linear(x)
+
+    processor = object.__new__(ParoProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    moved_values = []
+
+    original_move_value = paro_processor_module._LayerShardLoader._move_value_to_device
+
+    def counting_move_value(value, device):
+        moved_values.append((type(value).__name__, str(device)))
+        return original_move_value(value, device)
+
+    monkeypatch.setattr(paro_processor_module._LayerShardLoader, "_move_value_to_device", counting_move_value)
+
+    attention_mask = torch.ones(1, 2)
+    position_ids = torch.arange(2).unsqueeze(0)
+    shared_kwargs = {"foo": {"bar": torch.randn(1)}}
+    kwargs = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(2, 4),
+        input_kwargs=shared_kwargs,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        cache=False,
+    )
+
+    assert kwargs["foo"]["bar"] is shared_kwargs["foo"]["bar"]
+    assert kwargs["attention_mask"] is attention_mask
+    assert kwargs["position_ids"] is position_ids
+
+
+def test_paro_processor_group_forward_kwargs_drop_past_key_values():
+    """Layer-scope replay must mirror the normal forward executor and omit KV-cache objects."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(
+            self,
+            x,
+            attention_mask=None,
+            position_ids=None,
+            past_key_values=None,
+            past_key_value=None,
+            use_cache=False,
+        ):
+            del attention_mask, position_ids, past_key_values, past_key_value, use_cache
+            return self.linear(x)
+
+    processor = object.__new__(ParoProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+
+    kwargs = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(2, 4),
+        input_kwargs={
+            "past_key_values": object(),
+            "past_key_value": object(),
+            "cache_position": torch.arange(2),
+        },
+        attention_mask=torch.ones(1, 2),
+        position_ids=torch.arange(2).unsqueeze(0),
+        cache=False,
+    )
+
+    assert "past_key_values" not in kwargs
+    assert "past_key_value" not in kwargs
+    assert "cache_position" in kwargs
+
+
+def test_paro_processor_force_layer_eager_attention_restores_shared_config():
+    """Live-layer optimization should temporarily switch shared attention config to eager and restore it."""
+
+    class _Config:
+        def __init__(self):
+            self._attn_implementation = "flash_attention_2"
+            self.attn_implementation = "flash_attention_2"
+
+    class _ToyAttention(torch.nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+            self.self_attn = _ToyAttention(config)
+
+    processor = object.__new__(ParoProcessor)
+    shared_config = _Config()
+    layer = _ToyLayer(shared_config)
+
+    overrides = processor._force_layer_eager_attention(layer)
+
+    assert shared_config._attn_implementation == "eager"
+    assert shared_config.attn_implementation == "eager"
+    assert len(overrides) == 2
+
+    processor._restore_layer_attention_impl(overrides)
+
+    assert shared_config._attn_implementation == "flash_attention_2"
+    assert shared_config.attn_implementation == "flash_attention_2"
+
+
+def test_paro_processor_prepare_group_forward_kwargs_normalizes_inference_position_embeddings(monkeypatch):
+    """Grouped replay kwargs must clone rotary metadata back to normal tensors before live-layer forward."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None, position_embeddings=None):
+            del attention_mask, position_ids, position_embeddings
+            return self.linear(x)
+
+    class _FakeLlamaRotaryEmbedding(torch.nn.Module):
+        __module__ = "transformers.models.llama.modeling_llama"
+
+        def forward(self, x, position_ids):
+            del x, position_ids
+            with torch.inference_mode():
+                return (torch.randn(1, 2, 4), torch.randn(1, 2, 4))
+
+    processor = object.__new__(ParoProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    rotary = _FakeLlamaRotaryEmbedding()
+
+    monkeypatch.setattr(processor, "_get_root_rotary", lambda: rotary)
+    monkeypatch.setattr(processor, "_get_rotary_for_device", lambda device: rotary)
+    monkeypatch.setattr(processor, "_get_rotary_device", lambda module, fallback=None: torch.device("cpu"))
+
+    kwargs = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(1, 2, 4),
+        input_kwargs={},
+        attention_mask=torch.ones(1, 2),
+        position_ids=torch.arange(2).unsqueeze(0),
+        cache=False,
+    )
+
+    assert "position_embeddings" in kwargs
+    assert not paro_processor_module._value_has_inference_tensor(kwargs["position_embeddings"])
+
+
+def test_paro_processor_caches_group_targets_by_dtype_and_device():
+    """Guard grouped replay targets against repeated device/dtype conversions."""
+
+    processor = object.__new__(ParoProcessor)
+    target_batch = [torch.randn(2, 4)]
+
+    first = processor._prepare_group_target(target_batch, device=torch.device("cpu"), dtype=torch.float32)
+    second = processor._prepare_group_target(target_batch, device=torch.device("cpu"), dtype=torch.float32)
+    third = processor._prepare_group_target(target_batch, device=torch.device("cpu"), dtype=torch.float16)
+
+    assert first is second
+    assert third.dtype == torch.float16
+    assert third is not first
+
+
+def test_paro_processor_optimize_group_runs_on_toy_layer():
+    """Guard the grouped optimizer path on a tiny layer without needing the full looper."""
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
+
+    class _ToyMlp(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(8, 8, bias=False)
+            self.up_proj = torch.nn.Linear(8, 8, bias=False)
+            self.down_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.down_proj(torch.sigmoid(self.gate_proj(x)) * self.up_proj(x))
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+            self.mlp = _ToyMlp()
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            x = self.self_attn(x)
+            return self.mlp(x)
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer()
+    x = torch.randn(1, 2, 8)
+    y = layer(x).detach()
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=0,
+        opt_finetune_epochs=0,
+        dynamic_get=_dynamic_get,
+        resolve_module_config=_default_resolved_module_config,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+    )
+
+    results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+    assert results["self_attn.q_proj"].pseudo_weight.shape == q_proj.weight.shape
+    assert results["self_attn.k_proj"].pseudo_weight.shape == k_proj.weight.shape
+    assert results["self_attn.v_proj"].pseudo_weight.shape == v_proj.weight.shape
+
+
+def test_paro_processor_layer_scope_streams_without_device_dataset(monkeypatch):
+    """Guard layer scope against materializing the full grouped dataset on device."""
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
+
+    class _ToyMlp(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(8, 8, bias=False)
+            self.up_proj = torch.nn.Linear(8, 8, bias=False)
+            self.down_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.down_proj(torch.sigmoid(self.gate_proj(x)) * self.up_proj(x))
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+            self.mlp = _ToyMlp()
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            return self.mlp(self.self_attn(x))
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer()
+    x = torch.randn(1, 2, 8)
+    y = layer(x).detach()
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="layer",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=0,
+        opt_finetune_epochs=0,
+        dynamic_get=_dynamic_get,
+        resolve_module_config=_default_resolved_module_config,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    def fail_group_dataset_for_device(*args, **kwargs):
+        raise AssertionError("layer scope should stream replay batches instead of caching a full device dataset")
+
+    monkeypatch.setattr(processor, "_group_dataset_for_device", fail_group_dataset_for_device)
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+        replay_batches=None,
+        grouped_dataset_by_device=None,
+    )
+
+    results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+    assert state.grouped_dataset_by_device is None
+    assert state.replay_batches is not None
+    replay_train, replay_val = state.replay_batches
+    assert all(batch.inputs[0].device.type == "cpu" for batch in replay_train + replay_val)
+
+
+def test_paro_processor_layer_scope_skips_angle_reset_when_theta_frozen(monkeypatch):
+    """Guard finetune-only layer scope against redundant masked-angle resets."""
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
+
+    class _ToyMlp(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(8, 8, bias=False)
+            self.up_proj = torch.nn.Linear(8, 8, bias=False)
+            self.down_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.down_proj(torch.sigmoid(self.gate_proj(x)) * self.up_proj(x))
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+            self.mlp = _ToyMlp()
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            return self.mlp(self.self_attn(x))
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer()
+    x = torch.randn(1, 2, 8)
+    y = layer(x).detach()
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="layer",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=0,
+        opt_finetune_epochs=1,
+        dynamic_get=_dynamic_get,
+        resolve_module_config=_default_resolved_module_config,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor.model = None
+    processor.lock = threading.Lock()
+    processor.calculate_w_wq_diff = False
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+        replay_batches=None,
+    )
+
+    reset_calls = []
+
+    def counting_reset(optim_modules):
+        reset_calls.append(tuple(sorted(optim_modules)))
+
+    monkeypatch.setattr(processor, "_reset_group_angles", counting_reset)
+
+    results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+    assert reset_calls == []
+
+
+def test_paro_processor_optimize_group_reenables_grad_inside_inference_mode():
+    """Guard grouped optimization under the worker lifecycle, which runs process() inside inference mode."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = torch.nn.Module()
+            self.self_attn.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.v_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            return self.self_attn.q_proj(x) + self.self_attn.k_proj(x) + self.self_attn.v_proj(x)
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer()
+    x = torch.randn(1, 2, 8)
+    y = layer(x).detach()
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=0,
+        dynamic_get=_dynamic_get,
+        resolve_module_config=_default_resolved_module_config,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+    )
+
+    with torch.inference_mode():
+        results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+
+
+def test_paro_processor_compute_block_scope_strips_hooked_linear_wrappers():
+    """ComputeBlock clone optimization must unwrap HookedLinear so backward survives cloned full-layer replay."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = torch.nn.Module()
+            self.self_attn.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            hidden_states = (
+                self.self_attn.q_proj(x)
+                + self.self_attn.k_proj(x)
+                + self.self_attn.v_proj(x)
+            )
+            return self.self_attn.o_proj(hidden_states)
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    float_layer = _ToyLayer()
+    x = torch.randn(1, 2, 8)
+    y = float_layer(x).detach()
+
+    hooked_layer = copy.deepcopy(float_layer)
+    replace_module_with_hooked_legacy(hooked_layer)
+
+    q_proj = NamedModule(hooked_layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(hooked_layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(hooked_layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="compute_block",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=0,
+        dynamic_get=_dynamic_get,
+        resolve_module_config=_default_resolved_module_config,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    state = SimpleNamespace(
+        layer_module=hooked_layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+        pristine_layer_module=None,
+        prepared_group_source_module=None,
+    )
+
+    with torch.inference_mode():
+        results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+    assert hooked_layer.self_attn.o_proj.__class__.__name__ == "HookedLinear"
+    assert state.prepared_group_source_module is not None
+    assert state.prepared_group_source_module.self_attn.o_proj.__class__ is torch.nn.Linear
+
+
+def test_paro_processor_layer_scope_strips_hooked_linear_wrappers():
+    """Layer scope trains on an unwrapped FP32 copy and leaves the live layer alone.
+
+    The copy drops HookedLinear so training does not re-enter inference mode;
+    the live layer keeps its wrappers and dtypes (contracts/kernel/forward-dtype.md).
+    """
+
+    class _ToyNorm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(8))
+
+        def forward(self, hidden_states):
+            input_dtype = hidden_states.dtype
+            hidden_states = hidden_states.to(torch.float32)
+            return self.weight * hidden_states.to(input_dtype)
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = torch.nn.Module()
+            self.self_attn.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.o_proj = torch.nn.Linear(8, 8, bias=False)
+            self.post_attention_layernorm = _ToyNorm()
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            hidden_states = (
+                self.self_attn.q_proj(x)
+                + self.self_attn.k_proj(x)
+                + self.self_attn.v_proj(x)
+            )
+            hidden_states = self.self_attn.o_proj(hidden_states)
+            return self.post_attention_layernorm(hidden_states)
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    float_layer = _ToyLayer()
+    x = torch.randn(1, 2, 8)
+    y = float_layer(x).detach()
+
+    hooked_layer = copy.deepcopy(float_layer)
+    replace_module_with_hooked_legacy(hooked_layer)
+
+    q_proj = NamedModule(hooked_layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(hooked_layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(hooked_layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="layer",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=0,
+        dynamic_get=_dynamic_get,
+        resolve_module_config=_default_resolved_module_config,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor.model = None
+    processor.lock = threading.Lock()
+    processor.calculate_w_wq_diff = False
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    state = SimpleNamespace(
+        layer_module=hooked_layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+        replay_batches=None,
+    )
+
+    with torch.inference_mode():
+        results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+    hooked_cls = type(hooked_layer.self_attn.o_proj)
+    assert hooked_cls is not torch.nn.Linear
+    assert q_proj.module is hooked_layer.self_attn.q_proj
+    assert k_proj.module is hooked_layer.self_attn.k_proj
+    assert v_proj.module is hooked_layer.self_attn.v_proj
+    assert type(q_proj.module) is hooked_cls
+
+    q_proj_result = results["self_attn.q_proj"]
+    original_weight = processor._module_weight_matrix(q_proj).detach().clone()
+    processor._apply_optimization_result(q_proj, q_proj_result, original_weight)
+    assert torch.allclose(
+        hooked_layer.self_attn.q_proj.weight.detach(),
+        q_proj_result.pseudo_weight.to(dtype=hooked_layer.self_attn.q_proj.weight.dtype),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+
+
+def test_paro_processor_layer_scope_restores_live_layer_dtype_after_fp32_training():
+    """Layer-scope live optimization must downcast the layer back to its original replay dtype."""
+
+    class _ToyConfig:
+        def __init__(self):
+            self._attn_implementation = "flash_attention_2"
+            self.attn_implementation = "flash_attention_2"
+            self.dtype = torch.bfloat16
+
+    class _ToyNorm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(8, dtype=torch.bfloat16))
+
+        def forward(self, hidden_states):
+            input_dtype = hidden_states.dtype
+            hidden_states = hidden_states.to(torch.float32)
+            return (self.weight.to(torch.float32) * hidden_states).to(input_dtype)
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+            self.q_proj = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+
+        def forward(self, hidden_states, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            hidden_states = self.q_proj(hidden_states) + self.k_proj(hidden_states) + self.v_proj(hidden_states)
+            return self.o_proj(hidden_states), None
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = _ToyConfig()
+            self.self_attn = _ToyAttn(self.config)
+            self.post_attention_layernorm = _ToyNorm()
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            attn_out, _ = self.self_attn(
+                x,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=use_cache,
+            )
+            return self.post_attention_layernorm(attn_out)
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer()
+    # A tensor the live layer keeps wider than the projections must not be
+    # narrowed by layer-scope training.
+    layer.post_attention_layernorm.register_buffer("wide", torch.full((8,), 1 + 2**-20, dtype=torch.float32))
+    x = torch.randn(1, 2, 8, dtype=torch.bfloat16)
+    y = layer(x).detach()
+
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="layer",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=0,
+        dynamic_get=_dynamic_get,
+        resolve_module_config=_default_resolved_module_config,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor.model = None
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+        replay_batches=None,
+    )
+
+    with torch.inference_mode():
+        results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+    assert layer.self_attn.q_proj.weight.dtype == torch.bfloat16
+    assert layer.self_attn.k_proj.weight.dtype == torch.bfloat16
+    assert layer.self_attn.v_proj.weight.dtype == torch.bfloat16
+    assert layer.self_attn.o_proj.weight.dtype == torch.bfloat16
+    assert layer.post_attention_layernorm.weight.dtype == torch.bfloat16
+    assert layer.post_attention_layernorm.wide.dtype == torch.float32
+    assert torch.all(layer.post_attention_layernorm.wide == 1 + 2**-20)
+    assert layer.config._attn_implementation == "flash_attention_2"
+    assert layer(x).dtype == torch.bfloat16
+
+
+def test_paro_quant_device_selection_forces_single_gpu():
+    """Guard against multi-GPU Paro worker fan-out and sync hazards."""
+    cuda_devices = [torch.device("cuda:0"), torch.device("cuda:1"), torch.device("cuda:2")]
+    mixed_devices = [torch.device("cpu"), torch.device("cuda:3"), torch.device("cuda:4")]
+
+    assert _restrict_quant_devices_for_method(METHOD.PARO, cuda_devices) == [torch.device("cuda:0")]
+    assert _restrict_quant_devices_for_method(METHOD.PARO, mixed_devices) == [torch.device("cuda:3")]
+    assert _restrict_quant_devices_for_method(METHOD.GPTQ, cuda_devices) == cuda_devices
+
+
+def test_paro_kernel_rejects_sym_false():
+    """Guard that runtime capability flags disable asymmetric Paro."""
+    ok, err = ParoLinear.validate(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=128,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert not ok
+    assert isinstance(err, NotImplementedError)
+    assert "actual sym = `False`" in str(err)
+
+
+def test_paro_kernel_accepts_bf16():
+    """Guard that saved Paro checkpoints can be reloaded for bf16 inference."""
+    ok, err = ParoLinear.validate(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=128,
+        pack_dtype=torch.int32,
+        dtype=torch.bfloat16,
+    )
+
+    assert ok
+    assert err is None
+
+
+def test_paro_cuda_awq_kernel_preserves_bf16(monkeypatch):
+    """Guard that the CUDA AWQ fast path does not silently downcast bf16 inputs."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro AWQ bf16 kernel path.")
+    if IS_ROCM:
+        # The AWQ GEMM extension is CUDA-only; ``_cuda_awq_kernel_supported``
+        # routes HIP to the portable path, so this fast path never runs there.
+        pytest.skip("The Paro AWQ CUDA fast path is not built for ROCm.")
+
+    paro_module = sys.modules[ParoLinear.__module__]
+
+    module = ParoLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda")
+    module.scales.fill_(1)
+    checkpoint_scales_dtype = module.scales.dtype
+
+    seen = {}
+
+    def fake_awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum=True, kernel=None):
+        del qweight, qzeros, fp32_accum, kernel
+        seen["input_dtype"] = input.dtype
+        seen["scales_dtype"] = scales.dtype
+        seen["split_k_iters"] = split_k_iters
+        return torch.zeros((input.shape[0], module.out_features), device=input.device, dtype=input.dtype)
+
+    monkeypatch.setattr(paro_module, "_awq_cuda_gemm_forward", fake_awq_cuda_gemm_forward)
+
+    x = torch.randn((2, module.in_features), device="cuda", dtype=torch.bfloat16)
+    out = module._forward_cuda_awq_kernel(x)
+
+    assert seen["input_dtype"] == torch.bfloat16
+    assert seen["scales_dtype"] == torch.bfloat16
+    assert seen["split_k_iters"] == 4
+    assert module.scales.dtype == checkpoint_scales_dtype
+    assert module._runtime_scales.dtype == torch.bfloat16
+    assert out is not None
+    assert out.dtype == torch.bfloat16
+
+
+def test_paro_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch):
+    """Guard bf16 activations onto the fused CUDA rotation path when ready."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro rotation bf16 fused path.")
+
+    module = ParoLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        register_buffers=True,
+        auto_cache_bf16_rotation_dtype=True,
+    ).to("cuda")
+    module.theta.uniform_(-0.2, 0.2)
+    module.channel_scales.uniform_(0.75, 1.25)
+    module.post_init()
+
+    calls = {}
+
+    def spy_load_rotation_extension():
+        calls["load_count"] = calls.get("load_count", 0) + 1
+        return True
+
+    def fake_rotate(x, pairs, theta, scales, group_size, cta_m, row_pad, reverse=0):
+        calls["x_dtype"] = x.dtype
+        calls["pairs_device"] = pairs.device.type
+        calls["theta_dtype"] = theta.dtype
+        calls["scales_dtype"] = None if scales is None else scales.dtype
+        calls["group_size"] = group_size
+        calls["cta_m"] = cta_m
+        calls["row_pad"] = row_pad
+        calls["reverse"] = int(reverse)
+        return x.clone()
+
+    monkeypatch.setattr(paro_utils_module, "_load_rotation_extension", spy_load_rotation_extension)
+    monkeypatch.setattr(paro_utils_module, "_rotation_requested_launch", lambda: (8, 2))
+    monkeypatch.setattr(paro_utils_module._PARO_ROTATION_EXTENSION, "op", lambda name: fake_rotate)
+
+    x = torch.randn((2, module.in_features), device="cuda", dtype=torch.bfloat16)
+    theta = module.theta.to(device=x.device, dtype=torch.bfloat16)
+    channel_scales = module.channel_scales.to(device=x.device, dtype=torch.bfloat16)
+
+    actual = apply_paro_rotation(
+        x,
+        module.pairs,
+        theta,
+        scales=channel_scales,
+        group_size=module.group_size,
+    )
+
+    assert calls["load_count"] == 1
+    assert calls["x_dtype"] == torch.bfloat16
+    assert calls["pairs_device"] == "cuda"
+    assert calls["theta_dtype"] == torch.bfloat16
+    assert calls["scales_dtype"] == torch.bfloat16
+    assert calls["group_size"] == 128
+    assert calls["cta_m"] == 8
+    assert calls["row_pad"] == 2
+    assert calls["reverse"] == 0
+    assert actual.dtype == torch.bfloat16
+    assert torch.equal(actual, x)
+
+
+def test_paro_rotation_fused_bf16_uses_fp16_workspace_contract():
+    """Guard bf16 fused rotation against regressing back to bf16 workspace accumulation."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro rotation bf16 fused workspace path.")
+
+    assert (
+        prewarm_paro_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 128
+    group_size = 128
+    krot = 8
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=13,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(7)
+    x = torch.randn((4, in_features), generator=generator, dtype=torch.float32).to(device="cuda", dtype=torch.bfloat16)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda", dtype=torch.bfloat16)
+    scales = torch.empty((1, in_features), dtype=torch.float32)
+    scales.uniform_(0.75, 1.25, generator=generator)
+    scales = scales.to(device="cuda", dtype=torch.bfloat16)
+
+    actual = apply_paro_rotation(x, pairs, theta, scales=scales, group_size=group_size)
+    fp16_workspace_reference = apply_paro_rotation_reference(
+        x.to(dtype=torch.float16),
+        pairs,
+        theta.to(dtype=torch.float16),
+        scales=scales.to(dtype=torch.float16),
+        group_size=group_size,
+    ).to(dtype=torch.bfloat16)
+    fp32_reference = apply_paro_rotation_reference(
+        x.to(dtype=torch.float32),
+        pairs,
+        theta.to(dtype=torch.float32),
+        scales=scales.to(dtype=torch.float32),
+        group_size=group_size,
+    )
+
+    actual_fp16_workspace = (actual.float() - fp16_workspace_reference.float()).abs()
+    actual_fp32 = (actual.float() - fp32_reference).abs()
+
+    assert actual.dtype == torch.bfloat16
+    # The kernel's bf16 path keeps the rotation stages in an fp16 workspace, so
+    # its result must track the fp16-workspace reference more closely than the
+    # fp32 reference and stay within a couple of bf16 output ulps.
+    assert actual_fp16_workspace.mean().item() <= actual_fp32.mean().item()
+    assert actual_fp16_workspace.max().item() <= 4 * torch.finfo(torch.bfloat16).eps
+
+
+def test_paro_rotation_backward_folds_frozen_theta_sweep_into_one_reverse_launch(monkeypatch):
+    """Guard the frozen-theta backward against one rotation launch per rotation row."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro reverse rotation sweep.")
+
+    assert (
+        prewarm_paro_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 128
+    group_size = 128
+    krot = 8
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=29,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(5)
+    x = torch.randn((6, in_features), generator=generator, dtype=torch.float32).to(device="cuda")
+    x.requires_grad_(True)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda")
+    grad_out = (
+        torch.randn((6, in_features), generator=generator, dtype=torch.float32).to(device="cuda")
+    )
+
+    real_rotate = paro_utils_module._paro_rotation_op("rotate")
+    rotate_calls = []
+
+    def counting_rotate(*args):
+        rotate_calls.append(int(args[-1]))
+        return real_rotate(*args)
+
+    monkeypatch.setattr(paro_utils_module, "_rotation_requested_launch", lambda: (8, 2))
+    monkeypatch.setattr(
+        paro_utils_module._PARO_ROTATION_EXTENSION,
+        "op",
+        lambda name: counting_rotate if name == "rotate" else None,
+    )
+
+    # `theta` never requires grad here, so the backward only needs the inverse
+    # transform of the incoming gradient.
+    assert theta.requires_grad is False
+    rotated = paro_utils_module.apply_paro_rotation_autograd(
+        x,
+        pairs,
+        theta,
+        group_size=group_size,
+    )
+    rotated.backward(grad_out)
+
+    # One forward sweep plus one fused reverse sweep, and the reverse sweep has to
+    # be the single-launch spelling.
+    assert rotate_calls == [0, 1]
+
+    # The fused reverse sweep has to be bit-equal to the per-rotation loop it
+    # replaced, which is the formulation every earlier release produced.
+    neg_theta_all = theta.neg()
+    looped = grad_out
+    for rot_idx in range(pairs.shape[0] - 1, -1, -1):
+        looped = paro_utils_module._apply_fused_rotation(
+            looped,
+            pairs.narrow(0, rot_idx, 1),
+            neg_theta_all.narrow(0, rot_idx, 1),
+            None,
+            group_size,
+        )
+    assert torch.equal(x.grad, looped)
+
+    reference = apply_paro_rotation_reference(
+        grad_out,
+        pairs.flip(0),
+        -theta.flip(0),
+        scales=None,
+        group_size=group_size,
+    )
+    # The native reverse sweep and the torch reference sum in different
+    # orders, so fp32 drift reaches ~1.9e-6 on this fixture.
+    assert torch.allclose(x.grad, reference, atol=1e-5, rtol=1e-5)
+
+
+def test_paro_pair_grad_reduce_folds_tiles_in_ascending_order():
+    """Guard the cross-tile rotation-gradient reduce against a re-associated sum.
+
+    The reduce walks the tile axis in fixed-size load batches so the strided
+    loads overlap instead of costing one memory round trip each. That is only
+    legal while every add still runs in ascending tile order, so the batched
+    fold has to stay bit-equal to folding the per-tile rotation gradients one at
+    a time with plain fp32 adds.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro rotation-gradient reduce.")
+
+    assert (
+        prewarm_paro_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 128
+    group_size = 128
+    krot = 8
+    cta_m = 4
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=31,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(7)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda")
+    pair_grad = paro_utils_module._paro_rotation_op("rotate_pair_grad")
+
+    def run(x_rows, grad_rows):
+        _x, _grad, grad_theta = pair_grad(
+            x_rows.contiguous(),
+            grad_rows.contiguous(),
+            pairs,
+            theta,
+            group_size,
+            cta_m,
+            0,
+        )
+        return grad_theta
+
+    # 4 tiles only ever hits the scalar tail; 48 tiles runs one wide batch, one
+    # narrow batch and no tail, so every reduce path is covered.
+    for row_tiles in (4, 48):
+        rows = row_tiles * cta_m
+        x = torch.randn((rows, in_features), generator=generator, dtype=torch.float32).to(
+            device="cuda"
+        )
+        grad = torch.randn((rows, in_features), generator=generator, dtype=torch.float32).to(
+            device="cuda"
+        )
+
+        fused = run(x, grad)
+        assert fused.shape == (krot, in_features // 2)
+
+        reference = None
+        for tile in range(row_tiles):
+            tile_slice = slice(tile * cta_m, (tile + 1) * cta_m)
+            tile_grad = run(x[tile_slice], grad[tile_slice])
+            reference = tile_grad if reference is None else reference + tile_grad
+        assert torch.equal(fused, reference)
+
+
+@pytest.mark.parametrize("cta_m", [4, 8, 16])
+@pytest.mark.parametrize("row_pad", [0, 2])
+def test_paro_pair_grad_sweep_is_race_free(cta_m, row_pad):
+    """Guard the fused backward sweep against the shared-memory write-after-read race (#4461).
+
+    Rotation r-1 overwrites columns that other threads are still reading back for
+    rotation r's gradient unless a barrier separates the readback from the next
+    ``apply_one``. The race only surfaces with many resident blocks and only
+    corrupts the rotation gradient (the rotated operands stay exact), so repeat
+    a wide launch, require bit-identical results and check the gradient against
+    an fp64 autograd oracle.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro fused rotation backward.")
+
+    assert (
+        prewarm_paro_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 2048
+    group_size = 128
+    krot = 8
+    rows = 1024
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=31,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(7)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda")
+    rotated = torch.randn((rows, in_features), generator=generator).to(device="cuda")
+    grad_out = torch.randn((rows, in_features), generator=generator).to(device="cuda")
+    pair_grad = paro_utils_module._paro_rotation_op("rotate_pair_grad")
+
+    results = [
+        pair_grad(rotated, grad_out, pairs, theta, group_size, cta_m, row_pad) for _ in range(20)
+    ]
+    first_x, first_g, first_theta_grad = results[0]
+    for x_out, g_out, theta_grad in results[1:]:
+        assert torch.equal(x_out, first_x)
+        assert torch.equal(g_out, first_g)
+        assert torch.equal(theta_grad, first_theta_grad)
+
+    # The sweep's input-side output is the un-rotated activation, so rebuild the
+    # forward in fp64 from it and differentiate <grad_out, R(theta) x> by theta.
+    theta64 = theta.double().requires_grad_(True)
+    forward = apply_paro_rotation_reference(
+        first_x.double(), pairs, theta64, group_size=group_size
+    )
+    torch.testing.assert_close(forward, rotated.double(), rtol=0, atol=1e-4)
+    (forward * grad_out.double()).sum().backward()
+    torch.testing.assert_close(first_theta_grad.double(), theta64.grad, rtol=1e-4, atol=1e-2)
+
+
+@pytest.mark.parametrize("path", ["rotate_pair_grad", "grad_theta", "torch"])
+@pytest.mark.parametrize("with_scales", [False, True])
+def test_paro_fused_rotation_theta_grad_matches_autograd(monkeypatch, path, with_scales):
+    """Guard the fused rotation's theta gradient against fp64 autograd.
+
+    The backward sweeps the activation and the gradient back through each
+    rotation, so it holds the rotation's input and the input-side gradient
+    ``R^T g_out``; the derivative is then ``sum(g_i x_j - g_j x_i)`` with no
+    sin/cos factor. Applying the output-side formula
+    ``A cos(theta) - B sin(theta)`` there is only right at ``theta == 0``, so
+    use angles well away from zero and check every backward path.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro fused rotation backward.")
+
+    assert (
+        prewarm_paro_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+    if path != "rotate_pair_grad":
+        monkeypatch.setattr(paro_utils_module, "_fused_rotate_pair_grad_op", lambda: None)
+    if path == "torch":
+        monkeypatch.setattr(paro_utils_module, "_fused_grad_theta_op", lambda: None)
+
+    in_features = 256
+    group_size = 128
+    krot = 8
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=31,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(13)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.8, 0.8, generator=generator)
+    x = torch.randn((48, in_features), generator=generator)
+    grad_out = torch.randn((48, in_features), generator=generator)
+    scales = (torch.rand((1, in_features), generator=generator) + 0.5) if with_scales else None
+
+    theta_cuda = theta.to("cuda").requires_grad_(True)
+    x_cuda = x.to("cuda").requires_grad_(True)
+    scales_cuda = None if scales is None else scales.to("cuda").requires_grad_(True)
+    out = paro_utils_module._ParoRotateTensorFunc.apply(
+        x_cuda, pairs, theta_cuda, scales_cuda, group_size
+    )
+    (out * grad_out.to("cuda")).sum().backward()
+
+    theta64 = theta.double().to("cuda").requires_grad_(True)
+    x64 = x.double().to("cuda").requires_grad_(True)
+    scales64 = None if scales is None else scales.double().to("cuda").requires_grad_(True)
+    reference = apply_paro_rotation_reference(
+        x64, pairs, theta64, scales=scales64, group_size=group_size
+    )
+    (reference * grad_out.double().to("cuda")).sum().backward()
+
+    torch.testing.assert_close(out.double(), reference, rtol=0, atol=1e-4)
+    torch.testing.assert_close(theta_cuda.grad.double(), theta64.grad, rtol=1e-4, atol=1e-3)
+    torch.testing.assert_close(x_cuda.grad.double(), x64.grad, rtol=1e-4, atol=1e-4)
+    if scales is not None:
+        torch.testing.assert_close(scales_cuda.grad.double(), scales64.grad, rtol=1e-4, atol=1e-3)
+
+
+@pytest.mark.parametrize("rows", [1, 1000, 1001])
+def test_paro_pair_grad_is_launch_plan_invariant(rows):
+    """Guard the rotation gradient against the autotuned launch plan (#4460).
+
+    ``cta_m``/``row_pad`` are picked by a timing-based autotune, so two runs can
+    launch the same shape with different tiles. The gradient partials use a
+    fixed row granule, so every plan must return bit-identical results; the
+    row counts cover a tail CTA with granules past the end and a partial
+    granule.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro fused rotation backward.")
+
+    assert (
+        prewarm_paro_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 256
+    group_size = 128
+    krot = 8
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=31,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(11)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda")
+    rotated = torch.randn((rows, in_features), generator=generator).to(device="cuda")
+    grad_out = torch.randn((rows, in_features), generator=generator).to(device="cuda")
+    pair_grad = paro_utils_module._paro_rotation_op("rotate_pair_grad")
+
+    results = {
+        (cta_m, row_pad): pair_grad(rotated, grad_out, pairs, theta, group_size, cta_m, row_pad)
+        for cta_m in (4, 8, 16)
+        for row_pad in (0, 2)
+    }
+    reference = results[(4, 0)]
+    for plan, outputs in results.items():
+        for name, actual, expected in zip(("x", "grad", "theta_grad"), outputs, reference):
+            assert torch.equal(actual, expected), f"{name} differs for launch plan {plan}"
+
+
+def test_paro_rotation_cache_preserves_bf16(monkeypatch):
+    """Guard that cached BF16 rotation metadata preserves the runtime dtype and values."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the Paro rotation cache path.")
+
+    paro_module = sys.modules[ParoLinear.__module__]
+    from gptqmodel.utils import paro as paro_utils
+
+    module = ParoLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        register_buffers=True,
+        auto_cache_bf16_rotation_dtype=True,
+    ).to("cuda")
+    module.theta.uniform_(-0.2, 0.2)
+    module.channel_scales.uniform_(0.75, 1.25)
+    module.post_init()
+
+    seen = {}
+    original_rotate = paro_utils.apply_paro_rotation
+
+    def spy_rotate(x, pairs, theta, scales=None, group_size=128):
+        del pairs, group_size
+        seen["x_dtype"] = x.dtype
+        seen["theta_dtype"] = theta.dtype
+        seen["scales_dtype"] = None if scales is None else scales.dtype
+        return original_rotate(x, module.pairs, theta, scales=scales, group_size=module.group_size)
+
+    monkeypatch.setattr(paro_module, "apply_paro_rotation", spy_rotate)
+
+    x = torch.randn((2, module.in_features), device="cuda", dtype=torch.bfloat16)
+    module._rotate_inputs(x)
+    baseline = module._rotate_inputs(x)
+    cached = module._rotate_inputs(x)
+
+    assert seen["x_dtype"] == torch.bfloat16
+    assert seen["theta_dtype"] == torch.bfloat16
+    assert seen["scales_dtype"] == torch.bfloat16
+    assert module._runtime_theta is not None
+    assert module._runtime_channel_scales is not None
+    assert module._runtime_theta.dtype == torch.bfloat16
+    assert module._runtime_channel_scales.dtype == torch.bfloat16
+    assert torch.equal(baseline, cached)
+
+
+def test_paro_optimizer_improves_over_identity_quantization():
+    """Guard that learned rotations beat naive identity-domain quantization."""
+    in_features = 128
+    out_features = 12
+    group_size = 128
+    bits = 4
+    seed = 11
+    pair_ratio = 1.0 / group_size
+
+    pairs, mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=1,
+        pair_ratio=pair_ratio,
+        seed=seed,
+        device=torch.device("cpu"),
+    )
+
+    theta = torch.zeros((1, in_features // 2), dtype=torch.float32)
+    theta[~mask] = 0.65
+    channel_scales_opt = torch.linspace(0.75, 1.25, steps=in_features, dtype=torch.float32).view(1, -1)
+    transformed_weight = (torch.randint(-7, 8, (out_features, in_features), dtype=torch.int32).to(torch.float32)) * 0.25
+
+    original_weight = apply_paro_rotation_reference(
+        transformed_weight,
+        pairs.flip(0),
+        -theta.flip(0),
+        scales=None,
+        group_size=group_size,
+    ) / channel_scales_opt
+
+    inputs = torch.randn(256, in_features, dtype=torch.float32)
+    targets = F.linear(inputs, original_weight)
+
+    baseline_weight = pseudo_quantize_dequant(
+        original_weight,
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        use_ste=False,
+    )
+    baseline_loss = F.smooth_l1_loss(F.linear(inputs, baseline_weight), targets)
+
+    result = optimize_paro_linear(
+        weight=original_weight,
+        bias=None,
+        inputs=inputs,
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        krot=1,
+        pair_ratio=pair_ratio,
+        train_rows=192,
+        val_rows=64,
+        batch_size=32,
+        rotation_epochs=24,
+        finetune_epochs=16,
+        rotation_lr=0.05,
+        weight_lr=5e-4,
+        quantizer_lr=5e-4,
+        seed=seed,
+    )
+
+    optimized_loss = F.smooth_l1_loss(F.linear(inputs, result.pseudo_weight), targets)
+    assert optimized_loss < baseline_loss
+
+
+def test_paro_exported_runtime_state_matches_paper_contract():
+    """Guard that export tensors reproduce the pseudo-quantized optimization model.
+
+    This is the key paper-contract regression test. It checks that we optimize
+    in the transformed domain, inverse-map back to the input domain for replay,
+    and then export runtime tensors whose rotated-input execution matches the
+    pseudo-quantized layer exactly.
+    """
+    in_features = 128
+    out_features = 10
+    group_size = 128
+    bits = 4
+
+    weight = torch.randn(out_features, in_features, dtype=torch.float32) * 0.3
+    bias = torch.randn(out_features, dtype=torch.float32) * 0.1
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=2,
+        pair_ratio=2.0 / group_size,
+        seed=7,
+        device=torch.device("cpu"),
+    )
+
+    model = _ParoOptimLinear(
+        weight,
+        bias,
+        bits=bits,
+        group_size=group_size,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+    )
+
+    with torch.no_grad():
+        model.theta.uniform_(-0.35, 0.35)
+        model.reset_masked_angles()
+        model.channel_scales_opt.copy_(torch.linspace(0.8, 1.2, steps=in_features))
+        model.weight.add_(torch.linspace(-0.05, 0.05, steps=in_features).view(1, -1))
+
+    model.quantizer = GroupLinearQuantizer(
+        model.transformed_weight().detach(),
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+    )
+    with torch.no_grad():
+        model.quantizer.scale.mul_(1.05)
+
+    transformed = apply_paro_rotation_reference(
+        model.weight.detach() * model.channel_scales_opt.detach().view(1, -1),
+        model.pairs,
+        model.theta.detach(),
+        scales=None,
+        group_size=group_size,
+    )
+    quantized_transformed = pseudo_quantize_dequant(
+        transformed,
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        scale=model.quantizer.scale.detach(),
+        zero_point_float=None,
+        use_ste=False,
+    )
+    expected_pseudo_weight = apply_paro_rotation_reference(
+        quantized_transformed,
+        model.pairs.flip(0),
+        -model.theta.detach().flip(0),
+        scales=None,
+        group_size=group_size,
+    ) / model.channel_scales_opt.detach().view(1, -1)
+
+    torch.testing.assert_close(model.pseudo_weight().detach(), expected_pseudo_weight, atol=1e-5, rtol=1e-5)
+
+    pack_weight, _q_scales, _q_zeros, theta, runtime_channel_scales = model.export_pack_state()
+    inputs = torch.randn(32, in_features, dtype=torch.float32)
+    runtime_outputs = F.linear(
+        apply_paro_rotation_reference(
+            inputs,
+            model.pairs,
+            theta,
+            scales=runtime_channel_scales,
+            group_size=group_size,
+        ),
+        pack_weight,
+        bias,
+    )
+
+    torch.testing.assert_close(
+        runtime_outputs,
+        F.linear(inputs, model.pseudo_weight().detach(), bias),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+
+
+def test_paro_result_from_model_matches_direct_export():
+    """Guard the fused result export against the original direct pseudo/export path."""
+    torch.manual_seed(7)
+    in_features = 128
+    out_features = 64
+    group_size = 128
+    bits = 4
+    weight = torch.randn((out_features, in_features), dtype=torch.float32)
+    bias = torch.randn((out_features,), dtype=torch.float32)
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=2,
+        pair_ratio=2.0 / in_features,
+        seed=7,
+        device=torch.device("cpu"),
+    )
+    model = _ParoOptimLinear(
+        weight,
+        bias,
+        bits=bits,
+        group_size=group_size,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    model.init_quantizer()
+    with torch.no_grad():
+        model.theta.normal_(mean=0.0, std=0.05)
+        model.channel_scales_opt.uniform_(0.8, 1.2)
+
+    direct_pseudo_weight = model.pseudo_weight().detach()
+    direct_pack_weight, direct_q_scales, direct_q_zeros, direct_theta, direct_channel_scales = model.export_pack_state()
+    result = paro_optimization._result_from_model(
+        model,
+        train_loss=0.123,
+        val_loss=0.456,
+        used_identity=False,
+    )
+
+    torch.testing.assert_close(result.pseudo_weight, direct_pseudo_weight, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(result.pack_weight, direct_pack_weight, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(result.q_scales, direct_q_scales, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(result.q_zeros, direct_q_zeros, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(result.theta, direct_theta, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(result.channel_scales, direct_channel_scales, atol=1e-5, rtol=1e-5)
+    assert result.train_loss == pytest.approx(0.123)
+    assert result.val_loss == pytest.approx(0.456)
+    assert result.used_identity is False
+
+
+def test_paro_reference_quantizer_exports_affine_qzeros():
+    """Guard that reference optimizer mode uses affine qparams despite sym runtime config."""
+    torch.manual_seed(5)
+    weight = torch.randn(32, 128, dtype=torch.float32) * 0.25 + 0.1
+    inputs = torch.randn(96, 128, dtype=torch.float32)
+
+    result = optimize_paro_linear(
+        weight=weight,
+        bias=None,
+        inputs=inputs,
+        bits=4,
+        group_size=128,
+        sym=True,
+        krot=2,
+        pair_ratio=2.0 / 128.0,
+        train_rows=64,
+        val_rows=32,
+        batch_size=16,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=11,
+        stage_impl="reference",
+        pair_impl="reference",
+        quantizer_impl="reference",
+    )
+
+    midpoint = 2 ** (4 - 1)
+    assert not torch.all(result.q_zeros == midpoint)
+
+
+def _reference_affine_quantize(
+    weight: torch.Tensor, *, bits: int, group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Independent float64 oracle, including the discrete grid and every code."""
+    qmax = 2**bits - 1
+    groups = weight.detach().cpu().double().reshape(-1, group_size)
+    scales = torch.empty((groups.shape[0], 1), dtype=torch.float64)
+    zeros = torch.empty((groups.shape[0], 1), dtype=torch.int64)
+    codes = torch.empty(groups.shape, dtype=torch.int64)
+    quantized = torch.empty_like(groups)
+    for group_index, group in enumerate(groups):
+        low = min(float(group.min()), 0.0)
+        high = max(float(group.max()), 0.0)
+        base_scale = max(high - low, 1e-5) / qmax
+        zero_point = min(max(round(-low / base_scale), 0), qmax)
+        negative_scale = -low / zero_point if zero_point > 0 else 0.0
+        positive_scale = high / (qmax - zero_point) if zero_point < qmax else 0.0
+        scale = min(max(max(negative_scale, positive_scale), 1e-5), 1e5)
+        scales[group_index] = scale
+        zeros[group_index] = zero_point
+        for value_index, value in enumerate(group.tolist()):
+            code = min(max(round(value / scale) + zero_point, 0), qmax)
+            codes[group_index, value_index] = code
+            quantized[group_index, value_index] = (code - zero_point) * scale
+    return scales, zeros, codes.reshape_as(weight), quantized.reshape_as(weight)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_paro_affine_low_precision_grid_matches_float64_oracle(device, dtype):
+    """Fitting and export must not inherit model-dtype overflow or rounding."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("The accelerator oracle requires an available Torch GPU runtime.")
+    group_size = 128
+    endpoints = [
+        [1.0, 1.0], [-1.0, -1.0], [0.0, -0.0],
+        [0.125, 2.0], [-2.0, -0.125], [-1.0, 1.0],
+        [-65504.0, 65504.0],
+        [-0.5126953125, 0.669921875],
+        [-0.26171875, 0.1982421875],
+        [-0.01, 1.0], [-1.0, 0.01],
+        [1e-7, 1e-7], [-1e-7, -1e-7],
+    ]
+    weight = torch.tensor(endpoints, dtype=dtype).repeat(1, group_size // 2).to(device)
+    expected_scale, expected_zero, expected_codes, expected = _reference_affine_quantize(
+        weight, bits=4, group_size=group_size,
+    )
+    quantizer = GroupLinearQuantizer(weight, bits=4, group_size=group_size, sym=False)
+    assert quantizer.scale.dtype == torch.float32
+    assert quantizer.zero_point_float.dtype == torch.float32
+    torch.testing.assert_close(quantizer.scale.detach().cpu().double(), expected_scale, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(-quantizer.zero_point_float.detach().cpu().long(), expected_zero, rtol=0, atol=0)
+
+    pack_scales, pack_zeros = quantizer.pack_params(weight)
+    codes = (weight.float() / pack_scales.reshape(-1, 1)).round().add(pack_zeros.reshape(-1, 1)).clamp(0, 15)
+    torch.testing.assert_close(codes.cpu().long(), expected_codes, rtol=0, atol=0)
+    # Check arithmetic error independently of mandatory model-dtype output rounding.
+    arithmetic = (codes.double() - pack_zeros.reshape(-1, 1).double()) * pack_scales.reshape(-1, 1).double()
+    torch.testing.assert_close(arithmetic.cpu(), expected, rtol=1e-6, atol=1e-6)
+    # Independently round the oracle's scales to their specified storage dtype
+    # before multiplying, then apply the model's visible-output rounding.
+    stored_expected = (
+        (expected_codes - expected_zero).float() * expected_scale.float()
+    ).to(dtype)
+    for use_ste in (False, True):
+        output = pseudo_quantize_dequant(weight, bits=4, group_size=group_size, sym=False, use_ste=use_ste)
+        assert output.dtype == dtype
+        assert torch.isfinite(output).all()
+        torch.testing.assert_close(output.cpu(), stored_expected, rtol=0, atol=0)
+
+    fallback = paro_optimization._identity_result(
+        weight=weight, bias=None, bits=4, group_size=group_size, quantizer_sym=False, krot=2,
+    )
+    torch.testing.assert_close(fallback.q_scales.cpu().double(), expected_scale, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(fallback.q_zeros.cpu().long(), expected_zero, rtol=0, atol=0)
+    torch.testing.assert_close(fallback.pack_weight.cpu(), stored_expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_paro_affine_threshold_neighbors_match_oracle(device, dtype):
+    """Check exact ties and adjacent input values for both signs and zero selection."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("The accelerator oracle requires an available Torch GPU runtime.")
+    group_size = 128
+    ties = torch.arange(-13, 14, 2).to(dtype)
+    below = torch.nextafter(ties, torch.full_like(ties, -torch.inf))
+    above = torch.nextafter(ties, torch.full_like(ties, torch.inf))
+    # Endpoints give the exactly representable scale 2 and integer zero point 8.
+    weight = torch.zeros((4, group_size), dtype=dtype)
+    weight[0, :2] = torch.tensor([-16.0, 14.0], dtype=dtype)
+    weight[0, 2:2 + ties.numel() * 3] = torch.stack((below, ties, above), dim=1).flatten()
+    zero_tie = torch.tensor(-7.0, dtype=dtype)
+    for row, low in enumerate((
+        torch.nextafter(zero_tie, torch.tensor(-torch.inf, dtype=dtype)),
+        zero_tie,
+        torch.nextafter(zero_tie, torch.tensor(torch.inf, dtype=dtype)),
+    ), start=1):
+        weight[row, 0], weight[row, 1] = low, 23.0
+    weight = weight.to(device)
+    expected_scale, expected_zero, expected_codes, _ = _reference_affine_quantize(
+        weight, bits=4, group_size=group_size,
+    )
+    scale, negative_zero = paro_optimization._calc_affine_qparams(weight, bits=4, group_size=group_size)
+    codes = (weight.float() / scale).round().sub(negative_zero).clamp(0, 15)
+    torch.testing.assert_close(codes.cpu().long(), expected_codes, rtol=0, atol=0)
+    torch.testing.assert_close(-negative_zero.cpu().long(), expected_zero, rtol=0, atol=0)
+    torch.testing.assert_close(scale.cpu().double(), expected_scale, rtol=1e-6, atol=1e-6)
+    actual = pseudo_quantize_dequant(weight, bits=4, group_size=group_size, sym=False, use_ste=False)
+    stored_expected = ((expected_codes - expected_zero).float() * expected_scale.float()).to(dtype)
+    torch.testing.assert_close(actual.cpu(), stored_expected, rtol=0, atol=0)
+
+
+def test_paro_affine_qparams_fit_one_sided_and_constant_groups():
+    """Guard that every group's fitted affine grid contains its values."""
+    group_size = 128
+    bits = 4
+    qmax = 2**bits - 1
+    threshold_row = torch.linspace(-1.0, 1.0, group_size)
+    threshold_row[10] = 1.5 / 7 - 1e-6
+    threshold_row[11] = 1.5 / 7 + 1e-6
+    weight = torch.stack(
+        [
+            torch.full((group_size,), 1.0),
+            torch.full((group_size,), -1.0),
+            torch.full((group_size,), 0.5),
+            torch.full((group_size,), -0.5),
+            torch.zeros(group_size),
+            torch.cat([torch.ones(group_size // 2), -torch.ones(group_size // 2)]),
+            torch.linspace(-1.0, 1.0, group_size),
+            torch.linspace(0.1, 1.0, group_size),
+            torch.linspace(-1.0, -0.1, group_size),
+            threshold_row,
+        ],
+    )
+
+    scale, zero_point_float = paro_optimization._calc_affine_qparams(
+        weight,
+        group_size=group_size,
+        bits=bits,
+    )
+    zero_point = (-zero_point_float).round()
+    assert torch.all(scale > 0)
+    assert torch.all((zero_point >= 0) & (zero_point <= qmax))
+
+    quantized = pseudo_quantize_dequant(
+        weight,
+        bits=bits,
+        group_size=group_size,
+        sym=False,
+        scale=scale,
+        zero_point_float=zero_point_float,
+        use_ste=False,
+    )
+    # The no-qparams entry point must fit the same grid.
+    default_fit = pseudo_quantize_dequant(
+        weight,
+        bits=bits,
+        group_size=group_size,
+        sym=False,
+        use_ste=False,
+    )
+    torch.testing.assert_close(default_fit, quantized, atol=0, rtol=0)
+    _, _, _, expected = _reference_affine_quantize(weight, bits=bits, group_size=group_size)
+    torch.testing.assert_close(quantized.double(), expected, atol=1e-6, rtol=1e-6)
+    # No group may be clipped to a boundary: every element stays within half a
+    # quantization step of the original value.
+    error = (quantized - weight).abs().amax(dim=1)
+    assert torch.all(error <= scale.flatten() / 2 + 1e-6)
+    # Constant one-sided groups must round-trip instead of collapsing toward zero.
+    torch.testing.assert_close(quantized[:5], weight[:5], atol=1e-6, rtol=0)
+
+
+def test_paro_identity_fallback_quantizes_one_sided_groups():
+    """Guard the no-calibration fallback against one-sided range collapse."""
+    group_size = 128
+    weight = torch.stack(
+        [torch.full((group_size,), 1.0), torch.full((group_size,), -1.0)]
+    )
+
+    direct = paro_optimization._identity_result(
+        weight=weight,
+        bias=None,
+        bits=4,
+        group_size=group_size,
+        quantizer_sym=False,
+        krot=2,
+    )
+    assert direct.used_identity is True
+    torch.testing.assert_close(direct.pseudo_weight, weight, atol=1e-6, rtol=0)
+
+    result = optimize_paro_linear(
+        weight=weight,
+        bias=None,
+        inputs=torch.empty(0, group_size),
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        krot=2,
+        pair_ratio=2.0 / group_size,
+        train_rows=8,
+        val_rows=8,
+        batch_size=8,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=0,
+        quantizer_impl="reference",
+    )
+    assert result.used_identity is True
+    torch.testing.assert_close(result.pseudo_weight, weight, atol=1e-6, rtol=0)
+    assert torch.all((result.q_zeros >= 0) & (result.q_zeros <= 15))
+
+
+def test_paro_identity_fallback_preserves_one_sided_groups_in_bfloat16():
+    """Guard the fallback fit under the bfloat16 model dtype."""
+    group_size = 128
+    weight = torch.stack(
+        [torch.full((group_size,), 1.0), torch.full((group_size,), -1.0)]
+    ).to(torch.bfloat16)
+
+    result = paro_optimization._identity_result(
+        weight=weight,
+        bias=None,
+        bits=4,
+        group_size=group_size,
+        quantizer_sym=False,
+        krot=2,
+    )
+    assert result.pseudo_weight.dtype == torch.bfloat16
+    torch.testing.assert_close(result.pseudo_weight.float(), weight.float(), atol=1e-2, rtol=0)
+
+
+def test_paro_reference_optimizer_keeps_one_sided_groups_representable():
+    """Guard quantizer initialization and export for one-sided groups."""
+    group_size = 128
+    weight = torch.stack(
+        [torch.full((group_size,), 1.0), torch.full((group_size,), -1.0)]
+    )
+    result = optimize_paro_linear(
+        weight=weight,
+        bias=None,
+        inputs=torch.randn(8, group_size),
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        krot=2,
+        pair_ratio=2.0 / group_size,
+        train_rows=4,
+        val_rows=4,
+        batch_size=4,
+        rotation_epochs=0,
+        finetune_epochs=0,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=0,
+        quantizer_impl="reference",
+    )
+    assert result.used_identity is False
+    torch.testing.assert_close(result.pseudo_weight, weight, atol=1e-6, rtol=0)
+    torch.testing.assert_close(result.pack_weight, result.pseudo_weight, atol=1e-5, rtol=0)
+    assert torch.all(result.q_scales > 0)
+    assert torch.all((result.q_zeros >= 0) & (result.q_zeros <= 15))
+
+
+@pytest.mark.parametrize("learned_scale", [None, 0.0, 1e-8, 1e-5, 1e5, 1e6])
+def test_paro_optimizer_export_qparams_reproduce_quantized_weight(learned_scale):
+    """Guard that exported affine qparams reproduce the packed pseudo weight."""
+    group_size = 128
+    bits = 4
+    qmax = 2**bits - 1
+    weight = torch.stack(
+        [torch.full((group_size,), 2.0), torch.full((group_size,), -2.0)]
+    )
+    pairs, _theta, _channel_scales = build_identity_rotation_buffers(
+        in_features=group_size,
+        group_size=group_size,
+        krot=2,
+    )
+    theta_mask = torch.zeros((pairs.shape[0], group_size // 2), dtype=torch.bool)
+    model = _ParoOptimLinear(
+        weight,
+        None,
+        bits=bits,
+        group_size=group_size,
+        quantizer_sym=False,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    model.init_quantizer()
+    if learned_scale is not None:
+        with torch.no_grad():
+            model.quantizer.scale.fill_(learned_scale)
+    quantized, q_scales, q_zeros, _theta, _runtime_scales = model.export_pack_state()
+
+    if learned_scale is not None:
+        expected_scale = torch.full_like(q_scales, min(max(learned_scale, 1e-5), 1e5))
+        torch.testing.assert_close(q_scales, expected_scale, atol=0, rtol=0)
+    assert torch.all(q_scales > 0)
+    assert torch.all((q_zeros >= 0) & (q_zeros <= qmax))
+    transformed = model.transformed_weight(use_ste=False).detach()
+    scale = q_scales.reshape(-1, 1)
+    zeros = q_zeros.reshape(-1, 1)
+    codes = ((transformed.reshape(-1, group_size) / scale).round() + zeros).clamp(0, qmax)
+    reconstructed = ((codes - zeros) * scale).reshape_as(transformed)
+    torch.testing.assert_close(reconstructed, quantized, atol=0, rtol=0)
+    if learned_scale is None:
+        torch.testing.assert_close(quantized, weight, atol=1.0 / qmax, rtol=0)
+
+
+def test_rotation_autotune_entry_serialization_round_trip():
+    """A persisted launch entry must rebuild the exact in-process cache key."""
+    utils = paro_utils_module
+    key = (0, torch.float32, 896, 4864, 128, 8, True, -2, -2)
+
+    serialized = utils._rotation_autotune_entry_from_cache(key, (4, 0))
+    assert serialized == [0, "torch.float32", 896, 4864, 128, 8, 1, -2, -2, 4, 0]
+    assert utils._rotation_autotune_entry_to_cache(serialized) == (key, (4, 0))
+
+    # Malformed or unknown-dtype entries are skipped instead of raising.
+    assert utils._rotation_autotune_entry_to_cache("not-a-list") is None
+    assert utils._rotation_autotune_entry_to_cache([0, "torch.float32", 1]) is None
+    assert utils._rotation_autotune_entry_to_cache([0, "torch.uint8", 8, 896, 128, 8, 1, -2, -2, 4, 0]) is None
+
+
+def test_rotation_autotune_disk_cache_writes_and_honours_kill_switch(tmp_path, monkeypatch):
+    """Writes land under the configured cache dir and can be disabled."""
+    utils = paro_utils_module
+    monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path))
+    configure_kernel(KernelConfig())
+
+    key = (0, torch.float32, 8, 896, 128, 8, True, -2, -2)
+    utils._persist_rotation_autotune_entry(key, (4, 0), 0)
+    path = utils._rotation_autotune_cache_path(0)
+    assert path.exists()
+    assert str(path).startswith(str(tmp_path))
+
+    configure_kernel(KernelConfig(paro_autotune_cache=False))
+    assert utils._rotation_autotune_cache_enabled() is False
+    # Identical GPUs share one hardware-fingerprint path, so remove the first
+    # entry and prove the kill switch prevents rewriting that same file.
+    path.unlink()
+    utils._persist_rotation_autotune_entry((0, torch.float32, 64, 896, 128, 8, True, -2, -2), (4, 0), 0)
+    assert not path.exists()

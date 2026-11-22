@@ -1,0 +1,110 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "attn_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attn_pdrop": 0.0,
+   "chunk_size_feed_forward": 0,
+   "clip_qkv": 8,
+   "dtype": null,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "is_encoder_decoder": false,
+   "kv_n_heads": 1,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "model_type": "",
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "problem_type": null,
+   "return_dict": true,
+   "rope_theta": 500000
+  },
+  "bos_token_id": 1,
+  "chunk_size_feed_forward": 0,
+  "d_model": 32,
+  "dtype": null,
+  "emb_pdrop": 0.0,
+  "eos_token_id": 2,
+  "ffn_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "ffn_act_fn": {
+    "name": "gelu"
+   },
+   "ffn_hidden_size": 64,
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "model_type": "",
+   "moe_jitter_eps": 0.0,
+   "moe_loss_weight": 0.05,
+   "moe_normalize_expert_weights": 1.0,
+   "moe_num_experts": 8,
+   "moe_top_k": 4,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "problem_type": null,
+   "return_dict": true
+  },
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_range": 0.02,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "max_seq_len": 512,
+  "model_type": "dbrx",
+  "n_heads": 2,
+  "n_layers": 2,
+  "num_key_value_heads": 1,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "output_router_logits": false,
+  "pad_token_id": 0,
+  "problem_type": null,
+  "resid_pdrop": 0.0,
+  "return_dict": true,
+  "rope_parameters": {
+   "rope_theta": 10000.0,
+   "rope_type": "default"
+  },
+  "tie_word_embeddings": false,
+  "transformers_version": "5.23.0",
+  "use_cache": true,
+  "vocab_size": 99
+ },
+ "config_class": "DbrxConfig",
+ "config_module": "configuration_dbrx",
+ "extra_inputs": {},
+ "float_inputs": {},
+ "model_classes": [
+  [
+   "modeling_dbrx",
+   "DbrxModel"
+  ],
+  [
+   "modeling_dbrx",
+   "DbrxForCausalLM"
+  ]
+ ]
+}

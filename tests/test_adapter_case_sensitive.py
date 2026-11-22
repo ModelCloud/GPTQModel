@@ -11,12 +11,14 @@ names remain loadable through an explicit fallback.
 """
 
 import json
+import re
 from types import SimpleNamespace
 
+import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from gptqmodel.adapter.adapter import Lora
+from gptqmodel.adapter.adapter import Lora, LoraConfig
 from gptqmodel.models.writer import ModelWriter
 
 
@@ -98,3 +100,60 @@ def test_eora_export_round_trips_canonical_module_case(tmp_path):
 
     torch.testing.assert_close(loaded.lora_A, adapter.lora_A.T)
     torch.testing.assert_close(loaded.lora_B, adapter.lora_B.T)
+
+
+def _peft_pattern_key(patterns, name):
+    """PEFT 0.21.3 ``get_pattern_key``: the first case-sensitive match wins."""
+
+    for key in patterns:
+        if re.match(rf"(.*\.)?({key})$", name):
+            return key
+    return name
+
+
+def test_alpha_pattern_keeps_peft_case_order():
+    """A later canonical pattern must beat an earlier lowercase one (#5422).
+
+    PEFT resolves ``alpha_pattern={"proj": 8, "Proj": 2}`` case-sensitively, so
+    ``block.Proj`` takes 2. The per-pattern legacy fallback matched ``proj``
+    case-insensitively before ever looking at ``Proj`` and applied 8.
+    """
+
+    config = LoraConfig(r=2, lora_alpha=2, alpha_pattern={"proj": 8, "Proj": 2})
+    adapter = Lora(rank=2)
+
+    for name in ("block.proj", "block.Proj"):
+        expected = config.alpha_pattern[_peft_pattern_key(config.alpha_pattern, name)]
+        assert adapter.dynamic_alpha_override(config, name) == pytest.approx(expected)
+
+    assert adapter.dynamic_alpha_override(config, "block.Proj") == pytest.approx(2)
+    assert adapter.dynamic_alpha_override(config, "block.proj") == pytest.approx(8)
+
+
+def test_rank_pattern_keeps_peft_case_order():
+    """The rank override has the same case-order contract as alpha (#5422)."""
+
+    config = LoraConfig(r=2, lora_alpha=2, rank_pattern={"proj": 8, "Proj": 4})
+
+    for name, expected in (("block.proj", 8), ("block.Proj", 4)):
+        adapter = Lora(rank=2)
+        assert adapter.dynamic_rank_override(config, name) is True
+        assert adapter.rank == expected
+
+
+def test_lowercase_pattern_still_matches_a_canonical_module():
+    """The legacy case-insensitive fallback survives for a lowercase rule."""
+
+    config = LoraConfig(r=2, lora_alpha=2, alpha_pattern={"wqkv": 6})
+    adapter = Lora(rank=2)
+
+    assert adapter.dynamic_alpha_override(
+        config, "transformer.blocks.0.attn.Wqkv"
+    ) == pytest.approx(6)
+
+    rank_config = LoraConfig(r=2, lora_alpha=2, rank_pattern={"wqkv": 4})
+    rank_adapter = Lora(rank=2)
+    assert rank_adapter.dynamic_rank_override(
+        rank_config, "transformer.blocks.0.attn.Wqkv"
+    ) is True
+    assert rank_adapter.rank == 4

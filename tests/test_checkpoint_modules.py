@@ -19,6 +19,7 @@ from gptqmodel.quantization.config import (
     QQQConfig,
     QuantizeConfig,
 )
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 def assert_schema_roundtrip(module, config):
@@ -235,7 +236,7 @@ def test_checkpoint_persists_effective_dynamic_fp8_settings():
         "format": "float8_e5m2",
         "weight_scale_method": "block",
         "weight_block_size": [32, 32],
-        "weight_scale_semantics": "inverse",
+        "weight_scale_semantics": "multiplier",
     }
 
     restored = restore_packed_module(
@@ -268,6 +269,9 @@ def test_gguf_bits_schema(bits):
     assert restored.bits == module.bits
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="QQQ (BACKEND.QQQ) has no ROCm kernel"
+)
 def test_qqq_optional_group_scales_schema():
     from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
 
@@ -326,7 +330,7 @@ def test_qqq_torch_checkpoint_restore_runs_with_real_permutations():
 
 
 def test_paro_runtime_options_schema():
-    from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+    from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 
     config = ParoConfig(bits=4, group_size=32, krot=4)
     module = ParoLinear(

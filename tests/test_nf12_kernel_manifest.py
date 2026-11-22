@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import importlib.util
 import re
 from pathlib import Path
 
@@ -84,6 +85,10 @@ def test_every_kernel_has_an_explicit_mlx_decision():
     assert set(kernels.MLX_VARIANTS) == registered
 
 
+def _mlx_available() -> bool:
+    return importlib.util.find_spec("mlx") is not None
+
+
 @pytest.mark.parametrize("operation,variant", sorted(kernels.MLX_VARIANTS.items()))
 def test_mlx_variant_resolves(operation, variant):
     """A claimed MLX variant must exist; an unclaimed one must be a listed gap."""
@@ -92,6 +97,11 @@ def test_mlx_variant_resolves(operation, variant):
         return
     module_name, _, attribute = variant.partition(":")
     assert module_name and attribute, f"{operation}: expected 'module:attribute', got {variant!r}"
+    # ``mlx_nf12`` imports MLX at module scope, so a claimed variant can only be
+    # resolved where the Metal runtime is installed. The claim itself is still
+    # validated on every host by ``test_every_kernel_has_an_explicit_mlx_decision``.
+    if not _mlx_available():
+        pytest.skip(f"{operation}: MLX is not installed; cannot import {module_name}")
     module = importlib.import_module(module_name)
     assert callable(getattr(module, attribute, None)), f"{operation}: {variant} is not callable"
 

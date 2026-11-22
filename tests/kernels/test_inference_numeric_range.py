@@ -8,6 +8,7 @@ import torch
 from test_torch_weight_storage import state_tensors
 
 from gptqmodel.quantization import FORMAT
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 DEVICES = ['cpu'] + (['cuda'] if torch.cuda.is_available() else [])
@@ -43,12 +44,13 @@ def check(module, x, expected):
 @pytest.mark.parametrize('method', ['tensor', 'row', 'block'])
 def test_fp8_small_weight_scale(device, dtype, fmt, method):
     from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+    from tests.fp8_test_utils import pack_fp8_module
     m = TorchFP8Linear(bits=8, group_size=-1, desc_act=False, sym=True,
                        in_features=128, out_features=64, bias=False, format=fmt,
                        weight_scale_method=method, weight_block_size=(16, 16) if method == "block" else None)
     linear = torch.nn.Linear(128, 64, bias=False)
     linear.weight.data.fill_(2**-20)
-    m.pack(linear, None, None)
+    pack_fp8_module(m, linear)
     m = m.to(device).eval()
     x = torch.full((1, 128), 1024., dtype=dtype, device=device)
     check(m, x, .125)
@@ -361,11 +363,12 @@ def test_native_qqq_small_activation_scale():
 @pytest.mark.parametrize('simd', ['default', 'avx2', 'scalar'])
 def test_floatx_cpu_scale_range(monkeypatch, dtype, fmt, layout, simd):
     from gptqmodel.quantization.dtype import dequantize_fp8
-    monkeypatch.setenv('GPTQMODEL_FLOATX_CPU_FORCE_NATIVE_FP8', '1')
-    if simd in ('avx2', 'scalar'):
-        monkeypatch.setenv('GPTQMODEL_FLOATX_CPU_DISABLE_AVX512', '1')
-    if simd == 'scalar':
-        monkeypatch.setenv('GPTQMODEL_FLOATX_CPU_DISABLE_AVX2', '1')
+    configure_kernel(
+        KernelConfig(
+            floatx_cpu_native_fp8=True,
+            floatx_cpu_simd_level={'default': 2, 'avx2': 1, 'scalar': 0}[simd],
+        )
+    )
     # All byte codes plus tails; mask NaN/Inf codes, which have no finite oracle.
     codes = torch.arange(256, dtype=torch.uint8).repeat(3)[:2 * 257].reshape(2, 257)
     source = codes.view(getattr(torch, fmt))
@@ -384,10 +387,11 @@ def test_floatx_cpu_scale_range(monkeypatch, dtype, fmt, layout, simd):
 @pytest.mark.parametrize('simd', ['default', 'avx2', 'scalar'])
 def test_fp4_cpu_tiny_scale(monkeypatch, dtype, simd):
     from gptqmodel.quantization.dtype import dequantize_f4_e2m1
-    if simd in ('avx2', 'scalar'):
-        monkeypatch.setenv('GPTQMODEL_FLOATX_CPU_DISABLE_AVX512', '1')
-    if simd == 'scalar':
-        monkeypatch.setenv('GPTQMODEL_FLOATX_CPU_DISABLE_AVX2', '1')
+    configure_kernel(
+        KernelConfig(
+            floatx_cpu_simd_level={'default': 2, 'avx2': 1, 'scalar': 0}[simd],
+        )
+    )
     packed = torch.arange(256, dtype=torch.uint8).reshape(2, 128)
     lut = torch.tensor([0., .5, 1., 1.5, 2., 3., 4., 6., -0., -.5, -1., -1.5, -2., -3., -4., -6.], dtype=torch.float64)
     expected = torch.stack((lut[(packed & 15).long()], lut[(packed >> 4).long()]), -1).reshape(2, 256)
@@ -514,3 +518,198 @@ def test_exllamav2_retains_no_dense_weight_scratch(backend, rows):
     check(m, x, expected)
     after = [t for t in state_tensors(vars(model)) if t.numel() * t.element_size() >= dense_bytes]
     assert after == [], 'prefill retained a dense weight'
+
+
+# E2M1 values indexed by the four-bit nibble, including signed zero.
+_E2M1_CODE_VALUES = (
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+)
+
+
+def _fp4_effective_weight(packed, scale, block_size):
+    """Decode the E2M1 codes and the effective block scale in FP64.
+
+    The oracle never narrows to the activation dtype: the effective weight is
+    the product the layer is supposed to apply, and the only rounding under
+    test is the final output cast.
+    """
+
+    low = (packed & 0x0F).to(torch.long)
+    high = ((packed >> 4) & 0x0F).to(torch.long)
+    codes = torch.stack((low, high), dim=-1).reshape(*packed.shape[:-1], packed.shape[-1] * 2)
+    values = torch.tensor(_E2M1_CODE_VALUES, dtype=torch.float64, device=packed.device)[codes]
+    expanded = scale.to(torch.float64).repeat_interleave(block_size, dim=-1)
+    assert expanded.shape == values.shape, (expanded.shape, values.shape)
+    return values * expanded
+
+
+def _tiny_fp4_linear(*, byte, scale, bias=None, orig_dtype=torch.bfloat16):
+    from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
+
+    return TorchFP4Linear(
+        in_features=16,
+        out_features=1,
+        weight=torch.full((1, 8), byte, dtype=torch.uint8),
+        weight_scale=torch.tensor([[scale]], dtype=torch.float32),
+        weight_block_size=16,
+        orig_dtype=orig_dtype,
+        bias=bias,
+    ).eval()
+
+
+@pytest.mark.parametrize('device', DEVICES)
+@pytest.mark.parametrize('dtype', DTYPES)
+@pytest.mark.parametrize(
+    'byte,scale,x_value,expected',
+    [
+        # Six times a 16384 effective scale is 98304, above the FP16 maximum,
+        # although 6 * 16384 * 0.5 = 49152 is representable. Narrowing the
+        # weight first returns NaN.
+        (0x77, 16384.0, 0.5, 49152.0),
+        # 1 * 2**-30 is zero in FP16, although 2**-30 * 32768 = 2**-15 is
+        # representable. Narrowing the weight first returns 0.
+        (0x22, 2.0 ** -30, 32768.0, 3.0517578125e-05),
+        # Both terms leave the narrow range; the product is still finite.
+        (0x77, 2.0 ** -30, 32768.0, 6.0 * 2.0 ** -15),
+        (0x22, 16384.0, 1.0, 16384.0),
+    ],
+    ids=['overflow', 'underflow', 'both', 'unit'],
+)
+def test_fp4_wide_decode_preserves_effective_weight_range(device, dtype, byte, scale, x_value, expected):
+    """Decode the effective weight wide so the reduction can recover its range."""
+
+    module = _tiny_fp4_linear(byte=byte, scale=scale, orig_dtype=dtype).to(device)
+    x = torch.zeros(1, 16, dtype=dtype, device=device)
+    x[0, 0] = x_value
+    weight = _fp4_effective_weight(module.weight, module.weight_scale, module.weight_block_size)
+    oracle = x.double() @ weight.t()
+
+    actual = check(module, x, oracle)
+
+    # The correct result is exactly representable, so only a wide decode of the
+    # weight can reproduce it; narrowing first returns NaN/0/0.
+    assert torch.equal(actual, oracle.to(dtype)), (actual, oracle.to(dtype))
+    assert float(actual.item()) == pytest.approx(expected, rel=0, abs=0)
+
+
+@pytest.mark.parametrize('device', DEVICES)
+@pytest.mark.parametrize('dtype', DTYPES)
+def test_fp4_wide_bias_branch_preserves_effective_weight_range(device, dtype):
+    """The wide-bias fallback must not narrow the weight before the product."""
+
+    # -65536 is not representable in FP16, so the stored bias keeps the wide
+    # epilogue; the weight itself must also skip the narrow decode.
+    module = _tiny_fp4_linear(
+        byte=0x77,
+        scale=16384.0,
+        bias=torch.tensor([-65536.0], dtype=torch.float32),
+        orig_dtype=dtype,
+    ).to(device)
+    x = torch.zeros(1, 16, dtype=dtype, device=device)
+    x[0, 0] = 0.5
+    weight = _fp4_effective_weight(module.weight, module.weight_scale, module.weight_block_size)
+    oracle = x.double() @ weight.t() + module.bias.double()
+
+    actual = check(module, x, oracle)
+
+    assert torch.equal(actual, oracle.to(dtype)), (actual, oracle.to(dtype))
+    assert float(actual.item()) == 49152.0 - 65536.0
+
+
+@pytest.mark.parametrize('device', DEVICES)
+@pytest.mark.parametrize('dtype', DTYPES)
+def test_fp4_narrow_decode_keeps_in_range_weights_narrow(device, dtype):
+    """An in-range pack still takes the narrow decode (no wide copy per forward)."""
+
+    module = _tiny_fp4_linear(byte=0x77, scale=0.04, orig_dtype=dtype).to(device)
+    assert module._narrow_decode_in_range(dtype)
+    x = torch.zeros(1, 16, dtype=dtype, device=device)
+    x[0, 0] = 1.0
+    weight = _fp4_effective_weight(module.weight, module.weight_scale, module.weight_block_size)
+    oracle = x.double() @ weight.t()
+
+    actual = check(module, x, oracle)
+    assert float(actual.item()) == pytest.approx(0.24, rel=2e-3)
+
+
+def test_fp4_decode_range_gate_reads_live_scale():
+    """The gate must not bake in a stale answer after an in-place scale write."""
+
+    from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
+
+    module = _tiny_fp4_linear(byte=0x77, scale=0.04)
+    assert module._narrow_decode_in_range(torch.float16)
+    # `.data.fill_` does not bump the version counter, so a cached answer would
+    # keep the narrow decode and return inf.
+    module.weight_scale.data.fill_(16384.0)
+    assert not module._narrow_decode_in_range(torch.float16)
+    x = torch.zeros(1, 16, dtype=torch.float16)
+    x[0, 0] = 0.5
+    with torch.inference_mode():
+        output = module(x)
+    assert float(output.item()) == 49152.0
+    assert isinstance(module, TorchFP4Linear)
+
+
+@pytest.mark.parametrize('device', DEVICES)
+@pytest.mark.parametrize('orig_dtype', DTYPES)
+@pytest.mark.parametrize('dtype', DTYPES)
+def test_fp4_activation_dtype_mismatch_decodes_wide(device, orig_dtype, dtype):
+    """An activation that differs from ``orig_dtype`` must still execute.
+
+    The torchao wrapper dequantizes at ``orig_dtype`` and then requires the
+    activation to share it, so the accelerator path raised a dtype mismatch.
+    The forward now decodes wide instead, and the result is the same one a
+    matching activation would produce from the same packed bytes.
+    """
+
+    module = _tiny_fp4_linear(byte=0x77, scale=0.04, orig_dtype=orig_dtype).to(device)
+    x = torch.zeros(1, 16, dtype=dtype, device=device)
+    x[0, 0] = 1.0
+    weight = _fp4_effective_weight(module.weight, module.weight_scale, module.weight_block_size)
+    oracle = x.double() @ weight.t()
+
+    actual = check(module, x, oracle)
+
+    assert actual.dtype is dtype
+    assert float(actual.item()) == pytest.approx(float(oracle.item()), rel=2e-3)
+
+
+@pytest.mark.skipif('cuda' not in DEVICES, reason='device-side scale refresh')
+def test_fp4_decode_range_gate_refreshes_on_device_scale_write():
+    """A device scale rewrite must invalidate the recorded decode decision."""
+
+    module = _tiny_fp4_linear(byte=0x77, scale=0.04, orig_dtype=torch.float16).to('cuda')
+    assert module._narrow_decode_in_range(torch.float16)
+    # ``copy_`` bumps the version counter, which is what a device-side
+    # reduction cannot avoid: the forward caches the answer instead of
+    # synchronizing the host on every token.
+    module.weight_scale.copy_(torch.tensor([[16384.0]], dtype=torch.float32, device='cuda'))
+    assert not module._narrow_decode_in_range(torch.float16)
+    x = torch.zeros(1, 16, dtype=torch.float16, device='cuda')
+    x[0, 0] = 0.5
+    with torch.inference_mode():
+        output = module(x)
+    assert float(output.item()) == 49152.0
+
+
+@pytest.mark.parametrize('device', DEVICES)
+def test_fp4_decode_range_gate_handles_inference_tensors(device):
+    """A checkpoint tensor without a version counter must not fail the gate.
+
+    Tensors materialized under ``torch.inference_mode`` raise on ``_version``.
+    Reading it unguarded turned the new range check into a forward-time error
+    for exactly the tensors the loader produces.
+    """
+
+    module = _tiny_fp4_linear(byte=0x77, scale=16384.0, orig_dtype=torch.float16)
+    with torch.inference_mode():
+        module.weight_scale = torch.full((1, 1), 16384.0, dtype=torch.float32, device=device)
+    assert module.weight_scale.is_inference()
+    module = module.to(device)
+    x = torch.zeros(1, 16, dtype=torch.float16, device=device)
+    x[0, 0] = 0.5
+    with torch.inference_mode():
+        output = module(x)
+    assert float(output.item()) == 49152.0

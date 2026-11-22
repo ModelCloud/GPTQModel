@@ -31,9 +31,27 @@ from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
 
 
+#: Capability the faked topology reports. Tests that need a real per-card
+#: value (or a deliberately mixed pair) override ``importer._device_capability``
+#: after calling ``_fake_visible``.
+FAKE_CAPABILITY = (8, 9)
+
+
 def _fake_visible(monkeypatch, n):
+    """Pretend ``n`` CUDA devices exist, and make the faked pair homogeneous.
+
+    The count is faked but ``importer._device_capability`` used to keep querying
+    the real cards, so on a host with two different GPU generations (a 5090 next
+    to a 4090) the faked four-GPU topology reported *mixed* capabilities and the
+    placement helpers rejected it for a reason the test never asked about
+    (#4905). Pinning the capability here makes the faked topology homogeneous
+    regardless of the hardware running the suite; a test that wants a mixed pair
+    or a per-card value overrides this afterwards.
+    """
+
     monkeypatch.setattr(torch.cuda, "device_count", lambda: n)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(importer, "_device_capability", lambda _target: FAKE_CAPABILITY)
 
 
 def test_explicit_devices_accepts_concrete_ordinals():
@@ -165,6 +183,65 @@ def test_indexed_device_is_a_full_model_map_without_a_memory_budget(device):
     assert explicit == {"": "cuda:0"}
 
 
+@pytest.mark.parametrize("ordinal", [0, 1])
+def test_bare_integer_device_is_a_full_model_map_pinned_to_that_ordinal(
+    monkeypatch, ordinal
+):
+    """#4384: `device=N` is the active accelerator's ordinal, not its family."""
+
+    _fake_visible(monkeypatch, 4)
+    monkeypatch.setattr(importer, "_current_accelerator_type", lambda: "cuda")
+
+    assert _indexed_device_request(ordinal) == f"cuda:{ordinal}"
+    requested, explicit = _normalize_explicit_placement(ordinal, None, None)
+
+    assert requested == {"": f"cuda:{ordinal}"}
+    assert explicit == {"": f"cuda:{ordinal}"}
+
+
+@pytest.mark.parametrize("visible,ordinal,message", [
+    (1, 1, "device=1 is not a visible cuda ordinal"),
+    (4, 4, "device=4 is not a visible cuda ordinal"),
+    (4, -1, "device=-1 is not an accelerator ordinal"),
+])
+def test_bare_integer_device_beyond_the_visible_devices_is_a_value_error(
+    monkeypatch, visible, ordinal, message
+):
+    """#4449: an out-of-range ordinal fails before placement, not in the CUDA runtime."""
+
+    _fake_visible(monkeypatch, visible)
+    monkeypatch.setattr(importer, "_current_accelerator_type", lambda: "cuda")
+
+    with pytest.raises(ValueError, match=message):
+        _indexed_device_request(ordinal)
+    with pytest.raises(ValueError, match=message):
+        _normalize_explicit_placement(ordinal, None, None)
+
+
+def test_bare_integer_device_without_an_accelerator_is_rejected(monkeypatch):
+    """A CPU-only host must not turn an integer ordinal into a CPU request."""
+
+    monkeypatch.setattr(importer, "_current_accelerator_type", lambda: None)
+
+    with pytest.raises(ValueError, match="require an active accelerator"):
+        _indexed_device_request(1)
+    with pytest.raises(ValueError, match="require an active accelerator"):
+        _normalize_explicit_placement(1, None, None)
+
+
+def test_unset_device_still_expands_to_the_layerwise_map(monkeypatch):
+    """`device=None` keeps the family-wide layer-wise placement."""
+
+    _fake_visible(monkeypatch, 4)
+    monkeypatch.setattr(importer, "HAS_CUDA", True)
+    monkeypatch.setattr(importer, "IS_ROCM", False)
+
+    assert _normalize_explicit_placement(None, None, None) == (None, None)
+    assert _resolve_default_layerwise_device(None, BACKEND.AUTO) == tuple(
+        torch.device(f"cuda:{index}") for index in range(4)
+    )
+
+
 @pytest.mark.parametrize("device", ["cuda:0", torch.device("cuda:0")])
 def test_max_memory_keeps_the_indexed_device_for_the_budgeted_map(device):
     """#4068: the cap must survive when the caller also passes device="cuda:0"."""
@@ -209,9 +286,13 @@ def test_cpu_only_max_memory_rejects_an_explicit_accelerator_device():
         _resolve_max_memory_device({"cpu": "10GiB"}, torch.device("cuda:0"))
 
 
-def test_max_memory_with_an_accelerator_keeps_device_resolution():
-    assert _resolve_max_memory_device({"cuda:0": "1GiB", "cpu": "1GiB"}, "cuda:0") is None
-    assert _resolve_max_memory_device({0: "1GiB"}, DEVICE.CUDA) is None
+def test_max_memory_with_an_accelerator_resolves_to_the_budget_devices():
+    """#4632: kernel selection sees exactly the accelarators the budget names."""
+
+    assert _resolve_max_memory_device({"cuda:0": "1GiB", "cpu": "1GiB"}, "cuda:0") == (
+        torch.device("cuda:0"),
+    )
+    assert _resolve_max_memory_device({0: "1GiB"}, DEVICE.CUDA) == (torch.device("cuda:0"),)
     assert _resolve_max_memory_device(None, "cuda:0") is None
 
 
@@ -289,3 +370,43 @@ def test_strings_render_requested_subset(monkeypatch):
         "cuda:2",
         "cuda:3",
     ]
+
+
+def _mixed_generation_capability(target):
+    """A host with a 12.0 card at cuda:0 and an 8.9 card at cuda:1 (#4905)."""
+
+    return (12, 0) if target.index == 0 else (8, 9)
+
+
+def test_faked_topology_is_homogeneous_on_a_mixed_generation_host(monkeypatch):
+    """The faked four-GPU topology must not inherit the real cards' capabilities.
+
+    On a 5090+4090 host the real ``_device_capability`` reports 12.0 for cuda:0
+    and 8.9 for cuda:1, so the three tests below raised
+    ``ValueError: ... device map spanning different GPU compute capabilities``
+    while faking four *identical* GPUs. Install the mixed function first (as the
+    real hardware would answer), then let ``_fake_visible`` describe the fake
+    homogeneous topology and run the three calls that used to fail.
+    """
+
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(importer, "_device_capability", _mixed_generation_capability)
+    monkeypatch.setattr(importer, "_current_accelerator_type", lambda: "cuda")
+    monkeypatch.setattr(importer, "HAS_CUDA", True)
+    monkeypatch.setattr(importer, "IS_ROCM", False)
+
+    _fake_visible(monkeypatch, 4)
+
+    # test_default_loader_resolution_preserves_explicit_sequences[(0, 1)]
+    resolved = _resolve_default_layerwise_device((0, 1), BACKEND.AUTO)
+    assert resolved == (torch.device("cuda:0"), torch.device("cuda:1"))
+    assert _layerwise_device_strings(resolved, 2) == ["cuda:0", "cuda:1"]
+
+    # test_count_honours_requested_subset
+    assert _layerwise_device_count(["cuda:0", "cuda:1", "cuda:2", "cuda:3"]) == 4
+
+    # test_unset_device_still_expands_to_the_layerwise_map
+    assert _resolve_default_layerwise_device(None, BACKEND.AUTO) == tuple(
+        torch.device(f"cuda:{index}") for index in range(4)
+    )

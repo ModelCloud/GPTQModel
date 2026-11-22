@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Issue Claims"
+  short_description: "Scan issues and claim one per agent session before working"
+  default_prompt: "Use $gptqmodel-issue-claims to claim only eligible GPT-QModel issues with a current external security screen before starting work."

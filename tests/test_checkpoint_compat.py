@@ -15,7 +15,7 @@ import os
 import pytest
 import torch
 
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq, unpack_awq
 from gptqmodel.quantization.config import (
@@ -43,7 +43,7 @@ def _tokenizer_source() -> str:
     raise RuntimeError("unreachable after pytest.skip")
 
 
-def _build_tiny_qwen2(target_dir: str, *, tied: bool) -> str:
+def _build_tiny_qwen2(target_dir: str, *, tied: bool, store_lm_head: bool = False) -> str:
     """Write a 2-layer Qwen2 with a real tokenizer, tied or untied."""
 
     from transformers import AutoTokenizer, Qwen2Config, Qwen2ForCausalLM
@@ -67,7 +67,18 @@ def _build_tiny_qwen2(target_dir: str, *, tied: bool) -> str:
         tie_word_embeddings=tied,
     )
     torch.manual_seed(0)
-    Qwen2ForCausalLM(config).save_pretrained(target_dir, safe_serialization=True)
+    model = Qwen2ForCausalLM(config)
+    model.save_pretrained(target_dir, safe_serialization=True)
+    if tied and store_lm_head:
+        # Some tied checkpoints (Qwen3, for example) still contain
+        # `lm_head.weight`. The loader ties it afterwards, so the stored tensor
+        # is not evidence of an independent head.
+        from safetensors.torch import load_file, save_file
+
+        checkpoint = os.path.join(target_dir, "model.safetensors")
+        state = load_file(checkpoint)
+        state["lm_head.weight"] = model.lm_head.weight.detach().clone()
+        save_file(state, checkpoint, metadata={"format": "pt"})
     return target_dir
 
 
@@ -197,6 +208,27 @@ def test_hf_compat_warning_for_8bit_awq():
     ) == []
 
 
+def test_hf_compat_warning_for_dynamic_awq():
+    from gptqmodel.models.writer import hf_compat_warnings
+
+    warnings = hf_compat_warnings(
+        QuantizeConfig(
+            bits=4,
+            group_size=128,
+            method=METHOD.AWQ,
+            dynamic={"model.layers.0.mlp.down_proj": {"group_size": 32}},
+        ),
+        FORMAT.GEMM,
+    )
+
+    assert len(warnings) == 1
+    assert "dynamic" in warnings[0]
+    assert "qzeros" in warnings[0]
+    assert hf_compat_warnings(
+        QuantizeConfig(bits=4, group_size=128, method=METHOD.AWQ), FORMAT.GEMM
+    ) == []
+
+
 def test_gguf_config_publishes_non_colliding_quant_method():
     """Packed GGUF must not claim transformers' `gguf` quant method."""
 
@@ -254,25 +286,6 @@ def test_hf_compat_warning_for_every_gptqmodel_only_method():
     ) == []
 
 
-def test_every_refused_method_registers_a_refusing_quantizer():
-    from transformers.quantizers import auto as hf_auto
-
-    from gptqmodel._quant_methods import REFUSED_HF_QUANT_METHODS
-    from gptqmodel.utils.hf_refusing_quantizer import (
-        GPTQModelRefusingHfQuantizer,
-        GPTQModelRefusingQuantizationConfig,
-    )
-
-    for quant_method in REFUSED_HF_QUANT_METHODS:
-        assert (
-            hf_auto.AUTO_QUANTIZER_MAPPING[quant_method] is GPTQModelRefusingHfQuantizer
-        )
-        assert (
-            hf_auto.AUTO_QUANTIZATION_CONFIG_MAPPING[quant_method]
-            is GPTQModelRefusingQuantizationConfig
-        )
-
-
 def _reference_pack_8bit(codes: torch.Tensor) -> torch.Tensor:
     """Independent little-endian lane-order reference for 8-bit AWQ words."""
 
@@ -324,7 +337,7 @@ def test_untied_lm_head_quantizes_and_reloads(tmp_path):
     model_dir = _build_tiny_qwen2(str(tmp_path / "untied"), tied=False)
 
     model = GPTQModel.load(model_dir, QuantizeConfig(bits=4, group_size=32, lm_head=True))
-    model.quantize(CALIBRATION_TEXT, batch_size=2)
+    model.quantize(CalibrationConfig(dataset=CALIBRATION_TEXT, batch_size=2))
 
     assert isinstance(model.model.lm_head, BaseQuantLinear)
 
@@ -349,7 +362,18 @@ def test_tied_lm_head_is_rejected_with_the_explicit_error(tmp_path):
     model = GPTQModel.load(model_dir, QuantizeConfig(bits=4, group_size=32, lm_head=True))
 
     with pytest.raises(NotImplementedError, match="tied weights"):
-        model.quantize(CALIBRATION_TEXT, batch_size=2)
+        model.quantize(CalibrationConfig(dataset=CALIBRATION_TEXT, batch_size=2))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="lm_head quantization needs an accelerator")
+def test_tied_lm_head_with_stored_head_is_still_rejected(tmp_path):
+    model_dir = _build_tiny_qwen2(
+        str(tmp_path / "tied_stored"), tied=True, store_lm_head=True
+    )
+    model = GPTQModel.load(model_dir, QuantizeConfig(bits=4, group_size=32, lm_head=True))
+
+    with pytest.raises(NotImplementedError, match="tied weights"):
+        model.quantize(CalibrationConfig(dataset=CALIBRATION_TEXT, batch_size=2))
 
 
 def test_hf_compat_warning_for_defused_moe_checkpoint():

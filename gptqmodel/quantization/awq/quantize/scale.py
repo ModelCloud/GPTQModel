@@ -4,25 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import logging
+from importlib import import_module
 from typing import Dict, List, Set, Tuple
 
 import torch
 import torch.nn as nn
-from packaging.version import Version
-from transformers import __version__ as transformers_version
-from transformers.activations import GELUActivation, NewGELUActivation
+from transformers.activations import GELUActivation, GELUTanh, NewGELUActivation
 
-
-if Version(transformers_version) >= Version("4.57.0"):
-    from transformers.activations import GELUTanh
-else:
-    from transformers.activations import PytorchGELUTanh as GELUTanh
-from transformers.models.bloom.modeling_bloom import BloomGelu
-from transformers.models.cohere.modeling_cohere import CohereLayerNorm
-from transformers.models.gemma.modeling_gemma import GemmaRMSNorm
-from transformers.models.gemma2.modeling_gemma2 import Gemma2RMSNorm
-from transformers.models.llama.modeling_llama import LlamaRMSNorm
-
+from gptqmodel._rocm_env import running_on_rocm
 from gptqmodel.quantization.awq.modules.act import ScaledActivation
 from gptqmodel.quantization.awq.utils.module import get_op_by_name, set_op_by_name
 from gptqmodel.quantization.norm_tuning import resolve_gain_offset
@@ -37,43 +26,58 @@ class UnresolvableGainOffset(RuntimeError):
     """The norm's gain parameterization could not be measured on the live module."""
 
 
-try:
-    from transformers.models.gemma4.modeling_gemma4 import Gemma4RMSNorm
-except Exception:  # pragma: no cover - older transformers builds do not expose Gemma 4 yet
-    Gemma4RMSNorm = None
-
-try:
-    from transformers.models.cohere_compass.modeling_cohere_compass import CohereCompassLayerNorm
-except Exception:  # pragma: no cover - older transformers builds do not expose Cohere Compass yet
-    CohereCompassLayerNorm = None
-
-try:
-    from transformers.models.cohere2.modeling_cohere2 import Cohere2LayerNorm
-except Exception:  # pragma: no cover - older transformers builds do not expose Cohere2 yet
-    Cohere2LayerNorm = None
-
-try:
-    from transformers.models.cohere2_moe.modeling_cohere2_moe import Cohere2MoeLayerNorm
-except Exception:  # pragma: no cover - older transformers builds do not expose Cohere2-MoE yet
-    Cohere2MoeLayerNorm = None
+# Fold sources: framework modules plus the vendored Transformers 5.23 norm and
+# activation classes that definitions load (never ``transformers.models``).
+_VENDORED_FOLD_NORMS = (
+    ("llama", "LlamaRMSNorm"),
+    ("gemma", "GemmaRMSNorm"),
+    ("gemma2", "Gemma2RMSNorm"),
+    ("gemma4", "Gemma4RMSNorm"),
+    ("cohere", "CohereLayerNorm"),
+    ("cohere2", "Cohere2LayerNorm"),
+    ("cohere_compass", "CohereCompassLayerNorm"),
+    ("cohere2_moe", "Cohere2MoeLayerNorm"),
+)
+_VENDORED_FOLD_ACTIVATIONS = (("bloom", "BloomGelu"),)
 
 
-allowed_norms = [nn.LayerNorm, LlamaRMSNorm, GemmaRMSNorm, Gemma2RMSNorm, CohereLayerNorm]
-if Gemma4RMSNorm is not None:
-    allowed_norms.append(Gemma4RMSNorm)
-if CohereCompassLayerNorm is not None:
-    allowed_norms.append(CohereCompassLayerNorm)
-if Cohere2LayerNorm is not None:
-    allowed_norms.append(Cohere2LayerNorm)
-if Cohere2MoeLayerNorm is not None:
-    allowed_norms.append(Cohere2MoeLayerNorm)
+def _vendored(family, name):
+    return getattr(import_module(f"gptqmodel.models.ports.native.{family}.modeling_{family}"), name)
+
+
+allowed_norms = [nn.LayerNorm, *(_vendored(family, name) for family, name in _VENDORED_FOLD_NORMS)]
 allowed_act_fns = [
     nn.GELU,
-    BloomGelu,
     NewGELUActivation,
     GELUTanh,
     GELUActivation,
+    *(_vendored(family, name) for family, name in _VENDORED_FOLD_ACTIVATIONS),
 ]
+
+# The identical Transformers classes (an unsupported model built by
+# Transformers itself) are recognized by class path, without importing them.
+_TRANSFORMERS_FOLD_NORM_PATHS = frozenset(
+    f"transformers.models.{family}.modeling_{family}.{name}" for family, name in _VENDORED_FOLD_NORMS
+)
+_TRANSFORMERS_FOLD_ACTIVATION_PATHS = frozenset(
+    f"transformers.models.{family}.modeling_{family}.{name}" for family, name in _VENDORED_FOLD_ACTIVATIONS
+)
+
+
+def _class_paths(module):
+    return {f"{cls.__module__}.{cls.__qualname__}" for cls in type(module).__mro__}
+
+
+def _is_fold_norm(module) -> bool:
+    return any(isinstance(module, t) for t in allowed_norms) or bool(
+        _class_paths(module) & _TRANSFORMERS_FOLD_NORM_PATHS
+    )
+
+
+def _is_fold_activation(module) -> bool:
+    return any(isinstance(module, t) for t in allowed_act_fns) or bool(
+        _class_paths(module) & _TRANSFORMERS_FOLD_ACTIVATION_PATHS
+    )
 
 
 def is_foldable_source(prev_op: nn.Module) -> bool:
@@ -87,15 +91,30 @@ def is_foldable_source(prev_op: nn.Module) -> bool:
 
     if isinstance(prev_op, nn.Linear):
         return True
-    if any(isinstance(prev_op, t) for t in allowed_act_fns):
+    if _is_fold_activation(prev_op):
         return True
-    is_norm = any(isinstance(prev_op, t) for t in allowed_norms) or "rmsnorm" in str(
+    is_norm = _is_fold_norm(prev_op) or "rmsnorm" in str(
         prev_op.__class__
     ).lower()
     if not is_norm:
         return False
     weight = getattr(prev_op, "weight", None)
     return isinstance(weight, torch.Tensor) and weight.ndim == 1
+
+
+def _is_norm_source(prev_op: nn.Module) -> bool:
+    """Whether ``prev_op`` divides its output on the source device's own gain.
+
+    A norm (RMSNorm/LayerNorm and the registered family aliases) owns a
+    per-channel gain, so ``scale_ln_fcs`` can fold it locally and let each
+    consumer apply the shared channel scale on its own device. Linear and
+    activation sources reshape/concatenate the weight instead, so their
+    consumers are co-located for the fold.
+    """
+
+    if _is_fold_norm(prev_op):
+        return True
+    return "rmsnorm" in str(prev_op.__class__).lower()
 
 
 def _norm_gain_offset(ln: nn.Module) -> float:
@@ -129,8 +148,49 @@ def _resolve_module_exec_device(module: nn.Module) -> torch.device:
     return get_device(module)
 
 
+def _release_rocm_layer_cache(module: nn.Module) -> None:
+    """Return AWQ's freed per-layer scratch to the driver on ROCm.
+
+    AWQ's clip search pre-allocates a ``scratch_prod`` buffer per clip-eligible
+    module sized from the GPU MSE budget (256 MiB by default). PyTorch rounds
+    those 255 MiB requests up to 256 MiB segments. Under a configured
+    ``max_split_size_mb:256`` - the ROCm default until #5072 - the allocator
+    refuses to serve any request below 256 MiB from a free block of at least
+    that size (see ``get_free_block``'s "Do not return an oversized block for a
+    large request"). Consecutive modules then cannot reuse each other's
+    segments: Qwen3-0.6B adds four 256 MiB plus one 250 MiB segment per decoder
+    layer, and the reserved cache grows by ~1 GiB per layer while active memory
+    stays flat. The default no longer pins the cap, but a caller can, and this
+    release bounds that case too. ``garbage_collection_threshold`` does not
+    help because it is inert without a memory fraction.
+
+    ``apply_clip`` runs once per AWQ layer, after the clip search has released
+    all of those scratch tensors and before the next layer allocates its own.
+    Releasing the unused cache here keeps reserved memory flat. CUDA is not
+    touched, so its allocator keeps its cache and pays no extra ``cudaMalloc``.
+    """
+
+    if not running_on_rocm():
+        return
+    try:
+        if not torch.cuda.is_available():
+            return
+        device = _resolve_module_exec_device(module)
+        if device.type != "cuda":
+            # Offloaded layers keep their weights on the host while the search
+            # scratch still lives on the quantization device.
+            device = torch.device("cuda", torch.cuda.current_device())
+        with torch.cuda.device(device):
+            torch.cuda.empty_cache()
+    except Exception:  # pragma: no cover - cleanup must never fail a run
+        log.debug("AWQ: ROCm per-layer cache release failed", exc_info=True)
+
+
 @torch.inference_mode()
 def apply_clip(module, clip_list: Tuple[str, torch.Tensor]):
+    # One layer boundary: the clip-search scratch is already freed here and the
+    # next layer has not allocated yet. See _release_rocm_layer_cache.
+    _release_rocm_layer_cache(module)
     for name, max_val in clip_list:
         layer: nn.Linear = get_op_by_name(module, name)
         original_device = get_device(layer)
@@ -213,13 +273,22 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
             continue
         layers = [get_op_by_name(module, name) for name in layer_names]
 
+        # A norm-anchored group does not have to be co-located: `scale_ln_fcs`
+        # divides the norm on its own device and multiplies every consumer on
+        # that consumer's device. `VramStrategy.BALANCED` relies on this, since
+        # its routed experts live on every device of the MoE pool and copying a
+        # whole expert family onto one device can exhaust it (#5104).
+        co_locate_layers = not _is_norm_source(prev_op)
+
         original_prev_device = get_device(prev_op)
         original_layer_devices = [get_device(layer) for layer in layers]
-        target_device = _resolve_module_exec_device(layers[0] if layers else prev_op)
-
+        if co_locate_layers:
+            target_device = _resolve_module_exec_device(layers[0] if layers else prev_op)
+            for layer in layers:
+                move_to(layer, device=target_device)
+        else:
+            target_device = _resolve_module_exec_device(prev_op)
         move_to(prev_op, device=target_device)
-        for layer in layers:
-            move_to(layer, device=target_device)
         scales = scales.to(target_device)
 
         try:
@@ -234,17 +303,14 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
                 assert len(layers) == 1
                 scale_fc_fc(prev_op, layers[0], scales)
 
-            elif (
-                any(isinstance(prev_op, t) for t in allowed_norms)
-                or "rmsnorm" in str(prev_op.__class__).lower()
-            ):
+            elif _is_norm_source(prev_op):
                 # `scale_ln_fcs` renormalises the per-channel scale for
                 # offset-gain norms (see its docstring). The captured input
                 # features and the non-quantized consumers must use the same
                 # effective scale as the folded weights, so take it back.
                 scales = scale_ln_fcs(prev_op, layers, scales)
 
-            elif any(isinstance(prev_op, t) for t in allowed_act_fns):
+            elif _is_fold_activation(prev_op):
                 new_module = ScaledActivation(prev_op, scales)
                 set_op_by_name(module, prev_op_name, new_module)
                 scale_gelu_fc(prev_op, layers[0], scales)
@@ -259,8 +325,9 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
                 exc,
             )
             move_to(prev_op, device=original_prev_device)
-            for layer, original_device in zip(layers, original_layer_devices):
-                move_to(layer, device=original_device)
+            if co_locate_layers:
+                for layer, original_device in zip(layers, original_layer_devices):
+                    move_to(layer, device=original_device)
             continue
 
         if consumer_map and prev_op_name in consumer_map:
@@ -274,6 +341,12 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
                 # Skip the modules that are not quantized
                 if layer_name in input_feat_dict:
                     inp = input_feat_dict[layer_name]
+                    if inp is None or inp.numel() == 0:
+                        # A starved member captured no rows: there is nothing to
+                        # divide. Its weights were still multiplied by the
+                        # folded scale, which is what keeps the layer equivalent
+                        # to the unscaled one (#4675).
+                        continue
                     previous_group = divided.get(id(inp))
                     if previous_group == group_index:
                         # A sibling in this group already applied the same scale.
@@ -289,8 +362,9 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
                     divided[id(inp)] = group_index
 
         move_to(prev_op, device=original_prev_device)
-        for layer, original_device in zip(layers, original_layer_devices):
-            move_to(layer, device=original_device)
+        if co_locate_layers:
+            for layer, original_device in zip(layers, original_layer_devices):
+                move_to(layer, device=original_device)
 
     # A norm that was divided by `s` no longer emits the tensor its non-quantized
     # consumers were trained on. Fold the accumulated scale into those consumers
@@ -340,8 +414,12 @@ def scale_ln_fcs(ln: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor) -> t
     if hasattr(ln, "bias") and ln.bias is not None:
         ln.bias.div_(scales)
 
+    # A group can span several devices: `VramStrategy.BALANCED` splits the
+    # routed experts of one norm-anchored MoE group across the MoE pool
+    # (#5104). The channel scale is one tensor, but each consumer applies it on
+    # its own device, so the fold never has to co-locate (and copy) the group.
     for fc in fcs:
-        fc.weight.mul_(scales.view(1, -1))
+        fc.weight.mul_(scales.to(device=fc.weight.device).view(1, -1))
 
     for p in ln.parameters():
         assert torch.isnan(p).sum() == 0
@@ -363,7 +441,7 @@ def scale_fc_fc(fc1: nn.Linear, fc2: nn.Linear, scales: torch.Tensor):
     if fc1.bias is not None:
         fc1.bias.div_(scales.view(-1))
 
-    fc2.weight.mul_(scales.view(1, -1))
+    fc2.weight.mul_(scales.to(device=fc2.weight.device).view(1, -1))
 
     for p in fc1.parameters():
         assert torch.isnan(p).sum() == 0
@@ -383,7 +461,7 @@ def scale_fc_fcs(fc1: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
         fc1.bias.div_(scales.view(-1))
 
     for fc in fcs:
-        fc.weight.mul_(scales.view(1, -1))
+        fc.weight.mul_(scales.to(device=fc.weight.device).view(1, -1))
 
     for p in fc1.parameters():
         assert torch.isnan(p).sum() == 0
@@ -394,7 +472,7 @@ def scale_fc_fcs(fc1: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
 
 @torch.inference_mode()
 def scale_gelu_fc(gelu: allowed_act_fns, fc: nn.Linear, scales: torch.Tensor):
-    assert any(isinstance(gelu, t) for t in allowed_act_fns)
+    assert _is_fold_activation(gelu)
     assert isinstance(fc, nn.Linear)
 
     fc.weight.mul_(scales.view(1, -1).to(fc.weight.device))

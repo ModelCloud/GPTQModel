@@ -94,9 +94,9 @@ always saw `False`.
 
 | Area | Before | After |
 | --- | --- | --- |
-| Factory kwargs | `_filter_quantize_config_payload_for_target_cls` dropped unknown and foreign keys silently | `_validate_quantize_config_factory_kwargs` raises for unknown keys and warns for foreign known fields (`config.py:4012`) |
+| Factory kwargs | `_filter_quantize_config_payload_for_target_cls` dropped unknown and foreign keys silently | `_validate_quantize_config_factory_kwargs` raises for unknown keys and warns for foreign known fields (`config.py:4760`) |
 | EXL3 fields | `EXL3Config.__post_init__` bypassed base normalisation (`config.py:6303` before this change) | calls `_normalize_serialization_fields` (`config.py:6401`) |
-| Serialization helper | duplicated in `BaseQuantizeConfig.__post_init__` | shared `_normalize_serialization_fields` (`config.py:4429`) |
+| Serialization helper | duplicated in `BaseQuantizeConfig.__post_init__` | shared `_normalize_serialization_fields` (`config.py:5288`) |
 | Bool fields | `bool()` accepted the string `"False"` as `True` (`config.py:4450` before this change) | `_validate_bool_fields` raises `TypeError` (`config.py:4452`); `desc_act` likewise |
 | Calibration examples | `isinstance(example, dict)` rejected `BatchEncoding` (`calibration.py:352` before this change) | `isinstance(example, Mapping)` (`calibration.py:356`) |
 | Device placement | explicit `device` replaced by `device_map` without a check (`loader.py:1735` before this change) | `_normalize_requested_device_map` (`loader.py:569`) validates agreement and maps HF device strings |
@@ -134,8 +134,32 @@ Measured with the commands in the pull request:
   both an RTX 4090 and an R9700; before the fix the same run quantized and then
   raised `AttributeError` inside `writer.py`.
 
+## Quantized load keyword validation (#4945)
+
+`from_quantized` consumes its options with `pop`. A keyword that no `pop`
+touched used to reach `QuantizeConfig.from_pretrained`, which ignored it, so a
+typo of a real option changed nothing. The loader now records every consumed
+key and rejects the rest, deriving the accepted set from the function's own
+signature and pops instead of a hand-written allow-list.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load(path, **kwargs)"] --> B{"checkpoint has a GPTQModel<br/>quantization config?"}
+    B -- yes --> C{"quantize_config= also passed?"}
+    C -- yes --> D["ValueError: config comes<br/>from the checkpoint"]
+    C -- no --> E["ModelLoader.from_quantized<br/>(_TrackedKwargs records every pop)"]
+    E --> F{"backend is VLLM or SGLang?"}
+    F -- yes --> G["pass through: engine owns<br/>its runtime options"]
+    F -- no --> H{"kwargs left after<br/>normalisation?"}
+    H -- no --> I["continue the load"]
+    H -- yes --> J["TypeError naming each key,<br/>difflib hint when close"]
+    B -- no --> K["from_pretrained: HF constructor<br/>already raises for unknown keys"]
+```
+
 ## Not in scope
 
 `QuantizeConfig(method="gptq", format="gemm")` still auto-selects AWQ with a
-warning, and `GPTQModel.load(quantized_path, quantize_config=X)` still ignores
-`X` (as `from_pretrained` warns). Those are separate dispatch contracts.
+warning. That is a separate dispatch contract. `GPTQModel.load(quantized_path,
+quantize_config=X)` now raises instead of ignoring `X`: a quantized
+checkpoint's bits/group_size/method/format come from the checkpoint itself
+(#4945).

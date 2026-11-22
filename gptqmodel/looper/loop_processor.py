@@ -31,7 +31,13 @@ from ..models.writer import (
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
-from ..quantization.config import QuantizeConfig
+from ..quantization.config import CalibrationConfig, QuantizeConfig
+from ..utils.attn_mask import (
+    align_single_head_capture,
+    bos_token_positions,
+    exclude_attention_sinks,
+)
+from ..utils.calibration import calibration_input_row_count
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
 from ..utils.random_str import get_random_string
@@ -57,6 +63,103 @@ def remove_processor_log(log_path: Optional[str], *, keep: bool = True) -> bool:
     except OSError:
         log.debug("Failed to remove processor log file %s", log_path, exc_info=True)
         return False
+
+
+def _calibration_dataset_length(dataset) -> Optional[int]:
+    """Return the calibration row count when the input exposes a size.
+
+    ``datasets.IterableDataset`` and plain generators are valid calibration
+    inputs (``prepare_calibration_dataset`` materialises them), but they do not
+    implement ``__len__``. Callers must treat ``None`` as "unknown" instead of
+    forcing a length the input cannot provide.
+
+    A columnar mapping (``{"input_ids": [...], "attention_mask": [...]}``) has
+    one entry per column, so ``len(mapping)`` is the column count, not the row
+    count. ``calibration_input_row_count`` resolves that case to the primary
+    column's length.
+    """
+
+    return calibration_input_row_count(dataset)
+
+
+def _sized_calibration_dataset(dataset):
+    """Return a re-iterable calibration dataset that supports ``len()``.
+
+    Model-specific ``prepare_dataset`` overrides may return a one-shot
+    iterable. The processor replays the prepared batches once per layer, so an
+    unsized result is materialised here rather than failing later on ``len()``.
+    """
+
+    if _calibration_dataset_length(dataset) is None:
+        return list(dataset)
+    return dataset
+
+
+def prepare_calibration_dataset_once(calibration: CalibrationConfig):
+    """Return the prepared calibration batches of one run.
+
+    Every calibrated processor of a run must replay the same batch order:
+    GPTAQ/FOEM pair the native capture with the quantized capture by batch
+    index, so preparing the same ``sort="shuffle"`` dataset once per processor
+    would pair unrelated sequences (#4869). ``quantize()`` calls this once and
+    hands the result to every processor in the chain.
+    """
+
+    dataset = calibration.dataset
+    if dataset is None:
+        return None
+
+    prepare_dataset = calibration.prepare_dataset
+    if prepare_dataset is None:
+        raise ValueError(
+            "CalibrationConfig.prepare_dataset must be bound (CalibrationConfig.bind()) "
+            "when calibration data is supplied."
+        )
+
+    prepared = prepare_dataset(
+        calibration_dataset=dataset,
+        calibration_dataset_concat_size=calibration.concat_size,
+        calibration_dataset_sort=calibration.sort,
+        batch_size=calibration.batch_size,
+        calibration_data_min_length=calibration.min_length,
+        calibration_concat_separator=calibration.concat_separator,
+    )
+    # A model-specific ``prepare_dataset`` override may return a one-shot
+    # iterable; normalise it before the checks below and before the per-layer
+    # replay, which needs a reusable dataset.
+    prepared = _sized_calibration_dataset(prepared)
+    if len(prepared) == 0:
+        raise ValueError(
+            "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
+            "all samples (for example, every input_ids was shorter than "
+            "CalibrationConfig.min_length). Lower CalibrationConfig.min_length "
+            "or provide longer calibration samples."
+        )
+    return prepared
+
+
+def _reusable_calibration_dataset(dataset):
+    """Return a calibration input that more than one processor can prepare.
+
+    ``quantize()`` builds separate calibration configs for the native and EoRA
+    steps, and every ``LoopProcessor`` prepares its dataset again. A plain
+    iterator (for example a generator expression) is exhausted by the first
+    preparation, so the second processor would receive an empty dataset and
+    fail with "calibration dataset is empty". Materialise such an input once,
+    before it is shared. Sized containers are returned unchanged, and
+    ``datasets.IterableDataset`` stays lazy because it yields a fresh iterator.
+    """
+
+    if dataset is None:
+        return None
+    try:
+        iterator = iter(dataset)
+    except TypeError:
+        return dataset
+    if iterator is dataset:
+        return list(dataset)
+    return dataset
+
 
 _PROJECT_LOG_DIR = Path("logs")
 
@@ -246,7 +349,7 @@ class ForwardConfig:
     +--------------+----------+------------------------+---------------------------+------------+--------------------+
     | GPTQ          | yes      | yes                    | no                        | yes        | no                 |
     | AWQ           | yes      | yes                    | no                        | yes        | yes                |
-    | ParoQuant     | yes      | yes                    | no                        | yes        | yes                |
+    | Paro     | yes      | yes                    | no                        | yes        | yes                |
     | Native        | yes      | no                     | yes                       | no         | no                 |
     | WeightOnly    | no       | no                     | no/default                | no/default | no                 |
     +--------------+----------+------------------------+---------------------------+------------+--------------------+
@@ -274,18 +377,6 @@ class ForwardConfig:
     allow_auto_dtype_cast: bool = True
 
 
-@dataclass(frozen=True)
-class CalibrationConfig:
-    """Describe the data and preparation policy for one calibration run."""
-
-    dataset: Any = None
-    prepare_dataset: Optional[Callable] = None
-    concat_size: Optional[int] = None
-    sort: Optional[str] = None
-    concat_separator: Optional[str] = None
-    batch_size: int = 1
-
-
 class CalibrationTypes(str, Enum):
     NOT_REQUIRED = "not_required"
     EACH_MODULE_NEEDS_INPUT = "each_module_needs_input"
@@ -310,6 +401,37 @@ def checkpoint_chain_supported(roles) -> bool:
     }
 
 
+def record_quant_log(model, processors) -> list:
+    """Publish one row per module from the run's primary quantization processor.
+
+    ``processors`` is the loop's processor chain in run-plan order. The earliest
+    processor that recorded per-module rows and owns the quantization log
+    supplies ``model.quant_log``. Auxiliary processors such as EoRA set
+    ``owns_quant_log = False`` because their rows carry adapter timing, not
+    quantization loss/samples/damp; concatenating them produced a second, blank
+    row for every module (#4367).
+
+    Selecting the first owning log rather than a hard-coded processor name keeps
+    every quantizer's rows publishable (FOEM, QQQ, VPTQ, Paro, FP8-GSQ, RTN,
+    ...; issue #4321). When no owning processor recorded rows, an existing
+    ``model.quant_log`` is preserved: the standalone EoRA-generation loop has no
+    primary quantizer, so it cannot replace a restored quantization log with
+    adapter rows.
+    """
+
+    for processor in processors:
+        if not getattr(processor, "owns_quant_log", True):
+            continue
+        entries = getattr(processor, "log", None)
+        if entries:
+            model.quant_log = list(entries)
+            return model.quant_log
+
+    if getattr(model, "quant_log", None) is None:
+        model.quant_log = []
+    return model.quant_log
+
+
 @dataclass
 class ProcessorLifecycleConfig:
     """Mutable processor configuration consumed by the looper and checkpoint adapter."""
@@ -321,6 +443,78 @@ class ProcessorLifecycleConfig:
     def use(self, forward: ForwardConfig) -> "ProcessorLifecycleConfig":
         """Return a copy using the supplied forward configuration."""
         return replace(self, forward=forward)
+
+
+def active_padding_mask(processor):
+    """Return the padding-only ``[B, S]`` keep-mask bound to this worker thread.
+
+    Forward-visible consumers (MoE padding zeroing, activation ranges, router
+    evidence) must use this mask: the calibration mask in ``_mask_tls.value``
+    can additionally drop attention-sink tokens, real tokens whose activations
+    later positions still depend on.
+    """
+
+    tls = getattr(processor, "_mask_tls", None)
+    if tls is None:
+        return None
+    return getattr(tls, "padding_value", getattr(tls, "value", None))
+
+
+def install_moe_padding_zero_hook(processor, moe_block: Module, handles: List[Any]) -> bool:
+    """Zero calibration padding rows on a MoE block input.
+
+    Natively routed experts run through the model's own router, so their forward
+    hooks see ``[routed_rows, H]`` rows whose count is unrelated to the
+    calibration keep mask and the padding cannot be filtered there. Zeroing the
+    padded rows of the MoE input makes them reach every expert as an all-zero
+    row, which contributes exactly nothing to the per-expert statistics while
+    leaving real rows untouched (#5719).
+
+    The mask is read per batch, so one hook serves every replayed sample. A
+    caller that also wants attention sinks zeroed must not use this: a sink is a
+    real token whose output later positions attend to.
+    """
+
+    def zero_masked_rows(_module, args, kwargs):
+        """Scale the hidden states by the active padding mask."""
+
+        keep_mask = active_padding_mask(processor)
+        if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+            return None
+
+        hidden_states = kwargs.get("hidden_states") if kwargs else None
+        from_kwargs = hidden_states is not None
+        if hidden_states is None:
+            if not args or not torch.is_tensor(args[0]):
+                return None
+            hidden_states = args[0]
+        if hidden_states.dim() != 3 or tuple(hidden_states.shape[:2]) != tuple(keep_mask.shape):
+            return None
+
+        row_mask = keep_mask.to(device=hidden_states.device, dtype=hidden_states.dtype).unsqueeze(-1)
+        masked = hidden_states * row_mask
+        if from_kwargs:
+            kwargs = dict(kwargs)
+            kwargs["hidden_states"] = masked
+            return args, kwargs
+        return (masked,) + tuple(args[1:]), kwargs
+
+    handles.append(moe_block.register_forward_pre_hook(zero_masked_rows, with_kwargs=True))
+    return True
+
+
+def resolve_calibration_keep_mask(processor, keep_mask, *, batch_index, layer_input):
+    """Return ``processor``'s calibration row mask for one replayed batch.
+
+    Processors without ``calibration_keep_mask`` (test doubles, adapters) keep
+    the padding mask, which is also what every processor gets with
+    ``CalibrationConfig.exclude_attention_sinks`` off.
+    """
+
+    resolver = getattr(processor, "calibration_keep_mask", None)
+    if not callable(resolver):
+        return keep_mask
+    return resolver(keep_mask, batch_index=batch_index, layer_input=layer_input)
 
 
 def bind_resolved_module_config(module, resolved_cfg) -> None:
@@ -346,9 +540,20 @@ def get_resolved_module_config(module):
     return getattr(module, "resolved_module_config", None)
 
 
+# Marks a processor whose Device-SMI handles were never opened. Handles are
+# opened on the first metric query, so a processor that never runs starts no
+# sampler thread (#4862). ``{}`` means "opened and nothing was available".
+_DEVICE_SMI_UNINITIALIZED = object()
+
+
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
     """Base lifecycle coordinator shared by all quantization processors."""
+
+    # Auxiliary processors (EoRA) record their own per-module timing rows but do
+    # not own the quantization log. ``record_quant_log`` skips them so they
+    # neither duplicate nor replace the primary quantizer's rows.
+    owns_quant_log: bool = True
 
     @property
     def forward(self) -> ForwardConfig:
@@ -423,41 +628,44 @@ class LoopProcessor:
         current_time = datetime.now().strftime("%m_%d_%Y_%Hh_%Mm_%Ss")
         self.log_tmp_log_file_name = str(self._build_log_file_path(self.name(), current_time))
         self._torch_rocm_memory_devices: List[str] = []
-        self._device_smi_handles = self._init_device_smi_handles()
-        self._cpu_device_smi = self._init_cpu_device_handle()
+        # A ``device_smi.Device`` owns a daemon sampler thread. Open the handles
+        # on the first metric query instead of here: a processor that never
+        # runs -- rejected calibration, a failure before ``loop()``, or a later
+        # processor in the chain failing -- must not start any (#4862).
+        self._device_smi_handles: Any = _DEVICE_SMI_UNINITIALIZED
+        self._cpu_device_smi: Optional[Device] = None
         self._device_metric_failures: Set[str] = set()
 
 
         # prepare dataset
         calibration_dataset = self.calibration.dataset
         if calibration_dataset is not None:
-            if len(calibration_dataset) == 0:
-                raise ValueError("Calibration dataset must not be empty.")
-
             min_calibration_dataset_size = 256
             min_calibration_dataset_input_ids_avg_length = 256
-            if len(calibration_dataset) < min_calibration_dataset_size:
+
+            # ``datasets.IterableDataset`` and plain generators are valid
+            # calibration inputs but do not implement ``__len__``. Only run the
+            # pre-prepare checks when the caller supplied a sized container;
+            # emptiness is verified again on the prepared result by
+            # ``prepare_calibration_dataset_once``.
+            raw_calibration_size = _calibration_dataset_length(calibration_dataset)
+            if raw_calibration_size == 0:
+                raise ValueError("Calibration dataset must not be empty.")
+
+            if raw_calibration_size is not None and raw_calibration_size < min_calibration_dataset_size:
                 log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
-                               f"Current: {len(calibration_dataset)}.")
+                               f"Current: {raw_calibration_size}.")
 
-            if self.calibration.prepare_dataset is None:
-                raise ValueError("CalibrationConfig.prepare_dataset must be provided when calibration data is supplied.")
+            # ``quantize()`` prepares the batches once per run and hands the
+            # same list to every processor, so processors that pair their
+            # captures by batch index (GPTAQ/FOEM) see one order (#4869).
+            calibration_dataset = prepare_calibration_dataset_once(self.calibration)
+            prepared_calibration_size = len(calibration_dataset)
 
-            calibration_dataset = self.calibration.prepare_dataset(
-                calibration_dataset=calibration_dataset,
-                calibration_dataset_concat_size=self.calibration.concat_size,
-                calibration_dataset_sort=self.calibration.sort,
-                batch_size=self.calibration.batch_size,
-                calibration_concat_separator=self.calibration.concat_separator,
-            )
-
-            if len(calibration_dataset) == 0:
-                raise ValueError(
-                    "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
-                    "all samples (for example, every input_ids was shorter than "
-                    "calibration_data_min_length). Lower calibration_data_min_length "
-                    "or provide longer calibration samples."
-                )
+            # The size is only knowable after preparation for unsized inputs.
+            if raw_calibration_size is None and prepared_calibration_size < min_calibration_dataset_size:
+                log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
+                               f"Current: {prepared_calibration_size}.")
 
             # A disk-backed calibration sequence can provide exact scalar
             # accounting without being traversed merely for a warning.  This
@@ -466,6 +674,7 @@ class LoopProcessor:
             calibration_summary = getattr(
                 calibration_dataset, "gptqmodel_calibration_summary", None
             )
+            token_rows = len(calibration_dataset)
             if calibration_summary is not None:
                 if not isinstance(calibration_summary, dict):
                     raise TypeError(
@@ -495,7 +704,12 @@ class LoopProcessor:
             else:
                 total_input_ids_length = 0
                 max_input_id_length = 0
+                token_rows = 0
                 for row in calibration_dataset:
+                    # Tensor-kwargs calibration (Decision Transformer) carries no
+                    # token ids, so token-length accounting does not apply.
+                    if "input_ids" not in row:
+                        continue
                     input_ids = row["input_ids"]
                     if isinstance(input_ids, torch.Tensor):
                         if input_ids.dim() <= 2:
@@ -507,14 +721,16 @@ class LoopProcessor:
                     else:
                         input_ids_length = len(input_ids)
 
+                    token_rows += 1
                     if input_ids_length > max_input_id_length:
                         max_input_id_length = input_ids_length
                     total_input_ids_length += input_ids_length
-            avg = total_input_ids_length / len(calibration_dataset)
+            if token_rows:
+                avg = total_input_ids_length / token_rows
 
-            if avg < min_calibration_dataset_input_ids_avg_length:
-                log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
-                               f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
+                if avg < min_calibration_dataset_input_ids_avg_length:
+                    log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
+                                   f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
             self.num_batches = len(calibration_dataset)
             self.calibration_dataset = calibration_dataset
@@ -523,11 +739,164 @@ class LoopProcessor:
             self.calibration_dataset = []
 
         self.total_calibration_tokens = self._compute_total_tokens(self.calibration_dataset)
+        # Per-batch ``[B, S]`` attended BOS positions (``None`` for a batch
+        # without any). Only populated with ``exclude_attention_sinks`` and a
+        # tokenizer that defines a BOS token.
+        self.attention_sink_positions: Optional[List[Optional[torch.Tensor]]] = None
+        if self.calibration.exclude_attention_sinks and self.calibration_dataset:
+            bos_token_id = self._attention_sink_bos_token_id()
+            if bos_token_id is None:
+                log.warn(
+                    "Calibration: `CalibrationConfig.exclude_attention_sinks` is enabled but the "
+                    "tokenizer has no BOS token, so there is no attention sink to exclude; "
+                    "calibration statistics are unchanged."
+                )
+            else:
+                self.attention_sink_positions, excluded = self._compute_attention_sink_positions(
+                    self.calibration_dataset, bos_token_id
+                )
+                # Averaging and the Hessian fallback threshold must describe
+                # the same rows the hooks retain.
+                self.total_calibration_tokens = max(self.total_calibration_tokens - excluded, 0)
+                log.info(
+                    "Calibration: exclude_attention_sinks drops %s BOS attention-sink tokens "
+                    "from %s calibration batches.",
+                    excluded,
+                    len(self.calibration_dataset),
+                )
 
         # Track the current calibration batch index on a per-thread basis so
         # processors can retrieve deterministic ordering information (e.g.
         # GPTQ's Hessian updates) even when forwards run on multiple threads.
         self._batch_tls = threading.local()
+
+    def _attention_sink_bos_token_id(self) -> Optional[int]:
+        """Return the tokenizer's BOS id, or ``None`` when it defines none."""
+
+        tokenizer = self.tokenizer
+        for candidate in (tokenizer, getattr(tokenizer, "tokenizer", None)):
+            if candidate is None:
+                continue
+            bos_token_id = getattr(candidate, "bos_token_id", None)
+            if isinstance(bos_token_id, int) and not isinstance(bos_token_id, bool):
+                return bos_token_id
+        return None
+
+    def _compute_attention_sink_positions(
+        self, calibration_dataset, bos_token_id: int
+    ) -> Tuple[List[Optional[torch.Tensor]], int]:
+        """Locate the attended BOS positions of every prepared batch.
+
+        Returns the per-batch ``[B, S]`` BOS positions (``None`` for a batch
+        without BOS or without usable ``input_ids``) and how many tokens
+        ``exclude_attention_sinks`` removes from the whole dataset, so token
+        totals match what the hooks retain.
+        """
+
+        positions: List[Optional[torch.Tensor]] = []
+        excluded = 0
+        for row in calibration_dataset:
+            bos = None
+            if isinstance(row, dict):
+                bos = bos_token_positions(
+                    row.get("input_ids"), row.get("attention_mask"), bos_token_id
+                )
+            positions.append(bos)
+            if bos is not None:
+                excluded += int(bos.sum().item())
+        return positions, excluded
+
+    def attention_sink_positions_for_batch(self, batch_index: Optional[int]) -> Optional[torch.Tensor]:
+        """Return the ``[B, S]`` BOS positions of one calibration batch."""
+
+        positions = getattr(self, "attention_sink_positions", None)
+        if not positions or batch_index is None:
+            return None
+        batch_index = int(batch_index)
+        if not 0 <= batch_index < len(positions):
+            return None
+        return positions[batch_index]
+
+    def calibration_keep_mask(
+        self,
+        keep_mask: Optional[torch.Tensor],
+        *,
+        batch_index: Optional[int],
+        layer_input=None,
+    ) -> Optional[torch.Tensor]:
+        """Return the row mask every calibration statistic of this batch uses.
+
+        This is the single place ``CalibrationConfig.exclude_attention_sinks``
+        is applied: the padding keep-mask derived from ``attention_mask`` loses
+        every attended BOS token (``exclude_attention_sinks`` in
+        ``utils.attn_mask``). With the option off, for a batch without a BOS
+        token, and for a tokenizer without one, ``keep_mask`` is returned
+        unchanged (same object), so those batches keep their exact statistics.
+        """
+
+        calibration = getattr(self, "calibration", None)
+        if calibration is None or not calibration.exclude_attention_sinks:
+            return keep_mask
+        batch = seq_len = None
+        device = None
+        hidden = None
+        if isinstance(layer_input, (list, tuple)) and layer_input:
+            hidden = layer_input[0]
+        elif torch.is_tensor(layer_input):
+            hidden = layer_input
+        if torch.is_tensor(hidden) and hidden.dim() >= 3:
+            batch, seq_len = int(hidden.shape[0]), int(hidden.shape[1])
+            device = hidden.device
+        return exclude_attention_sinks(
+            keep_mask,
+            self.attention_sink_positions_for_batch(batch_index),
+            batch=batch,
+            seq_len=seq_len,
+            device=device,
+        )
+
+    def calibration_rows(self, inp: torch.Tensor) -> torch.Tensor:
+        """Select the calibration rows for a module input the mask wrapper left whole.
+
+        ``ModuleLooper._masked_hook_wrapper`` already applies the calibration
+        mask to ``[B, S, H]`` inputs. QQQ, MACaQ and the EXL3 capture also see
+        inputs it cannot place: a flattened ``[B*S, H]`` full grid (an
+        all-expert MoE bypass or a shared expert) and natively routed
+        ``[routed_rows, H]`` rows.
+
+        A flattened full grid keeps the batch geometry, so it is filtered with
+        the same calibration mask as the ``[B, S, H]`` layout -- padding and
+        excluded sinks alike (#5385). A ``[B, S, H]`` input that still matches
+        the mask loses only the sink rows, because its padding was already
+        removed by the wrapper. Routed rows cannot be mapped back to a sequence
+        position and stay unfiltered.
+        """
+
+        if not torch.is_tensor(inp):
+            return inp
+        tls = getattr(self, "_mask_tls", None)
+        keep_mask = getattr(tls, "value", None)
+        padding_mask = getattr(tls, "padding_value", keep_mask)
+        if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+            return inp
+        inp = align_single_head_capture(inp, keep_mask)
+        # A flattened `[B*S, H]` full grid still carries the batch geometry, so
+        # filter it with the calibration mask exactly like `[B, S, H]`. It used
+        # to keep its padding rows: only sinks were removed, which made the
+        # same calibration batch accumulate 15 rows here and 12 through the
+        # grid layout (#5385).
+        if inp.dim() == 2 and inp.shape[0] == keep_mask.numel():
+            return inp[keep_mask.reshape(-1).to(device=inp.device, dtype=torch.bool)]
+        if keep_mask is padding_mask:
+            # Option off or no sink in this batch: the calibration mask is the
+            # padding mask itself.
+            return inp
+        rows = keep_mask.to(dtype=torch.bool)
+        if torch.is_tensor(padding_mask) and tuple(padding_mask.shape) == tuple(rows.shape):
+            rows = rows | ~padding_mask.to(device=rows.device, dtype=torch.bool)
+        if inp.dim() >= 3 and tuple(inp.shape[:2]) == tuple(rows.shape):
+            return inp[rows.to(device=inp.device)]
+        return inp
 
     @staticmethod
     def _build_log_file_path(processor_name: str, current_time: str) -> Path:
@@ -837,6 +1206,20 @@ class LoopProcessor:
 
         return dtype_alias.get(dtype_str, dtype_str)
 
+    def _ensure_device_smi_handles(self) -> None:
+        """Open the Device-SMI handles on the first metric query (#4862).
+
+        Every handle starts a 5 Hz daemon sampler thread. Opening them in
+        ``__init__`` meant a processor that failed calibration validation, or
+        whose run failed before ``loop()``, leaked those threads for the life
+        of the process. Callers already hold ``_device_smi_lock``.
+        """
+
+        if self._device_smi_handles is not _DEVICE_SMI_UNINITIALIZED:
+            return
+        self._device_smi_handles = self._init_device_smi_handles()
+        self._cpu_device_smi = self._init_cpu_device_handle()
+
     def _init_device_smi_handles(self) -> Dict[str, Device]:
         """Create Device-SMI handles except where ROCm VFs use Torch metrics."""
 
@@ -941,6 +1324,7 @@ class LoopProcessor:
         """Captures current accelerator memory usage in GiB per device."""
 
         with self._device_smi_lock:
+            self._ensure_device_smi_handles()
             snapshot: Dict[str, float] = {}
             for device_id in getattr(self, "_torch_rocm_memory_devices", ()):
                 if device_id in self._device_metric_failures:
@@ -963,6 +1347,7 @@ class LoopProcessor:
         """Captures current CPU memory usage in GiB when supported."""
 
         with self._device_smi_lock:
+            self._ensure_device_smi_handles()
             if self._cpu_device_smi is None:
                 return None
             metrics = self._safe_query_metric("cpu", self._cpu_device_smi)
@@ -1006,12 +1391,17 @@ class LoopProcessor:
         """Closes all Device-SMI handles owned by this processor."""
 
         with self._device_smi_lock:
-            for handle in self._device_smi_handles.values():
+            handles = self._device_smi_handles
+            if handles is _DEVICE_SMI_UNINITIALIZED:
+                # Never opened: nothing to close, and the processor stays
+                # closed so a released processor cannot start a sampler later.
+                handles = {}
+            for handle in handles.values():
                 try:
                     handle.close()
                 except Exception:
                     log.debug("Failed to close device telemetry handle during cleanup.", exc_info=True)
-            self._device_smi_handles.clear()
+            self._device_smi_handles = {}
 
             if self._cpu_device_smi is not None:
                 try:
@@ -1061,6 +1451,7 @@ class LoopProcessor:
                 "log": self.log,
                 "num_batches": self.num_batches,
                 "total_calibration_tokens": self.total_calibration_tokens,
+                "attention_sink_positions": getattr(self, "attention_sink_positions", None),
                 "results": self.results(),
                 "statistics": {
                     key: getattr(self, key)
@@ -1076,6 +1467,8 @@ class LoopProcessor:
             self.log = state["log"]
             self.num_batches = state["num_batches"]
             self.total_calibration_tokens = state["total_calibration_tokens"]
+            if "attention_sink_positions" in state:
+                self.attention_sink_positions = state["attention_sink_positions"]
             with self._results_lock:
                 self._results = dict(state["results"])
             for key in ("durations", "module_names", "gpu_memorys", "cpu_memorys", "log_call_count", "avg_losses"):
@@ -1218,6 +1611,22 @@ class LoopProcessor:
         del moe_block, moe_block_name, handles
         return False
 
+    def prune_uncovered_module(self, module: NamedModule) -> None:
+        """Forget a module the calibration-coverage policy removed from quantization.
+
+        ``fallback=None`` prunes modules that never received calibration input
+        (typically MoE experts no token was routed to). The subset executor
+        removes the module from the subset, restores its dense source and
+        records the dynamic exclusion; the processor must drop every per-module
+        record it created in ``preprocess`` so the module is never quantized,
+        never gates layer completion and never reaches ``submodule_finalize``.
+        Processors that track more than ``tasks`` extend this.
+        """
+
+        tasks = getattr(self, "tasks", None)
+        if tasks is not None:
+            tasks.pop(module.name, None)
+
     # do work and return processor.self state which will updated/merged
     def process(
             self,
@@ -1293,6 +1702,50 @@ class LoopProcessor:
         pass
         #self.offload_to_disk(module=module)
 
+    def finalize_deferred_runtime_weights(self, model: BaseQModel) -> None:
+        """Publish deferred replay weights a cancelled run will not replay.
+
+        A processor may pack a projection and leave the owning module holding a
+        placement placeholder until the layer's next forward materializes the
+        dense replay weight. A stopped or failed run never reaches that
+        forward, so the in-session model keeps a parameter no forward can read.
+        Processors that defer replay state override this hook and materialize
+        it here, before the looper restores the in-flight layer and before the
+        remaining-meta verdict (#5083). The default has nothing to publish.
+
+        ``model`` is the wrapper the packed module is installed into, the same
+        object ``submodule_finalize`` receives.
+        """
+
+        del model
+
+    def release_run_workspace(self) -> None:
+        """Release process-wide scratch that outlives individual modules.
+
+        The looper calls this from its end-of-run cleanup on both success and
+        failure, after every worker stream has drained. Processors that cache
+        shared scratch tensors override it.
+        """
+
+        pass
+
+    def release_failed_run(self) -> None:
+        """Release run resources that ``finalize()`` would otherwise close.
+
+        ``finalize()`` runs only after a successful loop, so a cancelled or
+        failed run used to keep its Device-SMI handles -- and their 5 Hz sampler
+        threads -- alive for the life of the process (#4813). Closing here is
+        idempotent: ``finalize()`` may still run later and finds no handles
+        left, and a repeated release never raises.
+        """
+
+        self._close_device_smi_handles()
+        # ``finalize`` also drops the process-wide Hessian workspace; a failed
+        # run must not keep it pinned until the next successful one.
+        from ..quantization.gptq import release_workspace_cache
+
+        release_workspace_cache()
+
     # last step, after all loop processor is called
     # finalize is called in reverse after all next sequential processes are called
     def finalize(self, model: BaseQModel, **kwargs):
@@ -1332,6 +1785,82 @@ class LoopProcessor:
         """Override point for the processor name shown in logs and reports."""
 
         pass
+
+
+def rehome_failed_run_kernels(gptq_model) -> None:
+    """Best-effort switch of a failed run's packed layers to a runnable kernel.
+
+    The loop packs every finished layer with the calibration-time kernel, which
+    may be accelerator-only (AWQ GEMM, QQQ, GGUF Triton). The success path
+    rehomes them after the loop; a cancelled or failed run must do the same or
+    the next in-session forward raises ``Could not run ... with arguments from
+    the 'CPU' backend`` (#4947). Finished layers of a disk-offloaded run are
+    meta shells, so resolve the device from the rest of the model instead of
+    from their own tensors. Cleanup never masks the cancellation: a rehome
+    failure (for example the save-and-reload guidance) is logged and ignored.
+    """
+
+    from ..models.base import rehome_quantized_kernel
+
+    model = getattr(gptq_model, "model", None)
+    if model is None:
+        return
+
+    device = None
+    for module in model.modules():
+        runtime_device = getattr(module, "runtime_device", None)
+        if not callable(runtime_device):
+            continue
+        try:
+            candidate = runtime_device()
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if candidate is not None and candidate.type != "meta":
+            device = candidate
+            break
+
+    if device is None:
+        for tensor in model.parameters():
+            if tensor.device.type != "meta":
+                device = tensor.device
+                break
+    if device is None:
+        for tensor in model.buffers():
+            if tensor.device.type != "meta":
+                device = tensor.device
+                break
+
+    try:
+        rehome_quantized_kernel(gptq_model, device=device)
+    except Exception:
+        log.warn(
+            "failed to rehome the quantized kernels of a cancelled/failed run",
+            exc_info=True,
+        )
+
+
+def release_failed_run_processors(processors) -> None:
+    """Release every processor a failed run built, best effort (#4862).
+
+    ``quantize()`` can fail while the processor chain is still being built or
+    before a looper exists (calibration validation, checkpoint entry,
+    ``ModuleLooper.__init__``). Nothing calls ``finalize()`` on that path, so
+    the processors already constructed must release their per-run resources
+    here. Each release is independent and must never mask the run failure.
+    """
+
+    for processor in processors or ():
+        release = getattr(processor, "release_failed_run", None)
+        if not callable(release):
+            continue
+        try:
+            release()
+        except Exception:
+            log.warn(
+                "failed to release processor resources while failing the quantization run",
+                exc_info=True,
+            )
+
 
 def get_max_memory() -> str:
     """Returns current accelerator memory usage for the first one or two devices."""

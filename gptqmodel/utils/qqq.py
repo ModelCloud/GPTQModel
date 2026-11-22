@@ -127,6 +127,7 @@ def qqq_gemm(
     thread_n=-1,
     sms=-1,
     max_par=16,
+    bias=None,
 ):
     return _qqq_op("qqq_gemm")(
         A,
@@ -141,6 +142,7 @@ def qqq_gemm(
         thread_n,
         sms,
         max_par,
+        bias,
     )
 
 

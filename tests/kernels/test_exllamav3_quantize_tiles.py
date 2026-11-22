@@ -7,10 +7,309 @@ import struct
 import subprocess
 import sys
 from itertools import combinations
+from math import sqrt
 from pathlib import Path
+from random import Random
 
 import pytest
 import torch
+
+
+def _q4nx_pack_oracle(suffixes, kv):
+    stream = "".join(f"{suffix:0{kv}b}" for suffix in suffixes)
+    words = [int(stream[i:i + 16], 2) for i in range(0, len(stream), 16)]
+    return torch.tensor(words).reshape(-1, 2).flip(-1).flatten().to(torch.int16)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("bits", [2.5, 3.0, 3.5])
+def test_q4nx_beam_reproduces_a_legal_tile_and_packs_its_bytes(bits):
+    from tests.accelerator_gates import requires_nvidia_cuda
+
+    if not requires_nvidia_cuda():
+        pytest.skip("requires NVIDIA CUDA")
+
+    from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import pack_trellis, quantize_tiles
+
+    kv = int(4 * bits)
+    rng = Random(671)
+    suffixes = [rng.randrange(1 << kv) for _ in range(64)]
+    stream = "".join(f"{suffix:0{kv}b}" for suffix in suffixes)
+    packed_oracle = _q4nx_pack_oracle(suffixes, kv)
+
+    state_bits = 32 - kv
+    prefix_stream = "0" * state_bits + stream
+    values = []
+    for step in range(1, 65):
+        end = state_bits + step * kv
+        state = int(prefix_stream[end - state_bits:end], 2)
+        product = (state * 0x83DCD12D) % (1 << 32)
+        for byte in product.to_bytes(4, "little"):
+            values.append(((byte // 16) + (byte % 16) - 15) / sqrt(42.5))
+    source = torch.tensor([values], dtype=torch.float32, device="cuda")
+
+    for scale_search in (False, True):
+        args = {"K": bits, "q4nx": True, "q4nx_scale_search": scale_search}
+        reconstructed, codes = quantize_tiles(source, args)
+        torch.testing.assert_close(reconstructed, source, atol=2e-7, rtol=1e-7)
+        assert codes[0, :64].tolist() == suffixes
+        torch.testing.assert_close(
+            pack_trellis(codes.view(1, 1, 256), args).flatten().cpu(), packed_oracle, rtol=0, atol=0,
+        )
+
+
+@pytest.mark.cuda
+def test_q4nx_w35_matches_exhaustive_viterbi():
+    from tests.accelerator_gates import requires_nvidia_cuda
+
+    if not requires_nvidia_cuda():
+        pytest.skip("requires NVIDIA CUDA")
+
+    from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import quantize_tiles
+
+    # The 18-bit state overlaps by four bits when a step appends its 14-bit
+    # suffix. An independent FP64 recurrence enumerates all 2**18 states at
+    # every step and retains the true minimum for each successor class.
+    device = torch.device("cuda", torch.cuda.current_device())
+    source = torch.randn((1, 256), generator=torch.Generator().manual_seed(516)).to(device)
+    state = torch.arange(1 << 18, device=device)
+    product = (state[:, None] * 0x83DCD12D) >> torch.arange(0, 32, 8, device=device)
+    values = (((product >> 4) & 15) + (product & 15) - 15).double() / sqrt(42.5)
+    prior = torch.full((16,), torch.inf, dtype=torch.float64, device=device)
+    prior[0] = 0
+    history = []
+    successors = torch.arange(16, device=device)
+    for target in source.reshape(64, 4).double():
+        costs = (values - target).square().sum(-1) + prior[state >> 14]
+        prior, best = costs.view(-1, 16).min(dim=0)
+        history.append(best * 16 + successors)
+    current = int(prior.argmin())
+    suffixes = []
+    for line in reversed(torch.stack(history).cpu()):
+        state = int(line[current])
+        suffixes.append(state & ((1 << 14) - 1))
+        current = state >> 14
+
+    recovered, codes = quantize_tiles(source, {"K": 3.5, "q4nx": True})
+    assert codes[0, :64].tolist() == suffixes[::-1]
+    torch.testing.assert_close((recovered.double() - source).square().sum(), prior.min(), atol=1e-6, rtol=1e-6)
+
+
+def _q4nx_decode_in_half_steps(states):
+    shifts = torch.arange(0, 32, 8, device=states.device)
+    bytes_ = (states[..., None] * 0x83DCD12D) >> shifts
+    return 2 * (((bytes_ >> 4) & 15) + (bytes_ & 15) - 15)
+
+
+def _q4nx_integer_path(target, kv, beam):
+    """Compare exact dyadic costs and break ties by the smallest state."""
+    state_bits = 32 - kv
+    state_mask = (1 << state_bits) - 1
+    class_count = 1 << (state_bits - kv)
+    device = target.device
+    suffixes = torch.arange(1 << kv, device=device)
+    prefixes = torch.zeros(1, dtype=torch.int64, device=device)
+    prior = torch.zeros_like(prefixes)
+    history = []
+    tied = torch.zeros((), dtype=torch.bool, device=device)
+    for point in target.reshape(64, 4):
+        states = (prefixes[:, None] << kv) | suffixes
+        costs = (_q4nx_decode_in_half_steps(states) - point).square().sum(-1) + prior[:, None]
+        # Sort by (path cost, state) as an integer and reduce independently for
+        # each overlap class. A state determines its own predecessor class.
+        edges = (costs << state_bits) | states
+        classes = states % class_count
+        winners = torch.full((class_count,), torch.iinfo(edges.dtype).max, dtype=edges.dtype, device=device)
+        winners.scatter_reduce_(0, classes.flatten(), edges.flatten(), reduce="amin")
+        best = winners.topk(beam, largest=False, sorted=True).values
+        prior = best >> state_bits
+        prefixes = best % class_count
+        history.append(winners & state_mask)
+        tied |= (prior[1:] == prior[:-1]).any()
+
+    state = int(best[0]) & state_mask
+    path = []
+    for winners in torch.stack(history).cpu().flip(0):
+        state = int(winners[state % class_count])
+        path.append(state)
+        state >>= kv
+    assert tied.item(), "the fixture must exercise equal path costs"
+    return torch.tensor(path[::-1], device=device)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("bits", [2.5, 3.0, 3.5])
+def test_q4nx_exact_codes_for_ties_and_partial_launch_chunks(bits):
+    from tests.accelerator_gates import requires_nvidia_cuda
+
+    if not requires_nvidia_cuda():
+        pytest.skip("requires NVIDIA CUDA")
+
+    from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import pack_trellis, quantize_tiles
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
+
+    # Half-code steps with exactly representable normalized targets. The
+    # squared errors and sums are multiples of 1/4 and fit exactly in FP32,
+    # even at the two targets beyond the range of the codebook.
+    device = torch.device("cuda", torch.cuda.current_device())
+    targets = torch.tensor([[0] * 8, [-32, -4, -1, 0, 1, 2, 4, 32]], device=device).repeat(1, 32)
+    order = [1, 0, 1, 1, 0]
+    source = targets[order].float() * (0.5 / sqrt(42.5))
+    kv = int(bits * 4)
+    previous = get_kernel_config()
+    try:
+        for scale_search in (False, True):
+            beam = 16 if scale_search or bits == 3.5 else 128
+            paths = torch.stack([_q4nx_integer_path(target, kv, beam) for target in targets])
+            expected = _q4nx_decode_in_half_steps(paths[order]).flatten(1).float() * (0.5 / sqrt(42.5))
+            suffixes = (paths & ((1 << kv) - 1)).to(torch.int16)
+            expected_codes = torch.zeros_like(source, dtype=torch.int16)
+            expected_codes[:, :64] = suffixes[order]
+            expected_words = torch.stack([_q4nx_pack_oracle(row, kv) for row in suffixes.tolist()])[order]
+
+            args = {"K": bits, "q4nx": True, "q4nx_scale_search": scale_search}
+            for policy in (KernelConfig(), KernelConfig(exl3_tile_batch=2)):
+                configure_kernel(policy)
+                recovered, codes = quantize_tiles(source, args)
+                packed = pack_trellis(codes.unsqueeze(0), args).squeeze(0)
+                assert torch.equal(recovered.view(torch.int32), expected.view(torch.int32))
+                assert torch.equal(codes, expected_codes)
+                assert torch.equal(packed.cpu(), expected_words)
+    finally:
+        configure_kernel(previous)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("bits", [1.5, 2.5, 3.5])
+def test_native_mul1_half_rate_packer_matches_alternating_ring(bits):
+    if (
+        not torch.cuda.is_available()
+        or torch.version.hip is not None
+        or torch.cuda.get_device_capability(0)[0] < 8
+    ):
+        pytest.skip("requires NVIDIA Ampere or newer")
+
+    from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import clear_tile_workspace, pack_trellis, quantize_tiles
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
+
+    source = torch.linspace(-3, 3, 256, dtype=torch.float32, device="cuda").roll(7).reshape(1, 256)
+    previous = get_kernel_config()
+    configure_kernel(KernelConfig(exl3_tile_batch=1))
+    try:
+        args = {"K": bits, "mul1": True}
+        quantized, encoded = quantize_tiles(source, args)
+        packed = pack_trellis(encoded.view(1, 1, 256), args).cpu()
+        encoded = encoded.cpu().long().flatten() & 0xFFFF
+        quantized = quantized.cpu().flatten()
+    finally:
+        clear_tile_workspace()
+        configure_kernel(previous)
+
+    widths = [int(bits) + index % 2 for index in range(256)]
+    ring = "".join(f"{int(state) & ((1 << width) - 1):0{width}b}" for state, width in zip(encoded, widths))
+    expected_words = torch.tensor([int(ring[start:start + 16], 2) for start in range(0, len(ring), 16)])
+    expected_words = expected_words.view(-1, 2).flip(-1).reshape(1, 1, int(16 * bits)).to(torch.int16)
+    assert torch.equal(packed, expected_words)
+    tail_biting_ring = ring[-16:] + ring
+    end = 0
+    for index, width in enumerate(widths):
+        end += width
+        assert encoded[index] == int(tail_biting_ring[end:end + 16], 2)
+    assert encoded.unique().numel() > 20
+    assert torch.equal(quantized, _codebook("mul1")[encoded])
+
+
+@pytest.mark.cuda
+@pytest.mark.integration
+@pytest.mark.parametrize(("bits", "codebook"), [(2.5, "mul1"), (3.5, "mul1"), (2.5, "q4nx"), (3, "q4nx"), (3.5, "q4nx")])
+def test_exl3_tiny_llama_quantize_and_reload(tmp_path, bits, codebook):
+    if (
+        not torch.cuda.is_available()
+        or torch.version.hip is not None
+        or torch.cuda.get_device_capability(0)[0] < 8
+    ):
+        pytest.skip("requires NVIDIA Ampere or newer")
+
+    from safetensors.torch import load_file
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+    from gptqmodel.quantization.config import EXL3Config
+    from gptqmodel.utils.kernel import KernelConfig
+    from tests.tiny_remote_models import build_wordlevel_tokenizer
+
+    source = tmp_path / "source"
+    quantized = tmp_path / "quantized"
+    config = LlamaConfig(
+        vocab_size=128, hidden_size=128, intermediate_size=256, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=4, max_position_embeddings=32,
+        bos_token_id=0, eos_token_id=1, pad_token_id=3,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(17)
+        LlamaForCausalLM(config).eval().half().save_pretrained(source)
+    build_wordlevel_tokenizer(128).save_pretrained(source)
+    projection = "model.layers.0.self_attn.q_proj"
+    control = "model.layers.0.self_attn.k_proj"
+    mixed = codebook == "q4nx"
+    include = [f"^{projection}$", f"^{control}$"] if mixed else [f"^{projection}$"]
+    cfg = EXL3Config(
+        bits=3 if mixed else bits,
+        codebook="mcg" if mixed else codebook,
+        dynamic={projection: {"bits": bits, "codebook": codebook}} if mixed else None,
+        offload_to_disk=False,
+        module_include=include,
+        kernel=KernelConfig(exl3_tile_batch=4),
+    )
+    model = GPTQModel.load(str(source), quantize_config=cfg, device="cuda:0", dtype=torch.float16)
+    tokens = torch.randint(4, 128, (8, 32), generator=torch.Generator().manual_seed(119)).tolist()
+    dataset = [{"input_ids": row, "attention_mask": [1] * len(row)} for row in tokens]
+    model.quantize(CalibrationConfig(dataset=dataset, batch_size=2))
+    packed = model.model.get_submodule(projection)
+    assert isinstance(packed, ExllamaV3Linear)
+    assert packed.kernel.exl3_tile_batch == 4
+    assert packed.trellis.dtype == torch.int16 and packed.trellis.shape == (8, 8, int(16 * bits))
+    assert packed.tensor_storage_entry()["bits_per_weight"] == bits
+    assert getattr(packed, codebook).dtype == torch.int32
+    x = torch.linspace(-0.5, 0.5, 128, device="cuda", dtype=torch.float16).unsqueeze(0)
+    packed.to(x.device)
+    with torch.inference_mode():
+        expected = packed(x)
+    model.save(str(quantized))
+    tensors = load_file(quantized / "model.safetensors")
+    for name, value in packed.state_dict().items():
+        assert torch.equal(tensors[f"{projection}.{name}"], value.cpu())
+
+    loaded_policy = KernelConfig(exl3_tile_batch=2)
+    restored = GPTQModel.load(
+        str(quantized), device="cuda:0", backend=BACKEND.EXL3_EXLLAMA_V3, dtype=torch.float16,
+        kernel=loaded_policy,
+    )
+    reloaded = restored.model.get_submodule(projection)
+    assert isinstance(reloaded, ExllamaV3Linear)
+    assert reloaded.kernel.exl3_tile_batch == 2
+    assert packed.kernel.exl3_tile_batch == 4
+    assert restored.quantize_config.runtime_bits == cfg.runtime_bits
+    assert restored.quantize_config.codebook == cfg.codebook
+    assert reloaded.tensor_storage_entry()["bits_per_weight"] == bits
+    for name, value in reloaded.state_dict().items():
+        assert torch.equal(tensors[f"{projection}.{name}"], value.cpu())
+    with torch.inference_mode():
+        assert torch.equal(reloaded(x), expected)
+    if mixed:
+        assert restored.quantize_config.dynamic_get(projection, "codebook") == "q4nx"
+        assert restored.model.get_submodule(control).mcg.dtype == torch.int32
+        assert reloaded.mcg is None
+        portable = GPTQModel.load(
+            str(quantized), device="cpu", backend=BACKEND.EXL3_TORCH, dtype=torch.float16,
+        )
+        assert portable.model.get_submodule(projection).q4nx.item() == 0x83DCD12D - (1 << 32)
+        with torch.inference_mode():
+            probe = torch.tensor([tokens[0][:8]])
+            cpu_logits = portable.model(probe, use_cache=False).logits
+            cuda_logits = restored.model(probe.cuda(), use_cache=False).logits.cpu()
+        torch.testing.assert_close(cuda_logits, cpu_logits, rtol=2e-3, atol=2e-3)
 
 
 def _codebook(codebook):

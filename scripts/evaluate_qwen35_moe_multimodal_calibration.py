@@ -29,6 +29,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping, Sequence
 
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -719,7 +720,8 @@ def _run_model_cell(
     if inference_multimodal:
         _validate_runtime_images(images)
     import torch
-    from gptqmodel import GPTQModel
+
+    from gptqmodel import CalibrationConfig, GPTQModel
     from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
 
     cell = str(config["cell"])
@@ -817,9 +819,11 @@ def _run_model_cell(
         quantization_start = time.perf_counter()
         try:
             model.quantize(
-                calibration,
-                calibration_concat_size=config["quant"].get("calibration_concat_size"),
-                batch_size=config["quant"].get("batch_size", 1),
+                CalibrationConfig(
+                    dataset=calibration,
+                    concat_size=config["quant"].get("calibration_concat_size"),
+                    batch_size=config["quant"].get("batch_size", 1),
+                ),
             )
         except StopMainLoop as exc:
             raise RuntimeError(

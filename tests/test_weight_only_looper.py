@@ -13,7 +13,9 @@ import gptqmodel.looper.weight_only_looper as weight_only_looper_module
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.looper.weight_only_processor import WeightOnlyProcessor
+from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.quantization.config import QuantizeEmbed, QuantizeEmbedConfig, RTNConfig, VramStrategy
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
 
 
 class _FakeProgress:
@@ -154,7 +156,7 @@ class _FakeQModel:
     def simple_layer_modules(self, **_kwargs):
         return [["linear"]]
 
-    def pre_quantize(self, module):
+    def pre_quantize(self, module, module_path=None):
         return module
 
     def post_quantize(self, module):
@@ -240,6 +242,17 @@ def test_weight_only_extension_resumes_at_quiescent_boundary(monkeypatch, cursor
     assert model.model.config.use_cache
 
 
+def test_weight_only_looper_unset_policy_resets_previous_run():
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    previous = get_kernel_config()
+    try:
+        configure_kernel(KernelConfig(marlin_fp32=False, max_packers=2))
+        WeightOnlyLooper(model=_FakeQModel(qcfg), processor=_FakeProcessor(qcfg))
+        assert get_kernel_config().to_dict() == KernelConfig().to_dict()
+    finally:
+        configure_kernel(previous)
+
+
 def test_weight_only_looper_reports_logbar_progress(monkeypatch):
     qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
     qcfg.lm_head = False
@@ -314,9 +327,14 @@ def test_weight_only_looper_quantizes_input_and_lm_head_embeddings_only(monkeypa
     assert processor.memory_calls == []
     assert model._module_replacement_prefixes == {"embed_tokens", "lm_head"}
     assert model._model_free_weight_only_replacements_only is True
-    assert qcfg.offload_to_disk is False
-    assert qcfg.dynamic["embed_tokens"] == {"bits": 8, "group_size": 32}
-    assert qcfg.dynamic["lm_head"] == {"bits": 8, "group_size": 32}
+    # ``offload_to_disk=True`` binds a private per-run config copy (#4368), so
+    # the embed-only overrides land on the run's config, not the caller's.
+    run_config = model.quantize_config
+    assert run_config is not qcfg
+    assert qcfg.offload_to_disk is True
+    assert run_config.offload_to_disk is False
+    assert run_config.dynamic["embed_tokens"] == {"bits": 8, "group_size": 32}
+    assert run_config.dynamic["lm_head"] == {"bits": 8, "group_size": 32}
 
 
 @pytest.mark.parametrize(
@@ -645,6 +663,18 @@ def test_weight_only_looper_respects_dense_and_moe_vram_strategy_devices(monkeyp
     fake_logger = _FakeLogger()
     processor = _FakeProcessor(qcfg)
     model = _FakeQModel(qcfg)
+    # Production wrappers expose the model definition's ModulePlan; without it
+    # expert families are indistinguishable from dense projections.
+    model.module_plan = lambda: ModulePlan.from_tree([
+        "model", "layers", "#",
+        {
+            "self_attn": ("q_proj:0",),
+            "mlp:moe": {
+                "experts": {"#": ("gate_proj:0", "up_proj:0")},
+                "shared_expert": ("down_proj:1",),
+            },
+        },
+    ])
     model.model.layers = nn.ModuleList([_ExpertLayer()])
     model.simple_layer_modules = lambda **_kwargs: [
         ["self_attn.q_proj"],

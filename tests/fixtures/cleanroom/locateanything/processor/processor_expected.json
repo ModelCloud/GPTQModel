@@ -1,0 +1,419 @@
+{
+ "image_processor": {
+  "p14_default__a": {
+   "input": "a_rgb_w50_h30",
+   "kwargs": {
+    "patch_size": 14,
+    "in_token_limit": 4096,
+    "image_mean": [
+     0.5,
+     0.5,
+     0.5
+    ],
+    "image_std": [
+     0.5,
+     0.5,
+     0.5
+    ]
+   },
+   "applied_to_rgb_first": false,
+   "grid_hws": [
+    [
+     4,
+     4
+    ]
+   ]
+  },
+  "p2_limit16__b": {
+   "input": "b_rgb_w20_h12",
+   "kwargs": {
+    "patch_size": 2,
+    "in_token_limit": 16,
+    "image_mean": [
+     0.5,
+     0.5,
+     0.5
+    ],
+    "image_std": [
+     0.5,
+     0.5,
+     0.5
+    ]
+   },
+   "applied_to_rgb_first": false,
+   "grid_hws": [
+    [
+     4,
+     6
+    ]
+   ]
+  },
+  "p2_exact__c": {
+   "input": "c_rgb_w8_h4",
+   "kwargs": {
+    "patch_size": 2,
+    "in_token_limit": 4096,
+    "image_mean": [
+     0.5,
+     0.5,
+     0.5
+    ],
+    "image_std": [
+     0.5,
+     0.5,
+     0.5
+    ]
+   },
+   "applied_to_rgb_first": false,
+   "grid_hws": [
+    [
+     2,
+     4
+    ]
+   ]
+  },
+  "p2_pad__e": {
+   "input": "e_gray_w5_h7",
+   "kwargs": {
+    "patch_size": 2,
+    "in_token_limit": 4096,
+    "image_mean": [
+     0.5,
+     0.5,
+     0.5
+    ],
+    "image_std": [
+     0.5,
+     0.5,
+     0.5
+    ]
+   },
+   "applied_to_rgb_first": false,
+   "grid_hws": [
+    [
+     4,
+     4
+    ]
+   ]
+  },
+  "p2_to_rgb_rgba__d": {
+   "input": "d_rgba_w6_h4",
+   "kwargs": {
+    "patch_size": 2,
+    "in_token_limit": 4096,
+    "image_mean": [
+     0.5,
+     0.5,
+     0.5
+    ],
+    "image_std": [
+     0.5,
+     0.5,
+     0.5
+    ]
+   },
+   "applied_to_rgb_first": true,
+   "grid_hws": [
+    [
+     2,
+     4
+    ]
+   ]
+  },
+  "p2_mean_std__c": {
+   "input": "c_rgb_w8_h4",
+   "kwargs": {
+    "patch_size": 2,
+    "in_token_limit": 4096,
+    "image_mean": [
+     0.4,
+     0.5,
+     0.6
+    ],
+    "image_std": [
+     0.2,
+     0.3,
+     0.25
+    ]
+   },
+   "applied_to_rgb_first": false,
+   "grid_hws": [
+    [
+     2,
+     4
+    ]
+   ]
+  }
+ },
+ "chat_case": {
+  "messages": "user: [image(c), video([b, c]), text 'Find 5 and 6']; assistant: '7 8'",
+  "py_apply_chat_template(add_generation_prompt=True)": "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n<image-1><video-1>Find 5 and 6<|im_end|>\n<|im_start|>assistant\n7 8<|im_end|>\n<|im_start|>assistant\n",
+  "expanded_text": "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n<image 1><img><IMG_CONTEXT><IMG_CONTEXT></img>The first video: Frame-1: <img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></img>Frame-2: <img><IMG_CONTEXT><IMG_CONTEXT></img>Find 5 and 6<|im_end|>\n<|im_start|>assistant\n7 8<|im_end|>\n<|im_start|>assistant\n",
+  "input_ids": [
+   [
+    1,
+    59,
+    59,
+    1,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    1,
+    59,
+    59,
+    1
+   ]
+  ],
+  "attention_mask": [
+   [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ]
+  ],
+  "image_grid_hws": [
+   [
+    2,
+    4
+   ],
+   [
+    6,
+    10
+   ],
+   [
+    2,
+    4
+   ]
+  ]
+ },
+ "chat_inline_placeholder": {
+  "py_apply_chat_template(add_generation_prompt=False)": "<|im_start|>system\nsys 9<|im_end|>\n<|im_start|>user\nlook <image-1> here<|im_end|>\n"
+ },
+ "video_tensor_case": {
+  "call": "replace_media_placeholder('<video-1> and <image-1>', images=[c], videos=[vt], timestamps=[[0.0,0.5]], fps=[2.0])",
+  "expanded_text": "The first video sampled with 2.00 fps: Frame-1-0.00s: <img><IMG_CONTEXT><IMG_CONTEXT></img>Frame-2-0.50s: <img><IMG_CONTEXT><IMG_CONTEXT></img> and <image 1><img><IMG_CONTEXT><IMG_CONTEXT></img>",
+  "image_grid_hws": [
+   [
+    2,
+    4
+   ],
+   [
+    2,
+    4
+   ],
+   [
+    2,
+    4
+   ]
+  ],
+  "num_images": 1,
+  "num_videos": 1
+ },
+ "video_tensor01_case": {
+  "expanded_text": "The first video: Frame-1: <img><IMG_CONTEXT><IMG_CONTEXT></img>Frame-2: <img><IMG_CONTEXT><IMG_CONTEXT></img>",
+  "image_grid_hws": [
+   [
+    2,
+    4
+   ],
+   [
+    2,
+    4
+   ]
+  ]
+ },
+ "batch_two_samples": {
+  "input_ids": [
+   [
+    1,
+    59,
+    59,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    1,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    59,
+    1
+   ]
+  ],
+  "attention_mask": [
+   [
+    1,
+    1,
+    1,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ]
+  ],
+  "image_grid_hws": [
+   [
+    2,
+    4
+   ],
+   [
+    6,
+    10
+   ]
+  ]
+ },
+ "get_video_frame_indices": [
+  {
+   "ele": {},
+   "total_frames": 100,
+   "video_fps": 25.0,
+   "idx": [
+    0,
+    14,
+    28,
+    42,
+    57,
+    71,
+    85,
+    99
+   ],
+   "sample_fps": 2.0
+  },
+  {
+   "ele": {},
+   "total_frames": 10,
+   "video_fps": 30.0,
+   "idx": [
+    0
+   ],
+   "sample_fps": 3.0
+  },
+  {
+   "ele": {
+    "fps": 1.0,
+    "max_frames": 4
+   },
+   "total_frames": 300,
+   "video_fps": 30.0,
+   "idx": [
+    0,
+    100,
+    199,
+    299
+   ],
+   "sample_fps": 0.4
+  },
+  {
+   "ele": {},
+   "total_frames": 3,
+   "video_fps": 1.0,
+   "idx": [
+    0,
+    1,
+    2
+   ],
+   "sample_fps": 1.0
+  },
+  {
+   "ele": {
+    "fps": 4.0
+   },
+   "total_frames": 7,
+   "video_fps": 2.0,
+   "idx": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+   ],
+   "sample_fps": 2.0
+  }
+ ]
+}

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# ParoQuant reference: Z Lab, MIT, https://github.com/z-lab/paroquant
-"""Compare merged and fused ParoQuant MLX rotations on Qwen projection shapes."""
+# Paro reference: Z Lab, MIT, https://github.com/z-lab/paroquant
+"""Compare merged and fused Paro MLX rotations on Qwen projection shapes."""
 
 import argparse
 import gc

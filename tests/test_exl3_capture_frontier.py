@@ -19,12 +19,10 @@ from gptqmodel.utils.exl3_capture_frontier import (
     EXL3CaptureFrontierStore,
     EXL3CaptureState,
 )
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 FAMILY_JOIN = {"source": {"revision": "test"}, "corpus": {"sha256": "a" * 64}}
-_processor_wiring_pending = pytest.mark.skip(
-    reason="EXL3Processor capture-frontier wiring lands in a later stack layer"
-)
 
 
 def _subset():
@@ -360,11 +358,10 @@ def _processor(subset, *, captured: bool, inline_mixed: bool = False) -> EXL3Pro
     return processor
 
 
-@_processor_wiring_pending
 def test_processor_commits_and_restores_before_replay(tmp_path, monkeypatch) -> None:
     subset = _subset()
     root = tmp_path / "frontier"
-    monkeypatch.setenv("GPTQMODEL_EXL3_CAPTURE_FRONTIER", str(root))
+    configure_kernel(KernelConfig(exl3_capture_frontier=str(root)))
     captured = _processor(subset, captured=True)
     captured.commit_subset_capture_frontier(
         layer_index=3,
@@ -415,13 +412,12 @@ def test_processor_commits_and_restores_before_replay(tmp_path, monkeypatch) -> 
     assert load_devices == ["cpu", "cpu"]
 
 
-@_processor_wiring_pending
 def test_inline_commit_demotes_live_hessians_to_lazy_frontier(
     tmp_path, monkeypatch
 ) -> None:
     subset = _subset()
     root = tmp_path / "frontier"
-    monkeypatch.setenv("GPTQMODEL_EXL3_CAPTURE_FRONTIER", str(root))
+    configure_kernel(KernelConfig(exl3_capture_frontier=str(root)))
     captured = _processor(subset, captured=True, inline_mixed=True)
     for task in captured.tasks.values():
         capture = task["capture"]

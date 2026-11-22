@@ -155,21 +155,15 @@ static void validate_bf16_device(torch::Device device);
 
 namespace {
 
-bool fused_splitk_reduce_enabled()
-{
-  const char* disable_value = std::getenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE");
-  return disable_value == nullptr || std::atoi(disable_value) == 0;
-}
-
 template <typename output_t>
 __global__ void reduce_splitk_fp32_to_output_kernel(
     const float* __restrict__ partials,
     output_t* __restrict__ out,
     int split_k_iters,
-    int total_elements)
+    int64_t total_elements)
 {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int stride = blockDim.x * gridDim.x;
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
 
   for (; idx < total_elements; idx += stride)
   {
@@ -188,10 +182,11 @@ torch::Tensor fused_reduce_splitk_fp32_to_output(torch::Tensor out_feats_tensor,
 {
   auto options = torch::TensorOptions().dtype(output_dtype).device(out_feats_tensor.device());
   at::Tensor result = torch::empty({out_feats_tensor.size(1), out_feats_tensor.size(2)}, options);
-  const int total_elements = static_cast<int>(result.numel());
+  const int64_t total_elements = result.numel();
   const int split_k_iters = static_cast<int>(out_feats_tensor.size(0));
   const int threads = 256;
-  const int blocks = std::max(1, std::min((total_elements + threads - 1) / threads, 4096));
+  const int64_t wanted_blocks = (total_elements + threads - 1) / threads;
+  const int blocks = static_cast<int>(std::max<int64_t>(1, std::min<int64_t>(wanted_blocks, 4096)));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   auto partials = reinterpret_cast<const float*>(out_feats_tensor.data_ptr<float>());
@@ -214,9 +209,14 @@ torch::Tensor fused_reduce_splitk_fp32_to_output(torch::Tensor out_feats_tensor,
   return result;
 }
 
-torch::Tensor maybe_fused_reduce_splitk_fp32_to_output(torch::Tensor out_feats_tensor, at::ScalarType output_dtype)
+torch::Tensor maybe_fused_reduce_splitk_fp32_to_output(
+    torch::Tensor out_feats_tensor,
+    at::ScalarType output_dtype,
+    bool fused_splitk_reduce)
 {
-  if (!fused_splitk_reduce_enabled())
+  // The fused reduce is a kernel choice, not an environment switch: the caller
+  // passes it from KernelConfig so the same shape always takes the same path.
+  if (!fused_splitk_reduce)
   {
     return out_feats_tensor.sum(0).to(output_dtype);
   }
@@ -264,7 +264,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
   // bool wb_C_flag = (threadIdx.x / 4) < M;
 
   scalar_t* A_ptr = A 
-                + (((int)blockIdx_y) / j_factors1 * 16 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8)) * IC
+                + static_cast<int64_t>((((int)blockIdx_y) / j_factors1 * 16 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8))) * IC
                 + (((int)threadIdx.x) % (32 / 8)) * 8;
   
   int* B_ptr = B
@@ -394,7 +394,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
       int row_offset = (((int)blockIdx_y) / j_factors1) * 16 + ((int)threadIdx.x) / 4 + (local_id % 4) / 2 * 8;
       if (row_offset < M)
       {
-        store_accum_value(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax1_0_1 * 8) + local_id]);
+        store_accum_value(C_ptr + ax1_0_1 * 16 + static_cast<int64_t>(row_offset) * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax1_0_1 * 8) + local_id]);
       }
     }
   }
@@ -428,7 +428,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, in
   bool ld_A_flag = (blockIdx_y / j_factors1 * 16 + threadIdx.y * row_stride_warp + threadIdx.x * 8 / 32) < M;
 
   scalar_t* A_ptr = A
-                + (((int)blockIdx_y) / j_factors1 * 16 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8)) * IC
+                + static_cast<int64_t>((((int)blockIdx_y) / j_factors1 * 16 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8))) * IC
                 + (((int)threadIdx.x) % (32 / 8)) * 8;
 
   int* B_ptr = B
@@ -534,14 +534,14 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, in
       int row_offset = (((int)blockIdx_y) / j_factors1) * 16 + ((int)threadIdx.x) / 4 + (local_id % 4) / 2 * 8;
       if (row_offset < M)
       {
-        store_accum_value(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax1_0_1 * 8) + local_id]);
+        store_accum_value(C_ptr + ax1_0_1 * 16 + static_cast<int64_t>(row_offset) * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax1_0_1 * 8) + local_id]);
       }
     }
   }
 }
 
-template <int G>
-__global__ void __launch_bounds__(128) gemmv2_forward_4bit_cuda_m128n64k32(int split_k_iters, half* __restrict__ A, int* __restrict__ B, half* __restrict__ scaling_factors, int* zeros, int M, int IC, int OC, half* __restrict__ C) 
+template <int G, typename output_t>
+__global__ void __launch_bounds__(128) gemmv2_forward_4bit_cuda_m128n64k32(int split_k_iters, half* __restrict__ A, int* __restrict__ B, half* __restrict__ scaling_factors, int* zeros, int M, int IC, int OC, output_t* __restrict__ C) 
 {
   static constexpr uint32_t ZERO = 0x0;
   float C_warp[64];
@@ -579,7 +579,7 @@ __global__ void __launch_bounds__(128) gemmv2_forward_4bit_cuda_m128n64k32(int s
   // bool wb_C_flag = (threadIdx.x / 4) < M;
 
   half* A_ptr = A 
-                + (((int)blockIdx_y) / j_factors1 * 128 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8)) * IC
+                + static_cast<int64_t>((((int)blockIdx_y) / j_factors1 * 128 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8))) * IC
                 + (((int)threadIdx.x) % (32 / 8)) * 8;
   
   int* B_ptr = B
@@ -617,7 +617,7 @@ __global__ void __launch_bounds__(128) gemmv2_forward_4bit_cuda_m128n64k32(int s
 
 
   // Haotian: TBD, check, May 29 11:46 AM PST
-  half* C_ptr = C 
+  output_t* C_ptr = C 
               + static_cast<long long>(blockIdx_z) * M * OC        // blockIdx_z -> split_k dim
               + (((int)blockIdx_y) % j_factors1) * 64
               + (((int)threadIdx.y) / 2) * 32
@@ -778,7 +778,7 @@ __global__ void __launch_bounds__(128) gemmv2_forward_4bit_cuda_m128n64k32(int s
         int row_offset = (((int)blockIdx_y) / j_factors1) * 128 + (threadIdx.y % 2) * 64 + ax0_0_2 * 16 + (local_id % 4) / 2 * 8 + ((int)threadIdx.x) / 4;
         if (row_offset < M)
         {
-          *(C_ptr + ax1_0 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2) = __float2half(C_warp[(ax0_0_2 * 16) + (ax1_0 * 8) + local_id]);
+          store_accum_value(C_ptr + ax1_0 * 16 + static_cast<int64_t>(row_offset) * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax0_0_2 * 16) + (ax1_0 * 8) + local_id]);
         }
       }
     }
@@ -844,7 +844,7 @@ int j=0;
   }
 }
 
-template<int N>
+template<int N, typename output_t>
 __global__ void __launch_bounds__(64) group_gemm_forward_4bit_cuda_m16nXk32(
   int G,
   int split_k_iters,
@@ -863,7 +863,7 @@ __global__ void __launch_bounds__(64) group_gemm_forward_4bit_cuda_m16nXk32(
   int M,
   int IC,
   int OC,
-  half* __restrict__ C)
+  output_t* __restrict__ C)
 {
   // Only support matrix n = 64 or 128
   assert(N == 64 || N == 128);
@@ -934,7 +934,7 @@ __global__ void __launch_bounds__(64) group_gemm_forward_4bit_cuda_m16nXk32(
                             + (((int)blockIdx_y) % j_factors1) * N
                             + (((int)threadIdx.x) % (N / 8)) * 8;
 
-  half* C_ptr = C
+  output_t* C_ptr = C
               + static_cast<long long>(blockIdx_z) * M * OC * expert_num  // blockIdz.x -> split_k dim
               + (((int)blockIdx_y) % j_factors1) * N
               + ((int)threadIdx.y) * (N / 2)
@@ -1082,7 +1082,7 @@ __global__ void __launch_bounds__(64) group_gemm_forward_4bit_cuda_m16nXk32(
         if (topk_weights) {
             value = value * topk_weights[token_id];
         }
-        *(C_ptr + ax1_0_1 * 16 + token_id * OC + (local_id / 4) * 8 + local_id % 2) = __float2half(value);
+        store_accum_value(C_ptr + ax1_0_1 * 16 + static_cast<int64_t>(token_id) * OC + (local_id / 4) * 8 + local_id % 2, value);
       }
     }
   }
@@ -1107,7 +1107,9 @@ torch::Tensor grouped_gemm_forward(
     int num_in_channels = _in_feats.size(2);
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
 
-    auto options = torch::TensorOptions().dtype(_in_feats.dtype()).device(_in_feats.device());
+    // Keep the grouped split-K partials wide for the same reason as
+    // gemmv2_forward_cuda: the reduction must round only once.
+    auto options = torch::TensorOptions().dtype(at::kFloat).device(_in_feats.device());
     int num_experts = _topk_weights.size(1);
     int top_k = num_experts / _in_feats.size(1);
     int group_size = num_in_channels / _scaling_factors.size(1);
@@ -1117,7 +1119,7 @@ torch::Tensor grouped_gemm_forward(
 
     auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
     auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
-    auto out_feats = reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>());
+    auto out_feats = _out_feats.data_ptr<float>();
     auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
     auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
     auto topk_weights = mul_weights ? reinterpret_cast<float*>(_topk_weights.data_ptr()) : nullptr;
@@ -1133,7 +1135,7 @@ torch::Tensor grouped_gemm_forward(
         // threadIdx.x: 32
         // threadIdx.y: i_factors[2] * j_factors[2]
         dim3 threads_per_block(32, 2);
-        group_gemm_forward_4bit_cuda_m16nXk32<128><<<num_blocks, threads_per_block, 0, stream>>>(
+        group_gemm_forward_4bit_cuda_m16nXk32<128, float><<<num_blocks, threads_per_block, 0, stream>>>(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros,
             topk_weights, sorted_token_ids_ptr, expert_ids_ptr, num_tokens_post_padded,
             _topk_weights.numel(), top_k, num_experts, pad_num_in_feats,
@@ -1147,13 +1149,13 @@ torch::Tensor grouped_gemm_forward(
         // threadIdx.x: 32
         // threadIdx.y: i_factors[2] * j_factors[2]
         dim3 threads_per_block(32, 2);
-        group_gemm_forward_4bit_cuda_m16nXk32<64><<<num_blocks, threads_per_block, 0, stream>>>(
+        group_gemm_forward_4bit_cuda_m16nXk32<64, float><<<num_blocks, threads_per_block, 0, stream>>>(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros,
             topk_weights, sorted_token_ids_ptr, expert_ids_ptr, num_tokens_post_padded,
             _topk_weights.numel(), top_k, num_experts, pad_num_in_feats,
             num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
-    return _out_feats.sum(0);
+    return _out_feats.sum(0).to(_in_feats.scalar_type());
 }
 
 // Dequantization to fp16
@@ -1247,7 +1249,8 @@ torch::Tensor gemmv2_forward_cuda(
     torch::Tensor _scaling_factors,
     torch::Tensor _zeros,
     int group_size,
-    int split_k_iters)
+    int split_k_iters,
+    bool fp32_output)
 {
     // Validate the flattened GEMV ABI before allocating or launching. The
     // caller handles empty batches because this kernel requires M > 0.
@@ -1298,7 +1301,10 @@ torch::Tensor gemmv2_forward_cuda(
     // Follow the input tensor's device even when it is not the current device.
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
 
-    auto options = torch::TensorOptions().dtype(_in_feats.dtype()).device(_in_feats.device());
+    // Split-K partials stay in FP32: rounding each partial to FP16 before the
+    // reduction overflows above 65504 and costs an extra rounding. The result
+    // is rounded exactly once, after the split-K sum (and any caller bias).
+    auto options = torch::TensorOptions().dtype(at::kFloat).device(_in_feats.device());
     // for int4, need _kernel.size(1) * 8
     at::Tensor _out_feats = torch::empty({split_k_iters, num_in_feats, _kernel.size(0)}, options);
     int num_out_feats = _out_feats.size(-2);
@@ -1306,7 +1312,7 @@ torch::Tensor gemmv2_forward_cuda(
 
     auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
     auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
-    auto out_feats = reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>());
+    auto out_feats = _out_feats.data_ptr<float>();
     auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
     auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
 
@@ -1326,12 +1332,12 @@ torch::Tensor gemmv2_forward_cuda(
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     if (group_size == 128)
     {
-      gemmv2_forward_4bit_cuda_m128n64k32<128><<<num_blocks, threads_per_block, 0, stream>>>(
+      gemmv2_forward_4bit_cuda_m128n64k32<128, float><<<num_blocks, threads_per_block, 0, stream>>>(
         split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
     else if (group_size == 64)
     {
-      gemmv2_forward_4bit_cuda_m128n64k32<64><<<num_blocks, threads_per_block, 0, stream>>>(
+      gemmv2_forward_4bit_cuda_m128n64k32<64, float><<<num_blocks, threads_per_block, 0, stream>>>(
         split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
     else
@@ -1339,7 +1345,8 @@ torch::Tensor gemmv2_forward_cuda(
       throw std::invalid_argument("Group size temporarily not supported.");
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    return _out_feats.sum(0);
+    const at::ScalarType output_dtype = fp32_output ? at::kFloat : _in_feats.scalar_type();
+    return maybe_fused_reduce_splitk_fp32_to_output(_out_feats, output_dtype, true);
 }
 
 // in_feats: M, IC [float16]
@@ -1464,7 +1471,8 @@ torch::Tensor launch_gemm_forward_cuda_fp32_reduce(
     torch::Tensor scaling_factors_tensor,
     torch::Tensor zeros_tensor,
     int split_k_iters,
-    at::ScalarType output_dtype)
+    at::ScalarType output_dtype,
+    bool fused_splitk_reduce)
 {
     int num_in_feats = in_feats_tensor.size(0);
     int num_in_channels = in_feats_tensor.size(1);
@@ -1504,7 +1512,7 @@ torch::Tensor launch_gemm_forward_cuda_fp32_reduce(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
 
-    return maybe_fused_reduce_splitk_fp32_to_output(out_feats_tensor, output_dtype);
+    return maybe_fused_reduce_splitk_fp32_to_output(out_feats_tensor, output_dtype, fused_splitk_reduce);
 }
 
 torch::Tensor gemm_forward_cuda(
@@ -1513,11 +1521,14 @@ torch::Tensor gemm_forward_cuda(
     torch::Tensor _scaling_factors,
     torch::Tensor _zeros,
     int split_k_iters,
-    bool fp32_accum)
+    bool fp32_accum,
+    bool fused_splitk_reduce)
 {
     if (fp32_accum)
     {
-        return gemm_forward_cuda_fp32_reduce(_in_feats, _kernel, _scaling_factors, _zeros, split_k_iters);
+        return gemm_forward_cuda_fp32_reduce(
+            _in_feats, _kernel, _scaling_factors, _zeros, split_k_iters, false,
+            fused_splitk_reduce);
     }
 
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
@@ -1540,7 +1551,8 @@ torch::Tensor gemm_forward_cuda_fp32_reduce(
     torch::Tensor _scaling_factors,
     torch::Tensor _zeros,
     int split_k_iters,
-    bool fp32_output)
+    bool fp32_output,
+    bool fused_splitk_reduce)
 {
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
     // The split-K partials are always float32.  Asking for a float32 result
@@ -1555,7 +1567,9 @@ torch::Tensor gemm_forward_cuda_fp32_reduce(
 
     if (in_feats.scalar_type() == at::kBFloat16)
     {
-        return launch_gemm_forward_cuda_fp32_reduce<nv_bfloat16>(in_feats, kernel, scaling_factors, zeros, split_k_iters, output_dtype);
+        return launch_gemm_forward_cuda_fp32_reduce<nv_bfloat16>(
+            in_feats, kernel, scaling_factors, zeros, split_k_iters, output_dtype, fused_splitk_reduce);
     }
-    return launch_gemm_forward_cuda_fp32_reduce<half>(in_feats, kernel, scaling_factors, zeros, split_k_iters, output_dtype);
+    return launch_gemm_forward_cuda_fp32_reduce<half>(
+        in_feats, kernel, scaling_factors, zeros, split_k_iters, output_dtype, fused_splitk_reduce);
 }

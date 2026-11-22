@@ -8,9 +8,15 @@ import inspect
 import torch
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class BloomQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     pre_lm_head_norm_module = "transformer.ln_f"
 
     module_tree = [
@@ -101,25 +107,9 @@ class BloomQModel(BaseQModel):
         positions instead of the captured sample's ``0..S-1`` range.
         """
 
-        try:
-            from transformers.models.bloom.modeling_bloom import _get_alibi_slopes
+        from ..ports.native.bloom.modeling_bloom import _get_alibi_slopes
 
-            slopes = _get_alibi_slopes(num_heads, device)
-        except Exception:
-            # Derive from the captured tensor only when the helper is absent.
-            # Index 1 is the first key after BOS, so a padded sample would not
-            # give the slope; the helper above is the authoritative source.
-            if not (
-                torch.is_tensor(alibi)
-                and alibi.dim() == 3
-                and alibi.shape[-1] > 1
-                and alibi.shape[0] >= num_heads
-            ):
-                raise NotImplementedError(
-                    "Bloom AWQ replay cannot resolve ALiBi slopes to rebuild "
-                    "the packed alibi"
-                )
-            slopes = alibi.detach().reshape(-1, num_heads, 1, alibi.shape[-1])[0, :, 0, 1]
+        slopes = _get_alibi_slopes(num_heads, device)
         # `build_alibi_tensor` multiplies fp32 slopes by the integer position
         # and only then casts to the activation dtype; match that order so the
         # rebuilt tensor is bit-identical to the captured one.

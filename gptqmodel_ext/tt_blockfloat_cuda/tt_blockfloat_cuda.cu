@@ -50,6 +50,11 @@ __device__ __forceinline__ int floor_log2_exact(float x) {
   return e < -126 ? -126 : e;
 }
 
+// Shared exponents the int8 field can store.  One step beyond either end is an
+// infinity (``2**128``) or a non-normal scale, not a grid point.
+constexpr int kExponentMin = -127;
+constexpr int kExponentMax = 127;
+
 // ---------------------------------------------------------------------------
 // Element type helpers
 // ---------------------------------------------------------------------------
@@ -210,27 +215,49 @@ __global__ void quantize_kernel(const float* __restrict__ x, int64_t rows, int64
 
   // Three candidates: base, base-1, base+1.  Strict `<` keeps the earlier one
   // on ties, matching the reference's sequential torch.where updates.
+  //
+  // The errors are measured on the block normalised by ``2**base``, exactly as
+  // the reference does. Dividing by a power of two is exact, so the compared
+  // grid is unchanged, but the sums stay O(1): raw squared errors overflow to
+  // inf for large blocks (so no candidate can win) and underflow to 0 for tiny
+  // ones (so a strict `<` never leaves the base candidate).
+  // Dividing by the scale (rather than multiplying by its reciprocal) stays
+  // exact for every exponent: ``2**-127`` is subnormal and would be flushed.
+  const float base_scale = exp2f((float)base);
+  float unit[BLOCK];
+#pragma unroll
+  for (int i = 0; i < BLOCK; ++i) unit[i] = block[i] / base_scale;
+
+  // Candidate 0 is taken unconditionally, which initialises ``best_code`` and
+  // fixes the tie order; the neighbours must beat it strictly. A neighbour
+  // outside the storable exponent range has no representable scale
+  // (``2**128`` is inf, and ``0 * inf`` is NaN), so it is rejected before its
+  // error is compared.
   int best_exp = base;
-  float best_err = CUDART_INF_F;
+  float best_err = 0.0f;
   int best_code[BLOCK];
+#pragma unroll
+  for (int i = 0; i < BLOCK; ++i) best_code[i] = 0;
   const int deltas[3] = {0, -1, 1};
 #pragma unroll
   for (int t = 0; t < 3; ++t) {
     const int ex = base + deltas[t];
-    const float scale = exp2f((float)ex);
+    const bool usable = ex >= kExponentMin && ex <= kExponentMax;
+    const float step = (t == 0) ? 1.0f : (t == 1 ? 0.5f : 2.0f);
     float err = 0.0f;
     int cand[BLOCK];
 #pragma unroll
     for (int i = 0; i < BLOCK; ++i) {
-      const float q = rintf(block[i] / scale * (float)levels);
+      const float q = rintf(unit[i] / step * (float)levels);
       int qi = (int)q;
       qi = qi > offset ? offset : (qi < -offset ? -offset : qi);
       cand[i] = qi;
-      const float v = (float)qi * (1.0f / levels) * scale;
-      const float d = v - block[i];
+      // Reconstructed value on the normalised grid: exact float arithmetic.
+      const float u = (float)qi * (1.0f / levels) * step;
+      const float d = u - unit[i];
       err += d * d;
     }
-    if (err < best_err) {
+    if (usable && (t == 0 || err < best_err)) {
       best_err = err;
       best_exp = ex;
 #pragma unroll
@@ -281,10 +308,12 @@ __global__ void decompose_kernel(const float* __restrict__ x, int64_t rows, int6
   for (int i = 0; i < BLOCK; ++i) mag = fmaxf(mag, fabsf(p[i]));
   const int base = floor_log2_exact(fmaxf(mag, FLT_MIN));
 
-  // Same candidate order as decompose_blockfloat.
+  // Same candidate order as decompose_blockfloat.  A shift past the representable
+  // exponent range has no storable scale, so skip it rather than search it.
   const int shifts[4] = {0, 1, -1, 2};
   for (int s = 0; s < 4; ++s) {
     const int ex = base + shifts[s];
+    if (ex < kExponentMin || ex > kExponentMax) continue;
     const float scale = exp2f((float)ex);
     bool ok = true;
     int cand[BLOCK];
@@ -717,13 +746,6 @@ struct CublasApi {
 inline const CublasApi& cublas_api() {
   static const CublasApi api = [] {
     CublasApi a;
-    // Escape hatch that forces the fused fallback.  It is the only way to
-    // exercise that path on a machine which does have cuBLAS, and it lets a
-    // build with no cuBLAS at all run the same tests.
-    if (const char* off = std::getenv("GPTQMODEL_BLOCKFLOAT_NO_CUBLAS");
-        off != nullptr && off[0] != '\0' && off[0] != '0') {
-      return a;
-    }
     static const char* kSonames[] = {"libcublas.so.13", "libcublas.so.12",
                                      "libcublas.so.11", "libcublas.so"};
     void* lib = nullptr;
@@ -946,6 +968,7 @@ cudaError_t launch_linear_cublas(const void* x, const uint8_t* codes,
                                  const int8_t* exponents, int64_t m, int64_t n, int64_t k,
                                  const void* bias, void* out, cudaStream_t stream) {
   cublasHandle_t handle = nullptr;
+
   cudaError_t e = cublas_handle_for_stream(stream, &handle);
   if (e != cudaSuccess) return e;
   const CublasApi& api = cublas_api();
@@ -1028,10 +1051,12 @@ cudaError_t launch_linear_fused(const void* x, const uint8_t* codes,
 template <int BITS, typename T>
 cudaError_t launch_linear_mma(const void* x, const uint8_t* codes,
                               const int8_t* exponents, int64_t m, int64_t n, int64_t k,
-                              const void* bias, void* out, cudaStream_t stream) {
+                              const void* bias, void* out, cudaStream_t stream,
+                              bool allow_cublas) {
   if (m <= 0 || n <= 0 || k <= 0) return cudaErrorInvalidValue;
   constexpr int64_t kIntMax = std::numeric_limits<int>::max();
-  if (cublas_api().ready && m <= kIntMax && n <= kIntMax && k <= kIntMax) {
+  if (allow_cublas && cublas_api().ready && m <= kIntMax && n <= kIntMax &&
+      k <= kIntMax) {
     cudaError_t e =
         launch_linear_cublas<BITS, T>(x, codes, exponents, m, n, k, bias, out, stream);
     if (e != cudaErrorNotSupported) return e;
@@ -1114,17 +1139,19 @@ cudaError_t blockfloat_decompose(const float* x, int bits, int64_t rows, int64_t
 
 cudaError_t blockfloat_linear(const void* x, int dtype, const uint8_t* codes,
                         const int8_t* exponents, int bits, int64_t m, int64_t n,
-                        int64_t k, const void* bias, void* out, cudaStream_t stream) {
+                        int64_t k, const void* bias, void* out, cudaStream_t stream,
+                        int32_t allow_cublas) {
   if (k % BLOCK) return cudaErrorInvalidValue;
   if (m <= 0 || n <= 0 || k <= 0) return cudaErrorInvalidValue;
+  const bool cublas = allow_cublas != 0;
   if (bits == 4) {
     if (dtype == BLOCKFLOAT_DTYPE_F32) return launch_linear_f32<4>(x, codes, exponents, m, n, k, bias, out, stream);
-    if (dtype == BLOCKFLOAT_DTYPE_F16) return launch_linear_mma<4, __half>(x, codes, exponents, m, n, k, bias, out, stream);
-    if (dtype == BLOCKFLOAT_DTYPE_BF16) return launch_linear_mma<4, __nv_bfloat16>(x, codes, exponents, m, n, k, bias, out, stream);
+    if (dtype == BLOCKFLOAT_DTYPE_F16) return launch_linear_mma<4, __half>(x, codes, exponents, m, n, k, bias, out, stream, cublas);
+    if (dtype == BLOCKFLOAT_DTYPE_BF16) return launch_linear_mma<4, __nv_bfloat16>(x, codes, exponents, m, n, k, bias, out, stream, cublas);
   } else if (bits == 8) {
     if (dtype == BLOCKFLOAT_DTYPE_F32) return launch_linear_f32<8>(x, codes, exponents, m, n, k, bias, out, stream);
-    if (dtype == BLOCKFLOAT_DTYPE_F16) return launch_linear_mma<8, __half>(x, codes, exponents, m, n, k, bias, out, stream);
-    if (dtype == BLOCKFLOAT_DTYPE_BF16) return launch_linear_mma<8, __nv_bfloat16>(x, codes, exponents, m, n, k, bias, out, stream);
+    if (dtype == BLOCKFLOAT_DTYPE_F16) return launch_linear_mma<8, __half>(x, codes, exponents, m, n, k, bias, out, stream, cublas);
+    if (dtype == BLOCKFLOAT_DTYPE_BF16) return launch_linear_mma<8, __nv_bfloat16>(x, codes, exponents, m, n, k, bias, out, stream, cublas);
   }
   return cudaErrorInvalidValue;
 }

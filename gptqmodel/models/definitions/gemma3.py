@@ -3,13 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import itertools
-from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Dict
 
-import torch
-from transformers import AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to, nested_move_to
@@ -18,10 +15,12 @@ from ...utils.structure import LazyTurtle
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from . import LlamaQModel
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
+    split_calibration_dataset,
 )
 
 
@@ -29,6 +28,11 @@ _GEMMA3_REPLAY_MASK_MAPPING = "__gptqmodel_gemma3_replay_mask_mapping"
 
 
 class Gemma3QModel(LlamaQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("gemma3_text").merge(LlamaFusableConfig())
 
     shared_input_verified_model_types = frozenset({"gemma3_text"})
@@ -60,6 +64,13 @@ class Gemma3QModel(LlamaQModel):
 
 class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
     fusable = FusableConfig("gemma3").merge(Gemma3QModel.fusable)
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     support_batch_quantize = False
     pre_lm_head_norm_module = "model.language_model.norm"
@@ -114,8 +125,12 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
             operations=[],
         ),
         SimpleNamespace(
-            source_patterns=[r"model\.language_model"],
-            target_patterns=[r"^language_model.model"],
+            # Runtime `model.language_model.<rest>` <-> checkpoint
+            # `language_model.model.<rest>`. Keep the explicit capture group so
+            # both directions carry the suffix instead of relying on a prefix
+            # replace (issue #4802).
+            source_patterns=[r"^model\.language_model\.(.+)$"],
+            target_patterns=[r"^language_model.model.\1"],
             operations=[],
         ),
         SimpleNamespace(
@@ -282,15 +297,9 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
-
-    @staticmethod
-    def _is_pretokenized_sample(sample) -> bool:
-        if isinstance(sample, Mapping):
-            return "input_ids" in sample and sample.keys() <= {"input_ids", "attention_mask"}
-        if isinstance(sample, (list, tuple)):
-            return bool(sample) and all(isinstance(token, int) for token in sample)
-        return torch.is_tensor(sample)
+        # BaseQModel already loaded the vendored processor with the normalized
+        # tokenizer through this definition's loader.
+        return self.processor
 
     @classmethod
     def prepare_inputs_for_conversations(
@@ -307,22 +316,15 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
         )
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        iterator = iter(calibration_dataset)
-        try:
-            first_sample = next(iterator)
-        except StopIteration:
-            return super().prepare_dataset([], batch_size=batch_size, **kwargs)
-
-        samples = itertools.chain((first_sample,), iterator)
-        if self._is_pretokenized_sample(first_sample):
-            samples = (dict(sample) if isinstance(sample, Mapping) else sample for sample in samples)
-            return super().prepare_dataset(samples, batch_size=batch_size, **kwargs)
-
         label = type(self).__name__
+        pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+        if pretokenized is not None:
+            return super().prepare_dataset(pretokenized, batch_size=batch_size, **kwargs)
+
         sort, min_length = pop_conversation_calibration_options(kwargs, label=label)
         processor = self.load_processor()
         calib_data = []
-        for batch in batched_conversations(samples, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(conversations, batch_size, process_func=self.preprocess_dataset):
             calib_data.append(self.prepare_inputs_for_conversations(processor, batch))
         del processor
         return finalize_conversation_batches(

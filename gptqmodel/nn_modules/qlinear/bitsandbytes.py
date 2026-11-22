@@ -22,9 +22,10 @@ from ...quantization.config import (
 )
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import cpu_bf16x3_matmul, has_avx512_bf16
-from ...utils.env import env_flag
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from .gguf import _apply_optional_smoother
 
 
@@ -46,7 +47,6 @@ _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES = (
 _BITSANDBYTES_8BIT_STATE_BUFFER_NAMES = ("weight_scb",)
 _MLX_4BIT_MIN_ELEMENTS = 4 * 1024 * 1024
 _MLX_INT8_MIN_ELEMENTS = 8 * 1024 * 1024
-_CPU_PACKED_ENV = "GPTQMODEL_BITSANDBYTES_CPU_PACKED"
 _CPU_PACKED_SMALL_WEIGHT_ELEMENTS = 512 * 512
 _CPU_PACKED_SMALL_WEIGHT_MAX_M = 512
 _CPU_PACKED_SMALL_WEIGHT_MULTITHREAD_MAX_M = 64
@@ -54,12 +54,29 @@ _CPU_PACKED_WIDE_WEIGHT_MAX_M = 48
 _CPU_PACKED_SINGLE_THREAD_MAX_M = 32
 _CPU_PACKED_SMALL_WEIGHT_MIN_THREADS = 4
 _CPU_PACKED_REL_TOL = 2e-3
-_CPU_INT8_DENSE_ENV = "GPTQMODEL_BITSANDBYTES_CPU_INT8_DENSE"
 _CPU_INT8_DENSE_MIN_ROWS = 64
 _CPU_INT8_DENSE_MAX_ROWS = 256
 _CPU_INT8_DENSE_SQUARE = 512
 _CPU_INT8_DENSE_MAX_WEIGHT_ELEMENTS = 512 * 512
 _CPU_INT8_DENSE_TILE_FEATURES = 512
+# bitsandbytes uses a separate small-M kernel for at most 16 rows; above that
+# the 2-D INT8 GEMM goes to cuBLASLt IMMA (#4746).
+_BNB_INT8_IMMA_MAX_ROWS = 16
+# The native fused INT8 epilogue indexes its single output buffer with 32-bit
+# arithmetic; a problem holding 2**31 elements or more answers with
+# ``Error invalid argument ... ops.cu``, which terminates the interpreter
+# instead of raising (#5097). Stay below that limit.
+_INT8_NATIVE_EPILOGUE_MAX_ELEMENTS = 2**31 - 1
+# ``int8_vectorwise_quant`` indexes the flattened activation with 32-bit
+# arithmetic as well. At 2**31 input elements and above its CUDA kernel faults
+# with ``cudaErrorIllegalAddress``; the error is sticky and takes the CUDA
+# context down with it (#5205). The quantizer is row-local, so above this limit
+# it is run over bounded row chunks instead of one launch.
+_INT8_NATIVE_QUANT_MAX_ELEMENTS = 2**31 - 1
+# Elements per FP32 epilogue chunk: bounds the transient scratch at roughly two
+# 2**25-element tiles (the FP32 chunk and its INT32 exponent) regardless of the
+# output width.
+_INT8_EPILOGUE_CHUNK_ELEMENTS = 1 << 25
 
 
 def _is_bitsandbytes_available() -> bool:
@@ -301,9 +318,66 @@ def _dequantize_int8_weight(
     weight: torch.Tensor,
     weight_scb: torch.Tensor,
 ) -> torch.Tensor:
-    """Dequantize BnB INT8 weights with the same row-scale math as the native op."""
+    """Dequantize BnB INT8 weights with the same row-scale math as the native op.
 
-    return weight.to(torch.float32) * (weight_scb.to(torch.float32) / 127.0).unsqueeze(1)
+    Divide the code by 127 before applying the row scale. Evaluating
+    ``weight_scb / 127`` first underflows to zero for a subnormal row absmax
+    (for example ``2**-145``) and erases every finite value in that row.
+    """
+
+    return (weight.to(torch.float32) / 127.0) * weight_scb.to(torch.float32).unsqueeze(1)
+
+
+def _int8_imma_misaligned(in_features: int, out_features: int) -> bool:
+    """Return whether cuBLASLt INT8 IMMA rejects this 2-D GEMM shape.
+
+    ``int8_linear_matmul`` handles ``in_features % 4 != 0`` itself with an FP32
+    fallback. For the remaining shapes, cuBLASLt IMMA needs ``in_features``
+    divisible by 16 and ``out_features`` divisible by 4; otherwise the first
+    launch with more than 16 rows raises ``cublasLt ran into an error!``
+    (#4746). Keep this predicate exact so aligned shapes stay on the native
+    kernel.
+    """
+
+    if in_features % 4 != 0:
+        return False
+    return in_features % 16 != 0 or out_features % 4 != 0
+
+
+def _int8_vectorwise_quant_native_chunked(
+    x: torch.Tensor,
+    *,
+    in_features: int,
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Run the native FP16 row quantizer over bounded row chunks.
+
+    ``bitsandbytes.functional.int8_vectorwise_quant`` faults with
+    ``cudaErrorIllegalAddress`` once the flattened activation holds 2**31
+    elements or more, and the sticky error kills the CUDA context (#5205).
+    Quantization is row-local, so visiting rows in chunks below that limit is
+    value-identical to a single launch while the fast native kernel is kept.
+    """
+
+    bnb = import_bitsandbytes()
+    rows = x.shape[0]
+    chunk_rows = max(1, _INT8_NATIVE_QUANT_MAX_ELEMENTS // max(in_features, 1))
+    codes = torch.empty(x.shape, dtype=torch.int8, device=x.device)
+    stats: Optional[torch.Tensor] = None
+    for start in range(0, rows, chunk_rows):
+        end = min(start + chunk_rows, rows)
+        chunk_codes, chunk_stats, chunk_outliers = bnb.functional.int8_vectorwise_quant(
+            x[start:end],
+            threshold=0.0,
+        )
+        if chunk_outliers is not None and chunk_outliers.numel() > 0:
+            return codes, chunk_stats, chunk_outliers
+        if stats is None:
+            stats = torch.empty((rows,), dtype=chunk_stats.dtype, device=chunk_stats.device)
+        codes[start:end] = chunk_codes
+        stats[start:end] = chunk_stats
+    if stats is None:  # pragma: no cover - the caller never passes an empty row set
+        stats = torch.empty((rows,), dtype=torch.float32, device=x.device)
+    return codes, stats, None
 
 
 def _int8_vectorwise_quant_fp32(
@@ -318,12 +392,79 @@ def _int8_vectorwise_quant_fp32(
     scale), so the shared dequant epilogue stays valid.
     """
 
-    x_fp32 = x.to(torch.float32)
+    x_fp32 = x.to(torch.float32).reshape(-1, x.shape[-1])
     row_absmax = x_fp32.abs().amax(dim=1)
-    scale = row_absmax / 127.0
-    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
-    codes = (x_fp32 / scale[:, None]).round().clamp(-127, 127).to(torch.int8)
+    # Normalize by the row absmax before applying the code range. Computing
+    # ``row_absmax / 127`` first underflows to zero for a subnormal row and
+    # then selects the unit denominator meant for a genuinely zero row, which
+    # erases every finite code. A zero row keeps the unit denominator so its
+    # codes stay zero.
+    safe_absmax = torch.where(row_absmax == 0, torch.ones_like(row_absmax), row_absmax)
+    codes = (x_fp32 / safe_absmax[:, None] * 127.0).round().clamp(-127, 127).to(torch.int8)
     return codes, row_absmax, None
+
+
+def _int8_fp32_epilogue_scale(
+    mm_out: torch.Tensor,
+    x_stats: torch.Tensor,
+    weight_scb: torch.Tensor,
+) -> torch.Tensor:
+    """Scale an exact INT32 INT8 dot product by both absmaxes in FP32.
+
+    The epilogue value is ``mm_out * row_absmax * col_absmax / 127**2``, a
+    single product of finite FP32 values. Evaluating it left to right can
+    overflow an intermediate even though the product is representable: an
+    activation absmax of ``2**120`` times a weight absmax of ``2**-120``
+    overflows at ``16129 * 2**120`` before the decreasing weight absmax is
+    applied (#5694). Split both absmaxes into a mantissa in ``[0.5, 1)`` and a
+    binary exponent, multiply the integer dot by the sub-unit mantissas, and
+    restore the summed exponent with ``ldexp``. ``frexp``/``ldexp`` are exact,
+    so the power-of-two rescaling adds no rounding and saturates only where
+    the exact product itself leaves the FP32 range.
+    """
+
+    row_mant, row_exp = torch.frexp(x_stats.to(torch.float32).reshape(-1, 1))
+    col_mant, col_exp = torch.frexp(weight_scb.to(torch.float32).reshape(1, -1))
+    # The ``/ 127**2`` rides on the sub-unit mantissas so the integer dot is
+    # multiplied by values below one: no intermediate can overflow.
+    scaled = mm_out.to(torch.float32) * (row_mant / 127.0) * (col_mant / 127.0)
+    return torch.ldexp(scaled, row_exp + col_exp)
+
+
+def _int8_chunked_fp32_epilogue(
+    mm_out: torch.Tensor,
+    x_stats: torch.Tensor,
+    weight_scb: torch.Tensor,
+    *,
+    bias: Optional[torch.Tensor] = None,
+    out_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Apply the INT8 row/column scales over bounded row chunks.
+
+    This is the FP32 epilogue already used for bias and non-FP16 activations:
+    scale the exact INT32 product first, add a bias before the single output
+    rounding, and never materialize more than one chunk of FP32 scratch. The
+    chunking only decides which rows are visited together, so every element
+    keeps the value the unchunked expression produces.
+    """
+
+    rows, cols = mm_out.shape
+    chunk_rows = max(1, _INT8_EPILOGUE_CHUNK_ELEMENTS // max(cols, 1))
+
+    out = torch.empty((rows, cols), dtype=out_dtype, device=mm_out.device)
+    for start in range(0, rows, chunk_rows):
+        end = min(start + chunk_rows, rows)
+        # The same exponent-safe scaling as the unchunked FP32 epilogue, so a
+        # chunked result is bitwise identical to the single-expression form.
+        chunk = _int8_fp32_epilogue_scale(
+            mm_out[start:end],
+            x_stats[start:end],
+            weight_scb,
+        )
+        if bias is not None:
+            chunk = chunk + bias.to(torch.float32)
+        out[start:end] = chunk.to(out_dtype)
+    return out
 
 
 def _cpu_packed_max_rows(
@@ -357,6 +498,7 @@ def _cpu_int8_dense_should_use(
     in_features: int,
     out_features: int,
     compute_dtype: torch.dtype,
+    kernel=None,
 ) -> bool:
     """Return whether a tiled FP32 recompute is accurate and faster than native INT8.
 
@@ -369,7 +511,7 @@ def _cpu_int8_dense_should_use(
     retains a dense weight.
     """
 
-    if not env_flag(_CPU_INT8_DENSE_ENV, default=True):
+    if not resolve_kernel_config(kernel).bitsandbytes_cpu_int8_dense:
         return False
     if not has_avx512_bf16():
         return False
@@ -433,6 +575,40 @@ def _buffer_spec_4bit(
 
 
 class BitsAndBytesLinear(WeightOnlyQuantLinear):
+    # 4-bit stores `weight` plus the quant-state metadata/absmax/quant-map
+    # tensors; compressed statistics add the nested pair, and 8-bit stores
+    # `weight_scb`. A buffer this instance does not allocate (uncompressed
+    # stats, the other bit width) is skipped by the validator, so the union
+    # never refuses a valid checkpoint.
+    CHECKPOINT_REQUIRED_BUFFERS = (
+        "weight",
+        "weight_absmax",
+        "weight_quant_map",
+        "weight_nested_absmax",
+        "weight_nested_quant_map",
+        "weight_quant_state",
+        "weight_scb",
+    )
+
+    # Measured on RTX 4090 (sm_89), RTX 5090 (sm_120) and Radeon R9700
+    # (gfx1201) with torch 2.15/2.16: dynamo, aot_eager, inductor and
+    # reduce-overhead all pass, and an explicit eager CUDA-graph capture
+    # replays the eager output. The accelerator path is straight-line; the CPU
+    # packing branch is never taken on a device. (The old static `data_ptr()`
+    # hit came from a comment, not an executed call.)
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU, torch 2.16.0.dev20261021+cpu: the CPU forward is plain tensor
+    # math and reaches ``INDUCTOR`` (dynamo/aot_eager/inductor pass); only
+    # the CUDA path is capture-safe, so the base stays ``CUDAGRAPH``.
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_GRAPH_CAPTURE = True
+    # ... and the #4669 policy flag follows the capability: a static-cache
+    # `generate()` compiles this forward to one graph with zero breaks and the
+    # compiled decode is 2.2-3.5x faster than eager on the same hardware
+    # (#4984). AUTO selects this kernel for every BitsAndBytes checkpoint on
+    # CUDA, so opting out here made the default 3.5x slower.
+    SUPPORTS_COMPILE = True
+
     @staticmethod
     def _weight_to_matrix(linear: nn.Module) -> torch.Tensor:
         """Expose the weight-only processor's reference-weight conversion hook."""
@@ -551,7 +727,13 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 self.register_buffer(buffer_name, value)
 
         if bias:
-            bias_tensor = torch.zeros(self.out_features, dtype=self.compute_dtype)
+            # The INT8 bias is checkpoint state, not compute state: keep it in
+            # FP32 (the widest supported source precision) so a value such as
+            # -257 is not rounded to a BF16/FP16 compute dtype before the first
+            # forward (#5695). The 4-bit vendor kernel consumes the bias at the
+            # compute dtype, so that path keeps its existing storage.
+            bias_dtype = self.compute_dtype if self.is_4bit else torch.float32
+            bias_tensor = torch.zeros(self.out_features, dtype=bias_dtype)
             if "bias" in self._buffers:
                 self._buffers["bias"] = bias_tensor
             else:
@@ -634,7 +816,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         return self.quant_state
 
     def _cpu_packing_supported(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
-        if self._cpu_packing_disabled or not env_flag(_CPU_PACKED_ENV, default=False):
+        if self._cpu_packing_disabled or not self.kernel.bitsandbytes_cpu_packed:
             return False
         if not self.is_4bit or self.training or self.weight.device.type != "cpu":
             return False
@@ -713,7 +895,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         relative_error = (packed - canonical).norm() / denominator
         return bool(relative_error <= _CPU_PACKED_REL_TOL)
 
-    def _cpu_int8_tiled_forward(
+    def _int8_dequant_tiled_forward(
         self,
         x: torch.Tensor,
         bias: Optional[torch.Tensor],
@@ -727,21 +909,30 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             device=x_flat.device,
         )
 
-        with cpu_bf16x3_matmul():
-            for start in range(0, self.in_features, _CPU_INT8_DENSE_TILE_FEATURES):
-                end = min(start + _CPU_INT8_DENSE_TILE_FEATURES, self.in_features)
-                weight = _dequantize_int8_weight(
-                    self.weight[:, start:end],
-                    self.weight_scb,
-                )
-                output = output + torch.matmul(
-                    x_flat[:, start:end].to(torch.float32),
-                    weight.t(),
-                )
+        for start in range(0, self.in_features, _CPU_INT8_DENSE_TILE_FEATURES):
+            end = min(start + _CPU_INT8_DENSE_TILE_FEATURES, self.in_features)
+            weight = _dequantize_int8_weight(
+                self.weight[:, start:end],
+                self.weight_scb,
+            )
+            output = output + torch.matmul(
+                x_flat[:, start:end].to(torch.float32),
+                weight.t(),
+            )
 
         if bias is not None:
             output = output + bias.to(torch.float32)
         return output.reshape(x.shape[:-1] + (self.out_features,)).to(x.dtype)
+
+    def _cpu_int8_tiled_forward(
+        self,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Run the tiled INT8 recompute with oneDNN BF16x3 on the CPU."""
+
+        with cpu_bf16x3_matmul():
+            return self._int8_dequant_tiled_forward(x, bias)
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         self._ensure_unpacked()
@@ -775,9 +966,28 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         )
         self._cpu_packing_disabled = False
 
-    def _apply(self, fn, *args, **kwargs):
+    def _apply(self, fn, recurse=True):
         self._ensure_unpacked()
-        return super()._apply(fn, *args, **kwargs)
+        bias = self._buffers.get("bias")
+        if self.is_4bit or bias is None:
+            return super()._apply(fn, recurse=recurse)
+
+        # The INT8 bias is stored in FP32 independently of the compute dtype.
+        # Hide it from the generic transform so ``to(bfloat16)``/``to(float16)``
+        # cannot round it, then move it to the device the transform selected.
+        # ``to_empty`` materializes buffers from uninitialized storage, so a
+        # meta bias is recreated on the target device instead of copied.
+        self._buffers["bias"] = None
+        try:
+            result = super()._apply(fn, recurse=recurse)
+        finally:
+            self._buffers["bias"] = bias
+        target_device = self.weight.device
+        if bias.device.type == "meta" and target_device.type != "meta":
+            self._buffers["bias"] = torch.empty_like(bias, device=target_device, dtype=torch.float32)
+        else:
+            self._buffers["bias"] = bias.to(device=target_device, dtype=torch.float32)
+        return result
 
     def post_init(self):
         self._ensure_unpacked()
@@ -871,7 +1081,11 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             self._buffers["weight_scb"] = scales.contiguous()
 
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device="cpu", dtype=self.compute_dtype).contiguous()
+            # Keep the INT8 bias in FP32 so the source value survives the pack;
+            # the forward epilogue casts it once, after the exact INT32 product.
+            # The 4-bit kernel still takes its bias at the compute dtype.
+            bias_dtype = self.compute_dtype if self.is_4bit else torch.float32
+            bias = linear.bias.detach().to(device="cpu", dtype=bias_dtype).contiguous()
             if "bias" in self._buffers:
                 self._buffers["bias"] = bias
             else:
@@ -880,6 +1094,13 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             self.bias = None
 
     def forward(self, x: torch.Tensor):
+        # The native INT8 vectorwise quantizer and matmul reject an M=0
+        # problem, and bitsandbytes answers with ``Error invalid argument``
+        # from ops.cu, which terminates the interpreter instead of raising.
+        # Return the empty Linear output before any native launch.
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
+
         bnb = import_bitsandbytes()
 
         input_dtype = x.dtype
@@ -903,6 +1124,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                     self.weight.device,
                     compute_dtype,
                     x.numel() // self.in_features,
+                    kernel=self.kernel,
                 )
             ):
                 quant_state = self._refresh_quant_state()
@@ -983,6 +1205,10 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 )
             return out.to(input_dtype)
 
+        # The INT8 bias is stored in FP32; every epilogue below adds it in
+        # FP32 after the exact INT32 product, so do not pre-round it here.
+        bias = self.bias
+
         rows = x.numel() // self.in_features
         if (
             not self._int8_dense_disabled
@@ -993,41 +1219,78 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 in_features=self.in_features,
                 out_features=self.out_features,
                 compute_dtype=compute_dtype,
+                kernel=self.kernel,
             )
         ):
             return self._cpu_int8_tiled_forward(x, bias)
 
+        if (
+            self.weight.device.type == "cuda"
+            and rows > _BNB_INT8_IMMA_MAX_ROWS
+            and _int8_imma_misaligned(self.in_features, self.out_features)
+        ):
+            # cuBLASLt IMMA raises for these shapes once M > 16 (#4746).
+            # Dequantize the INT8 weight and use the same bounded FP32 tiled
+            # epilogue as the CPU recompute; decode-sized M stays native.
+            return self._int8_dequant_tiled_forward(x, bias)
+
+        # ``int8_vectorwise_quant`` and ``int8_linear_matmul`` are rank-2
+        # kernels. Flatten arbitrary leading activation dimensions and restore
+        # them afterwards. Without the flatten, a [batch, seq, K] activation
+        # reduces the wrong axis in the row quantizer and the rank-2 row scale
+        # no longer matches the rank-3 product in the epilogue. The copy is
+        # required: ``reshape`` can return a row-strided view (for example
+        # ``hidden[:, -1:, :]``), and the native quantizer reads ``data_ptr()``
+        # as packed [M, K] rows instead of honoring the tensor strides.
+        x_flat = x.reshape(-1, self.in_features).contiguous()
+
         if x.dtype == torch.float16:
-            x_int8, x_stats, outlier_cols = bnb.functional.int8_vectorwise_quant(
-                x,
-                threshold=0.0,
-            )
+            if x_flat.numel() <= _INT8_NATIVE_QUANT_MAX_ELEMENTS:
+                x_int8, x_stats, outlier_cols = bnb.functional.int8_vectorwise_quant(
+                    x_flat,
+                    threshold=0.0,
+                )
+            else:
+                # #5205: the native quantizer's 32-bit input indexing faults
+                # above 2**31 elements, so chunk the same kernel by rows.
+                x_int8, x_stats, outlier_cols = _int8_vectorwise_quant_native_chunked(
+                    x_flat,
+                    in_features=self.in_features,
+                )
         else:
-            x_int8, x_stats, outlier_cols = _int8_vectorwise_quant_fp32(x)
+            x_int8, x_stats, outlier_cols = _int8_vectorwise_quant_fp32(x_flat)
         if outlier_cols is not None and outlier_cols.numel() > 0:
             raise NotImplementedError(
                 "BitsAndBytesLinear only supports the direct int8 vectorwise path without outlier routing."
             )
 
+        x_int8 = x_int8.contiguous()
         mm_out = bnb.functional.int8_linear_matmul(x_int8, self.weight)
-        if x.dtype == torch.float16 and bias is None:
+        fits_native_epilogue = mm_out.numel() <= _INT8_NATIVE_EPILOGUE_MAX_ELEMENTS
+        if x.dtype == torch.float16 and bias is None and fits_native_epilogue:
             # The native fused epilogue is safe without a bias: there is no
             # later cancellation that could be destroyed by its FP16 rounding.
-            return bnb.functional.int8_mm_dequant(
-                mm_out, x_stats, self.weight_scb
-            ).to(input_dtype)
-        # ``int8_mm_dequant`` runs its epilogue in FP16, which rounds (or
-        # overflows) the partial sum before a cancelling bias is added. Keep
-        # the row/column scales and the bias in FP32 and round once.
-        out = (
-            mm_out.to(torch.float32)
-            * x_stats.to(torch.float32).reshape(-1, 1)
-            * self.weight_scb.to(torch.float32).reshape(1, -1)
-            / (127.0 * 127.0)
-        )
-        if bias is not None:
-            out = out + bias.to(torch.float32)
-        return out.to(input_dtype)
+            out = bnb.functional.int8_mm_dequant(mm_out, x_stats, self.weight_scb)
+        elif fits_native_epilogue:
+            # ``int8_mm_dequant`` runs its epilogue in FP16, which rounds (or
+            # overflows) the partial sum before a cancelling bias is added. Keep
+            # the row/column scales and the bias in FP32 and round once.
+            out = _int8_fp32_epilogue_scale(mm_out, x_stats, self.weight_scb)
+            if bias is not None:
+                out = out + bias.to(torch.float32)
+        else:
+            # #5097: at 2**31 output elements and above the native epilogue
+            # fails with ``Error invalid argument`` from ops.cu, which exits the
+            # interpreter instead of raising. Apply the same FP32 epilogue, in
+            # row chunks, for every dtype and bias case at that size.
+            out = _int8_chunked_fp32_epilogue(
+                mm_out,
+                x_stats,
+                self.weight_scb,
+                bias=bias,
+                out_dtype=input_dtype,
+            )
+        return out.reshape(x.shape[:-1] + (self.out_features,)).to(input_dtype)
 
 
 BitsAndBytes4bitLinear = BitsAndBytesLinear

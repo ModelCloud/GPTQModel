@@ -15,23 +15,31 @@ thread pool.
 
 from __future__ import annotations
 
+import copy
 import os
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from accelerate.utils import find_tied_parameters
 
 from .. import DEVICE_THREAD_POOL
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
+from ..looper.inflight_layer import InflightLayerTracker
 from ..looper.input_cache import InputCache
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import (
+    LoopProcessor,
+    record_quant_log,
+    rehome_failed_run_kernels,
+    release_failed_run_processors,
+)
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.named_module import NamedModule
+from ..looper.native_processor import NativeProcessor
+from ..looper.run_exit_recovery import RunExitRecovery
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
@@ -47,8 +55,10 @@ from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.disk import estimate_disk_io_speed
+from ..utils.kernel import configure_kernel, resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
+    bind_processor_masks,
     clone_module_for_devices,
     find_last_quantized_layer_index,
     forward_batch_worker,
@@ -67,7 +77,17 @@ from ..utils.model import (
     set_moe_topk,
     untie_word_embeddings,
 )
-from ..utils.offload import offload_to_disk
+from ..utils.offload import (
+    bind_private_offload_root,
+    capture_offloaded_base_modules,
+    ensure_version_counters,
+    has_disk_offloaded_modules,
+    materialize_remaining_meta_modules,
+    offload_to_disk,
+    release_private_offload_root,
+    restore_disk_offloaded_modules,
+    restore_offloaded_modules,
+)
 from ..utils.p2p import (
     configure_p2p,
     enable_for_devices,
@@ -75,20 +95,38 @@ from ..utils.p2p import (
     safe_move_to,
 )
 from ..utils.python import has_gil_control, has_gil_disabled
+from ..utils.tied_weights import lm_head_quantization_is_tied
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
 from .execution_state import DeviceAssignmentState
 from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 from .forward_executor import ForwardExecutor
-from .paroquant_processor import ParoQuantProcessor
+from .paro_processor import ParoProcessor
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
 
+
+# Model-level hooks that decide what the initial calibration capture records.
+# A model that overrides any of them needs its own qualification before the
+# GPTAQ/FOEM native capture can stand in for the GPTQ capture (#5831).
+_CAPTURE_REUSE_GUARDED_HOOKS = (
+    "run_input_capture",
+    "pre_quantize_generate_hook_start",
+    "pre_quantize_generate_hook_end",
+    "move_input_capture_example",
+    "begin_input_capture_example",
+    "end_input_capture_example",
+    "capture_first_layer_positional_inputs",
+    "capture_first_layer_input_kwargs",
+    "capture_layer_type_replay_kwargs",
+    "build_quantization_input_cache",
+)
 
 log = setup_logger()
 
 _IO_WRITE_SPEED_MB: Optional[float] = None
 _IO_WRITE_SPEED_LOCK = threading.Lock()
+_SAME_MASK = object()
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from logbar.progress import ProgressBar
@@ -156,6 +194,28 @@ def _resolve_strategy_device_pool(
     return resolved
 
 
+def validate_moe_routing_support(gptq_model) -> None:
+    """Reject ``ExpertsRoutingBypass`` when the definition cannot feed all experts.
+
+    A model without ``moe_lifecycle_hooks`` cannot replay the whole calibration
+    batch through every expert. Warning per forward and continuing to calibrate
+    only the natively routed tokens while the saved config still claimed bypass
+    routing made the option a silent no-op.
+    """
+
+    if not gptq_model.quantize_config.moe_routing_bypass():
+        return
+    if getattr(gptq_model, "moe_lifecycle_hooks", None) is not None:
+        return
+    raise ValueError(
+        f"ModuleLooper: MoEConfig(routing=ExpertsRoutingBypass()) was requested but "
+        f"{type(gptq_model).__name__} does not declare `moe_lifecycle_hooks`. "
+        "The all-experts calibration path cannot run, and continuing would silently "
+        "fall back to native routed calibration. Declare `moe_lifecycle_hooks` on the "
+        "model definition, or use `ExpertsRoutingOverride` instead."
+    )
+
+
 class StopMainLoop(Exception):
     """Signal that the module loop should abort immediately."""
 
@@ -177,7 +237,7 @@ def io_write_performance(enabled: bool = True) -> Optional[float]:
     return _IO_WRITE_SPEED_MB
 
 
-class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
+class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignmentState):
     """Drive the per-layer quantisation workflow over one or more devices.
 
     The looper executes work on the shared global :class:`DeviceThreadPool`
@@ -201,6 +261,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self.processors = processors
         self.extensions = LoopExtensions(extensions)
         self.gptq_model = model
+        # Base modules offloaded at the start of the run are restored when the
+        # loop exits so the model stays usable in-session.
+        self._offloaded_base_modules: List[Tuple[str, nn.Module, torch.device]] = []
+        self._bind_private_offload_namespace()
         # Concurrent module-tree branches can declare different quantizable
         # leaves.  Cache each branch's leaf blocks so a layer is never asked to
         # resolve a sibling branch's modules.
@@ -351,6 +415,18 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self._dense_vram_strategy_explicit = bool(dense_strategy_devices) or self._dense_vram_strategy != VramStrategy.EXCLUSIVE
         self._moe_vram_strategy_explicit = bool(moe_strategy_devices) or self._moe_vram_strategy != VramStrategy.EXCLUSIVE
 
+        # Processors are built before the looper, so hand the resolved MoE pool
+        # to the ones that own per-device capture state. EXL3 keys a routed
+        # expert's shared Hessian accumulator by owner device; deriving that
+        # owner from the bare `qcfg.device` family let every data-parallel
+        # worker resolve "cuda" to its own current GPU (#5093).
+        for processor in self.processors:
+            bind_moe_quant_devices = getattr(
+                processor, "bind_moe_quant_devices", None
+            )
+            if callable(bind_moe_quant_devices):
+                bind_moe_quant_devices(self._moe_quant_devices)
+
         # Best-effort peer enablement once the dense/MoE pools are known.  The
         # pools can span devices that ``quant_devices`` does not contain (for
         # example ``device="cuda:0"`` with
@@ -360,6 +436,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # mode, so a failed probe never blocks quantization.
         cross_device_pool = self._cross_device_pool()
         configure_p2p(getattr(self.gptq_model.quantize_config, "p2p", None))
+        configure_kernel(resolve_kernel_config(self.gptq_model.quantize_config, use_process_default=False))
         if len(cross_device_pool) > 1:
             enable_for_devices(cross_device_pool)
 
@@ -368,6 +445,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         # Track current subset for MoE lifecycle hooks
         self._current_subset: Optional[Dict[str, Any]] = None
+
+        # The decoder layer (or embedding/lm_head endpoint) currently in the
+        # quantization stage, paired with the device it lived on before the
+        # stage moved it. A cancelled or failed run must return it there;
+        # otherwise the in-flight layer stays on the accelerator while the rest
+        # of the model is on CPU and the next forward raises a device mismatch
+        # (issue #4546).
+        self._inflight_layer: Optional[Tuple[torch.nn.Module, torch.device]] = None
 
         # moe_routing_override is only required for MoE models (i.e., models with dynamic_expert_index).
         # `get_num_experts()` returns None when the config does not expose a
@@ -383,6 +468,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         else:
             self.moe_routing_override = None
         self.moe_routing_bypass = self.gptq_model.quantize_config.moe_routing_bypass()
+        validate_moe_routing_support(self.gptq_model)
         self._emit_moe_parallel_quant_runtime()
 
         for processor in self.processors:
@@ -532,6 +618,11 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             self.moe_hooks_active = False
             self.moe_block = None
             self.moe_forward_original = None
+            # Whether `forward` lived in the block's instance dict before patching.
+            # An inherited `forward` must not be written back on exit: storing the
+            # bound method creates moe_block -> __dict__ -> bound method -> moe_block,
+            # which keeps every data-parallel replica alive until cyclic GC (#5520).
+            self._moe_forward_was_instance_attr = False
 
         def __enter__(self):
             """Set up MoE lifecycle hooks if applicable."""
@@ -548,7 +639,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 )
 
                 if self.moe_block is not None:
-                    # Save original forward method
+                    # Remember whether `forward` was already an instance attribute. The
+                    # wrapper below must be removed on exit instead of being replaced by
+                    # a bound method, which would leave a reference cycle behind.
+                    self._moe_forward_was_instance_attr = "forward" in vars(self.moe_block)
                     self.moe_forward_original = self.moe_block.forward
 
                     # Create wrapper that forwards to all experts
@@ -579,8 +673,22 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         def __exit__(self, exc_type, exc_val, exc_tb):
             """Restore original MoE forward method if it was patched."""
-            if self.moe_hooks_active and self.moe_forward_original is not None and self.moe_block is not None:
-                self.moe_block.forward = self.moe_forward_original
+            if self.moe_hooks_active and self.moe_block is not None:
+                if self._moe_forward_was_instance_attr:
+                    # Restore the exact instance value that was shadowing the class method.
+                    self.moe_block.forward = self.moe_forward_original
+                else:
+                    # `forward` was inherited: remove the instance attribute so the class
+                    # method applies again. Writing the saved bound method back here would
+                    # create moe_block -> __dict__ -> bound method -> moe_block and pin the
+                    # replica (and its experts) until cyclic GC collects it (#5520).
+                    vars(self.moe_block).pop("forward", None)
+            # Drop every reference to the replica so a context kept alive by the caller
+            # cannot extend the replica's lifetime.
+            self.moe_hooks_active = False
+            self.moe_forward_original = None
+            self.moe_block = None
+            self.module = None
             return False  # Don't suppress exceptions
 
     def register_layer_callback(self, callback) -> None:
@@ -823,27 +931,19 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         tls = getattr(processor, "_hooks_paused_tls", None)
         return getattr(tls, "value", False) if tls else False
 
-    def _set_processor_mask(self, processor: LoopProcessor, mask):
-        """Store the active sequence mask for the current worker thread."""
+    def _set_processor_mask(self, processor: LoopProcessor, mask, padding_mask=_SAME_MASK):
+        """Store the active sequence mask for the current worker thread.
 
-        tls = self._processor_mask_tls(processor)
-        tls.value = mask
-        # ``mask`` is [batch, seq] on the execution device. Derive the
-        # per-sample emptiness flags once per batch here; every module's
-        # forward hook would otherwise synchronize once per sample.
-        tls.sample_has_tokens = (
-            mask.any(dim=1).tolist()
-            if torch.is_tensor(mask) and mask.ndim == 2
-            else None
-        )
-        # Routed-expert hooks need to know whether this batch contains padding
-        # before they scan a `[routed_rows, H]` activation for all-zero rows.
-        # Resolve it here, once per batch, instead of synchronizing per expert.
-        tls.mask_has_padding = (
-            not bool(mask.all())
-            if torch.is_tensor(mask) and mask.ndim == 2
-            else None
-        )
+        ``mask`` is the calibration row mask every statistic uses (padding and,
+        with ``CalibrationConfig.exclude_attention_sinks``, the attention-sink
+        tokens). ``padding_mask`` is the attention padding alone; it drives the
+        forward-visible MoE padding zeroing and activation ranges, which must
+        never alter a real token. It defaults to ``mask``.
+        """
+
+        if padding_mask is _SAME_MASK:
+            padding_mask = mask
+        bind_processor_masks(processor, mask, padding_mask=padding_mask)
 
     def _get_processor_mask(self, processor: LoopProcessor):
         """Return the sequence mask bound to the current worker thread."""
@@ -998,15 +1098,16 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         if not flag_enabled:
             return False
 
-        # Check if model has lifecycle hooks
+        # Check if model has lifecycle hooks. __init__ already rejects a bypass
+        # request for a model without hooks; keep this guard so a config mutated
+        # after construction cannot silently re-enable native routing.
         hooks = getattr(self.gptq_model, 'moe_lifecycle_hooks', None)
         if hooks is None:
-            log.warn(
-                f"pass_whole_dataset_to_each_expert is enabled but {self.gptq_model.__class__.__name__} "
-                f"model does not have 'moe_lifecycle_hooks' configured. MoE optimization will be disabled. "
-                f"Please ensure your model definition has proper MoE lifecycle hooks configured."
+            raise ValueError(
+                f"ModuleLooper: ExpertsRoutingBypass was requested but "
+                f"{self.gptq_model.__class__.__name__} does not declare `moe_lifecycle_hooks`. "
+                "The all-experts calibration path cannot run."
             )
-            return False
 
         # Check if this module contains an MoE block
         moe_block = hooks.get_moe_block_for_subset(
@@ -1257,7 +1358,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             except Exception:
                 pass
 
-        tensor_attrs = ("H", "module_copy")
+        # GPTAQ/FOEM keep an auxiliary Hessian companion (`dXXT`) beside
+        # `H`. Rehome every per-module tensor the task owns so quantization
+        # cannot mix devices (issue #4312).
+        tensor_attrs = ("H", "module_copy", "dXXT")
         for attr_name in tensor_attrs:
             tensor_value = getattr(task, attr_name, None)
             if isinstance(tensor_value, torch.Tensor):
@@ -1321,36 +1425,12 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     def _lm_head_is_tied(self) -> bool:
         """Return whether `lm_head` shares its source weight with another module.
 
-        `find_tied_parameters` only compares materialized parameters. A lazily
-        loaded shell keeps both sides as independent META parameters until the
-        loader ties them, so identity never matches and quantization continues
-        until the source reload fails with a misleading "missing checkpoint
-        tensors" error. Detect that shape from the checkpoint instead: a tied
-        HF checkpoint omits `lm_head.weight`, so the head has no independent
-        source tensor to quantize.
+        The check is shared with `WeightOnlyLooper`, which used
+        `find_tied_parameters` alone and therefore missed a lazily loaded shell
+        (#4034, #5027).
         """
 
-        model = self.gptq_model.model
-        lm_head_name = self.gptq_model.lm_head
-        if any(
-            f"{lm_head_name}.weight" in names
-            for names in find_tied_parameters(model)
-        ):
-            return True
-        if not bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False)):
-            return False
-        lm_head_module = get_module(model, key=lm_head_name)
-        if lm_head_module is None:
-            return False
-        weight = getattr(lm_head_module, "weight", None)
-        if not torch.is_tensor(weight) or not getattr(weight, "is_meta", False):
-            # A materialized head either has its own storage or shares it; the
-            # identity check above already covered the shared case.
-            return False
-        checker = getattr(getattr(self.gptq_model, "turtle_model", None), "has_checkpoint_tensor", None)
-        if not callable(checker):
-            return False
-        return not checker(target_model=model, target_submodule=lm_head_module)
+        return lm_head_quantization_is_tied(self.gptq_model)
 
     def _prepare_layer_direct_state_for_forward(
         self,
@@ -1358,6 +1438,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         fallback_device: torch.device,
         *,
         projection_modules: Optional[Dict[str, object]] = None,
+        module_path: Optional[str] = None,
     ) -> int:
         """Materialize non-projection direct state needed by a lazy layer forward.
 
@@ -1375,7 +1456,24 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             if isinstance(candidate_module, torch.nn.Module):
                 excluded_ids.add(id(candidate_module))
 
-        module_names = {id(child): name for name, child in module.named_modules()}
+        # A descriptor such as a layer index is not a model path.  Drop it
+        # once instead of letting every child pay a failed lookup.
+        if module_path:
+            try:
+                resolved = self.gptq_model.model.get_submodule(module_path)
+            except (AttributeError, IndexError, KeyError):
+                resolved = None
+            if resolved is not module:
+                module_path = None
+
+        module_names: Dict[int, str] = {}
+        full_names: Optional[Dict[int, str]] = {} if module_path else None
+        for name, child in module.named_modules():
+            module_names.setdefault(id(child), name)
+            if full_names is not None:
+                full_names.setdefault(
+                    id(child), f"{module_path}.{name}" if name else module_path
+                )
         materialized = 0
         for child in module.modules():
             if id(child) in excluded_ids or getattr(child, "QUANT_TYPE", None):
@@ -1388,6 +1486,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             self.gptq_model.shell_direct_meta_materialize(
                 target_submodule=child,
                 device=fallback_device,
+                module_path=full_names.get(id(child)) if full_names is not None else None,
             )
             remaining = [
                 tensor
@@ -1507,6 +1606,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         force_serial: bool = False,
         preserve_module_devices: bool = False,
         apply_moe_config: bool = True,
+        consume_inputs: bool = False,
     ) -> List[List[torch.Tensor]]:
         """Run cached batches through the module using serial or parallel execution."""
 
@@ -1533,6 +1633,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             force_serial=force_serial,
             preserve_module_devices=preserve_module_devices,
             apply_moe_config=apply_moe_config,
+            consume_inputs=consume_inputs,
             select_forward_devices_fn=select_forward_devices,
         )
 
@@ -1783,11 +1884,174 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             layer_names=layer_names,
         )
 
+    def _bind_private_offload_namespace(self) -> None:
+        """Give this run a private offload root under the configured path."""
+
+        config = getattr(self.gptq_model, "quantize_config", None)
+        if config is None:
+            return
+        run_root = bind_private_offload_root(self.gptq_model)
+        if run_root is None:
+            return
+        private_config = self.gptq_model.quantize_config
+        # Processors are built before the looper and may hold the shared config
+        # object; point them at the private copy so every offload write during
+        # this run lands in the same namespace the model saves from.
+        for processor in self.processors:
+            if getattr(processor, "qcfg", None) is config:
+                processor.qcfg = private_config
+
+    def _finalize_deferred_runtime_weights(self) -> None:
+        """Let each processor publish packed state a stopped run never replayed.
+
+        A calibrated processor can finish packing a projection and defer the
+        dense replay weight until the layer's next forward. A stop, exception
+        or Ctrl-C in that window leaves the in-flight layer holding a
+        placeholder weight that no forward can read. Processors that defer such
+        state publish it here, before the layer is rehomed and before the
+        remaining-meta verdict (#5083).
+        """
+
+        for processor in getattr(self, "processors", ()) or ():
+            finalize = getattr(
+                processor, "finalize_deferred_runtime_weights", None
+            )
+            if not callable(finalize):
+                continue
+            finalize(self.gptq_model)
+
+    def _restore_offloaded_base_modules(self, *, strict: bool) -> None:
+        entries = getattr(self, "_offloaded_base_modules", None)
+        if not entries:
+            return
+        self._offloaded_base_modules = []
+        restore_offloaded_modules(self.gptq_model.model, entries, strict=strict)
+
+    def _restore_disk_offloaded_modules(self) -> None:
+        """Bring the disk-offloaded quantized modules back into memory.
+
+        Offload bounds host memory while the loop runs. Once it returns, the
+        in-session model must not depend on the run's bundles (issue #4450).
+        """
+
+        restore_disk_offloaded_modules(self.gptq_model.model, device=CPU, strict=True)
+
+    def _materialize_remaining_meta_modules(self) -> None:
+        """Load modules the lazy shell left on meta (e.g. an untied lm_head)."""
+
+        materialize_remaining_meta_modules(self.gptq_model, device=CPU)
+
+    def _materialize_unreached_meta_modules(self) -> None:
+        """Best-effort fill of the layers a cancelled/failed run never reached.
+
+        With the default ``offload_to_disk=True`` the model is a lazy meta
+        shell: the loop materializes each layer on demand, so every layer after
+        the cancel point still owns meta tensors and has no offload hook. The
+        success path fills those modules in ``_materialize_remaining_meta_
+        modules``; the failure path must do the same or the next forward fails
+        on the first unreached layer (#4860). Cleanup must never mask the
+        cancellation that got us here, so a materialization failure is logged
+        and ignored.
+        """
+
+        try:
+            self._materialize_remaining_meta_modules()
+        except Exception:
+            log.warning(
+                "failed to materialize the layers the cancelled/failed run never reached",
+                exc_info=True,
+            )
+
+    def _release_run_workspace(self) -> None:
+        """Release processor-owned scratch shared across the whole run."""
+
+        for processor in getattr(self, "processors", ()) or ():
+            processor.release_run_workspace()
+
+    def _release_failed_run_processors(self) -> None:
+        """Close the per-run resources a successful loop releases in ``finalize``.
+
+        A cancelled or failed run never reaches ``finalize()``, which is the only
+        other place a processor closes its Device-SMI handles. Without this every
+        attempt leaves one daemon sampler thread per device (and CPU) polling for
+        the life of the process (#4813). Each release is independent and must
+        never mask the failure that got us here.
+        """
+
+        release_failed_run_processors(getattr(self, "processors", ()))
+
+    def _fence_run_work(self) -> None:
+        """Wait for work this run already submitted before tearing its state down.
+
+        ``loop()`` drains the device pool and the watcher threads only on the
+        success path. The failure path used to restore the model and delete the
+        per-run offload directory while already-submitted submodule finalizers
+        were still executing: those finalizers re-created the run directory
+        that ``release_private_offload_root`` had just removed (leaking one
+        layer's bundles per failed run) and kept packing/replacing modules
+        after ``quantize()`` had already raised (issue #4595).
+
+        Each wait is independent. A pool that fails to drain must not skip the
+        remaining waits, and nothing here may mask the original exception.
+        """
+
+        from ..utils.stream import STREAM_DEVICE_POOL
+
+        waits = (
+            ("device thread pool", DEVICE_THREAD_POOL.wait),
+            ("finalizer watcher threads", self.wait_dangling_threads),
+            ("stream device pool", STREAM_DEVICE_POOL.wait),
+        )
+        for label, wait in waits:
+            try:
+                wait()
+            except Exception:
+                log.warning(
+                    "failed to drain the %s while failing the quantization run",
+                    label,
+                    exc_info=True,
+                )
+
+    def _make_run_exit_recovery(self) -> RunExitRecovery:
+        """Build the one run-scoped owner of this run's exit obligations."""
+
+        return RunExitRecovery(
+            fence=self._fence_run_work,
+            release_processors=self._release_failed_run_processors,
+            restore_deferred=self._finalize_deferred_runtime_weights,
+            restore_inflight=self._restore_inflight_layer,
+            unwrap_hooked=self._unwrap_failed_run_hooked_linears,
+            restore_offloaded=self._restore_offloaded_base_modules,
+            materialize_unreached=self._materialize_unreached_meta_modules,
+            rehome_kernels=lambda: rehome_failed_run_kernels(self.gptq_model),
+            repair_counters=lambda: ensure_version_counters(self.gptq_model.model),
+            release_private_root=self._release_or_keep_private_offload_root,
+            restore_disk=self._restore_disk_offloaded_modules,
+            materialize_success=self._materialize_remaining_meta_modules,
+            release_workspace=self._release_run_workspace,
+        )
+
+    def _release_or_keep_private_offload_root(self) -> None:
+        """Keep the per-run root while a disk-offloaded shell still reads it."""
+
+        model = getattr(self.gptq_model, "model", None)
+        if model is not None and has_disk_offloaded_modules(model):
+            log.debug(
+                "Offload: keeping the per-run directory for the disk-offloaded "
+                "layers of a cancelled/failed run."
+            )
+        else:
+            release_private_offload_root(self.gptq_model)
+
     def loop(self, fallback=None, **kwargs):
         """Run the quantization loop under the TF32 guard."""
 
         with tf32_high_precision_guard():
-            return self._loop_impl(fallback=fallback, **kwargs)
+            recovery = self._make_run_exit_recovery()
+            # Exposed for diagnostics and tests: the run, not the exception
+            # handler, owns the exit sequence (#5060).
+            self._run_exit_recovery = recovery
+            return recovery.run(lambda: self._loop_impl(fallback=fallback, **kwargs))
 
     def _materialize_deferred_boundary_prefix(self, checkpoint) -> None:
         """Install a recovered packed prefix only when publication needs it."""
@@ -1803,6 +2067,67 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 processors=self.processors,
             )
             self._check_loop_stop()
+
+    def _model_initial_capture_is_generic(self) -> bool:
+        """Whether the model keeps every initial-capture hook at its base form.
+
+        Model-specific capture hooks (vision-tower staging, looped-decoder
+        capture, custom positional inputs) can change what the first forward
+        records. Only the generic path is qualified to hand its capture to the
+        next processor; a model that overrides a hook must be audited first.
+        """
+
+        model_cls = type(self.gptq_model)
+        for name in _CAPTURE_REUSE_GUARDED_HOOKS:
+            base = getattr(BaseQModel, name, None)
+            override = getattr(model_cls, name, None)
+            if base is None:
+                # Hooks outside the base class (e.g. the looped-decoder lazy
+                # capture) are opt-in; a model that defines one is not generic.
+                if override is not None:
+                    return False
+                continue
+            if override is not base:
+                return False
+        return True
+
+    def _reusable_initial_capture(
+        self,
+        processor: LoopProcessor,
+        previous_processor: Optional[LoopProcessor],
+    ) -> Optional[InputCache]:
+        """Returns the completed first-layer capture GPTQ may replay.
+
+        GPTAQ/FOEM pair the native and quantized captures of the same prepared
+        batches (#4869). Both used to run the model-level capture forward, which
+        repeated the identical deterministic pass before the first decoder
+        block was quantized (#5831). The caller clones the returned cache so
+        each processor keeps private replay state as the two streams diverge.
+        """
+
+        if previous_processor is None or not isinstance(previous_processor, NativeProcessor):
+            return None
+        if not isinstance(processor, GPTQProcessor):
+            return None
+        qcfg = self.gptq_model.quantize_config
+        if getattr(qcfg, "gptaq", None) is None and getattr(qcfg, "foem", None) is None:
+            return None
+        # A distinct adapter/rotation dataset must run its own capture; only the
+        # shared prepared object can stand in for the second pass.
+        if processor.calibration_dataset is not previous_processor.calibration_dataset:
+            return None
+        if not self._model_initial_capture_is_generic():
+            return None
+
+        cache = previous_processor.inputs_cache
+        unwrap = getattr(cache, "unwrap", None)
+        if callable(unwrap):
+            cache = unwrap()
+        # Lazy/looped captures own per-layer state outside the cache and keep
+        # their own replay path; only a plain completed capture is reusable.
+        if type(cache) is not InputCache or not cache.layer_inputs:
+            return None
+        return cache
 
     @torch.inference_mode()
     def _loop_impl(self, fallback=None, **kwargs):
@@ -1891,11 +2216,26 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
                 continue
 
+            previous_processor = self.processors[p_index - 1] if p_index else None
+            reusable_capture = self._reusable_initial_capture(processor, previous_processor)
+            if reusable_capture is not None:
+                # Private copy: per-layer kwargs and hidden frontiers diverge
+                # between the native and quantized streams (#5831).
+                processor.receive_input_cache(copy.deepcopy(reusable_capture))
+                # The processor owns the copy; do not keep the source capture
+                # alive through the run if its owner later replaces it.
+                del reusable_capture
+                continue
+
             input_cache = self.cache_inputs(layers=layers,
                                             layer_names=layer_names,
                                             calibration_data=processor.calibration_dataset,
                                             use_cache=False)
             processor.receive_input_cache(input_cache)
+            # The processor owns the capture now. A checkpoint restore replaces
+            # its backing cache, so a lingering local would keep the discarded
+            # first-layer replay frontier alive for the rest of the run (#5829).
+            del input_cache
 
         # release calibration_dataset
         for processor in self.processors:
@@ -1911,22 +2251,27 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     if name
                 }
                 base_modules = [name for name in base_modules if name not in endpoint_names]
+            self._offloaded_base_modules = capture_offloaded_base_modules(
+                self.gptq_model.model, base_modules
+            )
             offload_to_disk(
                 model=self.gptq_model.model,
                 module=base_modules,
-                disk_path=self.gptq_model.quantize_config.offload_to_disk_path
+                disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
+                source_root=getattr(self.gptq_model, "model_local_path", None),
+                source_checkpoint=getattr(self.gptq_model, "checkpoint_file_name", None),
             )
 
         for processor in self.processors:
-            # Pre-build ParoQuant's optional fused rotation extension before the
+            # Pre-build Paro's optional fused rotation extension before the
             # first timed layer so layer 0 does not absorb a one-time JIT cost.
-            if isinstance(processor, ParoQuantProcessor):
+            if isinstance(processor, ParoProcessor):
                 processor.prewarm_runtime()
 
         if region_timer is not None:
             region_timer.flush()
 
-        is_awq_quantize = any(isinstance(proc, (AWQProcessor, ParoQuantProcessor)) for proc in self.processors)
+        is_awq_quantize = any(isinstance(proc, (AWQProcessor, ParoProcessor)) for proc in self.processors)
         # Capture-only layer groups are driven by processor forward config,
         # not by ad-hoc processor attributes.
         requires_activation_capture = any(
@@ -2098,8 +2443,6 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     len(reverse_p.log),
                 )
                 total_log[processor_name] = reverse_p.log
-                if processor_name in ["gptq", "gptaq", "awq", "exl3", "macaq"]:
-                    self.gptq_model.quant_log = reverse_p.log
 
                 if emit_finalize_records:
                     for module_log in reverse_p.log:
@@ -2127,6 +2470,13 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             region_timer.flush()
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
+
+        # Publish one row per module from the primary quantizer. Auxiliary
+        # processors (EoRA) opt out via ``owns_quant_log``, so an adapter pass
+        # cannot duplicate rows or replace the primary log (#4367). Reading the
+        # processor objects directly also covers a processor whose dynamic name
+        # changed mid-run.
+        record_quant_log(self.gptq_model, self.processors)
 
         return total_log
 
@@ -2176,7 +2526,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         best_variant = best[0][2]
 
         is_awq_quantize = any(
-            isinstance(proc, (AWQProcessor, ParoQuantProcessor))
+            isinstance(proc, (AWQProcessor, ParoProcessor))
             for proc in self.processors
         )
         include_capture_only = any(

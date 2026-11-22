@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from numbers import Integral
 from pathlib import Path
 from types import MethodType
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -25,6 +25,7 @@ from ...utils.exl3_error_ledger import (
     zero_route_recovery_recipe,
 )
 from ...utils.exl3_router_candidates import has_learned_router_recovery, learned_router_ranked_choices
+from ..local import LocalModelLoader
 from .deepseek_v3 import DeepSeekV3QModel
 
 
@@ -272,7 +273,8 @@ class DeepSeekV4MTPAuxiliaryShell(nn.Module):
     def __init__(self, config, *, device: torch.device | str = "meta"):
         super().__init__()
         from transformers.modeling_utils import local_torch_dtype
-        from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+
+        from ..ports.native.deepseek_v4.modeling_deepseek_v4 import (
             DeepseekV4DecoderLayer,
             DeepseekV4HyperHead,
             DeepseekV4RMSNorm,
@@ -397,6 +399,8 @@ class DeepSeekV4MTPAuxiliary:
             raise ValueError(
                 "DeepSeek V4 MTP auxiliary loading requires a local checkpoint snapshot"
             )
+        # The shell's own ``local_torch_dtype`` window takes the writer
+        # (#5304); the rest of its construction stays concurrent.
         shell = DeepSeekV4MTPAuxiliaryShell(config, device=device)
         turtle = LazyTurtle.maybe_create(
             model_local_path=model_local_path,
@@ -943,7 +947,8 @@ class DeepSeekV4MTPReplay:
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
     ):
         from transformers.cache_utils import DynamicCache
-        from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+
+        from ..ports.native.deepseek_v4.modeling_deepseek_v4 import (
             apply_rotary_pos_emb,
         )
 
@@ -976,7 +981,7 @@ class DeepSeekV4MTPReplay:
     ) -> DeepSeekV4MTPReplayState:
         """Prepare the one shared target window and five proposal rows once."""
 
-        from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+        from ..ports.native.deepseek_v4.modeling_deepseek_v4 import (
             DeepseekV4RotaryEmbedding,
         )
 
@@ -1304,6 +1309,31 @@ def patch_deepseek_v4_router_precision(model) -> int:
     return patched
 
 
+def _compressor_projection_forward(self, input: torch.Tensor) -> torch.Tensor:
+    if self.weight.dtype == torch.float32 and input.dtype == torch.float16:
+        return nn.Linear.forward(self, input.float()).to(input.dtype)
+    return nn.Linear.forward(self, input)
+
+
+def _patch_deepseek_v4_compressor_projections(model) -> None:
+    # Transformers 5.23 pins these dense weights to FP32 when loading FP16.
+    # Its compressor still supplies FP16 activations and expects FP16 KV.
+    projections = (
+        "self_attn.compressor.kv_proj",
+        "self_attn.compressor.gate_proj",
+        "self_attn.compressor.indexer.kv_proj",
+        "self_attn.compressor.indexer.gate_proj",
+        "self_attn.compressor.indexer.scorer.weights_proj",
+    )
+    for name, module in model.named_modules():
+        if (
+            type(module) is nn.Linear
+            and name.endswith(projections)
+            and getattr(module.forward, "__func__", None) is nn.Linear.forward
+        ):
+            module.forward = MethodType(_compressor_projection_forward, module)
+
+
 def patch_deepseek_v4_checkpoint_precision(model) -> dict[str, int]:
     """Preserve every V4 checkpoint tensor intentionally stored in FP32.
 
@@ -1315,7 +1345,7 @@ def patch_deepseek_v4_checkpoint_precision(model) -> dict[str, int]:
     in their native packed source format.
     """
 
-    from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+    from ..ports.native.deepseek_v4.modeling_deepseek_v4 import (
         DeepseekV4Attention,
         DeepseekV4CSACompressor,
         DeepseekV4HCACompressor,
@@ -1408,6 +1438,14 @@ def deepseek_v4_mtp_source_projection_prefix(runtime_prefix: str) -> str:
 
 
 class DeepSeekV4QModel(DeepSeekV3QModel):
+    # V3 owns a package config/model bridge for Kimi-K2. V4 loads the vendored
+    # Transformers 5.23 port and must not inherit the V3 local loader.
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+    require_trust_remote_code = False
+
     dynamic_expert_index = "n_routed_experts"
     rotary_embedding = "model.rotary_emb"
     # Transformers intentionally ignores the integrated dSpark/MTP checkpoint
@@ -1574,7 +1612,11 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
             )
         return layer
 
-    def pre_quantize(self, module: nn.Module) -> nn.Module:
+    def pre_quantize(
+        self,
+        module: nn.Module,
+        module_path: Optional[str] = None,
+    ) -> nn.Module:
         """Keep each packed target layer lazy for per-leaf materialization.
 
         Subset planning materializes checkpoint-backed leaves through their
@@ -1592,7 +1634,7 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
         layers = getattr(getattr(self.model, "model", None), "layers", ())
         if any(module is layer for layer in layers) and self._keeps_packed_target_layer_lazy():
             return module
-        return super().pre_quantize(module)
+        return super().pre_quantize(module, module_path=module_path)
 
     def _keeps_packed_target_layer_lazy(self) -> bool:
         """Whether this run uses the decoder-aware packed-floatx layer boundary."""
@@ -1734,6 +1776,7 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
 
     def after_model_load(self, model, load_quantized_model=False):
         precision = patch_deepseek_v4_checkpoint_precision(model)
+        _patch_deepseek_v4_compressor_projections(model)
         expected_layers = int(getattr(model.config, "num_hidden_layers", 0))
         if expected_layers <= 0:
             raise RuntimeError(
@@ -2406,6 +2449,11 @@ class DeepSeekV4MTPQuantizationModel(DeepSeekV4QModel):
         "ffn_hc.scale",
     )
 
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Only routed experts cross this adapter's artifact boundary; the norms,
+        # router and shared experts a fold would rewrite stay native and unsaved.
+        return []
+
     def after_model_load(self, model, load_quantized_model=False):
         del load_quantized_model
         if not isinstance(model, DeepSeekV4MTPAuxiliaryShell):
@@ -2635,7 +2683,10 @@ class DeepSeekV4MTPQuantizationModel(DeepSeekV4QModel):
             if pending_ffn_input is not None:
                 raise RuntimeError("DeepSeek V4 recovery router input was not consumed")
             expert_input = ffn_input.reshape(-1, ffn_input.shape[-1])
-            keep_mask = getattr(getattr(processor, "_mask_tls", None), "value", None)
+            # Router rows include the BOS sinks, so align with padding only.
+            from ...looper.loop_processor import active_padding_mask
+
+            keep_mask = active_padding_mask(processor)
             if keep_mask is not None:
                 keep_mask = keep_mask.reshape(-1).to(
                     device=expert_input.device,
@@ -3190,11 +3241,11 @@ class DeepSeekV4MTPQuantizationModel(DeepSeekV4QModel):
             raise RuntimeError("MTP activation store was not configured")
         from ...looper.input_cache import DiskBackedLayerOutputWriter
         from ...utils.exl3_capture_frontier import (
-            CAPTURE_FRONTIER_ENV,
             EXL3CaptureFrontierStore,
         )
+        from ...utils.kernel import get_kernel_config
 
-        capture_root = os.getenv(CAPTURE_FRONTIER_ENV)
+        capture_root = get_kernel_config().exl3_capture_frontier
 
         def discard_superseded_capture(_outputs) -> None:
             if capture_root is None:
@@ -3262,7 +3313,7 @@ class DeepSeekV4MTPQuantizationModel(DeepSeekV4QModel):
             raise ValueError("MTP replay batches do not accept a concat separator")
         if calibration_dataset_sort not in (None, "none"):
             raise ValueError(
-                "MTP replay order is immutable; calibration_sort must be None"
+                "MTP replay order is immutable; CalibrationConfig.sort must be None"
             )
         if batch_size != 1:
             raise ValueError(
@@ -3401,11 +3452,15 @@ class DeepSeekV4MTPQuantizationModel(DeepSeekV4QModel):
             },
         )
 
-    def pre_quantize(self, module: nn.Module) -> nn.Module:
+    def pre_quantize(
+        self,
+        module: nn.Module,
+        module_path: Optional[str] = None,
+    ) -> nn.Module:
         """Decode the exact auxiliary block body, excluding unused heads."""
 
         if module not in self.model.mtp:
-            return super().pre_quantize(module)
+            return super().pre_quantize(module, module_path=module_path)
         device = torch.device(self.quantize_config.device)
         source_dtype = getattr(self.model.config, "dtype", torch.bfloat16)
         if not isinstance(source_dtype, torch.dtype):

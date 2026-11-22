@@ -2,14 +2,17 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-from transformers import AutoModel
-
+from ..local import LocalModelLoader
 from . import LlamaQModel
 
 
 class DreamQModel(LlamaQModel):
     fusable = None  # No qualified executor for this definition.
 
-    loader = AutoModel
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.dream.configuration_dream.DreamConfig",
+        model_class="gptqmodel.models.ports.dream.modeling_dream.DreamModel",
+    )
+
     # TODO: fix dream attention mask tensor size/dtype issues due to batching/padding
     support_batch_quantize = False

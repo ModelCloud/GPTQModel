@@ -15,6 +15,7 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, LlamaConfig, LlamaForCausalLM
 
 from gptqmodel.models.auto import check_and_get_model_definition
+from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.writer import ModelWriter, _merge_selected_tensors_into_state_dict
 from gptqmodel.quantization.config import FORMAT, METHOD
 from gptqmodel.utils.model import TensorSource
@@ -64,6 +65,9 @@ class _DummyQuantizeConfig:
     def save_pretrained(self, save_dir):
         with open(os.path.join(save_dir, "quantize_config.json"), "w", encoding="utf-8") as handle:
             json.dump({"meta": dict(self._meta)}, handle)
+
+    def has_dynamic_exclusions(self):
+        return False
 
     def extract_adapter_rank_patterns(self):
         return {}
@@ -352,6 +356,12 @@ class _DummyModel:
         self.config = _DummyConfig()
         self.generation_config = _DummyGenerationConfig()
 
+    def named_modules(self):
+        return iter(())
+
+    def modules(self):
+        return iter(())
+
     def save_pretrained(self, save_dir, state_dict=None, is_main_process=True):
         with open(os.path.join(save_dir, "config.json"), "w", encoding="utf-8") as handle:
             json.dump({"dummy": True}, handle)
@@ -418,8 +428,12 @@ def _build_writer_from_real_model_config(model_local_path, expected_out_of_model
             "gptqmodel.models.base.AutoProcessor.from_pretrained",
             lambda *args, **kwargs: None,
         )
+        monkeypatch.setattr(LocalModelLoader, "load_processor", lambda self, *args, **kwargs: None)
 
-    config = AutoConfig.from_pretrained(model_local_path, trust_remote_code=False)
+    if isinstance(model_definition.loader, LocalModelLoader):
+        config = model_definition.loader.load_config(model_local_path)
+    else:
+        config = AutoConfig.from_pretrained(model_local_path, trust_remote_code=False)
     model = model_definition.loader.from_config(config, trust_remote_code=False)
 
     instance = model_definition(
@@ -483,7 +497,6 @@ def _patch_streaming(monkeypatch, shard_count=1):
 def _patch_basic_env(monkeypatch, state_dict_tensor):
     monkeypatch.setattr("gptqmodel.models.writer.get_model_files_size", lambda _: 1)
     monkeypatch.setattr("gptqmodel.models.writer.alias_all_from_turtle_if_meta", lambda *args, **kwargs: None)
-    monkeypatch.setattr("gptqmodel.models.writer.sanitize_model_config", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("gptqmodel.models.writer.sanitize_generation_config_file", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         "gptqmodel.models.writer.get_state_dict_for_save",

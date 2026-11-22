@@ -1,5 +1,56 @@
 # Embedding checkpoint shard replacement
 
+## Public save dispatch
+
+`GPTQModel.save()` and `GPTQModel.save_pretrained()` route on the same model
+state before either writer runs (`gptqmodel/models/writer.py:2034-2056`,
+`gptqmodel/models/base.py:4267-4363`). A dense wrapper delegates to the wrapped
+Transformers model. A checkpoint whose only changed payload is a module
+replacement uses `save_quantized_embeddings()`. An ordinary quantized
+checkpoint keeps the full `save_quantized()` writer.
+
+Before this change `save_pretrained()` always called `save_quantized()`:
+
+```mermaid
+flowchart TD
+    S["save_pretrained"] --> Q["save_quantized"]
+    D["dense wrapper"] --> S
+    R["module-replacement checkpoint"] --> S
+    Q --> E["ValueError: model is not quantized"]
+    Q --> W["dense model.embed_tokens.weight; packed endpoints dropped"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class E,W failure;
+```
+
+The current flow is shared by both public names:
+
+```mermaid
+flowchart TD
+    A["GPTQModel.save"] --> B{"self.quantized?"}
+    P["GPTQModel.save_pretrained"] --> B
+    B -- No --> C["self.model.save_pretrained"]
+    B -- Yes --> D{"_model_free_weight_only_replacements_only?"}
+    D -- Yes --> E["save_quantized_embeddings"]
+    D -- No --> F["save_quantized"]
+    C -.-> X["writer errors propagate"]
+    E -.-> X
+    F -.-> X
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+| Model state | Before `save_pretrained()` | Current contract |
+| --- | --- | --- |
+| Dense wrapper | `save_quantized()` raised `ValueError` (`gptqmodel/models/writer.py:2034-2042` before this change) | `self.model.save_pretrained()` owns config, tied weights and sharding (`gptqmodel/models/writer.py:2045-2046`) |
+| Weight-only module replacement | `save_quantized()` rebuilt the checkpoint and wrote the dense embedding tensor, dropping the packed payload | `save_quantized_embeddings()` preserves the replaced modules (`gptqmodel/models/writer.py:2047-2052`) |
+| Ordinary quantized | `save_quantized()` | unchanged (`gptqmodel/models/writer.py:2053-2054`) |
+
+`save()` already selected the writer by state
+(`gptqmodel/models/base.py:4319-4363`); the override now follows the same
+branches, so the two public names cannot disagree.
+
+Introduced by [PR #5480](https://github.com/ModelCloud/GPTQModel/pull/5480).
+
 `save_quantized_embeddings()` copies missing source files, then rewrites only
 the safetensors shards that contain replaced modules. Each rewritten shard is
 read from the existing output when present, or from the source checkpoint
@@ -33,7 +84,7 @@ flowchart TD
 
 | Step | Prior behavior or issue | Current contract |
 | --- | --- | --- |
-| Rewrite one affected shard | `save_file(tensors, target_path)` opened the destination directly (`gptqmodel/models/writer.py:448` before PR #3623). An I/O failure after opening it could leave a partial shard. | `save_file` writes a sibling temporary under `_atomic_shard_path`; only a successful write reaches `os.replace` (`gptqmodel/models/writer.py:453-454`). |
+| Rewrite one affected shard | `save_file(tensors, target_path)` opened the destination directly (`gptqmodel/models/writer.py:448` before PR #3623). An I/O failure after opening it could leave a partial shard. | `save_file` writes a sibling temporary under `_atomic_shard_path`; only a successful write reaches `os.replace` (`gptqmodel/models/writer.py:913`). |
 | Existing destination mode | A direct rewrite retained the file's mode. | `_atomic_shard_path` applies the destination's mode to the temporary before replacement (`gptqmodel/utils/model.py:2790-2830`). A new shard follows the process umask. |
 | Failed write | The destination could be truncated, while its index still pointed to it. | The temporary is removed and the destination shard remains readable. The exception stops the save before the index update. |
 | Prior module keys on repeated save | Only source checkpoint keys and existing `weight`/`bias` keys were dropped. Old layout keys such as `proj.old_scale` stayed in the shard and index (`gptqmodel/models/writer.py:396-405` before this change). | `_save_module_replacement_safetensors` collects every indexed key under each runtime prefix and also filters such keys while reading a shard (`gptqmodel/models/writer.py:398-405, 442-449`). `save_quantized_embeddings` removes those names from the index before adding current keys (`gptqmodel/models/writer.py:942-945`). |

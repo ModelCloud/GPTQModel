@@ -15,7 +15,7 @@ from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.loop_processor import ForwardConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+from gptqmodel.looper.paro_processor import ParoProcessor
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.looper.stage_layer import (
     _capture_pristine_group_context,
@@ -50,6 +50,21 @@ class _DummyQModel:
 def _make_looper():
     processors = [types.SimpleNamespace(layer_count=0, pb=None)]
     return ModuleLooper(model=_DummyQModel(), processors=processors)
+
+
+class _StageLooperDouble:
+    """Looper methods ``run_layer_stage`` calls that the doubles do not model.
+
+    ``run_layer_stage`` records and clears the in-flight layer so a cancelled
+    or failed quantize can restore its placement (#4546). The doubles below only
+    exercise the stage protocol, so they accept the calls and do nothing.
+    """
+
+    def _track_inflight_layer(self, *_args, **_kwargs):
+        pass
+
+    def _clear_inflight_layer(self, *_args, **_kwargs):
+        pass
 
 
 def test_module_looper_preserves_embedding_only_setting():
@@ -375,7 +390,7 @@ def _make_forward_executor_looper(
     return types.SimpleNamespace(
         _resolve_batch_total=lambda _num_batches, layer_inputs: len(layer_inputs),
         _collect_row_counts=lambda layer_inputs: [int(batch[0].shape[0]) for batch in layer_inputs],
-        _set_processor_mask=lambda _processor, _mask: None,
+        _set_processor_mask=lambda _processor, _mask, padding_mask=None: None,
         _batch_row_count=lambda batch_inputs: int(batch_inputs[0].shape[0]),
         support_batch_quantize=False,
         gptq_model=types.SimpleNamespace(
@@ -453,7 +468,7 @@ def _run_executor_parallel(executor, processor, *, apply_moe_config):
     )
 
 
-def test_stage_layer_forces_sync_finalizers_for_paroquant():
+def test_stage_layer_forces_sync_finalizers_for_paro():
     looper = types.SimpleNamespace(
         gptq_model=types.SimpleNamespace(
             quantize_config=QuantizeConfig(
@@ -463,7 +478,7 @@ def test_stage_layer_forces_sync_finalizers_for_paroquant():
             )
         )
     )
-    paro_processor = object.__new__(ParoQuantProcessor)
+    paro_processor = object.__new__(ParoProcessor)
 
     assert _should_drain_finalize_futures_synchronously(
         looper,
@@ -471,7 +486,7 @@ def test_stage_layer_forces_sync_finalizers_for_paroquant():
     ) is True
 
 
-def test_stage_layer_keeps_async_finalizers_for_non_paroquant_when_unset():
+def test_stage_layer_keeps_async_finalizers_for_non_paro_when_unset():
     looper = types.SimpleNamespace(
         gptq_model=types.SimpleNamespace(
             quantize_config=QuantizeConfig(
@@ -638,7 +653,7 @@ def test_stage_layer_keeps_async_finalizers_for_single_device_awq():
     ) is False
 
 
-def test_stage_layer_empties_cache_after_sync_paroquant_finalize_only_with_offload():
+def test_stage_layer_empties_cache_after_sync_paro_finalize_only_with_offload():
     looper = types.SimpleNamespace(
         gptq_model=types.SimpleNamespace(
             quantize_config=QuantizeConfig(
@@ -648,7 +663,7 @@ def test_stage_layer_empties_cache_after_sync_paroquant_finalize_only_with_offlo
             )
         )
     )
-    paro_processor = object.__new__(ParoQuantProcessor)
+    paro_processor = object.__new__(ParoProcessor)
 
     assert _should_empty_cache_after_sync_finalize(
         looper,
@@ -661,15 +676,15 @@ def test_stage_layer_empties_cache_after_sync_paroquant_finalize_only_with_offlo
         finalize_tasks=[(paro_processor, None, None, None, None)],
     ) is False
 
-def test_stage_layer_paroquant_layer_scope_skips_pristine_group_clone():
-    processor = object.__new__(ParoQuantProcessor)
+def test_stage_layer_paro_layer_scope_skips_pristine_group_clone():
+    processor = object.__new__(ParoProcessor)
     processor.qcfg = types.SimpleNamespace(opt_scope="layer")
 
     assert _processor_needs_pristine_group_clone(processor) is False
 
 
-def test_stage_layer_paroquant_compute_block_scope_keeps_pristine_group_clone():
-    processor = object.__new__(ParoQuantProcessor)
+def test_stage_layer_paro_compute_block_scope_keeps_pristine_group_clone():
+    processor = object.__new__(ParoProcessor)
     processor.qcfg = types.SimpleNamespace(opt_scope="compute_block")
 
     assert _processor_needs_pristine_group_clone(processor) is True
@@ -701,7 +716,9 @@ def test_subset_pass_without_forward_skips_forward_device_overrides(monkeypatch)
         def set_fwd_time(self, *_):
             return None
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         gptq_model = types.SimpleNamespace(
             quantize_config=QuantizeConfig(bits=4, group_size=128),
         )
@@ -775,7 +792,9 @@ def test_subset_pass_restored_capture_skips_forward(monkeypatch):
         def set_fwd_time(self, *_):
             return None
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         gptq_model = types.SimpleNamespace(
             quantize_config=QuantizeConfig(bits=4, group_size=128),
         )
@@ -938,7 +957,9 @@ def test_subset_pass_finishes_zero_route_recovery_before_quant_fanout(monkeypatc
         def zero_route_recovery_context(self, **_kwargs):
             return RecoveryContext()
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         gptq_model = DummyQModel()
 
         def _masked_hook_wrapper(self, _processor, hook, _source):
@@ -1074,7 +1095,9 @@ def test_subset_pass_restored_recovery_frontier_is_validated_before_fanout(
         def process(self, **_kwargs):
             events.append("process")
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         gptq_model = types.SimpleNamespace(
             quantize_config=QuantizeConfig(bits=4, group_size=128),
         )
@@ -1197,7 +1220,9 @@ def test_lazy_forward_materializes_direct_state_but_not_projection_weights():
     calls = []
 
     class DummyQModel:
-        def shell_direct_meta_materialize(self, *, target_submodule, device):
+        def shell_direct_meta_materialize(
+            self, *, target_submodule, device, module_path=None
+        ):
             calls.append((target_submodule, device))
             target_submodule.scale = torch.nn.Parameter(torch.ones(2, device=device))
 
@@ -1583,7 +1608,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):
@@ -1595,7 +1620,9 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
         def lm_head_pre_quantize_generate_hook(self, value):
             return value
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self.gptq_model = DummyGptqModel()
             self.processors = [DummyProcessor()]
@@ -1806,7 +1833,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):
@@ -1818,7 +1845,9 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
         def lm_head_pre_quantize_generate_hook(self, value):
             return value
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self.gptq_model = DummyGptqModel()
             self.processors = [DummyProcessor()]
@@ -2083,7 +2112,7 @@ def test_run_layer_stage_publishes_exactly_the_planned_steps(monkeypatch):
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):
@@ -2107,7 +2136,9 @@ def test_run_layer_stage_publishes_exactly_the_planned_steps(monkeypatch):
         def get_output_embeddings_name(self):
             return "lm_head"
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self.gptq_model = DummyGptqModel()
             self.processors = [DummyProcessor()]
@@ -2379,7 +2410,7 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):
@@ -2391,7 +2422,9 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
         def lm_head_pre_quantize_generate_hook(self, value):
             return value
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self.gptq_model = DummyGptqModel()
             self.processors = [DummyProcessor()]
@@ -2500,7 +2533,9 @@ def test_replay_layer_outputs_without_plan_uses_generic_progress():
         def record(self, *args, **kwargs):
             timer_records.append((args, kwargs))
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self._current_subset = "not-cleared"
             self.forward_calls = []
@@ -2617,7 +2652,9 @@ def test_replay_layer_outputs_with_plan_uses_plan_metadata_and_device_overrides(
         def record(self, *args, **kwargs):
             timer_records.append((args, kwargs))
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self._current_subset = replay_modules
             self.forward_calls = []
@@ -2732,7 +2769,9 @@ def test_replay_layer_outputs_with_plan_can_skip_override_restore():
         def pb(self, iterable):
             return DummyPB()
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self._current_subset = replay_modules
             self.forward_calls = []
@@ -2841,7 +2880,9 @@ def test_replay_layer_outputs_with_multi_device_plan_skips_moe_config():
         def record(self, *args, **kwargs):
             timer_records.append((args, kwargs))
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self._current_subset = replay_modules
             self.forward_calls = []
@@ -3077,7 +3118,7 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):
@@ -3089,7 +3130,9 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
         def lm_head_pre_quantize_generate_hook(self, value):
             return value
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self, layers, initial_inputs):
             self.gptq_model = DummyGptqModel()
             self.processors = [DummyProcessor(initial_inputs)]
@@ -3144,7 +3187,12 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
             return None
 
         def _prepare_layer_direct_state_for_forward(
-            self, module, fallback_device, *, projection_modules=None
+            self,
+            module,
+            fallback_device,
+            *,
+            projection_modules=None,
+            module_path=None,
         ):
             self.direct_state_layers.append(
                 (module, fallback_device, projection_modules)
@@ -3428,13 +3476,15 @@ def test_run_layer_stage_catches_up_packed_layer_with_original_forward_topology(
         def should_quantize_layer(self, *_args):
             return True
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def post_quantize(self, module):
             raise AssertionError("packed catch-up used generic post_quantize")
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self.processors = [DummyProcessor()]
             self.boundary = Boundary(self.processors[0])
@@ -3624,7 +3674,7 @@ def test_run_layer_stage_skips_boundary_commit_when_finalize_fails(monkeypatch):
             self.quantization_layer_boundary_checkpoint = boundary
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):
@@ -3633,7 +3683,7 @@ def test_run_layer_stage_skips_boundary_commit_when_finalize_fails(monkeypatch):
         def post_quantize(self, module):
             return module
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def __init__(self):
             self.processors = [FailingFinalizeProcessor()]
             self.boundary = Boundary()

@@ -40,6 +40,7 @@ from gptqmodel.utils.packing import (
     hf_post_init,
     hf_repack_layer,
 )
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 pytestmark = [pytest.mark.cpu]
@@ -213,6 +214,34 @@ def test_hf_public_apis_accept_legacy_method_qualified_backend_strings(monkeypat
             4, 128, False, False, format=FORMAT.GEMM, quant_method=METHOD.AWQ,
             backend=awq_legacy, device=DEVICE.CPU, repack=True,
         )
+
+
+@pytest.mark.parametrize("format_value", ["llm-awq", "LLM-AWQ", "Llm-AwQ", FORMAT.LLM_AWQ])
+def test_hf_select_quant_linear_v2_llm_awq_format_is_case_insensitive(format_value):
+    """The normalized ``format`` must also drive the LLM_AWQ int16 pack override.
+
+    ``hf_select_quant_linear_v2`` accepts case-insensitive format strings, but
+    the LLM_AWQ override compared the raw argument, so an uppercase spelling
+    fell through to the int32 default and failed the kernel's pack-dtype
+    validation (#5352).
+    """
+    from gptqmodel.nn_modules.qlinear.gemv_fast_awq import LLMAwqTorchLinear
+    from gptqmodel.utils.importer import hf_select_quant_linear_v2
+
+    kernel = hf_select_quant_linear_v2(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        format=format_value,
+        quant_method="awq",
+        dtype=torch.float16,
+        pack=False,
+        device_map={"": "cpu"},
+        backend="awq_torch",
+    )
+
+    assert kernel is LLMAwqTorchLinear
 
 
 def test_feasibility_repack_targets_include_plain_gptq_kernels():
@@ -916,8 +945,8 @@ def _cuda_device(index: int = 0) -> str:
 
 @pytest.mark.cuda
 def test_gpu_feasibility_and_best_format():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for GPU feasibility checks")
+    if not requires_nvidia_cuda():
+        pytest.skip("an NVIDIA CUDA device is required for GPU feasibility checks")
 
     device = _cuda_device()
     # Marlin has no raw-weight packer; it is a repack target that consumes

@@ -1,5 +1,5 @@
 common:
-  py: 3.14t # common config
+  py: 3.14.10t # common config
   gpu: 1
   sm: 0
   skip: false
@@ -11,9 +11,21 @@ tests:
   test_calibration_data_device:
     gpu: 2
 
+  # #5420: deps.yaml pins cp313 wheels for these three (vLLM and
+  # causal-conv1d publish no cp314/cp314t build), so they cannot install on
+  # the 3.14t lane. `py` gates them off that lane; a 3.13 lane picks them up.
+  test_eval:
+    py: '3.13' # quoted: YAML would read 3.13 as a float
+
 tests/models:
   test_llama3_2_fp8:
     sm: '12.0'
+
+  test_nemotron_ultra: # #5420: causal-conv1d is cp313-only
+    py: '3.13' # quoted: YAML would read 3.13 as a float
+
+  test_hymba: # #5420: causal-conv1d is cp313-only
+    py: '3.13' # quoted: YAML would read 3.13 as a float
 
 tests/kernels:
   test_asymmetric_real_models:

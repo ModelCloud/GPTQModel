@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 from types import MethodType
 from typing import Callable, Dict, Optional, Tuple
 
@@ -28,12 +29,12 @@ from ..looper.loop_processor import (
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
-    LoopProcessor,
     ProcessorLifecycleConfig,
     bind_resolved_module_config,
     get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
+from ..looper.shared_input import SharedInputCaptureProcessor
 from ..models import BaseQModel
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
@@ -52,14 +53,15 @@ from ..quantization.macaq import Macaq
 from ..utils.backend import BACKEND
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, move_to
+from ..utils.model import create_quant_module, install_quant_module, move_to
+from ..utils.module_locks import parent_module_lock
 from ..utils.torch import CPU
 
 
 log = setup_logger()
 
 
-class MacaqProcessor(LoopProcessor):
+class MacaqProcessor(SharedInputCaptureProcessor):
     """Captures Hessians and quantizes Linear modules with the MACaQ recipe."""
 
     lifecycle = ProcessorLifecycleConfig(
@@ -88,6 +90,7 @@ class MacaqProcessor(LoopProcessor):
             calibration=calibration,
             forward=forward,
         )
+        self._init_shared_input_capture()
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
         if backend not in (BACKEND.MACAQ_TORCH, BACKEND.MACAQ_TRITON):
@@ -124,8 +127,15 @@ class MacaqProcessor(LoopProcessor):
         return self.tasks.get(module.name, False) == False  # noqa: E712
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        if self.shared_input_leader(name) is not None:
+            def skip(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+                """Follower of a shared-input group: the leader collects this Hessian."""
+
+                del inp, out
+            return skip
+
         def hook(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
-            self.tasks[name].add_batch(inp[0].data, out.data)
+            self.tasks[name].add_batch(self.calibration_rows(inp[0].data), out.data)
 
         return hook
 
@@ -309,7 +319,7 @@ class MacaqProcessor(LoopProcessor):
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
 
         with log_time_block("create_quant_module", logger=log, module_name=module_label):
-            create_quant_module(
+            qmodule = create_quant_module(
                 name=module.full_name,
                 linear_cls=linear_cls,
                 bits=self.qcfg.runtime_bits,
@@ -328,15 +338,25 @@ class MacaqProcessor(LoopProcessor):
                 init_kwargs=self.qcfg.quant_linear_init_kwargs(),
                 dtype=module.module_dtype,
                 resolved_module_config=get_resolved_module_config(module),
+                install=False,
+            )
+        if qmodule is None:
+            raise RuntimeError(
+                f"MacaqProcessor: module `{module.full_name}` resolved to an excluded "
+                "quant config but still reached packing."
             )
 
-        qmodule = model.model.get_submodule(module.full_name)
         with log_time_block("module.pack", logger=log, module_name=module_label):
             qmodule.pack(linear=layers[module.full_name], macaq_result=result)
 
         with self.lock:
             self.result_pop(module.full_name)
 
+        # Publish the packed kernel with one assignment; installing it before
+        # packing left an unusable projection behind when packing was
+        # interrupted (issue #5089).
+        with parent_module_lock(module.full_name):
+            install_quant_module(model.model, module.full_name, qmodule)
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
@@ -344,6 +364,12 @@ class MacaqProcessor(LoopProcessor):
         model.quantize_config.method = METHOD.MACAQ
         model.quantize_config.format = model.quantize_config.checkpoint_format_for_settings()
         super().finalize(model=model, **kwargs)
+        # Backstop for the #4747/#4757 contract: ``quantize()`` returns with
+        # no quantizer memory resident. The graph-break-free flip sweep (#4854)
+        # no longer leaves the Dynamo frame cycle #4801 chased, so a full gen-2
+        # collection per Linear only cost time (#4900); this single pass is
+        # what actually holds the contract.
+        gc.collect()
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         if self.calibration_dataset is None:

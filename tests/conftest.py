@@ -29,6 +29,7 @@ for _thread_env in (
 os.environ.setdefault("OMP_NESTED", "FALSE")
 
 import numpy
+import pytest
 import torch
 
 
@@ -54,6 +55,19 @@ torch.manual_seed(787)
 random.seed(787)
 numpy.random.seed(787)
 
+
+@pytest.fixture(autouse=True)
+def _reset_kernel_config_between_tests():
+    """Keep the process-wide kernel policy from leaking between tests."""
+
+    from gptqmodel.utils.kernel import reset_kernel_config
+
+    reset_kernel_config()
+    try:
+        yield
+    finally:
+        reset_kernel_config()
+
 _TESTS_DIR = Path(__file__).resolve().parent
 _MODELS_TESTS_DIR = _TESTS_DIR / "models"
 _REPO_ROOT = _TESTS_DIR.parent
@@ -68,8 +82,23 @@ for path in (_REPO_ROOT, _TESTS_DIR, _MODELS_TESTS_DIR):
         sys.path.insert(0, path_str)
 
 
+_OPT_IN_MARKERS = (
+    "exl3_cuda_e2e",
+    "gptq_cuda_e2e",
+    "gptq_cuda_eval_only",
+    "checkpoint_recovery",
+    "meta_coverage",
+)
+
+
 def pytest_collection_modifyitems(config, items):
-    """Run native-TTNN hardware tests before the Torch/XLA hardware tests.
+    """Apply opt-in test selection, then order native-TTNN hardware tests.
+
+    Opt-in checks quantize and evaluate a real model, run the multi-minute
+    subprocess checkpoint-recovery matrix, or build every registered model on
+    ``meta`` to check routed-expert coverage, so they are selected by marker
+    rather than by an environment variable. Any other ``-m`` expression still
+    leaves them skipped; only naming the marker runs them.
 
     TT-Metal allows one runtime owner per chip, and initializing the Torch/XLA
     PJRT plugin is irreversible within a process: once it has claimed the
@@ -79,6 +108,14 @@ def pytest_collection_modifyitems(config, items):
     This is an ordering contract, not a skip: whichever backend the user
     enabled still runs.
     """
+    markexpr = getattr(config.option, "markexpr", "") or ""
+    for item in items:
+        for marker_name in _OPT_IN_MARKERS:
+            if item.get_closest_marker(marker_name) and marker_name not in markexpr:
+                item.add_marker(
+                    pytest.mark.skip(reason=f"opt-in test; run with `-m {marker_name}` to enable it")
+                )
+                break
 
     if os.environ.get("GPTQMODEL_TEST_TTNN") != "1":
         return

@@ -23,8 +23,9 @@ from __future__ import annotations
 import importlib
 import sys
 import threading
+import weakref
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from .logger import setup_logger
 from .tt_thermal import after_device_close, before_device_open, park_idle_clock
@@ -34,6 +35,12 @@ log = setup_logger()
 
 _LOCK = threading.RLock()
 _MESH: Optional["TTNNMesh"] = None
+_MESH_GENERATION = 0
+# Live users of the open mesh.  Layers register when they upload their packed
+# tensors and drop the lease in ``release_device``; the mesh closes only after
+# the last lease is gone.  A plain module attribute would keep released layers
+# alive, so the registry holds weak references.
+_LEASES: "weakref.WeakSet[Any]" = weakref.WeakSet()
 
 
 class TTNNUnavailable(RuntimeError):
@@ -42,12 +49,25 @@ class TTNNUnavailable(RuntimeError):
 
 @dataclass(frozen=True)
 class TTNNMesh:
-    """An open ``ttnn.MeshDevice`` plus the fabric mode it was opened with."""
+    """An open ``ttnn.MeshDevice`` plus the request it was opened for.
+
+    ``device_id`` and ``trace_region_size`` are recorded next to the fabric mode
+    because they are part of the placement the caller asked for: a later
+    ``open_mesh`` may only reuse this handle when every one of them matches.
+    ``mesh_shape == ()`` means a single chip, so it cannot carry the ordinal;
+    ``device_id`` is where that chip identity lives.
+    """
 
     device: Any
     mesh_shape: tuple[int, ...]
     fabric: str
     owner: str
+    device_id: int = 0
+    trace_region_size: int = 0
+    #: Monotonic per-process open counter. Device-resident caches include it so
+    #: a buffer built for a closed mesh can never match a later handle, even if
+    #: Python recycles the device object's address.
+    generation: int = 0
 
     @property
     def num_devices(self) -> int:
@@ -173,13 +193,32 @@ def open_mesh(
     ``trace_region_size`` reserves device memory for captured traces (a traced
     decode step needs one).  ``device_id`` picks the chip for a single-device
     open, which is how one process per card is run.
+
+    A live handle is reused only when it was opened for the same owner, chip
+    count, chip ordinal, fabric mode and trace reservation.  Anything else
+    raises :class:`TTNNUnavailable` instead of returning a device with different
+    placement than the caller asked for; changing placement requires an
+    explicit :func:`close_mesh` first.
     """
 
-    global _MESH
+    global _MESH, _MESH_GENERATION
 
     ttnn = import_ttnn()
     if device_count < 1:
         raise ValueError(f"device_count must be >= 1, got {device_count}")
+    device_count = int(device_count)
+    device_id = int(device_id)
+    trace_region_size = int(trace_region_size)
+    # Normalise and validate the request before touching process state, so an
+    # unknown fabric or a mesh offset fails even when a handle already exists.
+    fabric = (fabric or "DISABLED").upper()
+    configured_fabric = None
+    if fabric != "DISABLED":
+        configured_fabric = getattr(ttnn.FabricConfig, fabric, None)
+        if configured_fabric is None:
+            raise ValueError(f"unknown TTNN fabric config {fabric!r}")
+    if device_count > 1 and device_id:
+        raise ValueError("device_id selects a single chip; it cannot offset a mesh")
 
     with _LOCK:
         if _MESH is not None:
@@ -188,10 +227,23 @@ def open_mesh(
                     f"the Tenstorrent chips are already owned by {_MESH.owner!r}; "
                     f"{owner!r} cannot open a second runtime in this process"
                 )
-            if _MESH.mesh_shape and _prod(_MESH.mesh_shape) != device_count:
+            mismatched = []
+            if _MESH.num_devices != device_count:
+                mismatched.append(f"device_count={device_count} (open: {_MESH.num_devices})")
+            if _MESH.device_id != device_id:
+                mismatched.append(f"device_id={device_id} (open: {_MESH.device_id})")
+            if _MESH.fabric != fabric:
+                mismatched.append(f"fabric={fabric} (open: {_MESH.fabric})")
+            if _MESH.trace_region_size != trace_region_size:
+                mismatched.append(
+                    f"trace_region_size={trace_region_size} "
+                    f"(open: {_MESH.trace_region_size})"
+                )
+            if mismatched:
                 raise TTNNUnavailable(
-                    f"an existing {_MESH.mesh_shape} TTNN mesh cannot serve "
-                    f"device_count={device_count}"
+                    "the open TTNN device cannot serve this request: "
+                    + ", ".join(mismatched)
+                    + "; close it and reopen explicitly to change placement"
                 )
             return _MESH
 
@@ -202,24 +254,18 @@ def open_mesh(
         # left the GDDR hot, and give the parts a fixed idle window otherwise.
         before_device_open(owner=owner)
 
-        fabric = (fabric or "DISABLED").upper()
         applied_fabric = "DISABLED"
-        if fabric != "DISABLED":
-            configured = getattr(ttnn.FabricConfig, fabric, None)
-            if configured is None:
-                raise ValueError(f"unknown TTNN fabric config {fabric!r}")
-            ttnn.set_fabric_config(configured)
+        if configured_fabric is not None:
+            ttnn.set_fabric_config(configured_fabric)
             applied_fabric = fabric
 
         mesh_shape: tuple[int, ...] = ()
         device = None
         try:
-            extra = {"trace_region_size": int(trace_region_size)} if trace_region_size else {}
+            extra = {"trace_region_size": trace_region_size} if trace_region_size else {}
             if device_count == 1:
-                device = ttnn.open_device(device_id=int(device_id), **extra)
+                device = ttnn.open_device(device_id=device_id, **extra)
             else:
-                if device_id:
-                    raise ValueError("device_id selects a single chip; it cannot offset a mesh")
                 mesh_shape = (1, device_count)
                 device = ttnn.open_mesh_device(ttnn.MeshShape(*mesh_shape), **extra)
         except Exception as exc:
@@ -233,14 +279,19 @@ def open_mesh(
                     log.debug(f"TTNN: fabric reset failed during cleanup: {cleanup_exc}")
             raise _translate_open_failure(exc) from exc
 
+        _MESH_GENERATION += 1
         _MESH = TTNNMesh(
             device=device,
             mesh_shape=mesh_shape,
             fabric=applied_fabric,
             owner=owner,
+            device_id=device_id,
+            trace_region_size=trace_region_size,
+            generation=_MESH_GENERATION,
         )
         log.info(
-            f"TTNN: opened {'mesh ' + str(mesh_shape) if mesh_shape else 'device 0'} "
+            f"TTNN: opened "
+            f"{'mesh ' + str(mesh_shape) if mesh_shape else f'device {device_id}'} "
             f"for {owner!r} (fabric={applied_fabric})."
         )
         return _MESH
@@ -260,7 +311,17 @@ def close_mesh(*, owner: Optional[str] = None) -> None:
                 f"from {owner!r}"
             )
         mesh, _MESH = _MESH, None
+        _LEASES.clear()
         mesh.close()
+        # Every cached grid operand is device-resident, so it died with this
+        # device. Dropping the entries here also keeps a recycled object id from
+        # ever matching a buffer that belonged to the closed device.
+        try:
+            from .tt_int4_kernel import clear_grid_weight_cache
+
+            clear_grid_weight_cache()
+        except Exception as exc:  # pragma: no cover - teardown must not mask errors
+            log.debug(f"TTNN: could not clear the grid weight cache on close: {exc}")
         # Closing the device does not stop the card generating heat: measured on
         # a p300c, AICLK stayed at 1350 MHz and ~50 W per board for over 50 s
         # after ``close_device``, with GDDR still climbing. The firmware drops
@@ -280,6 +341,36 @@ def current_mesh() -> Optional[TTNNMesh]:
 
     with _LOCK:
         return _MESH
+
+
+def hold_mesh_lease(owner: Any) -> None:
+    """Record that ``owner`` (normally a kernel module) is using the mesh.
+
+    Every upload path calls this after ``open_mesh`` succeeds, so the model
+    wrapper can release only devices its own kernels hold.  A repeated call is
+    a no-op, which keeps a cache rebuild from inflating the lease count.
+    """
+
+    with _LOCK:
+        if _MESH is None:
+            raise TTNNUnavailable("cannot hold a lease on a closed TTNN mesh")
+        _LEASES.add(owner)
+
+
+def release_mesh_lease(owner: Any) -> bool:
+    """Drop ``owner``'s mesh lease.
+
+    Returns ``True`` only when ``owner`` held the last live lease, which is the
+    caller's signal to close the shared mesh.  Releasing an owner that never
+    acquired one returns ``False`` so an unleased or already-released handle is
+    left untouched.
+    """
+
+    with _LOCK:
+        if owner not in _LEASES:
+            return False
+        _LEASES.discard(owner)
+        return not _LEASES
 
 
 def _reject_pjrt_owner() -> None:
@@ -311,6 +402,39 @@ def _reject_pjrt_owner() -> None:
         )
 
 
+def mesh_device_ids(mesh: TTNNMesh) -> Tuple[int, ...]:
+    """Chip ordinals this mesh occupies.
+
+    A single-chip handle records the requested ordinal itself; a multi-chip
+    mesh exposes the physical chip ids it was opened on (for example ``(0, 3)``
+    for two chips in a four-chip cluster).
+    """
+
+    if int(getattr(mesh, "num_devices", 1) or 1) <= 1:
+        return (int(getattr(mesh, "device_id", 0) or 0),)
+    device = getattr(mesh, "device", None)
+    ids = device.get_device_ids() if device is not None else ()
+    return tuple(int(index) for index in ids)
+
+
+def dram_allocated_bytes(device) -> int:
+    """(measured) DRAM bytes one chip's allocator currently holds.
+
+    ``get_memory_view`` reports per-bank totals, so the chip total is
+    ``num_banks * total_bytes_allocated_per_bank``. On a mesh the view is per
+    chip, not summed across chips: a replicated tensor reports the full tensor
+    on each chip and a shard reports only its own slice.
+
+    Reading the allocator includes what the tensor payload alone hides: tile
+    padding, per-page rounding and replicated operands (#5810).
+    """
+
+    ttnn = import_ttnn()
+    ttnn.synchronize_device(device)
+    view = ttnn.get_memory_view(device, ttnn.BufferType.DRAM)
+    return int(view.num_banks) * int(view.total_bytes_allocated_per_bank)
+
+
 def to_host_replica(ttnn, tensor, mesh):
     """Copy a mesh tensor to host memory, keeping one replica.
 
@@ -337,9 +461,13 @@ __all__ = [
     "TTNNUnavailable",
     "close_mesh",
     "current_mesh",
+    "dram_allocated_bytes",
+    "hold_mesh_lease",
     "import_ttnn",
     "is_ttnn_available",
+    "mesh_device_ids",
     "open_mesh",
+    "release_mesh_lease",
     "to_host_replica",
     "ttnn_device_count",
 ]

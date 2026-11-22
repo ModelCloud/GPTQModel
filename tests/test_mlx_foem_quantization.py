@@ -18,6 +18,7 @@ if sys.platform != "darwin":
 mx = pytest.importorskip("mlx.core")
 torch = pytest.importorskip("torch")
 
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization import foem as foem_module
 from gptqmodel.quantization.config import FOEMConfig, GPTQConfig
 from gptqmodel.quantization.foem import FOEM
@@ -90,6 +91,9 @@ def _torch_foem_oracle(
         zeros.append(zero[:, None])
         if end < columns:
             remaining = remaining[:, group_size:] - errors @ factor[start:end, end:]
+            # #4046: the first column of every block after the first gets the
+            # same beta correction the Torch loop applies at the boundary.
+            remaining[:, 0] -= beta * (remaining[:, 0] - raw[:, end])
     result = tuple(
         torch.cat(values, dim=1).numpy() for values in (quantized, scales, zeros)
     )
@@ -103,7 +107,8 @@ def _processor_quantize(source, factor, config, *, blocksize):
         source.shape[1], source.shape[0], bias=False, dtype=source.dtype
     )
     layer.weight.data.copy_(source)
-    task = FOEM(layer, config)
+    # Native processors read routing metadata from the NamedModule wrapper.
+    task = FOEM(NamedModule(layer, "proj", "proj", 0), config)
     task.quantizer.configure(
         perchannel=True,
         grid=100,

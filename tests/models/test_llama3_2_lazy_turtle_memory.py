@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 from model_test import ModelTest
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.looper.module_looper import StopMainLoop
 from gptqmodel.utils.torch import torch_empty_cache
 
@@ -163,10 +163,12 @@ class TestLlama3_2LazyTurtleMemory(ModelTest):
 
             try:
                 model.quantize(
-                    dataset,
-                    calibration_concat_size=self.DATASET_CONCAT_SIZE,
-                    calibration_sort=self.DATASET_SORT,
-                    batch_size=self.QUANT_BATCH_SIZE,
+                    CalibrationConfig(
+                        dataset=dataset,
+                        concat_size=self.DATASET_CONCAT_SIZE,
+                        sort=self.DATASET_SORT,
+                        batch_size=self.QUANT_BATCH_SIZE,
+                    ),
                 )
             except StopMainLoop:
                 # The layer callback raises this sentinel once layers 0-3 have

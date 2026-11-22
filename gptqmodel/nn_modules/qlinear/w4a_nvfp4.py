@@ -21,6 +21,7 @@ from ...quantization import FORMAT, METHOD
 from ...quantization.activation_floatx import _nvfp4_mse_quantize_blocks, nvfp4_global_scale
 from ...utils.backend import BACKEND
 from . import PackableQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from .w4a_floatx import W4AFP8Linear
 
 
@@ -85,6 +86,12 @@ def nvfp4_input(x: torch.Tensor, global_scale: torch.Tensor,
 
 
 class W4ANVFP4Linear(W4AFP8Linear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
+    # torch.cuda.graph capture succeeds, but dynamo fails on `data_ptr()` in
+    # `_require_current_weights` and on `_scaled_mm_v2`: EAGER only.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
+
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_W4A_NVFP4]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 0, FORMAT.GPTQ_V2: 0}
     SUPPORTS_METHODS = [METHOD.GPTQ]
@@ -278,7 +285,6 @@ class W4ANVFP4Linear(W4AFP8Linear):
         retained between calls.
         """
         from .w4a_activation import pack_activation
-        from .w4a_triton import fp8_linear_prepacked
 
         if x.shape[-1] != self.in_features:
             raise ValueError("W4AFP8 requires a matching scale-aware FP8 activation.")
@@ -288,7 +294,11 @@ class W4ANVFP4Linear(W4AFP8Linear):
         if needs_rotation and not x.rotation_applied:
             rotated = self._apply_rotation_to_input(x.decode(torch.float32))
             x = pack_activation(rotated, "w4afp8", model_dtype=x.model_dtype)
+        # Validate the operand and the weight layout before touching the kernel
+        # module, so a stale cache is reported as such on every host.
         weight = self.fp8_weight_operand()
+        from .w4a_triton import fp8_linear_prepacked
+
         result = fp8_linear_prepacked(
             x.codes, x.scales, weight, self.scales, self.bias, torch.float32,
         )

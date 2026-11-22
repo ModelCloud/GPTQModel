@@ -33,19 +33,26 @@ def utils():
 
 @pytest.fixture(scope="module")
 def reference(utils):
-    path = Path(os.environ.get(
-        "KIMI_K3_SNAPSHOT",
-        str(Path.home() / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/"
-            "f831ab66814297da540d832a5235f8e904f29d06"),
-    ))
-    if not (path / "modeling_kimi_linear.py").is_file():
-        pytest.skip("Kimi K3 checkpoint reference code is not cached; set KIMI_K3_SNAPSHOT")
-    return utils.load_calibration_reference(path, trust_remote_code=True)
+    return importlib.import_module("gptqmodel.models.ports.kimi_k3.modeling_kimi_linear")
 
 
-def test_calibration_reference_requires_trust_remote_code(utils, tmp_path):
-    with pytest.raises(ValueError, match="trust_remote_code=True"):
-        utils.load_calibration_reference(tmp_path)
+def test_calibration_reference_is_the_package_port_not_snapshot_code(utils, reference, tmp_path):
+    # A snapshot with hostile Python must never be imported or executed.
+    (tmp_path / "modeling_kimi_linear.py").write_text("raise SystemExit('checkpoint code executed')\n")
+    (tmp_path / "configuration_kimi_k3.py").write_text("raise SystemExit('checkpoint code executed')\n")
+    assert utils.load_calibration_reference(tmp_path) is reference
+    assert utils.load_calibration_reference(tmp_path, trust_remote_code=True) is reference
+
+
+def test_padded_kda_a_log_is_trimmed_to_active_heads(utils):
+    parameter = nn.Parameter(torch.empty(96))
+    padded = torch.cat([torch.arange(96, dtype=torch.float32), torch.zeros(32)])
+    fitted = utils.fit_checkpoint_parameter("layers.0.self_attn.A_log", padded, parameter)
+    assert torch.equal(fitted, padded[:96])
+    with pytest.raises(ValueError, match="nonzero KDA A_log padding"):
+        utils.fit_checkpoint_parameter("layers.0.self_attn.A_log", torch.ones(128), parameter)
+    with pytest.raises(ValueError, match="geometry differs"):
+        utils.fit_checkpoint_parameter("layers.0.mlp.weight", torch.ones(3, 4), nn.Parameter(torch.empty(4, 3)))
 
 
 @pytest.mark.parametrize("model_type,definition", [
@@ -54,11 +61,12 @@ def test_calibration_reference_requires_trust_remote_code(utils, tmp_path):
     # tests/module_tree/test_kimi_linear_native_tree.py.
     ("kimi_k3", KimiK3QModel), ("kimi_linear", KimiLinearNativeQModel),
 ])
-def test_registry_selects_kimi_backbone(monkeypatch, model_type, definition):
+def test_registry_selects_kimi_backbone(monkeypatch, tmp_path, model_type, definition):
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": model_type}))
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda *a, **kw: True)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *a, **kw:
+    monkeypatch.setattr(auto, "load_model_config", lambda *a, **kw:
                         SimpleNamespace(model_type=model_type))
-    assert auto.check_and_get_model_definition("tiny-kimi", trust_remote_code=True) is definition
+    assert auto.check_and_get_model_definition(tmp_path, trust_remote_code=True) is definition
 
 
 @pytest.mark.parametrize("definition,nested", [(KimiK3QModel, True), (KimiLinearQModel, False)])

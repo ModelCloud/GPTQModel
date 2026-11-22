@@ -10,6 +10,7 @@ from torch import nn
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.qwen4_exp import Qwen4ExpQModel, Qwen4ExpTextQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 from gptqmodel.utils.model import apply_no_placement_to_device_map, simple_dispatch_model
 from gptqmodel.utils.structure import LazyTurtle
 
@@ -34,20 +35,16 @@ class _TinyNoPlacementModel(nn.Module):
         layer.ple.key_proj = nn.Linear(4, 4)
 
 
-def test_qwen4_exp_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="qwen4_exp")
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+def test_qwen4_exp_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["qwen4_exp"]().save_pretrained(tmp_path)
 
-    assert auto.check_and_get_model_definition("/tmp/qwen3.8-flash-next") is Qwen4ExpQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is Qwen4ExpQModel
 
 
-def test_qwen4_exp_text_model_type_selects_standalone_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="qwen4_exp_text")
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+def test_qwen4_exp_text_model_type_selects_standalone_definition(tmp_path):
+    CONFIG_MAPPING["qwen4_exp_text"]().save_pretrained(tmp_path)
 
-    assert auto.check_and_get_model_definition("/tmp/whittle-next") is Qwen4ExpTextQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is Qwen4ExpTextQModel
 
 
 def test_qwen4_exp_quantized_load_keeps_ple_embedding_on_cpu():
@@ -175,7 +172,7 @@ def test_qwen4_exp_text_uses_causal_lm_paths_and_same_decoder_tree():
         SimpleNamespace(dynamic=None),
     )
 
-    assert Qwen4ExpTextQModel.loader.__name__ == "AutoModelForCausalLM"
+    assert Qwen4ExpTextQModel.loader.model_class == "gptqmodel.models.ports.native.auto.NativeForCausalLM"
     assert Qwen4ExpTextQModel.require_load_processor is False
     assert Qwen4ExpQModel.module_tree[-1] == Qwen4ExpTextQModel.module_tree[-1]
     assert Qwen4ExpTextQModel.extract_layers_node() == ["model.layers"]

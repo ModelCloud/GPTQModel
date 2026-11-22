@@ -7,33 +7,25 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 from model_test import ModelTest
 from ovis import image_to_test_dataset
 from PIL import Image
-from transformers import AutoConfig, AutoModelForImageTextToText
 
 from gptqmodel.models import auto
-from gptqmodel.models.definitions import mage_vl
 from gptqmodel.models.definitions.mage_vl import MageVLQModel
+from gptqmodel.models.local import LocalModelLoader
 
 
 MODEL_PATH = Path("/monster/data/model/Mage-VL")
 
 
-def test_mage_vl_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="mage_vl")
+def test_mage_vl_model_type_selects_definition(tmp_path):
+    from tests.test_mage_vl_local_port import _config
 
-    monkeypatch.setattr(
-        auto,
-        "resolve_trust_remote_code",
-        lambda path, trust_remote_code=False: trust_remote_code,
-    )
-    monkeypatch.setattr(
-        auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config
-    )
-
+    _config().save_pretrained(tmp_path)
     assert (
-        auto.check_and_get_model_definition("/tmp/mage-vl", trust_remote_code=True)
+        auto.check_and_get_model_definition(tmp_path, trust_remote_code=False)
         is MageVLQModel
     )
 
@@ -54,7 +46,7 @@ def test_mage_vl_definition_matches_qwen3_decoder_contract():
         "model.language_model.layers",
         "language_model.layers",
     ]
-    assert MageVLQModel.loader is AutoModelForImageTextToText
+    assert isinstance(MageVLQModel.loader, LocalModelLoader)
     assert MageVLQModel.pre_lm_head_norm_module == "model.language_model.norm"
     assert MageVLQModel.rotary_embedding == "model.language_model.rotary_emb"
     assert MageVLQModel.out_of_model_tensors == {
@@ -66,28 +58,22 @@ def test_mage_vl_definition_matches_qwen3_decoder_contract():
         ],
     }
     assert MageVLQModel.require_load_processor is True
-    assert MageVLQModel.require_trust_remote_code is True
+    assert not MageVLQModel.require_trust_remote_code
 
 
-def test_mage_vl_processor_load_enables_remote_code(monkeypatch):
-    calls = {}
-    expected_processor = object()
+def test_mage_vl_processor_load_is_package_owned(tmp_path):
+    from gptqmodel.models.ports.mage_vl.processing_mage_vl import MageVLProcessor
+    from tests.test_mage_vl_local_port import _model, _processor_assets
 
-    def fake_from_pretrained(model_path, **kwargs):
-        calls["model_path"] = model_path
-        calls.update(kwargs)
-        return expected_processor
-
-    monkeypatch.setattr(mage_vl.AutoProcessor, "from_pretrained", fake_from_pretrained)
-
-    qmodel = object.__new__(MageVLQModel)
-    qmodel.model_local_path = "/tmp/mage-vl"
-
-    assert qmodel.load_processor() is expected_processor
-    assert calls == {
-        "model_path": "/tmp/mage-vl",
-        "trust_remote_code": True,
-    }
+    tokenizer = _processor_assets(tmp_path)
+    qmodel = MageVLQModel.__new__(MageVLQModel)
+    torch.nn.Module.__init__(qmodel)
+    qmodel.model_local_path = str(tmp_path)
+    qmodel.model = _model()
+    qmodel.tokenizer = SimpleNamespace(tokenizer=tokenizer)
+    processor = qmodel.load_processor()
+    assert type(processor) is MageVLProcessor
+    assert processor.tokenizer is tokenizer
 
 
 def test_mage_vl_uses_qwen_style_image_calibration_dataset(monkeypatch):
@@ -114,6 +100,8 @@ def test_mage_vl_uses_qwen_style_image_calibration_dataset(monkeypatch):
 def test_mage_vl_processor_prepares_image_calibration_sample():
     qmodel = object.__new__(MageVLQModel)
     qmodel.model_local_path = str(MODEL_PATH)
+    qmodel.__dict__["model"] = SimpleNamespace(config=MageVLQModel.loader.load_config(MODEL_PATH))
+    qmodel.__dict__["tokenizer"] = None
     image = Image.open(MODEL_PATH / "examples/dog.jpg").convert("RGB")
     calibration_dataset = [
         [
@@ -143,9 +131,9 @@ def test_mage_vl_processor_prepares_image_calibration_sample():
 def test_mage_vl_native_shell_matches_definition_tree():
     from accelerate import init_empty_weights
 
-    config = AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True)
+    config = MageVLQModel.loader.load_config(MODEL_PATH)
     with init_empty_weights(include_buffers=True):
-        shell = AutoModelForImageTextToText.from_config(config, trust_remote_code=True)
+        shell = MageVLQModel.loader.from_config(config)
 
     layer = shell.model.language_model.layers[0]
 
@@ -169,9 +157,10 @@ def test_mage_vl_native_shell_matches_definition_tree():
     assert hasattr(layer.mlp, "down_proj")
 
 
+@pytest.mark.skipif(not MODEL_PATH.exists(), reason="Mage-VL trained checkpoint not found")
 class TestMageVL(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Mage-VL"
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     OFFLOAD_TO_DISK = False
     EVAL_BATCH_SIZE = 1

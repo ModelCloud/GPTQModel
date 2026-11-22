@@ -3,12 +3,13 @@
 
 import torch
 
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.module_preprocessor import ModulePreProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import (
     AutoModuleDecoderConfig,
+    CalibrationConfig,
     QuantizeConfig,
+    RTNConfig,
     SmootherConfig,
     SmoothMAD,
     TensorParallelPadderConfig,
@@ -46,7 +47,8 @@ def test_module_preprocessor_records_tensor_parallel_padder_and_smoother_plan():
     linear = torch.nn.Linear(10, 8, bias=False)
     named = NamedModule(linear, name="proj", full_name="model.layers.0.proj", layer_index=0)
 
-    qcfg = QuantizeConfig(
+    # #5302: only weight-only recipes (RTN here) apply a top-level smoother.
+    qcfg = RTNConfig(
         bits=4,
         group_size=12,
         preprocessors=[

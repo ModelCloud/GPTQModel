@@ -1,0 +1,93 @@
+{
+  "tokenizer_sha256": "47752d33008f5dd7cc91d875f1b798d1f1ad8f6a0e84aac9e67cbb49f9da16af",
+  "cases": [
+    {
+      "text": "Hello, Raon!",
+      "ids": [
+        14312,
+        44,
+        21804,
+        250,
+        33
+      ],
+      "decoded": "Hello, Raon!"
+    },
+    {
+      "text": "안녕하세요. 반갑습니다.",
+      "ids": [
+        29189,
+        46,
+        71850,
+        794,
+        46
+      ],
+      "decoded": "안녕하세요. 반갑습니다."
+    },
+    {
+      "text": "中文与日本語 mixed 👩🏽‍💻",
+      "ids": [
+        63110,
+        14895,
+        149275,
+        11284,
+        36427,
+        169,
+        44611,
+        189,
+        45964,
+        33422,
+        187
+      ],
+      "decoded": "中文与日本語 mixed 👩🏽‍💻"
+    },
+    {
+      "text": "def f(x):\n    return x + 1\n",
+      "ids": [
+        226252,
+        40,
+        120,
+        2114,
+        261,
+        176921,
+        426,
+        32,
+        49,
+        10
+      ],
+      "decoded": "def f(x):\n    return x + 1\n"
+    },
+    {
+      "text": " a\t b\n\n  c",
+      "ids": [
+        247,
+        9,
+        277,
+        269,
+        32,
+        254
+      ],
+      "decoded": " a\t b\n\n  c"
+    },
+    {
+      "text": "<|im_start|>assistant\n<think>\n",
+      "ids": [
+        259201,
+        39039,
+        10,
+        259213,
+        10
+      ],
+      "decoded": "<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "text": "é  é\u0000",
+      "ids": [
+        4213,
+        32,
+        27954,
+        0
+      ],
+      "decoded": "é  é\u0000"
+    }
+  ]
+}

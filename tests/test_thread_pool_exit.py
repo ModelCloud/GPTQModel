@@ -74,7 +74,7 @@ def test_concurrent_first_call_builds_and_registers_one_pool(monkeypatch):
     builds = []
     registrations = []
 
-    def build():
+    def build(**kwargs):
         builds.append(1)
         started.set()
         assert release.wait(timeout=5)

@@ -61,7 +61,6 @@ def _requant_args(tmp_path, mode):
         group_size=64,
         no_act_group_aware=False,
         desc_act=False,
-        scale_search="activation",
         calibration_parquet=None,
         dataset_path="dataset",
         dataset_name=None,
@@ -191,6 +190,10 @@ def test_updates_only_selected_runtime_embedding_paths(
 
     assert set(model.quantize_config.dynamic) == expected_targets
     assert model.requantize_kwargs["embed_quant_mode"] is QuantizeEmbed(mode)
+    calibration = model.requantize_kwargs["calibration"]
+    assert (calibration.dataset, calibration.concat_size, calibration.concat_separator, calibration.sort) == (
+        ["calibration"], 128, "\n", "desc",
+    )
     assert model.saved_to == args.output
     assert output == tmp_path / mode
 
@@ -275,3 +278,62 @@ def test_rejects_unresolved_embedding_paths(
 
     assert model.requantize_kwargs is None
     assert model.saved_to is None
+
+
+_EMBED_CONFIG = {
+    "bits": 4,
+    "group_size": 64,
+    "sym": True,
+    "desc_act": False,
+    "act_group_aware": True,
+}
+
+
+def test_embed_config_round_trips_through_a_real_gptq_config():
+    """The tool's override must survive save -> load, not only the stub (#5206)."""
+
+    config = GPTQConfig(
+        bits=4,
+        group_size=64,
+        dynamic={
+            "model.embed_tokens": dict(_EMBED_CONFIG),
+            "lm_head": dict(_EMBED_CONFIG),
+        },
+    )
+
+    payload = config.to_dict()
+    reloaded = GPTQConfig.from_quant_config(payload)
+
+    assert reloaded.dynamic == {
+        "model.embed_tokens": _EMBED_CONFIG,
+        "lm_head": _EMBED_CONFIG,
+    }
+    assert "scale_search" not in payload["dynamic"]["model.embed_tokens"]
+
+
+def test_legacy_scale_search_dynamic_key_still_loads_and_is_stripped_on_save():
+    """Checkpoints written before the fix must load and be rewritten cleanly."""
+
+    payload = GPTQConfig(
+        bits=4,
+        group_size=64,
+        dynamic={"model.embed_tokens": dict(_EMBED_CONFIG)},
+    ).to_dict()
+    payload["dynamic"]["model.embed_tokens"]["scale_search"] = "activation"
+
+    reloaded = GPTQConfig.from_quant_config(payload)
+
+    assert reloaded.dynamic["model.embed_tokens"]["scale_search"] == "activation"
+    resaved = reloaded.to_dict()
+    assert "scale_search" not in resaved["dynamic"]["model.embed_tokens"]
+
+
+def test_to_dict_refuses_an_unknown_dynamic_key():
+    """A dynamic map the loader would reject must never reach a checkpoint."""
+
+    config = GPTQConfig(bits=4, group_size=64)
+    # Assignment is a plain dataclass field, so validation has to happen on save.
+    config.dynamic = {"model.embed_tokens": {"scale_seach": "activation"}}
+
+    with pytest.raises(TypeError, match=r"unknown `dynamic\['model\.embed_tokens'\]`"):
+        config.to_dict()

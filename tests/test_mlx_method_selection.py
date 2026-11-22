@@ -13,13 +13,15 @@ pytest.importorskip("mlx.core")
 
 
 @pytest.mark.parametrize("method,fmt,bits,group,sym,expected", [
-    ("paroquant", "paroquant", 4, 128, True, "ParoMlxQuantLinear"),
+    ("paro", "paro", 4, 128, True, "ParoMlxQuantLinear"),
     ("qqq", "qqq", 4, 128, True, "QQQMlxQuantLinear"),
     ("gguf", "gguf", 4, -1, True, "GGUFMlxQuantLinear"),
-    ("fp8", "fp8", 8, -1, True, "FP8MlxQuantLinear"),
     ("bitsandbytes", "bitsandbytes", 4, -1, True, "BitsAndBytesMlxQuantLinear"),
 ])
 def test_mlx_registry_has_method_holder(method, fmt, bits, group, sym, expected):
+    if method == "bitsandbytes":
+        # The MLX BNB holder reuses BitsAndBytesLinear's dependency probe.
+        pytest.importorskip("bitsandbytes")
     from gptqmodel.models._const import DEVICE
     from gptqmodel.quantization.config import FORMAT, METHOD
     from gptqmodel.utils.backend import BACKEND
@@ -34,11 +36,10 @@ def test_mlx_registry_has_method_holder(method, fmt, bits, group, sym, expected)
 
 
 @pytest.mark.parametrize("method,fmt,bits,group,qtype,expected", [
-    ("paroquant", "paroquant", 4, 128, None, "mlx"),
+    ("paro", "paro", 4, 128, None, "mlx"),
     ("qqq", "qqq", 4, 128, None, "mlx"),
     ("gguf", "gguf", 4, -1, "q4_k", "mlx"),
     ("gguf", "gguf", 4, -1, "q3_k", "auto"),
-    ("fp8", "fp8", 8, -1, None, "mlx"),
     ("bitsandbytes", "bitsandbytes", 4, -1, None, "auto"),
     ("exl3", "exl3", 3.0, -1, None, "auto"),
 ])

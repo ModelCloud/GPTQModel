@@ -6,7 +6,7 @@
 
 import os
 
-from model_test import ModelTest
+from model_test import ModelTest, resolve_attn_implementation
 
 
 class Test(ModelTest):
@@ -19,7 +19,6 @@ class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16"  # nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
-    TRUST_REMOTE_CODE = True
     # TODO, update scores later
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
@@ -48,7 +47,7 @@ class Test(ModelTest):
             "evalution_batch_size": "auto",
             "evalution_model_args": {
                 "dtype": "bfloat16",
-                "attn_implementation": "paged|flash_attention_2",
+                "attn_implementation": resolve_attn_implementation(),
                 "device": "cuda:0",
             },
             "evalution_suite_kwargs": {

@@ -49,6 +49,8 @@ import transformers
 from ..looper.named_module import NamedModule
 from ..utils.arch import rocm_arch
 from ..utils.logger import setup_logger
+from ..utils.p2p import safe_move_to
+from ..utils.quant_metrics import relative_error_from_energies
 from ..utils.rocm import IS_ROCM
 
 
@@ -57,22 +59,31 @@ log = setup_logger()
 MXFP4_BLOCK = 32
 _HESSIAN_DTYPE = torch.float32
 
+# E8M0 has no zero and no subnormals: byte 0 is the smallest positive scale,
+# 2**-127, byte 254 is 2**127, and byte 255 is the format's NaN.  The smallest
+# nonzero MXFP4 value is therefore 0.5 * 2**-127 = 2**-128, not 1e-12.
+E8M0_MIN_EXPONENT = -127
+E8M0_MAX_EXPONENT = 127
+
 # Signed E2M1 grid: 15 distinct levels (0 is shared by both signs), matching
 # the OCP MXFP4 element set.  Index 7 is the zero level.
-E2M1_VALUES = torch.tensor(
-    [-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
-    dtype=torch.float32,
-)
-# Index into the unsigned magnitude code (0..7) for each signed-grid index.
-E2M1_MAGNITUDE_INDEX = torch.tensor(
-    [7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6, 7], dtype=torch.uint8
-)
-# Sign bit for each signed-grid index.
-E2M1_SIGN_BIT = torch.tensor(
-    [1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0], dtype=torch.uint8
-)
+E2M1_GRID_VALUES = (-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 # E2M1 magnitude for the 8 unsigned codes.
-E2M1_MAGNITUDES = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
+E2M1_MAGNITUDE_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+# Import-time range consumers need Python scalars.  Deriving them from the
+# lookup tensors below is data-dependent and raises on the meta device (#5776).
+E2M1_MIN_NONZERO_MAGNITUDE = min(value for value in E2M1_MAGNITUDE_VALUES if value > 0.0)
+E2M1_MAX_MAGNITUDE = max(E2M1_MAGNITUDE_VALUES)
+
+# These are process-wide static codebooks, not module state: build them on CPU
+# explicitly so importing this module inside `torch.device("meta")` leaves the
+# tables real instead of meta tensors (#5776).
+E2M1_VALUES = torch.tensor(E2M1_GRID_VALUES, dtype=torch.float32, device="cpu")
+# Index into the unsigned magnitude code (0..7) for each signed-grid index.
+E2M1_MAGNITUDE_INDEX = torch.tensor([7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6, 7], dtype=torch.uint8, device="cpu")
+# Sign bit for each signed-grid index.
+E2M1_SIGN_BIT = torch.tensor([1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0], dtype=torch.uint8, device="cpu")
+E2M1_MAGNITUDES = torch.tensor(E2M1_MAGNITUDE_VALUES, dtype=torch.float32, device="cpu")
 
 
 def _device_const(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -122,11 +133,38 @@ def balance_pre_scale_from_diag(
     ``p_j = w_std_j^alpha / act_rms_j^(1 - alpha)`` with
     ``act_rms_j = sqrt(sum_x2_j / T)``.  Folding ``p`` into the input and
     ``1/p`` into the weight cancels in the GEMM.
+
+    ``w_std_j`` is the unbiased per-input-channel weight standard deviation.
+    That estimate is undefined for a single output row, so the degenerate
+    one-row case uses the population standard deviation, which is exactly
+    zero, and then the documented positive floor.  Zero-variance columns take
+    the same floor.  Non-finite statistics are rejected here rather than
+    clamped into a plausible-looking scale.
     """
 
-    w_std = weight.float().std(dim=0).clamp_min(1e-8)
+    weight = weight.float()
+    if weight.ndim != 2:
+        raise ValueError(f"MACaQ: balance pre-scale expects a 2-D weight, got shape {tuple(weight.shape)}.")
+    if weight.shape[0] == 0:
+        raise ValueError("MACaQ: balance pre-scale needs at least one output row.")
+    if weight.shape[0] == 1:
+        # `torch.std` defaults to the unbiased estimate (correction=1), which
+        # is 0/0 for one sample.  The population standard deviation is well
+        # defined here and is exactly zero; the floor below keeps the result
+        # finite instead of clamping NaN into a plausible-looking scale.
+        w_std = weight.std(dim=0, correction=0)
+    else:
+        w_std = weight.std(dim=0)
+    if not torch.isfinite(w_std).all():
+        raise ValueError("MACaQ: weight standard deviation is non-finite; D1 balance pre-scale is undefined.")
+    w_std = w_std.clamp_min(1e-8)
     act_rms = (sum_x2.float() / max(float(n_tokens), 1.0)).clamp_min(1e-12).sqrt()
-    return (w_std.pow(alpha) / act_rms.pow(1.0 - alpha)).clamp(1e-4, 1e4)
+    if not torch.isfinite(act_rms).all():
+        raise ValueError("MACaQ: activation RMS is non-finite; D1 balance pre-scale is undefined.")
+    pre_scale = (w_std.pow(alpha) / act_rms.pow(1.0 - alpha)).clamp(1e-4, 1e4)
+    if not torch.isfinite(pre_scale).all():
+        raise ValueError("MACaQ: D1 balance pre-scale is non-finite; refusing to emit NaN artifacts.")
+    return pre_scale
 
 
 def balance_pre_scale(
@@ -141,33 +179,28 @@ def balance_pre_scale(
 # ---------------------------------------------------------------------------
 # OCP MXFP4 round-to-nearest (E2M1 + E8M0)
 # ---------------------------------------------------------------------------
+_E2M1_CODE_THRESHOLDS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
+
+
 def _e2m1_code_from_scaled(abs_scaled: torch.Tensor, *, tie_high: bool = False) -> torch.Tensor:
     """Nearest E2M1 magnitude code (0..7) for values already divided by the scale.
 
     ``tie_high=False`` uses strict ``>`` comparisons, matching the MACaQ weight
     quantizer.  The MACaQ activation kernels compare with ``>=``; pass
     ``tie_high=True`` to reproduce that tie behavior bit-for-bit.
+
+    The codes fit in four bits, so they accumulate in ``uint8``.  A nested
+    ``torch.where`` tree ending in ``.long()`` materialized an int64 plane per
+    weight; on an 8B ``down_proj`` that was 448 MiB per plane, and the exponent
+    screen builds three (#4820).  ``uint8`` is only ever used as data here, not
+    as an index.
     """
 
-    def above(value: float) -> torch.Tensor:
-        return abs_scaled >= value if tie_high else abs_scaled > value
-
-    return torch.where(
-        above(5.0), 7,
-        torch.where(
-            above(3.5), 6,
-            torch.where(
-                above(2.5), 5,
-                torch.where(
-                    above(1.75), 4,
-                    torch.where(
-                        above(1.25), 3,
-                        torch.where(above(0.75), 2, torch.where(above(0.25), 1, 0)),
-                    ),
-                ),
-            ),
-        ),
-    ).long()
+    code = torch.zeros(abs_scaled.shape, dtype=torch.uint8, device=abs_scaled.device)
+    for threshold in _E2M1_CODE_THRESHOLDS:
+        above = abs_scaled >= threshold if tie_high else abs_scaled > threshold
+        code += above.to(torch.uint8)
+    return code
 
 
 @torch.no_grad()
@@ -195,18 +228,41 @@ def mxfp4_rtn_signed_index(
         )
     groups = in_features // block_size
     grouped = weight.float().view(out_features, groups, block_size)
-    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+    amax = grouped.abs().amax(dim=-1, keepdim=True)
+    # An exact-zero block keeps the historical zero-preserving floor so its
+    # packed scale byte does not move.  A nonzero peak must not take that
+    # floor: `floor(log2(amax)) - 2` is a valid E8M0 exponent down to the
+    # format's smallest scale 2**-127, and the old `clamp(min=1e-12)` flushed
+    # blocks like a constant 2**-50 that are exactly representable as
+    # 4 * 2**-52 (#5627).
+    amax = torch.where(amax == 0, torch.full_like(amax, 1e-12), amax)
     log2_scale = torch.floor(torch.log2(amax)) - 2.0 + float(exp_offset)
-    scale = torch.exp2(log2_scale)
+    # Clamp the finite exponent to E8M0's actual range *before* the codes are
+    # computed.  Inf/NaN are left alone so the packer can still emit 0xFF.
+    log2_scale = torch.where(
+        torch.isfinite(log2_scale),
+        log2_scale.clamp(float(E8M0_MIN_EXPONENT), float(E8M0_MAX_EXPONENT)),
+        log2_scale,
+    )
+    # `2 ** exponent` is bit-exact over the whole E8M0 range; `exp2` rounds
+    # 2**-127 one ulp low on CUDA (the same reason `decode_e8m0_scale` uses
+    # `torch.pow`).  A one-ulp-low scale would change the codes of a block at
+    # the bottom of the range.
+    scale = torch.pow(2.0, log2_scale)
 
     abs_scaled = (grouped / scale).abs()
     code = _e2m1_code_from_scaled(abs_scaled, tie_high=tie_high)
     negative = grouped < 0
-    signed_index = torch.where(
+    # Build the signed grid in uint8 (values 0..14) and widen once.  int32 is
+    # the narrowest dtype PyTorch accepts as a gather index; int64 doubled
+    # every plane for no benefit, and the exponent screen holds one per offset
+    # (#4820).
+    signed = torch.where(
         code == 0,
         torch.full_like(code, 7),
         torch.where(negative, 7 - code, 7 + code),
-    ).view(out_features, in_features)
+    )
+    signed_index = signed.to(torch.int32).view(out_features, in_features)
     scale_element = scale.expand(out_features, groups, block_size).reshape(out_features, in_features).contiguous()
     return signed_index, log2_scale.squeeze(-1), scale_element
 
@@ -281,11 +337,39 @@ def pack_mxfp4_from_signed_index(
     sign = _device_const(E2M1_SIGN_BIT, device)[signed_index]
     nibbles = (sign.to(torch.uint8) << 3) | magnitude.to(torch.uint8)
     packed = (nibbles[:, 1::2] << 4) | nibbles[:, 0::2]
-    biased = (log2_scale + 127).clamp(0, 254).to(torch.int32)
-    scales = biased.to(torch.uint8).contiguous().view(torch.float8_e8m0fnu)
+    biased = (log2_scale + 127).clamp(0, 254)
+    # A block holding a NaN/Inf value has no finite E8M0 exponent. Casting the
+    # non-finite exponent to int folds it into a plausible one (0 on CUDA), so
+    # write the format's NaN code (0xFF) instead and let it reach the output.
+    biased = torch.where(
+        torch.isfinite(log2_scale), biased, torch.full_like(biased, 255.0)
+    )
+    scales = biased.to(torch.int32).to(torch.uint8).contiguous().view(torch.float8_e8m0fnu)
     if scales.shape != (out_features, groups):
         raise AssertionError("MACaQ: packed scale shape mismatch")
     return packed.contiguous(), scales
+
+
+def decode_mxfp4_scales(
+    scales: torch.Tensor, out_features: int, groups: int
+) -> torch.Tensor:
+    """Decode E8M0 scale bytes to FP32 powers of two.
+
+    ``scales`` may be an ``E8M0`` tensor or its ``uint8`` view and may carry
+    kernel padding; only the first ``out_features`` rows and ``groups`` columns
+    are read. E8M0 ``0xFF`` is the format's NaN, not ``2**128``:
+    :func:`pack_mxfp4_from_signed_index` writes it for a block that held a
+    NaN/Inf value.
+    """
+
+    scale_bytes = scales.view(torch.uint8)[:out_features, :groups].to(torch.float32)
+    # `2 ** exponent` rather than `exp2`: `exp2(0 - 127)` rounds 2**-127 one ulp
+    # low on CUDA, which would decode a representable block incorrectly.
+    return torch.where(
+        scale_bytes == 255.0,
+        torch.full_like(scale_bytes, float("nan")),
+        torch.pow(2.0, scale_bytes - 127.0),
+    )
 
 
 @torch.no_grad()
@@ -308,8 +392,7 @@ def dequantize_mxfp4(
     groups = in_features // MXFP4_BLOCK
     if packed.shape[1] * 2 < in_features:
         raise ValueError("MACaQ: `packed` holds fewer than `in_features` values.")
-    scale_bytes = scales.view(torch.uint8)[:out_features, :groups].to(torch.float32)
-    scale = torch.exp2(scale_bytes - 127.0)
+    scale = decode_mxfp4_scales(scales, out_features, groups)
     lo = (packed & 0x0F).to(torch.int64)
     hi = ((packed >> 4) & 0x0F).to(torch.int64)
     code = torch.stack([lo, hi], dim=-1).reshape(out_features, packed.shape[1] * 2)[:, :in_features]
@@ -359,9 +442,13 @@ def _flip_sweep(
     delta = torch.where(up_better, delta_up, delta_down)
     best_delta, best_column = delta.min(dim=1)
     improving = best_delta < -1e-12
-    if not improving.any():
-        return torch.empty(0, dtype=torch.long, device=signed_index.device)
-
+    # No data-dependent early return here: ``if not improving.any(): return``
+    # is a Dynamo graph break, and the resume frames of a broken graph keep
+    # this sweep's whole working set (the masks, ``best_column`` and the
+    # Hessian operands) in an unreachable reference cycle that only a cyclic
+    # GC pass reclaims (issue #4801). A converged iteration instead runs one
+    # wasted update whose empty masks make every index_put a no-op, so the
+    # refined codes are bit-identical.
     local_rows = torch.arange(rows.shape[0], device=signed_index.device)
     up_selected = up_better[local_rows, best_column]
     up_mask = up_selected & improving
@@ -395,7 +482,15 @@ def _compiled_flip_sweep(*args, **kwargs):
     global _COMPILED_FLIP_SWEEP
     with _COMPILED_FLIP_LOCK:
         if _COMPILED_FLIP_SWEEP is None:
-            _COMPILED_FLIP_SWEEP = torch.compile(_flip_sweep, dynamic=True)
+            # ``fullgraph=True`` is load-bearing, not a debugging aid: a graph
+            # break leaves the sweep's working set in Dynamo resume frames
+            # that only a cyclic GC pass reclaims (issue #4801). The sweep is
+            # written without data-dependent control flow so the whole call
+            # traces into one graph, and a future break fails loudly here
+            # instead of silently pinning the Hessian until ``gc.collect()``.
+            _COMPILED_FLIP_SWEEP = torch.compile(
+                _flip_sweep, dynamic=True, fullgraph=True
+            )
         return _COMPILED_FLIP_SWEEP(*args, **kwargs)
 
 
@@ -527,9 +622,15 @@ def macaq_quantize_weight(
 
     pre_scale = None
     if pre_mode != "none":
-        pre_scale = balance_pre_scale(weight, hessian, n_tokens, alpha=pre_alpha)
-        weight = weight / pre_scale.unsqueeze(0)
-        hessian = hessian * pre_scale.unsqueeze(0) * pre_scale.unsqueeze(1)
+        # Round once to the stored BF16 pre-scale before building the
+        # transformed weight and Hessian. Inference applies the stored BF16
+        # value, so quantizing against a different FP32 value changes the codes
+        # (and the reported loss) relative to the transform the layer ships
+        # with (#5840).
+        pre_scale = balance_pre_scale(weight, hessian, n_tokens, alpha=pre_alpha).to(torch.bfloat16)
+        pre_scale_work = pre_scale.float()
+        weight = weight / pre_scale_work.unsqueeze(0)
+        hessian = hessian * pre_scale_work.unsqueeze(0) * pre_scale_work.unsqueeze(1)
 
     if rotation == "hadamard":
         bh_bf16 = make_hadamard(had_block, device=device, dtype=torch.float32).to(torch.bfloat16)
@@ -540,11 +641,20 @@ def macaq_quantize_weight(
         rotated_weight = weight
         rotated_hessian = hessian
 
+    # `weight` and `hessian` are only read above: the rotated copies are what
+    # the rest of the recipe consumes. Drop the pre-scaled temporaries now so
+    # they do not overlap the flip sweep (one C^2 fp32 Hessian copy per module,
+    # with every module of a layer running concurrently).
+    del hessian, weight
+
     flip_hessian = None
     if do_flip or exp_screen:
         flip_hessian = rotated_hessian.clone()
         if ridge > 0:
             flip_hessian.diagonal().add_(ridge * flip_hessian.diagonal().mean())
+    # `rotated_hessian` only seeds the flip metric; release it after the clone
+    # so the sweep holds a single C^2 Hessian copy.
+    del rotated_hessian
 
     if exp_screen and flip_hessian is not None and len(exp_offsets) > 1:
         signed_index, log2_scale, scale_element = screen_block_exponents(
@@ -563,7 +673,6 @@ def macaq_quantize_weight(
             signed_index, scale_element, rotated_weight, flip_hessian, n_flip_iters,
             fast=fast_flip, compile_flip=compile_flip,
         )
-
     packed, scales = pack_mxfp4_from_signed_index(signed_index, log2_scale, block_size)
     result = MacaqQuantResult(
         W_packed=packed,
@@ -572,7 +681,7 @@ def macaq_quantize_weight(
         in_features=in_features,
         out_features=out_features,
         block_size=block_size,
-        pre_scale=None if pre_scale is None else pre_scale.to(torch.bfloat16),
+        pre_scale=pre_scale,
     )
     if return_dequantized:
         grid = _device_const(E2M1_VALUES, device)
@@ -692,6 +801,13 @@ class Macaq:
             target_device = self.dev
         target_device = torch.device(target_device)
         if not self._device_hessian_partials:
+            # A repeat materialization with no new batches returns the existing
+            # Hessian unchanged.  ``adopt_hessian_from`` installs an adopted
+            # Hessian here so ``quantize`` consumes it instead of zeroes.
+            if self.H2 is not None:
+                if self.H2.device == target_device and self.H2.dtype == _HESSIAN_DTYPE:
+                    return self.H2
+                return safe_move_to(self.H2, target_device, dtype=_HESSIAN_DTYPE)
             self.H2 = torch.zeros(
                 (self.columns, self.columns), dtype=_HESSIAN_DTYPE, device=target_device
             )
@@ -707,6 +823,41 @@ class Macaq:
             del partial
         self.H2 = merged
         return self.H2
+
+    def adopt_hessian_from(self, leader: "Macaq") -> None:
+        """Replace this task's Hessian with a private copy of ``leader``'s.
+
+        Sibling projections of one ``:in=<tag>`` group see the same activation
+        tensor, so their float64 sums are bitwise identical.  The leader's
+        partials are folded into ``H2`` first; the follower's copy is
+        independent because the quantizer consumes the metric in place.
+        """
+
+        if leader is self:
+            return
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"MACaQ: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+
+        source = leader.materialize_hessian(self.dev)
+        with leader.lock:
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            copy = safe_move_to(
+                source.detach(),
+                self.dev,
+                dtype=_HESSIAN_DTYPE,
+                copy=True,
+            )
+
+        with self.lock:
+            self.H2 = copy
+            self.nsamples = nsamples
+            self.fwd_counter = fwd_counter
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
 
     def _layer_weight(self) -> torch.Tensor:
         weight = self.layer.weight.data
@@ -817,4 +968,8 @@ class Macaq:
         metric = hessian.to(torch.float64)
         error = (delta @ metric * delta).sum()
         denominator = (weight.to(torch.float64) @ metric * weight.to(torch.float64)).sum()
-        return float((error / denominator.clamp_min(1e-12)).item())
+        # Divide by the reference energy itself: an absolute floor turned
+        # total signal loss on a small reference into a near-zero error (#5635).
+        return relative_error_from_energies(
+            float(error.item()), float(denominator.item())
+        )

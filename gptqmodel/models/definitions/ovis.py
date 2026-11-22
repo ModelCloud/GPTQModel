@@ -5,7 +5,6 @@
 
 import copy
 import logging
-from types import SimpleNamespace
 from typing import Dict
 
 import torch
@@ -16,21 +15,22 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class OvisQModel(BaseQModel):
-    HF_CONVERSION_MAP_REVERSED = (
-        # Ovis 1.6 builds the SigLIP visual backbone via `AutoModel`, whose
-        # runtime shell exposes `visual_tokenizer.backbone.*` directly, while
-        # checkpoint tensors still live under `visual_tokenizer.backbone.vision_model.*`.
-        SimpleNamespace(
-            source_patterns=[r"^visual_tokenizer\.backbone\.(?!vision_model\.)(.+)$"],
-            target_patterns=[r"^visual_tokenizer.backbone.vision_model.\1"],
-            operations=[],
-        ),
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.ovis.configuration_ovis.OvisConfig",
+        model_class="gptqmodel.models.ports.ovis.modeling_ovis.Ovis",
+        processor_class="gptqmodel.models.ports.ovis.processing_ovis.OvisProcessor",
     )
+    require_load_processor = True
+    require_trust_remote_code = False
 
     pre_lm_head_norm_module = "llm.model.norm"
+    lm_head = "llm.lm_head"
+    rotary_embedding = "llm.model.rotary_emb"
 
     module_tree = [
         "llm",
@@ -53,15 +53,33 @@ class OvisQModel(BaseQModel):
 
     IGNORE_ID = -100
 
-    def monkey_patch(self):
-        # From config.json, we know that visual_tokenizer.dtype is float32 and text model.confi.dtype is bfloat16.
-        # But before transformers<4.49.0, the dtype returned by AutoModel.from_config(config.visual_tokenizer_config)
-        # is bfloat16. This should be a bug, but OVIS generate() unexpectedly works properly.
-        # This bug was fixed in transformers 4.49.0. So visual_tokenizer needs to be converted to model.config.dtype
-        self.model.visual_tokenizer = self.model.visual_tokenizer.to(dtype=self.model.llm.dtype)
-        self.model.vte = self.model.vte.to(dtype=self.model.llm.dtype)
+    @classmethod
+    def get_base_modules(cls, model):
+        return [*super().get_base_modules(model), "visual_tokenizer", "vte"]
 
-        self.model.llm.generation_config.max_length = 8192
+    @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        tree = super()._resolve_effective_module_tree(model, quantize_config, detector)
+        config = getattr(getattr(model, "config", None), "llm_config", None)
+        if getattr(config, "model_type", None) == "gemma2":
+            # Gemma 2 sandwich norms: `post_attention_layernorm` normalizes the
+            # attention output before the residual add, and the MLP reads
+            # `pre_feedforward_layernorm`. Declare the MLP input norm before the
+            # MLP so AWQ folds gate/up into it rather than into the post-norm.
+            blocks = tree[-1]
+            ordered = {}
+            for key, value in blocks.items():
+                if key == "mlp":
+                    ordered["pre_feedforward_layernorm"] = ("pre_feedforward_layernorm:!",)
+                ordered[key] = value
+            ordered["post_feedforward_layernorm"] = ("post_feedforward_layernorm:!",)
+            tree[-1] = ordered
+        return tree
+
+    def monkey_patch(self):
+        self.model.text_tokenizer = getattr(self.tokenizer, "tokenizer", self.tokenizer)
+        self.model.processor = self.processor
+        self.model.visual_tokenizer.image_processor = self.processor.image_processor
 
     def pre_quantize_generate_hook_start(self):
         self.shell_module_materialize(self.model.llm.model.embed_tokens, self.quantize_config.device)
@@ -115,7 +133,7 @@ class OvisQModel(BaseQModel):
         )
 
         if pixel_values is None:
-            pixel_values, _ = self.visual_tokenizer.mock_input()
+            pixel_values, _ = self.model.visual_tokenizer.mock_input()
 
         input_ids = input_ids[:text_max_length]
         labels = labels[:text_max_length]
@@ -126,16 +144,16 @@ class OvisQModel(BaseQModel):
             "labels": labels,
         }
 
-    def prepare_dataset(self,calibration_dataset,batch_size: int = 1, **kwargs):
+    def _prepare_calibration_batches(self, conversations, batch_size):
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, self.preprocess_dataset):
+        for batch in batched(conversations, batch_size, self.preprocess_dataset):
             pixel_values, input_ids, labels = tuple([instance[key] for instance in batch]
                                                     for key in ("pixel_values", "input_ids", "labels"))
             input_ids = torch.nn.utils.rnn.pad_sequence(
                 input_ids,
                 batch_first=True,
-                padding_value=self.text_tokenizer.pad_token_id)
-            attention_mask = torch.ne(input_ids, self.text_tokenizer.pad_token_id)
+                padding_value=self.model.get_text_tokenizer().pad_token_id)
+            attention_mask = torch.ne(input_ids, self.model.get_text_tokenizer().pad_token_id)
             labels = torch.nn.utils.rnn.pad_sequence(
                 labels,
                 batch_first=True,
@@ -153,6 +171,15 @@ class OvisQModel(BaseQModel):
             })
 
         return calib_data
+
+    def prepare_dataset(self,calibration_dataset,batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+        )
 
     def generate(self, inputs=None, **kwargs):
         """shortcut for model.generate"""
@@ -185,3 +212,12 @@ class OvisQModel(BaseQModel):
 
     def run_input_capture(self, example, use_cache: bool, data_device):
         return self.model.generate(inputs=example.pop("input_ids"), **example)
+
+    def capture_first_layer_input_kwargs(self, args, kwargs, batch_device, layer_input_kwargs):
+        # Capture runs through generate(), which always threads a live
+        # DynamicCache into the decoder. Replaying the captured kwargs would
+        # append to it on every AWQ scale-search forward of `self_attn`.
+        layer_input_kwargs = super().capture_first_layer_input_kwargs(args, kwargs, batch_device, layer_input_kwargs)
+        if layer_input_kwargs.get("past_key_values") is not None:
+            layer_input_kwargs["past_key_values"] = None
+        return layer_input_kwargs

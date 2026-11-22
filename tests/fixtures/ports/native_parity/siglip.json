@@ -1,0 +1,112 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_factor": 1.0,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "model_type": "siglip",
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "problem_type": null,
+  "return_dict": true,
+  "text_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.1,
+   "bos_token_id": 49406,
+   "chunk_size_feed_forward": 0,
+   "dropout": 0.1,
+   "dtype": null,
+   "eos_token_id": 49407,
+   "hidden_act": "gelu_pytorch_tanh",
+   "hidden_size": 64,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "initializer_range": 0.02,
+   "intermediate_size": 37,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_norm_eps": 1e-06,
+   "max_position_embeddings": 512,
+   "model_type": "siglip_text_model",
+   "num_attention_heads": 2,
+   "num_hidden_layers": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "pad_token_id": 1,
+   "problem_type": null,
+   "projection_size": 64,
+   "return_dict": true,
+   "vocab_size": 99
+  },
+  "transformers_version": "5.23.0",
+  "vision_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.1,
+   "chunk_size_feed_forward": 0,
+   "dropout": 0.1,
+   "dtype": null,
+   "hidden_act": "gelu_pytorch_tanh",
+   "hidden_size": 64,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "image_size": 4,
+   "initializer_range": 0.02,
+   "intermediate_size": 37,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_norm_eps": 1e-06,
+   "model_type": "siglip_vision_model",
+   "num_attention_heads": 2,
+   "num_channels": 3,
+   "num_hidden_layers": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "patch_size": 2,
+   "problem_type": null,
+   "return_dict": true,
+   "vision_use_head": true
+  }
+ },
+ "config_class": "SiglipConfig",
+ "config_module": "configuration_siglip",
+ "extra_inputs": {},
+ "float_inputs": {
+  "pixel_values": {
+   "dtype": "float32",
+   "shape": [
+    12,
+    3,
+    4,
+    4
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_siglip",
+   "SiglipForImageClassification"
+  ]
+ ]
+}

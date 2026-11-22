@@ -10,7 +10,6 @@ import torch
 import transformers
 
 from ..looper.loop_processor import (
-    CalibrationConfig,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
@@ -18,6 +17,7 @@ from ..looper.loop_processor import (
 from ..looper.named_module import NamedModule
 from ..quantization.config import (
     AutoModuleDecoderConfig,
+    CalibrationConfig,
     QuantizeConfig,
     SmootherConfig,
     TensorParallelPadderConfig,
@@ -30,6 +30,9 @@ def _get_number_of_rows_and_cols(layer: torch.nn.Module) -> tuple[int, int]:
 
     if isinstance(layer, transformers.Conv1D):
         return layer.weight.shape[1], layer.weight.shape[0]
+
+    if getattr(layer, "_packed_source_linear", False):
+        return layer.out_features, layer.in_features
 
     return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
 

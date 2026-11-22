@@ -178,10 +178,10 @@ def test_hook_end_skips_absent_optional_modules(tmp_path, offload_to_disk):
 
 
 def _tiny_ernie4_5_vl_moe():
-    from transformers.models.ernie4_5_vl_moe.configuration_ernie4_5_vl_moe import (
+    from gptqmodel.models.ports.native.ernie4_5_vl_moe.configuration_ernie4_5_vl_moe import (
         Ernie4_5_VLMoeConfig,
     )
-    from transformers.models.ernie4_5_vl_moe.modeling_ernie4_5_vl_moe import (
+    from gptqmodel.models.ports.native.ernie4_5_vl_moe.modeling_ernie4_5_vl_moe import (
         Ernie4_5_VLMoeForConditionalGeneration,
     )
 
@@ -627,41 +627,9 @@ def test_capture_removes_hook_when_hook_start_raises(capture_contexts, tracked_p
     assert len(model.hooked_layer._forward_pre_hooks) == 0
 
 
-def test_capture_runs_cleanup_when_progress_bar_close_raises(capture_contexts, tracked_pre_hook):
-    """A failing progress-bar close must not skip the capture cleanup.
-
-    Closing the bar is cosmetic; releasing the generate-hook state and detaching
-    the pre-hook are not. When the two were sequential statements in the same
-    `finally`, a raising `close()` escaped before either obligation ran, leaving
-    the model mutated and the pre-hook live for the rest of the quantization run.
-    """
-
-    events = []
-    model = _HookedModel()
-    capture = _capture(
-        _FakeGPTQModel(
-            model,
-            hook_start=lambda: events.append("hook_start"),
-            hook_end=lambda: events.append("hook_end"),
-        ),
-        close_error=RuntimeError("progress bar close failed"),
-    )
-
-    with pytest.raises(RuntimeError, match="progress bar close failed"):
-        capture.cache_inputs(
-            layers=[model.hooked_layer],
-            calibration_data=_calibration_data(),
-            use_cache=False,
-        )
-
-    assert events == ["hook_start", "hook_end"]
-    assert tracked_pre_hook["count"] == 1
-    assert len(model.hooked_layer._forward_pre_hooks) == 0
-
-
 @pytest.mark.parametrize("forward_raises", [True, False])
 def test_capture_preserves_original_error_when_progress_bar_close_raises(
-    capture_contexts, forward_raises
+    capture_contexts, tracked_pre_hook, forward_raises
 ):
     """A renderer failure follows the same precedence as a release failure.
 
@@ -705,6 +673,7 @@ def test_capture_preserves_original_error_when_progress_bar_close_raises(
         assert warnings == []
 
     assert events == ["hook_start", "hook_end"]
+    assert tracked_pre_hook["count"] == 1
     assert len(model.hooked_layer._forward_pre_hooks) == 0
 
 

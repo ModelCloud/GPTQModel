@@ -5,7 +5,7 @@
 
 import copy
 import time
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch.nn import Module
@@ -15,11 +15,11 @@ from ..eora.eora import eora_compute_lora, eora_process_input
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CheckpointSupport,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
+    install_moe_padding_zero_hook,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -31,7 +31,7 @@ from ..models.writer import (
     PROCESS_LOG_TIME,
     PROCESS_USED_MEMORY,
 )
-from ..quantization.config import QuantizeConfig
+from ..quantization.config import CalibrationConfig, QuantizeConfig
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
@@ -43,6 +43,9 @@ log = setup_logger()
 
 class EoraProcessor(LoopProcessor):
     """Builds LoRA-style error adapters from dequantization residuals and activations."""
+
+    # EoRA rows describe adapter fitting time, not quantization loss/samples/damp.
+    owns_quant_log = False
 
     lifecycle = ProcessorLifecycleConfig(
         checkpointing=CheckpointSupport.SECONDARY,
@@ -150,8 +153,18 @@ class EoraProcessor(LoopProcessor):
         def tmp(module, input: Tuple[torch.Tensor, ...], output: torch.Tensor):
             """Processes one batch of inputs into an EoRA contribution segment."""
 
+            # The mask wrapper only masks `[B, S, H]` captures. A flattened
+            # `[B*S, H]` full grid (an all-expert MoE bypass or a shared expert
+            # that receives `hidden_states.view(-1, H)`) reached this hook with
+            # its padding, and with any excluded attention sinks, still in it:
+            # both the covariance and the token count were wrong (#5719). Route
+            # it through the same calibration-row filter QQQ, MACaQ and EXL3
+            # use. Natively routed rows keep their count and are handled by
+            # `register_moe_root_capture_hook` instead.
+            rows = self.calibration_rows(input[0])
+
             _, contribution, token_count = self.eora_process_input(
-                input=input,
+                input=(rows,),
                 name=name,
                 sample_size=self.num_batches,
                 # AUTO_NF12 forwards a packed wrapper that has no `weight`
@@ -165,6 +178,27 @@ class EoraProcessor(LoopProcessor):
                 token_count=token_count,
             )
         return tmp
+
+    def register_moe_root_capture_hook(
+        self,
+        moe_block: Module,
+        moe_block_name: str,
+        handles: List[Any],
+    ) -> bool:
+        """Zero calibration padding rows on the MoE block input.
+
+        Routed experts are called on the rows their router selected, so the row
+        count is unrelated to the calibration keep mask and the padding cannot be
+        filtered in their hooks. Zeroing the padded rows of the MoE input makes
+        them reach every expert as an all-zero row, which adds nothing to that
+        expert's ``X^T X`` (#5719).
+
+        EoRA keeps the mask wrapper active for `[B, S, H]` captures, so unlike
+        GPTQ it does not need ``preserve_batch_keep_mask`` to gate this.
+        """
+
+        del moe_block_name
+        return install_moe_padding_zero_hook(self, moe_block, handles)
 
     def _accumulate_eora_contribution(
         self,
@@ -384,7 +418,9 @@ class EoraProcessor(LoopProcessor):
         del self._segment_accumulators
         del self._module_target_devices
 
-        # hack: store loras into model until `save()` is called
+        # Store the generated adapters on the model for its lifetime: every
+        # `save()` exports this same adapter, and the writer no longer deletes
+        # the only copy after the first export (#5354).
         model.lora_results = self.results()
 
         super().finalize(model=model, **kwargs)

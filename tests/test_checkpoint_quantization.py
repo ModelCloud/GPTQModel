@@ -25,7 +25,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeForCausalLM,
 )
 
-from gptqmodel import BACKEND, CheckpointConfig, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, CheckpointConfig, GPTQModel, QuantizeConfig
 from gptqmodel.looper.checkpoint import CheckpointExtension, CheckpointStopped
 from gptqmodel.looper.gptq_checkpoint import (
     GPTQCheckpointAdapter,
@@ -152,7 +152,9 @@ def test_subprocess_recovery(
         "bos_token_id": 1,
         "eos_token_id": 2,
     }
-    if method in {"qqq", "exl3"} or format == "gemv_fast":
+    # LLM-AWQ only accepts group_size=128 and requires every in_features to be
+    # divisible by it, so the 64-wide attention fixture cannot be quantized.
+    if method in {"qqq", "exl3"} or format in {"gemv_fast", "llm-awq"}:
         args.update(hidden_size=128, intermediate_size=256)
     model = build_native_model(
         family,
@@ -384,10 +386,12 @@ def test_quantized_tensors_equal_after_resume(tmp_path, monkeypatch, family):
             str(native), quantize_config=config, backend=BACKEND.TORCH
         )
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
             checkpoint=checkpoint,
         )
         model.save(tmp_path / output)
@@ -465,10 +469,12 @@ def test_dynamic_quantized_tensors_equal_after_resume(tmp_path, monkeypatch):
             str(native), quantize_config=config, backend=BACKEND.TORCH
         )
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
             checkpoint=checkpoint,
         )
         model.save(tmp_path / output)
@@ -497,7 +503,7 @@ def test_dynamic_quantized_tensors_equal_after_resume(tmp_path, monkeypatch):
 def test_dynamic_weight_only_quantized_tensors_equal_after_resume(
     tmp_path, monkeypatch
 ):
-    from gptqmodel.quantization.config import FP8Config
+    from gptqmodel.quantization.config import RTNConfig
 
     torch.manual_seed(1234)
     native = tmp_path / "native"
@@ -519,36 +525,37 @@ def test_dynamic_weight_only_quantized_tensors_equal_after_resume(
 
     def run(output, checkpoint):
         torch.manual_seed(6789)
-        config = FP8Config(
-            weight_scale_method="row",
+        # FP8 is load-only (#5242), so the dynamic weight-only layout resumes
+        # through RTN, which still quantizes (#5271).
+        config = RTNConfig(
+            bits=4,
+            group_size=32,
             device="cpu",
             offload_to_disk=True,
             offload_to_disk_path=str(tmp_path / f"offload-{output}"),
             dynamic={
                 r"+:^model\.layers\.0\.self_attn\.q_proj$": {
-                    "format": "float8_e5m2",
-                    "weight_scale_method": "block",
-                    "weight_block_size": [32, 32],
+                    "bits": 8,
                 },
             },
         )
         model = GPTQModel.load(
-            str(native), quantize_config=config, backend=BACKEND.FP8_TORCH
+            str(native), quantize_config=config, backend=BACKEND.TORCH
         )
         model.quantize(
-            calibration,
-            batch_size=1,
-            backend=BACKEND.FP8_TORCH,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+            ),
+            backend=BACKEND.TORCH,
             checkpoint=checkpoint,
         )
         model.save(tmp_path / output)
         loaded = GPTQModel.load(
-            str(tmp_path / output), device="cpu", backend=BACKEND.FP8_TORCH
+            str(tmp_path / output), device="cpu", backend=BACKEND.TORCH
         )
         q_proj = loaded.model.model.layers[0].self_attn.q_proj
-        assert q_proj.fp8_format == "float8_e5m2"
-        assert q_proj.weight_scale_method == "block"
-        assert q_proj.weight_block_size == (32, 32)
+        assert q_proj.bits == 8
         del loaded
         return load_file(tmp_path / output / "model.safetensors")
 
@@ -612,10 +619,12 @@ def test_runtime_calibration_exclusions_survive_resume(tmp_path, monkeypatch):
             str(native), quantize_config=config, backend=BACKEND.TORCH
         )
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
             checkpoint=checkpoint,
         )
         model.save(tmp_path / output)
@@ -801,3 +810,80 @@ def test_checkpoint_roundtrip_restores_runtime_dynamic_exclusions(tmp_path):
     assert resumed_config.dynamic == config.dynamic
     assert resumed_config._runtime_dynamic_exclusions == {runtime_rule}
     assert resumed.processors[0].loaded == {"cursor": 1}
+
+
+def test_resumed_quantize_leaves_a_usable_in_session_model(tmp_path, monkeypatch):
+    """#4572 + #4562: a resumed run must honour the #4498 in-session contract.
+
+    The checkpoint-restored packed layers were meta with no offload hook, so the
+    loop-exit restore skipped them, and the excluded dense layer kept the
+    `param.data =` parameters that cannot take part in a forward.
+    """
+
+    torch.manual_seed(1234)
+    native = tmp_path / "native"
+    config_args = {
+        "num_hidden_layers": 2,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "vocab_size": 128,
+        "pad_token_id": 0,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+    }
+    build_native_model("llama", config_args, moe_intermediate_size=32).save_pretrained(native)
+    tokenizer = _build_local_tokenizer(native)
+    calibration = _build_calibration_dataset(tokenizer)
+
+    def run(output, checkpoint):
+        torch.manual_seed(6789)
+        config = QuantizeConfig(
+            bits=4,
+            group_size=32,
+            desc_act=False,
+            device="cpu",
+            offload_to_disk=True,
+            offload_to_disk_path=str(tmp_path / f"offload-{output}"),
+            dynamic={r"-:^model\.layers\.1\.": {}},
+        )
+        model = GPTQModel.load(str(native), quantize_config=config, backend=BACKEND.TORCH)
+        model.quantize(
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
+            backend=BACKEND.TORCH,
+            checkpoint=checkpoint,
+        )
+        return model
+
+    original = CheckpointExtension.on_boundary
+
+    def stop(extension, boundary):
+        if boundary.step.index == 0:
+            signal.raise_signal(signal.SIGTERM)
+        original(extension, boundary)
+
+    checkpoint = CheckpointConfig(tmp_path / "checkpoints")
+    with monkeypatch.context() as patch:
+        patch.setattr(CheckpointExtension, "on_boundary", stop)
+        with pytest.raises(CheckpointStopped):
+            run("interrupted", checkpoint)
+
+    resumed = run("resumed", checkpoint)
+
+    meta = [
+        name
+        for name, tensor in list(resumed.model.named_parameters())
+        + list(resumed.model.named_buffers())
+        if tensor.is_meta
+    ]
+    assert meta == []
+    for name, parameter in resumed.model.named_parameters():
+        parameter._version  # raises for the #4572 leftovers
+    ids = tokenizer("the quick brown fox", return_tensors="pt")["input_ids"]
+    with torch.inference_mode():
+        assert resumed.model(input_ids=ids).logits.shape[:2] == (1, ids.shape[1])

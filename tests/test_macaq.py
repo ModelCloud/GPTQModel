@@ -17,9 +17,12 @@ calling the production helpers, so a packer/rotation regression cannot hide
 behind the implementation it is checking.
 """
 
+import base64
 import copy
+import gc
 import math
 import sys
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -27,12 +30,13 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from gptqmodel.nn_modules.qlinear._numerics import linear_fp32_reduce
 from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear, MacaqTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD, MacaqConfig, QuantizeConfig
 from gptqmodel.quantization import macaq as macaq
 from gptqmodel.quantization.config import GGUFConfig, resolve_model_rotation, resolve_quant_format
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.macaq_triton import triton_mxfp4_available
+from gptqmodel.utils.macaq_triton import TRITON_AVAILABLE, triton_mxfp4_available
 
 
 def _device():
@@ -102,6 +106,83 @@ def test_macaq_weight_quantizer_requests_compiled_flips_by_default():
     with patch.object(macaq, "flip_refine_levels", wraps=macaq.flip_refine_levels) as sweep:
         macaq.macaq_quantize_weight(weight, hessian, 64, n_flip_iters=1)
     assert sweep.call_args.kwargs["compile_flip"] is True
+
+
+# Packed codes and E8M0 exponents for the seed-0 8x64 matrix below, captured
+# from the implementation before the dead-reference release.  The lifetime fix
+# only drops locals, so every code and exponent must stay bit-identical.
+# Re-captured once for #5840: the balance pre-scale is now rounded to the
+# stored BF16 value before the weight and Hessian are transformed.
+_MACAQ_PRE_FIX_GOLDEN_PACKED_B64 = (
+    "QAudLq4toeobwwBKGsaqTLPa1BowKx2juTctCwEuuSTwyakEJQCRHcHcYB7DoQWQQC1AKw1QQzEqGqdGoK1SFL0Z7mEm3eA/bNnds5mr3nBQSssJFjEeJSIBJTQ5CzLNlhIHHtTpcjw5H+/q8TSs5SDg2joqNJrcygOVW8TBFbQq/gWXrlVBT1N9v+ZdVdo7GxPwwEsaRTMEkAIjGaRbslMC6QTmITPNAs7RHlAjLmqWCkOhxyrDmQXAQ5KhwgwrZtyTliwh29yzsxbCxH4TSiUC8knBVRE0yq3hLJurGjUiC8zNIEA80KYbav1MwdrgLdS7BikqDCml4FtNatHsQA=="
+)
+_MACAQ_PRE_FIX_GOLDEN_SCALES_B64 = "fn5+fn1+fX59fn5+fn5+fg=="
+
+
+def test_macaq_weight_quantizer_lifetime_fix_preserves_packed_bytes():
+    torch.manual_seed(0)
+    weight = torch.randn(8, 64)
+    activations = torch.randn(64, 64)
+    hessian = activations.T @ activations
+
+    result = macaq.macaq_quantize_weight(
+        weight, hessian, activations.shape[0], n_flip_iters=8, compile_flip=False
+    )
+
+    assert result.W_packed.shape == (8, 32)
+    assert result.W_scales.shape == (8, 2)
+    assert result.W_packed.contiguous().numpy().tobytes() == base64.b64decode(
+        _MACAQ_PRE_FIX_GOLDEN_PACKED_B64
+    )
+    assert result.W_scales.view(torch.uint8).contiguous().numpy().tobytes() == base64.b64decode(
+        _MACAQ_PRE_FIX_GOLDEN_SCALES_B64
+    )
+
+
+def test_macaq_weight_quantizer_releases_rotation_scratch_before_flip():
+    """Pre-scaled weight/Hessian and rotated Hessian are dead by the sweep.
+
+    Without the explicit releases all three stay referenced for the whole flip
+    sweep: two extra C^2 fp32 Hessian copies and a C^2 weight copy per module,
+    while every module of a layer runs concurrently.
+    """
+
+    torch.manual_seed(0)
+    weight = torch.randn(8, 64)
+    activations = torch.randn(64, 64)
+    hessian = activations.T @ activations
+
+    real_rotate = macaq.rotate_blocks
+    rotations = []
+
+    def tracked_rotate(x, bh):
+        # Detach from rotate_blocks' internal reshape view chain so the weakref
+        # to the returned tensor follows the object `rotated_hessian` views.
+        out = real_rotate(x, bh).clone()
+        rotations.append((weakref.ref(x), weakref.ref(out)))
+        return out
+
+    real_flip = macaq.flip_refine_levels
+    alive_at_flip = {}
+
+    def probe_flip(*args, **kwargs):
+        gc.collect()
+        alive_at_flip["pre_scaled_weight"] = rotations[0][0]() is not None
+        alive_at_flip["pre_scaled_hessian"] = rotations[1][0]() is not None
+        alive_at_flip["rotated_hessian"] = rotations[2][1]() is not None
+        return real_flip(*args, **kwargs)
+
+    with patch.object(macaq, "rotate_blocks", tracked_rotate), patch.object(
+        macaq, "flip_refine_levels", probe_flip
+    ):
+        macaq.macaq_quantize_weight(weight, hessian, 64, n_flip_iters=4, compile_flip=False)
+
+    assert len(rotations) == 3
+    assert alive_at_flip == {
+        "pre_scaled_weight": False,
+        "pre_scaled_hessian": False,
+        "rotated_hessian": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +713,11 @@ def _quantized_module_pair():
         module.pack(layer, macaq_result=result)
         return module.to(device)
 
-    return layer, result, build(MacaqLinear, BACKEND.MACAQ_TORCH), build(MacaqTritonLinear, BACKEND.MACAQ_TRITON)
+    # MacaqTritonLinear refuses construction without a Triton accelerator; the
+    # torch-only callers must still run on CPU, so the Triton half is ``None``
+    # there (its callers are gated on ``triton_mxfp4_available()``).
+    triton_module = build(MacaqTritonLinear, BACKEND.MACAQ_TRITON) if triton_mxfp4_available() else None
+    return layer, result, build(MacaqLinear, BACKEND.MACAQ_TORCH), triton_module
 
 
 def test_macaq_linear_torch_matches_reference():
@@ -644,9 +729,9 @@ def test_macaq_linear_torch_matches_reference():
         result.W_packed, result.W_scales, 128, dtype=torch.bfloat16
     )
     reference_input = macaq.macaq_quantize_activations(x, result.pre_scale, result.BH).to(torch.bfloat16)
-    expected = torch.nn.functional.linear(
-        reference_input, reference_weight, layer.bias.to(torch.bfloat16)
-    )
+    # The packed bias keeps its FP32 dtype (#5632), so the reference adds it
+    # after the FP32 reduction instead of narrowing it to BF16 first.
+    expected = linear_fp32_reduce(reference_input, reference_weight, layer.bias)
 
     assert output.dtype == torch.bfloat16
     assert torch.equal(output, expected)
@@ -724,7 +809,7 @@ def test_triton_dense_kernel_masks_k_tail(k):
     a_packed, a_scales = macaq_triton.quantize_mxfp4(activations.float())
 
     out = torch.empty(rows, cols, device=device, dtype=torch.float32)
-    macaq_triton._dense_w4a4_kernel[
+    macaq_triton._dense_mx_gemm_kernel[
         (triton.cdiv(rows, 64), triton.cdiv(cols, 128))
     ](
         a_packed, w_packed, a_scales, w_scales, out, w_scales,
@@ -774,6 +859,10 @@ def test_checkpoint_module_config_roundtrips_macaq_kernel():
     assert restored.pre_alpha == 0.7
 
 
+@pytest.mark.skipif(
+    not TRITON_AVAILABLE or not torch.cuda.is_available(),
+    reason="MacaqTritonLinear checkpoint restore requires Triton and a CUDA or ROCm device",
+)
 def test_checkpoint_restores_recorded_macaq_triton_kernel():
     from gptqmodel.looper.checkpoint_modules import packed_module_config, restore_packed_module
 
@@ -818,9 +907,10 @@ def _reference_weight_mxfp4(weight, bh, offset=0):
     out_features, in_features = weight.shape
     rotated = _reference_rotate(weight.to(torch.float32), bh.float())
     grouped = rotated.reshape(out_features, in_features // 32, 32)
-    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-12)
+    amax = grouped.abs().amax(dim=-1, keepdim=True)
+    amax = torch.where(amax == 0, torch.full_like(amax, 1e-12), amax)
     exponent = (torch.floor(torch.log2(amax)) - 2.0 + offset).clamp(-127.0, 127.0)
-    scale = torch.exp2(exponent)
+    scale = torch.pow(2.0, exponent)
     normalized = (grouped / scale).abs()
     code = torch.zeros_like(grouped, dtype=torch.long)
     for threshold, level in _E2M1_THRESHOLDS:
@@ -872,9 +962,10 @@ def _reference_activation_mxfp4(values):
 
     rows, k = values.shape
     grouped = values.to(torch.float32).reshape(rows, k // 32, 32)
-    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-20)
+    amax = grouped.abs().amax(dim=-1, keepdim=True)
+    amax = torch.where(amax == 0, torch.full_like(amax, 1e-20), amax)
     exponent = (torch.floor(torch.log2(amax)) - 2.0).clamp(-127.0, 127.0)
-    scale = torch.exp2(exponent)
+    scale = torch.pow(2.0, exponent)
     normalized = (grouped / scale).abs()
     code = torch.zeros_like(grouped, dtype=torch.long)
     for threshold, level in _E2M1_THRESHOLDS:
@@ -933,6 +1024,7 @@ def test_triton_row_offsets_are_int64_past_2gb():
         torch.cuda.empty_cache()
 
 
+@pytest.mark.skipif(not TRITON_AVAILABLE, reason="MACaQ Triton kernels are only defined with Triton")
 def test_macaq_row_offsets_widen_to_int64():
     """All three row-indexed kernels must widen the program id.
 
@@ -1176,49 +1268,6 @@ def test_macaq_dynamic_false_excludes_modules():
     assert restored.dynamic_get("model.layers.0.mlp.up_proj") == {"do_flip": False}
 
 
-@pytest.mark.parametrize("method", ["macaq", "paroquant", "qqq", "nf12", "tt-blockfloat"])
-def test_transformers_refuses_gptqmodel_only_quant_methods(method):
-    """An unknown HF quant method only warns and random-inits (#4090 item 2)."""
-
-    from transformers.quantizers import auto as hf_quant_auto
-    from transformers.quantizers.auto import AutoHfQuantizer, AutoQuantizationConfig
-
-    from gptqmodel.utils.hf_refusing_quantizer import (
-        GPTQModelRefusingHfQuantizer,
-        GPTQModelRefusingQuantizationConfig,
-    )
-
-    assert hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING[method] is GPTQModelRefusingQuantizationConfig
-    assert hf_quant_auto.AUTO_QUANTIZER_MAPPING[method] is GPTQModelRefusingHfQuantizer
-
-    config = AutoQuantizationConfig.from_dict({"quant_method": method, "bits": 4})
-    assert isinstance(config, GPTQModelRefusingQuantizationConfig)
-    with pytest.raises(ValueError, match="cannot be loaded by `transformers`"):
-        AutoHfQuantizer.from_config(config)
-
-
-def test_hf_from_pretrained_refuses_macaq_checkpoint(tmp_path):
-    from transformers import AutoModelForCausalLM, LlamaConfig
-
-    model_config = LlamaConfig(
-        vocab_size=32,
-        hidden_size=16,
-        intermediate_size=32,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-    )
-    model_config.quantization_config = {
-        "quant_method": "macaq",
-        "bits": 4,
-        "format": "mxfp4_macaq",
-    }
-    model_config.save_pretrained(str(tmp_path))
-
-    with pytest.raises(ValueError, match="MACaQ MXFP4 checkpoints cannot be loaded"):
-        AutoModelForCausalLM.from_pretrained(str(tmp_path), local_files_only=True)
-
-
 # ---------------------------------------------------------------------------
 # rotation-free (rotation="none") weight-only MXFP4
 # ---------------------------------------------------------------------------
@@ -1431,7 +1480,9 @@ def test_plain_mxfp4_layer_stores_only_mxfp4_tensors(activation_precision):
 
     if activation_precision == "w4a16":
         weight = macaq.dequantize_mxfp4(result.W_packed, result.W_scales, 128, dtype=torch.bfloat16)
-        expected = torch.nn.functional.linear(x, weight, bias.to(torch.bfloat16))
+        # The packed bias keeps its FP32 dtype (#5632), so the reference adds
+        # it after the FP32 reduction instead of narrowing it to BF16 first.
+        expected = linear_fp32_reduce(x, weight, bias)
         assert torch.equal(fast, expected)
 
 
@@ -1488,3 +1539,165 @@ def test_triton_plain_mxfp4_matches_forced_transforms(activation_precision):
     fast = plain(x)
     assert not plain._triton_disabled
     assert torch.equal(forced(x), fast)
+
+
+# ---------------------------------------------------------------------------
+# issue #4820: the exponent screen must not materialize int64 planes
+# ---------------------------------------------------------------------------
+def _bitwise_equal(left, right):
+    """Bitwise equality, with NaN treated as equal to itself."""
+
+    return torch.allclose(left, right, rtol=0, atol=0, equal_nan=True)
+
+
+def _reference_signed_index(weight, block_size=32, offset=0, *, tie_high=False):
+    """Independent int64 E2M1 index build (the pre-#4820 algorithm)."""
+
+    out_features, in_features = weight.shape
+    groups = in_features // block_size
+    grouped = weight.float().view(out_features, groups, block_size)
+    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+    log2_scale = torch.floor(torch.log2(amax)) - 2.0 + float(offset)
+    scale = torch.exp2(log2_scale)
+    normalized = (grouped / scale).abs()
+
+    code = torch.zeros_like(grouped, dtype=torch.long)
+    for threshold, level in _E2M1_THRESHOLDS:
+        above = normalized >= threshold if tie_high else normalized > threshold
+        code = torch.where(above, torch.full_like(code, level), code)
+    negative = grouped < 0
+    signed = torch.where(
+        code == 0, torch.full_like(code, 7), torch.where(negative, 7 - code, 7 + code)
+    ).reshape(out_features, in_features)
+    scale_element = (
+        scale.expand(out_features, groups, block_size)
+        .reshape(out_features, in_features)
+        .contiguous()
+    )
+    return signed, log2_scale.squeeze(-1), scale_element
+
+
+def _reference_screen(weight, hessian_diagonal, block_size=32, offsets=(1, 0, -1)):
+    """Independent int64 exponent screen (the pre-#4820 algorithm)."""
+
+    out_features, in_features = weight.shape
+    groups = in_features // block_size
+    grid = macaq.E2M1_VALUES.to(weight.device)
+    hdiag = hessian_diagonal.float().view(1, groups, block_size)
+
+    best = None
+    for offset in offsets:
+        signed, log2_scale, scale_element = _reference_signed_index(
+            weight, block_size, offset
+        )
+        dequant = grid[signed] * scale_element
+        error = (
+            (weight.float() - dequant).pow(2).view(out_features, groups, block_size) * hdiag
+        ).sum(-1)
+        if best is None:
+            best = [error, signed, log2_scale, scale_element]
+            continue
+        best_error, best_index, best_log2, best_scale = best
+        better = error < best_error
+        expand = better.unsqueeze(-1)
+        best = [
+            torch.where(better, error, best_error),
+            torch.where(
+                expand,
+                signed.view(out_features, groups, block_size),
+                best_index.view(out_features, groups, block_size),
+            ).view(out_features, in_features),
+            torch.where(better, log2_scale, best_log2),
+            torch.where(
+                expand,
+                scale_element.view(out_features, groups, block_size),
+                best_scale.view(out_features, groups, block_size),
+            ).reshape(out_features, in_features),
+        ]
+    return best[1].contiguous(), best[2], best[3].contiguous()
+
+
+def _screen_fixtures():
+    torch.manual_seed(4820)
+    yield "random", torch.randn(64, 512) * 0.02
+
+    edge = torch.tensor(
+        [[0.0, -0.0, 1e-12, -1e-12, 65504.0, -65504.0, float("nan"), float("inf")]]
+    )
+    yield "edge", torch.cat([edge, torch.randn(1, 504) * 0.02], dim=1)
+
+    # Exactly on every threshold, in both tie modes. The row repeats until the
+    # width is a whole number of 32-wide blocks.
+    thresholds = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
+    row = torch.cat([thresholds, -thresholds, thresholds * 2, -thresholds * 2])
+    row = row.repeat(512 // row.numel() + 1)[:512]
+    yield "thresholds", row.unsqueeze(0).repeat(64, 1)
+
+
+@pytest.mark.parametrize("tie_high", [False, True])
+def test_mxfp4_rtn_signed_index_matches_the_int64_reference(tie_high):
+    """The narrow index dtype must not change a single code (#4820).
+
+    The screen built every plane as int64 for values 0..14; int32 is the
+    narrowest dtype PyTorch accepts as a gather index.
+    """
+
+    for label, weight in _screen_fixtures():
+        signed, log2_scale, scale_element = macaq.mxfp4_rtn_signed_index(
+            weight, tie_high=tie_high
+        )
+        ref_signed, ref_log2, ref_scale = _reference_signed_index(
+            weight, tie_high=tie_high
+        )
+
+        assert signed.dtype is torch.int32, label
+        assert _bitwise_equal(signed.to(torch.int64), ref_signed), label
+        assert _bitwise_equal(log2_scale, ref_log2), label
+        assert _bitwise_equal(scale_element, ref_scale), label
+        # The indices must stay inside the E2M1 grid.
+        assert int(signed.min()) >= 0 and int(signed.max()) <= 14, label
+
+
+def test_screen_block_exponents_matches_the_int64_reference():
+    """The screen's index, exponent and scale stay bitwise identical (#4820)."""
+
+    for label, weight in _screen_fixtures():
+        hessian_diagonal = torch.rand(weight.shape[1]) + 0.1
+
+        index, log2_scale, scale_element = macaq.screen_block_exponents(
+            weight, hessian_diagonal
+        )
+        ref_index, ref_log2, ref_scale = _reference_screen(weight, hessian_diagonal)
+
+        assert index.dtype is torch.int32, label
+        assert _bitwise_equal(index.to(torch.int64), ref_index), label
+        assert _bitwise_equal(log2_scale, ref_log2), label
+        assert _bitwise_equal(scale_element, ref_scale), label
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="peak accounting needs a GPU")
+def test_screen_block_exponents_peak_memory_stays_bounded():
+    """The screen must not allocate int64 planes for four-bit codes (#4820).
+
+    On a 1024x4096 fp32 weight the pre-#4820 algorithm peaked at 300 MiB above
+    its inputs (int64 index planes); the bounded version peaks at 144 MiB.
+    """
+
+    free_bytes, _ = torch.cuda.mem_get_info()
+    if free_bytes < 3 * 2**30:
+        pytest.skip("needs about 3 GiB of free GPU memory")
+
+    torch.manual_seed(4820)
+    weight = torch.randn(1024, 4096, device="cuda") * 0.02
+    hessian_diagonal = torch.rand(4096, device="cuda") + 0.1
+    torch.cuda.synchronize()
+
+    base = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    index, _, _ = macaq.screen_block_exponents(weight, hessian_diagonal)
+    torch.cuda.synchronize()
+    extra_peak_mib = (torch.cuda.max_memory_allocated() - base) / 2**20
+
+    assert index.dtype is torch.int32
+    assert extra_peak_mib < 200, extra_peak_mib

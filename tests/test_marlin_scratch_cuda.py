@@ -6,15 +6,20 @@ import torch
 from gptqmodel.utils import marlin as marlin_utils
 from gptqmodel.utils.marlin_scratch import MarlinScratchContext
 from scripts.marlin_scratch_fixture import gemm_arguments, make_layer
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 pytestmark = [pytest.mark.cuda, pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA required")]
+    not requires_nvidia_cuda(), reason="CUDA required")]
 
 
 def require_dtype(dtype, method="gptq"):
+    # HIP exposes the CUDA namespace, so ``torch.cuda.is_available()`` alone
+    # lets these tests reach a Marlin runtime that has no ROCm kernel.
+    if torch.version.hip is not None:
+        pytest.skip("Marlin has no ROCm kernel")
     major, minor = torch.cuda.get_device_capability()
-    if (major, minor) < (7, 5) or ((dtype == torch.bfloat16 or method == "awq") and major < 8):
+    if major < 8:
         pytest.skip("Unsupported Marlin device/dtype combination")
     if not marlin_utils.marlin_runtime_available(dtype):
         pytest.fail(marlin_utils.marlin_runtime_error(dtype))

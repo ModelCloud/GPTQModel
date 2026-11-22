@@ -12,12 +12,14 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import pack_awq_columns
+from ...quantization.awq.utils.packing_utils import pack_awq_columns, source_weight_out_in
 from ...utils.awq import awq_gemmv2_forward, awq_gemv_forward
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
 from ...utils.logger import setup_logger
 from ...utils.packing_math import scale_to_storage_dtype
+from ._compile_support import COMPILE_LEVEL
+from ._numerics import fp32_epilogue_context
 
 
 log = setup_logger()
@@ -40,14 +42,18 @@ log = setup_logger()
 # stay CUDA-only and keep raising the message above; a ROCm user can now pick
 # the Triton backend explicitly (``BACKEND.AWQ_GEMV_TRITON``) and AUTO stays off
 # it so no existing checkpoint silently changes kernel.
+# ``FORMAT.GEMV_FAST``/``FORMAT.LLM_AWQ`` are excluded from this refusal: their
+# portable Torch readers declare ROCm and read the identical interleaved layout
+# (issue #5109).
 AWQ_GEMV_ROCM_UNSUPPORTED = (
-    "AWQ GEMV/GEMV_FAST/LLM_AWQ kernels require the native CUDA AWQ extension, "
-    "which is not available on ROCm (it includes cuda_fp16.h and CUDA-only inline "
-    "asm, and its hipified warp-sync reduction rejects wave32). Use the AWQ GEMM "
-    "layout with `backend=AUTO` or `BACKEND.AWQ_GEMM_TRITON`, which has a Triton "
-    "ROCm kernel, instead of FORMAT.GEMV/GEMV_FAST/LLM_AWQ. For a GEMV-layout "
-    "checkpoint, `BACKEND.AWQ_GEMV_TRITON` runs the same packed layout with a "
-    "portable Triton kernel on ROCm."
+    "AWQ FORMAT.GEMV requires the native CUDA AWQ extension, which is not "
+    "available on ROCm (it includes cuda_fp16.h and CUDA-only inline asm, and "
+    "its hipified warp-sync reduction rejects wave32). Use the AWQ GEMM layout "
+    "with `backend=AUTO` or `BACKEND.AWQ_GEMM_TRITON`, which has a Triton ROCm "
+    "kernel, or load this GEMV checkpoint with `BACKEND.AWQ_GEMV_TRITON`, which "
+    "runs the same packed layout with a portable Triton kernel on ROCm. "
+    "`FORMAT.GEMV_FAST`/`FORMAT.LLM_AWQ` pack and load through their portable "
+    "Torch readers here."
 )
 
 
@@ -78,8 +84,19 @@ class AwqGEMVLinear(AWQuantLinear):
 
     SUPPORTS_DTYPES = [torch.float16]
 
+    # The bias is added after the kernel's FP16 result by a wide epilogue when
+    # the stored width differs, so it keeps its checkpoint dtype.
+    MODEL_DTYPE_BUFFERS = ()
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv"
+
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The native
+    # ``awq.gemv_forward`` op has no fake/meta kernel, so ``torch.compile``
+    # stops at EAGER.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @classmethod
     def validate(
@@ -210,6 +227,11 @@ class AwqGEMVLinear(AWQuantLinear):
         if input_dtype != torch.float16:
             inputs = inputs.half()
 
+        # A biased layer asks the kernel to keep the complete reduction (and
+        # every split-K partial) in FP32. The bias then joins the wide sum and
+        # the result is rounded once, instead of rounding the product first and
+        # adding the bias to that already-rounded value.
+        wide_bias = self.bias is not None
         if inputs.shape[0] > 8:
             out = awq_gemmv2_forward(
                 inputs,
@@ -218,21 +240,22 @@ class AwqGEMVLinear(AWQuantLinear):
                 self.qzeros,
                 self.group_size,
                 self.split_k_iters,
+                fp32_output=wide_bias,
             )
         else:
             out = awq_gemv_forward(
-                inputs, self.qweight, self.scales, self.qzeros, self.group_size
+                inputs,
+                self.qweight,
+                self.scales,
+                self.qzeros,
+                self.group_size,
+                fp32_output=wide_bias,
             )
 
         if self.bias is not None:
-            # A CUDA FP16 add already accumulates in FP32 and rounds once, so
-            # the single kernel is bitwise identical to widening both operands.
-            # Keep the wide path for BF16 and mixed dtypes: rounding either
-            # operand to BF16 before the add changes the result.
-            if input_dtype == torch.float16 and self.bias.dtype == torch.float16:
-                out = torch.add(out, self.bias)
-            else:
-                out = out.float() + self.bias.float()
+            # ``out`` is the wide kernel result; add the stored bias
+            # in place so only one allocation (the final cast) remains.
+            out.add_(self.bias)
         out = out.to(dtype=input_dtype)
 
         if self.adapter:
@@ -243,32 +266,41 @@ class AwqGEMVLinear(AWQuantLinear):
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor=None):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
-        scale_zeros = zeros.float() * scales.float()
 
         pack_num = 32 // self.bits
         qscales = torch.zeros(
             (
                 scales.shape[0],
-                calculate_zeros_width(linear.in_features, self.group_size) * pack_num,
+                calculate_zeros_width(self.in_features, self.group_size) * pack_num,
             ),
             dtype=torch.float16,
             device=scales.device,
         )
         # Reject an unrepresentable FP16 scale before replacing module state.
         qscales[:, : scales.shape[1]] = scale_to_storage_dtype(scales, qscales.dtype)
+        stored_scales = qscales[:, : scales.shape[1]]
+        # The checkpoint decodes with the stored FP16 scale, so build the
+        # affine offset from that same grid. Mixing the FP32 source scale into
+        # the offset shifts the zero point whenever the cast rounds (#5605).
+        scale_zeros = zeros.float() * stored_scales.float()
+        stored_bias = None if linear.bias is None else linear.bias.detach().clone()
         self.register_buffer("scales", qscales)
-        if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.clone().half())
+        if stored_bias is not None:
+            # The bias is not a quantization operand. Store it at the source
+            # width: ``forward`` adds it in a wide FP32 epilogue, so narrowing
+            # it to FP16 here could only turn a finite value into ``inf``.
+            self.register_buffer("bias", stored_bias)
         else:
             self.bias = None
 
         # Gather each input column's group scale/zero in a single pass instead
         # of launching one tiny kernel per input column.  The GEMV layout keeps
         # scales as [out_features, groups], so the group index selects columns.
-        group_index = torch.arange(self.in_features, device=linear.weight.device) // self.group_size
+        weight = source_weight_out_in(linear)
+        group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
-            (linear.weight.data.float() + scale_zeros.index_select(1, group_index))
-            / self.scales.index_select(1, group_index).float()
+            (weight.float() + scale_zeros.index_select(1, group_index))
+            / stored_scales.index_select(1, group_index).float()
         ).clamp_(0, (1 << self.bits) - 1).to(torch.int32)
         self.register_buffer("qweight", pack_awq_columns(intweight, self.bits))
 
@@ -276,7 +308,7 @@ class AwqGEMVLinear(AWQuantLinear):
         # Pad the group axis up to the packed width so the vectorized packer
         # reproduces the loop's out-of-range skips (those codes stay zero).
         padded_zeros = torch.zeros(
-            (zeros.shape[0], calculate_zeros_width(linear.in_features, self.group_size) * pack_num),
+            (zeros.shape[0], calculate_zeros_width(self.in_features, self.group_size) * pack_num),
             dtype=torch.int32,
             device=zeros.device,
         )
@@ -372,6 +404,20 @@ class AwqGEMVTritonLinear(AwqGEMVLinear):
 
     QUANT_TYPE = "awq_gemv_triton"
 
+    # Measured on NVIDIA GB10 (sm_121), torch 2.11.0+cu130: dynamo, aot_eager,
+    # inductor and reduce-overhead all pass, and an explicit CUDA-graph capture
+    # of the eager forward succeeds.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = True
+    # Only reachable through an explicit `BACKEND.AWQ_GEMV_TRITON` selection
+    # (FORMAT priority 0), and no static-cache `generate()` win has been
+    # measured for it, so the #4669 policy stays off (#4984).
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "explicit-selection-only GEMV decode kernel; no static-cache generate "
+        "win measured (#4984)"
+    )
+
     @classmethod
     def validate(cls, bits, group_size=-1, desc_act=False, sym=True, in_features=None,
                  out_features=None, pack_dtype=None, dtype=None, dynamic=None,
@@ -446,7 +492,9 @@ class AwqGEMVTritonLinear(AwqGEMVLinear):
                 output_dtype=output_dtype,
             )
         if self.bias is not None:
-            out = out + self.bias.float()
+            # ``out`` is the wide kernel result; add the stored bias
+            # in place so only one allocation (the final cast) remains.
+            out.add_(self.bias)
         if out.dtype != input_dtype:
             out = out.to(dtype=input_dtype)
         if self.adapter:
@@ -454,8 +502,128 @@ class AwqGEMVTritonLinear(AwqGEMVLinear):
         return out.reshape(out_shape)
 
 
+class AwqGEMVTorchLinear(AwqGEMVLinear):
+    """Portable CPU reader for the packed ``FORMAT.GEMV`` layout (issue #4554).
+
+    The native GEMV extension is CUDA-only and the Triton reader needs an
+    accelerator, so a quantize run that finishes on CPU had no in-session kernel
+    for a GEMV checkpoint and ``quantize()`` raised after the whole calibration.
+    This kernel reads the exact same packed ``qweight``/``qzeros``/``scales``
+    buffers and dequantizes them to a dense FP32 tile per forward, which keeps
+    the checkpoint format unchanged and makes the in-session model runnable.
+
+    It is a documented fallback, not an AUTO replacement: the priority-0
+    ``SUPPORTS_FORMATS`` entry keeps the accelerator AUTO order (native CUDA
+    GEMV, explicit Triton GEMV) untouched, and ``select_quant_linear`` only
+    reaches it for a CPU-only target through ``PORTABLE_CPU_FALLBACK`` (ROCm
+    uses the Triton reader, which keeps the weights packed).
+    """
+
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    # 0 => supported for this layout, never auto-selected on an accelerator.
+    SUPPORTS_FORMATS = {FORMAT.GEMV: 0}
+    SUPPORTS_BITS = [4]
+    # Same packed layout as the native GEMV, so a CPU-packed checkpoint keeps
+    # the contract the CUDA extension reads.
+    SUPPORTS_GROUP_SIZE = [-1, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_DEVICES = [DEVICE.CPU]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = [Lora]
+    SUPPORTS_DTYPES = [torch.float16]
+    QUANT_TYPE = "awq_gemv_torch"
+    # Consumed by select_quant_linear() when AUTO has no CPU kernel for GEMV.
+    PORTABLE_CPU_FALLBACK = True
+
+    # CPU-only kernel (`SUPPORTS_DEVICES` above), so the CPU measurement is the
+    # declaration: on torch 2.16.0.dev20261021+cpu eager=True, graph_breaks=0,
+    # and dynamo/aot_eager/inductor all pass. CUDA-graph capture is CUDA-only,
+    # so it is not a CPU level.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_GRAPH_CAPTURE = True
+    # CPU-only portable fallback for the packed GEMV layout: compiling a CPU
+    # static-cache decode has no measured win, so the #4669 policy stays off
+    # (#4984).
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "CPU-only portable GEMV fallback; no measured static-cache win (#4984)"
+    )
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("backend", BACKEND.AWQ_TORCH)
+        super().__init__(*args, **kwargs)
+
+    def _dequantize_weight(self) -> torch.Tensor:
+        """Return the packed GEMV words as a dense ``[in_features, out_features]``.
+
+        Nibble ``i`` of word ``w`` holds input column ``w * pack_factor + i``;
+        the group axis of ``qzeros``/``scales`` is padded to whole words, so the
+        real group index selects the column. The product is formed in FP32, the
+        same precision the native/Triton kernels accumulate in.
+        """
+
+        qweight = self.qweight
+        qzeros = self.qzeros
+        if qweight.dtype != torch.int32:
+            qweight = qweight.to(torch.int32)
+        if qzeros.dtype != torch.int32:
+            qzeros = qzeros.to(torch.int32)
+
+        out_features, words = qweight.shape
+        in_features = words * self.pack_factor
+        shifts = torch.arange(self.pack_factor, device=qweight.device, dtype=torch.int32) * self.bits
+        code_mask = (1 << self.bits) - 1
+        codes = ((qweight[:, :, None] >> shifts) & code_mask).reshape(out_features, in_features)
+        zeros = ((qzeros[:, :, None] >> shifts) & code_mask).reshape(out_features, -1)
+
+        groups = in_features // self.group_size
+        group_index = torch.arange(in_features, device=qweight.device) // self.group_size
+        zeros = zeros.index_select(1, group_index)
+        scales = self.scales[:, :groups].index_select(1, group_index)
+        weight = (codes.to(torch.float32) - zeros.to(torch.float32)) * scales.to(torch.float32)
+        return weight.t().contiguous()
+
+    def forward(self, x: torch.Tensor):
+        out_shape = x.shape[:-1] + (self.out_features,)
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
+
+        inputs = x.reshape(-1, x.shape[-1])
+        input_dtype = inputs.dtype
+
+        weight = self._dequantize_weight()
+        if weight.device != inputs.device:
+            weight = weight.to(device=inputs.device)
+
+        # One wide reduction and a single rounding at the end: the FP32
+        # accumulator is what the accelerator GEMV kernels use, so the portable
+        # path is a reference for them rather than a lower-precision shortcut.
+        # An ambient autocast would narrow this explicit FP32 matmul and round
+        # the product before the bias cancels it (#5613), so the epilogue runs
+        # outside it and the caller's context is restored afterwards.
+        with fp32_epilogue_context(inputs.device.type):
+            output = torch.matmul(inputs.to(torch.float32), weight)
+            if self.bias is not None:
+                output = output + self.bias.to(device=output.device, dtype=torch.float32)
+            output = output.to(dtype=input_dtype)
+
+        if self.adapter:
+            output = self.adapter.apply(x=inputs, out=output)
+
+        return output.reshape(out_shape)
+
+
 __all__ = [
     "AWQ_GEMV_ROCM_UNSUPPORTED",
     "AwqGEMVLinear",
     "AwqGEMVTritonLinear",
+    "AwqGEMVTorchLinear",
 ]

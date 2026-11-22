@@ -104,7 +104,16 @@ def test_dense_fallback_accumulates_grid_and_bias_in_float32(case):
     assert "weight" not in vars(layer)
 
 
-def test_tied_head_fallback_does_not_narrow_the_shared_grid():
+@pytest.mark.parametrize("autocast", [False, True])
+def test_tied_head_fallback_does_not_narrow_the_shared_grid(autocast):
+    """The wide fallback also runs under an ambient FP16 autocast (#5796).
+
+    Autocast narrowed the explicitly float32 operands back to float16 before
+    the reduction, so the cancelling ``+65536 / -65536`` dot came back as NaN
+    instead of the exact zero. The call must disable autocast locally and
+    leave the caller's context active.
+    """
+
     grid = torch.zeros(1, 16)
     grid[0, 0] = 65536.0
     grid[0, 1] = -65536.0
@@ -117,10 +126,62 @@ def test_tied_head_fallback_does_not_narrow_the_shared_grid():
     hidden[0, 0] = 1
     hidden[0, 1] = 1
 
-    got = head(hidden)
+    if autocast:
+        with torch.autocast("cpu", dtype=torch.float16):
+            got = head(hidden)
+            assert torch.is_autocast_enabled("cpu")
+    else:
+        got = head(hidden)
+        assert not torch.is_autocast_enabled("cpu")
     expected = (hidden.float() @ grid.T).to(torch.float16)
     assert torch.isfinite(got).all()
     assert torch.equal(got, expected)
+
+
+def test_tied_head_cuda_branch_reads_a_defined_execution_policy():
+    """Regression for #4482: the CUDA branch read an undefined policy.
+
+    A tied head delegates to the embedding's ``_kernel_linear``, which read
+    ``self.kernel.blockfloat_cublas``.  The embedding is a plain ``nn.Module``
+    and never defined ``kernel``, so the supported CUDA tied-head path raised
+    ``AttributeError`` before the native matmul.  The storage owner must hold a
+    policy and forward it to the binding.
+    """
+
+    from unittest import mock
+
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    from gptqmodel.utils import tt_blockfloat_cuda as bf_cuda
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+    calls = []
+
+    def fake_linear(x, *args, **kwargs):
+        calls.append(kwargs.get("cublas"))
+        return x.new_zeros(x.shape[0], 16)
+
+    # A non-default value proves the embedding snapshots and forwards its own
+    # policy rather than reading whatever the process default happens to be.
+    configure_kernel(KernelConfig(blockfloat_cublas=False))
+    try:
+        with FakeTensorMode():
+            # Force the CUDA branch so the regression is exercised on a HIP
+            # build too; the policy under test is the CUDA one.
+            with mock.patch.object(
+                TTBlockfloatEmbedding, "hip_dispatch", return_value=False
+            ), mock.patch.object(bf_cuda, "ready", return_value=True), mock.patch.object(
+                bf_cuda, "linear", side_effect=fake_linear
+            ):
+                embedding = TTBlockfloatEmbedding(16, 32, bits=4, block=16).to("cuda:0")
+                head = TTBlockfloatTiedHead(embedding)
+                out = head(torch.ones(1, 32, device="cuda:0"))
+    finally:
+        configure_kernel(KernelConfig())
+
+    assert tuple(out.shape) == (1, 16)
+    assert embedding.kernel.blockfloat_cublas is False
+    assert calls == [False]
 
 
 @pytest.mark.skipif(

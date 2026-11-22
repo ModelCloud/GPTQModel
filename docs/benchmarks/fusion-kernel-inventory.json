@@ -1,13 +1,13 @@
 {
   "date_utc": "2026-11-07",
-  "scope": "All 57 registered classes inventoried; native fusion numerical qualification covers GPTQ/AWQ only. Other formats remain explicitly ineligible.",
+  "scope": "All 56 registered classes inventoried; native fusion numerical qualification covers GPTQ/AWQ only. Other formats remain explicitly ineligible.",
   "runs": [
     {
       "torch": "2.15.0+cu132",
       "hip": null,
       "python": "3.14.4",
       "accelerator": "NVIDIA GeForce RTX 4090",
-      "registry_class_count": 57,
+      "registry_class_count": 56,
       "rows": [
         {
           "family": "cpu",
@@ -316,19 +316,6 @@
         },
         {
           "family": "cpu",
-          "kernel": "FP8MlxQuantLinear",
-          "module": "gptqmodel.nn_modules.qlinear.mlx",
-          "methods": [
-            "fp8"
-          ],
-          "declared_devices": [
-            "mps"
-          ],
-          "fusion_layout": null,
-          "status": "different_hardware_family"
-        },
-        {
-          "family": "cpu",
           "kernel": "GGUFCppKernel",
           "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
           "methods": [
@@ -487,9 +474,9 @@
         {
           "family": "cpu",
           "kernel": "ParoLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant",
+          "module": "gptqmodel.nn_modules.qlinear.paro",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "all"
@@ -502,7 +489,7 @@
           "kernel": "ParoMlxQuantLinear",
           "module": "gptqmodel.nn_modules.qlinear.mlx",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "mps"
@@ -512,10 +499,10 @@
         },
         {
           "family": "cpu",
-          "kernel": "ParoQuantTritonLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant_triton",
+          "kernel": "ParoTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paro_triton",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "cuda",
@@ -1383,19 +1370,6 @@
         },
         {
           "family": "cuda",
-          "kernel": "FP8MlxQuantLinear",
-          "module": "gptqmodel.nn_modules.qlinear.mlx",
-          "methods": [
-            "fp8"
-          ],
-          "declared_devices": [
-            "mps"
-          ],
-          "fusion_layout": null,
-          "status": "different_hardware_family"
-        },
-        {
-          "family": "cuda",
           "kernel": "GGUFCppKernel",
           "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
           "methods": [
@@ -1593,9 +1567,9 @@
         {
           "family": "cuda",
           "kernel": "ParoLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant",
+          "module": "gptqmodel.nn_modules.qlinear.paro",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "all"
@@ -1608,7 +1582,7 @@
           "kernel": "ParoMlxQuantLinear",
           "module": "gptqmodel.nn_modules.qlinear.mlx",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "mps"
@@ -1618,10 +1592,10 @@
         },
         {
           "family": "cuda",
-          "kernel": "ParoQuantTritonLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant_triton",
+          "kernel": "ParoTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paro_triton",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "cuda",
@@ -2032,7 +2006,7 @@
       "hip": "7.16.26385",
       "python": "3.14.10",
       "accelerator": "AMD Radeon AI PRO R9700",
-      "registry_class_count": 57,
+      "registry_class_count": 56,
       "rows": [
         {
           "family": "cpu",
@@ -2341,19 +2315,6 @@
         },
         {
           "family": "cpu",
-          "kernel": "FP8MlxQuantLinear",
-          "module": "gptqmodel.nn_modules.qlinear.mlx",
-          "methods": [
-            "fp8"
-          ],
-          "declared_devices": [
-            "mps"
-          ],
-          "fusion_layout": null,
-          "status": "different_hardware_family"
-        },
-        {
-          "family": "cpu",
           "kernel": "GGUFCppKernel",
           "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
           "methods": [
@@ -2512,9 +2473,9 @@
         {
           "family": "cpu",
           "kernel": "ParoLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant",
+          "module": "gptqmodel.nn_modules.qlinear.paro",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "all"
@@ -2527,7 +2488,7 @@
           "kernel": "ParoMlxQuantLinear",
           "module": "gptqmodel.nn_modules.qlinear.mlx",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "mps"
@@ -2537,10 +2498,10 @@
         },
         {
           "family": "cpu",
-          "kernel": "ParoQuantTritonLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant_triton",
+          "kernel": "ParoTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paro_triton",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "cuda",
@@ -3278,19 +3239,6 @@
         },
         {
           "family": "rocm",
-          "kernel": "FP8MlxQuantLinear",
-          "module": "gptqmodel.nn_modules.qlinear.mlx",
-          "methods": [
-            "fp8"
-          ],
-          "declared_devices": [
-            "mps"
-          ],
-          "fusion_layout": null,
-          "status": "different_hardware_family"
-        },
-        {
-          "family": "rocm",
           "kernel": "GGUFCppKernel",
           "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
           "methods": [
@@ -3449,9 +3397,9 @@
         {
           "family": "rocm",
           "kernel": "ParoLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant",
+          "module": "gptqmodel.nn_modules.qlinear.paro",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "all"
@@ -3464,7 +3412,7 @@
           "kernel": "ParoMlxQuantLinear",
           "module": "gptqmodel.nn_modules.qlinear.mlx",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "mps"
@@ -3474,10 +3422,10 @@
         },
         {
           "family": "rocm",
-          "kernel": "ParoQuantTritonLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant_triton",
+          "kernel": "ParoTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paro_triton",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "cuda",

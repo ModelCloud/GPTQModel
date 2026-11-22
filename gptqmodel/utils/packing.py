@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Sequence, Type, Union
 import torch
 import torch.nn as nn
 
+from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import AWQuantLinear, BaseQuantLinear, GPTQQuantLinear
 from ..quantization import FORMAT, METHOD, QuantizeConfig
 from .backend import BACKEND, normalize_backend
@@ -59,6 +60,8 @@ _ABI_TRANSFORMING_QUANT_TYPES = frozenset({
     "awq_swordfish",
     "gptq_bitblas",
     "awq_bitblas",
+    "humming",
+    "awq_humming",
 })
 
 
@@ -96,15 +99,62 @@ def _resolve_pack_dtype(
     return torch.int16 if method == METHOD.AWQ and format_value == FORMAT.GEMV_FAST else torch.int32
 
 
-def _auto_pack_impl(module: BaseQuantLinear, linear: Optional[nn.Module] = None) -> str:
-    """Resolve ``pack_impl="auto"`` to the fastest available packer.
+def _pack_target_family(target) -> Optional[DEVICE]:
+    """Resolve an explicit packing target to its hardware family.
+
+    ``None`` means the caller left the target unspecified, so AUTO keeps its
+    historical accelerator preference. The family resolver owns the HIP
+    distinction: ``torch.device("cuda:1")`` names ``DEVICE.ROCM`` on a HIP
+    build and ``DEVICE.CUDA`` on NVIDIA, and only those two families can run
+    ``pack_gpu``.
+    """
+    if target is None:
+        return None
+    try:
+        return normalize_device(target)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid pack target device `{target}`: {exc}") from exc
+
+
+def _is_accelerator_pack_family(family: Optional[DEVICE]) -> bool:
+    """True when ``pack_gpu`` can execute for the resolved target family.
+
+    An unspecified target (``None``) stays eligible: AUTO is allowed to use a
+    visible accelerator. An explicit CPU, XPU, NPU, MPS or XLA target is not.
+    """
+    return family is None or family in (DEVICE.CUDA, DEVICE.ROCM)
+
+
+def _requests_auto_pack_impl(pack_impl: Optional[str]) -> bool:
+    """True when the caller asked for ``pack_impl="auto"`` (or ``"default"``)."""
+    return (pack_impl or "original").strip().lower() in {"auto", "default"}
+
+
+def _auto_pack_impl(
+    module: BaseQuantLinear,
+    linear: Optional[nn.Module] = None,
+    target=None,
+) -> str:
+    """Resolve ``pack_impl="auto"`` to the fastest packer for ``target``.
 
     Accelerator packing is preferred whenever a CUDA/ROCm device is present and
-    the module implements it.  Embedding layers keep the CPU block packer because
-    ``pack_gpu`` does not emit their packed layout.
+    the module implements it, but only when the caller did not pin a different
+    target. ``pack_gpu`` rejects an explicit CPU target after AUTO has already
+    chosen it, and the resulting ``pack_original`` fallback is several times
+    slower than the bounded CPU block packer AUTO uses on a CPU-only host
+    (#5761). Embeddings keep the original packer: both the GPU and block
+    packers lay the packed words out along the input axis, while an embedding
+    is packed along its vocabulary axis (#5381).
     """
+    if isinstance(linear, nn.Embedding):
+        return "original"
+    # Both accelerated packers emit 32-bit storage words only, so narrow words
+    # (int8/int16 continuous layouts) must stay on the original packer instead
+    # of raising from the packer after a speculative device copy (#5806).
+    if int(getattr(module, "pack_dtype_bits", 32)) != 32:
+        return "original"
     if (
-        not isinstance(linear, nn.Embedding)
+        _is_accelerator_pack_family(_pack_target_family(target))
         and torch.cuda.is_available()
         and hasattr(module, "pack_gpu")
     ):
@@ -118,12 +168,19 @@ def _normalize_pack_impl(
     pack_impl: Optional[str],
     module: BaseQuantLinear,
     linear: Optional[nn.Module] = None,
+    target=None,
 ) -> str:
-    """Map a user supplied pack implementation to one of gpu/block/original."""
+    """Map a user supplied pack implementation to one of gpu/block/original.
+
+    ``target`` is the explicit packing target (a device, device family or
+    ordinal). AUTO only keeps the accelerator packer when that target is
+    unspecified or an accelerator family; an explicit CPU target resolves to
+    the CPU block packer instead of a GPU branch that rejects it.
+    """
     requested = (pack_impl or "original").strip().lower()
 
     if requested in {"auto", "default"}:
-        return _auto_pack_impl(module=module, linear=linear)
+        return _auto_pack_impl(module=module, linear=linear, target=target)
 
     if requested in {"cpu", "block", "pack_block"}:
         if not hasattr(module, "pack_block"):
@@ -137,6 +194,18 @@ def _normalize_pack_impl(
     if requested in {"original", "pack_original"}:
         return "original"
     if requested == "gpu":
+        if not _is_accelerator_pack_family(_pack_target_family(target)):
+            # An explicit CPU/XPU/NPU/MPS/XLA target cannot run the GPU packer,
+            # which rejects it after dispatch. Use the CPU block packer when the
+            # module has one so the explicit target still packs on CPU.
+            fallback = "block" if hasattr(module, "pack_block") else "original"
+            log.warning(
+                "hf_pack_layer: GPU packing requested but the target device `%s` is not a "
+                "CUDA/ROCm accelerator; falling back to %s pack.",
+                target,
+                fallback,
+            )
+            return fallback
         if not torch.cuda.is_available():
             log.warning(
                 "hf_pack_layer: GPU packing requested but CUDA is unavailable; "
@@ -573,10 +642,14 @@ def hf_pack_layer(
         g_idx: Activation-order group index of length ``in_features``.
         pack_impl: Packing implementation: ``"original"`` (default), ``"auto"``
             (accelerator pack when available), ``"block"``/``"cpu"`` or
-            ``"gpu"``.  GPU/block requests fall back to the original packer when
-            unavailable.  Ignored by QQQ and AWQ kernels, which expose a single
-            ``pack()`` implementation.
-        device: Target CUDA device for ``pack_impl="gpu"``.
+            ``"gpu"``.  AUTO keeps the accelerator packer only when ``device``
+            is unspecified or names a CUDA/ROCm accelerator; an explicit CPU
+            ``device`` resolves to the CPU block packer.  GPU/block requests
+            fall back to the original packer when unavailable.  Ignored by QQQ
+            and AWQ kernels, which expose a single ``pack()`` implementation.
+        device: Target CUDA/ROCm device for ``pack_impl="gpu"``. Also the
+            explicit target AUTO honours: ``"cpu"`` selects the CPU block
+            packer even when a GPU is visible.
         block_in: Input channels per block for ``pack_impl="block"``.
         workers: Worker threads for ``pack_impl="block"``.
         scales_extra: Extra scales used by QQQ kernels.
@@ -629,8 +702,9 @@ def hf_pack_layer(
             )
 
         resolved_zeros = _resolve_zeros(module=module, scales=scales, zeros=zeros)
+        auto_selected = _requests_auto_pack_impl(pack_impl)
         effective_impl = _normalize_pack_impl(
-            pack_impl=pack_impl, module=module, linear=linear
+            pack_impl=pack_impl, module=module, linear=linear, target=device
         )
 
         if effective_impl == "gpu":
@@ -643,13 +717,40 @@ def hf_pack_layer(
                     device=device,
                 )
             except (ValueError, NotImplementedError):
-                log.warning(
-                    "hf_pack_layer: GPU packing failed for `%s`; falling back to original pack.",
-                    type(module).__name__,
-                )
-                module.pack_original(
-                    linear=linear, scales=scales, zeros=resolved_zeros, g_idx=g_idx
-                )
+                if auto_selected and hasattr(module, "pack_block"):
+                    # AUTO picked the GPU packer from device availability, but
+                    # this layer's geometry/word width is not supported there.
+                    # The bounded CPU block packer is the next-fastest option;
+                    # the original packer remains the last resort.
+                    log.warning(
+                        "hf_pack_layer: GPU packing rejected `%s` under AUTO; trying the CPU block packer.",
+                        type(module).__name__,
+                    )
+                    try:
+                        module.pack_block(
+                            linear=linear,
+                            scales=scales,
+                            zeros=resolved_zeros,
+                            g_idx=g_idx,
+                            block_in=block_in,
+                            workers=workers,
+                        )
+                    except (ValueError, NotImplementedError):
+                        log.warning(
+                            "hf_pack_layer: block packing also failed for `%s`; falling back to original pack.",
+                            type(module).__name__,
+                        )
+                        module.pack_original(
+                            linear=linear, scales=scales, zeros=resolved_zeros, g_idx=g_idx
+                        )
+                else:
+                    log.warning(
+                        "hf_pack_layer: GPU packing failed for `%s`; falling back to original pack.",
+                        type(module).__name__,
+                    )
+                    module.pack_original(
+                        linear=linear, scales=scales, zeros=resolved_zeros, g_idx=g_idx
+                    )
         elif effective_impl == "block":
             try:
                 module.pack_block(
@@ -797,9 +898,20 @@ def _instantiate_kernel(
 
 
 def _copy_packed_state(source: BaseQuantLinear, target: BaseQuantLinear) -> None:
+    from ..nn_modules.qlinear._fused_train_state import checkpoint_layout_tensor
+
     source_tensors: Dict[str, torch.Tensor] = {}
     source_tensors.update(dict(source.named_parameters()))
     source_tensors.update(dict(source.named_buffers()))
+    # A CPU inference forward replaces the packed operands with the kernel's
+    # private int4pack layout (and keeps the checkpoint tensors in a
+    # non-persistent snapshot). Repacking must consume that canonical
+    # checkpoint snapshot, not the transformed runtime operands, or the target
+    # receives an incompatible shape/ABI after one valid forward (#4466).
+    for key in _PACKED_STATE_KEYS:
+        checkpoint_tensor = checkpoint_layout_tensor(source, key)
+        if checkpoint_tensor is not None:
+            source_tensors[key] = checkpoint_tensor
 
     target_tensors: Dict[str, torch.Tensor] = {}
     target_tensors.update(dict(target.named_parameters()))
@@ -869,8 +981,6 @@ def _preserve_checkpoint_buffer_dtypes(
 
 def _resolve_single_torch_device(device) -> Optional[torch.device]:
     """Resolve one public device value, or ``None`` for multi-device selectors."""
-    from ..models._const import DEVICE
-
     if device is None:
         return None
     if isinstance(device, DEVICE):

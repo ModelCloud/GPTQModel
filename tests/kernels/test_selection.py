@@ -14,6 +14,8 @@ from gptqmodel.adapter.adapter import Adapter
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
+from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
@@ -1947,3 +1949,236 @@ def test_explicit_backend_passes_the_adapter_to_validation(monkeypatch):
             pack_dtype=torch.int32,
             adapter=Adapter(),
         )
+
+
+def test_exllamav2_auto_priority_demotes_dense_non_fp16_fallback():
+    """#4213: AUTO must not rank ExLlamaV2's dense BF16/FP32 fallback first."""
+    fmt = FORMAT.GPTQ
+    assert ExllamaV2Linear.auto_select_priority(fmt, torch.float16) == 80
+    assert ExllamaV2Linear.auto_select_priority(fmt, torch.bfloat16) < 80
+    assert ExllamaV2Linear.auto_select_priority(fmt, torch.float32) < 80
+    # Native kernels keep their declared rank.
+    assert TritonV2Linear.auto_select_priority(fmt, torch.bfloat16) == 40
+    assert TorchLinear.auto_select_priority(fmt, torch.bfloat16) == 20
+    # The dense fallback stays reachable through an explicit backend.
+    assert ExllamaV2Linear.supports_dtype(torch.bfloat16)
+    assert ExllamaV2Linear.supports_dtype(torch.float32)
+
+
+def test_awq_exllamav2_auto_priority_demotes_dense_non_fp16_fallback():
+    """#5732: AUTO must rank the native-BF16 AWQ GEMM above the dense fallback.
+
+    ``ext_awq.cpp`` has a native quantized GEMM only for FP16 activations.
+    BF16/FP32 inputs rebuild the dense weight per forward, so AUTO must not
+    prefer ``AwqExllamaV2Linear`` over ``AwqGEMMLinear`` (native BF16 kernel)
+    for BF16.
+    """
+
+    fmt = FORMAT.GEMM
+    assert AwqExllamaV2Linear.auto_select_priority(fmt, torch.float16) == 80
+    assert AwqExllamaV2Linear.auto_select_priority(fmt, torch.bfloat16) < 80
+    assert AwqExllamaV2Linear.auto_select_priority(fmt, torch.float32) < 80
+    assert AwqGEMMLinear.supports_dtype(torch.bfloat16)
+    assert AwqGEMMLinear.auto_select_priority(fmt, torch.bfloat16) > (
+        AwqExllamaV2Linear.auto_select_priority(fmt, torch.bfloat16)
+    )
+    # ``AwqGEMMLinear`` has no FP32 kernel, but its declared rank still
+    # documents that the dense fallback is last.
+    assert AwqGEMMLinear.auto_select_priority(fmt, torch.float32) > (
+        AwqExllamaV2Linear.auto_select_priority(fmt, torch.float32)
+    )
+    # FP16 still prefers the ExLlamaV2 kernel.
+    assert AwqExllamaV2Linear.auto_select_priority(fmt, torch.float16) > (
+        AwqGEMMLinear.auto_select_priority(fmt, torch.float16)
+    )
+    # The dense fallback stays reachable through an explicit backend.
+    assert AwqExllamaV2Linear.supports_dtype(torch.bfloat16)
+    assert AwqExllamaV2Linear.supports_dtype(torch.float32)
+
+
+class _DenseFallbackKernel:
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_EXLLAMA_V2]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 80}
+
+    @classmethod
+    def auto_select_priority(cls, fmt, dtype=None):
+        return 1 if dtype == torch.bfloat16 else cls.SUPPORTS_FORMATS[fmt]
+
+    @classmethod
+    def validate(cls, **_):
+        return True, None
+
+
+class _NativeBf16Kernel:
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TRITON]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 40}
+
+    @classmethod
+    def validate(cls, **_):
+        return True, None
+
+
+@pytest.mark.usefixtures("nvidia_runtime")
+def test_auto_reranks_candidates_for_the_requested_dtype(monkeypatch):
+    """The dtype-aware rank reorders AUTO without dropping a candidate."""
+    _install_auto_candidates(
+        monkeypatch,
+        METHOD.GPTQ,
+        FORMAT.GPTQ,
+        [(BACKEND.GPTQ_EXLLAMA_V2, _DenseFallbackKernel), (BACKEND.GPTQ_TRITON, _NativeBf16Kernel)],
+    )
+
+    def _order(dtype):
+        return select_quant_linear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=False,
+            device=DEVICE.CUDA,
+            backend=BACKEND.AUTO,
+            format=FORMAT.GPTQ,
+            quant_method=METHOD.GPTQ,
+            pack_dtype=torch.int32,
+            dtype=dtype,
+            multi_select=True,
+        )
+
+    assert _order(torch.float16) == [_DenseFallbackKernel, _NativeBf16Kernel]
+    assert _order(torch.bfloat16) == [_NativeBf16Kernel, _DenseFallbackKernel]
+    # No dtype constraint keeps the declared order.
+    assert _order(None) == [_DenseFallbackKernel, _NativeBf16Kernel]
+
+
+@pytest.mark.skipif(not HAS_CUDA or IS_ROCM, reason="needs NVIDIA CUDA kernels")
+def test_auto_bf16_prefers_a_native_kernel_over_exllamav2_dense_fallback():
+    """Regression for #4213: the real AUTO order must not pick the fallback."""
+    ok, _ = ExllamaV2Linear.cached_validate_once()
+    if not ok:
+        pytest.skip("ExLlamaV2 runtime unavailable")
+
+    def _candidates(dtype):
+        return select_quant_linear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=False,
+            device=torch.device("cuda:0"),
+            backend=BACKEND.AUTO,
+            format=FORMAT.GPTQ,
+            quant_method=METHOD.GPTQ,
+            pack_dtype=torch.int32,
+            dtype=dtype,
+            multi_select=True,
+        )
+
+    # Asymmetric GPTQ now selects Marlin first for both dtypes. #4213 remains
+    # pinned: BF16 must rank the native Triton kernel ahead of ExLlamaV2's
+    # dense fallback instead of selecting it outright.
+    for dtype in (torch.bfloat16, torch.float16):
+        candidates = _candidates(dtype)
+        assert candidates[0] is MarlinLinear
+        assert ExllamaV2Linear in candidates
+
+    candidates = _candidates(torch.bfloat16)
+    if TritonV2Linear in candidates:
+        assert candidates.index(TritonV2Linear) < candidates.index(ExllamaV2Linear)
+
+    # FP16 keeps ExLlamaV2 ahead of Triton behind the higher-priority Marlin.
+    candidates = _candidates(torch.float16)
+    if TritonV2Linear in candidates:
+        assert candidates.index(ExllamaV2Linear) < candidates.index(TritonV2Linear)
+
+
+def test_cuda_auto_select_prioritizes_vptq_cuda_over_torch(monkeypatch, nvidia_runtime):
+    """AUTO must load a VPTQ checkpoint on the fused kernel, not the reference.
+
+    Both VPTQ kernels declare ``FORMAT.VPTQ``; the selector's stable sort keeps
+    the registry order for equal ranks, which lists the portable kernel first.
+    On an NVIDIA host with the extension available the native kernel must win,
+    and on ROCm the native kernel's ``validate_once`` must send AUTO back to the
+    portable one (issue #4591).
+    """
+
+    from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
+    from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
+
+    assert VPTQCudaLinear.auto_select_priority(FORMAT.VPTQ) > VPTQLinear.auto_select_priority(FORMAT.VPTQ)
+    _force_auto_candidates_valid(monkeypatch, METHOD.VPTQ, FORMAT.VPTQ)
+
+    selected = select_quant_linear(
+        bits=2,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.VPTQ,
+        quant_method=METHOD.VPTQ,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+    assert selected is VPTQCudaLinear
+
+    monkeypatch.setattr(VPTQCudaLinear, "validate_device", classmethod(lambda cls, _device: None))
+    monkeypatch.setattr(importer, "IS_ROCM", True)
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+    monkeypatch.setattr(
+        VPTQCudaLinear,
+        "cached_validate_once",
+        classmethod(lambda cls: (False, NotImplementedError("VPTQ_CUDA is not available on ROCm"))),
+    )
+    clear_validation_cache()
+    try:
+        selected = select_quant_linear(
+            bits=2,
+            group_size=-1,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.ROCM,
+            backend=BACKEND.AUTO,
+            format=FORMAT.VPTQ,
+            quant_method=METHOD.VPTQ,
+            pack_dtype=torch.int32,
+            dtype=torch.float16,
+        )
+    finally:
+        clear_validation_cache()
+
+    assert selected is VPTQLinear
+
+
+def test_cuda_auto_select_keeps_vptq_torch_when_the_native_probe_fails(monkeypatch, nvidia_runtime):
+    """A failed native build must fall back instead of failing the load."""
+
+    from gptqmodel.nn_modules.qlinear import vptq_cuda as vptq_cuda_module
+    from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
+    from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
+
+    monkeypatch.setattr(vptq_cuda_module, "vptq_cuda_runtime_available", lambda: False)
+    monkeypatch.setattr(
+        vptq_cuda_module,
+        "vptq_cuda_runtime_error",
+        lambda: "VPTQ CUDA requires an NVIDIA CUDA device: its torch.ops extension is built from CUDA sources.",
+    )
+    VPTQCudaLinear.cached_validate_once.cache_clear()
+    clear_validation_cache()
+    try:
+        selected = select_quant_linear(
+            bits=2,
+            group_size=-1,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.CUDA,
+            backend=BACKEND.AUTO,
+            format=FORMAT.VPTQ,
+            quant_method=METHOD.VPTQ,
+            pack_dtype=torch.int32,
+            dtype=torch.float16,
+        )
+    finally:
+        VPTQCudaLinear.cached_validate_once.cache_clear()
+        clear_validation_cache()
+
+    assert selected is VPTQLinear

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization.config import QuantizeConfig
@@ -93,7 +94,7 @@ def test_planar_model_quantize_save_reload_inference(bits: int, tmp_path: Path):
     )
 
     model = GPTQModel.load(str(model_dir), quantize_config=quantize_config, backend=BACKEND.TORCH)
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     model.save(quantized_dir)
 
     encoded = tokenizer("tiny planar calibration sample", return_tensors="pt")

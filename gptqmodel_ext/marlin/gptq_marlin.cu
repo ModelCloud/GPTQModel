@@ -66,15 +66,7 @@
 template <typename T, T v>
 struct is_valid_value { static constexpr bool value = true; };
 
-#if defined(__has_include)
-#  if __has_include(<ATen/native/quantized/Float8_e8m0fnu.h>)
-#    define HAS_FLOAT8_E8M0FNU 1
-#  else
-#    define HAS_FLOAT8_E8M0FNU 0
-#  endif
-#else
-#  define HAS_FLOAT8_E8M0FNU 0
-#endif
+#include <c10/util/Float8_e8m0fnu.h>
 
 #include "kernel.h"
 #include "marlin_scratch.cuh"
@@ -90,7 +82,7 @@ __global__ void MarlinDefault(MARLIN_KERNEL_PARAMS){};
 
 using MarlinFuncPtr = void (*)(MARLIN_KERNEL_PARAMS);
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
 __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int const* __restrict__ perm_int_ptr,
@@ -110,9 +102,10 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
     bool is_zp_float, std::optional<torch::Tensor> c_tmp_or_none,
-    std::optional<torch::Tensor> a_tmp_or_none) {
+    std::optional<torch::Tensor> a_tmp_or_none, int64_t thread_k_override,
+    int64_t thread_n_override, int64_t num_threads_override) {
   TORCH_CHECK_NOT_IMPLEMENTED(false,
-                              "marlin_gemm(..) requires CUDA_ARCH >= 7.5");
+                              "marlin_gemm(..) requires CUDA_ARCH >= 8.0");
   return torch::empty({1, 1});
 }
 
@@ -358,15 +351,21 @@ int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
   int sh_a_size = stages * (tb_m * tb_k) * 2;
   int sh_b_size = stages * (tb_k * tb_n / pack_factor) * 4;
   int sh_red_size = tb_m * (tb_n + 8) * 2;
-  int sh_bias_size = tb_n * 2;
-  int tmp_size =
-      (sh_b_size > sh_red_size ? sh_red_size : sh_b_size) + sh_bias_size;
-  tmp_size = max(max(sh_b_size, sh_red_size), tmp_size);
+  // marlin_template.h stages the bias as FP32 (four columns per int4), so its
+  // extent is ``thread_n_blocks * 16 / 4`` int4 = ``tb_n * 4`` bytes. The
+  // host-side model must use the same size: a config the host accepts with the
+  // old ``tb_n * 2`` term can need more dynamic shared memory than the launch
+  // reserves, and the bias stage must not be counted as the 16-bit region.
+  int sh_bias_size = tb_n * 4;
+  int tmp_size = (sh_b_size > sh_red_size ? sh_b_size : sh_red_size) +
+                 sh_bias_size;
 
   int sh_s_size =
       get_scales_cache_size(th_config, prob_m, prob_n, prob_k, num_bits,
                             group_size, has_act_order, is_k_full, stages);
-  int sh_g_idx_size = has_act_order && !is_k_full ? stages * tb_k / 4 : 0;
+  // ``g_idx_stage`` is ``tb_k / 4`` int4 in the kernel, i.e. ``tb_k * 4``
+  // bytes per stage. The previous byte count dropped that 16-byte factor.
+  int sh_g_idx_size = has_act_order && !is_k_full ? stages * tb_k * 4 : 0;
   int sh_zp_size = 0;
   if (has_zp) {
     if (is_zp_float)
@@ -409,18 +408,46 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     return false;
   }
 
-  // Our stage-2 dense 4-bit kernels need enough B-stage capacity to cover the
-  // output tile. Larger M tiles with thread_k == 64 are not emitted.
-  if (stages == 2 && num_bits == 4 &&
-      thread_m_blocks * 2 > th_config.thread_k / 16) {
-    return false;
-  }
-
   // Check that pipeline fits into cache
   int cache_size = get_kernel_cache_size(
       th_config, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
       has_act_order, is_k_full, has_zp, is_zp_float, stages);
   return cache_size + MARLIN_SHARED_MEM_GUARD_BYTES <= max_shared_mem;
+}
+
+// Hybrid tile-then-stripe schedule (#5222, ported from vllm-project/vllm#24722)
+// is a prefill-only kernel. Each config is compiled twice: `hybrid=false` is
+// the original Marlin schedule, and `hybrid=true` (64-row tiles only, see
+// generate_kernels.py) first gives each threadblock whole output tiles over
+// all of K, then stripes only the remainder along K.
+//
+// Limit: the host launches the hybrid kernel only for calls with at least
+// MARLIN_HYBRID_MIN_ROWS (512) rows, i.e. prefill. Measured on a 124-SM A100
+// (int4 g128, fp16/bf16, 7 shapes, 2 runs per build), the hybrid kernel was
+// ~1 us slower per call at M=1 and up to 14% slower at M=64; at M=512 it was
+// 1.04-1.11x faster in bf16 (6 of 7 shapes) and ~1% slower in fp16; at
+// M >= 1024 it was 1.06x median (up to 1.20x) faster. At or below the limit the original kernel runs
+// unchanged, so decode and small batches keep their speed and exact bits. The hybrid
+// kernel sums K in a different order, so its output bits can differ from the
+// original kernel's for the same input; it is deterministic.
+constexpr int MARLIN_HYBRID_MIN_ROWS = 512;
+
+template <typename scalar_t, vllm::ScalarTypeId w_type_id,
+          vllm::ScalarTypeId s_type_id, int threads, int thread_m_blocks,
+          int thread_n_blocks, int thread_k_blocks, bool m_block_size_8,
+          int stages, int group_blocks, bool is_zp_float>
+MarlinFuncPtr marlin_kernel_for_schedule(bool hybrid) {
+  // Only 64-row tile configs have a hybrid instantiation; never name the
+  // hybrid symbol for the others.
+  if constexpr (thread_m_blocks == 4) {
+    if (hybrid)
+      return Marlin<scalar_t, w_type_id, s_type_id, threads, thread_m_blocks,
+                    thread_n_blocks, thread_k_blocks, m_block_size_8, stages,
+                    group_blocks, is_zp_float, true>;
+  }
+  return Marlin<scalar_t, w_type_id, s_type_id, threads, thread_m_blocks,
+                thread_n_blocks, thread_k_blocks, m_block_size_8, stages,
+                group_blocks, is_zp_float, false>;
 }
 
   #define _GET_IF(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,   \
@@ -433,26 +460,18 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
              stages == STAGES && group_blocks == GROUP_BLOCKS &&               \
              num_threads == NUM_THREADS &&                                     \
              is_zp_float == IS_ZP_FLOAT) {                                     \
-      constexpr bool kIsStage2FourBitTile =                                    \
-          STAGES == 2 &&                                                       \
-          (W_TYPE == vllm::kU4 || W_TYPE == vllm::kU4B8 ||                     \
-           W_TYPE == vllm::kFE2M1f);                                           \
-      constexpr bool kIsSupportedStage2Tile =                                  \
-          !kIsStage2FourBitTile ||                                             \
-          THREAD_M_BLOCKS * 2 <= THREAD_K_BLOCKS;                              \
-      if constexpr (kIsSupportedStage2Tile) {                                  \
-        constexpr auto S_TYPE =                                                \
-            W_TYPE == vllm::kFE2M1f                                            \
-                ? (GROUP_BLOCKS == 1 ? vllm::kFE4M3fn : vllm::kFE8M0fnu)       \
-                : ((W_TYPE == vllm::kFE4M3fn && GROUP_BLOCKS == 2)             \
-                       ? vllm::kFE8M0fnu                                       \
-                       : (std::is_same<scalar_t, half>::value                  \
-                              ? vllm::kFloat16                                 \
-                              : vllm::kBFloat16));                             \
-        kernel = Marlin<scalar_t, W_TYPE.id(), S_TYPE.id(), NUM_THREADS,       \
-                        THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,     \
-                        M_BLOCK_SIZE_8, STAGES, GROUP_BLOCKS, IS_ZP_FLOAT>;    \
-      }                                                                        \
+      constexpr auto S_TYPE =                                                  \
+          W_TYPE == vllm::kFE2M1f                                              \
+              ? (GROUP_BLOCKS == 1 ? vllm::kFE4M3fn : vllm::kFE8M0fnu)         \
+              : ((W_TYPE == vllm::kFE4M3fn && GROUP_BLOCKS == 2)               \
+                     ? vllm::kFE8M0fnu                                         \
+                     : (std::is_same<scalar_t, half>::value                    \
+                            ? vllm::kFloat16                                   \
+                            : vllm::kBFloat16));                               \
+      kernel = marlin_kernel_for_schedule<                                     \
+          scalar_t, W_TYPE.id(), S_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,    \
+          THREAD_N_BLOCKS, THREAD_K_BLOCKS, M_BLOCK_SIZE_8, STAGES,            \
+          GROUP_BLOCKS, IS_ZP_FLOAT>(hybrid);                                  \
     }
 
   // COMMON: cases for (group_blocks in [-1, 2, 4, 8] and is_zp_float == false)
@@ -671,27 +690,10 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
                                 int thread_k_blocks, bool m_block_size_8,
                                 bool has_act_order, bool has_zp,
                                 int group_blocks, int num_threads,
-                                bool is_zp_float, int stages) {
+                                bool is_zp_float, int stages,
+                                bool hybrid = false) {
   int num_bits = q_type.size_bits();
   auto kernel = MarlinDefault;
-  if constexpr (std::is_same<scalar_t, half>::value) {
-    if (stages == 2) {
-      if (false) {
-      }
-      COMMON_GET_IF(vllm::kU4, 2)
-      COMMON_GET_IF(vllm::kU8, 2)
-      COMMON_GET_IF(vllm::kU4B8, 2)
-      COMMON_GET_IF(vllm::kU8B128, 2)
-
-      NVFP4_GET_IF(vllm::kFE2M1f, 2)
-
-      BIGGROUP_GET_IF(vllm::kFE4M3fn, 2)
-
-      ACT_GET_IF(vllm::kU4B8, 2)
-      ACT_GET_IF(vllm::kU8B128, 2)
-    }
-  }
-
   if (stages == pipe_stages) {
     if (false) {
     }
@@ -709,11 +711,6 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
   }
 
   if constexpr (std::is_same<scalar_t, half>::value) {
-    if (stages == 2) {
-      if (false) {
-      }
-      FZP_GET_IF(vllm::kU4, 2)
-    }
     if (stages == pipe_stages) {
       if (false) {
       }
@@ -803,6 +800,52 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
   return exec_cfg;
 }
 
+// Small-grid narrow-tile override (vllm-project/vllm#24722).
+//
+// #5216 switched to {thread_k=128, thread_n=64, threads=128} whenever the
+// auto-selected tile left fewer than four output tiles per SM. That rule only
+// counted output tiles: it ignored K and the 256-thread tile it replaced. On
+// 128-SM Ada parts N=4096 sits exactly on the boundary, so every large-K
+// down projection took the narrow tile even though the wide tile already had
+// enough split-K work per SM; those calls lost 1.1-1.35x. Parts with more SMs
+// keep #5216's choice: on the 170-SM RTX 5090 the narrow tile measured faster
+// for every 16-row shape in #5216's table, including the large-K ones.
+constexpr int MARLIN_NARROW_SMALL_GRID_MAX_SMS = 128;
+constexpr int MARLIN_SMALL_GRID_MAX_SHORT_K = 4096;
+constexpr int MARLIN_SMALL_GRID_THREAD_K = 128;
+constexpr int MARLIN_SMALL_GRID_THREAD_N = 64;
+constexpr int MARLIN_SMALL_GRID_THREADS = 128;
+
+bool marlin_prefers_narrow_small_grid(int prob_m_split, int prob_n, int prob_k,
+                                      const thread_config_t& wide,
+                                      int thread_m_blocks, int sms) {
+  const int m_tiles = div_ceil(prob_m_split, thread_m_blocks * 16);
+  const int wide_tiles = m_tiles * (prob_n / wide.thread_n);
+  if (wide_tiles * 4 > sms) {
+    return false;
+  }
+  if (sms > MARLIN_NARROW_SMALL_GRID_MAX_SMS) {
+    return true;
+  }
+  const int narrow_tiles = m_tiles * (prob_n / MARLIN_SMALL_GRID_THREAD_N);
+  const int narrow_k_tiles = div_ceil(prob_k, MARLIN_SMALL_GRID_THREAD_K);
+  const int narrow_blocks_per_tile =
+      narrow_tiles > 0 ? min(narrow_k_tiles, sms / narrow_tiles) : 0;
+  // Without a K split the narrow tile is one 128-thread block per output
+  // tile against the wide tile's 256 threads; keep the wide tile.
+  if (narrow_blocks_per_tile < 2) {
+    return false;
+  }
+  if (thread_m_blocks > 1) {
+    return true;
+  }
+  // A 16-row wide tile keeps its per-FLOP advantage at long K. The narrow
+  // tile is only used for short K or when it still splits K at least four
+  // ways (the k/v projection shapes #5216 targeted).
+  return prob_k <= MARLIN_SMALL_GRID_MAX_SHORT_K ||
+         narrow_blocks_per_tile >= 4;
+}
+
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                void* s, void* s2, void* zp, void* g_idx, void* perm,
@@ -810,8 +853,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                void* workspace, vllm::ScalarType const& q_type, bool has_bias,
                bool has_act_order, bool is_k_full, bool has_zp, int num_groups,
                int group_size, int dev, cudaStream_t stream, int thread_k_init,
-               int thread_n_init, int sms, bool use_atomic_add,
-               bool use_fp32_reduce, bool is_zp_float) {
+               int thread_n_init, int num_threads_init, int sms,
+               bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) {
   if (has_zp) {
     TORCH_CHECK(
         q_type == vllm::kU4 || q_type == vllm::kU8,
@@ -888,17 +931,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
   int major_capability = device_info.major_capability;
   int minor_capability = device_info.minor_capability;
-  TORCH_CHECK(major_capability > 7 ||
-                  (major_capability == 7 && minor_capability >= 5),
-              "marlin kernel only supports Turing or newer GPUs.");
+  TORCH_CHECK(major_capability >= 8,
+              "marlin kernel only supports Ampere or newer GPUs.");
 
   int stages = pipe_stages;
-  if (major_capability == 7 && minor_capability == 5) {
-    stages = 2;
-    if constexpr (!std::is_same<scalar_t, half>::value) {
-      TORCH_CHECK(false, "Turing only supports float16 dense Marlin kernels.");
-    }
-  }
 
   int max_par = 16;
   if (prob_n <= 4096) max_par = 16 * 8;
@@ -956,7 +992,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       exec_cfg = exec_config_t{1, thread_config_t{128, 128, 256}};
       thread_tfg = exec_cfg.tb_cfg;
     } else if (thread_k != -1 && thread_n != -1) {
-      thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
+      thread_tfg =
+          thread_config_t{thread_k, thread_n,
+                          num_threads_init != -1 ? num_threads_init
+                                                 : default_threads};
       exec_cfg = exec_config_t{1, thread_tfg};
       TORCH_CHECK(prob_n % thread_n == 0, "prob_n = ", prob_n,
                   " is not divisible by thread_n = ", thread_n);
@@ -969,6 +1008,32 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
           num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
           stages, max_shared_mem, major_capability, minor_capability, sms);
       thread_tfg = exec_cfg.tb_cfg;
+      // Small grids: when the chosen tile leaves fewer than four output tiles
+      // per SM, most SMs would split K for the same few tiles and then queue
+      // on their reduction locks. Narrow 128x64 tiles double the output
+      // parallelism instead (vllm-project/vllm#24722), but only while their
+      // K split and warp count stay worthwhile (#5281). The full-SM sm_80
+      // tables and Ada's narrow FP32 AWQ schedule are tuned separately and
+      // keep their own choice.
+      if (thread_tfg.thread_k != -1 && !full_sm80 && !narrow_fp32_awq &&
+          marlin_prefers_narrow_small_grid(prob_m_split, prob_n, prob_k,
+                                           thread_tfg, thread_m_blocks, sms)) {
+        const thread_config_t small_grid_cfg{
+            MARLIN_SMALL_GRID_THREAD_K, MARLIN_SMALL_GRID_THREAD_N,
+            MARLIN_SMALL_GRID_THREADS};
+        if (is_valid_config(small_grid_cfg, thread_m_blocks, prob_m_split,
+                            prob_n, prob_k, num_bits, group_size,
+                            has_act_order, is_k_full, has_zp, is_zp_float,
+                            stages, max_shared_mem) &&
+            get_marlin_kernel<scalar_t>(
+                q_type, thread_m_blocks, small_grid_cfg.thread_n / 16,
+                small_grid_cfg.thread_k / 16, m_block_size_8, has_act_order,
+                has_zp, group_blocks, small_grid_cfg.num_threads, is_zp_float,
+                stages) != MarlinDefault) {
+          thread_tfg = small_grid_cfg;
+          exec_cfg = exec_config_t{1, thread_tfg};
+        }
+      }
       if (thread_tfg.thread_k == -1 && force_exact_split) {
         disable_full_sm80_exact_split = true;
         max_thread_m_blocks = 4;
@@ -1015,10 +1080,17 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
         ", has_zp = ", has_zp, ", is_zp_float = ", is_zp_float,
         ", stages = ", stages, ", max_shared_mem_new = ", max_shared_mem_new);
 
+    // Prefill only: the hybrid schedule runs only when the whole call (not
+    // this launch's split) has at least MARLIN_HYBRID_MIN_ROWS rows and
+    // this launch uses 64-row tiles. Any smaller call (decode, small batches)
+    // keeps the original kernel. Keyed on the call's rows so one call never
+    // mixes schedules by row count.
+    const bool use_hybrid =
+        prob_m >= MARLIN_HYBRID_MIN_ROWS && thread_m_blocks == 4;
     auto kernel = get_marlin_kernel<scalar_t>(
         q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,
         m_block_size_8, has_act_order, has_zp, group_blocks, num_threads,
-        is_zp_float, stages);
+        is_zp_float, stages, use_hybrid);
 
     if (kernel == MarlinDefault) {
       TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
@@ -1065,7 +1137,8 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
     bool is_zp_float, std::optional<torch::Tensor> c_tmp_or_none,
-    std::optional<torch::Tensor> a_tmp_or_none) {
+    std::optional<torch::Tensor> a_tmp_or_none, int64_t thread_k_override,
+    int64_t thread_n_override, int64_t num_threads_override) {
   const int kernel_size_m = marlin::checked_kernel_dim(size_m, "size_m");
   const int kernel_size_n = marlin::checked_kernel_dim(size_n, "size_n");
   const int kernel_size_k = marlin::checked_kernel_dim(size_k, "size_k");
@@ -1134,12 +1207,27 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   TORCH_CHECK(b_scales.device().is_cuda(), "b_scales is not on GPU");
   TORCH_CHECK(b_scales.is_contiguous(), "b_scales is not contiguous");
 
-  // thread_k: `k` size of a thread_tile in `weights` (can usually be left as
-  // auto -1)
-  int thread_k = -1;
-  // thread_n: `n` size of a thread_tile in `weights` (can usually be left as
-  // auto -1)
-  int thread_n = -1;
+  // Explicit thread tile. The default (-1, -1) keeps the shape planner.
+  // ``thread_k``/``thread_n`` are the `k`/`n` sizes of one thread tile in
+  // `weights`; ``num_threads`` defaults to 256 for an explicit pair.
+  TORCH_CHECK((thread_k_override == -1) == (thread_n_override == -1),
+              "thread_k and thread_n must be set together (got ",
+              thread_k_override, ", ", thread_n_override, ")");
+  TORCH_CHECK(thread_k_override >= -1 &&
+                  thread_k_override <= std::numeric_limits<int>::max(),
+              "thread_k is out of range: ", thread_k_override);
+  TORCH_CHECK(thread_n_override >= -1 &&
+                  thread_n_override <= std::numeric_limits<int>::max(),
+              "thread_n is out of range: ", thread_n_override);
+  TORCH_CHECK(num_threads_override >= -1 &&
+                  num_threads_override <= std::numeric_limits<int>::max(),
+              "num_threads is out of range: ", num_threads_override);
+  TORCH_CHECK(num_threads_override == -1 ||
+                  (thread_k_override != -1 && thread_n_override != -1),
+              "num_threads requires an explicit thread_k and thread_n");
+  int thread_k = static_cast<int>(thread_k_override);
+  int thread_n = static_cast<int>(thread_n_override);
+  int num_threads = static_cast<int>(num_threads_override);
   // sms: number of SMs to use for the kernel
   int sms = marlin::get_marlin_device_info(a.get_device()).sms;
 
@@ -1343,8 +1431,24 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     TORCH_CHECK(b_bias.is_contiguous(), "b_bias is not contiguous");
     TORCH_CHECK(b_bias.size(0) == size_n, "b_bias.size(0) != size_n");
     TORCH_CHECK(b_bias.stride(0) == 1, "b_bias.stride(0) != 1");
+    // The epilogue adds the bias to its FP32 accumulator before the visible
+    // cast, so an FP32 operand is what keeps a checkpoint value the activation
+    // dtype cannot hold finite. The kernel stages it as FP32 either way; a
+    // half/bfloat16 operand is widened here so existing callers keep working.
+    TORCH_CHECK(b_bias.scalar_type() == at::ScalarType::Float ||
+                    b_bias.scalar_type() == a.scalar_type(),
+                "b_bias must be float32 or the activation dtype");
   } else {
-    b_bias = torch::empty({0}, options);
+    b_bias = torch::empty({0}, options_fp32);
+  }
+  // The kernel stages and adds the bias in FP32. A half/bfloat16 caller is
+  // widened once, per call; the widening is a temporary operand and never
+  // replaces the caller's buffer.
+  torch::Tensor bias_f32;
+  if (has_bias && b_bias.scalar_type() != at::ScalarType::Float) {
+    bias_f32 = b_bias.to(at::ScalarType::Float);
+  } else {
+    bias_f32 = b_bias;
   }
 
   torch::Tensor b_zeros;
@@ -1417,6 +1521,9 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   if (c_or_none.has_value()) c.record_stream(stream);
   if (c_tmp_or_none.has_value()) c_tmp.record_stream(stream);
   if (a_tmp_or_none.has_value()) a_tmp.record_stream(stream);
+  // A half/bfloat16 bias produces a short-lived FP32 widening here; record it
+  // so it cannot be recycled while the asynchronous launch still reads it.
+  if (has_bias) bias_f32.record_stream(stream);
   #if MARLIN_ENABLE_FP16
   if (a.scalar_type() == at::ScalarType::Half) {
     void* scales_ptr;
@@ -1424,36 +1531,30 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
       if (group_size == 16)
         scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
       else if (group_size == 32) {
-        #if HAS_FLOAT8_E8M0FNU
-          scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
-        #else
-          TORCH_CHECK(false,
-            "float8_e8m0fnu is not available in this build of PyTorch.");
-        #endif
+        TORCH_CHECK(false, "float4_e2m1f with float8_e8m0fnu scales requires "
+                           "bfloat16 compute (MXFP4).");
       } else
         TORCH_CHECK(false,
                     "float4_e2m1f only supports group_size == 16 (NVFP4) ",
                     "and group_size == 32 (MXFP4)");
-#if HAS_FLOAT8_E8M0FNU
     } else if (b_q_type == vllm::kFE4M3fn &&
                b_scales.scalar_type() == at::ScalarType::Float8_e8m0fnu) {
       TORCH_CHECK(false, "float8_e4m3fn with float8_e8m0fnu scales requires "
                          "bfloat16 compute (MXFP8).");
-#endif
-
     } else {
       scales_ptr = b_scales.data_ptr<at::Half>();
     }
 
     marlin::marlin_mm<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        c_tmp.data_ptr<float>(), b_bias.data_ptr<at::Half>(), scales_ptr,
+        c_tmp.data_ptr<float>(),
+        static_cast<void*>(bias_f32.data_ptr()), scales_ptr,
         global_scale.data_ptr<float>(), b_zeros.data_ptr(), g_idx.data_ptr(),
         perm.data_ptr(), a_tmp.data_ptr<at::Half>(), kernel_size_m,
         kernel_size_n, kernel_size_k, kernel_lda, workspace.data_ptr(),
         b_q_type, has_bias, has_act_order,
         is_k_full, has_zp, num_groups, group_size, dev,
-        stream, thread_k, thread_n, sms,
+        stream, thread_k, thread_n, num_threads, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
     return c;
   }
@@ -1465,25 +1566,18 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     if (b_q_type == vllm::kFE2M1f) {
       if (group_size == 16)
         scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
-      else if (group_size == 32) {
-        #if HAS_FLOAT8_E8M0FNU
-          scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
-        #else
-          TORCH_CHECK(false,
-            "float8_e8m0fnu is not available in this build of PyTorch.");
-        #endif
-     } else
+      else if (group_size == 32)
+        scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
+      else
         TORCH_CHECK(false,
                     "float4_e2m1f only supports group_size == 16 (NVFP4) ",
                     "and group_size == 32 (MXFP4)");
-#if HAS_FLOAT8_E8M0FNU
     } else if (b_q_type == vllm::kFE4M3fn &&
                b_scales.scalar_type() == at::ScalarType::Float8_e8m0fnu) {
       TORCH_CHECK(group_size == 32,
                   "float8_e4m3fn only supports group_size == 32 (MXFP8) when "
                   "using float8_e8m0fnu scales.");
       scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
-#endif
     } else {
       scales_ptr = b_scales.data_ptr<at::BFloat16>();
     }
@@ -1491,13 +1585,13 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     marlin::marlin_mm<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
         c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
-        b_bias.data_ptr<at::BFloat16>(), scales_ptr,
+        static_cast<void*>(bias_f32.data_ptr()), scales_ptr,
         global_scale.data_ptr<float>(), b_zeros.data_ptr(),
         g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
         kernel_size_m, kernel_size_n, kernel_size_k, kernel_lda,
         workspace.data_ptr(), b_q_type,
         has_bias, has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
-        stream, thread_k, thread_n, sms,
+        stream, thread_k, thread_n, num_threads, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
     return c;
   }

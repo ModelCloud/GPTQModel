@@ -505,23 +505,11 @@ nf12_moe_weight_t moe_weight_view(const Tensor& packed, const Tensor& escapes, c
   const int64_t k = packed.size(2) / 3 * 2;
   check_shape(n, k, "MoE packed weight");
 
-  // Offsets select each expert's local escape slice. Validate them at the op
-  // entry so a direct caller cannot make the kernel walk past the table.
-  {
-    std::vector<int64_t> host_offsets(static_cast<size_t>(num_experts) + 1);
-    const cudaStream_t stream = current_stream(device);
-    cudaMemcpyAsync(host_offsets.data(), escape_offsets.data_ptr(),
-                    host_offsets.size() * sizeof(int64_t), cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-    for (int64_t e = 0; e < num_experts; ++e) {
-      STD_TORCH_CHECK(host_offsets[e] >= 0 && host_offsets[e] <= host_offsets[e + 1],
-                      "nf12: escape_offsets must be non-negative and non-decreasing at expert ", e,
-                      ", got ", host_offsets[e], " then ", host_offsets[e + 1]);
-    }
-    STD_TORCH_CHECK(host_offsets[num_experts] <= escapes.size(0),
-                    "nf12: escape_offsets[E] = ", host_offsets[num_experts],
-                    " exceeds the ", escapes.size(0), "-row escape table");
-  }
+  // Offsets are not read here: a device-to-host copy plus stream synchronize on
+  // every forward would make these ops uncapturable in a CUDA graph (and the
+  // copy's result was previously unchecked anyway). NF12MoEWeight validates
+  // them once at load time, and the kernels bound each expert's local escape
+  // index against its slice count.
 
   nf12_moe_weight_t w{};
   w.packed = packed.data_ptr();

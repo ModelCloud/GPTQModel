@@ -276,28 +276,73 @@ live runtime layout. If those values changed, checkpoint export fails instead
 of writing the old snapshot. A dict with no local operands leaves the layout
 untouched.
 
+### Which layouts keep a resident `qweight` clone
+
+`capture_fused_train_state` clones `qweight` only as a `RebuildCandidate`: the
+CPU int4pack transform then calls `finalize_fused_train_state`, which rebuilds
+the checkpoint words from the live runtime tensor and compares them **bitwise**
+with that clone. Only an exact match replaces the clone with a
+`RebuiltCheckpointTensor` descriptor and releases the duplicate; any mismatch
+keeps the clone, so an inverse this build cannot reproduce never reaches a saved
+checkpoint (fail closed). A layout whose inverse was already proven in this
+process skips the per-module rebuild, because the inverse is a deterministic
+function of the layout.
+
+Every CPU int4 family now has a verified inverse:
+
+| `_FUSED_TRAIN_STATE_REBUILD` | Kernel | Inverse |
+| --- | --- | --- |
+| `"gptq"` | `TorchAtenLinear`, `TorchFusedLinear` | `rebuild_gptq_qweight`: `int4pack_to_codes` plus, for `desc_act`, the `ret_idx` scatter |
+| `"awq"` | `TorchAtenAwqLinear`, `TorchFusedAwqLinear` | `rebuild_awq_qweight` |
+| `"avx512_gptq"` | `TorchCpuAvx512Linear` | `rebuild_avx512_qweight` (`unpack_hf_int4`) |
+| `"avx512_awq"` | `TorchCpuAvx512AwqLinear` | `rebuild_avx512_awq_qweight` (nibble inverse of the extension's `pack_awq_int4`) |
+
+Two of them used to keep the full clone (#5013):
+
+* **`desc_act` GPTQ with a non-identity `ret_idx`.** The transform packs
+  `weight.index_select(0, ret_idx)`, so the runtime codes are in *group* order
+  while the checkpoint keeps source order. `ret_idx` is a permutation of
+  `[0, in_features)` (`argsort(g_idx)`) and the module keeps it, so
+  `index_copy_` with the same index is the exact inverse. The earlier code
+  refused every non-identity order because the ATen op does not keep the gather
+  itself, which cost a full checkpoint copy on every `desc_act` layer; `AUTO`
+  with `dtype=torch.float16` on CPU selects this kernel.
+* **`TorchCpuAvx512AwqLinear`.** `pack_awq_int4` is a pure nibble permutation:
+  each runtime byte pairs output column `group * 32 + row` (low nibble) with
+  `group * 32 + row + 16` (high nibble) for one input feature, reading the
+  checkpoint word through the AWQ reverse order. Undoing it needs only the
+  reverse read plus `pack_awq_columns(..., order=AWQ_ORDER)`, so the inverse is
+  pure Torch and does not need the extension or AVX512-BF16 at save time.
+
+`TorchCpuAvx512AwqLinear.transform_cpu` therefore ends with
+`finalize_fused_train_state`, like the other CPU int4 transforms.
+
 ### Cache invalidation is not a checkpoint restore
 
 `clear_weight_cache()` is called from three different lifecycle events:
-explicit cache invalidation, `nn.Module._apply` device/dtype moves, and the
-post-load hook. The clear itself only drops derived state (`ret_idx`,
+explicit cache invalidation, `nn.Module._apply` device moves, and the
+post-load hook. A dtype cast after the first forward never reaches it: the
+runtime layout only exists after a forward, and `BaseQuantLinear` rejects
+post-forward dtype changes
+([forward dtype contract](../contracts/kernel/forward-dtype.md)). The clear itself only drops derived state (`ret_idx`,
 `scales_and_zeros`, `torch_fused_op`) and rebuilds it from the live packed
 buffers; it deliberately keeps the runtime-layout flags (`linear_mode`,
 `_cpu_transformed`, `_cpu_transform_dtype`) live. The checkpoint snapshot is
-restored only by an explicit checkpoint load, export, `train()` resume, or an
-invalidating move (decided by `_apply`, not by the clear).
+restored only by an explicit checkpoint load, export, `train()` resume, or a
+cross-device move (decided by `_apply`, not by the clear).
 
 ```mermaid
 flowchart TD
     A["checkpoint layout<br/>qweight int32, snapshot present"] -->|"first eval forward<br/>capture_fused_train_state + transform"| B["runtime layout<br/>qweight int4pack uint8"]
     B -->|"clear_weight_cache<br/>explicit clear or same-device move"| B
-    B -->|"low-precision dtype move<br/>restore_fused_train_state"| A
+    B -. "dtype cast after forward" .-> D["BaseQuantLinear raises RuntimeError<br/>before any tensor changes"]
     B -->|"cross-device move<br/>restore_fused_train_state"| A
     B -->|"train / checkpoint load / export<br/>restore_fused_train_state"| A
     A -->|"clear_weight_cache<br/>invalidate derived state"| A
     B -. "modified runtime state" .-> X["export raises RuntimeError"]
     classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
     class X failure;
+    class D failure;
 ```
 
 The old clear path ran `restore_fused_train_state()` unconditionally. Clearing

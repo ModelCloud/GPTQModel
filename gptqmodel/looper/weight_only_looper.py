@@ -6,8 +6,8 @@
 """Weight-only quantization loop for methods that do not capture activations.
 
 This looper intentionally does not share the activation-capture lifecycle used
-by GPTQ/AWQ calibration flows. Weight-only methods such as RTN, FP8, NVFP4, or
-GGUF can usually process each linear layer directly, so the control flow here
+by GPTQ/AWQ calibration flows. Weight-only methods such as RTN, NVFP4, GGUF, or
+BitsAndBytes can usually process each linear layer directly, so the control flow here
 stays narrow: iterate quantizable modules, quantize weights, finalize, and
 optionally offload.
 """
@@ -21,32 +21,40 @@ from concurrent.futures import as_completed
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from accelerate.utils import find_tied_parameters
 from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
-from ..looper.loop_processor import CalibrationConfig
+from ..looper.inflight_layer import InflightLayerTracker
+from ..looper.loop_processor import (
+    record_quant_log,
+    rehome_failed_run_kernels,
+    release_failed_run_processors,
+)
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.module_preprocessor import ModulePreProcessor
 from ..looper.named_module import NamedModule
-from ..looper.weight_only_processor import WeightOnlyProcessor
+from ..looper.run_exit_recovery import RunExitRecovery
+from ..looper.weight_only_processor import WeightOnlyProcessor, WeightOnlyProcessorConfig
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
 from ..models.module_plan import _model_module_plan
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..quantization.config import (
     BitsAndBytesConfig,
-    FP8Config,
+    CalibrationConfig,
+    CPTCConfig,
     GGUFConfig,
     NF12Config,
     QuantizeEmbed,
     QuantizeEmbedConfig,
     RTNConfig,
     VramStrategy,
+    encoder_stages_on_host,
 )
 from ..utils import has_gil_disabled
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
+from ..utils.kernel import configure_kernel, resolve_kernel_config
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.looper_helpers import (
     device_ctx,
@@ -63,8 +71,24 @@ from ..utils.model import (
     get_module,
     get_module_by_name_prefix,
 )
-from ..utils.offload import offload_to_disk
+from ..utils.offload import (
+    bind_private_offload_root,
+    capture_offloaded_base_modules,
+    ensure_version_counters,
+    has_disk_offloaded_modules,
+    is_meta_module,
+    materialize_remaining_meta_modules,
+    offload_to_disk,
+    rebind_shared_meta_parameters,
+    release_private_offload_root,
+    replace_inference_parameters,
+    restore_disk_offloaded_modules,
+    restore_offloaded_modules,
+    shared_meta_parameter_owners,
+    shared_meta_parameter_snapshot,
+)
 from ..utils.p2p import configure_p2p, enable_for_devices
+from ..utils.tied_weights import lm_head_quantization_is_tied
 from .execution_state import DeviceAssignmentState
 from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 
@@ -72,7 +96,7 @@ from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 log = setup_logger()
 
 
-class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
+class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignmentState):
     """Run the simplified per-layer lifecycle for weight-only quantization."""
 
     def __init__(
@@ -87,6 +111,10 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self.gptq_model = model
         self.layer_module_coverage = LayerModuleCoverageTracker()
         self.processor = processor
+        # Base modules offloaded at the start of the run are restored when the
+        # loop exits so the model stays usable in-session.
+        self._offloaded_base_modules: List[Tuple[str, torch.nn.Module, torch.device]] = []
+        self._bind_private_offload_namespace()
         self.extensions = LoopExtensions(extensions)
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
         self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
@@ -104,6 +132,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # summary, and never blocks quantization when a link is unsupported.
         cross_device_pool = self._cross_device_pool()
         configure_p2p(getattr(self.gptq_model.quantize_config, "p2p", None))
+        configure_kernel(resolve_kernel_config(self.gptq_model.quantize_config, use_process_default=False))
         if len(cross_device_pool) > 1:
             enable_for_devices(cross_device_pool)
 
@@ -409,6 +438,18 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             )
             return device
 
+    def _encoder_stages_on_host(self) -> bool:
+        """Report whether this run's encoder consumes a host-resident source.
+
+        GGUF and BitsAndBytes encode on the host and NF12 stages an eligible
+        host source itself, so staging their dense layer on the accelerator is
+        a wasted round trip of the whole tensor (#5757). The assigned device
+        still selects the backend and owns the packed checkpoint handoff.
+        """
+
+        qcfg = getattr(self.processor, "qcfg", None)
+        return bool(qcfg is not None and encoder_stages_on_host(qcfg))
+
     def _prepare_named_module_for_quantization(self, named: NamedModule, target_device: torch.device) -> None:
         """Move a weight-only module to the assigned quantization device."""
 
@@ -416,12 +457,14 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             previous_device = get_device(named.module)
         except Exception:
             previous_device = None
+        host_encoder = self._encoder_stages_on_host()
         with device_ctx(target_device):
-            move_module_to_device(
-                named.module,
-                target_device,
-                root_module=getattr(self.gptq_model, "model", None),
-            )
+            if not host_encoder:
+                move_module_to_device(
+                    named.module,
+                    target_device,
+                    root_module=getattr(self.gptq_model, "model", None),
+                )
             # Keep the quantization device for the final pack step.
             named.state["quant_device"] = target_device
             named.target_device = target_device
@@ -431,6 +474,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             module=getattr(named, "full_name", named.name),
             previous_device=previous_device,
             target_device=target_device,
+            host_encoder=host_encoder,
         )
 
     def _move_named_module_to_cpu(self, named: NamedModule) -> None:
@@ -477,7 +521,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         target_device: torch.device,
     ) -> Tuple[
         NamedModule,
-        Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config],
+        Optional[WeightOnlyProcessorConfig],
     ]:
         """Run one module's weight-only quantization on its assigned device."""
 
@@ -491,7 +535,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     def _finalize_quantized_module(
         self,
         named: NamedModule,
-        active_qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+        active_qcfg: WeightOnlyProcessorConfig,
     ) -> str:
         """Move a quantized module back to CPU, pack it, and optionally offload it."""
 
@@ -541,7 +585,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
     def _finalize_target_device(
         self,
-        active_qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+        active_qcfg: WeightOnlyProcessorConfig,
     ) -> torch.device:
         """Resolve the worker device for one finalize task."""
 
@@ -555,7 +599,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         quantized_modules: List[
             Tuple[
                 NamedModule,
-                RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+                WeightOnlyProcessorConfig,
             ]
         ],
     ) -> None:
@@ -659,7 +703,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     ) -> List[
         Tuple[
             NamedModule,
-            RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+            WeightOnlyProcessorConfig,
         ]
     ]:
         """Quantize one subset, using multiple devices when available."""
@@ -668,7 +712,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             str,
             Tuple[
                 NamedModule,
-                RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+                WeightOnlyProcessorConfig,
             ],
         ] = {}
         task_specs = [
@@ -729,6 +773,16 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         resolved = full.get(module_name)
         if resolved is None:
             resolved, _ = get_module_by_name_prefix(layer_module, module_name)
+            if resolved is not None and not isinstance(resolved, tuple(SUPPORTS_MODULE_TYPES)):
+                # A declared name that ``find_modules`` skipped can still
+                # resolve to a placeholder. Nemotron-H declares
+                # ``mixer.fc1_latent_proj`` for the latent-MoE layout, and
+                # transformers builds an ``nn.Identity`` there whenever
+                # ``moe_latent_size`` is unset (#5270). Wrapping it in a
+                # ``NamedModule`` raises ``StopIteration`` on
+                # ``next(module.parameters())`` and aborts the whole run, so
+                # treat it as the coverage miss the calibrated looper records.
+                resolved = None
             if resolved is None:
                 self.layer_module_coverage.record_miss(module_name, layer_index)
                 if self.gptq_model.layer_modules_strict:
@@ -767,6 +821,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         offload_to_disk(
             model=self.gptq_model.model,
             module=target_module,
+            module_name=module_full_name,
             disk_path=offload_path,
         )
 
@@ -857,16 +912,201 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             self.processor.layer_count = layer_count
         return quantized_names
 
+    def _bind_private_offload_namespace(self) -> None:
+        """Give this run a private offload root under the configured path."""
+
+        config = getattr(self.gptq_model, "quantize_config", None)
+        if config is None:
+            return
+        run_root = bind_private_offload_root(self.gptq_model)
+        if run_root is None:
+            return
+        private_config = self.gptq_model.quantize_config
+        # The processor is built before the looper and may hold the shared
+        # config object; point it at the private copy so every offload write
+        # during this run lands in the namespace the model saves from.
+        if getattr(self.processor, "qcfg", None) is config:
+            self.processor.qcfg = private_config
+
+    def _restore_offloaded_base_modules(self, *, strict: bool) -> None:
+        entries = getattr(self, "_offloaded_base_modules", None)
+        if not entries:
+            return
+        self._offloaded_base_modules = []
+        restore_offloaded_modules(self.gptq_model.model, entries, strict=strict)
+
+    def _restore_disk_offloaded_modules(self) -> None:
+        """Bring the disk-offloaded quantized modules back into memory.
+
+        Offload bounds host memory while the loop runs. Once it returns, the
+        in-session model must not depend on the run's bundles (issue #4450).
+        """
+
+        restore_disk_offloaded_modules(self.gptq_model.model, device=CPU, strict=True)
+
+    def _materialize_remaining_meta_modules(self) -> None:
+        """Load modules the lazy shell left on meta (e.g. an untied lm_head)."""
+
+        materialize_remaining_meta_modules(self.gptq_model, device=CPU)
+
+    def _materialize_unreached_meta_modules(self) -> None:
+        """Best-effort fill of the layers a cancelled/failed run never reached.
+
+        The weight-only loop also leaves the base modules on meta until the
+        success path fills them, so cover both before the next forward. Cleanup
+        must never mask the cancellation that got us here, so a materialization
+        failure is logged and ignored (#4860).
+        """
+
+        try:
+            self._materialize_meta_base_modules(strict=False)
+            self._materialize_remaining_meta_modules()
+        except Exception:
+            log.warning(
+                "failed to materialize the layers the cancelled/failed run never reached",
+                exc_info=True,
+            )
+
+    def _materialize_meta_base_modules(self, *, strict: bool) -> None:
+        """Fill base modules that the lazy shell never materialized.
+
+        Weight-only methods load the model as a checkpoint-backed meta shell.
+        ``embed_tokens``/``norm``/``rotary_emb`` are already on meta before the
+        offload step, so ``capture_offloaded_base_modules`` records nothing for
+        them and the restore path cannot bring them back. Materialize those
+        modules from the turtle source after the loop, or fail with the
+        reload-the-checkpoint guidance instead of returning an unusable model.
+        """
+
+        model = self.gptq_model.model
+        get_base_modules = getattr(self.gptq_model, "get_base_modules", None)
+        if not callable(get_base_modules):
+            return
+        unresolved: List[str] = []
+        # A parameter shared with a module outside the base list (a tied
+        # ``lm_head``) must stay shared once its base owner is filled.
+        shared_meta = shared_meta_parameter_owners(model)
+        for name in get_base_modules(model=model):
+            module = get_module(model, name)
+            if module is None or not is_meta_module(module):
+                continue
+            if getattr(module, "QUANT_TYPE", None) is not None:
+                # Packed modules own their quantized payload; never overwrite
+                # it with the dense checkpoint tensor.
+                continue
+            try:
+                snapshot = shared_meta_parameter_snapshot(module, shared_meta)
+                self.gptq_model.shell_module_materialize(
+                    target_submodule=module,
+                    device=CPU,
+                    module_path=name,
+                )
+                # Keep the in-session model movable with ``model.to()``
+                # (issue #4450).
+                replace_inference_parameters(module)
+                rebind_shared_meta_parameters(snapshot, shared_meta)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warn("Weight-only: failed to materialize base module `%s`: %s", name, exc)
+            if is_meta_module(module):
+                unresolved.append(name)
+
+        if not unresolved:
+            return
+
+        message = (
+            "Weight-only quantization: base modules remain on the meta device after "
+            f"quantization ({', '.join(unresolved)}). The in-session model cannot run "
+            "inference; reload the saved checkpoint before using it."
+        )
+        if strict:
+            raise RuntimeError(message)
+        log.error(message)
+
+    def _fence_run_work(self) -> None:
+        """Wait for work this run already submitted before tearing its state down."""
+
+        from ..utils.stream import STREAM_DEVICE_POOL
+
+        waits = (
+            ("device thread pool", DEVICE_THREAD_POOL.wait),
+            ("stream device pool", STREAM_DEVICE_POOL.wait),
+        )
+        for label, wait in waits:
+            try:
+                wait()
+            except Exception:
+                log.warning(
+                    "failed to drain the %s while failing the weight-only run",
+                    label,
+                    exc_info=True,
+                )
+
+    def _release_failed_run_processors(self) -> None:
+        """Close the per-run resources a successful run releases in ``finalize``."""
+
+        release_failed_run_processors((self.processor,))
+
+    def _release_run_workspace(self) -> None:
+        """Release processor-owned scratch shared across the whole run."""
+
+        release = getattr(self.processor, "release_run_workspace", None)
+        if callable(release):
+            release()
+
+    def _release_or_keep_private_offload_root(self) -> None:
+        """Keep the per-run root while a disk-offloaded shell still reads it."""
+
+        model = getattr(self.gptq_model, "model", None)
+        if model is not None and has_disk_offloaded_modules(model):
+            log.debug(
+                "Offload: keeping the per-run directory for the "
+                "disk-offloaded layers of a cancelled/failed weight-only run."
+            )
+        else:
+            release_private_offload_root(self.gptq_model)
+
+    def _make_run_exit_recovery(self) -> RunExitRecovery:
+        """Build the one run-scoped owner of this run's exit obligations."""
+
+        def materialize_success() -> None:
+            self._materialize_meta_base_modules(strict=True)
+            self._materialize_remaining_meta_modules()
+
+        return RunExitRecovery(
+            fence=self._fence_run_work,
+            release_processors=self._release_failed_run_processors,
+            restore_inflight=self._restore_inflight_layer,
+            unwrap_hooked=self._unwrap_failed_run_hooked_linears,
+            restore_offloaded=self._restore_offloaded_base_modules,
+            materialize_unreached=self._materialize_unreached_meta_modules,
+            rehome_kernels=lambda: rehome_failed_run_kernels(self.gptq_model),
+            repair_counters=lambda: ensure_version_counters(self.gptq_model.model),
+            release_private_root=self._release_or_keep_private_offload_root,
+            restore_disk=self._restore_disk_offloaded_modules,
+            materialize_success=materialize_success,
+            release_workspace=self._release_run_workspace,
+            release_processors_before_restore=False,
+        )
+
     def loop(self, **kwargs):
         """Quantize layers directly from weights without calibration forwards."""
+
+        recovery = self._make_run_exit_recovery()
+        # Exposed for diagnostics and tests: the run, not the exception
+        # handler, owns the exit sequence (#5060).
+        self._run_exit_recovery = recovery
+        return recovery.run(lambda: self._loop_impl(**kwargs))
+
+    def _loop_impl(self, **kwargs):
+        """Run the weight-only quantization workflow."""
         quant_config = self.gptq_model.quantize_config
         if not isinstance(
             quant_config,
-            (RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig, NF12Config),
+            (RTNConfig, GGUFConfig, BitsAndBytesConfig, NF12Config, CPTCConfig),
         ):
             raise NotImplementedError(
                 "Weight-only looper only supports `RTNConfig`, `GGUFConfig`, "
-                "`FP8Config`, `BitsAndBytesConfig`, and `NF12Config` today."
+                "`BitsAndBytesConfig`, `NF12Config`, and `CPTCConfig`."
             )
 
         embedding_targets = self._embedding_quant_targets()
@@ -887,10 +1127,10 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         lm_head_name = self.gptq_model.get_output_embeddings_name() or self.gptq_model.lm_head
         if not embed_only and quant_config.lm_head and lm_head_name not in embedding_target_names:
             # The output head may belong to a nested multimodal text model.
-            if any(
-                f"{lm_head_name}.weight" in names
-                for names in find_tied_parameters(self.gptq_model.model)
-            ):
+            # Share the check with `ModuleLooper`: `find_tied_parameters` alone
+            # only sees materialized parameters, so a lazily loaded shell let
+            # the run continue and fail on the head's meta tensor (#5027).
+            if lm_head_quantization_is_tied(self.gptq_model, lm_head_name):
                 raise NotImplementedError(
                     "quantization of `lm_head` layer with tied weights is not supported. "
                     "Untie the model weights before quantization."
@@ -925,14 +1165,21 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 self.gptq_model.shell_direct_meta_materialize(
                     target_submodule=module,
                     device=CPU,
+                    module_path=module_name,
                 )
 
         if quant_config.offload_to_disk:
             log.info("Offloading base modules to disk...")
+            base_modules = self.gptq_model.get_base_modules(model=self.gptq_model.model)
+            self._offloaded_base_modules = capture_offloaded_base_modules(
+                self.gptq_model.model, base_modules
+            )
             offload_to_disk(
                 model=self.gptq_model.model,
-                module=self.gptq_model.get_base_modules(model=self.gptq_model.model),
+                module=base_modules,
                 disk_path=quant_config.offload_to_disk_path,
+                source_root=getattr(self.gptq_model, "model_local_path", None),
+                source_checkpoint=getattr(self.gptq_model, "checkpoint_file_name", None),
             )
 
         layer_modules = self.gptq_model.simple_layer_modules(
@@ -996,7 +1243,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             self._quantize_embedding_targets(embedding_targets, layer_count=layer_count, pb=pb)
             if embed_only:
                 total_log = {self.processor.name(): self.processor.log}
-                self.gptq_model.quant_log = self.processor.log
+                record_quant_log(self.gptq_model, (self.processor,))
                 self.processor.finalize(model=self.gptq_model)
                 self.gptq_model._model_free_weight_only_replacements_only = True
                 return total_log
@@ -1044,7 +1291,24 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     pb.current_iter_step = progress_index
                     pb.title(layer_title).subtitle("").draw()
 
-                module = self.gptq_model.pre_quantize(module)
+                # Capture the layer's pre-stage home before anything moves it,
+                # so a cancelled or failed run restores this placement instead
+                # of leaving the layer pinned on the compute device (#5011).
+                inflight_home = get_device(module)
+                if getattr(inflight_home, "type", None) == "meta":
+                    inflight_home = CPU
+                self._track_inflight_layer(module, inflight_home)
+
+                pre_quantize_path = (
+                    self.gptq_model.lm_head if is_lm_head_module else layer_name
+                )
+                module = self.gptq_model.pre_quantize(
+                    module, module_path=pre_quantize_path or None
+                )
+                # ``pre_quantize`` moves a CPU layer to the quantize device and
+                # may return a materialized shell, so track the object that is
+                # actually staged as well as the pre-call one.
+                self._track_inflight_layer(module, inflight_home)
                 if not is_lm_head_module:
                     # Preserve existing module conversion behavior so the new
                     # lifecycle stays compatible with model-specific wrappers.
@@ -1052,6 +1316,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     if model_type in MODULE_CONVERTER_MAP:
                         converter = MODULE_CONVERTER_MAP[model_type]
                         module = converter(module, self.gptq_model.model.config)
+                        self._track_inflight_layer(module, inflight_home)
                     layers[layer_index] = module
 
                 # Resolve concrete submodules after any pre-quantization
@@ -1112,15 +1377,18 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
                     self._finalize_subset_modules(self._quantize_subset_modules(subset_named_modules))
 
-                # Submodule-level offload may swap packed tensors to meta/disk placeholders.
-                # Skip the layer-wide CPU move in that case to avoid `.to()` on meta buffers.
-                if getattr(self.gptq_model.quantize_config, "offload_to_disk", False):
-                    if not is_lm_head_module:
-                        layers[layer_index] = module
-                elif is_lm_head_module:
+                # Move the finished layer to CPU even when its packed modules
+                # are disk-offloaded: `post_quantize` leaves their meta
+                # placeholders alone, while the layer norms and other
+                # non-quantized state must not stay on the accelerator next to
+                # a CPU-resident model (issue #4450).
+                if is_lm_head_module:
                     self.gptq_model.post_quantize(module)
                 else:
                     layers[layer_index] = self.gptq_model.post_quantize(module)
+                # The layer is back on its home device; a later failure must not
+                # try to restore it again (it may already be a packed module).
+                self._clear_inflight_layer()
                 self.extensions.publish(plan.steps[layer_index])
                 if pb is not None:
                     pb.current_iter_step = progress_index + 1
@@ -1131,7 +1399,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
         total_log = {self.processor.name(): self.processor.log}
-        self.gptq_model.quant_log = self.processor.log
+        record_quant_log(self.gptq_model, (self.processor,))
         self.processor.finalize(model=self.gptq_model)
         return total_log
 

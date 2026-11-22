@@ -9,8 +9,8 @@ every quantizable module of every decoder layer, and asserts the plan derived fr
 definition matches the activations actually observed.
 """
 
-from copy import deepcopy
-from functools import lru_cache
+from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,12 +19,15 @@ import transformers
 from defuser import convert_model
 
 from gptqmodel.models.auto import MODEL_MAP
+from gptqmodel.models.ports.interns1.configuration_interns1 import InternS1Config
+from gptqmodel.models.ports.internvl_chat.configuration_internvl_chat import InternVLChatConfig
+from gptqmodel.models.ports.spark2_5.configuration_spark import Spark2_5Config
+from gptqmodel.models.ports.spark2_5.modeling_spark import Spark2_5ForCausalLM
 from gptqmodel.models.shared_input import build_shared_input_plan, probe_shared_inputs
 
 
 QC = SimpleNamespace(dynamic=None)
 VOCAB = 64
-SPARK_MODEL_ID = "XHToken/Spark-X2.5-4B"
 
 _DENSE = {
     "hidden_size": 32,
@@ -90,14 +93,11 @@ def _jamba_cfg():
     )
 
 
-@lru_cache(maxsize=1)
-def _load_spark_config():
-    return transformers.AutoConfig.from_pretrained(SPARK_MODEL_ID, trust_remote_code=True)
-
-
 def _spark_cfg():
-    # Use the published remote config/model code, but shrink it to a tiny CPU fixture.
-    cfg = deepcopy(_load_spark_config())
+    # Use the pinned release config through the package-owned class, then shrink it.
+    cfg = Spark2_5Config.from_pretrained(
+        Path(__file__).resolve().parents[1] / "fixtures/ports/spark2_5/fixtures"
+    )
     cfg.vocab_size = VOCAB
     cfg.hidden_size = 32
     cfg.intermediate_size = 48
@@ -317,8 +317,7 @@ def _build(name):
     cfg = factory()
     qmodel_cls = MODEL_MAP[cfg.model_type]
     if name == "spark2_5":
-        qmodel_cls.before_model_load(qmodel_cls, SPARK_MODEL_ID, False)
-        model = transformers.AutoModelForCausalLM.from_config(cfg, trust_remote_code=True).eval()
+        model = Spark2_5ForCausalLM(cfg).eval()
     else:
         model = transformers.AutoModelForCausalLM.from_config(cfg).eval()
     convert_model(model, cleanup_original=False)
@@ -330,7 +329,52 @@ def _build(name):
 
 def _probe_layer(model, layer, plan):
     input_ids = torch.randint(0, VOCAB, (2, 6))
-    return probe_shared_inputs(layer, plan, lambda: model(input_ids, use_cache=False))
+    with _eager_torch_mamba_kernels():
+        return probe_shared_inputs(layer, plan, lambda: model(input_ids, use_cache=False))
+
+
+_EAGER_MAMBA_KERNELS = {
+    "transformers.models.jamba.modeling_jamba": (
+        "causal_conv1d_fn",
+        "causal_conv1d_update",
+        "mamba_inner_fn",
+        "mamba_selective_scan",
+        "mamba_selective_state_update",
+    ),
+    "transformers.models.nemotron_h.modeling_nemotron_h": (
+        "mamba2_chunk_scan",
+        "mamba2_split_conv1d_scan_combined",
+        "mamba2_selective_state_update",
+    ),
+}
+
+
+@contextmanager
+def _eager_torch_mamba_kernels():
+    """Pin the Torch Mamba reference for one CPU forward.
+
+    ``transformers`` resolves ``mamba_ssm``/``causal_conv1d`` at import time and
+    those kernels are CUDA-only. This module verifies real CPU forwards, so use
+    the undecorated Torch reference kept on ``__wrapped__``.
+    """
+
+    import importlib
+
+    saved = []
+    try:
+        for module_path, names in _EAGER_MAMBA_KERNELS.items():
+            module = importlib.import_module(module_path)
+            for name in names:
+                wrapper = getattr(module, name, None)
+                reference = getattr(wrapper, "__wrapped__", None)
+                if wrapper is None or reference is None:
+                    continue
+                saved.append((module, name, wrapper))
+                setattr(module, name, reference)
+        yield
+    finally:
+        for module, name, wrapper in reversed(saved):
+            setattr(module, name, wrapper)
 
 
 def _verified_model_types():
@@ -352,6 +396,10 @@ def test_only_real_forward_verified_definitions_dedup(model_type):
     model_cls = MODEL_MAP[model_type]
     covered = _verified_model_types()
     cfg = SimpleNamespace(model_type=model_type)
+    if model_type == "interns1":
+        cfg = InternS1Config(text_config={"model_type": "qwen3"})
+    elif model_type == "internvl_chat":
+        cfg = InternVLChatConfig(llm_config={"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3"})
     if isinstance(model_cls.dynamic_expert_index, str):
         setattr(cfg, model_cls.dynamic_expert_index, 2)
     plan = model_cls.shared_input_plan(cfg, QC)
@@ -558,4 +606,3 @@ def test_moe_unrouted_expert_is_reported_unverified():
     routed = [m for m in plan.modules if m.startswith("mlp.experts.") and report.call_counts[m]]
     assert len(routed) == 3  # exactly one expert (gate/up/down) ran for the single token
     assert len(report.unverified) == 3 * 2  # 3 idle experts x (gate/up group, down group)
-

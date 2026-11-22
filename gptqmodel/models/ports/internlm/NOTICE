@@ -1,0 +1,14 @@
+InternLM tokenizer port
+
+Copyright (c) The InternLM team and The HuggingFace Inc. team. All rights reserved.
+Transformers 5 adaptations: Copyright 2026 ModelCloud.ai.
+
+tokenization_internlm.py is adapted from the Apache-2.0 implementation in
+https://huggingface.co/internlm/internlm-chat-7b
+revision 4e2d2e185058a4cbaa2377ba1bb993eb599ce492.
+The upstream implementation is based on Hugging Face Llama tokenization.
+See the repository LICENSE (Apache-2.0) for terms.
+
+The shared algorithm is also used by the distinct InternLM2Tokenizer class.
+No upstream weights or SentencePiece vocabulary assets are redistributed.
+The licenses of checkpoint artifacts remain separate from this source port.

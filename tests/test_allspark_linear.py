@@ -96,6 +96,132 @@ def test_allspark_linear_matches_dequant(m, dtype):
     assert rel < 2e-3, f"m={m} relative error {rel.item():.5f}"
 
 
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_biased_prefill_past_int32_workspace_boundary(dtype):
+    """A biased prefill must not size its fused workspace in 32-bit.
+
+    ``grid_x * Mtile * grid_y * Ntile`` is the padded M*N element count. Once
+    rows x out_features exceeds 2^31 it wrapped int32, sign-extended to a huge
+    ``size_t`` and ``torch::empty`` raised a negative dimension. With a single
+    K slice the fused reduction never runs, so the padded FP32 C_tmp buffer
+    must not be materialized at all.
+    """
+    if IS_ROCM or not _kernel_supported():
+        pytest.skip("AllSpark CUDA (Ampere+) GPU required")
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if properties.total_memory < 8 * 1024**3:
+        pytest.skip("the int32 boundary regression needs at least 8 GiB of device memory")
+    assert _prewarm()
+
+    from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
+
+    m, k, n = 131072, 256, 16448
+    assert m * n > 2**31
+    torch.manual_seed(5092)
+    weight = (torch.randn(k, n, dtype=torch.float32, device="cuda") * 0.02).to(dtype)
+    qweight, scales, codes = _pack_gptq_8bit(weight)
+    bias = torch.randn(n, dtype=torch.float32, device="cuda") * 2.0
+
+    mod = AllSparkLinear(
+        bits=8, group_size=-1, desc_act=False, sym=True,
+        in_features=k, out_features=n, bias=True, dtype=dtype,
+    ).cuda().to(dtype)
+    mod.qweight.data.copy_(qweight)
+    mod.scales.data.copy_(scales)
+    mod.bias.data.copy_(bias)
+    mod.post_init()
+
+    x = (torch.randn(m, k, dtype=torch.float32, device="cuda") * 0.02).to(dtype)
+    torch.cuda.synchronize()
+    base = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    out = mod(x)
+    torch.cuda.synchronize()
+    peak = torch.cuda.max_memory_allocated() - base
+    assert out.shape == (m, n)
+    assert out.dtype == dtype
+    assert torch.isfinite(out).all()
+    # The padded M*N FP32 workspace is ~8.6 GiB; the output alone is ~4.3 GiB.
+    # Anything close to the sum means the unused C_tmp buffer was allocated.
+    assert peak < 6 * 1024**3, f"unexpected transient workspace: {peak / 2**30:.2f} GiB"
+
+    dense = ((codes.double() - 128.0) * scales.double()).to(dtype).double()
+    for row in (0, 1, m // 2, m - 1):
+        ref = x[row].double() @ dense + bias.double()
+        rounded = ref.to(dtype)
+        ulp = (torch.nextafter(rounded, torch.full_like(rounded, float("inf"))).double()
+               - rounded.double()).abs()
+        excess = ((out[row].double() - ref).abs() - ulp).clamp_min(0)
+        assert torch.all(excess <= 2e-3 + 2e-3 * ref.abs()), float(excess.max())
+
+
+@pytest.mark.cuda
+def test_biased_splitk_prefill_past_int32_workspace_boundary():
+    """A real K split must address its C_tmp buffer with 64-bit offsets.
+
+    Padded M*N is just over 2^31 here and ``gridDim.z`` is 2, so the fused
+    C_tmp buffer is genuinely materialized. Every per-block C_tmp offset used
+    to be an ``int`` and wrapped past the boundary.
+    """
+    if IS_ROCM or not _kernel_supported():
+        pytest.skip("AllSpark CUDA (Ampere+) GPU required")
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if properties.total_memory < 20 * 1024**3:
+        pytest.skip("the split-K boundary regression needs at least 20 GiB of device memory")
+    assert _prewarm()
+
+    from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
+
+    # Pick a grid whose K-split selection (which depends on the SM count) fails
+    # the n_slice=1 balance test, so the fused split-K path is really taken.
+    sm_count = properties.multi_processor_count
+    grid_y = 65
+    for grid_x in range(2017, 2017 + sm_count + 1):
+        blocks = grid_x * grid_y
+        if blocks * 16384 > 2**31 and (blocks % sm_count) * 2 < sm_count:
+            break
+    else:
+        pytest.skip("no split-K shape triggers the workspace boundary on this SM count")
+    m, k, n = grid_x * 64, 512, grid_y * 256
+    assert m * n > 2**31
+    torch.manual_seed(5093)
+    weight = (torch.randn(k, n, dtype=torch.float32, device="cuda") * 0.02).to(torch.float16)
+    qweight, scales, codes = _pack_gptq_8bit(weight)
+    bias = torch.randn(n, dtype=torch.float32, device="cuda")
+
+    mod = AllSparkLinear(
+        bits=8, group_size=-1, desc_act=False, sym=True,
+        in_features=k, out_features=n, bias=True, dtype=torch.float16,
+    ).cuda()
+    mod.qweight.data.copy_(qweight)
+    mod.scales.data.copy_(scales)
+    mod.bias.data.copy_(bias)
+    mod.post_init()
+
+    x = (torch.randn(m, k, dtype=torch.float32, device="cuda") * 0.02).to(torch.float16)
+    torch.cuda.synchronize()
+    base = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    out = mod(x)
+    torch.cuda.synchronize()
+    peak = torch.cuda.max_memory_allocated() - base
+    assert out.shape == (m, n)
+    assert torch.isfinite(out).all()
+    # The split-K C_tmp is ~8.0 GiB and the output ~4.0 GiB; seeing that peak
+    # proves this call really took the fused split-K path.
+    assert peak > 10 * 1024**3, f"split-K workspace was not materialized: {peak / 2**30:.2f} GiB"
+
+    dense = ((codes.double() - 128.0) * scales.double()).to(torch.float16).double()
+    for row in (0, 1, m // 2, m - 1):
+        ref = x[row].double() @ dense + bias.double()
+        rounded = ref.to(torch.float16)
+        ulp = (torch.nextafter(rounded, torch.full_like(rounded, float("inf"))).double()
+               - rounded.double()).abs()
+        excess = ((out[row].double() - ref).abs() - ulp).clamp_min(0)
+        assert torch.all(excess <= 2e-3 + 2e-3 * ref.abs()), float(excess.max())
+
+
 def _fp32_bias_module(dtype: torch.dtype, *, k: int = 4096, n: int = 128,
                       bias_value: float = -32768.0):
     """AllSparkLinear with unit weights and an FP32 bias outside FP16 range."""
@@ -150,6 +276,103 @@ def test_fp32_bias_survives_module_dtype_move(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_representable_bias_is_handed_to_the_kernel_narrowed(dtype):
+    """A bias the activation dtype holds exactly keeps the fast prefill path."""
+    if not _kernel_supported():
+        pytest.skip("AllSpark needs compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    mod, _, _ = _fp32_bias_module(dtype, k=256, n=128, bias_value=-32768.0)
+    # The checkpoint-facing buffer keeps its FP32 width ...
+    assert mod.bias.dtype == torch.float32
+    # ... while the kernel reads the lossless narrow copy.
+    kernel_bias = mod._kernel_bias()
+    assert kernel_bias.dtype == dtype
+    assert torch.equal(kernel_bias.to(torch.float32), mod.bias)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_unrepresentable_bias_stays_fp32_for_the_kernel(dtype):
+    """-100000 needs 17 mantissa bits and is outside the FP16 range."""
+    if not _kernel_supported():
+        pytest.skip("AllSpark needs compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    mod, _, _ = _fp32_bias_module(dtype, k=256, n=128, bias_value=-100000.0)
+    assert mod._kernel_bias().dtype == torch.float32
+
+
+def test_kernel_bias_cache_follows_in_place_edits():
+    """An in-place bias write must re-derive the kernel buffer."""
+    if not _kernel_supported():
+        pytest.skip("AllSpark needs compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    mod, _, _ = _fp32_bias_module(torch.float16, k=256, n=128, bias_value=0.5)
+    assert mod._kernel_bias().dtype == torch.float16
+    with torch.no_grad():
+        mod.bias.fill_(-100000.0)
+    assert mod._kernel_bias().dtype == torch.float32
+    with torch.no_grad():
+        mod.bias.fill_(0.5)
+    assert mod._kernel_bias().dtype == torch.float16
+    # A ``.data`` write does not advance the version counter, so the documented
+    # invalidation point is ``clear_weight_cache`` (same contract as the packed
+    # weight layout).
+    with torch.no_grad():
+        mod.bias.data.fill_(-100000.0)
+    mod.clear_weight_cache()
+    assert mod._kernel_bias().dtype == torch.float32
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("m", [1, 17, 64])
+def test_narrowed_bias_matches_fp64_oracle(m, dtype):
+    """The narrowed buffer must not move the result off the FP64 oracle.
+
+    m spans the fused ``M <= 16`` kernel and the prefill fallback, which is the
+    branch the narrow bias selects.
+    """
+    if not _kernel_supported():
+        pytest.skip("AllSpark needs compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
+
+    k, n = 256, 128
+    gen = torch.Generator(device="cuda").manual_seed(4100 + m)
+    weight = torch.randn(k, n, dtype=dtype, device="cuda", generator=gen) * 0.02
+    scale = (weight.abs().amax(dim=0) / 127).clamp_min(1e-8)
+    codes = (weight / scale).round().add(128).clamp(0, 255).to(torch.int32)
+    shifts = (torch.arange(4, device="cuda", dtype=torch.int32) * 8).view(1, 4, 1)
+    qweight = (codes.view(k // 4, 4, n) << shifts).sum(dim=1).to(torch.int32)
+
+    mod = AllSparkLinear(
+        bits=8, group_size=-1, desc_act=False, sym=True,
+        in_features=k, out_features=n, bias=True, dtype=dtype,
+    ).cuda()
+    mod.qweight.data.copy_(qweight)
+    mod.scales.data.copy_(scale.view(1, n).to(dtype))
+    # FP32 checkpoint bias whose values are exact in the activation dtype.
+    bias = (torch.randn(n, device="cuda", dtype=torch.float32, generator=gen) * 2).to(dtype).float()
+    mod.bias.data.copy_(bias)
+    mod.post_init()
+    assert mod._kernel_bias().dtype == dtype
+
+    x = torch.randn(m, k, dtype=dtype, device="cuda", generator=gen) * 0.02
+    out = mod(x)
+    # Independent FP64 oracle straight from the uint8 codes and the FP32 bias.
+    dense = (codes.double() - 128.0) * scale.double()[None, :]
+    ref = x.double() @ dense + bias.double()[None, :]
+    assert out.dtype == dtype
+    rounded = ref.to(dtype)
+    ulp = (torch.nextafter(rounded, torch.full_like(rounded, float("inf"))).double()
+           - rounded.double()).abs()
+    excess = ((out.double() - ref).abs() - ulp).clamp_min(0)
+    assert torch.all(excess <= 2e-3 + 2e-3 * ref.abs()), float(excess.max())
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_linear_bias_does_not_expand_persistent_storage(dtype):
     """Bias handling must not add a dense or FP32 weight cache."""
     if not _kernel_supported():
@@ -160,12 +383,14 @@ def test_linear_bias_does_not_expand_persistent_storage(dtype):
     packed_bytes = (mod.qweight_packed.numel()
                     + mod.scales_packed.numel() * mod.scales_packed.element_size())
     bias_bytes = mod.bias.numel() * mod.bias.element_size()
-    before = {name: t.numel() * t.element_size() for name, t in mod.named_buffers()}
+    before = {name: t.numel() * t.element_size() for name, t in mod.named_buffers()
+              if name != "qzeros_format"}
     x = torch.full((4, k), 16.0, dtype=dtype, device="cuda")
     for _ in range(3):
         mod(x)
         torch.cuda.synchronize()
-        after = {name: t.numel() * t.element_size() for name, t in mod.named_buffers()}
+        after = {name: t.numel() * t.element_size() for name, t in mod.named_buffers()
+                 if name != "qzeros_format"}
         assert after == before
     assert sum(before.values()) == packed_bytes + bias_bytes
 
@@ -271,13 +496,18 @@ def test_module_export_keeps_checkpoint_layout(dtype):
 
     module, qweight, scales, codes = _load_gptq_module(dtype)
     pristine = {name: tuple(t.shape) for name, t in module.state_dict().items()}
-    assert set(pristine) == {"qweight", "scales", "bias"}
+    assert set(pristine) == {"qweight", "scales", "bias", "qzeros_format"}
 
     module.post_init()
     assert {name: tuple(t.shape) for name, t in module.state_dict().items()} == pristine
-    assert {name: tuple(entry.shape) for name, entry in get_state_dict_for_save(module).items()} == pristine
+    exported_pristine = {name: shape for name, shape in pristine.items() if name != "qzeros_format"}
+    assert {
+        name: tuple(entry.shape) for name, entry in get_state_dict_for_save(module).items()
+    } == exported_pristine
     # The kernel layout is derived, not part of the checkpoint.
-    assert set(dict(module.named_buffers())) == {"bias", "qweight_packed", "scales_packed"}
+    assert set(dict(module.named_buffers())) == {
+        "bias", "qweight_packed", "scales_packed", "qzeros_format",
+    }
     assert "qweight_packed" not in dict(module.state_dict())
 
     x = (torch.randn(4, module.in_features, dtype=torch.float32, device="cuda") * 0.02).to(dtype)
@@ -332,4 +562,5 @@ def test_runtime_state_dict_roundtrip_and_cache_invalidation(dtype):
         "qweight": torch.Size([64, 512]),
         "scales": torch.Size([1, 512]),
         "bias": torch.Size([512]),
+        "qzeros_format": torch.Size([]),
     }

@@ -5,9 +5,14 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class LFM2QModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     shared_input_verified_model_types = frozenset({"lfm2"})
 
     fusable = FusableConfig("lfm2").merge(LlamaFusableConfig())

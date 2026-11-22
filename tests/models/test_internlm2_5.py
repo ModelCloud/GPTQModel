@@ -3,11 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import unittest
-
-import transformers
 from model_test import ModelTest
-from packaging.version import Version
 
 
 class TestInternlm2_5(ModelTest):
@@ -18,7 +14,7 @@ class TestInternlm2_5(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
     NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
     USE_VLLM = False
     EVAL_TASKS_SLOW = {
@@ -30,15 +26,5 @@ class TestInternlm2_5(ModelTest):
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        if Version(transformers.__version__) > Version("4.44.2"):
-            raise unittest.SkipTest(
-                "InternLM2.5 requires transformers<=4.44.2 in this test environment"
-            )
-
     def test_internlm2_5(self):
-        # transformers<=4.44.2 run normal
         self.quantize_and_evaluate()
-

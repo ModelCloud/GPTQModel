@@ -6,7 +6,8 @@ import torch
 
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.utils.awq import awq_gemm_forward, awq_runtime_available
-from gptqmodel.utils.paroquant import apply_paroquant_rotation, build_identity_rotation_buffers
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+from gptqmodel.utils.paro import apply_paro_rotation, build_identity_rotation_buffers
 
 
 def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
@@ -89,8 +90,8 @@ def test_awq_cuda_fp32_reduce_reduces_dense_error():
     assert candidate_abs.mean().item() < legacy_abs.mean().item() * 0.1
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ParoQuant CUDA fp32-reduce test")
-def test_paroquant_cuda_fp32_reduce_reduces_dense_error():
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for Paro CUDA fp32-reduce test")
+def test_paro_cuda_fp32_reduce_reduces_dense_error():
     if not awq_runtime_available():
         pytest.skip("AWQ CUDA fp32-reduce extension entrypoint unavailable.")
 
@@ -117,7 +118,7 @@ def test_paroquant_cuda_fp32_reduce_reduces_dense_error():
     )
     theta.uniform_(-0.2, 0.2)
     channel_scales.uniform_(0.75, 1.25)
-    rotated = apply_paroquant_rotation(x, pairs, theta, scales=channel_scales, group_size=group_size)
+    rotated = apply_paro_rotation(x, pairs, theta, scales=channel_scales, group_size=group_size)
 
     reference = _dense_reference(rotated, qweight, qzeros, scales, bits=bits, group_size=group_size)
 
@@ -151,20 +152,20 @@ def test_awq_cuda_fused_splitk_reduce_matches_default(dtype, monkeypatch):
     qzeros = qzeros.cuda()
     scales = scales.cuda().to(dtype=dtype)
 
-    monkeypatch.setenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE", "1")
+    configure_kernel(KernelConfig(awq_fused_splitk_reduce=False))
     with torch.inference_mode():
         baseline = awq_gemm_forward(x, qweight, scales, qzeros, 4, True)
 
-    monkeypatch.delenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE", raising=False)
+    configure_kernel(KernelConfig())
     with torch.inference_mode():
         candidate = awq_gemm_forward(x, qweight, scales, qzeros, 4, True)
 
     assert torch.equal(candidate, baseline)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ParoQuant fused split-K reduction test")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for Paro fused split-K reduction test")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_paroquant_fused_splitk_reduce_matches_default(dtype, monkeypatch):
+def test_paro_fused_splitk_reduce_matches_default(dtype, monkeypatch):
     if not awq_runtime_available():
         pytest.skip("AWQ CUDA extension entrypoint unavailable.")
 
@@ -190,14 +191,57 @@ def test_paroquant_fused_splitk_reduce_matches_default(dtype, monkeypatch):
     )
     theta.uniform_(-0.2, 0.2)
     channel_scales.uniform_(0.75, 1.25)
-    rotated = apply_paroquant_rotation(x, pairs, theta, scales=channel_scales, group_size=group_size)
+    rotated = apply_paro_rotation(x, pairs, theta, scales=channel_scales, group_size=group_size)
 
-    monkeypatch.setenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE", "1")
+    configure_kernel(KernelConfig(awq_fused_splitk_reduce=False))
     with torch.inference_mode():
         baseline = awq_gemm_forward(rotated, qweight, scales, qzeros, 4, True)
 
-    monkeypatch.delenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE", raising=False)
+    configure_kernel(KernelConfig())
     with torch.inference_mode():
         candidate = awq_gemm_forward(rotated, qweight, scales, qzeros, 4, True)
 
     assert torch.equal(candidate, baseline)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for AWQ wide split-K reduction test")
+def test_awq_cuda_fused_splitk_reduce_indexes_above_int32_element_count():
+    """Issue #5091: the fused reduce must address past 2^31 output elements.
+
+    ``fused_reduce_splitk_fp32_to_output`` narrowed ``result.numel()`` to
+    ``int`` and walked ``idx`` in 32 bits, so a wide prefill read and wrote the
+    wrong partial elements (or faulted) once the output crossed 2^31 elements.
+    The fused and eager ``sum(0)`` reductions must agree on the same partials.
+    """
+    if not awq_runtime_available():
+        pytest.skip("AWQ CUDA extension entrypoint unavailable.")
+
+    torch.manual_seed(0)
+    bits = 4
+    in_features = 256
+    out_features = 8192
+    group_size = 128
+    rows = 2**31 // out_features + (4096 + out_features - 1) // out_features
+    assert rows * out_features > 2**31
+    qweight, qzeros, scales = _make_packed_buffers(bits, in_features, out_features, group_size)
+
+    tail = 4
+    x = torch.zeros(rows, in_features, device="cuda", dtype=torch.float16)
+    x[-tail:] = torch.randn(tail, in_features, device="cuda", dtype=torch.float16)
+    qweight = qweight.cuda()
+    qzeros = qzeros.cuda()
+    scales = scales.cuda()
+
+    fused = awq_gemm_forward(x, qweight, scales, qzeros, 1, True, True)
+    eager = awq_gemm_forward(x, qweight, scales, qzeros, 1, True, False)
+    torch.cuda.synchronize()
+
+    assert fused.shape == eager.shape == (rows, out_features)
+    reference = _dense_reference(x[-tail:], qweight, qzeros, scales, bits=bits, group_size=group_size)
+    fused_abs = (fused[-tail:] - reference).abs()
+    eager_abs = (eager[-tail:] - reference).abs()
+    assert torch.isfinite(fused[-tail:]).all()
+    assert fused_abs.max().item() <= max(eager_abs.max().item(), 1e-3) * 1.01, (
+        "the fused split-K reduce no longer matches the dense reference above 2^31 "
+        "output elements"
+    )

@@ -7,9 +7,15 @@ import torch
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class FalconH1QModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("falcon_h1").merge(LlamaFusableConfig())
 
     pre_lm_head_norm_module = "model.final_layernorm"
@@ -38,7 +44,7 @@ class FalconH1QModel(BaseQModel):
         materializes the decoder from checkpoint tensors only, so the buffer
         stays on META unless it is re-registered here.
         """
-        from transformers.models.falcon_h1.modeling_falcon_h1 import compute_mup_vector
+        from ..ports.native.falcon_h1.modeling_falcon_h1 import compute_mup_vector
 
         root = getattr(model, "model", model)
         layers = getattr(root, "layers", None)

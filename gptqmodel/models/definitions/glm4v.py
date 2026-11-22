@@ -1,15 +1,17 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForImageTextToText
-
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class Glm4vGPTQ(BaseQModel):
     fusable = FusableConfig("glm4v").merge(LlamaFusableConfig(), profiles=("qkv",))
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+    )
 
     pre_lm_head_norm_module = ["model.language_model.norm", "model.norm"]
 

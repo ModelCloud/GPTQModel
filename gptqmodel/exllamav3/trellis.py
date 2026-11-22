@@ -6,18 +6,59 @@
 from __future__ import annotations
 
 
-def validate_trellis_k(k: int, mcg: bool = False, mul1: bool = False) -> None:
-    """Reject a trellis K that the native kernel table cannot represent.
+HALF_RATES = (1.5, 2.5, 3.5)
+HALF_RATE_MASK = 0xAAAA
+Q4NX_RATES = (2.5, 3, 3.5)
+R4NX_RATES = (2.5, 3, 3.5, 4.0)
+EXL3_CODEBOOK_MARKERS = ("mcg", "mul1", "q4nx", "r4nx")
 
-    ``reconstruct_kernel_instances`` has 24 entries: K in ``[1, 8]`` for the
-    plain, ``mcg`` and ``mul1`` variants. Anything else indexes past the table
-    (or runs the wrong kernel); the GEMM path already enforces this range.
-    """
 
-    if not 1 <= int(k) <= 8:
-        raise ValueError(f"EXL3 trellis K must be in [1, 8], got {k}")
+def validate_trellis_k(
+    k: int | float,
+    mcg: bool = False,
+    mul1: bool = False,
+    *,
+    q4nx: bool = False,
+    r4nx: bool = False,
+    max_integer_rate: int = 8,
+) -> None:
+    """Validate a native rate and its packed codebook marker."""
     if mcg and mul1:
         raise ValueError("EXL3 trellis cannot set both mcg and mul1")
+    if int(mcg) + int(mul1) + int(q4nx) + int(r4nx) > 1:
+        raise ValueError("EXL3 trellis cannot combine codebook markers")
+    if isinstance(k, bool) or not isinstance(k, (int, float)) or not 1 <= k <= max_integer_rate:
+        raise ValueError(f"EXL3 trellis K must be in [1, {max_integer_rate}], got {k}")
+    if q4nx and k not in Q4NX_RATES:
+        raise ValueError(f"EXL3 q4nx supports 2.5, 3.0, or 3.5 bpw, got {k}")
+    if r4nx and k not in R4NX_RATES:
+        raise ValueError(f"EXL3 r4nx supports 2.5, 3.0, 3.5, or 4.0 bpw, got {k}")
+    if not q4nx and not r4nx and k != int(k) and (k not in HALF_RATES or not mul1):
+        raise ValueError(f"EXL3 trellis K={k} requires a supported half-bit rate (1.5, 2.5, 3.5) and mul1")
 
 
-__all__ = ["validate_trellis_k"]
+def trellis_rate(
+    words: int,
+    mcg: bool = False,
+    mul1: bool = False,
+    *,
+    q4nx: bool = False,
+    r4nx: bool = False,
+    max_integer_rate: int = 8,
+) -> int | float:
+    """Derive the exact rate from the number of int16 words per 256 weights."""
+    depth, remainder = divmod(words, 16)
+    rate = words / 16 if remainder else depth
+    validate_trellis_k(rate, mcg, mul1, q4nx=q4nx, r4nx=r4nx, max_integer_rate=max_integer_rate)
+    return rate
+
+
+__all__ = [
+    "EXL3_CODEBOOK_MARKERS",
+    "HALF_RATES",
+    "HALF_RATE_MASK",
+    "Q4NX_RATES",
+    "R4NX_RATES",
+    "trellis_rate",
+    "validate_trellis_k",
+]

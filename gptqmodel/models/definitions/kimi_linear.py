@@ -12,6 +12,7 @@ different tree: ``self_attn`` plus ``mlp.experts``/``mlp.shared_experts``.
 """
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -35,7 +36,10 @@ _LAYER_MODULES = {
         "q_b_proj:1:in=q_a",
         "kv_a_proj_with_mqa:0:in=x",
         "kv_b_proj:1:in=kv_a",
-        "o_proj:1",
+        # `o_proj` consumes the gated KDA/MLA output built from `g_b_proj`
+        # (linear attention) or `kv_b_proj` (full attention), so it cannot share
+        # their subset.
+        "o_proj:2",
     ),
     "post_attention_layernorm": ("post_attention_layernorm:!",),
     "mlp:moe:?": {
@@ -51,6 +55,15 @@ _LAYER_MODULES = {
 
 class KimiLinearNativeQModel(BaseQModel):
     """Quantize native ``KimiLinearForCausalLM`` with the ordinary GPTQ looper."""
+
+    # auto.py dispatches non-K3 ``kimi_linear`` configs here (not through
+    # MODEL_MAP), so this class needs its own package-owned loader: the vendored
+    # Transformers 5.23 family, never ``transformers.models.kimi_linear``.
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.kimi_k3.tokenization_kimi.KimiTokenizerFactory",
+    )
 
     # Transformers 5.22 fuses the checkpoint's per-expert projections into 3-D
     # parameters; Defuser has no registry entry for this model type, so the

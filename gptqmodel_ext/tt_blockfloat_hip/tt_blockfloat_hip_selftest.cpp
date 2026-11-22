@@ -12,7 +12,7 @@
 //   hipcc --offload-arch=gfx1201 -O3 -std=c++17 \
 //       tt_blockfloat_hip.hip tt_blockfloat_hip_selftest.cpp -o ttbf_selftest
 //   ./ttbf_selftest            # internal checks + timings
-//   ./ttbf_selftest --dump DIR # also write DIR/*.bin for verify_against_torch.py
+//   ./ttbf_selftest --dump DIR # also write DIR/*.bin for scripts/verify_tt_blockfloat_hip.py
 // ---------------------------------------------------------------------------
 
 #include "tt_blockfloat_hip.h"
@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -37,6 +38,19 @@ constexpr int kLevels[2] = {4, 64};  // indexed by bits==4 ? 0 : 1
 constexpr int kOffset[2] = {7, 127};
 
 int bits_index(int bits) { return bits == 4 ? 0 : 1; }
+
+constexpr int kExponentMin = -127;
+constexpr int kExponentMax = 127;
+
+// Exact ``floor(log2(x))`` for a positive normal float, from the bit pattern.
+// ``std::log2`` rounds to nearest, so it reads ``FLT_MAX`` as ``2**128`` and a
+// value just below ``2**k`` as ``k + 1``.
+int floor_log2_exact(float x) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &x, sizeof(bits));
+    const int e = static_cast<int>(bits >> 23) - 127;
+    return e < -126 ? -126 : e;
+}
 
 float ref_value(int code, int bits, int exponent) {
     const int idx = bits_index(bits);
@@ -54,30 +68,41 @@ void ref_quantise_block(const float* x, int bits, int* code_out, int* exp_out) {
         magnitude = std::max(magnitude, std::fabs(x[i]));
     }
     const float safe = std::max(magnitude, 1.17549435e-38f);
-    const int base = static_cast<int>(std::floor(std::log2(safe)));
+    const int base = floor_log2_exact(safe);
 
-    float best_error = INFINITY;
+    // Candidates are compared on the block normalised by 2**base, matching
+    // ``quantize_blockfloat``. Raw squared errors overflow to inf for large
+    // blocks and underflow to 0 for tiny ones, which pins the base exponent.
+    const float base_scale = std::exp2(static_cast<float>(base));
+    float unit[16];
+    for (int i = 0; i < 16; ++i) {
+        unit[i] = x[i] / base_scale;
+    }
+
+    float best_error = 0.0f;
     int best_exp = base;
-    int best_code[16];
+    int best_code[16] = {0};
     for (int candidate = 0; candidate < 3; ++candidate) {
         const int exponent = base + (candidate == 0 ? 0 : (candidate == 1 ? -1 : 1));
-        const float scale = std::exp2(static_cast<float>(exponent));
+        // A neighbour outside the storable range has no representable scale.
+        const bool usable = exponent >= kExponentMin && exponent <= kExponentMax;
+        const float step =
+            (candidate == 0 ? 1.0f : (candidate == 1 ? 0.5f : 2.0f));
         float error = 0.0f;
         int code[16];
         for (int i = 0; i < 16; ++i) {
-            float q = std::rint((x[i] / scale) * static_cast<float>(levels));
+            float q = std::rint((unit[i] / step) * static_cast<float>(levels));
             q = std::min(std::max(q, -static_cast<float>(offset)),
                          static_cast<float>(offset));
             code[i] = static_cast<int>(q);
             const float reconstructed =
-                (static_cast<float>(code[i]) / static_cast<float>(levels)) * scale;
-            const float diff = reconstructed - x[i];
+                (static_cast<float>(code[i]) / static_cast<float>(levels)) * step;
+            const float diff = reconstructed - unit[i];
             error += diff * diff;
         }
-        // Candidate 0 is taken unconditionally, matching the Torch reference.
-        // Comparing strictly against INFINITY leaves ``best_code`` untouched
-        // when every candidate overflows, which happens for large inputs.
-        if (candidate == 0 || error < best_error) {
+        // Candidate 0 is taken unconditionally, matching the Torch reference:
+        // that initialises ``best_code`` and fixes the tie order.
+        if (usable && (candidate == 0 || error < best_error)) {
             best_error = error;
             best_exp = exponent;
             std::memcpy(best_code, code, sizeof(code));
@@ -367,45 +392,65 @@ int main(int argc, char** argv) {
                bits == 4 ? "bf4 quantize matches CPU oracle"
                          : "bf8 quantize matches CPU oracle");
 
-        // --- quantize with overflowing squared error -------------------------
-        // Near FLT_MAX every candidate's squared error is inf, so a strict
-        // ``error < best_error`` never initialises the winning codes.  Compare
-        // against the reference *and* assert the magnitude: both sides could
-        // regress to "uninitialised" together and still compare equal.
-        {
+        // --- quantize where the raw squared error over/underflows -----------
+        // ``1.9 * 2**100`` makes every candidate's float32 squared error
+        // overflow to inf, and ``1.9 * 2**-100`` make it underflow to 0.  In
+        // both cases the strict ``<`` used to keep ``floor(log2(block_max))``;
+        // 1.9 needs the next exponent (the grid reaches 1.75 * 2**exp), so a
+        // correct search picks ``base + 1``.  The error is now measured on the
+        // block normalised by ``2**base``, which is scale invariant.
+        for (int scale_sign : {-1, 1}) {
+            const float exponent_scale = std::exp2(static_cast<float>(100 * scale_sign));
             const int64_t kk = 16;
-            std::vector<float> huge(kk, 1e30f);
-            std::vector<uint8_t> hcodes(bits == 4 ? kk / 2 : kk);
-            std::vector<int8_t> hexp(1);
-            ref_quantize(huge, bits, 1, kk, &hcodes, &hexp);
+            std::vector<float> edge(kk, 1.9f * exponent_scale);
+            std::vector<uint8_t> ecodes(bits == 4 ? kk / 2 : kk);
+            std::vector<int8_t> eexp(1);
+            ref_quantize(edge, bits, 1, kk, &ecodes, &eexp);
 
-            uint8_t* dh_codes = nullptr;
-            int8_t* dh_exp = nullptr;
-            float* dh_x = nullptr;
-            hipMalloc(&dh_codes, hcodes.size());
-            hipMalloc(&dh_exp, hexp.size());
-            hipMalloc(&dh_x, huge.size() * sizeof(float));
-            hipMemcpy(dh_x, huge.data(), huge.size() * sizeof(float),
+            uint8_t* de_codes = nullptr;
+            int8_t* de_exp = nullptr;
+            float* de_x = nullptr;
+            hipMalloc(&de_codes, ecodes.size());
+            hipMalloc(&de_exp, eexp.size());
+            hipMalloc(&de_x, edge.size() * sizeof(float));
+            hipMemcpy(de_x, edge.data(), edge.size() * sizeof(float),
                       hipMemcpyHostToDevice);
-            const hipError_t hst =
-                ttbf_quantize(dh_x, bits, 1, kk, dh_codes, dh_exp, nullptr);
-            std::vector<uint8_t> hgot(hcodes.size());
-            std::vector<int8_t> hgot_exp(hexp.size());
-            hipMemcpy(hgot.data(), dh_codes, hgot.size(),
+            const hipError_t est =
+                ttbf_quantize(de_x, bits, 1, kk, de_codes, de_exp, nullptr);
+            std::vector<uint8_t> egot(ecodes.size());
+            std::vector<int8_t> egot_exp(eexp.size());
+            hipMemcpy(egot.data(), de_codes, egot.size(),
                       hipMemcpyDeviceToHost);
-            hipMemcpy(hgot_exp.data(), dh_exp, hgot_exp.size(),
+            hipMemcpy(egot_exp.data(), de_exp, egot_exp.size(),
                       hipMemcpyDeviceToHost);
 
-            std::vector<float> hdec;
-            ref_dequant(hgot, hgot_exp, bits, 1, kk, &hdec);
-            const float reconstructed = hdec.empty() ? 0.0f : hdec[0];
-            report(hst == hipSuccess && hgot == hcodes && hgot_exp == hexp &&
-                       reconstructed > 5e29f,
-                   bits == 4 ? "bf4 quantize survives overflow"
-                             : "bf8 quantize survives overflow");
-            hipFree(dh_codes);
-            hipFree(dh_exp);
-            hipFree(dh_x);
+            std::vector<float> edec;
+            ref_dequant(egot, egot_exp, bits, 1, kk, &edec);
+            const float reconstructed = edec.empty() ? 0.0f : edec[0];
+            // floor(log2(1.9)) is 0.  bf4_b's grid reaches only 1.75 * 2**exp,
+            // so 1.9 is closer to 2.0 (= base + 1); bf8_b reaches 1.984375 and
+            // keeps the base exponent at 1.90625.  Either way the answer is
+            // decided by the error, which the raw arithmetic cannot represent at
+            // these magnitudes.
+            const int expected_exponent =
+                100 * scale_sign + (bits == 4 ? 1 : 0);
+            const double expected_value =
+                (bits == 4 ? 2.0 : 1.90625) * static_cast<double>(exponent_scale);
+            const bool exponent_ok = !egot_exp.empty() &&
+                                     egot_exp[0] == expected_exponent;
+            const bool value_ok =
+                std::fabs(static_cast<double>(reconstructed) - expected_value) <=
+                1e-6 * std::fabs(expected_value);
+            report(est == hipSuccess && egot == ecodes && exponent_ok &&
+                       value_ok,
+                   bits == 4
+                       ? (scale_sign < 0 ? "bf4 quantize survives underflow"
+                                         : "bf4 quantize survives overflow")
+                       : (scale_sign < 0 ? "bf8 quantize survives underflow"
+                                         : "bf8 quantize survives overflow"));
+            hipFree(de_codes);
+            hipFree(de_exp);
+            hipFree(de_x);
         }
 
         if (!dump_dir.empty()) {

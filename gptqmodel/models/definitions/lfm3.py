@@ -15,6 +15,7 @@ from transformers.masking_utils import (
 from ...utils.device import get_device
 from ...utils.model import get_module_by_name_prefix, move_to, nested_move_to
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 _RAW_ATTENTION_MASK = "__gptqmodel_lfm3_attention_mask"
@@ -35,14 +36,16 @@ class LFM3QModel(BaseQModel):
     (`prepare_layer_replay_kwargs`) has to rebuild them from the captured
     `position_ids` and raw `attention_mask`.
 
-    The checkpoint is a remote-code (`auto_map`) Transformers model, therefore
-    the loader requires `trust_remote_code=True`.
+    Transformers 5 owns the native implementation, including conversion of
+    checkpoint `self_attn.gate_proj` weights to native `self_attn.g_proj`.
     """
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
 
     pre_lm_head_norm_module = "model.embedding_norm"
     rotary_embedding = "model.rotary_emb"
-
-    require_trust_remote_code = True
 
     # Conv layers have no `self_attn`, and attention layers have no `conv`;
     # the per-layer module sets therefore differ.
@@ -55,23 +58,42 @@ class LFM3QModel(BaseQModel):
         {
             "operator_norm": ("operator_norm:!",),
             "post_operator_norm": ("post_operator_norm:!:postnorm",),
-            "conv": ("in_proj:0", "out_proj:1"),
+            "conv": {
+                "in_proj": ("in_proj:0:nosrc",),
+                "conv": ("conv:!:nosrc",),
+                "out_proj": ("out_proj:1",),
+            },
             "self_attn": (
                 "q_proj:0",
                 "q_norm:0:!",
                 "k_proj:0",
                 "k_norm:0:!",
-                "v_proj:0",
-                # `gate_proj` is a per-head sigmoid gate (`num_attention_heads`
-                # outputs); keep it in its source dtype.
-                "gate_proj:!",
-                "o_proj:1",
+                # Both gate names describe consumers of the same norm as Q/K/V.
+                # End the block with V, which exists even when the gate is off.
+                # Its no-source flag keeps the next stage's o_proj plain.
+                "g_proj:!:nosrc",
+                "gate_proj:!:nosrc",
+                "v_proj:0:nosrc",
+                "o_proj:1:nosrc",
             ),
             "ffn_norm": ("ffn_norm:!",),
             "post_ffn_norm": ("post_ffn_norm:!:postnorm",),
             "feed_forward": ("w1:0", "w3:0", "w2:1"),
         },
     ]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # A conv layer has no attention gate, so folding both of its input
+        # norms is neutral. An attention layer's ``operator_norm`` feeds the
+        # gated q/k/v projections; compensating that fold rewrites the
+        # non-quantized ``gate_proj``, so only ``ffn_norm`` is folded there.
+        sources = (module.ffn_norm,)
+        if not module.is_attention_layer:
+            sources = (module.ffn_norm, module.operator_norm)
+        return [
+            node for node in super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+            if node["prev_op"] in sources
+        ]
 
     def _language_model(self):
         return self.model.model

@@ -2,6 +2,9 @@
 
 Describe the bug, fix, or feature clearly and briefly.
 
+<!-- Add a visible "Fixes #<issue-number>" line for each issue this PR resolves.
+Use "Fixes OWNER/REPO#<issue-number>" for issues in other repositories. -->
+
 ## What Changed
 
 - List the main code changes.
@@ -19,6 +22,19 @@ Paste the exact test commands and results here:
 
 ```bash
 ```
+
+## Measured Impact
+
+<!--
+For claimed issues, include a measured before/after table here for each
+applicable VRAM, performance, or accuracy metric before marking the PR ready.
+Use the same workload, hardware, and settings on the base and PR revisions.
+Include benchmark commands and conditions. Explain any unavailable measurements.
+
+| Metric (unit) | Before | After | Change (after − before) |
+| --- | ---: | ---: | ---: |
+| | | | |
+-->
 
 ## Model Support / Module Plan
 
@@ -83,7 +99,9 @@ Diagram summary (or "not applicable" with one sentence of justification):
 
 ## Review Requirements
 
-AI-assisted code is welcome. The PR must still be reviewed before it is opened as ready for review.
+AI-assisted code is welcome. Open the PR as a draft. Mark it ready only after
+review and after GitHub confirms the pushed head has no conflicts with the
+current remote base.
 
 I or an AI agent (such as Codex or Claude) have:
 

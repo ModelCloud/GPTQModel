@@ -6,7 +6,7 @@
 
 import os
 
-from model_test import ModelTest
+from model_test import ModelTest, resolve_attn_implementation
 
 
 # | Metric                                             |   MARLIN |
@@ -25,11 +25,15 @@ class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
+    # Every calibration document's BOS token is an attention sink (#4393); exclude them from the
+    # calibration statistics via `quantize(calibration_exclude_attention_sinks=True)`. Most
+    # concatenated windows start mid-document, so only the document-boundary BOS tokens go.
+    EXCLUDE_ATTENTION_SINKS = True
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
             "acc,num": {
-                "value": 0.3987,
+                "value": 0.3871,  # native bf16 0.4797; sinks kept 0.3871
                 "floor_pct": 0.04,
             },
         },
@@ -43,11 +47,11 @@ class TestLlama3_2(ModelTest):
         "arc_challenge": {
             "chat_template": True,
             "acc": {
-                "value": 0.3234,  # 0.3294 4096, 0.3242 2048
+                "value": 0.3114,  # native bf16 0.3183; sinks kept 0.3183
                 "floor_pct": 0.04,
             },
             "acc_norm": {
-                "value": 0.3643,  # 0.3558 4096, 0.3635 2048
+                "value": 0.3498,  # native bf16 0.3456; sinks kept 0.3524
                 "floor_pct": 0.04,
             },
         },
@@ -59,7 +63,7 @@ class TestLlama3_2(ModelTest):
             "evalution_batch_size": "auto",
             "evalution_model_args": {
                 "dtype": "bfloat16",
-                "attn_implementation": "paged|flash_attention_2",
+                "attn_implementation": resolve_attn_implementation(),
                 "device": "cuda:0",
             },
             "evalution_suite_kwargs": {

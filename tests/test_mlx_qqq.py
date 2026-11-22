@@ -90,7 +90,7 @@ def test_qqq_metal_dynamic_quant_matches_torch_codes(width, dtype):
 @pytest.mark.parametrize("group_size", [-1, 128])
 @pytest.mark.parametrize("rows", [1, 16], ids=["decode", "prefill"])
 @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16], ids=["fp16", "bf16"])
-def test_qqq_qwen_down_wide_reduction_matches_previous_and_torch(
+def test_qqq_qwen_down_wide_reduction_matches_fp64_oracle(
     group_size, rows, dtype, record_property,
 ):
     from gptqmodel.nn_modules.qlinear.mlx_qqq import _dynamic_quant
@@ -123,9 +123,11 @@ def test_qqq_qwen_down_wide_reduction_matches_previous_and_torch(
         torch_codes @ torch.from_numpy(row_weight.astype(np.float64))
     )[:, None] * torch_scale
     raw = raw_row.numpy() * channel_scale.astype(np.float64)
-    rounded = torch.from_numpy(raw).to(torch.float16)
-    if dtype == mx.bfloat16:
-        rounded = rounded.to(torch.bfloat16)
+    # The visible output must round the wide scaled product once, directly to
+    # the activation dtype; it must not pass through FP16 first.
+    rounded = torch.from_numpy(raw).to(
+        torch.float16 if dtype == mx.float16 else torch.bfloat16
+    )
     rounded = rounded.float().numpy()
 
     visible = np.asarray(actual.astype(mx.float32))
@@ -145,7 +147,6 @@ def test_qqq_qwen_down_wide_reduction_matches_previous_and_torch(
     assert actual.dtype == dtype
     np.testing.assert_array_equal(np.asarray(quantized), np.asarray(previous_quantized))
     np.testing.assert_array_equal(np.asarray(input_scale), np.asarray(previous_scale))
-    np.testing.assert_array_equal(visible, previous_visible)
     np.testing.assert_allclose(np.asarray(internal), raw, rtol=2e-3, atol=2e-3)
     np.testing.assert_allclose(visible, rounded, rtol=2e-3, atol=2e-3)
 
@@ -208,8 +209,10 @@ def test_qqq_mlx_matches_torch_quantized_arithmetic(monkeypatch, group_size, row
     x_t = torch.from_numpy(x)
     scale = (x_t.float().abs().amax(dim=-1, keepdim=True) / 127)
     quantized = (x_t / scale).round().clamp(-128, 127).to(torch.int8)
-    expected = (quantized.float() @ weight.float() * scale * channel).half()
-    expected += source.linear.bias
+    # Keep the scaled reduction and bias wide, then round once.
+    expected = (
+        quantized.float() @ weight.float() * scale * channel + source.linear.bias
+    ).half()
     np.testing.assert_allclose(np.array(output), expected.numpy(), rtol=0.002, atol=0.002)
 
     zero_output = model(mx.zeros((1, 256), dtype=mx.float16))
@@ -217,3 +220,95 @@ def test_qqq_mlx_matches_torch_quantized_arithmetic(monkeypatch, group_size, row
     np.testing.assert_array_equal(np.asarray(zero_output), source.linear.bias.numpy()[None, :])
     empty_output = model(mx.zeros((0, 256), dtype=mx.float16))
     assert empty_output.shape == (0, 128)
+
+
+@pytest.mark.parametrize("rows", [1, 2], ids=["finalizer", "python_epilogue"])
+@pytest.mark.parametrize(
+    "dtype,x_value,packed_word,channel_scale,bias",
+    [
+        (mx.bfloat16, 1024.0, 0x99999999, 0.0625, None),
+        (mx.float16, 12.5, 0xFFFFFFFF, 0.75, -2000.0),
+    ],
+    ids=["bf16_range", "fp16_bias_cancellation"],
+)
+def test_qqq_mlx_wide_epilogue_keeps_finite_range(
+    rows, dtype, x_value, packed_word, channel_scale, bias,
+):
+    """M=1 and M>=2 must round the wide product once, after the bias add."""
+    from gptqmodel.nn_modules.qlinear.mlx_qqq import MlxQQQLinear
+
+    out_features = in_features = 64
+    weight = np.full((out_features, in_features // 8), np.uint32(packed_word), dtype=np.uint32)
+    scales = np.full((out_features, 1), 16.0, dtype=np.float32)
+    biases = np.full((out_features, 1), -128.0, dtype=np.float32)
+    linear = nn.QuantizedLinear(
+        in_features, out_features, bias=False, group_size=64, bits=4,
+    )
+    linear.load_weights([
+        ("weight", mx.array(weight)),
+        ("scales", mx.array(scales)),
+        ("biases", mx.array(biases)),
+    ])
+    layer = MlxQQQLinear(
+        linear,
+        np.full((1, out_features), channel_scale, dtype=np.float32),
+        None if bias is None else np.full((out_features,), bias, dtype=np.float32),
+    )
+
+    x_np = np.full((rows, in_features), x_value, dtype=np.float32)
+    x = mx.array(x_np).astype(dtype)
+    actual = layer(x)
+    mx.eval(actual)
+
+    signed_code = (packed_word & 0xF) - 8
+    represented = np.full(
+        (in_features, out_features),
+        signed_code * 16.0 * channel_scale,
+        dtype=np.float64,
+    )
+    exact = x_np.astype(np.float64) @ represented
+    if bias is not None:
+        exact = exact + bias
+    expected = torch.from_numpy(exact).to(
+        torch.bfloat16 if dtype == mx.bfloat16 else torch.float16
+    ).float().numpy()
+
+    visible = np.array(actual.astype(mx.float32))
+    assert actual.dtype == dtype
+    assert np.isfinite(visible).all()
+    np.testing.assert_allclose(visible, expected, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("rows", [1, 2], ids=["finalizer", "python_epilogue"])
+def test_qqq_mlx_fp32_activation_range_stays_finite(rows):
+    """FP32 |x| > 65504 must not be narrowed to FP16 before the row max."""
+    from gptqmodel.nn_modules.qlinear.mlx_qqq import MlxQQQLinear
+
+    out_features = in_features = 64
+    weight = np.full((out_features, in_features // 8), np.uint32(0x99999999), dtype=np.uint32)
+    scales = np.full((out_features, 1), 16.0, dtype=np.float32)
+    biases = np.full((out_features, 1), -128.0, dtype=np.float32)
+    linear = nn.QuantizedLinear(
+        in_features, out_features, bias=False, group_size=64, bits=4,
+    )
+    linear.load_weights([
+        ("weight", mx.array(weight)),
+        ("scales", mx.array(scales)),
+        ("biases", mx.array(biases)),
+    ])
+    layer = MlxQQQLinear(
+        linear, np.full((1, out_features), 0.0625, dtype=np.float32),
+    )
+
+    x_np = np.full((rows, in_features), 100000.0, dtype=np.float32)
+    actual = layer(mx.array(x_np))
+    mx.eval(actual)
+
+    # Signed code 1, scale 16, channel scale 0.0625 -> represented weight 1.
+    exact = x_np.astype(np.float64) @ np.ones((in_features, out_features))
+    expected = torch.from_numpy(exact).float().numpy()
+    visible = np.array(actual.astype(mx.float32))
+
+    assert actual.dtype == mx.float32
+    assert np.isfinite(visible).all()
+    np.testing.assert_allclose(visible, expected, rtol=2e-3, atol=2e-3)

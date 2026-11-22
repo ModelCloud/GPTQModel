@@ -10,6 +10,7 @@ import torch
 from ...utils.model import get_module_by_name_prefix
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 # OPT-125m/1.7B/... apply both norms *before* attention and the MLP.
@@ -47,6 +48,10 @@ _POST_NORM_TREE = [
 
 
 class OptQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     shared_input_verified_model_types = frozenset({"opt"})
 
     fusable = FusableConfig("opt").merge(LlamaFusableConfig(), profiles=("qkv",))

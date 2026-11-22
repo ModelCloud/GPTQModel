@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import threading
+import weakref
 from typing import Any, Callable, Optional, Tuple
 
 import torch
@@ -14,6 +16,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 from .gguf import GGUFTorchLinear, _unpack_q4_k_scale_min_torch, gguf_tensor_qtype
 
@@ -26,6 +29,8 @@ try:
     import triton.language as tl
     from packaging import version
 
+    from gptqmodel.utils.triton_jit import jit as triton_jit
+
     from ..triton_utils import custom_autotune
 
     _TRITON_AVAILABLE = True
@@ -37,13 +42,206 @@ except Exception:  # pragma: no cover - optional dependency
 
 _CUDA_DEVICE_CAPABILITY_CACHE: dict[int, tuple[int, int]] = {}
 
+# Q1_0 G128 fixed launch configs are plain data consumed by the launch
+# selectors below, which are importable (and unit-tested) without Triton.
+_Q1_0_G128_SM80_DECODE_NARROW_CONFIG = {
+    "BLOCK_SIZE_M": 4,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 2,
+}
+_Q1_0_G128_SM80_DECODE_WIDE_CONFIG = {
+    "BLOCK_SIZE_M": 2,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM89_DECODE_NARROW_CONFIG = {
+    "BLOCK_SIZE_M": 8,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 8,
+    "num_stages": 2,
+}
+_Q1_0_G128_SM89_DECODE_2048_TO_2048_CONFIG = {
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 2,
+}
+_Q1_0_G128_SM89_DECODE_2048_TO_6144_CONFIG = {
+    "BLOCK_SIZE_M": 8,
+    "BLOCK_SIZE_N": 64,
+    "num_warps": 8,
+    "num_stages": 2,
+}
+_Q1_0_G128_SM89_DECODE_WIDE_CONFIG = {
+    "BLOCK_SIZE_M": 2,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 8,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM80_PREFILL_NARROW_CONFIG = {
+    "BLOCK_SIZE_M": 32,
+    "BLOCK_SIZE_N": 16,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM80_PREFILL_WIDE_CONFIG = {
+    "BLOCK_SIZE_M": 64,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM89_PREFILL_NARROW_CONFIG = {
+    "BLOCK_SIZE_M": 64,
+    "BLOCK_SIZE_N": 16,
+    "num_warps": 8,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM89_PREFILL_WIDE_CONFIG = {
+    "BLOCK_SIZE_M": 32,
+    "BLOCK_SIZE_N": 64,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM80_U32_DECODE_CONFIG = {
+    "BLOCK_SIZE_M": 32,
+    "BLOCK_SIZE_N": 16,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM80_U32_PREFILL_CONFIG = {
+    "BLOCK_SIZE_M": 64,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+# These exact-shape decode configs target the dominant post-down-proj A100 decode hotspots.
+_Q1_0_G128_SM80_U32_DECODE_2048_TO_1024_CONFIG = {
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 16,
+    "num_warps": 2,
+    "num_stages": 2,
+}
+_Q1_0_G128_SM80_U32_DECODE_2048_TO_2048_CONFIG = {
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 2,
+}
+_Q1_0_G128_SM80_U32_DECODE_2048_TO_6144_CONFIG = {
+    "BLOCK_SIZE_M": 8,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+
+
+# The SM89 fixed Q4_K/Q5_K/Q6_K launch table is plain data read by the module-level
+# selectors below, which are importable (and unit-tested) without Triton.
+#
+# ------------------------------------------------------------------
+# SM89 (RTX 4090) fixed launch configs for the Q4_K/Q5_K/Q6_K fused
+# kernels.  Measured on one RTX 4090 (torch 2.15.0+cu132, Triton 3.9.0),
+# FP16, 4-bit group 128 (KxN), as ``hot / 256 MiB L2-flushed`` medians with
+# ``torch.cuda.synchronize`` around every launch, against the kernel's own
+# autotuned ``best_config``:
+#
+#   Q4_K  (1024,128)    blocks=4   rows 1/8/64/127: 1.10x-1.15x
+#   Q4_K  (2048,1024)   blocks=8   rows 1/8/64 all faster
+#   Q4_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
+#   Q4_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
+#   Q4_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
+#   Q5_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
+#   Q5_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
+#   Q5_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
+#   Q6_K  (1024,128)    blocks=4   rows 1/8/64/127: 1.07x-1.13x
+#   Q6_K  (2048,1024)   blocks=8   rows 1/8/64/127 all faster
+#   Q6_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
+#   Q6_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
+#   Q6_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
+#
+# Keys are the *padded* in_features the dispatcher sees (GGUF blocks are
+# 256 wide, so a 896-wide projection is padded to 1024 before the kernel).
+# The narrow entries were re-measured on the padded 1024-wide input after
+# an unpadded 896-wide probe produced out-of-bounds reads: only the padded
+# numbers are claimed (1.07x-1.15x, bit-identical to autotuned).
+#
+# Only those exact (in_features, out_features) shapes are wired: a fixed
+# tile that was not measured on the exact shape could silently lose, and
+# the autotuned path is always available.  Rows 2..7 and rows > 127 were
+# not swept and stay autotuned.  Where the large-block decode tile lost in
+# both hot and flushed medians (rows 1 with >= 16 K blocks: the autotuner
+# picks a 2-stage tile that also survives the L2 flush, e.g. Q4_K
+# 4096x4096 auto 50.2/65.5 us vs the best fixed 53.2/83.8 us) it is
+# deliberately left on the autotuned generic kernel.
+_GGUF_SM89_QK_SHAPES = {
+    "Q4_K": {
+        1: {
+            (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
+            (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
+            (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
+        },
+        "mid": {
+            (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+        },
+        "large": {
+            (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "num_warps": 8, "num_stages": 2},
+        },
+    },
+    "Q5_K": {
+        1: {
+            (2048, 2048): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
+        },
+        "mid": {
+            (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+        },
+        "large": {
+            (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+        },
+    },
+    "Q6_K": {
+        1: {
+            (1024, 128): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
+            (2048, 1024): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
+            (2048, 2048): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
+        },
+        "mid": {
+            (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+        },
+        "large": {
+            (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 1024): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+        },
+    },
+}
+
 
 def triton_available() -> bool:
     return _TRITON_AVAILABLE
 
 
 if _TRITON_AVAILABLE:
-    @triton.jit
+    @triton_jit
     def _gguf_cast_wide_input_kernel(
         x_ptr, half_ptr, scale_ptr, K: tl.constexpr, BLOCK_K: tl.constexpr,
     ):
@@ -65,7 +263,7 @@ if _TRITON_AVAILABLE:
         tl.store(half_ptr + row * K + columns, values / scale, columns < K)
         tl.store(scale_ptr + row, scale)
 
-    @triton.jit(do_not_specialize=["N", "ELEMENTS"])
+    @triton_jit(do_not_specialize=["N", "ELEMENTS"])
     def _gguf_restore_wide_output_kernel(
         output_ptr, scale_ptr, bias_ptr, result_ptr,
         N, ELEMENTS, HAS_BIAS: tl.constexpr,
@@ -202,194 +400,9 @@ if _TRITON_AVAILABLE:
         ),
     ]
     _GGUF_TRITON_LARGE_NUM_BLOCKS = 16
-    _Q1_0_G128_SM80_DECODE_NARROW_CONFIG = {
-        "BLOCK_SIZE_M": 4,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 2,
-    }
-    _Q1_0_G128_SM80_DECODE_WIDE_CONFIG = {
-        "BLOCK_SIZE_M": 2,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM89_DECODE_NARROW_CONFIG = {
-        "BLOCK_SIZE_M": 8,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 8,
-        "num_stages": 2,
-    }
-    _Q1_0_G128_SM89_DECODE_2048_TO_2048_CONFIG = {
-        "BLOCK_SIZE_M": 16,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 2,
-    }
-    _Q1_0_G128_SM89_DECODE_2048_TO_6144_CONFIG = {
-        "BLOCK_SIZE_M": 8,
-        "BLOCK_SIZE_N": 64,
-        "num_warps": 8,
-        "num_stages": 2,
-    }
-    _Q1_0_G128_SM89_DECODE_WIDE_CONFIG = {
-        "BLOCK_SIZE_M": 2,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 8,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM80_PREFILL_NARROW_CONFIG = {
-        "BLOCK_SIZE_M": 32,
-        "BLOCK_SIZE_N": 16,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM80_PREFILL_WIDE_CONFIG = {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM89_PREFILL_NARROW_CONFIG = {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 16,
-        "num_warps": 8,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM89_PREFILL_WIDE_CONFIG = {
-        "BLOCK_SIZE_M": 32,
-        "BLOCK_SIZE_N": 64,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM80_U32_DECODE_CONFIG = {
-        "BLOCK_SIZE_M": 32,
-        "BLOCK_SIZE_N": 16,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM80_U32_PREFILL_CONFIG = {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
-    # These exact-shape decode configs target the dominant post-down-proj A100 decode hotspots.
-    _Q1_0_G128_SM80_U32_DECODE_2048_TO_1024_CONFIG = {
-        "BLOCK_SIZE_M": 16,
-        "BLOCK_SIZE_N": 16,
-        "num_warps": 2,
-        "num_stages": 2,
-    }
-    _Q1_0_G128_SM80_U32_DECODE_2048_TO_2048_CONFIG = {
-        "BLOCK_SIZE_M": 16,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 2,
-    }
-    _Q1_0_G128_SM80_U32_DECODE_2048_TO_6144_CONFIG = {
-        "BLOCK_SIZE_M": 8,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
 
-    # ------------------------------------------------------------------
-    # SM89 (RTX 4090) fixed launch configs for the Q4_K/Q5_K/Q6_K fused
-    # kernels.  Measured on one RTX 4090 (torch 2.15.0+cu132, Triton 3.9.0),
-    # FP16, 4-bit group 128 (KxN), as ``hot / 256 MiB L2-flushed`` medians with
-    # ``torch.cuda.synchronize`` around every launch, against the kernel's own
-    # autotuned ``best_config``:
-    #
-    #   Q4_K  (1024,128)    blocks=4   rows 1/8/64/127: 1.10x-1.15x
-    #   Q4_K  (2048,1024)   blocks=8   rows 1/8/64 all faster
-    #   Q4_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
-    #   Q4_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
-    #   Q4_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
-    #   Q5_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
-    #   Q5_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
-    #   Q5_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
-    #   Q6_K  (1024,128)    blocks=4   rows 1/8/64/127: 1.07x-1.13x
-    #   Q6_K  (2048,1024)   blocks=8   rows 1/8/64/127 all faster
-    #   Q6_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
-    #   Q6_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
-    #   Q6_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
-    #
-    # Keys are the *padded* in_features the dispatcher sees (GGUF blocks are
-    # 256 wide, so a 896-wide projection is padded to 1024 before the kernel).
-    # The narrow entries were re-measured on the padded 1024-wide input after
-    # an unpadded 896-wide probe produced out-of-bounds reads: only the padded
-    # numbers are claimed (1.07x-1.15x, bit-identical to autotuned).
-    #
-    # Only those exact (in_features, out_features) shapes are wired: a fixed
-    # tile that was not measured on the exact shape could silently lose, and
-    # the autotuned path is always available.  Rows 2..7 and rows > 127 were
-    # not swept and stay autotuned.  Where the large-block decode tile lost in
-    # both hot and flushed medians (rows 1 with >= 16 K blocks: the autotuner
-    # picks a 2-stage tile that also survives the L2 flush, e.g. Q4_K
-    # 4096x4096 auto 50.2/65.5 us vs the best fixed 53.2/83.8 us) it is
-    # deliberately left on the autotuned generic kernel.
-    _GGUF_SM89_QK_SHAPES = {
-        "Q4_K": {
-            1: {
-                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
-                (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
-                (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
-            },
-            "mid": {
-                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-            },
-            "large": {
-                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "num_warps": 8, "num_stages": 2},
-            },
-        },
-        "Q5_K": {
-            1: {
-                (2048, 2048): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
-            },
-            "mid": {
-                (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-            },
-            "large": {
-                (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-            },
-        },
-        "Q6_K": {
-            1: {
-                (1024, 128): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
-                (2048, 1024): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
-                (2048, 2048): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
-            },
-            "mid": {
-                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-            },
-            "large": {
-                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 1024): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-            },
-        },
-    }
 
-    @triton.jit
+    @triton_jit
     def _gguf_q1_0_g128_fused_matmul_kernel_impl(
         x_ptr,
         sign_ptr,
@@ -458,7 +471,7 @@ if _TRITON_AVAILABLE:
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
-    @triton.jit
+    @triton_jit
     def _gguf_q1_0_g128_u32_fused_matmul_kernel_impl(
         x_ptr,
         sign_ptr,
@@ -524,7 +537,7 @@ if _TRITON_AVAILABLE:
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
-    @triton.jit
+    @triton_jit
     def _gguf_q1_0_g128_k2048_fused_matmul_kernel_impl(
         x_ptr,
         sign_ptr,
@@ -592,7 +605,7 @@ if _TRITON_AVAILABLE:
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
-    @triton.jit
+    @triton_jit
     def _gguf_q1_0_g128_u32_k2048_fused_matmul_kernel_impl(
         x_ptr,
         sign_ptr,
@@ -688,7 +701,7 @@ if _TRITON_AVAILABLE:
         nearest_power_of_two=True,
     )(_gguf_q1_0_g128_u32_k2048_fused_matmul_kernel_impl)
 
-    @triton.jit
+    @triton_jit
     def _gguf_q4_k_fused_matmul_kernel_impl(
         x_ptr,
         qs_ptr,
@@ -778,7 +791,7 @@ if _TRITON_AVAILABLE:
         nearest_power_of_two=True,
     )(_gguf_q4_k_fused_matmul_kernel_impl)
 
-    @triton.jit
+    @triton_jit
     def _gguf_q5_k_fused_matmul_kernel_impl(
         x_ptr,
         qs_ptr,
@@ -880,7 +893,7 @@ if _TRITON_AVAILABLE:
         nearest_power_of_two=True,
     )(_gguf_q5_k_fused_matmul_kernel_impl)
 
-    @triton.jit
+    @triton_jit
     def _gguf_q6_k_fused_matmul_kernel_impl(
         x_ptr,
         ql_ptr,
@@ -1729,7 +1742,167 @@ def fused_q6_k_matmul(
     )
 
 
+def _publish_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> None:
+    """Order a freshly built cache against later forwards on other streams.
+
+    ``_build_triton_cache`` only *enqueues* the re-layout kernels that fill the
+    cache, and the dict is published as soon as it returns. A first forward of
+    the same module on another stream would then launch the fused matmul
+    against tensors that the building stream has not written yet, reading
+    uninitialized memory (#4797). Recording the building stream and an event
+    lets a consumer on a different stream wait for exactly that work.
+    """
+
+    # Snapshot the tensors a consumer stream must keep alive.  The forward path
+    # must never iterate the cache dict itself: a peer thread may retire the
+    # handshake (a ``dict.pop``) while this thread is iterating it, which raises
+    # "dictionary changed size during iteration" (#4962).  The cache is not
+    # visible to other threads until this returns, so the snapshot is safe here.
+    cache["tensors"] = tuple(
+        value for value in cache.values() if isinstance(value, torch.Tensor)
+    )
+    try:
+        stream = torch.cuda.current_stream(device)
+        event = torch.cuda.Event()
+        event.record(stream)
+    except Exception:
+        # No usable stream (CPU/meta placement or a runtime that cannot record
+        # events): nothing can be enqueued out of order either.
+        return
+    cache["ready_stream"] = stream
+    cache["ready_event"] = event
+
+
+def _is_current_stream_capturing() -> bool:
+    """True when the active stream is inside a CUDA graph capture."""
+
+    try:
+        return torch.cuda.is_current_stream_capturing()
+    except Exception:
+        return False
+
+
+_RAW_CURRENT_STREAM = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+
+
+def _current_stream_key(device: torch.device) -> int | None:
+    """Identity of the active CUDA stream, without building a Python wrapper.
+
+    ``torch.cuda.current_stream()`` allocates a ``Stream`` object on every call
+    (~2 us on the hosts we measure), which is a large fraction of a decode-sized
+    launch; the raw handle is the same identity the kernel sees.  Mirrors
+    ``gptqmodel.utils.marlin.marlin_stream_key`` (#4956).
+    """
+
+    try:
+        index = device.index
+        if index is None:
+            index = torch.cuda.current_device()
+        if _RAW_CURRENT_STREAM is not None:
+            return int(_RAW_CURRENT_STREAM(index))
+        return int(torch.cuda.current_stream(index).cuda_stream)
+    except Exception:
+        return None
+
+
+def _retire_triton_cache_ready(cache: dict[str, Any]) -> None:
+    """Drop the build handshake: nothing is left to order."""
+
+    cache.pop("ready_event", None)
+    cache.pop("ready_stream", None)
+
+
+def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> None:
+    """Make the caller's stream wait for the cache builder, when they differ."""
+
+    event = cache.get("ready_event")
+    if event is None:
+        # Retired: the build is complete and the cache is immutable from then
+        # on, so every later forward is a plain kernel launch.  Return before
+        # touching any stream API; this is the steady-state path (#4956).
+        return
+    if _is_current_stream_capturing():
+        # A captured stream may only wait on an event recorded inside the same
+        # capture, so an explicit ``torch.cuda.graph`` can never consume this
+        # one: the driver fails the capture with
+        # ``CUDA_ERROR_STREAM_CAPTURE_ISOLATION`` (#4867). Even ``Event.query()``
+        # is rejected while capturing, and ``torch.cuda.graph`` synchronizes the
+        # device before capture starts, so the build is already complete here:
+        # retire instead of waiting or querying.
+        _retire_triton_cache_ready(cache)
+        return
+    if event.query():
+        # The build finished, whichever stream is asking.  Retire the handshake
+        # so this stream - the builder included - pays nothing from now on
+        # (#4956).
+        _retire_triton_cache_ready(cache)
+        return
+    builder = cache.get("ready_stream")
+    if builder is not None and _current_stream_key(device) == builder.cuda_stream:
+        # Same stream: the build is already ordered before this forward, so the
+        # common single-stream path stays free of any bookkeeping.
+        return
+    try:
+        current = torch.cuda.current_stream(device)
+    except Exception:
+        return
+    current.wait_event(event)
+    # The cached tensors outlive every forward, but the allocator still has to
+    # know this stream reads them.  Iterate the publish-time snapshot, never the
+    # dict: a peer thread may retire the handshake concurrently (#4962).
+    for value in cache.get("tensors", ()):
+        value.record_stream(current)
+
+
+# One lock for every module's first-forward re-layout. The permute itself is a
+# single enqueue plus a short stream wait, so serializing it across modules is
+# cheap, and it makes "already permuted" a decision no two threads can race on
+# (#4879).
+_PACKED_WEIGHT_PERMUTE_LOCK = threading.Lock()
+
+# One cold-build lock per module. A published cache entry owns the
+# ``scale``/``min`` tensors that every consumer stream reads, so replacing it
+# while a consumer is still running drops the last reference and hands those
+# blocks back to the allocator under a pending kernel (#5008). Serializing the
+# cold build makes the entry a once-per-module decision, and it also removes
+# the N redundant builds of an N-thread cold burst.
+#
+# The lock lives in a weak map keyed by the module instead of on the module:
+# a ``threading.Lock`` attribute would make ``copy.deepcopy``/``torch.save`` of
+# a quantized model raise ``cannot pickle '_thread.lock' object``, while a
+# deep-copied replica (data-parallel forward) still gets its own lock here.
+_TRITON_CACHE_BUILD_LOCKS: "weakref.WeakKeyDictionary[torch.nn.Module, threading.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+_TRITON_CACHE_BUILD_LOCKS_GUARD = threading.Lock()
+# Fallback for a module that cannot be a weak key; never
+# ``_PACKED_WEIGHT_PERMUTE_LOCK``, which the build itself acquires.
+_TRITON_CACHE_BUILD_FALLBACK_LOCK = threading.Lock()
+
+
+def _triton_cache_build_lock(module: torch.nn.Module) -> threading.Lock:
+    """Return the cold-build lock that belongs to ``module``."""
+
+    try:
+        with _TRITON_CACHE_BUILD_LOCKS_GUARD:
+            lock = _TRITON_CACHE_BUILD_LOCKS.get(module)
+            if lock is None:
+                lock = threading.Lock()
+                _TRITON_CACHE_BUILD_LOCKS[module] = lock
+            return lock
+    except TypeError:
+        # Not weak-referenceable (a test double built without ``__init__``):
+        # fall back to one lock for the process rather than fail the forward.
+        return _TRITON_CACHE_BUILD_FALLBACK_LOCK
+
+
 class GGUFTritonKernel(GGUFTorchLinear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
+    # torch.cuda.graph capture succeeds, but dynamo breaks on
+    # `tensor.is_inference()` plus the raw Triton launches: EAGER only.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
+
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TRITON]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 45}
@@ -1738,6 +1911,18 @@ class GGUFTritonKernel(GGUFTorchLinear):
     # bit width is not enough to identify one (Q4_0 and Q4_K are both 4-bit),
     # so AUTO selection must consult the resolved qtype.
     SUPPORTS_GGUF_QTYPES = frozenset({"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"})
+
+    #: GGUF tensor types whose fused Triton forward is safe under an explicit
+    #: ``torch.cuda.CUDAGraph`` capture (#5591). The fused kernels are pure
+    #: device work (``tl.load``/``tl.dot``) with no host copy, so every layout
+    #: the constructor accepts is capturable. The inherited
+    #: ``GGUFTorchLinear.GRAPH_CAPTURE_QTYPES`` is *not* this kernel's answer: it
+    #: lists Q4_0/Q8_0, which this constructor rejects, and omits the 1-bit
+    #: formats it does build, so the per-instance answer under-claimed them.
+    #: Measured on sm_120 (RTX 5090, torch 2.15.0+cu132, triton 3.9.0): capture,
+    #: replay and a changed-input replay are bitwise identical to eager for all
+    #: five layouts, including the Q6_K wide-scale path.
+    GRAPH_CAPTURE_QTYPES = frozenset({"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"})
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True
@@ -1824,13 +2009,142 @@ class GGUFTritonKernel(GGUFTorchLinear):
         return True, None
 
     def clear_weight_cache(self) -> None:
-        self._gguf_triton_cache.clear()
+        # Mutate the cache only under the build lock: a concurrent cold build
+        # would otherwise re-publish an entry into the dict this just cleared.
+        with _triton_cache_build_lock(self):
+            self._gguf_triton_cache.clear()
         return super().clear_weight_cache()
 
-    def _triton_cache_key(self, device: torch.device, wide_dot: bool = False) -> tuple[int, str, bool]:
-        return (device.index if device.index is not None else -1, self.gguf_tensor_qtype, wide_dot)
+    def iter_runtime_weight_tensors(self):
+        """Yield the fused-kernel metadata tensors this module owns (#5810).
+
+        ``_gguf_triton_cache`` is a plain dict, so a budget walk that only
+        reads ``parameters()`` and ``buffers()`` misses the derived scale and
+        min planes the kernels read. The packed code bytes in each entry are
+        strided views of ``qweight``; the budget counts their storage once
+        through the registered buffer.
+        """
+
+        for entry in tuple(self._gguf_triton_cache.values()):
+            for value in entry.values():
+                if isinstance(value, torch.Tensor):
+                    yield value
+
+    def _packed_weight_is_permuted(self) -> bool:
+        """True when ``qweight`` holds the transposed runtime storage (#4811)."""
+        qweight = self.qweight
+        return (
+            qweight.numel() > 0
+            and qweight.stride(0) == 1
+            and qweight.stride(1) == qweight.shape[0]
+        )
+
+    def _permute_packed_weight(self) -> None:
+        """Re-lay out ``qweight`` once so the fused kernels read it coalesced.
+
+        ``qweight`` is stored output-feature-major, so the permuted
+        ``(k_blocks, bytes, out_features)`` code arrays the fused kernels want
+        are strided views whose ``offs_n`` axis moves by a whole packed row.
+        Materializing them keeps a second full copy of the weights resident
+        (#4748); reading the views uncoalesced costs up to +66% prefill
+        (#4811).  Transpose the storage once instead and expose the same
+        logical ``qweight`` as a transposed view, so there is still exactly one
+        resident copy and the code views become row-contiguous.  The extra
+        buffer is one module, not the whole model, and is released as soon as
+        the copy completes.
+        """
+        # Two cold builds of the same module can run concurrently on different
+        # streams (multi-threaded serving), so the re-layout is serialized and
+        # published only once the copy has actually run (#4879).
+        with _PACKED_WEIGHT_PERMUTE_LOCK:
+            qweight = self.qweight
+            if qweight.numel() == 0 or self._packed_weight_is_permuted():
+                return
+            # The first cache build runs under the caller's ``inference_mode``.
+            # ``qweight`` is a public buffer that callers may still mutate in place,
+            # so keep its storage a normal (non-inference) tensor.
+            with torch.inference_mode(False):
+                storage = torch.empty(
+                    (qweight.shape[1], qweight.shape[0]),
+                    dtype=qweight.dtype,
+                    device=qweight.device,
+                )
+            storage.copy_(qweight.t())
+            # ``copy_`` only *enqueues* the transpose on the calling stream. The
+            # permuted view is published below, and a second cold build on another
+            # stream would otherwise read bytes this copy has not written yet and
+            # bake them into its own cache -- silently wrong output (including
+            # NaN) for the rest of the session (#4879). Wait for this stream, so
+            # publishing ``self.qweight`` is the point of visibility. A cold build
+            # cannot happen inside a capture (allocations are not capturable), but
+            # ``synchronize`` would be illegal there, so keep the guard.
+            if storage.device.type == "cuda" and not _is_current_stream_capturing():
+                torch.cuda.current_stream(storage.device).synchronize()
+            self.qweight = storage.t()
+
+    def _reshape_blocks(
+        self,
+        *,
+        device: torch.device | str | None = None,
+    ) -> tuple[torch.Tensor, int, int]:
+        target_device = self.qweight.device if device is None else torch.device(device)
+        qweight = self.qweight if self.qweight.device == target_device else self.qweight.to(device=target_device)
+        rows = qweight.shape[0]
+        num_blocks = qweight.shape[1] // self.gguf_type_size
+        if self._packed_weight_is_permuted():
+            # Permuted storage (#4811): the canonical block view is a strided
+            # view of the same bytes, so no copy is needed.
+            blocks = qweight.as_strided(
+                (rows, num_blocks, self.gguf_type_size),
+                (1, self.gguf_type_size * rows, rows),
+            )
+        else:
+            blocks = qweight.contiguous().view(rows, num_blocks, self.gguf_type_size)
+        return blocks, rows, num_blocks
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars) -> None:
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        key = prefix + "qweight"
+        if key in destination and not destination[key].is_contiguous():
+            # The permuted storage (#4811) is an internal runtime layout; saved
+            # checkpoints must stay in the canonical GGUF order.
+            destination[key] = destination[key].contiguous()
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ) -> None:
+        key = prefix + "qweight"
+        if key in state_dict and self._packed_weight_is_permuted():
+            # Checkpoints are stored in canonical order, but the live buffer may
+            # still hold the permuted runtime layout (#4811).  The default
+            # implementation copies element-wise in logical order, so restore a
+            # canonical buffer first; the next cache build re-permutes it.
+            self.qweight = self.qweight.contiguous()
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
+    def _triton_cache_key(self, device: torch.device, wide_dot: bool = False) -> tuple[int, str]:
+        # ``wide_dot`` is fixed by the module's locked activation dtype
+        # (contracts/kernel/forward-dtype.md), so one entry per device suffices.
+        del wide_dot
+        return (device.index if device.index is not None else -1, self.gguf_tensor_qtype)
 
     def _build_triton_cache(self, device: torch.device, wide_dot: bool = False) -> dict[str, Any]:
+        self._permute_packed_weight()
         blocks, _, _ = self._reshape_blocks(device=device)
 
         if self.gguf_tensor_qtype in {"Q1_0", "Q1_0_g128"}:
@@ -1841,7 +2155,8 @@ class GGUFTritonKernel(GGUFTorchLinear):
                 in_features=self.padded_in_features,
                 out_features=scale.shape[1],
             ):
-                sign_bytes = blocks[..., 2:].permute(1, 2, 0).contiguous()
+                # Strided view of the packed sign bits (no second copy, #4748).
+                sign_bytes = blocks[..., 2:].permute(1, 2, 0)
                 sign_words_src = sign_bytes.to(torch.int32)
                 sign_words = (
                     sign_words_src[:, 0::4, :]
@@ -1857,7 +2172,8 @@ class GGUFTritonKernel(GGUFTorchLinear):
                     "use_u32": True,
                 }
 
-            sign_bytes = blocks[..., 2:].permute(1, 2, 0).contiguous()
+            # Strided view of the packed sign bits (no second copy, #4748).
+            sign_bytes = blocks[..., 2:].permute(1, 2, 0)
             return {
                 "fixed_decode_config": _select_q1_0_g128_fixed_launch_config(
                     capability=capability,
@@ -1877,7 +2193,11 @@ class GGUFTritonKernel(GGUFTorchLinear):
             sc, mins = _unpack_q4_k_scale_min_torch(blocks[..., 4:16])
             scale = (d.unsqueeze(-1) * sc.to(scale_dtype)).permute(1, 2, 0).contiguous()
             min_value = (dmin.unsqueeze(-1) * mins.to(scale_dtype)).permute(1, 2, 0).contiguous()
-            qs = blocks[..., 16:].permute(1, 2, 0).contiguous()
+            # Packed code bytes are a strided view into `qweight`; the
+            # fused kernels index the block layout through the strides
+            # passed to them. Materializing this used to keep a second
+            # full copy of every packed weight resident (#4748).
+            qs = blocks[..., 16:].permute(1, 2, 0)
             return {
                 "qs": qs,
                 "scale": scale,
@@ -1891,8 +2211,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
             sc, mins = _unpack_q4_k_scale_min_torch(blocks[..., 4:16])
             scale = (d.unsqueeze(-1) * sc.to(scale_dtype)).permute(1, 2, 0).contiguous()
             min_value = (dmin.unsqueeze(-1) * mins.to(scale_dtype)).permute(1, 2, 0).contiguous()
-            qh = blocks[..., 16:48].permute(1, 2, 0).contiguous()
-            qs = blocks[..., 48:].permute(1, 2, 0).contiguous()
+            # Packed code bytes are a strided view into `qweight`; the
+            # fused kernels index the block layout through the strides
+            # passed to them. Materializing this used to keep a second
+            # full copy of every packed weight resident (#4748).
+            qh = blocks[..., 16:48].permute(1, 2, 0)
+            qs = blocks[..., 48:].permute(1, 2, 0)
             return {
                 "qs": qs,
                 "qh": qh,
@@ -1901,8 +2225,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
             }
 
         if self.gguf_tensor_qtype == "Q6_K":
-            ql = blocks[..., :128].permute(1, 2, 0).contiguous()
-            qh = blocks[..., 128:192].permute(1, 2, 0).contiguous()
+            # Packed code bytes are a strided view into `qweight`; the
+            # fused kernels index the block layout through the strides
+            # passed to them. Materializing this used to keep a second
+            # full copy of every packed weight resident (#4748).
+            ql = blocks[..., :128].permute(1, 2, 0)
+            qh = blocks[..., 128:192].permute(1, 2, 0)
             subscales = blocks[..., 192:208].contiguous().view(torch.int8).to(torch.float32)
             d = blocks[..., 208:210].contiguous().view(torch.float16).squeeze(-1).to(torch.float32)
             scale = d.unsqueeze(-1) * subscales
@@ -1923,16 +2251,44 @@ class GGUFTritonKernel(GGUFTorchLinear):
         raise NotImplementedError(f"Unsupported GGUF Triton qtype: {self.gguf_tensor_qtype}")
 
     def _get_triton_cache(self, device: torch.device, wide_dot: bool = False) -> dict[str, Any]:
+        """Return this module's published metadata cache, building it once.
+
+        The hit path is the steady state: a dict read, a key compare and a
+        retired handshake (#4956). A miss (cold build, or an invalidation that
+        changed ``qweight_key``) is serialized per module so a concurrent burst
+        cannot replace the entry a peer is already reading (#5008).
+        """
+
         key = self._triton_cache_key(device, wide_dot)
         qweight_key = tensor_cache_key(self.qweight)
         cached = self._gguf_triton_cache.get(key)
         if cached is not None and cached.get("qweight_key") == qweight_key:
+            _wait_for_triton_cache_ready(cached, device)
             return cached
 
-        cached = self._build_triton_cache(device, wide_dot)
-        cached["qweight_key"] = qweight_key
-        self._gguf_triton_cache[key] = cached
-        return cached
+        # Cold build, or a genuine invalidation: a weight write, a reload or a
+        # device/dtype move changed ``qweight_key``. Serialize it per module so
+        # two threads can never both build: the second store used to replace the
+        # entry a peer had already picked up, dropping the last reference to that
+        # entry's ``scale``/``min`` while a consumer stream was still reading
+        # them -- NaN/garbage from the first concurrent forward (#5008).
+        with _triton_cache_build_lock(self):
+            # Double-check under the lock: a peer may have published while this
+            # thread waited, and the first build re-lays out ``qweight`` (#4811),
+            # which changes the key it was resolved against above.
+            qweight_key = tensor_cache_key(self.qweight)
+            cached = self._gguf_triton_cache.get(key)
+            if cached is not None and cached.get("qweight_key") == qweight_key:
+                _wait_for_triton_cache_ready(cached, device)
+                return cached
+
+            cached = self._build_triton_cache(device, wide_dot)
+            # The first build re-lays out ``qweight`` (#4811), so key the cache by
+            # the tensor that is actually resident now or every forward rebuilds it.
+            cached["qweight_key"] = tensor_cache_key(self.qweight)
+            _publish_triton_cache_ready(cached, device)
+            self._gguf_triton_cache[key] = cached
+            return cached
 
     def _forward_triton(
         self, x_flat: torch.Tensor, output_dtype: torch.dtype | None = None,
@@ -1951,10 +2307,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
         else:
             x_work = x_flat.contiguous()
 
-        cache = (
-            self._get_triton_cache(x_work.device, wide_dot=True)
-            if wide_dot else self._get_triton_cache(x_work.device)
-        )
+        cache = self._get_triton_cache(x_work.device, wide_dot=wide_dot)
         output_kwargs = {} if output_dtype is None else {"output_dtype": output_dtype}
 
         if self.gguf_tensor_qtype in {"Q1_0", "Q1_0_g128"}:

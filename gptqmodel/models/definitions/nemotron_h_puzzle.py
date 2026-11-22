@@ -1,20 +1,27 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch
 
-from ...utils.device import get_device
+from ..local import LocalModelLoader
 from .nemotron_h import NemotronHQModel
 
 
 class NemotronHPuzzleQModel(NemotronHQModel):
-    """GPTQ definition for NVIDIA Nemotron-Labs-3 Puzzle hybrid MoE models."""
-    require_pkgs = ["mamba-ssm"]
-    dynamic_expert_index = "n_routed_experts"
+    """Package-owned heterogeneous Nemotron-Labs-3 Puzzle decoder."""
 
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.nemotron_h_puzzle.NemotronHPuzzleConfig",
+        model_class="gptqmodel.models.ports.nemotron_h_puzzle.NemotronHPuzzleForCausalLM",
+    )
+    require_trust_remote_code = False
+    require_monkeypatch = False
+    require_pkgs = []
+    fusable = None
+    dynamic_expert_index = "n_routed_experts"
     pre_lm_head_norm_module = "model.norm_f"
+    out_of_model_tensors = {"prefixes": ["mtp"]}
 
     module_tree = [
         "model",
@@ -23,169 +30,96 @@ class NemotronHPuzzleQModel(NemotronHQModel):
         {
             "norm": ("norm:!",),
             "mixer:moe": {
-                # Puzzle layers are heterogeneous. A mixer is either Mamba,
-                # attention, or MoE, so missing paths are intentionally skipped.
-                "": (
-                    "q_proj:0",
-                    "k_proj:0",
-                    "v_proj:0",
-                    "in_proj:0",
-                    "o_proj:1",
-                    "out_proj:1",
-                ),
+                "": ("q_proj:0", "k_proj:0", "v_proj:0", "in_proj:0", "o_proj:1", "out_proj:1",
+                     "A_log:!", "D:!", "dt_bias:!"),
+                "conv1d": ("conv1d:!",),
+                "norm": ("norm:!",),
+                "gate": ("gate:!",),
                 "fc1_latent_proj:2": ("fc1_latent_proj:0",),
-                "experts": {
-                    "#": ("up_proj:0", "down_proj:1"),
-                },
+                # A scale cannot move across the experts' squared ReLU (#5739).
+                "experts": {"#": ("up_proj:0:nosrc", "down_proj:1")},
                 "fc2_latent_proj:3": ("fc2_latent_proj:0",),
-                "shared_experts": ("up_proj:0", "down_proj:1"),
+                "shared_experts": ("up_proj:0:nosrc", "down_proj:1"),
             },
         },
     ]
 
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        """Generic AWQ groups minus the folds that do not follow the mixer data flow.
+
+        The flat ``mixer`` declaration lets the planner fall back to the block
+        ``norm`` for every later projection. Only the projections that read
+        ``norm`` directly may receive its scale:
+
+        * ``o_proj`` reads the attention output and ``out_proj`` reads the
+          gated-RMSNorm SSM output, never the block norm.
+        * With ``moe_latent_size`` the routed experts read the
+          ``fc1_latent_proj`` output (a different, narrower tensor).
+        * ``fc2_latent_proj`` reads the router-weighted sum of every routed
+          expert, so no single expert ``down_proj`` can absorb its scale.
+
+        What remains is ``norm -> q/k/v``, ``norm -> in_proj`` and
+        ``norm -> [fc1_latent_proj | routed up_proj] + shared up_proj`` with the
+        sigmoid router compensated.
+        """
+
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        mixer = getattr(module, "mixer", None)
+        if mixer is None:
+            return nodes
+        excluded = [getattr(mixer, name, None) for name in ("o_proj", "out_proj", "fc2_latent_proj")]
+        if isinstance(getattr(mixer, "fc1_latent_proj", None), torch.nn.Linear):
+            excluded.extend(expert.up_proj for expert in mixer.experts)
+        excluded = {id(target) for target in excluded if target is not None}
+        kept = []
+        for node in nodes:
+            layers = [layer for layer in node.get("layers") or [] if id(layer) not in excluded]
+            if not layers:
+                continue
+            if len(layers) != len(node.get("layers") or []):
+                node = dict(node, layers=layers)
+                search = node.get("_awq_search_layers")
+                if search is not None:
+                    node["_awq_search_layers"] = [layer for layer in search if id(layer) not in excluded]
+            kept.append(node)
+        return kept
+
+    @classmethod
+    def awq_input_feature_aggregation(cls, module_name):
+        # The shared mixer prefix also names sequence-sensitive Mamba/attention blocks.
+        return None
+
     @staticmethod
     def _prepare_attention_replay_mask(attention_mask, hidden_states):
-        """Build the per-layer causal mask skipped by direct decoder-layer replay."""
-
         batch_size, sequence_length = hidden_states.shape[:2]
-        dtype = hidden_states.dtype
-        device = hidden_states.device
-
+        dtype, device = hidden_states.dtype, hidden_states.device
         if attention_mask is not None:
             attention_mask = attention_mask.to(device=device)
             if attention_mask.dim() == 4:
+                if not attention_mask.is_floating_point() or attention_mask.shape[-2:] != (sequence_length, sequence_length):
+                    raise ValueError("Puzzle attention replay expects a matching additive 4D causal mask")
                 return attention_mask.to(dtype=dtype)
             if attention_mask.dim() != 2:
-                raise ValueError(
-                    "Nemotron-H Puzzle attention replay expects a 2D padding mask or 4D causal mask, "
-                    f"got shape={tuple(attention_mask.shape)}."
-                )
+                raise ValueError("Puzzle attention replay expects a 2D padding mask or 4D causal mask")
             if attention_mask.shape[0] != batch_size:
-                raise ValueError(
-                    "Nemotron-H Puzzle attention replay mask batch size does not match hidden states: "
-                    f"mask={attention_mask.shape[0]}, hidden_states={batch_size}."
-                )
+                raise ValueError("Puzzle replay mask batch size does not match hidden states")
             if attention_mask.shape[-1] < sequence_length:
-                raise ValueError(
-                    "Nemotron-H Puzzle attention replay mask is shorter than hidden states: "
-                    f"mask={attention_mask.shape[-1]}, hidden_states={sequence_length}."
-                )
-            if attention_mask.shape[-1] > sequence_length:
-                # Causal language-model tokenizers use left padding; retain the
-                # tokens aligned with the replayed hidden-state suffix.
-                attention_mask = attention_mask[:, -sequence_length:]
-
+                raise ValueError("Puzzle replay mask is shorter than hidden states")
+            attention_mask = attention_mask[:, -sequence_length:]
         min_dtype = torch.finfo(dtype).min
-        causal_mask = torch.full(
-            (sequence_length, sequence_length),
-            fill_value=min_dtype,
-            dtype=dtype,
-            device=device,
-        )
-        if sequence_length != 1:
-            causal_mask = torch.triu(causal_mask, diagonal=1)
-        causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
-
+        causal = torch.full((sequence_length, sequence_length), min_dtype, dtype=dtype, device=device).triu(1)
+        causal = causal[None, None].expand(batch_size, 1, -1, -1)
         if attention_mask is not None:
-            causal_mask = causal_mask.clone()
-            padding_mask = causal_mask.eq(0.0) & attention_mask[:, None, None, :].eq(0.0)
-            causal_mask.masked_fill_(padding_mask, min_dtype)
-
-        return causal_mask
+            causal = causal.clone().masked_fill(causal.eq(0) & attention_mask[:, None, None].eq(0), min_dtype)
+        return causal
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         additional_inputs = super().prepare_layer_replay_kwargs(
-            layer=layer,
-            layer_input=layer_input,
-            additional_inputs=additional_inputs,
-            target_device=target_device,
+            layer=layer, layer_input=layer_input, additional_inputs=additional_inputs, target_device=target_device,
         )
-        # NemotronHBlock controls caching through `past_key_values` and does not
-        # expose the generic decoder-layer `use_cache` argument.
         additional_inputs.pop("use_cache", None)
-
         if getattr(layer, "block_type", None) == "attention":
-            # Input capture stops at layer 0 (Mamba), so the replay cache holds
-            # its 2D padding mask. The full model normally replaces that mask
-            # with an attention-specific causal mask before calling this layer.
-            mixer_config = getattr(getattr(layer, "mixer", None), "config", None)
-            if mixer_config is not None:
-                mixer_config._attn_implementation = "eager"
             additional_inputs["attention_mask"] = self._prepare_attention_replay_mask(
-                attention_mask=additional_inputs.get("attention_mask"),
-                hidden_states=layer_input[0],
+                additional_inputs.get("attention_mask"), layer_input[0],
             )
         return additional_inputs
-
-    def monkey_patch(self):
-        from transformers.utils.import_utils import (
-            is_causal_conv1d_available,
-            is_mamba_2_ssm_available,
-        )
-
-        if is_mamba_2_ssm_available():
-            from mamba_ssm.ops.triton.selective_state_update import selective_state_update
-            from mamba_ssm.ops.triton.ssd_combined import (
-                mamba_chunk_scan_combined,
-                mamba_split_conv1d_scan_combined,
-            )
-        else:
-            mamba_chunk_scan_combined, mamba_split_conv1d_scan_combined, selective_state_update = None, None, None
-
-        if is_causal_conv1d_available():
-            from gptqmodel.hf_kernels.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-        else:
-            causal_conv1d_update, causal_conv1d_fn = None, None
-
-        is_fast_path_available = all(
-            (
-                selective_state_update,
-                mamba_chunk_scan_combined,
-                mamba_split_conv1d_scan_combined,
-                causal_conv1d_fn,
-                causal_conv1d_update,
-            )
-        )
-
-        def forward(
-            self,
-            hidden_states,
-            cache_params=None,
-            attention_mask=None,
-        ):
-            if is_fast_path_available and get_device(self.in_proj).type == "cuda":
-                return self.cuda_kernels_forward(hidden_states, cache_params, attention_mask)
-
-            return self.torch_forward(hidden_states, cache_params, attention_mask)
-
-        def moe(self, hidden_states, topk_indices, topk_weights):
-            final_hidden_states = torch.zeros_like(hidden_states, dtype=topk_weights.dtype)
-            expert_mask = torch.nn.functional.one_hot(topk_indices, num_classes=len(self.experts))
-            expert_mask = expert_mask.permute(2, 0, 1)
-
-            for expert_idx, expert in enumerate(self.experts):
-                mask = expert_mask[expert_idx]
-                token_indices, weight_indices = torch.where(mask)
-
-                if token_indices.numel() > 0:
-                    expert_weights = topk_weights[token_indices, weight_indices]
-                    expert_input = hidden_states[token_indices]
-                    expert_output = expert(expert_input)
-                    weighted_output = expert_output * expert_weights.unsqueeze(-1)
-                    final_hidden_states.index_add_(0, token_indices, weighted_output)
-                else:
-                    # The remote implementation reads `down_proj.weight.dtype`
-                    # only to type a zero input. QuantLinear backends such as
-                    # Marlin intentionally store packed weights without exposing
-                    # a dense `.weight`; the routed hidden-state dtype is already
-                    # the correct expert input dtype.
-                    dummy_input = torch.zeros_like(hidden_states[0]).unsqueeze(0)
-                    final_hidden_states = final_hidden_states + expert(dummy_input)
-
-            return final_hidden_states.type(hidden_states.dtype)
-
-        for layer in self.model.model.layers:
-            if layer.mixer.__class__.__name__ == "NemotronHMamba2Mixer":
-                type(layer.mixer).forward = forward
-            elif layer.mixer.__class__.__name__ == "NemotronHMoE":
-                type(layer.mixer).moe = moe

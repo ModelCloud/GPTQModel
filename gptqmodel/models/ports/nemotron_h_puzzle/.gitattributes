@@ -1,0 +1,2 @@
+# Preserve the pinned upstream license's CRLF bytes and SHA-256.
+LICENSE -text whitespace=cr-at-eol

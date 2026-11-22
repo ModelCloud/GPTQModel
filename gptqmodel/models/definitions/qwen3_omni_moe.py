@@ -8,7 +8,7 @@ from typing import Dict, Optional
 
 import torch
 from PIL import Image
-from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
@@ -22,7 +22,11 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._omni_thinker_layout import OmniThinkerCheckpointLayoutMixin
+from ._thinker_embeddings import ThinkerEmbeddingsMixin
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .base_qwen3_vl import DeepStackReplayMixin
 
 
@@ -39,11 +43,15 @@ _THINKER_LAYER_MODULES = {
 }
 
 
-class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, BaseQModel):
+class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, OmniThinkerCheckpointLayoutMixin, ThinkerEmbeddingsMixin, BaseQModel):
     fusable = FusableConfig("qwen3_omni_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
     ATTENTION_MASKS_DTYPE = torch.long
+
+    # transformers 5.22 leaves `get_input_embeddings`/`get_output_embeddings`
+    # unimplemented on the Omni wrapper; both endpoints live on `thinker`.
+    lm_head = "thinker.lm_head"
 
     # The thinker decoder is calibrated on activations that include the vision
     # tower's embeddings, so text-only calibration is not representative.
@@ -55,11 +63,16 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, BaseQModel):
         "return_audio": False,
     }
 
-    loader = AutoModelForTextToWaveform
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForTextToWaveform",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     dynamic_expert_index = "num_experts"
 
-    pre_lm_head_norm_module = "thinker.model.norm"
+    pre_lm_head_norm_module = "thinker.model.language_model.norm"
 
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
@@ -89,14 +102,14 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path)
+        return self.__dict__.get("processor") or type(self).loader.load_processor(self.model_local_path)
 
-    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+    def _prepare_calibration_batches(self, conversations, batch_size):
         processor = self.__dict__.get("processor") or self.load_processor()
         calib_data = []
         for batch_index, batch in enumerate(
             batched_conversations(
-                calibration_dataset,
+                conversations,
                 batch_size,
                 process_func=self.preprocess_dataset,
             )
@@ -135,8 +148,16 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, BaseQModel):
                     )
             calib_data.append(inputs)
 
-        del processor
         return calib_data
+
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+        )
 
     def pre_quantize_generate_hook_start(self):
         spk_path = os.path.join(self.model_local_path, "spk_dict.pt")
@@ -216,7 +237,7 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, BaseQModel):
         if text_prefix:
             self.pre_lm_head_norm_module = f"{text_prefix}.norm"
         # need to load processor for save processor_config and chat_template
-        if not load_quantized_model:
-            self.processor = AutoProcessor.from_pretrained(self.model_local_path)
+        if not load_quantized_model and self.require_load_processor:
+            self.processor = type(self).loader.load_processor(self.model_local_path, config=model.config)
 
         return model

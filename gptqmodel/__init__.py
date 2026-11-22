@@ -5,7 +5,6 @@
 
 import atexit
 import os
-import sys
 import threading
 
 
@@ -39,20 +38,8 @@ from ._rocm_env import apply_default_rocm_blas_env  # noqa: E402
 
 _installed_rocm_blas_env = apply_default_rocm_blas_env()
 
-# Still before any other Torch use: HIP reports no last-level cache, so on
-# RDNA3/RDNA4 Torch exposes only L2 (8 MiB on an R9700) and never the 64 MiB
-# Infinity Cache / MALL behind it. Anything that sizes a cache-flush buffer
-# from L2 then measures a warm cache. This back-ports the Python half of
-# https://github.com/pytorch/pytorch/pull/203965 and has to run before a device
-# property is read or an Inductor benchmarker caches its size hint.
-from .rocm_llc import apply as _apply_rocm_llc  # noqa: E402
-
-_rocm_llc_status = _apply_rocm_llc()
-
 from ._banner import get_startup_banner  # noqa: E402
-from .utils import _MONKEY_PATCH_LOCK  # noqa: E402
 from .utils.logger import setup_logger  # noqa: E402
-from .utils.nogil_patcher import TritonPatch, patch_safetensors_save_file  # noqa: E402
 from .utils.rocm import warn_unsupported_rocm  # noqa: E402
 
 # isort: on
@@ -60,8 +47,113 @@ from .utils.rocm import warn_unsupported_rocm  # noqa: E402
 
 log = setup_logger()
 
-if any(result.startswith("applied") for result in _rocm_llc_status.values()):
-    log.debug("rocm_llc: %s", _rocm_llc_status)
+
+# ``#4364`` replaced every path-selecting environment variable with a typed
+# policy field. The old variables are intentionally not read anymore, but
+# silently ignoring one changes numerics or thread counts without telling the
+# caller. Warn once per retired variable and name its replacement.
+_RETIRED_KERNEL_ENV_VARS = {
+    "APHRODITE_SWORDFISH_DENSE_M": "KernelConfig.swordfish_dense_m",
+    "APHRODITE_SWORDFISH_DETERMINISTIC": "KernelConfig.swordfish_deterministic",
+    "GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE": "KernelConfig.awq_fused_splitk_reduce",
+    "GPTQMODEL_AWQ_TRITON_SCHEDULE": "KernelConfig.awq_triton_schedule",
+    "GPTQMODEL_BITSANDBYTES_CPU_INT8_DENSE": "KernelConfig.bitsandbytes_cpu_int8_dense",
+    "GPTQMODEL_BITSANDBYTES_CPU_PACKED": "KernelConfig.bitsandbytes_cpu_packed",
+    "GPTQMODEL_BLOCKFLOAT_NO_CUBLAS": "KernelConfig.blockfloat_cublas",
+    "GPTQMODEL_BNB_TRITON": "KernelConfig.bitsandbytes_triton",
+    "GPTQMODEL_CPU_BF16X3": "KernelConfig.cpu_bf16x3_matmul",
+    "GPTQMODEL_CPU_WORKERS": "RuntimeConfig.cpu_workers",
+    "GPTQMODEL_CUDA_WORKERS": "RuntimeConfig.cuda_workers",
+    "GPTQMODEL_DISABLE_BITBLAS": "KernelConfig.disable_bitblas",
+    "GPTQMODEL_DISABLE_GPTQ_CUDA": "KernelConfig.gptq_fused_block_update (set it to False)",
+    "GPTQMODEL_EXL3_CAPTURE_BATCH_CHECKPOINT_INTERVAL": "KernelConfig.exl3_capture_batch_checkpoint_interval",
+    "GPTQMODEL_EXL3_CAPTURE_BATCH_SPOOL": "KernelConfig.exl3_capture_batch_spool",
+    "GPTQMODEL_EXL3_CAPTURE_FRONTIER": "KernelConfig.exl3_capture_frontier",
+    "GPTQMODEL_EXL3_CPU_BF16X3": "KernelConfig.cpu_bf16x3_matmul",
+    "GPTQMODEL_EXL3_CUDA_ALLOCATION_LIMIT_BYTES": "KernelConfig.exl3_cuda_allocation_limit_bytes",
+    "GPTQMODEL_EXL3_HOST_RSS_LIMIT_BYTES": "KernelConfig.exl3_host_rss_limit_bytes",
+    "GPTQMODEL_EXL3_MEMORY_TELEMETRY_INTERVAL_BATCHES": "KernelConfig.exl3_memory_telemetry_interval_batches",
+    "GPTQMODEL_EXL3_TILE_BATCH": "KernelConfig.exl3_tile_batch",
+    "GPTQMODEL_FLOATX_CPU_DISABLE_AVX2": "KernelConfig.floatx_cpu_simd_level",
+    "GPTQMODEL_FLOATX_CPU_DISABLE_AVX512": "KernelConfig.floatx_cpu_simd_level",
+    "GPTQMODEL_FLOATX_CPU_FORCE_NATIVE_FP8": "KernelConfig.floatx_cpu_native_fp8",
+    "GPTQMODEL_FLOATX_CPU_THREADS": "KernelConfig.floatx_cpu_threads",
+    "GPTQMODEL_FP32_ACCUM": "KernelConfig.fp32_accum",
+    "GPTQMODEL_GGUF_CPP_NATIVE_MATMUL": "KernelConfig.gguf_cpp_native_matmul",
+    "GPTQMODEL_GGUF_CPP_THREADS": "KernelConfig.gguf_cpp_threads",
+    "GPTQMODEL_GGUF_FUSED_AUTOTUNE_ITERS": "removed; GGUF fused dispatch is static",
+    "GPTQMODEL_GGUF_FUSED_AUTOTUNE_MARGIN": "removed; GGUF fused dispatch is static",
+    "GPTQMODEL_GGUF_FUSED_AUTOTUNE_WARMUP": "removed; GGUF fused dispatch is static",
+    "GPTQMODEL_GGUF_FUSED_CHUNK_BLOCKS": "KernelConfig.gguf_fused_chunk_blocks",
+    "GPTQMODEL_GGUF_FUSED_CHUNK_BYTES": "KernelConfig.gguf_fused_chunk_bytes",
+    "GPTQMODEL_GGUF_FUSED_CPU_MAX_ROWS": "KernelConfig.gguf_fused_cpu_max_rows",
+    "GPTQMODEL_GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS": "KernelConfig.gguf_fused_cpu_min_matrix_elements",
+    "GPTQMODEL_GGUF_FUSED_CUDA_MAX_ROWS": "KernelConfig.gguf_fused_cuda_max_rows",
+    "GPTQMODEL_GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS": "KernelConfig.gguf_fused_cuda_min_matrix_elements",
+    "GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION": "KernelConfig.gsq_disable_cuda_relaxation",
+    "GPTQMODEL_GSQ_DISABLE_HIP_RELAXATION": "KernelConfig.gsq_disable_hip_relaxation",
+    "GPTQMODEL_INTERNAL_GGUF_DEQUANT_DEVICE": "KernelConfig.gguf_dequant_device",
+    "GPTQMODEL_INTERNAL_GGUF_DEQUANT_MAX_BYTES": "KernelConfig.gguf_dequant_chunk_bytes",
+    "GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER": "KernelConfig.gguf_native_quantized_loader",
+    # The direct-to-Torch dense GGUF import redirected Transformers' loader and
+    # was removed with every other Transformers patch; it has no replacement.
+    "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER": None,
+    "GPTQMODEL_MARLIN_USE_FP32": "KernelConfig.marlin_fp32",
+    "GPTQMODEL_MAX_PACKERS": "RuntimeConfig.max_packers",
+    # The torch last-level-cache back-port patched torch and Inductor globally;
+    # GPT-QModel never patches third-party libraries, so it has no replacement.
+    "GPTQMODEL_NO_ROCM_LLC": None,
+    "GPTQMODEL_NPU_CHOLESKY_BLOCK_SIZE": "KernelConfig.npu_cholesky_block_size",
+    "GPTQMODEL_PARO_AFFINE_STE_TRITON": "KernelConfig.paro_affine_ste_triton",
+    "GPTQMODEL_PARO_AFFINE_STE_TRITON_BACKWARD": "KernelConfig.paro_affine_ste_triton_backward",
+    "GPTQMODEL_PARO_AUTOTUNE_CACHE": "KernelConfig.paro_autotune_cache",
+    "GPTQMODEL_PARO_AUTO_CACHE_BF16_ROTATION_DTYPE": "KernelConfig.paro_auto_cache_bf16_rotation_dtype",
+    "GPTQMODEL_PARO_AUTO_CACHE_BF16_RUNTIME_DTYPE": "KernelConfig.paro_auto_cache_bf16_runtime_dtype",
+    "GPTQMODEL_PARO_CACHE_ROTATION_DTYPE": "KernelConfig.paro_cache_rotation_dtype",
+    "GPTQMODEL_PARO_CACHE_RUNTIME_DTYPE": "KernelConfig.paro_cache_runtime_dtype",
+    "GPTQMODEL_PARO_CPU_AVX512": "KernelConfig.paro_cpu_avx512",
+    "GPTQMODEL_PARO_OPT_FUSED_ROTATION": "QuantizeConfig.opt_fused_rotation",
+    "GPTQMODEL_PARO_ROTATE_AUTOTUNE": "KernelConfig.paro_rotate_autotune",
+    "GPTQMODEL_PARO_ROTATE_CTA_M": "KernelConfig.paro_rotate_cta_m",
+    "GPTQMODEL_PARO_ROTATE_ROW_PAD": "KernelConfig.paro_rotate_row_pad",
+    "GPTQMODEL_PARO_SYM_STE_TRITON": "KernelConfig.paro_sym_ste_triton",
+    "GPTQMODEL_PARO_TRITON_AUTOTUNE": "KernelConfig.paro_triton_autotune",
+    "GPTQMODEL_PARO_TRITON_AUTOTUNE_ITERS": "KernelConfig.paro_triton_autotune_iters",
+    "GPTQMODEL_PARO_TRITON_AUTOTUNE_MARGIN": "KernelConfig.paro_triton_autotune_margin",
+    "GPTQMODEL_PARO_TRITON_AUTOTUNE_WARMUP": "KernelConfig.paro_triton_autotune_warmup",
+    "GPTQMODEL_PARO_TRITON_DECODE_MAX_ROWS": "KernelConfig.paro_triton_decode_max_rows",
+    "GPTQMODEL_RESUME": "CheckpointConfig(path=...)",
+    "GPTQMODEL_ROCM_QUANT_BLAS": "KernelConfig.rocm_quant_blas",
+    "GPTQ_TORCH_CACHE_WEIGHTS": "KernelConfig.torch_cache_weights",
+    "GPTQ_TORCH_LOOKAHEAD": "KernelConfig.torch_lookahead",
+    "GPTQ_TORCH_ROCM_GEMM": "KernelConfig.torch_rocm_gemm",
+    "GPTQ_TORCH_ROCM_GEMV": "KernelConfig.torch_rocm_gemv",
+    "GPTQ_TORCH_STREAMING": "KernelConfig.torch_streaming",
+    "GPTQ_TORCH_STREAM_TILE": "KernelConfig.torch_stream_tile",
+    "GPTQ_TORCH_TRITON_DEQUANT": "KernelConfig.torch_triton_dequant",
+}
+_WARNED_RETIRED_KERNEL_ENV_VARS: set[str] = set()
+
+
+def warn_retired_kernel_env_vars() -> list[str]:
+    """Warn once for every retired kernel/thread env var that is still set."""
+
+    warned = []
+    for name, replacement in _RETIRED_KERNEL_ENV_VARS.items():
+        if name not in os.environ or name in _WARNED_RETIRED_KERNEL_ENV_VARS:
+            continue
+        _WARNED_RETIRED_KERNEL_ENV_VARS.add(name)
+        if replacement is None:
+            log.warn(f"ENV: {name} is retired and has no effect; the feature was removed.")
+        else:
+            log.warn(
+                f"ENV: {name} is retired and has no effect; use {replacement} instead."
+            )
+        warned.append(name)
+    return warned
+
+
+warn_retired_kernel_env_vars()
 
 if _installed_alloc_conf is not None:
     log.info(
@@ -78,304 +170,27 @@ if _installed_rocm_blas_env is not None:
 # Fail loudly (once) on ROCm releases older than the supported floor.
 warn_unsupported_rocm()
 
-patch_safetensors_save_file()
 
-# TODO: waiting for official fix from triton
-#  monkeypatching triton threading issues is fragile
-try:
-    TritonPatch.apply()
-except Exception:
-    log.warning("TritonPatch.apply() failed; triton autotuner threading fix is NOT active", exc_info=True)
+def _patch_transformers_model_construction_global_state():
+    """Hold the model-global-state writer for each construction window.
 
-
-def _patch_transformers_gptq_device_map_compat():
-    """Preserve concrete single-device GPTQ maps for Optimum's later packing step."""
-    try:
-        from functools import wraps
-
-        from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
-    except ImportError:
-        # transformers is a hard dependency, so a missing symbol means the
-        # upstream API moved and this compatibility shim is now inert.
-        log.warning(
-            "transformers GPTQ device-map compat is inactive: GptqHfQuantizer API changed",
-            exc_info=True,
-        )
-        return
-    except Exception:
-        log.warning("transformers GPTQ device-map compat probe failed", exc_info=True)
-        return
-
-    with _MONKEY_PATCH_LOCK:
-        original_process = GptqHfQuantizer._process_model_before_weight_loading
-        if getattr(original_process, "_gptqmodel_device_map_compat", False):
-            return
-
-        @wraps(original_process)
-        def _process_model_before_weight_loading_with_device_map(self, model, **kwargs):
-            """Backfill `hf_device_map` when GPTQ uses a single concrete device."""
-            device_map = kwargs.get("device_map")
-            if (
-                isinstance(device_map, dict)
-                and device_map
-                and len(set(device_map.values())) == 1
-                and not hasattr(model, "hf_device_map")
-            ):
-                model.hf_device_map = dict(device_map)
-            return original_process(self, model, **kwargs)
-
-        _process_model_before_weight_loading_with_device_map._gptqmodel_device_map_compat = True
-        GptqHfQuantizer._process_model_before_weight_loading = _process_model_before_weight_loading_with_device_map
-
-
-def _patch_transformers_gptqmodel_gguf_quantizer_compat():
-    """Make transformers refuse GPT-QModel packed GGUF checkpoints loudly.
-
-    `transformers` reserves `quant_method: "gguf"` for its own
-    `GgufHfQuantizer`, which expects a `.gguf` file. GPT-QModel publishes
-    `gptqmodel_gguf`; registering a refusing quantizer for that name turns an
-    otherwise silent random-weight load into an actionable error.
-    """
-    try:
-        from transformers.quantizers import auto as hf_quant_auto
-    except ImportError:
-        log.debug("GPT-QModel GGUF quantizer guard inactive: transformers quantizer API changed", exc_info=True)
-        return
-
-    from ._quant_methods import GGUF_EXPORT_QUANT_METHOD
-    from .utils.hf_gguf_quantizer import (
-        GPTQModelGGUFHfQuantizer,
-        GPTQModelGGUFQuantizationConfig,
-    )
-
-    with _MONKEY_PATCH_LOCK:
-        hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault(
-            GGUF_EXPORT_QUANT_METHOD, GPTQModelGGUFQuantizationConfig
-        )
-        hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault(
-            GGUF_EXPORT_QUANT_METHOD, GPTQModelGGUFHfQuantizer
-        )
-
-
-def _patch_transformers_refusing_quantizers():
-    """Make transformers refuse every GPT-QModel-only packed checkpoint format.
-
-    Without a registered quantizer, transformers 5.x only warns about the
-    unknown `quant_method` and returns a plain model with randomly initialized
-    packed weights. The names live in one table so parallel method fixes do not
-    race on this registration.
-    """
-    try:
-        from transformers.quantizers import auto as hf_quant_auto
-    except ImportError:
-        log.debug("GPT-QModel refusing quantizers inactive: transformers quantizer API changed", exc_info=True)
-        return
-
-    from ._quant_methods import REFUSED_HF_QUANT_METHODS
-    from .utils.hf_refusing_quantizer import (
-        GPTQModelRefusingHfQuantizer,
-        GPTQModelRefusingQuantizationConfig,
-    )
-
-    with _MONKEY_PATCH_LOCK:
-        for method in REFUSED_HF_QUANT_METHODS:
-            hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault(
-                method, GPTQModelRefusingQuantizationConfig
-            )
-            hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault(
-                method, GPTQModelRefusingHfQuantizer
-            )
-
-
-def _patch_transformers_save_pretrained_runtime_layout_guard():
-    """Refuse an HF checkpoint write while a kernel holds a runtime layout.
-
-    Marlin, AWQ-Marlin, ExLlamaV2 and AWQ-ExLlamaV2 permute or shuffle their
-    packed tensors in place during ``post_init()`` and have no inverse.
-    ``PreTrainedModel.save_pretrained()`` collects ``state_dict()`` directly,
-    so without this guard it publishes that private layout under an ordinary
-    GPTQ/AWQ config; the resulting directory then reloads as garbage (or with a
-    shape error) instead of failing at save.
-
-    The kernels refuse from ``_save_to_state_dict`` only inside
-    ``checkpoint_serialization()``, because PEFT calls ``state_dict()`` merely
-    to read tensors and must keep working. Wrapping the Transformers writer puts
-    every checkpoint write on the refusing side while leaving those read-only
-    callers alone. ``GPTQModel.save()``/``save_quantized()`` build a separate
-    export shell, so they never serialize a runtime layout and are unaffected.
+    transformers opens a process-global ``torch.set_default_dtype`` window for
+    each construction (#5304) and, in the same init-context group, disables
+    ``PreTrainedModel.tie_weights`` class-wide and swaps registered classes
+    (#5421). Only the window was exclusive, so a foreign construction in
+    another thread could untie a GPT-QModel shell. Every construction now holds
+    the writer for the window; a compiled forward still does not wait for a
+    dense load's weight I/O, dtype casts and device placement.
     """
 
-    try:
-        from transformers import PreTrainedModel
-    except ImportError:
-        log.debug("GPT-QModel save_pretrained guard inactive: transformers API changed", exc_info=True)
-        return
+    from .utils.torch import install_model_global_state_dtype_guard
 
-    from functools import wraps
-
-    from .utils.checkpoint_state import checkpoint_serialization
-
-    with _MONKEY_PATCH_LOCK:
-        original = PreTrainedModel.save_pretrained
-        if getattr(original, "_gptqmodel_runtime_layout_guard", False):
-            return
-
-        @wraps(original)
-        def save_pretrained_with_runtime_layout_guard(self, *args, **kwargs):
-            with checkpoint_serialization():
-                return original(self, *args, **kwargs)
-
-        save_pretrained_with_runtime_layout_guard._gptqmodel_runtime_layout_guard = True
-        PreTrainedModel.save_pretrained = save_pretrained_with_runtime_layout_guard
-
-
-def _patch_openvino_gptqmodel_compat():
-    """Extend OpenVINO's GPTQ patcher to understand GPTQModel new kernels."""
-    try:
-        from openvino.frontend.pytorch import gptq as ov_gptq
-    except ImportError:
-        log.debug("OpenVINO GPTQ compat skipped: openvino not installed", exc_info=True)
-        return
-    except Exception:
-        log.warning("OpenVINO GPTQ compat probe failed", exc_info=True)
-        return
-
-    with _MONKEY_PATCH_LOCK:
-        if getattr(ov_gptq, "_gptqmodel_torch_quant_compat", False):
-            return
-
-        class MatchAll(list):
-            def __contains__(self, item):
-                return True
-
-        ov_gptq.supported_quant_types = MatchAll()
-        ov_gptq._gptqmodel_torch_quant_compat = True
-
-
-def _patch_transformers_causal_conv1d_hub_kernel_compat():
-    """Prioritize local kernel ports before falling back to Transformers hub kernels."""
-    try:
-        import importlib
-        from pathlib import Path
-
-        import transformers.integrations as hf_integrations
-        from transformers.integrations import hub_kernels
-    except ImportError:
-        log.warning(
-            "causal-conv1d hub-kernel compat is inactive: transformers integrations API changed",
-            exc_info=True,
-        )
-        return
-    except Exception:
-        log.warning("causal-conv1d hub-kernel compat probe failed", exc_info=True)
-        return
-
-    with _MONKEY_PATCH_LOCK:
-        if not hasattr(hf_integrations, "lazy_load_kernel"):
-            return
-
-        if getattr(hub_kernels, "_gptqmodel_local_causal_conv1d_kernel", False):
-            hf_integrations.lazy_load_kernel = hub_kernels.lazy_load_kernel
-            return
-
-        original_lazy_load_kernel = hub_kernels.lazy_load_kernel
-        project_root = Path(__file__).resolve().parent.parent
-
-        def _resolve_local_kernel_module(kernel_name):
-            module_name = kernel_name.replace("-", "_")
-            namespaced_module = f"gptqmodel.hf_kernels.{module_name}"
-            if (project_root / "gptqmodel" / "hf_kernels" / module_name / "__init__.py").exists() or (
-                project_root / "gptqmodel" / "hf_kernels" / f"{module_name}.py"
-            ).exists():
-                return importlib.import_module(namespaced_module)
-            package_path = project_root / module_name / "__init__.py"
-            module_path = project_root / f"{module_name}.py"
-            if not package_path.exists() and not module_path.exists():
-                return None
-            return importlib.import_module(module_name)
-
-        def _lazy_load_kernel_with_local_causal_conv1d(kernel_name, mapping=hub_kernels._KERNEL_MODULE_MAPPING):
-            local_kernel = _resolve_local_kernel_module(kernel_name)
-            if local_kernel is not None:
-                mapping[kernel_name] = local_kernel
-                return local_kernel
-            return original_lazy_load_kernel(kernel_name, mapping)
-
-        hub_kernels.lazy_load_kernel = _lazy_load_kernel_with_local_causal_conv1d
-        local_causal_conv1d = _resolve_local_kernel_module("causal-conv1d")
-        if local_causal_conv1d is not None:
-            hub_kernels._KERNEL_MODULE_MAPPING["causal-conv1d"] = local_causal_conv1d
-            # Keep legacy imports working after moving the local port under gptqmodel.hf_kernels.
-            sys.modules.setdefault("causal_conv1d", local_causal_conv1d)
-        if hasattr(hf_integrations, "lazy_load_kernel"):
-            hf_integrations.lazy_load_kernel = _lazy_load_kernel_with_local_causal_conv1d
-        hub_kernels._gptqmodel_local_causal_conv1d_kernel = True
-
-
-def _patch_optimum_gptqmodel_load_bridge():
-    """Route Optimum's GPTQ loading through GPTQModel's native bridge.
-
-    Transformers delegates pre-quantized GPTQ loading to Optimum, which
-    replaces every ``nn.Linear`` with one kernel chosen from the *global*
-    quantization config. GPTQModel checkpoints can carry per-module ``dynamic``
-    settings and structural rewrites (expanded MoE experts, fused blocks), so
-    Optimum's homogeneous replacement silently drops every per-expert tensor.
-    Wrapping ``GPTQQuantizer.convert_model`` / ``post_init_model`` lets
-    ``hf_gptqmodel_prepare_model_for_load`` rebuild the checkpoint's real module
-    manifest first; checkpoints Optimum owns keep Optimum's own path because the
-    bridge returns ``None`` for them.
-    """
-
-    try:
-        from functools import wraps
-
-        from optimum.gptq import GPTQQuantizer
-    except ImportError:
-        # Optimum is an optional dependency of Transformers' GPTQ loader.
-        return
-    except Exception:
-        log.warning("Optimum GPTQ load-bridge compat probe failed", exc_info=True)
-        return
-
-    with _MONKEY_PATCH_LOCK:
-        original_convert_model = GPTQQuantizer.convert_model
-        if getattr(original_convert_model, "_gptqmodel_load_bridge", False):
-            return
-        original_post_init_model = GPTQQuantizer.post_init_model
-
-        @wraps(original_convert_model)
-        def _convert_model_with_gptqmodel_bridge(self, model, **kwargs):
-            from .utils.hf_load import hf_gptqmodel_prepare_model_for_load
-
-            context = hf_gptqmodel_prepare_model_for_load(
-                model,
-                checkpoint_files=kwargs.get("checkpoint_files"),
-                device_map=kwargs.get("device_map"),
-                dtype=kwargs.get("dtype"),
-            )
-            if context is None:
-                return original_convert_model(self, model, **kwargs)
-            model._gptqmodel_hf_load_context = context
-            return model
-
-        @wraps(original_post_init_model)
-        def _post_init_model_with_gptqmodel_bridge(self, model):
-            context = getattr(model, "_gptqmodel_hf_load_context", None)
-            if context is None:
-                return original_post_init_model(self, model)
-            from .utils.hf_load import hf_gptqmodel_post_init_for_load
-
-            return hf_gptqmodel_post_init_for_load(model, context)
-
-        _convert_model_with_gptqmodel_bridge._gptqmodel_load_bridge = True
-        _post_init_model_with_gptqmodel_bridge._gptqmodel_load_bridge = True
-        GPTQQuantizer.convert_model = _convert_model_with_gptqmodel_bridge
-        GPTQQuantizer.post_init_model = _post_init_model_with_gptqmodel_bridge
+    install_model_global_state_dtype_guard()
 
 
 from .utils import has_gil_disabled
 from .utils.env import env_flag
-from .utils.modelscope import ensure_modelscope_available
+from .utils.kernel import get_kernel_config
 
 
 DEBUG_ON = env_flag("DEBUG")
@@ -389,14 +204,11 @@ _DEVICE_THREAD_POOL_LOCK = threading.Lock()
 
 
 def _default_cpu_workers() -> int:
-    """Return the default CPU worker count, respecting an explicit env override."""
+    """Return the CPU worker count selected by the kernel policy."""
 
-    env_workers = os.getenv("GPTQMODEL_CPU_WORKERS")
-    if env_workers is not None:
-        try:
-            return max(1, int(env_workers))
-        except ValueError:
-            pass
+    configured = get_kernel_config().cpu_workers
+    if configured is not None:
+        return configured
 
     # Cap CPU workers to avoid OpenMP team explosion under free-threading.
     # On GIL builds keep the historical default; only free-threading needs the aggressive cap.
@@ -406,20 +218,37 @@ def _default_cpu_workers() -> int:
 
 
 def _default_cuda_workers() -> int:
-    """Return the per-CUDA worker count, respecting an explicit env override."""
+    """Return the per-CUDA worker count selected by the kernel policy."""
 
-    env_workers = os.getenv("GPTQMODEL_CUDA_WORKERS")
-    if env_workers is not None:
-        try:
-            return max(1, int(env_workers))
-        except ValueError:
-            pass
+    configured = get_kernel_config().cuda_workers
+    if configured is not None:
+        return configured
     return 4
 
 
-def _build_device_thread_pool():
-    return DeviceThreadPool(
+def _device_thread_pool_settings(cpu_workers=None) -> tuple:
+    """Return the pool parameters the current kernel policy selects.
+
+    The tuple is ``(cpu_workers, cuda_workers_per_device, intraop_threads)``.
+    Worker threads are fixed at construction, so any change to one of these
+    requires a rebuild.
+    """
+
+    return (
+        _default_cpu_workers() if cpu_workers is None else int(cpu_workers),
+        _default_cuda_workers(),
+        get_kernel_config().pool_intraop_threads,
+    )
+
+
+def _build_device_thread_pool(warmup_devices=None, cpu_workers=None, settings=None):
+    if settings is None:
+        settings = _device_thread_pool_settings(cpu_workers)
+    cpu_workers, cuda_workers, intraop_threads = settings
+    pool = DeviceThreadPool(
         inference_mode=True,
+        warmup_devices=warmup_devices,
+        intraop_threads_per_worker=intraop_threads,
         warmups={
             "cuda": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
             "xpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
@@ -427,29 +256,80 @@ def _build_device_thread_pool():
             "cpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
         },
         workers={
-            "cuda:per": _default_cuda_workers(),
+            "cuda:per": cuda_workers,
             "xpu:per": 1,
             "npu:per": 1,
             "mps": 8,
-            "cpu": _default_cpu_workers(),
+            "cpu": cpu_workers,
             "model_loader:cpu": 2,
         },
         empty_cache_every_n=512,
     )
+    # Remember what the pool was built for so a later load can tell whether
+    # its policy asks for a different pool.
+    pool._gptqmodel_settings = settings
+    return pool
 
 
-def get_device_thread_pool():
+def _device_thread_pool_settings_of(pool) -> tuple | None:
+    return getattr(pool, "_gptqmodel_settings", None)
+
+
+def get_device_thread_pool(warmup_devices=None):
     global _DEVICE_THREAD_POOL
     if _DEVICE_THREAD_POOL is None:
         with _DEVICE_THREAD_POOL_LOCK:
             if _DEVICE_THREAD_POOL is None:
-                pool = _build_device_thread_pool()
+                pool = _build_device_thread_pool(warmup_devices=warmup_devices)
                 # Register before publishing the pool so every caller that
                 # receives it has a matching exit cleanup. Capture this pool:
                 # a later replacement must not leave its workers unjoined.
                 atexit.register(_shutdown_device_thread_pool, pool)
                 _DEVICE_THREAD_POOL = pool
     return _DEVICE_THREAD_POOL
+
+
+def resize_device_thread_pool(warmup_devices=None, cpu_workers=None, *, create: bool = True):
+    """Match the singleton pool to the current kernel policy.
+
+    Worker threads cannot be resized in place, so a later load whose
+    ``RuntimeConfig`` asks for a different ``cpu_workers``, ``cuda_workers`` or
+    ``pool_intraop_threads`` replaces the pool at the load boundary. Before
+    this, the per-process singleton kept the first load's settings and
+    silently ignored later requests (issues #4396, #4448).
+
+    ``create=False`` only retunes an existing pool; callers that must not build
+    one eagerly (post-quantized loads) leave the lazy build to the first use,
+    which reads the already-installed policy.
+    """
+
+    global _DEVICE_THREAD_POOL
+    target = _device_thread_pool_settings(cpu_workers)
+    pool = _DEVICE_THREAD_POOL
+    if pool is not None and _device_thread_pool_settings_of(pool) == target:
+        return pool
+    if pool is None and not create:
+        return None
+
+    with _DEVICE_THREAD_POOL_LOCK:
+        pool = _DEVICE_THREAD_POOL
+        if pool is not None and _device_thread_pool_settings_of(pool) == target:
+            return pool
+        if pool is not None:
+            log.info(
+                "ENV: rebuilding device thread pool (cpu_workers, cuda_workers, pool_intraop_threads) "
+                "from %s to %s for the new kernel policy.",
+                _device_thread_pool_settings_of(pool),
+                target,
+            )
+            # Detach before shutting down so no concurrent caller can submit to
+            # a pool whose workers are stopping.
+            _DEVICE_THREAD_POOL = None
+            pool.shutdown(wait=True)
+        pool = _build_device_thread_pool(warmup_devices=warmup_devices, settings=target)
+        atexit.register(_shutdown_device_thread_pool, pool)
+        _DEVICE_THREAD_POOL = pool
+        return pool
 
 
 def _shutdown_device_thread_pool(pool: DeviceThreadPool) -> None:
@@ -518,12 +398,12 @@ class _LazyDeviceThreadPoolProxy:
 
 DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
-_patch_transformers_gptq_device_map_compat()
-_patch_transformers_gptqmodel_gguf_quantizer_compat()
-_patch_transformers_refusing_quantizers()
-_patch_transformers_save_pretrained_runtime_layout_guard()
-_patch_openvino_gptqmodel_compat()
-_patch_transformers_causal_conv1d_hub_kernel_compat()
+# The port installs one Transformers guard: the model-global-state writer for
+# the construction window (#5304, #5421). It now covers the dtype window, the
+# init-context group and the class-wide patches, so the port's older
+# dtype-only entry point and the model-compatibility patches main still keeps
+# for its Transformers 4 tree are not installed here.
+_patch_transformers_model_construction_global_state()
 
 
 def exllama_set_max_input_length(model, max_input_length: int):
@@ -543,6 +423,24 @@ def exllama_set_max_input_length(model, max_input_length: int):
 import torch
 
 from . import extension
+from .backend import (  # noqa: F401
+    AwqGemmConfig,
+    AwqTorchConfig,
+    AwqTritonConfig,
+    BackendConfig,
+    BitsAndBytesConfig,
+    EXL3CUDAConfig,
+    GGUFCPPConfig,
+    GGUFCUDAConfig,
+    GGUFTorchConfig,
+    MarlinConfig,
+    ParoCUDAConfig,
+    ParoTritonConfig,
+    RuntimeConfig,
+    SwordfishConfig,
+    TorchConfig,
+    TTBlockFloatConfig,
+)
 from .looper.checkpoint import CheckpointStopped
 from .looper.checkpoint_store import CheckpointConfig
 from .models import (
@@ -559,6 +457,8 @@ from .quantization import (
     AutoDtypeCast,
     AWQConfig,
     BaseQuantizeConfig,
+    CalibrationConfig,
+    CPTCConfig,
     FOEMConfig,
     GGUFConfig,
     GPTAQConfig,
@@ -589,19 +489,3 @@ log.info(
         torch_version=torch.__version__,
     ),
 )
-
-if ensure_modelscope_available():
-    try:
-        from modelscope.utils.hf_util.patcher import patch_hub
-
-        patch_hub()
-    except Exception as exc:
-        raise ModuleNotFoundError(
-            "env `GPTQMODEL_USE_MODELSCOPE` used but modelscope pkg is not found: please install with `pip install modelscope`."
-        ) from exc
-
-
-# Installed last: `optimum.gptq` imports `gptqmodel` (BACKEND, QuantizeConfig)
-# while it loads, so the bridge can only be wrapped once this package has
-# finished defining its public names.
-_patch_optimum_gptqmodel_load_bridge()

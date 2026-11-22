@@ -9,7 +9,7 @@ may be selected when a `device_map` offloads layers to CPU, and how
 Introduced by the fix for issue #4054 (items 3-7). The AWQ CUDA kernels are
 covered by the other half of that issue.
 
-## 1. CPU int4pack group sizes
+## 1. CPU int4pack kernel contracts
 
 `TorchFusedLinear` and `TorchFusedAwqLinear` execute on CPU through
 `aten::_weight_int4pack_mm_for_cpu`, which accepts only group sizes 32, 64, 128
@@ -45,6 +45,70 @@ flowchart TD
 explicit `backend="gptq_torch_fused"` now fails at selection with the resolved
 size instead of failing on the first forward.
 
+### Output width
+
+The same CPU op also requires the packed row width to be a multiple of 16
+(`aten::_convert_weight_to_int4pack_for_cpu` rejects any other `N`).
+`TorchAtenLinear` and `TorchAtenAwqLinear` are CPU-only, so they declare
+`SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]`
+(`torch_aten_kernel.py:101`). `TorchFusedLinear` and `TorchFusedAwqLinear`
+also serve XPU, whose packer only needs the nibble pack factor of 8; they keep
+the `[8]` declaration and apply the CPU-only 16-wide check in
+`_validate_cpu_int4pack_out_features` (`torch_fused.py:45`).
+
+### `group_size == in_features`
+
+`GroupedQuantLinear._validate` allows `group_size == in_features` so a
+per-channel checkpoint can express its resolved group without listing every
+input width (`qlinear/__init__.py:1023`). That escape also let a checkpoint
+with `group_size = 512` and `in_features = 512` reach the aten op, whose
+contract is still only 32/64/128/256. `TorchAtenLinear._validate`
+(`torch_aten_kernel.py:117`) now re-applies
+`_validate_cpu_int4pack_group_size` to the resolved size, so the selector
+falls through instead of loading a layer that fails on its first forward.
+
+```mermaid
+flowchart TD
+    A["create_quant_layer(AUTO, CPU)"] --> B["validate_quant_linear(candidate)"]
+    B --> C["_validate_shape_constraints"]
+    C --> D{"out_features divisible by<br/>declared divisor?"}
+    D -- "no" --> E["NotImplementedError<br/>try the next AUTO candidate"]
+    D -- "yes" --> F["kernel _validate"]
+    F --> G{"class uses the<br/>aten int4pack op?"}
+    G -- "no, AVX512 subclass" --> H["keep its wider<br/>group-size contract"]
+    G -- "yes" --> I["_validate_cpu_int4pack_group_size"]
+    I --> J{"resolved group size<br/>in 32, 64, 128, 256?"}
+    J -- "no" --> E
+    J -- "yes" --> K["_validate_cpu_int4pack_out_features"]
+    K --> L{"device is CPU and<br/>out_features % 16 == 0?"}
+    L -- "no" --> E
+    L -- "yes" --> M["candidate accepted"]
+    E --> N["next candidate"]
+    N --> B
+    style E fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    style M fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+```
+
+The same contracts are copied to the AWQ kernels because they execute the
+same packed op (`torch_aten_kernel_awq.py`, `torch_fused_awq.py`).
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Aten output width | `SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]` (`torch_aten_kernel.py:82` at 6c3421c) | `[16]`, enforced before construction |
+| Fused output width | `[1]` for CPU and XPU | `[8]` plus a CPU-only 16-wide check |
+| `group_size == in_features` | accepted by the base escape, rejected later by ATen | rejected during selection |
+| AVX512 group size | inherited from `TorchAtenLinear` | still owns `[16, 32, 64, 128, 256, 512]` |
+
+### `dequantize_model` contract
+
+`TorchAtenLinear.dequantize_model` and `TorchFusedLinear.dequantize_model`
+used to build `nn.Parameter(module.bias)` even when the quantized layer had no
+bias. `nn.Parameter(None)` is a shape-`[0]` tensor, so every bias-less layer
+(all of Llama, for example) failed in forward. Both functions now pass
+`bias=module.bias is not None` to `nn.Linear` and only wrap a real tensor.
+They also keep the checkpoint scale dtype instead of forcing FP16, matching
+`TorchLinear.dequantize_model`.
+
 ### Kernel `optimize` signature
 
 `BaseQModel.optimize` forwards `(backend, mode, fullgraph)` to every quantized
@@ -74,6 +138,20 @@ the accelerator family for kernel validation. The loader then runs
 moves them to the execution device only for `forward`
 (`simple_dispatch_model` -> `cpu_offload_with_hook`).
 
+Two placement rules keep that path runnable (#4866):
+
+* A tied group is never split across devices. `retie_parameters` rebinds the
+  whole group to one tensor, so a map with `lm_head` on `cpu` and
+  `model.embed_tokens` on the accelerator would put the shared weight on CPU
+  while the embedding's `AlignDevicesHook` kept moving `input_ids` to the
+  accelerator. The group follows the accelerator of its GPU member, and the
+  hooks share one materialized copy per device through Accelerate's
+  `tied_params_map`.
+* A module with no parameters (rotary embeddings) cannot carry
+  `CpuOffload.pre_forward`, which reads `next(module.parameters())`. Such a
+  module mapped to `cpu` stays on `main_device` with an `AlignDevicesHook`
+  instead, the same choice `max_memory` makes for structural modules.
+
 A CUDA-only kernel such as `MarlinLinear` or `ExllamaV2Linear` needs CUDA during
 `post_init`, so it cannot serve that map. `TritonV2Linear` is CUDA-only for
 execution but its `post_init` only validates `g_idx` bounds with Torch ops, so
@@ -100,6 +178,75 @@ flowchart TD
 `BaseQuantLinear` is `False` (fail closed). An explicit `gptq_marlin` or
 `gptq_exllamav2` request with a CPU-offload map raises with the same message.
 
+### The post-init payload probe
+
+`gptqmodel_post_init` runs `post_init` for every remaining `BaseQuantLinear`.
+Before that call it asks the module whether its checkpoint payload is a meta
+placeholder, and only a meta layer goes through `_post_init_offloaded`. That
+probe is a kernel contract, not a GPTQ attribute (#5261):
+
+* `checkpoint_payload_tensors()` resolves the names in
+  `CHECKPOINT_REQUIRED_BUFFERS` (dotted names such as VPTQ's
+  `centroids.weight` are allowed) and falls back to every registered tensor
+  when the declaration is empty or the live tensors are absent.
+* `checkpoint_payload_is_meta()` is true when any of those tensors is a meta
+  placeholder.
+
+`CHECKPOINT_REQUIRED_BUFFERS` is the same declaration
+`validate_checkpoint_qweights` uses, so the probe cannot drift from the
+loader's required payload.
+
+| Kernel family | Payload tensors |
+| --- | --- |
+| GPTQ / RTN (`PackedGroupedQuantLinear`) | `qweight`, `scales`, `qzeros` (+ `g_idx` with `desc_act`) |
+| Marlin / AWQ Marlin | inherits the GPTQ payload |
+| NF12 | `nf12_packed`, `nf12_escapes`, `nf12_exp_base` |
+| QQQ | `B`, `s_channel`, `s_group` |
+| VPTQ | `indices` + the live codebook / norm / permutation tensors |
+| FP8 | `weight`, `weight_scale_inv` |
+| BitsAndBytes | `weight` + the live quant-state tensors |
+| MacaQ | `W_packed`, `W_scales`, `BH`, `pre_scale` |
+
+```mermaid
+flowchart TD
+    A["gptqmodel_post_init(submodule)"] --> B["checkpoint_payload_is_meta()"]
+    B --> C["checkpoint_payload_tensors()<br/>resolve CHECKPOINT_REQUIRED_BUFFERS"]
+    C --> D{"any payload tensor<br/>is meta?"}
+    D -- "no, resident" --> E["submodule.post_init()"]
+    D -- "yes, disk-offloaded" --> F{"SUPPORTS_CPU_OFFLOAD?"}
+    F -- "no" --> G["RuntimeError<br/>fail closed"]
+    F -- "yes" --> H["hook.pre_forward -> post_init<br/>-> hook.post_forward"]
+    style E fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+    style G fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    style H fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+```
+
+Before #5261 the first decision read `module.qweight.is_meta` directly. NF12,
+QQQ, VPTQ and BitsAndBytes never register `qweight`, so every plain
+single-GPU load raised
+`AttributeError: '<Kernel>' object has no attribute 'qweight'` even though no
+offload was involved.
+
+```mermaid
+flowchart LR
+    subgraph Before["Before #5261"]
+        A1["BaseQuantLinear"] --> A2["module.qweight.is_meta"]
+        A2 --> A3["AttributeError for<br/>NF12 / QQQ / VPTQ / BnB"]
+    end
+    subgraph After["After #5261"]
+        B1["BaseQuantLinear"] --> B2["checkpoint_payload_is_meta()"]
+        B2 --> B3["family payload declaration"]
+        B3 --> B4["resident -> post_init()<br/>meta -> offload hook"]
+    end
+```
+
+A resident layer is initialized exactly once: the probe returns `False`, so
+`post_init` runs in place and the layer never enters the materialize/restore
+path. A disk-offloaded layer still runs `post_init` while materialized and is
+returned to meta afterwards, so the offload map stays authoritative.
+`_post_init_cpu_offloaded_marlin` uses the same probe for the GPTQ and AWQ
+Marlin repack path.
+
 Measured on Qwen2.5-0.5B-Instruct-GPTQ-Int4 with
 `model.layers.2`/`model.layers.3` mapped to `cpu`:
 
@@ -107,6 +254,37 @@ Measured on Qwen2.5-0.5B-Instruct-GPTQ-Int4 with
 | --- | --- | --- | --- |
 | AUTO, before | `MarlinLinear` | `ValueError: GPTQ Marlin requires CUDA tensors, got cpu` | n/a |
 | AUTO, after | `TritonV2Linear` | loads | bitwise equal (`rel 0.0`) |
+
+### Transformers/Optimum selectors derive the same contract
+
+`GPTQModel.load` is not the only entry point that can receive an offloading map.
+`AutoModelForCausalLM.from_pretrained` reaches the kernels through two public
+selectors that Transformers and Optimum call, and both must derive
+`cpu_offload` from the map they are handed (#5022):
+
+* `gptqmodel.utils.importer.hf_select_quant_linear` — Transformers' GPTQ
+  quantizer (`GptqHfQuantizer`).
+* `gptqmodel.utils.importer.hf_select_quant_linear_v2` — Optimum's
+  `GPTQQuantizer.convert_model` and Transformers' AWQ `replace_with_awq_linear`.
+
+`utils.importer.device_map_uses_cpu` is the single implementation (the native
+loader's `_device_map_uses_cpu` delegates to it), and
+`utils.importer.auto_cpu_offload` narrows it to AUTO: an explicit
+`backend="marlin"` with a CPU-offload map stays the caller's choice, because
+`_post_init_cpu_offloaded_marlin` can repack such a layer.
+
+That repack needs a **writable in-memory** map. Transformers dispatches through
+Accelerate, which attaches
+`AlignDevicesHook(weights_map=PrefixedDataset(OffloadedWeightsLoader(...)))` —
+not the plain `dict` the original guard accepted. `_cpu_offload_writable_storage`
+unwraps the prefix and uses the loader's `state_dict` (its `index` names the
+entries that live on disk and therefore cannot be rewritten). A disk-backed
+entry still fails closed with the original
+`CPU-offloaded Marlin requires a writable in-memory weights map.` message.
+
+`AwqMarlinLinear` shares that post-init: it repacks AWQ weights into the Marlin
+layout the same way, so before the fix it ran `post_init` on `meta` and raised
+`AWQ Marlin requires CUDA tensors, got 'meta'` for every offloading map.
 
 ## 3. `max_memory` placement
 
@@ -250,7 +428,7 @@ hid it) and a read-only site-packages install could not build at all.
 `TorchOpsJitExtension(stage_hip_sources=True)` copies the source root into
 `<base_build_root>/_src` before the fingerprint/build, rewrites the source and
 include paths to that copy, and leaves the shipped tree untouched. It is used
-by `allspark_hip`, `hadamard`, `gptq_cuda`, `exllamav3` and `paroquant`;
+by `allspark_hip`, `hadamard`, `gptq_cuda`, `exllamav3` and `paro`;
 `nf12_hip` and `tt_blockfloat_hip` already stage their own sources.
 
 ```mermaid
@@ -267,10 +445,10 @@ flowchart TD
     style H fill:#d1e7dd,stroke:#146c43,stroke-width:2px
 ```
 
-## 6. ParoQuant strided decode
+## 6. Paro strided decode
 
 `generate()` feeds `hidden_states[:, -1:, :]`, which is a strided view.
-`ParoLinear.forward` packed it after #4047, but `ParoQuantTritonLinear`
+`ParoLinear.forward` packed it after #4047, but `ParoTritonLinear`
 overrode `forward` and passed `x.reshape(-1, K)` to the fused rotation, which
 rejects non-contiguous tensors. The Triton override now calls
 `.contiguous()` on the flat activation.
@@ -318,7 +496,7 @@ flowchart TD
 | `tests/test_cpu_kernel_optimize.py` | `model.optimize()` reaches all five CPU kernel overrides |
 | `tests/test_inference_fp16_overflow.py::test_cpu_fused_layers_compile_through_the_int4pack_path` | FP16+Bias and BF16 int4pack layers compile and stay finite |
 | `tests/test_hip_jit_source_staging.py` | HIP sources are staged under the build cache; no loader writes into the checkout |
-| `tests/kernels/test_paroquant.py::test_paroquant_cuda_forward_packs_a_strided_activation` | both `ParoLinear` and `ParoQuantTritonLinear` accept a strided decode slice |
+| `tests/kernels/test_paro.py::test_paro_cuda_forward_packs_a_strided_activation` | both `ParoLinear` and `ParoTritonLinear` accept a strided decode slice |
 | `tests/kernels/test_bitsandbytes_rocm_triton.py::test_triton_dispatch_falls_back_when_the_input_needs_grad` | M=16 grad input uses the vendor kernel |
 | `tests/kernels/test_gguf_triton_bias_epilogue.py::test_grad_input_uses_the_differentiable_torch_path` | GGUF grad input uses `GGUFTorchLinear` |
 | `tests/kernels/test_linear_fp32_reduce.py::test_bias_path_eager_output_is_bitwise_unchanged` | eager bias rounding is bitwise unchanged |

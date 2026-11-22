@@ -21,6 +21,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 import torch
 
 from ..looper.input_cache import InputCache
+from ..utils.inspect import bound_forward_argument
 from ..utils.looper_helpers import normalize_device_like
 from ..utils.model import get_module, move_to, nested_move_to
 from ..utils.torch import CPU
@@ -56,6 +57,7 @@ class LoopedLayerCaptureMixin:
                 self.shell_direct_meta_materialize(
                     target_submodule=module,
                     device=device,
+                    module_path=module_name,
                 )
 
         for layer, layer_name in zip(layers, layer_names):
@@ -99,7 +101,6 @@ class LoopedLayerCaptureMixin:
 
         def make_hook(layer):
             def hook(module, args, kwargs):
-                del module
                 hidden_states = args[0] if args else kwargs.get("hidden_states")
                 if not torch.is_tensor(hidden_states):
                     raise TypeError(
@@ -111,13 +112,19 @@ class LoopedLayerCaptureMixin:
                     [move_to(hidden_states.detach(), device=CPU)]
                 )
 
-                attention_mask = kwargs.get("attention_mask")
+                # A looped family may pass its mask positionally; bind the
+                # layer's own signature instead of trusting kwargs alone.
+                attention_mask = bound_forward_argument(
+                    module, args, kwargs, "attention_mask"
+                )
                 bucket["attention_masks"].append(
                     None
                     if attention_mask is None
                     else move_to(attention_mask.detach(), device=CPU)
                 )
-                position_ids = kwargs.get("position_ids")
+                position_ids = bound_forward_argument(
+                    module, args, kwargs, "position_ids"
+                )
                 bucket["position_ids"].append(
                     None
                     if position_ids is None
@@ -198,7 +205,11 @@ class LoopedLayerCaptureMixin:
         self._looped_input_caches.append(cache)
         return cache
 
-    def pre_quantize(self, module: torch.nn.Module) -> torch.nn.Module:
+    def pre_quantize(
+        self,
+        module: torch.nn.Module,
+        module_path: Optional[str] = None,
+    ) -> torch.nn.Module:
         """Point the shared cache at the invocations of the layer being quantized."""
 
         per_layer = getattr(self, "_looped_per_layer", None)
@@ -210,7 +221,7 @@ class LoopedLayerCaptureMixin:
                 cache.position_ids = bucket["position_ids"]
                 cache.attention_masks = bucket["attention_masks"]
                 cache.src_inputs = []
-        return super().pre_quantize(module)
+        return super().pre_quantize(module, module_path=module_path)
 
     def after_quantize(self) -> None:
         """Release the looped calibration captures after the loop completes."""

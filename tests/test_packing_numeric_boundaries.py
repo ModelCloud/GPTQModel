@@ -9,11 +9,13 @@ import pytest
 import torch
 from torch import nn
 
-from gptqmodel.nn_modules.qlinear.fp8 import quantize_fp8_weight
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear
 from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear, pack_intweight
-from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+from gptqmodel.nn_modules.qlinear.gguf import (
+    _fallback_gguf_quantize,
+    _quantize_gguf_tensor_numpy,
+)
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
@@ -23,6 +25,7 @@ from gptqmodel.quantization.awq.utils.packing_utils import pack_awq_columns
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 from gptqmodel.utils.packing import hf_pack_layer
 from gptqmodel.utils.packing_math import scaled_zero_offset
+from tests.fp8_test_utils import quantize_fp8_weight
 
 
 @pytest.fixture(params=["cpu", "cuda"])
@@ -258,15 +261,18 @@ def test_mxfp4_minimum_scale_and_rounding_neighbors():
 
 
 @pytest.mark.parametrize("cls", [MacheteLinear, AwqMacheteLinear])
-def test_machete_rejects_offset_overflow_before_repacking(device, cls):
+def test_machete_rejects_affine_overflow_before_repacking(device, cls):
     module = _bare(cls)
     module.sym = False
+    module.desc_act = False
     module.weight_type = scalar_types.uint4
     module.register_buffer("scales", torch.full((1, 64), 5000., dtype=torch.float16, device=device))
     module.register_buffer("qzeros", _words(torch.full((1, 64), 14), 4).to(device))
-    module.register_buffer("qweight", torch.zeros((16, 64), dtype=torch.int32, device=device))
+    # GPTQ packs eight codes per word along in_features; AWQ along out_features.
+    qweight_shape = (16, 64) if cls is MacheteLinear else (128, 8)
+    module.register_buffer("qweight", torch.zeros(qweight_shape, dtype=torch.int32, device=device))
     before = {name: value.clone() for name, value in module.state_dict().items()}
-    with pytest.raises(ValueError, match="Scaled zero-point offset"):
+    with pytest.raises(ValueError, match="Scaled zero-point product"):
         module.post_init()
     for name, value in before.items():
         assert torch.equal(module.state_dict()[name], value)
@@ -309,3 +315,88 @@ def test_scaled_zero_offset_finite_boundary(device, dtype):
         zeros = zeros[:, :3]
     expected = (-scale.double() * zeros.double()).to(dtype)
     torch.testing.assert_close(scaled_zero_offset(scale, zeros), expected, rtol=0, atol=0)
+
+
+def _gguf_q8_0_roundf_oracle(weight: np.ndarray) -> np.ndarray:
+    """Independent Q8_0 bytes using the format's round-half-away-from-zero rule.
+
+    ggml's ``quantize_row_q8_0_ref`` applies ``roundf`` to the scaled value, so
+    a half-step rounds away from zero. This oracle derives codes from the
+    absolute integer and fractional parts instead of calling the packer.
+    """
+    blocks = np.asarray(weight, dtype=np.float32).reshape(-1, 32)
+    scale = np.abs(blocks).max(axis=1, keepdims=True) / np.float32(127.0)
+    with np.errstate(divide="ignore"):
+        inverse = np.where(scale == 0, np.float32(0), np.float32(1) / scale)
+    scaled = blocks * inverse
+    magnitude = np.abs(scaled)
+    integral = np.trunc(magnitude)
+    rounded = np.copysign(integral + (magnitude - integral >= 0.5), scaled)
+    codes = rounded.astype(np.int8)
+    return np.concatenate(
+        (
+            scale.astype(np.float16).view(np.uint8),
+            codes.view(np.uint8),
+        ),
+        axis=1,
+    )
+
+
+def _q8_0_half_step_weight() -> np.ndarray:
+    """One block whose peak of 127 makes the stored Q8_0 scale exactly 1."""
+    values = [np.float32(127.0), np.float32(-127.0), np.float32(0.0)]
+    for tie in (0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, -3.5):
+        sample = np.float32(tie)
+        values.extend(
+            (
+                np.nextafter(sample, np.float32(-np.inf)),
+                sample,
+                np.nextafter(sample, np.float32(np.inf)),
+            )
+        )
+    values.extend(np.zeros(32 - len(values), dtype=np.float32))
+    return np.asarray(values, dtype=np.float32).reshape(1, 32)
+
+
+def test_gguf_q8_0_fallback_matches_roundf_oracle_at_half_steps():
+    weight = _q8_0_half_step_weight()
+    expected = _gguf_q8_0_roundf_oracle(weight)
+
+    packed = _fallback_gguf_quantize(weight, "Q8_0")
+
+    np.testing.assert_array_equal(packed, expected)
+
+
+def test_gguf_q8_0_missing_dependency_packs_same_bytes_as_installed_dependency(monkeypatch):
+    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
+
+    weight = np.repeat(_q8_0_half_step_weight(), 2, axis=0)
+    expected = _gguf_q8_0_roundf_oracle(weight)
+
+    installed = gguf_module._GGUF_AVAILABLE
+    monkeypatch.setattr(gguf_module, "_GGUF_AVAILABLE", False)
+    try:
+        missing = _quantize_gguf_tensor_numpy(weight, "Q8_0")
+    finally:
+        monkeypatch.setattr(gguf_module, "_GGUF_AVAILABLE", installed)
+
+    np.testing.assert_array_equal(missing, expected)
+
+    if installed:
+        served_by_gguf = []
+        reference = gguf_module.gguf_lib.quantize
+
+        def record(weight, qtype):
+            served_by_gguf.append(qtype)
+            return reference(weight, qtype)
+
+        monkeypatch.setattr(gguf_module.gguf_lib, "quantize", record)
+        present = _quantize_gguf_tensor_numpy(weight, "Q8_0")
+        # The presence path must actually reach the optional package; a
+        # fallback-only pass would not exercise the dispatcher transition.
+        assert served_by_gguf == [gguf_module.gguf_lib.GGMLQuantizationType.Q8_0]
+        np.testing.assert_array_equal(present, expected)
+        np.testing.assert_array_equal(missing, present)
+    else:
+        # Without the optional package both dispatch paths are the fallback.
+        np.testing.assert_array_equal(_fallback_gguf_quantize(weight, "Q8_0"), expected)

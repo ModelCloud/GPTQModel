@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # GPU=-1
-"""ROCm backend gating for AWQ scheduling, GGUF, VPTQ, and ParoQuant.
+"""ROCm backend gating for AWQ scheduling, GGUF, VPTQ, and Paro.
 
 These tests are pure CPU: HIP/CUDA runtimes are simulated with monkeypatched
 ``torch`` symbols so the architecture-dispatch decisions can be asserted on a
@@ -14,6 +14,7 @@ import pytest
 import torch
 
 import gptqmodel.quantization.awq.modules.triton.scheduler as awq_scheduler
+from gptqmodel import CalibrationConfig
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import exllamav2 as exllamav2_module
 from gptqmodel.nn_modules.qlinear import exllamav2_awq as exllamav2_awq_module
@@ -23,7 +24,6 @@ from gptqmodel.nn_modules.qlinear import qqq as qqq_module
 from gptqmodel.nn_modules.qlinear import vptq_cuda as vptq_cuda_module
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
-from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
 from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
 from gptqmodel.utils import arch as arch_utils
 
@@ -130,6 +130,8 @@ def test_gguf_triton_declares_rocm_and_validates(monkeypatch):
     assert gguf_triton_module.GGUFTritonKernel.SUPPORTS_DEVICES == [DEVICE.CUDA, DEVICE.ROCM]
     monkeypatch.setattr(gguf_triton_module, "IS_ROCM", True)
     GGUFTritonKernel = gguf_triton_module.GGUFTritonKernel
+    if not gguf_triton_module._TRITON_AVAILABLE:
+        pytest.skip("GGUFTritonKernel validation requires triton")
     GGUFTritonKernel.cached_validate_once.cache_clear()
 
     ok, error = GGUFTritonKernel.validate_once()
@@ -167,10 +169,16 @@ def test_vptq_cuda_rejects_rocm_with_actionable_error(monkeypatch):
     assert ok_validate is False
     assert isinstance(error_validate, NotImplementedError)
 
-def test_paroquant_triton_supports_rocm_explicitly():
-    assert DEVICE.ROCM in ParoQuantTritonLinear.SUPPORTS_DEVICES
-    # Priority 0 keeps this kernel out of AUTO selection on every device.
-    assert ParoQuantTritonLinear.SUPPORTS_FORMATS[fp8_module.FORMAT.PAROQUANT] == 0
+def test_paro_triton_supports_rocm_explicitly():
+    # The kernel module imports Triton at module scope.
+    pytest.importorskip("triton")
+    from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
+
+    assert DEVICE.ROCM in ParoTritonLinear.SUPPORTS_DEVICES
+    # A positive declared priority makes the kernel AUTO-eligible. On ROCm it
+    # outranks the dense ``ParoLinear`` fallback; on CUDA ``ParoLinear`` keeps
+    # the higher rank (#4914).
+    assert ParoTritonLinear.SUPPORTS_FORMATS[fp8_module.FORMAT.PARO] > 0
 
 
 def test_qqq_marlin_kernel_declares_cuda_only():
@@ -294,7 +302,7 @@ def test_qqq_quantize_actually_packs_modules_on_rocm(tmp_path):
     )
     calib = [("the quick brown fox jumps over the lazy dog quantize weights")] * 8
     model = GPTQModel.load(fixture, qcfg)
-    model.quantize(calib, batch_size=1)
+    model.quantize(CalibrationConfig(dataset=calib, batch_size=1))
 
     packed = [m for _, m in model.model.named_modules() if isinstance(m, QQQTorchLinear)]
     assert packed, "QQQ packed no modules"
@@ -339,6 +347,13 @@ def test_cuda_only_backends_reject_rocm_with_actionable_errors(monkeypatch):
 
     monkeypatch.setattr(torch.version, "hip", "7.16.26385")
     monkeypatch.setattr("gptqmodel.models._const.IS_ROCM", True)
+    # Marlin freezes its build-environment refusal at import time. Recompute it
+    # as a ROCm host would, otherwise a GPU-less test host reports the
+    # "requires CUDA" refusal instead of the ROCm one under test.
+    import gptqmodel.utils.marlin as marlin_utils
+
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", True)
+    rocm_marlin_error = marlin_utils._marlin_build_environment_error()
 
     cases = [
         (MarlinLinear, "ROCm"),
@@ -351,6 +366,8 @@ def test_cuda_only_backends_reject_rocm_with_actionable_errors(monkeypatch):
         module = sys.modules[cls.__module__]
         if hasattr(module, "IS_ROCM"):
             monkeypatch.setattr(module, "IS_ROCM", True)
+        if hasattr(module, "marlin_import_exception"):
+            monkeypatch.setattr(module, "marlin_import_exception", rocm_marlin_error)
         # Runtime guards must see HIP even on a CUDA test host. Do not retain
         # a simulated refusal in the class's process-wide availability cache.
         monkeypatch.setattr(cls, "cached_validate_once", classmethod(lambda kernel: kernel.validate_once()))

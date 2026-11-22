@@ -1,0 +1,481 @@
+# Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
+# Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
+# Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""
+Processor class for Qwen2.5Omni.
+"""
+
+import math
+
+import numpy as np
+
+from transformers.feature_extraction_utils import BatchFeature
+from transformers.image_utils import ImageInput
+from transformers.processing_utils import (
+    MultiModalData,
+    OmniModalProcessingKwargs,
+    OmniModalProcessorMixin,
+    ProcessingKwargs,
+    Unpack,
+    VideosKwargs,
+)
+from transformers.tokenization_utils_base import AudioInput, PreTokenizedInput, TextInput
+from transformers.utils import auto_docstring, logging
+from transformers.utils.deprecation import deprecate_attr
+from transformers.video_utils import VideoInput
+
+
+logger = logging.get_logger(__name__)
+
+
+# Redefine kwargs for videos because Qwen-Omni uses some kwargs for processing omni
+# and does not use them in video processor class
+class DeprecatedQwen2_5_OmniVideosKwargs(VideosKwargs, total=False):
+    """
+    min_pixels (`int`, *optional*):
+        Minimum number of pixels (height × width) for video frames after resizing. Frames smaller than this
+        threshold will be upscaled to meet the minimum requirement.
+    max_pixels (`int`, *optional*):
+        Maximum number of pixels (height × width) for video frames after resizing. Frames larger than this
+        threshold will be downscaled to fit within the limit.
+    patch_size (`int`, *optional*):
+        The spatial patch size used by the vision encoder. Video frames are divided into patches of this size
+        in both height and width dimensions.
+    temporal_patch_size (`int`, *optional*):
+        The temporal patch size used by the vision encoder. This determines how many consecutive frames are
+        grouped together as a single temporal patch.
+    merge_size (`int`, *optional*):
+        The merge size used for combining spatial patches. Multiple patches are merged together to reduce the
+        sequence length while maintaining spatial information.
+    min_frames (`int`, *optional*):
+        Minimum number of frames to extract from the video. Videos with fewer frames will be padded or repeated
+        to meet this requirement.
+    max_frames (`int`, *optional*):
+        Maximum number of frames to extract from the video. Longer videos will be truncated or sampled to fit
+        within this limit.
+    load_audio_from_video (`bool`, *optional*, defaults to `False`):
+        Deprecated, use [`Qwen2_5OmniProcessorKwargs.load_audio_from_video`] instead.
+        Whether to incorporate audio information when processing videos. When enabled, audio tokens are
+        interleaved with video tokens based on temporal alignment, creating a unified multimodal representation.
+    use_audio_in_video (`bool`, *optional*, defaults to `False`):
+        Deprecated arg - use `load_audio_from_video` instead.
+    seconds_per_chunk (`float`, *optional*, defaults to `2.0`):
+        Deprecated, use [`Qwen2_5OmniProcessorKwargs.seconds_per_chunk`] instead.
+        The duration (in seconds) of each video chunk when splitting long videos. This parameter controls how
+        videos are divided into temporal segments for processing.
+    position_id_per_seconds (`int` or `float`, *optional*, defaults to `25`):
+        Deprecated, use [`Qwen2_5OmniProcessorKwargs.position_id_per_seconds`] instead.
+        The number of position IDs allocated per second of video. This parameter controls the temporal resolution
+        of position embeddings and is used to align video tokens with audio tokens when `use_audio_in_video=True`.
+    """
+
+    min_pixels: int
+    max_pixels: int
+    patch_size: int
+    temporal_patch_size: int
+    merge_size: int
+    min_frames: int
+    max_frames: int
+    use_audio_in_video: bool
+    load_audio_from_video: bool
+    seconds_per_chunk: float
+    position_id_per_seconds: int | float
+
+
+class Qwen2_5OmniProcessorKwargs(OmniModalProcessingKwargs, total=False):
+    """
+    seconds_per_chunk (`float`, *optional*, defaults to `2.0`):
+        The duration (in seconds) of each video chunk when splitting long videos. This parameter controls how
+        videos are divided into temporal segments for processing.
+    position_id_per_seconds (`int` or `float`, *optional*, defaults to `25`):
+        The number of position IDs allocated per second of video. This parameter controls the temporal resolution
+        of position embeddings and is used to align video tokens with audio tokens when `load_audio_from_video=True`.
+    """
+
+    videos_kwargs: DeprecatedQwen2_5_OmniVideosKwargs
+
+    seconds_per_chunk: float
+    position_id_per_seconds: int | float
+
+
+def _get_feat_extract_output_lengths(input_lengths):
+    """
+    Computes the output length of the convolutional layers and the output length of the audio encoder
+    """
+    input_lengths = (input_lengths - 1) // 2 + 1
+    return (input_lengths - 2) // 2 + 1
+
+
+@auto_docstring
+class Qwen2_5OmniProcessor(OmniModalProcessorMixin):
+    valid_processor_kwargs = Qwen2_5OmniProcessorKwargs
+
+    text_kwargs = {
+        "padding_side": "left",
+    }
+    videos_kwargs = {
+        "size": {
+            "shortest_edge": 128 * 28 * 28,
+            "longest_edge": 768 * 28 * 28,
+        },
+    }
+    audio_kwargs = {
+        "sampling_rate": 16000,
+        "return_attention_mask": True,
+    }
+    seconds_per_chunk = 2.0
+    position_id_per_seconds = 25
+
+    def __init__(
+        self, image_processor=None, video_processor=None, feature_extractor=None, tokenizer=None, chat_template=None
+    ):
+        super().__init__(image_processor, video_processor, feature_extractor, tokenizer, chat_template=chat_template)
+        self.image_token = self.tokenizer.image_token
+        self.audio_token = self.tokenizer.audio_token
+        self.video_token = self.tokenizer.video_token
+        self.image_token_id = self.tokenizer.image_token_id
+        self.audio_token_id = self.tokenizer.audio_token_id
+        self.video_token_id = self.tokenizer.video_token_id
+        self.vision_bos_token = self.tokenizer.vision_bos_token
+        self.vision_eos_token = self.tokenizer.vision_eos_token
+        self.audio_bos_token = self.tokenizer.audio_bos_token
+        self.audio_eos_token = self.tokenizer.audio_eos_token
+
+    @auto_docstring
+    def __call__(
+        self,
+        text: TextInput | PreTokenizedInput | list[TextInput] | list[PreTokenizedInput] = None,
+        images: ImageInput | None = None,
+        videos: VideoInput | None = None,
+        audio: AudioInput | None = None,
+        **kwargs: Unpack[Qwen2_5OmniProcessorKwargs],
+    ) -> BatchFeature:
+        videos_kwargs = dict(kwargs.pop("videos_kwargs", {}))
+        for key in ("seconds_per_chunk", "position_id_per_seconds"):
+            if key in videos_kwargs:
+                logger.warning_once(
+                    f"Passing `{key}` in `videos_kwargs` is deprecated "
+                    "and will be removed in v5.29.0. "
+                    "Pass it directly to the processor instead."
+                )
+                # "videos_kwargs" has priority for backwards compatibility
+                kwargs[key] = videos_kwargs.pop(key)
+
+        if kwargs.pop("use_audio_in_video", False) or videos_kwargs.pop("use_audio_in_video", False):
+            logger.warning(
+                "`use_audio_in_video` is depreacted and will be removed in v5.25, use `load_audio_from_video` instead"
+            )
+            kwargs["load_audio_from_video"] = True
+        return super().__call__(
+            images=images, text=text, videos=videos, audio=audio, videos_kwargs=videos_kwargs, **kwargs
+        )
+
+    def validate_inputs(
+        self,
+        images: ImageInput | None = None,
+        text: TextInput | PreTokenizedInput | list[TextInput] | list[PreTokenizedInput] | None = None,
+        **kwargs: Unpack[ProcessingKwargs],
+    ):
+        super().validate_inputs(images=images, text=text, **kwargs)
+
+        if text is None:
+            raise ValueError("You need to specify either a `text` input to process.")
+
+    def _process_audio(self, audio: AudioInput, **kwargs):
+        kwargs["padding"] = "max_length"  # Support "max_length" padding only here
+        audio_inputs = self.feature_extractor(audio, **kwargs)
+        audio_inputs["feature_attention_mask"] = audio_inputs.pop(
+            "attention_mask"
+        )  # rename feature_attention_mask to prevent conflicts later on
+        audio_inputs["num_audio_tokens"] = _get_feat_extract_output_lengths(
+            audio_inputs["feature_attention_mask"].sum(-1)
+        )
+
+        audio_replacements = []
+        for idx in range(len(audio)):
+            replacement_text = self.replace_audio_token(audio_inputs, audio_idx=idx)
+            audio_replacements.append(replacement_text)
+
+        return audio_inputs, audio_replacements
+
+    def _process_videos(
+        self,
+        videos: VideoInput,
+        audio: AudioInput | None = None,
+        processed_audio: dict | None = None,
+        video_to_audio_indices: list | None = None,
+        **kwargs: Unpack[Qwen2_5OmniProcessorKwargs],
+    ):
+        processed_videos = self.video_processor(videos, **kwargs["videos_kwargs"])
+
+        fps = kwargs["videos_kwargs"].get("fps")
+        fps = fps if fps is not None else 2.0  # default fps not saved in official ckpt, hardcode
+        video_grid_thw = processed_videos["video_grid_thw"]
+        processed_videos["video_second_per_grid"] = [self.video_processor.temporal_patch_size / fps] * len(
+            video_grid_thw
+        )
+
+        video_replacements = []
+        for idx in range(len(video_grid_thw)):
+            replacement_text = self.replace_video_token(
+                processed_videos,
+                video_idx=idx,
+                processed_audio=processed_audio,
+                video_to_audio_indices=video_to_audio_indices,
+                **kwargs,
+            )
+            video_replacements.append(replacement_text)
+        return processed_videos, video_replacements
+
+    def replace_image_token(self, image_inputs: dict, image_idx: int, **kwargs) -> str:
+        image_seq_length = image_inputs["image_grid_thw"][image_idx].prod() // self.image_processor.merge_size**2
+        return self.image_token * image_seq_length
+
+    def replace_audio_token(self, audio_inputs: dict, audio_idx: int, **kwargs) -> str:
+        num_audio_tokens = audio_inputs["num_audio_tokens"][audio_idx]
+        return self.audio_token * num_audio_tokens
+
+    def replace_video_token(
+        self,
+        video_inputs: dict,
+        video_idx: int,
+        processed_audio: dict | None = None,
+        video_to_audio_indices: list | None = None,
+        **kwargs: Unpack[Qwen2_5OmniProcessorKwargs],
+    ) -> str:
+        # When loading audio from video and if current video has an associated audio, i.e. no silent
+        if kwargs["load_audio_from_video"] and video_to_audio_indices[video_idx] is not None:
+            return self.replace_video_with_audio_token(
+                video_inputs,
+                video_idx,
+                processed_audio,
+                video_to_audio_indices[video_idx],
+                **kwargs,
+            )
+
+        video_seq_length = video_inputs["video_grid_thw"][video_idx].prod() // self.video_processor.merge_size**2
+        return self.video_token * video_seq_length
+
+    def replace_video_with_audio_token(
+        self,
+        video_inputs: dict,
+        video_idx: int,
+        audio_inputs: dict,
+        audio_idx: int,
+        **kwargs: Unpack[Qwen2_5OmniProcessorKwargs],
+    ) -> str:
+        position_id_per_seconds = kwargs["position_id_per_seconds"]
+        audio_token_indices = np.arange(audio_inputs["num_audio_tokens"][audio_idx])
+        curr_video_grid_thw = video_inputs["video_grid_thw"][video_idx]
+        height = curr_video_grid_thw[1] // self.video_processor.merge_size
+        width = curr_video_grid_thw[2] // self.video_processor.merge_size
+        video_token_indices = np.arange(curr_video_grid_thw[0]).reshape(-1, 1, 1)
+        video_token_indices = np.broadcast_to(
+            video_token_indices, (video_token_indices.shape[0], height, width)
+        ).reshape(-1)
+        video_token_indices = (
+            video_token_indices * video_inputs["video_second_per_grid"][video_idx] * position_id_per_seconds
+        )
+
+        tokens_per_chunk = int(position_id_per_seconds * kwargs["seconds_per_chunk"])
+        video_chunk_indexes = self.get_chunked_index(video_token_indices, tokens_per_chunk)
+        audio_chunk_indexes = self.get_chunked_index(audio_token_indices, tokens_per_chunk)
+
+        placeholder_string = self.audio_bos_token
+        for j in range(max(len(video_chunk_indexes), len(audio_chunk_indexes))):
+            if j < len(video_chunk_indexes):
+                video_seq_length = video_chunk_indexes[j][1] - video_chunk_indexes[j][0]
+                placeholder_string += self.video_token * video_seq_length
+            if j < len(audio_chunk_indexes):
+                audio_seq_length = audio_chunk_indexes[j][1] - audio_chunk_indexes[j][0]
+                placeholder_string += self.audio_token * audio_seq_length
+        placeholder_string += self.audio_eos_token
+        return placeholder_string
+
+    def get_chunked_index(self, token_indices: np.ndarray, tokens_per_chunk: int) -> list[tuple[int, int]]:
+        """
+        Splits token index list into chunks based on token value ranges.
+
+        Given a list of token indices, returns a list of (start, end) index tuples representing
+        slices of the list where the token values fall within successive ranges of `t_ntoken_per_chunk`.
+
+        For example, if `t_ntoken_per_chunk` is 1000, the function will create chunks such that:
+        - the first chunk contains token values < 1000,
+        - the second chunk contains values >= 1000 and < 2000, and so on.
+
+        Parameters:
+            token_indices (`np.ndarray`): A monotonically increasing list of token index values.
+            t_ntoken_per_chunk (`int`): Number of tokens per chunk (used as the chunk size threshold).
+
+        Returns:
+            `list[tuple[int, int]]`: A list of tuples, each representing the start (inclusive)
+                                and end (exclusive) indices of a chunk in `token_indices`.
+        """
+
+        def _iter():
+            i, start_idx = 0, 0  # skip bos token
+            current_chunk = 1
+            while i < len(token_indices):  # skip eos token
+                if token_indices[i] >= current_chunk * tokens_per_chunk:
+                    yield (start_idx, i)
+                    start_idx = i
+                    current_chunk += 1
+                i += 1
+            yield (start_idx, len(token_indices))
+
+        return list(_iter())
+
+    def post_process_image_text_to_text(self, generated_outputs, skip_special_tokens=True, **kwargs):
+        """
+        Post-process the output of a vlm to decode the text.
+
+        Args:
+            generated_outputs (`torch.Tensor` or `np.ndarray`):
+                The output of the model `generate` function. The output is expected to be a tensor of shape `(batch_size, sequence_length)`
+                or `(sequence_length,)`.
+            skip_special_tokens (`bool`, *optional*, defaults to `True`):
+                Whether or not to remove special tokens in the output. Argument passed to the tokenizer's `batch_decode` method.
+            **kwargs:
+                Additional arguments to be passed to the tokenizer's `batch_decode method`.
+
+        Returns:
+            `list[str]`: The decoded text.
+        """
+        if isinstance(generated_outputs, (tuple, list)):
+            generated_outputs = generated_outputs[0]
+        return self.tokenizer.batch_decode(generated_outputs, skip_special_tokens=skip_special_tokens, **kwargs)
+
+    def post_process_multimodal_output(
+        self, generated_outputs, skip_special_tokens=True, generation_mode=None, **kwargs
+    ):
+        """
+        Post-process the output of a multimodal model to return the requested modality output.
+        If the model cannot generated the requested modality, an error will be raised.
+
+        Args:
+            generated_outputs (`torch.Tensor` or `np.ndarray`):
+                The output of the model `generate` function. The output is expected to be a tensor of shape `(batch_size, sequence_length)`
+                or `(sequence_length,)`.
+            skip_special_tokens (`bool`, *optional*, defaults to `True`):
+                Whether or not to remove special tokens in the output. Argument passed to the tokenizer's `batch_decode` method.
+            generation_mode (`str`, *optional*):
+                Generation mode indicated which modality to output and can be one of `["text", "image", "audio"]`.
+            **kwargs:
+                Additional arguments to be passed to the tokenizer's `batch_decode method`.
+
+        Returns:
+            `list[Union[str, np.ndarray]]`: The decoded text or generated audio.
+        """
+        if generation_mode is None or generation_mode == "text":
+            return self.post_process_image_text_to_text(
+                generated_outputs, skip_special_tokens=skip_special_tokens, **kwargs
+            )
+
+        elif generation_mode == "audio":
+            # Batched generation returns one waveform per sample, while a single sample comes back as a lone
+            # `(num_samples,)` tensor that return as a list
+            audio_outputs = generated_outputs[1]
+            if not isinstance(audio_outputs, (list, tuple)):
+                audio_outputs = [audio_outputs]
+            return [audio.reshape(-1).detach().cpu().numpy() for audio in audio_outputs]
+
+        else:
+            raise ValueError(
+                f"{self.__class__.__name__} got an unexpected generation_mode={generation_mode}. Supported options are only `text` and `audio"
+            )
+
+    def _get_num_multimodal_tokens(self, image_sizes=None, video_sizes=None, audio_lengths=None, **kwargs):
+        """
+        Computes the number of placeholder tokens needed for multimodal inputs with the given sizes.
+        Args:
+            image_sizes (`list[list[int]]`, *optional*):
+                The input sizes formatted as (height, width) per each image.
+            video_sizes (`list[list[int]]`, *optional*):
+                The input sizes formatted as (num_frames, height, width) per each video.
+            audio_lengths (`list[int]`, *optional*):
+                The lengths of audio inputs in number of samples. Used to dynamically
+                compute per-audio token counts.
+        Returns:
+            `MultiModalData`: A `MultiModalData` object holding number of tokens per each of the provided
+            input modalities, along with other useful data.
+        """
+
+        vision_data = {}
+        merged_kwargs = self._merge_kwargs(**kwargs)
+        if image_sizes is not None:
+            images_kwargs = merged_kwargs["images_kwargs"]
+            merge_size = images_kwargs.get("merge_size", None) or self.image_processor.merge_size
+
+            num_image_patches = [
+                self.image_processor.get_number_of_image_patches(*image_size, images_kwargs)
+                for image_size in image_sizes
+            ]
+            num_image_tokens = [(num_patches // merge_size**2) for num_patches in num_image_patches]
+            vision_data.update({"num_image_tokens": num_image_tokens, "num_image_patches": num_image_patches})
+
+        if video_sizes is not None:
+            videos_kwargs = merged_kwargs["videos_kwargs"]
+            merge_size = videos_kwargs.get("merge_size", None) or self.video_processor.merge_size
+            num_video_patches = [
+                self.video_processor.get_num_of_video_patches(*video_size, videos_kwargs) for video_size in video_sizes
+            ]
+            num_video_tokens = [(num_patches // merge_size**2) for num_patches in num_video_patches]
+            vision_data["num_video_tokens"] = num_video_tokens
+
+        if audio_lengths is not None:
+            vision_data["num_audio_tokens"] = [
+                self._get_num_audio_tokens(length, **merged_kwargs["audio_kwargs"]) for length in audio_lengths
+            ]
+
+        return MultiModalData(**vision_data)
+
+    def _get_num_audio_tokens(self, audio_length: int, **kwargs) -> int:
+        """
+        Computes the output length of the convolutional layers and the output length of the audio encoder
+        """
+        input_lengths = min(
+            math.ceil(audio_length / self.feature_extractor.hop_length), self.feature_extractor.nb_max_frames
+        )
+        return _get_feat_extract_output_lengths(input_lengths)
+
+    @property
+    def unused_input_names(self) -> list[str]:
+        "Input names returned always by subprocessors but not used in model's `forward`"
+        return ["num_audio_tokens"]
+
+    @property
+    def model_input_names(self):
+        tokenizer_input_names = self.tokenizer.model_input_names
+        feature_extractor_input_names = self.feature_extractor.model_input_names
+        image_processor_input_names = self.image_processor.model_input_names
+        video_processor_input_names = self.video_processor.model_input_names
+        return list(
+            dict.fromkeys(
+                tokenizer_input_names
+                + feature_extractor_input_names
+                + image_processor_input_names
+                + video_processor_input_names
+                + ["feature_attention_mask"]
+                + ["video_second_per_grid"]
+            )
+        )
+
+
+__getattr__ = deprecate_attr(
+    __name__,
+    remove={"Qwen2_5_OmniVideosKwargs": (DeprecatedQwen2_5_OmniVideosKwargs, "5.29.0")},
+)
+__all__ = ["Qwen2_5OmniProcessor"]

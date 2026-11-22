@@ -15,8 +15,6 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from gptqmodel.models.definitions import LlamaQModel
 from gptqmodel.models.definitions.instella import InstellaQModel
 
@@ -58,33 +56,23 @@ def test_instella_attention_and_mlp_read_their_own_norm():
     assert InstellaQModel.module_tree != LlamaQModel.module_tree
 
 
-@pytest.mark.skipif(
-    not INSTELLA_PATH.is_dir(),
-    reason=f"local Instella fixture is unavailable: {INSTELLA_PATH}",
-)
-def test_instella_module_plan_resolves_on_the_real_decoder_layer(tmp_path):
-    from transformers import AutoModelForCausalLM
-
+def test_instella_module_plan_resolves_on_the_real_decoder_layer():
     from gptqmodel.models.module_plan import ModulePlan
-    from tests.tiny_remote_models import build_tiny_remote_model
+    from gptqmodel.models.ports.instella import InstellaConfig, InstellaForCausalLM
 
-    path = build_tiny_remote_model(
-        INSTELLA_PATH,
-        tmp_path / "tiny",
-        {
-            "vocab_size": 128,
-            "hidden_size": 32,
-            "intermediate_size": 64,
-            "num_hidden_layers": 2,
-            "num_attention_heads": 4,
-            "num_key_value_heads": 2,
-            "max_position_embeddings": 64,
-            "bos_token_id": 0,
-            "eos_token_id": 0,
-            "pad_token_id": 1,
-        },
+    config = InstellaConfig(
+        vocab_size=128,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+        bos_token_id=0,
+        eos_token_id=0,
+        pad_token_id=1,
     )
-    hf = AutoModelForCausalLM.from_pretrained(str(path), trust_remote_code=True)
+    hf = InstellaForCausalLM(config).eval()
     layer = hf.model.layers[0]
 
     assert hasattr(layer, "pre_attention_layernorm")

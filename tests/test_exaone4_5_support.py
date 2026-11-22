@@ -1,29 +1,33 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from types import SimpleNamespace
+
+import pytest
+from transformers import Exaone4_5_Config, Exaone4Config
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.exaone4 import Exaone4_5QModel, Exaone4QModel
 
 
-def test_exaone4_5_model_types_select_expected_definitions(monkeypatch):
-    monkeypatch.setattr(
-        auto,
-        "resolve_trust_remote_code",
-        lambda path, trust_remote_code=False: trust_remote_code,
-    )
+@pytest.mark.parametrize("model_type,expected", [
+    ("exaone4_5", Exaone4_5QModel),
+    ("exaone4_5_text", Exaone4QModel),
+])
+def test_exaone4_5_model_types_select_expected_definitions(tmp_path, model_type, expected):
+    if model_type == "exaone4_5":
+        config = Exaone4_5_Config(text_config=Exaone4Config().to_dict())
+    else:
+        config = Exaone4Config()
+    config.save_pretrained(tmp_path)
+    if model_type == "exaone4_5_text":
+        config_path = tmp_path / "config.json"
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        payload["model_type"] = model_type
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    for model_type, expected in (
-        ("exaone4_5", Exaone4_5QModel),
-        ("exaone4_5_text", Exaone4QModel),
-    ):
-        monkeypatch.setattr(
-            auto.AutoConfig,
-            "from_pretrained",
-            lambda *args, model_type=model_type, **kwargs: SimpleNamespace(model_type=model_type),
-        )
-        assert auto.check_and_get_model_definition("exaone4-5-fixture") is expected
+    assert auto.check_and_get_model_definition(str(tmp_path)) is expected
 
 
 def test_exaone4_5_module_tree_targets_language_model_only():

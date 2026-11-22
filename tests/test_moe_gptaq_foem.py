@@ -23,6 +23,7 @@ import pytest
 import torch
 from torch import nn
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY
 from gptqmodel.quantization.config import FOEMConfig, GPTAQConfig, QuantizeConfig
@@ -58,8 +59,18 @@ _FOEM_CFG = QuantizeConfig(
 )
 
 
-@pytest.mark.parametrize(("cls", "qcfg"), [(GPTAQ, _GPTAQ_CFG), (FOEM, _FOEM_CFG)])
-def test_routed_expert_ignores_mismatched_native_inputs(cls, qcfg):
+@pytest.mark.parametrize(
+    ("cls", "qcfg", "token_normalized"),
+    [
+        # GPTAQ keeps its upstream request-count Hessian recurrence and only
+        # reports a token-normalized loss.
+        (GPTAQ, _GPTAQ_CFG, False),
+        # FOEM normalizes its Hessian by calibration token count since 60b420d
+        # (the #4179 loss-denominator fix), matching GPTQ.
+        (FOEM, _FOEM_CFG, True),
+    ],
+)
+def test_routed_expert_ignores_mismatched_native_inputs(cls, qcfg, token_normalized):
     """A routed expert must build its Hessian from the quantized-path rows only."""
 
     torch.manual_seed(0)
@@ -72,7 +83,14 @@ def test_routed_expert_ignores_mismatched_native_inputs(cls, qcfg):
     assert task.dXXT is None
     hessian = task.H.to(torch.float64)
     samples = torch.cat(rows).to(torch.float64)
-    oracle = (2.0 / len(rows)) * (samples.T @ samples)
+    # The oracle must follow the quantizer's internal normalization: FOEM scales
+    # by the number of calibration tokens (2 / total tokens), GPTAQ by requests.
+    # FOEM's token normalization is the documented contract (docs/quantizer-moe.md)
+    # and is what makes its Hessian, `nsamples` and reported loss match GPTQ for
+    # the same rows; `2 / len(rows)` would scale with the number of calibration
+    # sequences instead. `dXXT` stays on the same scale as `H`.
+    denominator = sum(row.shape[0] for row in rows) if token_normalized else len(rows)
+    oracle = (2.0 / denominator) * (samples.T @ samples)
     relative_error = torch.linalg.vector_norm(hessian - oracle) / torch.linalg.vector_norm(oracle)
     assert float(relative_error) <= 1e-6
 
@@ -159,7 +177,7 @@ def _build_tiny_qwen2_moe(model_dir: Path):
     return config, fast_tokenizer, calibration
 
 
-def _quantize_and_load(model_dir: Path, output_dir: Path, calibration, qcfg, device, dtype):
+def _quantize_and_load(model_dir: Path, output_dir: Path, calibration, qcfg, device, dtype, batch_size: int = 1):
     from gptqmodel import BACKEND, GPTQModel
 
     model = GPTQModel.load(
@@ -169,10 +187,12 @@ def _quantize_and_load(model_dir: Path, output_dir: Path, calibration, qcfg, dev
         dtype=dtype,
     )
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=batch_size,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     model.save(output_dir)
     return GPTQModel.load(str(output_dir), backend=BACKEND.TORCH, device=device)
@@ -187,7 +207,11 @@ def _perplexity(model, tokenizer, text: str) -> float:
 
 
 @pytest.mark.slow
-def test_tiny_qwen2_moe_gptaq_and_foem_quantize(tmp_path: Path):
+# batch_size=4 pads the variable-length rows. HF qwen2_moe calls its
+# shared_expert on flattened `[B*S, H]` rows, so the native capture must split
+# them per sample exactly like the quantized-pass hook (#4457).
+@pytest.mark.parametrize("batch_size", [1, 4])
+def test_tiny_qwen2_moe_gptaq_and_foem_quantize(tmp_path: Path, batch_size: int):
     """The issue's repro: GPTAQ and FOEM must complete on a routed Qwen2-MoE."""
 
     from gptqmodel import QuantizeConfig
@@ -215,7 +239,7 @@ def test_tiny_qwen2_moe_gptaq_and_foem_quantize(tmp_path: Path):
     loaded = {}
     for name, qcfg in controls.items():
         loaded[name] = _quantize_and_load(
-            model_dir, tmp_path / name, calibration, qcfg, device, dtype
+            model_dir, tmp_path / name, calibration, qcfg, device, dtype, batch_size=batch_size
         )
 
     eval_text = (

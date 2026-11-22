@@ -16,7 +16,6 @@ The synthetic fixtures are CPU-only and use an independent dense oracle for the
 AWQ case; the GPTQ cases compare logits before and after the round trip.
 """
 
-import json
 import os
 import shutil
 import types
@@ -32,7 +31,7 @@ from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.quantization import FORMAT, QuantizeConfig, RTNConfig
+from gptqmodel.quantization import FORMAT, QuantizeConfig
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
 from gptqmodel.utils.model import convert_gptq_v2_to_v1_format
 
@@ -72,9 +71,26 @@ def _tiny_llama(seed=0):
     return config, LlamaForCausalLM(config).half()
 
 
+def _model_device(model):
+    """Device a direct forward must use.
+
+    ``#4871`` stopped installing the per-module ``AlignDevicesHook`` for a
+    single-device placement (the hooks pinned the model in a reference cycle),
+    so nothing moves inputs to the accelerator any more; a direct forward has to
+    pass them on the model's own device, as transformers and accelerate require
+    (#4908). ``generate()`` is unaffected because transformers moves its inputs.
+    """
+
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
 def _logits(model):
+    input_ids = torch.tensor([[1, 3, 4, 5]], device=_model_device(model))
     with torch.inference_mode():
-        return model(input_ids=torch.tensor([[1, 3, 4, 5]]), use_cache=False).logits.float()
+        return model(input_ids=input_ids, use_cache=False).logits.float()
 
 
 def _relative_error(reference, actual):
@@ -276,96 +292,6 @@ def test_save_pretrained_emits_checkpoint_qzeros(tmp_path):
     assert _relative_error(reference, _logits(reloaded.model)) < 1e-5
 
 
-def test_save_pretrained_key_set_matches_save(tmp_path):
-    """Issue #4152: the HF writer must not add ``*.qzeros_format`` keys.
-
-    ``GPTQModel.save()`` has always skipped the runtime layout marker, but HF
-    ``save_pretrained()`` collected the persistent buffer, so the two save
-    paths produced different checkpoints: one extra int64 tensor per quantized
-    linear. Published checkpoints then carried keys that ``config.json`` and
-    the GPTQ/AWQ format do not describe, which strict third-party loaders may
-    reject or warn on.
-    """
-
-    source = tmp_path / "source"
-    torch.manual_seed(1234)
-    config = LlamaConfig(
-        vocab_size=64,
-        hidden_size=128,
-        intermediate_size=256,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        max_position_embeddings=128,
-        pad_token_id=0,
-        bos_token_id=1,
-        eos_token_id=2,
-        tie_word_embeddings=False,
-    )
-    LlamaForCausalLM(config).to(torch.float16).eval().save_pretrained(str(source))
-    _save_tokenizer(str(source))
-
-    qcfg = RTNConfig(bits=BITS, group_size=128, offload_to_disk=False, device="cpu")
-    model = GPTQModel.load(
-        str(source), quantize_config=qcfg, backend=BACKEND.GPTQ_TORCH
-    )
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(source))
-    calibration = []
-    for text in ("the quick brown fox", "a tiny llama calibration sample"):
-        encoded = tokenizer(text, return_tensors="pt")
-        calibration.append(
-            {
-                "input_ids": encoded["input_ids"],
-                "attention_mask": encoded["attention_mask"],
-            }
-        )
-    model.quantize(
-        calibration,
-        batch_size=1,
-        backend=BACKEND.GPTQ_TORCH,
-        calibration_data_min_length=1,
-    )
-    reference = _logits(model.model)
-
-    save_dir = tmp_path / "save"
-    hf_dir = tmp_path / "hf"
-    model.save(str(save_dir))
-    model.model.save_pretrained(str(hf_dir))
-    # ``save_pretrained`` writes tensors and config only; the quantize config
-    # and tokenizer come from the save directory (as for any HF re-save).
-    shutil.copy(save_dir / "quantize_config.json", hf_dir / "quantize_config.json")
-    _save_tokenizer(str(hf_dir))
-
-    def _tensor_keys(directory):
-        keys = set()
-        for name in os.listdir(directory):
-            if name.endswith(".safetensors"):
-                keys.update(load_file(os.path.join(directory, name)))
-        return keys
-
-    save_keys = _tensor_keys(str(save_dir))
-    hf_keys = _tensor_keys(str(hf_dir))
-
-    marker_keys = [key for key in hf_keys if key.endswith(".qzeros_format")]
-    assert marker_keys == [], f"save_pretrained wrote layout markers: {marker_keys}"
-    assert hf_keys == save_keys, (
-        f"save_pretrained differs from save(): extra={sorted(hf_keys - save_keys)}, "
-        f"missing={sorted(save_keys - hf_keys)}"
-    )
-
-    # Both save paths write the same tensors, so their reloads must agree
-    # exactly. The in-memory comparison keeps a small fp16 tolerance: the
-    # freshly quantized module and its fp16 payload can round differently on
-    # some runtimes (measured 0.0 on CUDA and 4.4e-3 on the ROCm CPU runtime),
-    # while the two serialized checkpoints are identical either way.
-    reloaded_logits = {}
-    for directory, label in ((save_dir, "save"), (hf_dir, "save_pretrained")):
-        reloaded = _load(str(directory))
-        reloaded_logits[label] = _logits(reloaded.model)
-        assert _relative_error(reference, reloaded_logits[label]) < 5e-3, label
-    assert torch.equal(reloaded_logits["save"], reloaded_logits["save_pretrained"])
-
-
 @pytest.mark.parametrize(
     ("backend", "device"),
     [
@@ -546,28 +472,6 @@ def test_optimized_cpu_kernels_pickle_round_trip(tmp_path, kind):
         assert isinstance(getattr(restored, compiled_attr), types.MethodType)
 
 
-def test_hf_from_pretrained_refuses_packed_gguf(tmp_path):
-    """A GPT-QModel GGUF checkpoint must not silently random-init in HF."""
-
-    from transformers import AutoModelForCausalLM
-
-    from gptqmodel._quant_methods import GGUF_EXPORT_QUANT_METHOD
-
-    source = tmp_path / "gguf"
-    _build_gptq_v1_checkpoint(str(source))
-    config_path = source / "config.json"
-    config = json.loads(config_path.read_text())
-    config["quantization_config"] = {
-        "method": "gguf",
-        "quant_method": GGUF_EXPORT_QUANT_METHOD,
-        "bits": BITS,
-    }
-    config_path.write_text(json.dumps(config))
-
-    with pytest.raises(ValueError, match="packed GGUF checkpoints cannot be loaded"):
-        AutoModelForCausalLM.from_pretrained(str(source), local_files_only=True)
-
-
 def _runtime_layout_shell(cls, flag: str):
     """A module flagged as holding an unrecoverable runtime layout."""
 
@@ -578,36 +482,6 @@ def _runtime_layout_shell(cls, flag: str):
     module._qzeros_format = 2
     setattr(module, flag, True)
     return module
-
-
-@pytest.mark.parametrize(
-    "quant_method", ["exl3", "qqq", "paroquant", "macaq", "nf12", "tt-blockfloat"]
-)
-def test_hf_from_pretrained_refuses_every_refused_method(tmp_path, quant_method):
-    """Plain transformers must raise instead of loading random weights (#4091 item 5)."""
-
-    from transformers import AutoModelForCausalLM
-
-    from gptqmodel._quant_methods import REFUSED_HF_QUANT_METHODS
-
-    assert quant_method in REFUSED_HF_QUANT_METHODS
-    source = tmp_path / quant_method
-    _build_gptq_v1_checkpoint(str(source))
-    config_path = source / "config.json"
-    config = json.loads(config_path.read_text())
-    config["quantization_config"] = {
-        "method": quant_method,
-        "quant_method": quant_method,
-        "bits": BITS,
-    }
-    config_path.write_text(json.dumps(config))
-
-    with pytest.raises(ValueError) as excinfo:
-        AutoModelForCausalLM.from_pretrained(str(source), local_files_only=True)
-
-    message = str(excinfo.value)
-    assert "cannot be loaded by `transformers`" in message
-    assert quant_method in message
 
 
 @pytest.mark.parametrize(

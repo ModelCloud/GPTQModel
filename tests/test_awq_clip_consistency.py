@@ -4,8 +4,7 @@ from parameterized import parameterized
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
-from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, CalibrationConfig, QuantizeConfig
 
 
 _GRID_DEVICES = ["cpu", pytest.param(
@@ -14,14 +13,27 @@ _GRID_DEVICES = ["cpu", pytest.param(
 
 
 def _sequential_clip_grid(qcfg, w, input_feat, n_grid=20, max_shrink=0.5):
-    """Independent scalar-grid oracle, including low-precision arithmetic."""
+    """Independent scalar-grid oracle, including low-precision arithmetic.
+
+    The clipped candidate and its quantization stay in the checkpoint dtype,
+    but the reconstruction score is accumulated in float32 for a half
+    precision checkpoint (#5752). FP16/BF16 round several distinct positive
+    losses to the same value, so the strict-improvement test would otherwise
+    keep an arbitrarily early grid step instead of the minimum.
+    """
     group_size = qcfg.group_size if qcfg.group_size > 0 else w.shape[1]
+    score_dtype = (
+        torch.float32 if w.dtype in (torch.float16, torch.bfloat16) else w.dtype
+    )
     x = input_feat.reshape(1, -1, w.shape[1] // group_size, group_size)
     w = w.reshape(w.shape[0], 1, -1, group_size)
+    x_score = x.to(score_dtype)
     original_bound = w.abs().amax(dim=-1, keepdim=True)
     best_bound = original_bound.clone()
-    best_error = torch.full_like(original_bound, float("inf"))
-    original_output = (x * w).sum(-1)
+    best_error = torch.full(
+        original_bound.shape, float("inf"), dtype=score_dtype, device=w.device
+    )
+    original_output = (x_score * w.to(score_dtype)).sum(-1)
     for step in range(int(n_grid * max_shrink)):
         bound = original_bound * (1 - step / n_grid)
         clipped = torch.clamp(w, -bound, bound)
@@ -38,7 +50,7 @@ def _sequential_clip_grid(qcfg, w, input_feat, n_grid=20, max_shrink=0.5):
             scale = (high - low).clamp(min=1e-5) / maxq
             zero = (-torch.round(low / scale)).clamp(0, maxq)
             quantized = (torch.clamp(torch.round(clipped / scale) + zero, 0, maxq) - zero) * scale
-        output = (x * quantized).sum(-1)
+        output = (x_score * quantized).sum(-1)
         error = (output - original_output).pow(2).mean(1).reshape_as(best_error)
         better = error < best_error
         best_bound = torch.where(better, bound, best_bound)
@@ -66,7 +78,9 @@ def test_clip_grid_low_precision_oracle(device, dtype, sym, group_size, budget):
 
 
 @pytest.mark.parametrize("device", _GRID_DEVICES)
-@pytest.mark.parametrize("kind", ["empty_grid", "ties", "overflow", "mixed_dtype"])
+@pytest.mark.parametrize(
+    "kind", ["empty_grid", "ties", "overflow", "nonfinite", "mixed_dtype"]
+)
 def test_clip_grid_edge_cases(device, kind):
     g = torch.Generator().manual_seed(42)
     w = torch.randn(128, 64, generator=g).to(device=device, dtype=torch.float16)
@@ -75,7 +89,17 @@ def test_clip_grid_edge_cases(device, kind):
     if kind == "ties":
         x.zero_()
     elif kind == "overflow":
+        # A large but finite activation must not overflow the score. It used to
+        # saturate the FP16 products, so the whole grid scored `inf` and the
+        # unclipped bound was retained (#5752).
         x.mul_(1e4)
+    elif kind == "nonfinite":
+        # The all-non-finite grid still retains `org_max_val`. Keep the guard
+        # reachable now that the score is float32: an explicit `inf` token
+        # survives the cast, whereas the old FP16 overflow does not. Every
+        # group must be poisoned, because the per-group error averages over
+        # tokens before it is compared.
+        x[0, :] = float("inf")
     elif kind == "mixed_dtype":
         x = x.float()
     qcfg = QuantizeConfig(
@@ -86,6 +110,61 @@ def test_clip_grid_edge_cases(device, kind):
     expected = _sequential_clip_grid(qcfg, w, x, max_shrink=shrink)
     actual = processor._compute_best_clip(w, x, max_shrink=shrink)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("out_features", [96, 100, 130])
+@pytest.mark.parametrize("group_size", [-1, 32])
+def test_clip_search_handles_a_partial_output_tile(out_features, group_size):
+    """#4474: clip search owns a tile size, not a second shape predicate.
+
+    The portable AWQ packer only requires ``out_features`` divisible by its own
+    packing factor, but clip search asserted divisibility by 64/256 and aborted
+    a supported ``quantize()`` with a bare ``AssertionError``. The final tile is
+    now partial, and each output row must still get its own bound.
+    """
+
+    g = torch.Generator().manual_seed(4474 + out_features)
+    w = torch.randn(out_features, 128, generator=g)
+    x = torch.randn(17, 128, generator=g)
+    qcfg = QuantizeConfig(
+        quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=group_size,
+        mse={"clip_grid_budget": 0},
+    )
+    processor = _ClipTestAWQProcessor(qcfg)
+
+    actual = processor._compute_best_clip(w, x)
+
+    assert actual.shape[0] == out_features
+    assert torch.isfinite(actual).all()
+    assert (actual > 0).all()
+
+    # Clip search is row-independent, so each tile must reproduce the same
+    # single-tile search over its own rows. A missing tail would leave zeros.
+    head = processor._compute_best_clip(w[:64], x)
+    torch.testing.assert_close(actual[:64], head, rtol=0, atol=0)
+    tail = processor._compute_best_clip(w[64:], x)
+    torch.testing.assert_close(actual[64:], tail, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("out_features", [1, 7, 63, 65])
+def test_clip_search_covers_every_row_for_awkward_widths(out_features):
+    """Widths below, at, and just above the tile size all get a bound per row."""
+
+    g = torch.Generator().manual_seed(out_features)
+    w = torch.randn(out_features, 64, generator=g)
+    x = torch.randn(11, 64, generator=g)
+    qcfg = QuantizeConfig(
+        quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=32,
+        mse={"clip_grid_budget": 0},
+    )
+    processor = _ClipTestAWQProcessor(qcfg)
+
+    actual = processor._compute_best_clip(w, x)
+
+    assert actual.shape[0] == out_features
+    torch.testing.assert_close(
+        actual, _sequential_clip_grid(qcfg, w, x), rtol=0, atol=0
+    )
 
 
 def test_clip_grid_slices_reference_product():
@@ -135,6 +214,10 @@ def _legacy_clip(processor: AWQProcessor, w: torch.Tensor, input_feat: torch.Ten
     input_feat = input_feat[:, ::step_size]
 
     w = w.reshape(w.shape[0], 1, -1, group_size)
+    score_dtype = (
+        torch.float32 if w.dtype in (torch.float16, torch.bfloat16) else w.dtype
+    )
+    input_feat = input_feat.to(score_dtype)
     oc_batch_size = 256 if w.shape[0] % 256 == 0 else 64
     assert w.shape[0] % oc_batch_size == 0
     best_max_val_all = []
@@ -142,7 +225,9 @@ def _legacy_clip(processor: AWQProcessor, w: torch.Tensor, input_feat: torch.Ten
         w_chunk = w[i_b * oc_batch_size: (i_b + 1) * oc_batch_size]
         org_max_val = w_chunk.abs().amax(dim=-1, keepdim=True)
         best_max_val = org_max_val.clone()
-        min_errs = torch.ones_like(org_max_val) * 1e9
+        min_errs = torch.full(
+            org_max_val.shape, float("inf"), dtype=score_dtype, device=w_chunk.device
+        )
         input_feat = input_feat.to(w_chunk.device)
         org_out = (input_feat * w_chunk).sum(dim=-1)
         for i_s in range(int(0.5 * 20)):

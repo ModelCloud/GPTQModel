@@ -7,16 +7,16 @@ description: Qualify AWQ source/consumer relationships, scale-search objectives,
 
 # AWQ model-onboarding safety gate
 
-Apply this skill before adding any model type/alias or changing model paths,
-tags, layout/config variants, AWQ overrides, grouping, replay, search, or folds.
-Use it alongside `gptqmodel-model-plan-tests`; passing the module-plan inventory
-is necessary, but is **not AWQ qualification**. General model support must state
-its AWQ policy even when the motivating feature uses another quantizer.
+## At a glance
 
-This is a source-review and regression-test gate, not an automatic data-flow
-proof. Width equality, module order, live binding, replay containment, and
-observing every declared target cannot establish the true producer or discover
-an undeclared consumer. Do not claim arbitrary architectures are now safe.
+For every new model/alias, definition variant, or grouping/search/replay/fold
+change, qualify each layout against native forward code or use tested plain
+quantization. A passing [module plan](../gptqmodel-model-plan-tests/SKILL.md),
+matching widths, live bindings and observing all declared targets cannot reveal
+an undeclared consumer. State the AWQ policy even for non-AWQ onboarding.
+
+Start in `gptqmodel/models/definitions/` and `gptqmodel/looper/awq_processor.py`;
+use the evidence matrix below, not architecture names or generation quality.
 
 ## 1. Establish the native execution relationships
 

@@ -7,9 +7,15 @@ from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class Dots1QModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     # allow missing expert modules on dense layers and support MoE expansion via config
     fusable = FusableConfig("dots1").merge(LlamaFusableConfig(), profiles=("qkv",))
 

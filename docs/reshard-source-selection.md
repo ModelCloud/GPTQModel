@@ -40,9 +40,9 @@ Previously, `_resolve_source_dir` discarded an explicit filename at
 `gptqmodel/reshard.py:279-285`, and `_scan_checkpoint` then preferred a
 standard index or discovered every safetensors file in that directory at
 `gptqmodel/reshard.py:436-443`. The current `_resolve_source_input` keeps the
-selected path at `gptqmodel/reshard.py:279-293`. `_index_containing_file` keeps
+selected path at `gptqmodel/reshard.py:448-293`. `_index_containing_file` keeps
 a selected shard attached to its full checkpoint at
-`gptqmodel/reshard.py:439-468`; `_scan_checkpoint` branches at
+`gptqmodel/reshard.py:488-468`; `_scan_checkpoint` branches at
 `gptqmodel/reshard.py:471-492`, called from `gptqmodel/reshard.py:827`.
 
 | `from_model` | Previous selection | Current selection |
@@ -58,10 +58,13 @@ An explicitly selected index must pass the same shard and tensor-name checks
 as a standard index. If it is invalid, resharding fails before publishing the
 destination. An unrelated invalid standard index does not override a named
 standalone file.
-`_index_containing_file()` now compares the complete resolved weight maps for
-every standard index that lists the selected shard. It raises on conflicting
-maps and accepts equivalent paths such as `shard.safetensors` and
-`./shard.safetensors`. An explicit index path bypasses this choice.
+`_index_containing_file()` searches the selected file's directory and its
+ancestors, comparing the complete resolved weight maps for every standard index
+that lists the selected shard. This keeps a shard nested below a resharded
+checkpoint attached to the root index and copies root auxiliary files. It
+raises on conflicting maps and accepts equivalent paths such as
+`shard.safetensors` and `./shard.safetensors`. An explicit index path bypasses
+this choice.
 See [PR #3589](https://github.com/ModelCloud/GPTQModel/pull/3589) for the
 reproducer and rationale.
 The indexed-shard compatibility rule is covered by

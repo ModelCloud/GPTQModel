@@ -1,3 +1,7 @@
+import importlib
+import importlib.util
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -16,10 +20,38 @@ from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
-from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
-from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
+from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear, SwordfishLinear
+from gptqmodel.utils.awq import awq_runtime_available
+from gptqmodel.utils.kernel import KernelConfig
+
+
+# ParoTritonLinear imports Triton kernels at module scope; every other class
+# below imports on a CPU-only host.
+HAS_TRITON = importlib.util.find_spec("triton") is not None
+if HAS_TRITON:
+    from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
+else:
+    ParoTritonLinear = None
+
+
+_TRITON_GEMM_MODULE = "gptqmodel.quantization.awq.modules.triton.gemm"
+
+
+def _triton_gemm_module(monkeypatch):
+    """Return the module ``AwqGemmTritonFn`` imports its kernels from.
+
+    The dispatch under test replaces both kernel entry points with fakes, so
+    it does not need Triton. On a host without Triton the real module cannot
+    be imported; stand in an empty module for the duration of the test.
+    """
+
+    if HAS_TRITON:
+        return importlib.import_module(_TRITON_GEMM_MODULE)
+    stub = types.ModuleType(_TRITON_GEMM_MODULE)
+    monkeypatch.setitem(sys.modules, _TRITON_GEMM_MODULE, stub)
+    return stub
 
 
 def _fake_quant_tensors(in_features=32, out_features=8, group_size=32):
@@ -57,16 +89,9 @@ def _patch_backend(monkeypatch, backend, calls):
         monkeypatch.setattr(
             gemm_awq_triton, "awq_gemm_triton", fake_gemm, raising=False
         )
-        monkeypatch.setattr(
-            "gptqmodel.quantization.awq.modules.triton.gemm.awq_dequantize_triton",
-            fake_dequant,
-            raising=False,
-        )
-        monkeypatch.setattr(
-            "gptqmodel.quantization.awq.modules.triton.gemm.awq_gemm_triton",
-            fake_gemm,
-            raising=False,
-        )
+        triton_gemm = _triton_gemm_module(monkeypatch)
+        monkeypatch.setattr(triton_gemm, "awq_dequantize_triton", fake_dequant, raising=False)
+        monkeypatch.setattr(triton_gemm, "awq_gemm_triton", fake_gemm, raising=False)
         return gemm_awq_triton.AwqGemmTritonFn
 
     def fake_dequant(qweight, scales, qzeros, *_args):
@@ -184,6 +209,134 @@ def test_awq_jit_heuristic_respects_fp32_accum_opt_out(
     }
 
 
+@pytest.mark.parametrize("backend", ["jit", "triton"])
+@pytest.mark.parametrize("shape", [(2, 3, 32), (2, 3, 4, 32)])
+def test_awq_gemm_inference_does_not_clone_batched_output(monkeypatch, backend, shape):
+    """An untracked batched forward must not copy the full output (#5086).
+
+    #5001 materialized the leading-dimension reshape unconditionally, so every
+    batched inference forward paid for one extra output copy even though
+    ``inference_mode`` never tracks the result. Only a grad-tracked result has
+    to be materialized (#4974).
+    """
+
+    calls = {"dequant": 0, "gemm": 0}
+    fn = _patch_backend(monkeypatch, backend, calls)
+    qweight, scales, qzeros = _fake_quant_tensors()
+
+    original = torch.Tensor.clone
+    clones = {"n": 0}
+
+    def counting_clone(self, *args, **kwargs):
+        clones["n"] += 1
+        return original(self, *args, **kwargs)
+
+    torch.Tensor.clone = counting_clone
+    try:
+        with torch.inference_mode():
+            x = torch.ones(shape, dtype=torch.float16)
+            out = fn.apply(x, qweight, qzeros, scales, 4, 32, None, 8)
+    finally:
+        torch.Tensor.clone = original
+
+    assert out.shape == shape[:-1] + (8,)
+    assert clones["n"] == 0
+
+
+@pytest.mark.parametrize("backend", ["jit", "triton"])
+def test_awq_gemm_tracked_batched_output_is_owned(monkeypatch, backend):
+    """The #4974 guarantee: a tracked batched output must not be a view."""
+
+    calls = {"dequant": 0, "gemm": 0}
+    fn = _patch_backend(monkeypatch, backend, calls)
+    qweight, scales, qzeros = _fake_quant_tensors()
+    x = torch.ones((2, 3, 32), dtype=torch.float16, requires_grad=True)
+
+    out = fn.apply(x, qweight, qzeros, scales, 4, 32, None, 8)
+
+    assert out.shape == (2, 3, 8)
+    assert not out._is_view()
+    out += 1.0
+    out.sum().backward()
+    assert x.grad is not None and x.grad.shape == x.shape
+
+
+def _awq_gemm_module(monkeypatch, backend):
+    calls = {"dequant": 0, "gemm": 0}
+    _patch_backend(monkeypatch, backend, calls)
+    if backend == "triton":
+        # Keep the module on the portable dequantise-then-GEMM branch so the
+        # test exercises the shared Function epilogue without a native device.
+        monkeypatch.setattr(
+            gemm_awq_triton,
+            "select_awq_triton_plan",
+            lambda **kwargs: SimpleNamespace(fused=False),
+        )
+        monkeypatch.setattr(
+            gemm_awq_triton, "mark_awq_triton_plan_warmed", lambda *args, **kwargs: None
+        )
+        cls = AwqGEMMTritonLinear
+    else:
+        cls = AwqGEMMLinear
+    in_features, out_features, group_size = 128, 64, 32
+    module = cls(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        register_buffers=True,
+    )
+    module.qweight.copy_(
+        torch.ones((in_features, out_features // 8), dtype=torch.int32)
+    )
+    module.qzeros.copy_(
+        torch.zeros(
+            (in_features // group_size, out_features // 8), dtype=torch.int32
+        )
+    )
+    module.scales.copy_(
+        torch.ones((in_features // group_size, out_features), dtype=torch.float16)
+    )
+    module.post_init()
+    return module.eval()
+
+
+@pytest.mark.parametrize("backend", ["jit", "triton"])
+def test_awq_gemm_module_inference_does_not_clone_batched_output(
+    monkeypatch, backend
+):
+    """The user-visible path: ``AwqGEMM*Linear`` under ``inference_mode``."""
+
+    if backend == "jit" and (
+        not torch.cuda.is_available() or not awq_runtime_available()
+    ):
+        pytest.skip("AwqGEMMLinear needs the native CUDA AWQ extension")
+    if backend == "triton" and not HAS_TRITON:
+        pytest.skip("AwqGEMMTritonLinear construction validates the installed triton")
+    module = _awq_gemm_module(monkeypatch, backend)
+
+    original = torch.Tensor.clone
+    clones = {"n": 0}
+
+    def counting_clone(self, *args, **kwargs):
+        clones["n"] += 1
+        return original(self, *args, **kwargs)
+
+    torch.Tensor.clone = counting_clone
+    try:
+        with torch.inference_mode():
+            x = torch.ones((2, 3, 128), dtype=torch.float16)
+            out = module(x)
+    finally:
+        torch.Tensor.clone = original
+
+    assert out.shape == (2, 3, 64)
+    assert clones["n"] == 0
+
+
 def test_awq_triton_rejects_declared_group_mismatching_buffers(monkeypatch):
     calls = {"dequant": 0, "gemm": 0}
     fn = _patch_backend(monkeypatch, "triton", calls)
@@ -237,7 +390,11 @@ def test_empty_linear_output_keeps_autograd_connection(shape):
         AwqGEMVLinear,
         AwqGEMVFastLinear,
         ParoLinear,
-        ParoQuantTritonLinear,
+        pytest.param(
+            ParoTritonLinear,
+            id="ParoTritonLinear",
+            marks=pytest.mark.skipif(not HAS_TRITON, reason="ParoTritonLinear requires triton"),
+        ),
     ],
 )
 def test_representative_qlinear_empty_shape_without_native_extension(linear_cls):
@@ -247,6 +404,7 @@ def test_representative_qlinear_empty_shape_without_native_extension(linear_cls)
     module.out_features = 11
     module.adapter = None
     module.training = True
+    module.kernel = KernelConfig()
     if linear_cls in (AwqGEMMLinear, AwqGEMMTritonLinear):
         module.bits = 4
         module.group_size = 8

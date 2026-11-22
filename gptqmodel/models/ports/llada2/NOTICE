@@ -1,0 +1,15 @@
+LLaDA2 Transformers 5 port
+
+Copyright 2025 Antgroup and The HuggingFace Inc. team. All rights reserved.
+Adaptation copyright 2026 ModelCloud.ai.
+
+The configuration, packed-QKV diffusion MoE, and generation algorithms derive
+from InclusionAI's LLaDA2 repositories. The original source headers and model
+cards declare Apache-2.0. The pinned repositories and revisions are recorded in
+the test fixture tests/fixtures/ports/llada2/checkpoint_audits.json.
+The upstream repository at the pinned mini revision has no standalone LICENSE
+file; the repository root LICENSE is the complete Apache-2.0 text referenced
+by its headers.
+
+The upstream headers credit EleutherAI GPT-NeoX, OPT, Meta AI, and Hugging Face.
+No checkpoint Python is imported or executed by this package.

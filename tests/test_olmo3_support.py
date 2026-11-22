@@ -10,6 +10,7 @@ from transformers import Olmo3Config, Olmo3ForCausalLM
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.olmo3 import Olmo3QModel, _prepare_olmo3_replay_kwargs
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
 
 def _tiny_olmo3_model():
@@ -37,19 +38,10 @@ def _tiny_olmo3_model():
     return Olmo3ForCausalLM(config)
 
 
-def test_olmo3_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="olmo3")
+def test_olmo3_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["olmo3"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(
-        auto,
-        "resolve_trust_remote_code",
-        lambda path, trust_remote_code=False: trust_remote_code,
-    )
-    monkeypatch.setattr(
-        auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config
-    )
-
-    assert auto.check_and_get_model_definition("/tmp/olmo3") is Olmo3QModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is Olmo3QModel
 
 
 def test_olmo3_quantization_groups_match_forward_boundaries():

@@ -13,6 +13,7 @@ import copy
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -21,7 +22,7 @@ from tokenizers.trainers import WordLevelTrainer
 from transformers import JambaConfig, JambaForCausalLM, PreTrainedTokenizerFast
 from transformers.masking_utils import create_causal_mask
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.jamba import JambaQModel
 from gptqmodel.models.module_plan import ModulePlan
@@ -127,15 +128,13 @@ def _build_calibration_dataset(tokenizer: PreTrainedTokenizerFast, pad_tail: int
     return dataset
 
 
-def test_jamba_registry_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="jamba")
+def test_jamba_registry_selects_definition(tmp_path):
+    from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda path: None)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    CONFIG_MAPPING["jamba"]().save_pretrained(tmp_path)
 
     assert auto.MODEL_MAP["jamba"] is JambaQModel
-    assert auto.check_and_get_model_definition("/tmp/jamba", trust_remote_code=False) is JambaQModel
+    assert auto.check_and_get_model_definition(str(tmp_path), trust_remote_code=False) is JambaQModel
 
 
 def test_jamba_definition_contract_and_module_tree():
@@ -153,6 +152,7 @@ def test_jamba_definition_contract_and_module_tree():
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["mamba.in_proj"],
+        ["mamba.x_proj"],
         ["mamba.out_proj"],
         [
             "feed_forward.experts.0.gate_proj",
@@ -171,9 +171,11 @@ def test_jamba_definition_contract_and_module_tree():
     assert "feed_forward.router:!" in full_names
     assert "feed_forward.experts.0.gate_proj" in full_names
     assert "feed_forward.experts.0.down_proj" in full_names
-    # The mixer consumes `dt_proj.weight` and `x_proj` output directly, so the
-    # definition intentionally leaves them dense.
-    assert not any("dt_proj" in name or "x_proj" in name for name in full_names)
+    # ``x_proj`` was declared as a quantizable mixer projection (#4245); the
+    # mixer still consumes ``conv1d``/``dt_proj`` directly, so those stay dense.
+    assert "mamba.x_proj" in full_names
+    assert "mamba.conv1d:!" in full_names
+    assert "mamba.dt_proj:!" in full_names
 
 
 def test_jamba_moe_hooks_replay_every_routed_expert(monkeypatch):
@@ -303,6 +305,11 @@ def test_jamba_replay_mask_is_causal_not_bidirectional():
 
 
 def test_tiny_jamba_gptq_quantization_smoke(tmp_path: Path, monkeypatch):
+    # GPTQModel.load() validates the definition's `mamba-ssm` requirement and
+    # raises PackageNotFoundError when its metadata is absent. Only this smoke
+    # run loads a model; the CPU contract tests above do not need the package.
+    pytest.importorskip("mamba_ssm")
+
     _use_torch_reference_kernels(monkeypatch)
 
     model_dir = tmp_path / "native"
@@ -320,10 +327,12 @@ def test_tiny_jamba_gptq_quantization_smoke(tmp_path: Path, monkeypatch):
         backend=BACKEND.TORCH,
     )
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     model.save(quantized_dir)
 
@@ -350,9 +359,10 @@ def test_tiny_jamba_gptq_quantization_smoke(tmp_path: Path, monkeypatch):
     # The top-k router is checkpoint-owned but intentionally stays unquantized.
     assert not isinstance(modules["model.layers.1.feed_forward.router"], TorchLinear)
 
-    # Mamba mixer modules that consume dense weights stay dense.
+    # ``x_proj`` is a declared quantizable mixer projection (#4245); the mixer
+    # still consumes ``conv1d``/``dt_proj`` as dense weights, so those stay dense.
+    assert isinstance(modules["model.layers.0.mamba.x_proj"], TorchLinear)
     assert isinstance(modules["model.layers.0.mamba.dt_proj"], torch.nn.Linear)
-    assert isinstance(modules["model.layers.0.mamba.x_proj"], torch.nn.Linear)
     assert isinstance(modules["model.layers.0.mamba.conv1d"], torch.nn.Conv1d)
 
     input_ids = tokenizer("tiny jamba calibration sample one", return_tensors="pt")["input_ids"]

@@ -63,11 +63,14 @@ def test_kimi_linear_registry_still_names_the_k3_definition():
         ),
     ],
 )
-def test_kimi_linear_dispatch_uses_config_fields(monkeypatch, config, expected):
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda *args, **kwargs: False)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
+def test_kimi_linear_dispatch_uses_config_fields(monkeypatch, tmp_path, config, expected):
+    import json
 
-    assert auto.check_and_get_model_definition("tiny-kimi-linear") is expected
+    (tmp_path / "config.json").write_text(json.dumps(vars(config)))
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda *args, **kwargs: False)
+    monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: config)
+
+    assert auto.check_and_get_model_definition(tmp_path) is expected
 
 
 def test_native_kimi_linear_tree_resolves_every_declared_spec():
@@ -111,3 +114,29 @@ def test_native_kimi_linear_tree_resolves_every_declared_spec():
     assert "mlp.experts.0.up_proj" in resolved
     assert "mlp.experts.0.down_proj" in resolved
     assert "mlp.shared_experts.down_proj" in resolved
+
+
+def test_native_kimi_linear_definition_builds_the_vendored_model(tmp_path):
+    """auto.py dispatches native configs outside MODEL_MAP; the class must still
+    build the vendored family, never ``transformers.models.kimi_linear``."""
+
+    import json
+
+    from gptqmodel.models.auto import check_and_get_model_definition
+    from gptqmodel.models.local import LocalModelLoader
+    from gptqmodel.utils.hf import load_model_config
+
+    config = {
+        "model_type": "kimi_linear", "architectures": ["KimiLinearForCausalLM"], "vocab_size": 64,
+        "hidden_size": 32, "intermediate_size": 64, "num_hidden_layers": 1, "num_attention_heads": 2,
+        "num_key_value_heads": 2, "moe_intermediate_size": 16, "num_experts": 2, "num_experts_per_token": 1,
+        "pad_token_id": 0, "bos_token_id": 1, "eos_token_id": 2,
+        "linear_attn_config": {"kda_layers": [1], "full_attn_layers": [], "head_dim": 16, "num_heads": 2,
+                               "short_conv_kernel_size": 4},
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    definition = check_and_get_model_definition(str(tmp_path))
+    assert definition is KimiLinearNativeQModel
+    assert isinstance(definition.loader, LocalModelLoader)
+    model = definition.loader.from_config(load_model_config(str(tmp_path)))
+    assert type(model).__module__ == "gptqmodel.models.ports.native.kimi_linear.modeling_kimi_linear"

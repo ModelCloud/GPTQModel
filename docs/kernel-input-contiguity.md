@@ -1,7 +1,7 @@
 # Kernel input contiguity and launch contracts
 
 Quantized inference kernels fall into two groups. Native and ctypes kernels
-(BitBLAS, EXL3 `had_r_128`/`hgemm`/`bc`, Machete, the ParoQuant fused rotation)
+(BitBLAS, EXL3 `had_r_128`/`hgemm`/`bc`, Machete, the Paro fused rotation)
 receive a raw `data_ptr()` and walk rows with a fixed `K` stride. Triton kernels
 compute their own dense offsets from the same assumption. Both groups require a
 packed operand, and both must launch in the CUDA context that owns that operand.
@@ -23,7 +23,7 @@ flowchart TD
     C -- BitBLAS --> D["_invoke_bitblas_matmul passes data_ptr() to the prebuilt CUDA library"]
     C -- EXL3 --> E["had_r_128 / hgemm / bc read packed rows"]
     C -- Machete --> F["machete_mm reads packed rows"]
-    C -- ParoQuant --> G["apply_paroquant_rotation launch config"]
+    C -- Paro --> G["apply_paro_rotation launch config"]
     D --> X["silently wrong rows (rel err 1.30)"]
     E --> Y["silently wrong rows (rel err 1.36)"]
     F --> Z["silently wrong rows"]
@@ -39,7 +39,7 @@ flowchart TD
     C -- BitBLAS --> D["_invoke_bitblas_matmul: enter the module device, then data_ptr()"]
     C -- EXL3 --> E["had_r_128 / hgemm / bc + TORCH_CHECK(is_contiguous)"]
     C -- Machete --> F["machete_mm"]
-    C -- ParoQuant --> G["fused rotation"]
+    C -- Paro --> G["fused rotation"]
     D --> H["correct output"]
     E --> H
     F --> H
@@ -51,7 +51,7 @@ flowchart TD
 | BitBLAS fp16 | `bitblas.py:865` reshaped and passed the strided view's `data_ptr()` (`bitblas.py:889-899`). | `bitblas.py:875` packs the operand; the dtype cast above already copies, so this is a no-op for bf16. |
 | EXL3 fp16 | `exl3.py:135` used `x.view(-1, in_features)` and the kernels assumed packed rows. | `exl3.py:139` packs; `hadamard.cu`, `hgemm.cu`, and `libtorch/linear.cpp` now reject a strided operand. |
 | Machete | `machete.py:314` / `machete_awq.py:212` passed the strided view. | `machete.py:317` / `machete_awq.py:215` pack first. |
-| ParoQuant | `paroquant.py:593` fed the strided view to the fused rotation. | `paroquant.py:595` packs first. |
+| Paro | `paro.py:593` fed the strided view to the fused rotation. | `paro.py:595` packs first. |
 
 The native checks are deliberate: a future caller that forgets to pack now
 fails closed instead of returning wrong values.
@@ -121,6 +121,7 @@ flowchart LR
 | GGUF Q4_K/Q6_K fused matmuls | `offs_m * stride_xm` | `gguf_triton.py:416` and siblings cast `offs_m`. |
 | NVFP4 pack/decode | int32 row and element offsets | `w4a_nvfp4_triton.py` casts them. |
 | EXL3 Hadamard | `gridDim.y * 128 * blockIdx.x` in unsigned 32-bit | `hadamard.cu` uses `size_t`. |
+| BitsAndBytes 4-bit fused GEMM | int32 `rows * K` and `rows * N` | `bitsandbytes_triton.py` casts the activation and output row offsets. |
 
 Two launch limits are handled separately. `launch_linear_f32` and
 `launch_linear_fused` in `tt_blockfloat_cuda.cu` map rows to `gridDim.y`, which
@@ -136,16 +137,21 @@ An empty batch used to reach a zero-sized grid or an ambiguous `reshape`.
 flowchart TD
     A["x.numel() == 0"] --> B{"where"}
     B -- native Hadamard --> C["return empty output before the launch"]
+    B -- EXL3 had_r_128/dual --> G["return empty output before the launch"]
+    B -- LinearEXL3.forward --> H["return empty y before torch_mode"]
     B -- Torch butterfly --> D["return empty_like before reshape"]
     B -- apply_online_hadamard --> E["return x unchanged"]
     B -- NF12Linear --> F["empty_linear_output before the rotation"]
     classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
     C -. "before: CUDA error invalid argument" .-> X["crash"]
+    G -. "before: CUDA error invalid argument" .-> X
     D -. "before: RuntimeError ambiguous reshape" .-> X
     class X failure;
 ```
 
-The native early return is in every binding in `gptqmodel_ext/hadamard/hadamard.cpp`;
+The native early return is in every binding in `gptqmodel_ext/hadamard/hadamard.cpp`,
+in EXL3's `had_r_128`/`had_r_128_dual` (`gptqmodel_ext/exllamav3/quant/hadamard.cu`),
+and in `LinearEXL3.forward` (`gptqmodel/exllamav3/modules/quant/exl3.py`);
 the Torch fallback and `apply_online_hadamard` are in
 `gptqmodel/quantization/rotation/hadamard_utils.py`; `NF12Linear._forward_impl`
 checks `input_rows(x) == 0` before rotating.
@@ -183,7 +189,8 @@ flowchart TD
 - A zero-element operand short-circuits before any launch or reshape.
 - A token count is a runtime argument, never a compile-time constant.
 
-The regression coverage lives in `tests/test_hadamard_empty_input.py`,
+The regression coverage lives in `tests/test_hadamard_empty_input.py`
+(including EXL3's `had_r_128` and the `LinearEXL3.forward` short-circuit),
 `tests/kernels/test_kernel_input_contiguity.py`,
 `tests/kernels/test_gguf_triton_multi_gpu.py`,
 `tests/kernels/test_triton_int32_offsets.py`, and

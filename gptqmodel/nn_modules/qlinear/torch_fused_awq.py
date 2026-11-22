@@ -19,25 +19,58 @@ from ...quantization.awq.utils.packing_utils import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.torch import TORCH_HAS_FUSED_OPS
-from . import AWQuantLinear
+from ...utils.torch import TORCH_HAS_FUSED_OPS, dynamo_is_compiling
+from . import AWQuantLinear, detach_cpu_operand
+from ._awq_decode import AwqDecodeRangeMixin
+from ._compile_support import COMPILE_LEVEL
+from ._cpu_int4pack_layout import runtime_int4pack_dense_weight
 from ._fused_train_state import (
+    bind_runtime_qzeros,
     capture_fused_train_state,
+    ensure_cpu_inference_layout,
+    finalize_fused_train_state,
+    fused_autograd_needs_dense,
     refinalize_fused_state_after_apply,
+    refresh_runtime_zero_offsets,
     restore_fused_train_state,
 )
-from ._numerics import matmul_fp32_reduce
+from ._numerics import (
+    linear_wide_bias,
+    matmul_fp32_reduce,
+    needs_wide_bias_epilogue,
+)
 from ._runtime_cache import tensor_cache_key
-from .torch_fused import Int4PackedOp, TorchFusedLinear, _validate_cpu_int4pack_group_size, pack_scales_and_zeros
+from .torch_fused import (
+    Int4PackedOp,
+    TorchFusedLinear,
+    _validate_cpu_int4pack_group_size,
+    _validate_cpu_int4pack_out_features,
+    pack_scales_and_zeros,
+)
 
 
 log = setup_logger()
 
 
-class TorchFusedAwqLinear(AWQuantLinear):
+class TorchFusedAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
     """Torch fused AWQ variant based on GPTQ fused kernels via CPU int4 packing."""
 
     QUANT_TYPE = "torch_fused_awq"
+
+    # Measured on CPU, torch 2.16.0.dev20261021+cpu: eager=True,
+    # graph_breaks=0, dynamo/aot_eager/inductor all reach it for an unbiased
+    # layer. The `_cpu_transform_lock` RLock around the one-time packed-buffer
+    # rewrite is skipped while tracing. A biased FP16/BF16 layer asks for an
+    # FP32 product, and inductor cannot lower
+    # `aten::_weight_int4pack_mm_for_cpu` with a fused operand cast (#4068), so
+    # that case stays eager. CPU/XPU-only, so no CUDA graph capture applies.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_FUSED]
     SUPPORTS_METHODS = [METHOD.AWQ]
@@ -121,6 +154,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
                 self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.float16))
             else:
                 self.bias = None
+        self._refresh_decode_range_fits()
 
     @classmethod
     def _validate(
@@ -154,13 +188,38 @@ class TorchFusedAwqLinear(AWQuantLinear):
         )
         if not ok:
             return ok, err
-        return _validate_cpu_int4pack_group_size(
+        ok, err = _validate_cpu_int4pack_group_size(
             cls, group_size=group_size, in_features=in_features, device=device
+        )
+        if not ok:
+            return ok, err
+        return _validate_cpu_int4pack_out_features(
+            cls, out_features=out_features, device=device
         )
 
     def post_init(self):
+        # The decode range is read by a compiled graph as a Python constant, so
+        # it must be computed before ``optimize()`` traces the first forward.
+        self._refresh_decode_range_fits()
         super().post_init()
         self.optimize()
+
+    # The CPU ATen int4pack permutation has a verified inverse, so the
+    # checkpoint qweight is rebuilt on save instead of kept resident.
+    _FUSED_TRAIN_STATE_REBUILD = "awq"
+
+    def _fused_train_state_names(self):
+        """Checkpoint operands the current fused transform rewrites.
+
+        ``transform_cpu_awq`` keeps ``scales`` in the checkpoint dtype and
+        layout, so the live buffer is the checkpoint tensor and a snapshot
+        clone would only be a byte-identical second copy. The XPU transform
+        narrows ``scales`` in place, so it still needs the snapshot.
+        """
+
+        if getattr(self, "qweight", None) is not None and self.qweight.device.type == "cpu":
+            return ("qweight", "qzeros")
+        return ("qweight", "qzeros", "scales")
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
@@ -235,7 +294,13 @@ class TorchFusedAwqLinear(AWQuantLinear):
 
         from .torch_aten_kernel import _cpu_int4pack_scale_dtype
 
-        compute_dtype = _cpu_int4pack_scale_dtype(self.scales, izeros.reshape_as(self.scales), self.bits, dtype)
+        compute_dtype = _cpu_int4pack_scale_dtype(
+            self.scales,
+            izeros.reshape_as(self.scales),
+            self.bits,
+            dtype,
+            wide_bias=needs_wide_bias_epilogue(self.bias, dtype),
+        )
 
         # AWQ has no g_idx — weights are already in natural order, just transpose
         # iweight: (in_features, out_features) -> (out_features, in_features) for int4pack
@@ -246,10 +311,26 @@ class TorchFusedAwqLinear(AWQuantLinear):
         # dtype so a later forward or save cannot persist a narrowed scale
         # (issue #4178).
         compute_scales = self.scales.to(dtype=compute_dtype).contiguous()
+        # Keep the checkpoint zero codes: the affine offsets installed below
+        # are derived from ``scales`` and must be rebuilt if the caller changes
+        # them (#5372).
+        self._cpu_zero_codes = izeros.reshape_as(self.scales)
         zeros = (zero_offset - izeros.reshape_as(compute_scales).float()) * compute_scales.float()
         self.qzeros = zeros.to(device=self.qweight.device, dtype=compute_dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
+        bind_runtime_qzeros(self)
         self._cpu_transform_dtype = dtype
+        # ``qweight`` now holds int4pack words: drop the checkpoint clone if
+        # the inverse reproduces exactly the bytes captured before the pack.
+        finalize_fused_train_state(self)
+        # AWQ has no ``g_idx``, but ``scales`` and ``bias`` are still the
+        # loader's tensors and pin the shard mapping (#4785).
+        self.scales = detach_cpu_operand(self.scales)
+        self.bias = detach_cpu_operand(getattr(self, "bias", None))
+        # Record the inputs the installed affine offsets were derived from so a
+        # later scale-only change can rebuild them (#5372).
+        self._fused_scale_key = tensor_cache_key(self.scales)
+        self._fused_zero_key = tensor_cache_key(self.qzeros)
 
     def transform_xpu_awq(self, dtype):
         # Unpack AWQ weights directly to integer form
@@ -296,10 +377,17 @@ class TorchFusedAwqLinear(AWQuantLinear):
         return out
 
     def awq_weight_dequantize(self, device, dtype):
+        # ``dequantize_gemm`` multiplies the integer codes by the scales, so a
+        # half-precision decode can overflow before the result is widened.
+        # Convert the temporary scales first; the checkpoint buffer keeps its
+        # loaded dtype.
+        scales = self.scales
+        if scales.device != device or scales.dtype != dtype:
+            scales = scales.to(device=device, dtype=dtype)
         return dequantize_gemm(
             qweight=self.qweight,
             qzeros=self.qzeros,
-            scales=self.scales,
+            scales=scales,
             bits=self.bits,
             group_size=self.group_size,
         ).to(device=device, dtype=dtype)
@@ -321,6 +409,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
         must keep the live packed weight authoritative. Only checkpoint loads,
         export, and training resume restore the snapshot.
         """
+        self._refresh_decode_range_fits()
         self._fused_state_key = None
         self._refresh_fused_op()
 
@@ -341,32 +430,49 @@ class TorchFusedAwqLinear(AWQuantLinear):
         current = getattr(self, "scales_and_zeros", None)
         dtype = current.dtype if isinstance(current, torch.Tensor) else scales.dtype
         dtype = torch.promote_types(dtype, torch.promote_types(scales.dtype, qzeros.dtype))
+        scale_key = tensor_cache_key(scales)
+        recomputed = None
+        if (
+            scale_key != getattr(self, "_fused_scale_key", None)
+            and tensor_cache_key(qzeros) == getattr(self, "_fused_zero_key", None)
+        ):
+            # Only ``scales`` changed. The live ``qzeros`` are affine offsets
+            # derived from the previous scale, so rebuild them from the
+            # checkpoint zero codes instead of republishing the stale pair
+            # (#5372). A replaced or edited ``qzeros`` is an explicit offset
+            # and keeps the historical meaning.
+            recomputed = refresh_runtime_zero_offsets(self, bits=self.bits, dtype=dtype)
+            if recomputed is not None:
+                qzeros = recomputed
         self.scales_and_zeros = pack_scales_and_zeros(scales.to(dtype), qzeros.to(dtype))
+        # ``qzeros`` is byte-identical to the packed metadata's zero column.
+        # Keep it as a view instead of a second allocation, then key the cache
+        # on the view that is actually installed.
+        if bind_runtime_qzeros(self):
+            key = tuple(tensor_cache_key(tensor) for tensor in (qweight, scales, self.qzeros))
+        elif recomputed is not None:
+            self.qzeros = qzeros
         self.torch_fused_op = Int4PackedOp(
             self.qweight, self.scales_and_zeros, self.group_size
         ).eval()
         self._fused_state_key = key
+        self._fused_scale_key = scale_key
+        self._fused_zero_key = tensor_cache_key(self.qzeros)
 
     def _apply(self, fn, recurse: bool = True):
-        """Re-finalize the checkpoint layout after an invalidating move.
+        """Re-finalize the checkpoint layout after a device move.
 
-        The runtime int4pack layout is device- and scale-dtype-coupled, so a
-        cross-device or low-precision move restores the checkpoint snapshot
-        instead of reinterpreting it in place. A same-device move to FP32 keeps
-        the live layout because it only widens the offsets.
+        The runtime int4pack layout is device-specific, so a cross-device move
+        restores the checkpoint snapshot and the next forward transforms for
+        the new device. Weight dtypes are frozen after the first forward
+        (contracts/kernel/forward-dtype.md).
         """
 
         scales = getattr(self, "scales", None)
         transformed = self.linear_mode == LinearMode.INFERENCE and isinstance(scales, torch.Tensor)
-        # The packed layout is keyed by the activation dtype it was built for,
-        # not by ``scales.dtype``: the checkpoint scale buffer now keeps its
-        # loaded dtype while the affine metadata follows the activation dtype.
-        runtime_dtype = getattr(self, "_cpu_transform_dtype", None) if transformed else None
-        if runtime_dtype is None and transformed:
-            runtime_dtype = scales.dtype
         device = scales.device if transformed else None
         result = super()._apply(fn, recurse=recurse)
-        refinalize_fused_state_after_apply(self, runtime_dtype, device)
+        refinalize_fused_state_after_apply(self, device)
         return result
 
     def train(self, mode: bool = True):
@@ -378,51 +484,174 @@ class TorchFusedAwqLinear(AWQuantLinear):
             self.linear_mode = None
             self.torch_fused_op = None
             self.scales_and_zeros = None
+        elif not mode and self.linear_mode == LinearMode.TRAIN:
+            # The dense-dequant path holds no derived state, so clearing the
+            # latch lets the next forward choose the fused layout again.
+            # Without this a forward taken while the module was in training
+            # mode pinned it to dense dequantization for the rest of its life,
+            # so a later `eval()` could never recover (#4907, #5018).
+            self.linear_mode = None
         return super().train(mode=mode)
+
+    def _dense_weight_for_activation(self, x: torch.Tensor) -> torch.Tensor:
+        """Checkpoint-layout dense weight for a call that cannot use the fused op."""
+        decode_dtype = self._decode_dtype_for_activation(x.dtype)
+        return self.awq_weight_dequantize(device=x.device, dtype=decode_dtype)
+
+    def _runtime_dense_weight(
+        self, activation_dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
+        """Decode the live CPU int4pack layout to a dense ``[in, out]`` weight."""
+        return runtime_int4pack_dense_weight(self, activation_dtype=activation_dtype)
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
         input_dtype = x_flat.dtype
         self.assert_supported_dtype(input_dtype)
-        if input_dtype == torch.float32:
+        # The CPU int4pack op consumes FP32 activations natively, so narrowing
+        # them to BF16 would round the input and the result for no speedup.
+        # The XPU op keeps its BF16 contract.
+        if input_dtype == torch.float32 and x_flat.device.type != "cpu":
             x_flat = x_flat.to(torch.bfloat16)
-        if (
-            not self.training
-            and not x_flat.requires_grad
-            and self.linear_mode is None
-            and TORCH_HAS_FUSED_OPS
-            # FP16 can overflow before a cancelling bias. BF16 has FP32's
-            # range, so it can use the fused op and add the bias once. The CPU
-            # fused op returns an FP32 product for a biased FP16 layer, so it
-            # can add the bias before the single visible cast too.
-            and (
-                self.bias is None
-                or x_flat.dtype in (torch.bfloat16, torch.float16)
-            )
-        ):
-            capture_fused_train_state(self)
-            self.transform(x_flat.dtype, x_flat.device.type)
-            self.linear_mode = LinearMode.INFERENCE
-            if x_flat.device.type == "cpu":
-                self.torch_fused_op = Int4PackedOp(
-                    self.qweight, self.scales_and_zeros, self.group_size
-                ).eval()
-        elif self.linear_mode is None:
-            self.linear_mode = LinearMode.TRAIN
+        runtime_dense = False
+        dense_weight = None
+        if dynamo_is_compiling():
+            # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
+            # hard graph break), and the one-time ``transform()`` rewrites the
+            # packed ``qweight``/``qzeros`` buffers in place, which a traced
+            # graph must not do. The transform runs on the first eager forward
+            # and in ``optimize()``'s warmup, so the graph only reads the
+            # resolved ``linear_mode``.
+            #
+            # A grad-requiring call cannot use the ``@torch.no_grad`` fused op
+            # and must not restore the checkpoint layout by mutating buffers
+            # inside the trace. Decode the live runtime operands instead
+            # (#5369).
+            runtime_dense = x_flat.device.type == "cpu" and fused_autograd_needs_dense(self, x_flat)
+            if runtime_dense:
+                # The eager refresh below cannot run inside a trace, so decode
+                # the offsets from the checkpoint zero codes and the current
+                # scales instead of the installed stale pair (#5571).
+                dense_weight = runtime_int4pack_dense_weight(self, use_zero_codes=True, activation_dtype=x_flat.dtype)
+            if (
+                not runtime_dense
+                and self.linear_mode is None
+                and not self.training
+                and not x_flat.requires_grad
+                and TORCH_HAS_FUSED_OPS
+                and x_flat.dtype in (torch.float32, torch.bfloat16, torch.float16)
+            ):
+                # A cold trace must not bake in the dense branch: the
+                # one-time transform only runs eagerly, so install the runtime
+                # layout here and retrace into the fused path (#5515).
+                ensure_cpu_inference_layout(self, x_flat.dtype)
+            linear_mode = self.linear_mode
+        else:
+            with self._cpu_transform_lock:
+                force_dense = fused_autograd_needs_dense(self, x_flat)
+                if force_dense:
+                    if x_flat.device.type == "cpu":
+                        # The fused op has no backward, so this call needs a
+                        # dense weight. Decode the live runtime layout instead
+                        # of restoring the checkpoint layout: the restore
+                        # rewrites the packed buffers a concurrent no-grad
+                        # forward is reading, so alternating grad/no-grad calls
+                        # raced (#5509).
+                        # Refresh first: a scale-only change leaves the
+                        # installed ``qzeros`` offsets derived from the old
+                        # scales, which a no-grad forward rebuilds but this
+                        # decode used to read stale (#5571).
+                        self._refresh_fused_op()
+                        runtime_dense = True
+                        dense_weight = self._runtime_dense_weight(x_flat.dtype)
+                    else:
+                        # XPU keeps the checkpoint-layout dense fallback; there
+                        # is no CPU int4pack runtime decode for it.
+                        if not restore_fused_train_state(self):
+                            raise RuntimeError(
+                                f"{type(self).__name__} cannot provide a gradient after the fused "
+                                "inference transform because the checkpoint layout cannot be restored."
+                            )
+                elif (
+                    self.linear_mode is None
+                    and not self.training
+                    and x_flat.requires_grad
+                ):
+                    # A concurrent first no-grad forward may install the runtime
+                    # layout while this call decodes the checkpoint layout.
+                    # Snapshot the weight under the lock so that transform
+                    # cannot swap the buffers mid-read (#5509).
+                    dense_weight = self._dense_weight_for_activation(x_flat)
+                if not force_dense and (
+                    not self.training
+                    and not x_flat.requires_grad
+                    and self.linear_mode is None
+                    and TORCH_HAS_FUSED_OPS
+                    # FP16 can overflow before a cancelling bias. FP32 and BF16
+                    # have FP32's range, so they can use the fused op and add
+                    # the bias once. The CPU fused op returns an FP32 product
+                    # for a biased FP16 layer, so it can add the bias before
+                    # the single visible cast too.
+                    and (
+                        self.bias is None
+                        or x_flat.dtype in (
+                            torch.float32,
+                            torch.bfloat16,
+                            torch.float16,
+                        )
+                    )
+                ):
+                    capture_fused_train_state(self)
+                    self.transform(x_flat.dtype, x_flat.device.type)
+                    self.linear_mode = LinearMode.INFERENCE
+                    if x_flat.device.type == "cpu":
+                        self.torch_fused_op = Int4PackedOp(
+                            self.qweight, self.scales_and_zeros, self.group_size
+                        ).eval()
+                elif not force_dense and self.linear_mode is None and self.training:
+                    # Only a training-mode forward pins the dense path until
+                    # `eval()` clears the latch. An eval-mode grad forward takes
+                    # the dense path for this call only: latching here made every
+                    # later no-grad forward dequantize the weight (#5392).
+                    self.linear_mode = LinearMode.TRAIN
+            linear_mode = self.linear_mode
 
-        if self.linear_mode == LinearMode.INFERENCE:
+        if runtime_dense:
+            if dense_weight is None:
+                dense_weight = runtime_int4pack_dense_weight(
+                    self, activation_dtype=x_flat.dtype
+                )
+            if dense_weight.dtype == x_flat.dtype:
+                weight = dense_weight
+                if self.bias is not None:
+                    out = matmul_fp32_reduce(x_flat, weight, self.bias)
+                else:
+                    out = torch.matmul(x_flat, weight)
+            else:
+                # Wide decode: promote the activation for this call, accumulate
+                # in FP32, add the stored bias there, and round once at output.
+                out = linear_wide_bias(x_flat, dense_weight.t(), self.bias)
+        elif linear_mode == LinearMode.INFERENCE:
             # log.debug("awq calling fused op")
             out = self._fused_op_forward(x_flat)
             if self.bias is not None:
                 out = (out.float() + self.bias.to(out.device, torch.float32)).to(x_flat.dtype)
         else:
             # log.debug("awq dense path")
-            weight = self.awq_weight_dequantize(device=x_flat.device, dtype=x_flat.dtype)
-            if self.bias is not None:
-                out = matmul_fp32_reduce(x_flat, weight, self.bias)
+            if dense_weight is None:
+                dense_weight = self._dense_weight_for_activation(x_flat)
+            weight = dense_weight
+            if weight.dtype == x_flat.dtype:
+                if self.bias is not None:
+                    out = matmul_fp32_reduce(x_flat, weight, self.bias)
+                else:
+                    out = torch.matmul(x_flat, weight)
             else:
-                out = torch.matmul(x_flat, weight)
+                # Wide decode: promote the activation for this call, accumulate
+                # in FP32, add the stored bias there, and round once at output.
+                # The reconstructed weight stays call-local.
+                out = linear_wide_bias(x_flat, weight.t(), self.bias)
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)
 

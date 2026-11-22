@@ -11,6 +11,7 @@ import transformers
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.hrm_text import HrmTextQModel
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 from gptqmodel.utils.model import get_layers_with_prefixes
 from gptqmodel.utils.structure import LazyTurtle
 
@@ -38,13 +39,10 @@ class _DummyHrmModel(nn.Module):
         self.model.H_module = _DummyStack(3)
 
 
-def test_hrm_text_model_type_selects_hrm_text_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="hrm_text")
+def test_hrm_text_model_type_selects_hrm_text_definition(tmp_path):
+    CONFIG_MAPPING["hrm_text"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/hrm_text") is HrmTextQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is HrmTextQModel
 
 
 def test_get_layers_with_prefixes_flattens_hrm_stacks_in_order():
@@ -97,7 +95,9 @@ def test_hrm_text_direct_meta_materialization_hook_targets_root_stack():
     calls = []
 
     class _FakeTurtle:
-        def materialize_direct_meta_tensors(self, *, target_model, target_submodule, device=None):
+        def materialize_direct_meta_tensors(
+            self, *, target_model, target_submodule, device=None, module_path=None
+        ):
             calls.append((target_model, target_submodule, device))
             target_submodule.register_parameter(
                 "z_L_init",
@@ -237,7 +237,9 @@ def test_stage_input_capture_materializes_hrm_direct_meta_tensor_modules():
         def get_modules_with_direct_meta_tensors(self, model):
             return HrmTextQModel.get_modules_with_direct_meta_tensors(model)
 
-        def shell_direct_meta_materialize(self, *, target_submodule, device=None):
+        def shell_direct_meta_materialize(
+            self, *, target_submodule, device=None, module_path=None
+        ):
             calls.append((target_submodule, device))
             target_submodule.register_parameter(
                 "z_L_init",

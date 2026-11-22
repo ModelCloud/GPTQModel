@@ -33,6 +33,7 @@ from ..exllamav3.modules.quant.exl3_lib.quantize import (
     EXL3_HESSIAN_SYMMETRY_CONTRACT,
     quantize_exl3,
 )
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, validate_trellis_k
 from .exl3_projection_checkpoint import (
     CHECKPOINT_SCHEMA,
     CHECKPOINT_SCHEMA_VERSION,
@@ -330,6 +331,9 @@ def validate_remote_inputs(
     weight = tensors["input_weight"]
     hessian = tensors["hessian"]
     contract = request.get("quantizer_contract")
+    uncalibrated = request.get("uncalibrated", False)
+    if not isinstance(uncalibrated, bool):
+        raise ValueError("EXL3 remote request uncalibrated flag must be a boolean")
     if (
         tensor_identity(weight) != request.get("input_weight")
         or tensor_identity(hessian) != request.get("hessian")
@@ -342,11 +346,7 @@ def validate_remote_inputs(
         or weight.shape[0] % 128
         or weight.shape[1] % 128
         or not isinstance(contract, dict)
-        or isinstance(contract.get("bits"), bool)
-        or not isinstance(contract.get("bits"), int)
-        or contract["bits"] < 1
-        or contract["bits"] > 8
-        or contract.get("codebook") not in ("mcg", "mul1")
+        or contract.get("codebook") not in EXL3_CODEBOOK_MARKERS
         or contract.get("hessian_capture") != EXL3_HESSIAN_CAPTURE_CONTRACT
         or contract.get("hessian_numerical") != EXL3_HESSIAN_NUMERICAL_CONTRACT
         or contract.get("hessian_symmetry") != EXL3_HESSIAN_SYMMETRY_CONTRACT
@@ -356,9 +356,19 @@ def validate_remote_inputs(
         or not isinstance(contract.get("seed"), int)
         or isinstance(contract.get("seed"), bool)
         or not isinstance(request.get("sample_count"), int)
-        or request["sample_count"] <= 0
+        or request["sample_count"] < 0
+        # Only an explicitly uncalibrated projection may carry no samples.
+        or (not uncalibrated and request["sample_count"] == 0)
     ):
         raise ValueError("EXL3 remote request tensor/quantizer contract is invalid")
+    codebook = contract["codebook"]
+    validate_trellis_k(
+        contract.get("bits"),
+        codebook == "mcg",
+        codebook == "mul1",
+        q4nx=codebook == "q4nx",
+        r4nx=codebook == "r4nx",
+    )
     return weight, hessian, contract
 
 
@@ -380,11 +390,16 @@ def validate_remote_output_tensors(
         not isinstance(shape, list)
         or len(shape) != 2
         or any(isinstance(value, bool) or not isinstance(value, int) for value in shape)
-        or isinstance(bits, bool)
-        or not isinstance(bits, int)
-        or codebook not in ("mcg", "mul1")
+        or codebook not in EXL3_CODEBOOK_MARKERS
     ):
         raise ValueError("EXL3 remote output tensor contract is invalid")
+    validate_trellis_k(
+        bits,
+        codebook == "mcg",
+        codebook == "mul1",
+        q4nx=codebook == "q4nx",
+        r4nx=codebook == "r4nx",
+    )
     expected_names = {"trellis", "suh", "svh", codebook}
     if set(tensors) != expected_names:
         raise ValueError("EXL3 remote output tensor contract is invalid")
@@ -395,7 +410,7 @@ def validate_remote_output_tensors(
     marker = tensors[codebook]
     if (
         trellis.dtype != torch.int16
-        or list(trellis.shape) != [rows // 16, columns // 16, bits * 16]
+        or list(trellis.shape) != [rows // 16, columns // 16, int(bits * 16)]
         or suh.dtype != torch.float16
         or list(suh.shape) != [rows]
         or svh.dtype != torch.float16
@@ -411,17 +426,29 @@ def validate_exl3_hessian_metrics(
     *,
     sample_count: int,
     sigma_reg: float,
+    uncalibrated: bool = False,
 ) -> None:
-    """Require the complete production Hessian numerical contract."""
+    """Require the complete production Hessian numerical contract.
 
+    A starved module is quantized by EXL3's uncalibrated ``fallback_quant``
+    path (#4995). There is no Hessian solve, so the quantizer reports
+    ``quantizer_path="fallback"`` and
+    ``hessian_metric_status="not_applicable_fallback"`` with a zero sample
+    count. Every other term of the numerical contract is still required, so a
+    broken fallback run cannot pass as a calibrated one.
+    """
+
+    expected_sample_count = 0 if uncalibrated else sample_count
     diagonal_addend = metrics.get("hessian_regularization_diagonal_addend")
     symmetry_correction = metrics.get("hessian_symmetry_correction_max_abs")
     selected_global_scale = metrics.get("selected_global_scale")
     scale_search_mse = metrics.get("scale_search_mse")
     if (
-        metrics.get("quantizer_path") != "hessian_ldlq"
-        or metrics.get("hessian_metric_status") != "ok"
-        or metrics.get("hessian_sample_count") != sample_count
+        metrics.get("quantizer_path")
+        != ("fallback" if uncalibrated else "hessian_ldlq")
+        or metrics.get("hessian_metric_status")
+        != ("not_applicable_fallback" if uncalibrated else "ok")
+        or metrics.get("hessian_sample_count") != expected_sample_count
         or metrics.get("hessian_regularization_sigma") != sigma_reg
         or metrics.get("hessian_numerical_contract")
         != EXL3_HESSIAN_NUMERICAL_CONTRACT
@@ -468,8 +495,8 @@ def validate_exl3_hessian_metrics(
         }
         raise RuntimeError(
             "EXL3 quantizer returned an invalid Hessian numerical contract: "
-            f"expected_sample_count={sample_count}, expected_sigma_reg={sigma_reg}, "
-            f"observed={observed!r}"
+            f"expected_sample_count={expected_sample_count}, "
+            f"expected_sigma_reg={sigma_reg}, observed={observed!r}"
         )
 
 
@@ -506,6 +533,9 @@ def execute_remote_projection(
     target = torch.device(device)
     if target.type != "cuda":
         raise ValueError("EXL3 remote execution requires a CUDA/HIP device")
+    # A starved projection is quantized against a data-free proxy Hessian with
+    # count=0, which selects EXL3's uncalibrated `fallback_quant` path (#4995).
+    uncalibrated = request.get("uncalibrated") is True
     quant_args: dict[str, Any] = {
         "K": contract["bits"],
         "devices": [target],
@@ -521,7 +551,7 @@ def execute_remote_projection(
             weight.to(device=target),
             {
                 "H": device_hessian,
-                "count": request["sample_count"],
+                "count": 0 if uncalibrated else request["sample_count"],
                 "finalized": False,
             },
             quant_args,
@@ -542,12 +572,16 @@ def execute_remote_projection(
     del _weight_q
     duration = time.perf_counter() - started
     metrics = quant_args.get("error_metrics")
-    if not isinstance(metrics, dict) or quant_args.get("q_fallback") is not False:
+    if (
+        not isinstance(metrics, dict)
+        or bool(quant_args.get("q_fallback")) is not uncalibrated
+    ):
         raise RuntimeError("EXL3 remote worker rejected fallback/incomplete metrics")
     validate_exl3_hessian_metrics(
         metrics,
         sample_count=request["sample_count"],
         sigma_reg=float(contract["sigma_reg"]),
+        uncalibrated=uncalibrated,
     )
     if isinstance(proxy_error, torch.Tensor):
         proxy_error = proxy_error.item()

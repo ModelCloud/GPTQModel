@@ -14,12 +14,13 @@ import gptqmodel.exllamav3.ext as exllamav3_ext
 import gptqmodel.extension as extension_api
 import gptqmodel.utils.awq as awq_utils
 import gptqmodel.utils.cpp as cpp_utils
+import gptqmodel.utils.cptc as cptc_utils
 import gptqmodel.utils.cpu_features as cpu_features
 import gptqmodel.utils.exllamav2 as exllamav2_utils
 import gptqmodel.utils.hadamard as hadamard_utils
 import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
-import gptqmodel.utils.paroquant as paroquant_utils
+import gptqmodel.utils.paro as paro_utils
 import gptqmodel.utils.qqq as qqq_utils
 import gptqmodel.utils.rocm as rocm
 import gptqmodel.utils.swordfish as swordfish_utils
@@ -78,6 +79,7 @@ def _install_fake_extensions(monkeypatch):
         "int4_qzero_group_scaled_cpu": _FakeExtension("int4_qzero_group_scaled_cpu"),
         "awq": _FakeExtension("AWQ"),
         "qqq": _FakeExtension("QQQ"),
+        "cptc": _FakeExtension("CPTC"),
         "vptq": _FakeExtension("VPTQ CUDA"),
         "exllamav2": _FakeExtension("ExLlamaV2 GPTQ"),
         "exllamav2_awq": _FakeExtension("ExLlamaV2 AWQ"),
@@ -85,7 +87,7 @@ def _install_fake_extensions(monkeypatch):
         "machete": _FakeExtension("Machete"),
         "marlin_fp16": _FakeExtension("Marlin fp16"),
         "marlin_bf16": _FakeExtension("Marlin bf16"),
-        "paroquant": _FakeExtension("ParoQuant rotation"),
+        "paro": _FakeExtension("Paro rotation"),
         "hadamard": _FakeExtension("Fast Hadamard transform"),
         "swordfish": _FakeExtension("Swordfish"),
     }
@@ -102,6 +104,8 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(cpu_features, "avx512_bf16_error", lambda: "")
     monkeypatch.setattr(awq_utils, "_AWQ_TORCH_OPS_EXTENSION", fakes["awq"])
     monkeypatch.setattr(qqq_utils, "_QQQ_TORCH_OPS_EXTENSION", fakes["qqq"])
+    monkeypatch.setattr(cptc_utils, "_EXTENSION", fakes["cptc"])
+    monkeypatch.setattr(cptc_utils, "host_supported", lambda: True)
     monkeypatch.setattr(vptq_utils, "_VPTQ_TORCH_OPS_EXTENSION", fakes["vptq"])
     # VPTQ is CUDA-only; pin support so the test does not depend on the host GPU.
     monkeypatch.setattr(vptq_utils, "_validate_vptq_build_support", lambda: True)
@@ -112,7 +116,7 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(machete_utils, "_validate_machete_build_support", lambda: True)
     monkeypatch.setattr(marlin_utils, "_MARLIN_FP16_TORCH_OPS_EXTENSION", fakes["marlin_fp16"])
     monkeypatch.setattr(marlin_utils, "_MARLIN_BF16_TORCH_OPS_EXTENSION", fakes["marlin_bf16"])
-    monkeypatch.setattr(paroquant_utils, "_PAROQUANT_ROTATION_EXTENSION", fakes["paroquant"])
+    monkeypatch.setattr(paro_utils, "_PARO_ROTATION_EXTENSION", fakes["paro"])
     monkeypatch.setattr(hadamard_utils, "_HADAMARD_TORCH_OPS_EXTENSION", fakes["hadamard"])
     monkeypatch.setattr(hadamard_utils, "hadamard_supported", lambda: True)
     monkeypatch.setattr(swordfish_utils, "_SWORDFISH_TORCH_OPS_EXTENSION", fakes["swordfish"])

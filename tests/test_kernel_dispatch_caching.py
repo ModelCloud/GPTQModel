@@ -9,6 +9,8 @@ memoised fast paths, their invalidation, the ExLlamaV2 handle lifecycle, and
 the single-kernel FP16 bias epilogue.
 """
 
+import threading
+import time
 import types
 
 import pytest
@@ -241,6 +243,46 @@ def test_exllamav2_fast_path_detects_in_place_write(monkeypatch):
     assert made[1].eq(0).all()
 
 
+def test_exllamav2_concurrent_first_forward_builds_one_handle(monkeypatch):
+    """Issue #4184: serialize the cold native q-matrix rebuild.
+
+    Eight free-threaded workers forwarding after a cache clear used to each
+    build (and leak) their own native q-matrix. The double-checked rebuild lock
+    must collapse them onto one handle.
+    """
+
+    layer, made = _exllamav2_layer()
+    real_make = layer.ext_make_q_matrix
+    barrier = threading.Barrier(8)
+
+    def slow_make(tensors, **kwargs):
+        # Keep the rebuild in flight long enough for an unsynchronized peer to
+        # enter the same slow path.
+        time.sleep(0.05)
+        return real_make(tensors, **kwargs)
+
+    layer.ext_make_q_matrix = slow_make
+    handles = []
+    errors = []
+
+    def worker():
+        try:
+            barrier.wait(timeout=10)
+            handles.append(exllamav2.ExllamaV2Linear._ensure_q_handle(layer))
+        except BaseException as exc:  # pragma: no cover - surfaced by assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors
+    assert len(made) == 1
+    assert handles == [1] * 8
+
+
 # ---------------------------------------------------------------------------
 # bitsandbytes availability + quant-state signature
 # ---------------------------------------------------------------------------
@@ -315,19 +357,7 @@ def test_bitsandbytes_quant_state_signature_uses_tensor_identity_fields(monkeypa
 # AWQ bias epilogue
 # ---------------------------------------------------------------------------
 
-def _count_float_conversions(monkeypatch):
-    calls = {"float": 0}
-    original = torch.Tensor.float
-
-    def counting_float(self):
-        calls["float"] += 1
-        return original(self)
-
-    monkeypatch.setattr(torch.Tensor, "float", counting_float)
-    return calls
-
-
-def test_awq_gemv_bias_epilogue_is_a_single_fp16_add(monkeypatch):
+def test_awq_gemv_bias_epilogue_adds_bias_to_fp32_kernel_output(monkeypatch):
     module = gemv_awq.AwqGEMVLinear(
         bits=4,
         group_size=64,
@@ -338,15 +368,21 @@ def test_awq_gemv_bias_epilogue_is_a_single_fp16_add(monkeypatch):
         bias=True,
         register_buffers=True,
     )
-    kernel_out = torch.randn(1, 64, dtype=torch.float16)
-    monkeypatch.setattr(gemv_awq, "awq_gemv_forward", lambda *args: kernel_out)
-    monkeypatch.setattr(gemv_awq, "awq_gemmv2_forward", lambda *args: kernel_out)
+    kernel_out = torch.randn(1, 64, dtype=torch.float32)
+    seen = {}
 
-    calls = _count_float_conversions(monkeypatch)
+    def fake_gemv(inputs, qweight, scales, qzeros, group_size, fp32_output=False):
+        seen["fp32_output"] = fp32_output
+        return kernel_out
+
+    monkeypatch.setattr(gemv_awq, "awq_gemv_forward", fake_gemv)
+    monkeypatch.setattr(gemv_awq, "awq_gemmv2_forward", fake_gemv)
+
     out = module(torch.randn(1, 64, dtype=torch.float16))
 
-    oracle = (kernel_out.to(torch.float32) + module.bias.to(torch.float32)).to(torch.float16)
-    assert calls["float"] == 0
+    oracle = (kernel_out + module.bias.float()).to(torch.float16)
+    assert seen["fp32_output"] is True
+    assert out.dtype == torch.float16
     assert torch.equal(out, oracle)
 
 
@@ -361,19 +397,25 @@ def test_awq_gemv_bias_epilogue_keeps_wide_path_for_bf16(monkeypatch):
         bias=True,
         register_buffers=True,
     )
-    kernel_out = torch.randn(1, 64, dtype=torch.float16)
-    monkeypatch.setattr(gemv_awq, "awq_gemv_forward", lambda *args: kernel_out)
-    monkeypatch.setattr(gemv_awq, "awq_gemmv2_forward", lambda *args: kernel_out)
+    kernel_out = torch.randn(1, 64, dtype=torch.float32)
+    seen = {}
 
-    calls = _count_float_conversions(monkeypatch)
+    def fake_gemv(inputs, qweight, scales, qzeros, group_size, fp32_output=False):
+        seen["fp32_output"] = fp32_output
+        return kernel_out
+
+    monkeypatch.setattr(gemv_awq, "awq_gemv_forward", fake_gemv)
+    monkeypatch.setattr(gemv_awq, "awq_gemmv2_forward", fake_gemv)
+
     out = module(torch.randn(1, 64, dtype=torch.bfloat16))
 
-    oracle = (kernel_out.to(torch.float32) + module.bias.to(torch.float32)).to(torch.bfloat16)
-    assert calls["float"] == 2
+    oracle = (kernel_out + module.bias.float()).to(torch.bfloat16)
+    assert seen["fp32_output"] is True
+    assert out.dtype == torch.bfloat16
     assert torch.equal(out, oracle)
 
 
-def test_awq_gemv_fast_bias_epilogue_is_a_single_fp16_add(monkeypatch):
+def test_awq_gemv_fast_bias_epilogue_adds_bias_to_fp32_kernel_output(monkeypatch):
     module = gemv_fast_awq.AwqGEMVFastLinear(
         bits=4,
         group_size=128,
@@ -384,16 +426,22 @@ def test_awq_gemv_fast_bias_epilogue_is_a_single_fp16_add(monkeypatch):
         bias=True,
         register_buffers=True,
     )
-    kernel_out = torch.randn(1, 128, dtype=torch.float16)
-    monkeypatch.setattr(gemv_fast_awq, "awq_runtime_available", lambda: True)
-    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemv_forward_decode", lambda *args: kernel_out)
-    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemm_forward_prefill", lambda *args: kernel_out)
+    kernel_out = torch.randn(1, 128, dtype=torch.float32)
+    seen = {}
 
-    calls = _count_float_conversions(monkeypatch)
+    def fake_prefill(inputs, qweight, scales, zeros, fp32_output=False):
+        seen["fp32_output"] = fp32_output
+        return kernel_out
+
+    monkeypatch.setattr(gemv_fast_awq, "awq_runtime_available", lambda: True)
+    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemv_forward_decode", lambda *args, **kwargs: kernel_out)
+    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemm_forward_prefill", fake_prefill)
+
     out = module(torch.randn(1, 128, dtype=torch.float16))
 
-    oracle = (kernel_out.to(torch.float32) + module.bias.to(torch.float32)).to(torch.float16)
-    assert calls["float"] == 0
+    oracle = (kernel_out + module.bias.float()).to(torch.float16)
+    assert seen["fp32_output"] is True
+    assert out.dtype == torch.float16
     assert torch.equal(out, oracle)
 
 
@@ -408,16 +456,22 @@ def test_awq_gemv_fast_bias_epilogue_keeps_wide_path_for_bf16_input(monkeypatch)
         bias=True,
         register_buffers=True,
     )
-    kernel_out = torch.randn(1, 128, dtype=torch.float16)
-    monkeypatch.setattr(gemv_fast_awq, "awq_runtime_available", lambda: True)
-    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemv_forward_decode", lambda *args: kernel_out)
-    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemm_forward_prefill", lambda *args: kernel_out)
+    kernel_out = torch.randn(1, 128, dtype=torch.float32)
+    seen = {}
 
-    calls = _count_float_conversions(monkeypatch)
+    def fake_prefill(inputs, qweight, scales, zeros, fp32_output=False):
+        seen["fp32_output"] = fp32_output
+        return kernel_out
+
+    monkeypatch.setattr(gemv_fast_awq, "awq_runtime_available", lambda: True)
+    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemv_forward_decode", lambda *args, **kwargs: kernel_out)
+    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemm_forward_prefill", fake_prefill)
+
     out = module(torch.randn(1, 128, dtype=torch.bfloat16))
 
-    oracle = (kernel_out.to(torch.float32) + module.bias.to(torch.float32)).to(torch.bfloat16)
-    assert calls["float"] == 2
+    oracle = (kernel_out + module.bias.float()).to(torch.bfloat16)
+    assert seen["fp32_output"] is True
+    assert out.dtype == torch.bfloat16
     assert torch.equal(out, oracle)
 
 
@@ -455,8 +509,8 @@ def test_gemv_fast_runtime_check_is_memoized_after_success(monkeypatch):
         return True
 
     monkeypatch.setattr(gemv_fast_awq, "awq_runtime_available", available)
-    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemv_forward_decode", lambda *args: kernel_out)
-    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemm_forward_prefill", lambda *args: kernel_out)
+    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemv_forward_decode", lambda *args, **kwargs: kernel_out)
+    monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemm_forward_prefill", lambda *args, **kwargs: kernel_out)
 
     module(torch.randn(1, 128, dtype=torch.float16))
     module(torch.randn(1, 128, dtype=torch.float16))

@@ -6,7 +6,7 @@ from model_test import ModelTest
 
 class TestXing4_0(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Xing4.0-29B-A4B" # XingChen-AGI/Xing4.0-29B-A4B
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     EVAL_TASKS_SLOW = {
         "arc_challenge": {

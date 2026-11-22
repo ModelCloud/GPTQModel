@@ -3,29 +3,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from functools import wraps
-from importlib import import_module
-from inspect import signature
 from typing import Dict
 
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
-from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class InternS2PreviewQModel(BaseQModel):
     require_pkgs = ["sentencepiece>=0.2.0"]
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.intern_s2_preview.configuration_interns2_preview.InternS2PreviewConfig",
+        model_class="gptqmodel.models.ports.intern_s2_preview.modeling_interns2_preview.InternS2PreviewForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.intern_s2_preview.processing_interns2_preview.InternS2PreviewProcessor",
+        tokenizer_class="gptqmodel.models.ports.intern_s2_preview.tokenization_interns1.InternS1Tokenizer",
+    )
 
     require_load_processor = True
-    require_trust_remote_code = True
-    require_monkeypatch = True
     layer_modules_strict = False
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
@@ -59,7 +60,7 @@ class InternS2PreviewQModel(BaseQModel):
                 "v_proj:0:in=x",
                 "o_proj:1",
             ),
-            "linear_attn": (
+            "linear_attn:!": (
                 "norm:!",
                 "conv1d:!",
                 "in_proj_qkv:0:in=x",
@@ -87,68 +88,52 @@ class InternS2PreviewQModel(BaseQModel):
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
 
-    def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(
-            self.model_local_path,
-            trust_remote_code=self.trust_remote_code,
-        )
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        if getattr(module, "block_type", None) != "linear_attention":
+            return nodes
 
-    def monkey_patch(self):
-        modeling_module = import_module(
-            type(self.model.model.language_model).__module__
-        )
+        # Native Qwen3.5-MoE decoder: `input_layernorm` feeds all four DeltaNet
+        # input projections. The capture-only `linear_attn:!` owner breaks the
+        # generic norm run, so the planner pairs `in_proj_qkv` with `in_proj_z`
+        # instead. Drop every group touching DeltaNet internals (convolution,
+        # recurrence and the gated per-head norm separate inputs from
+        # `out_proj`) and bind the real input edge directly.
+        attn = module.linear_attn
+        internal = {id(child) for child in attn.modules()}
+        nodes = [
+            node for node in nodes
+            if id(node["prev_op"]) not in internal
+            and not any(id(target) in internal for target in node["layers"])
+        ]
+        feature = "linear_attn.in_proj_qkv"
+        if feature not in input_feat:
+            return nodes
+        kwargs = dict(module_kwargs or {})
+        per_feature = kwargs.pop("_awq_feature_kwargs", {})
+        kwargs.update(per_feature.get(feature, {}))
+        # The decoder passes its cache as `past_key_values`; DeltaNet calls it `cache_params`.
+        if "past_key_values" in kwargs:
+            kwargs.setdefault("cache_params", kwargs.pop("past_key_values"))
+        node = {
+            "prev_op": module.input_layernorm,
+            "layers": [attn.in_proj_qkv, attn.in_proj_z],
+            "inp": input_feat[feature],
+            "module2inspect": attn,
+            "kwargs": kwargs,
+            "_input_feature_name": feature,
+            # Unquantized gate projections read the same normed input.
+            "_scale_consumers": ["linear_attn.in_proj_b", "linear_attn.in_proj_a"],
+        }
+        return self._filter_awq_scaling_sources(module, [node, *nodes])
 
-        # Intern-S2's remote code owns a legacy stateful cache with top-level
-        # conv_states/recurrent_states. Newer Transformers versions otherwise
-        # pre-create their generic DynamicCache, whose state lives per layer.
-        # Let the remote model create InternS2PreviewDynamicCache in forward.
-        model_cls = type(self.model)
-        legacy_cache_cls = getattr(
-            modeling_module,
-            "InternS2PreviewDynamicCache",
-            None,
-        )
-        if legacy_cache_cls is not None and getattr(model_cls, "_is_stateful", False):
-            model_cls._supports_default_dynamic_cache = classmethod(
-                lambda cls: False
-            )
-
-            if not hasattr(legacy_cache_cls, "get_query_offset"):
-                def get_query_offset(cache_self, layer_idx=0):
-                    return cache_self.get_seq_length(layer_idx)
-
-                legacy_cache_cls.get_query_offset = get_query_offset
-
-            get_mask_sizes = legacy_cache_cls.get_mask_sizes
-            if (
-                "cache_position" in signature(get_mask_sizes).parameters
-                and not getattr(get_mask_sizes, "_gptqmodel_accepts_query_length", False)
-            ):
-                @wraps(get_mask_sizes)
-                def get_mask_sizes_compat(cache_self, query_length, layer_idx):
-                    if hasattr(query_length, "shape"):
-                        return get_mask_sizes(cache_self, query_length, layer_idx)
-
-                    past_seen_tokens = cache_self.get_seq_length(layer_idx)
-                    return query_length + past_seen_tokens, 0
-
-                get_mask_sizes_compat._gptqmodel_accepts_query_length = True
-                legacy_cache_cls.get_mask_sizes = get_mask_sizes_compat
-
-        create_causal_mask = modeling_module.create_causal_mask
-
-        if "cache_position" in signature(create_causal_mask).parameters or getattr(
-            create_causal_mask, "_gptqmodel_accepts_cache_position", False
-        ):
-            return
-
-        @wraps(create_causal_mask)
-        def create_causal_mask_compat(*args, cache_position=None, **kwargs):
-            del cache_position
-            return create_causal_mask(*args, **kwargs)
-
-        create_causal_mask_compat._gptqmodel_accepts_cache_position = True
-        modeling_module.create_causal_mask = create_causal_mask_compat
+    def awq_module_replay_inputs(self, module, x, module_kwargs):
+        x, kwargs = super().awq_module_replay_inputs(module, x, module_kwargs)
+        # Calibration is an uncached prefill; a mutable recurrent/KV cache would
+        # advance on the reference and again on each candidate replay.
+        if any(kwargs.get(key) is not None for key in ("cache_params", "past_key_values")):
+            raise NotImplementedError("Intern-S2 AWQ requires uncached calibration context")
+        return x, kwargs
 
     def _materialize_core_module(self, parent, attr_name: str):
         module = getattr(parent, attr_name)
@@ -184,27 +169,29 @@ class InternS2PreviewQModel(BaseQModel):
         for parent, attr_name in core_modules:
             setattr(parent, attr_name, move_to(getattr(parent, attr_name), device=CPU))
 
+    @classmethod
+    def prepare_inputs_for_conversations(
+        cls,
+        processor: ProcessorMixin,
+        conversations: list[dict] | list[list[dict]],
+    ):
+        return processor.apply_chat_template(
+            conversations,
+            tokenize=True,
+            add_generation_prompt=True,
+            processor_kwargs={"padding": True},
+            return_dict=True,
+            return_tensors="pt",
+        )
+
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del kwargs
-        processor = self.load_processor()
-        calibration_data = []
-        for batch in batched_conversations(
+        return prepare_vlm_calibration_dataset(
+            self,
             calibration_dataset,
-            batch_size,
-            process_func=self.preprocess_dataset,
-        ):
-            calibration_data.append(
-                processor.apply_chat_template(
-                    batch,
-                    tokenize=True,
-                    add_generation_prompt=True,
-                    processor_kwargs={"padding": True},
-                    return_dict=True,
-                    return_tensors="pt",
-                )
-            )
-        del processor
-        return calibration_data
+            batch_size=batch_size,
+            options=kwargs,
+            preprocess_func=self.preprocess_dataset,
+        )
 
 
 __all__ = ["InternS2PreviewQModel"]

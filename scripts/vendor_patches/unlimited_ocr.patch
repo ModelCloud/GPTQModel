@@ -1,0 +1,22 @@
+--- a/unlimited_ocr/modeling_unlimited_ocr.py
++++ b/unlimited_ocr/modeling_unlimited_ocr.py
+@@ -1507,14 +1507,14 @@
+             prefill_key_states = key_states[..., :prefill_kv_length, :]
+             prefill_value_states = value_states[..., :prefill_kv_length, :]
+ 
+-            cache_position = torch.arange(prefill_kv_length, device=self.device) + self.prefill_cumulative_length
++            write_positions = torch.arange(prefill_kv_length, device=self.device) + self.prefill_cumulative_length
+             try:
+-                self.prefill_keys.index_copy_(2, cache_position, prefill_key_states)
+-                self.prefill_values.index_copy_(2, cache_position, prefill_value_states)
++                self.prefill_keys.index_copy_(2, write_positions, prefill_key_states)
++                self.prefill_values.index_copy_(2, write_positions, prefill_value_states)
+             except NotImplementedError:
+                 # Fallback for devices like MPS where index_copy_ might not be supported.
+-                self.prefill_keys[:, :, cache_position] = prefill_key_states
+-                self.prefill_values[:, :, cache_position] = prefill_value_states
++                self.prefill_keys[:, :, write_positions] = prefill_key_states
++                self.prefill_values[:, :, write_positions] = prefill_value_states
+ 
+             self.prefill_cumulative_length += prefill_kv_length
+ 

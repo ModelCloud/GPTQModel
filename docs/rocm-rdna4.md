@@ -49,33 +49,54 @@ table instead of a single module-level constant set.
 | GPTQ Torch (fused GEMV / small-M GEMM / dequant) | ✅ (family table) | ✅ measured | ✅ (family table) | Per-arch launch table: RDNA4 GEMV `block_n=16/num_warps=4`, GEMM `(32, 32)/num_warps=4`, gate `(16, 17408)`; `tl.dot` lowers to `v_wmma_f32_16x16x16_f16`; **fused small-M GEMM is FP16-only** (BF16 goes through dequantize + matmul), GEMV keeps both dtypes |
 | GPTQ Triton dequant (`triton_utils/dequant.py`) | ✅ (family table) | ✅ measured | ✅ (family table) | Per-arch launch table: RDNA4 `x_block=2048/num_warps=4/num_stages=1` (74.5 us geomean vs the CDNA tile's 81.7 us on gfx1201). Output is bit-identical to the CDNA tile; the tile only changes the launch shape |
 | AWQ Triton GEMM (`FORMAT.GEMM` → `AwqGEMMTritonLinear`) | ✅ | ✅ measured (per-device plan table) | ✅ (family table) | portable Triton; capability-based dispatch removed for ROCm. A HIP host reports a seven-field `device_identity` (the HIP arch is appended, `capability` is `None`), and the scheduler now has an exact-match RDNA4 rule set instead of always falling back to the generic tile. Measured 1.67x-10.01x faster than that generic policy at the 4090 rule shapes (`(M,N,K,G)` in the M<=128 band), FP16 only. See *AWQ GEMM scheduler on RDNA4* below |
-| AWQ `FORMAT.GEMV` / `GEMV_FAST` / `LLM_AWQ` | ❌ native / ✅ `AWQ_GEMV_TRITON` (AUTO quantize, explicit load) | ❌ native / ✅ `AWQ_GEMV_TRITON` measured | ❌ native / ✅ `AWQ_GEMV_TRITON` (family table) | The native CUDA extension (`gemv_forward`/`gemmv2_forward`/`gemv_fast_forward_decode`) is still CUDA-only and hipcc rejects it (`cuda_fp16.h`, CUDA inline asm, 64-bit-only warp mask); `AwqGEMVLinear` keeps `SUPPORTS_DEVICES=[DEVICE.CUDA]` and loading it on ROCm raises `NotImplementedError` naming `AWQ_GEMM_TRITON`. **`BACKEND.AWQ_GEMV_TRITON`** now runs the same packed `FORMAT.GEMV` layout portably: a Triton kernel (`quantization/awq/modules/triton/gemv.py`) with FP32 accumulation, weights staying packed, output dtype == input dtype. `FORMAT.GEMV` quantize with `backend=AUTO` resolves to it on ROCm (`awq_gemv_pack_backend`), while the generic AUTO load order keeps its `SUPPORTS_FORMATS` priority `0` and still refuses an AUTO load of the native layout, so reload a GEMV checkpoint with `BACKEND.AWQ_GEMV_TRITON`. Measured 6.6-30.7x faster than the split dequantize+matmul path it replaces, and at parity (0.81-1.38x) with the shipped `FORMAT.GEMM` Triton GEMM at M==1 (see the AWQ table below); it is a portability fix, not a decode speedup over `FORMAT.GEMM`. Single-token / decode only; `FORMAT.GEMM` stays the prefill path |
+| AWQ `FORMAT.GEMV` / `GEMV_FAST` / `LLM_AWQ` | ❌ native / ✅ `FORMAT.GEMV` via `AWQ_GEMV_TRITON`, `GEMV_FAST`/`LLM_AWQ` via portable Torch | ❌ native / ✅ same split measured | ❌ native / ✅ same split (family table) | The native CUDA extension (`gemv_forward`/`gemmv2_forward`/`gemv_fast_forward_decode`) is still CUDA-only and hipcc rejects it (`cuda_fp16.h`, CUDA inline asm, 64-bit-only warp mask); the native classes keep `SUPPORTS_DEVICES=[DEVICE.CUDA]`. **`FORMAT.GEMV`**: `BACKEND.AWQ_GEMV_TRITON` runs the same packed layout with a portable Triton kernel (`quantization/awq/modules/triton/gemv.py`, FP32 accumulation, weights staying packed, output dtype == input dtype). AUTO quantize resolves it (`awq_gemv_pack_backend`), while the generic AUTO load order keeps its `SUPPORTS_FORMATS` priority `0`, so reload a GEMV checkpoint with `BACKEND.AWQ_GEMV_TRITON`; measured 6.6-30.7x faster than the split dequantize+matmul path, at parity (0.81-1.38x) with the `FORMAT.GEMM` Triton GEMM at M==1. **`FORMAT.GEMV_FAST`/`FORMAT.LLM_AWQ`** have no Triton kernel: `AwqGEMVFastTorchLinear`/`LLMAwqTorchLinear` read the identical interleaved INT16 layout in portable Torch, dequantizing a bounded FP32 tile per forward and retaining only the packed storage. AUTO quantize resolves them through `awq_gemv_fast_pack_backend` -> `BACKEND.AWQ_TORCH` (#5109), and an AUTO load resolves the same reader through `PORTABLE_FALLBACK`, so quantize -> save -> reload completes on ROCm. A CPU-only host resolves `FORMAT.GEMV` to `BACKEND.AWQ_TORCH` (`AwqGEMVTorchLinear`) and the other two to their Torch readers as well |
 | QQQ | ✅ `QQQ_TORCH` only | ✅ | ✅ | `QQQLinear` (Marlin-derived W4A8) is CUDA-only and there is **no** Triton port (see *QQQ* below); AUTO selects `QQQTorchLinear` |
-| ParoQuant Triton | ✅ explicit `PAROQUANT_TRITON` only | ✅ measured (per-family tiles) | ✅ (family table) | portable Triton ops; AUTO keeps the Torch `ParoLinear` kernel. Per-family, row-banded launch table; the RDNA4 tiles are 1.31-1.72x faster than the historical CUDA tile (see *ParoQuant Triton* below) |
+| Paro Triton | ✅ AUTO (family table) | ✅ AUTO measured (per-family tiles) | ✅ AUTO (family table) | portable Triton ops; AUTO selects `PARO_TRITON` on ROCm and keeps `ParoLinear` on CUDA. Per-family, row-banded launch table; the RDNA4 tiles are 1.31-1.72x faster than the historical CUDA tile (see *Paro Triton* below) |
 | GGUF | ✅ `GGUF_TRITON` (AUTO) or `GGUF_TORCH` | ✅ measured | ✅ (family table) | `GGUF_TRITON` now declares `DEVICE.ROCM` and validates there; on ROCm `_cuda_device_capability()` returns `None`, so only the generic launch configs run (no SM80/SM89 specialization). Measured 5.0-13.1x faster than `GGUF_TORCH` at decode **and** prefill, so AUTO (priority 45) selects it; `GGUF_TORCH` stays available via `BACKEND.GGUF_TORCH` |
 | FP8 Torch | ✅ (family table) | ✅ measured | ✅ (family table) | `_scaled_mm` accepts `float8_e4m3fn`/`e5m2` and rejects the `fnuz` encodings on gfx1201; a rejected dtype is logged once and falls back to dequantize + matmul |
-| VPTQ | ✅ via `VPTQ_TORCH` (`vptq_cuda` is CUDA-only and rejects ROCm explicitly) | ✅ | ✅ | |
-| EXL3 | ✅ `EXL3_TORCH` only | ✅ | ✅ | tensor-core GEMM tables are `nullptr` on ROCm; AUTO selects `EXL3_TORCH` |
+| VPTQ | ✅ via `VPTQ_TORCH` (`vptq_cuda` is CUDA-only and rejects ROCm explicitly) | ✅ | ✅ | `VPTQCudaLinear` ranks above `VPTQLinear` (110 vs 100) so AUTO loads the fused kernel on NVIDIA; `validate_once` rejects ROCm before any build, so AUTO still lands on `VPTQ_TORCH` here |
+| EXL3 | ✅ `EXL3_EXLLAMA_V3` (AUTO) or `EXL3_TORCH` | ✅ `EXL3_EXLLAMA_V3` (AUTO), measured | ✅ `EXL3_TORCH` only | tensor-core GEMM tables are `nullptr` on ROCm, but the native HIP GEMV and WMMA GEMM cover `gfx1200`/`gfx1201`. AUTO selects `EXL3_EXLLAMA_V3` when every selected ordinal is gfx120x and the extension is loadable or buildable; `gfx1250`, CDNA, other ROCm targets and hosts without the HIP ops keep `EXL3_TORCH`. Parity harness and baseline in *EXL3 on RDNA4* |
 | Marlin / Machete / Swordfish / BitBLAS / W4A-NVFP4 | ❌ | ❌ | ❌ | deliberately unsupported: NVIDIA-only kernels (Marlin `mma.sync`/`cp.async` with tile permutes, Hopper/Blackwell CUTLASS for Machete/Swordfish, BitBLAS TensorCore IR, SM12.1 FP4 tensor cores for W4A-NVFP4) with no HIP lowering. None lists `DEVICE.ROCM`, so the AUTO candidate list filters them out before validation; an explicit selection fails with an actionable error naming the portable backend. See *Deliberately unsupported backends* below |
 
-### AWQ GEMV AUTO resolution
+### AWQ GEMV-family AUTO resolution
 
 `FORMAT.GEMV` quantization used to hardcode `BACKEND.AWQ_GEMV`, the native
 CUDA-only kernel, so `backend=AUTO` aborted before calibration on ROCm. The
-quantize path now asks `awq_gemv_pack_backend(is_rocm=IS_ROCM)` for the pack
-kernel; the generic AUTO load order is unchanged.
+quantize path now asks `awq_gemv_pack_backend(device_type=..., is_rocm=IS_ROCM)`
+for the pack kernel; the generic AUTO load order is unchanged. A CPU-only host
+resolves to `BACKEND.AWQ_TORCH` (`AwqGEMVTorchLinear`), so `quantize()` ->
+`save()` produces the requested GEMV checkpoint and the in-session model still
+runs (issue #4554).
+
+`FORMAT.GEMV_FAST`/`FORMAT.LLM_AWQ` have no Triton kernel, so their quantize
+path asks `awq_gemv_fast_pack_backend` instead and resolves to
+`BACKEND.AWQ_TORCH` on CPU and ROCm (#5109). Their portable readers
+(`AwqGEMVFastTorchLinear`, `LLMAwqTorchLinear`) declare `DEVICE.ROCM`, so the
+AUTO *load* of a saved checkpoint resolves them through the per-family
+`PORTABLE_FALLBACK` in `select_quant_linear`; no explicit backend is needed.
 
 ```mermaid
 flowchart TD
-    A["quantize(format=GEMV, backend=AUTO)"] --> B{"IS_ROCM?"}
-    B -- "yes" --> C["awq_gemv_pack_backend<br/>BACKEND.AWQ_GEMV_TRITON"]
-    B -- "no" --> D["awq_gemv_pack_backend<br/>BACKEND.AWQ_GEMV"]
-    C --> E["select_quant_linear<br/>AwqGEMVTritonLinear"]
-    D --> F["select_quant_linear<br/>AwqGEMVLinear"]
-    E --> G["quantize -> save -> reload<br/>with BACKEND.AWQ_GEMV_TRITON"]
-    F --> H["quantize -> save -> AUTO reload"]
-    G -. "AUTO load still refuses native GEMV" .-> I["AWQ_GEMV_ROCM_UNSUPPORTED"]
-    style I fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    A["quantize(format, backend=AUTO)"] --> B{"format"}
+    B -- "GEMV" --> C{"device_type"}
+    B -- "GEMV_FAST / LLM_AWQ" --> F{"device_type / is_rocm"}
+    C -- "cpu" --> J["awq_gemv_pack_backend<br/>BACKEND.AWQ_TORCH"]
+    C -- "cuda + IS_ROCM" --> K["awq_gemv_pack_backend<br/>BACKEND.AWQ_GEMV_TRITON"]
+    C -- "cuda" --> L["awq_gemv_pack_backend<br/>BACKEND.AWQ_GEMV"]
+    F -- "cpu or IS_ROCM" --> M["awq_gemv_fast_pack_backend<br/>BACKEND.AWQ_TORCH"]
+    F -- "cuda" --> N["awq_gemv_fast_pack_backend<br/>BACKEND.AWQ_GEMV_FAST"]
+    J --> J2["AwqGEMVTorchLinear"]
+    K --> K2["AwqGEMVTritonLinear"]
+    L --> L2["AwqGEMVLinear"]
+    M --> M2["AwqGEMVFastTorchLinear<br/>LLMAwqTorchLinear"]
+    N --> N2["AwqGEMVFastLinear<br/>LLMAwqLinear"]
+    J2 --> P["quantize -> save -> AUTO reload<br/>on CPU"]
+    M2 --> Q["quantize -> save -> AUTO reload<br/>on CPU and ROCm"]
+    K2 --> R["quantize -> save -> reload<br/>with BACKEND.AWQ_GEMV_TRITON"]
+    L2 --> S["quantize -> save -> reload<br/>with BACKEND.AWQ_GEMV"]
+    N2 --> T["quantize -> save -> reload<br/>with BACKEND.AWQ_GEMV_FAST"]
+    K2 -. "AUTO load still refuses native GEMV" .-> U["AWQ_GEMV_ROCM_UNSUPPORTED"]
+    style U fill:#f8d7da,stroke:#b02a37,stroke-width:2px
 ```
 
 ### hipBLASLt is present but untuned
@@ -92,12 +113,16 @@ identical GPTQ runs then save different checkpoints — measured on Qwen2.5-0.5B
 therefore exports `ROCBLAS_USE_HIPBLASLT=0` at import unless the caller already
 set it, so rocBLAS runs its own deterministic kernels.
 
-That pin is scoped to methods that build a Hessian. #4079 forced rocBLAS for
-every calibrated run; on gfx1201 rocBLAS has no fast fp16/bf16 kernels, so AWQ
-and RTN paid 8-14x on their GEMMs with no determinism gain. A run plan that
-contains a Hessian builder - GPTQ, QQQ, VPTQ, MACaQ, EXL3 or calibrated FP8 GSQ
-(`_needs_deterministic_hessian` in `gptqmodel/models/base.py`) - now pins
-rocBLAS, and every other method pins hipBLASLt for its whole run. #4105 gated
+That pin is scoped to methods that build a Hessian or input Gram. #4079 forced
+rocBLAS for every calibrated run; on gfx1201 rocBLAS has no fast fp16/bf16
+kernels, so AWQ and RTN paid 8-14x on their GEMMs with no determinism gain. A
+run plan that contains a Hessian/Gram builder - GPTQ, QQQ, VPTQ, MACaQ, EXL3, or an EoRA adapter (`_needs_deterministic_hessian` in
+`gptqmodel/models/base.py`) - now pins rocBLAS, as does Paro (no Hessian, but
+hipBLASLt's per-process kernel choice made seeded runs differ, #4460); every
+other method pins hipBLASLt for its whole run. An AWQ plan with an EoRA adapter
+therefore pins rocBLAS for the whole run as well: EoRA's fp32 input Gram
+accumulates from the same calibration forwards, and the guard cannot switch
+backends for a nested secondary phase. #4105 gated
 this on `ProcessorStep.GPTQ` alone and therefore dropped QQQ, which does build a
 Hessian: four QQQ runs then produced three distinct checkpoints differing in
 490/627 tensors (issue #4123). The Hessian builders keep the pin for the
@@ -113,20 +138,32 @@ nondeterministic, independently of BLAS. See
 for the flow and the full table.
 
 An explicit `ROCBLAS_USE_HIPBLASLT=1` (or
-`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt`, or the opt-out spellings `""`, `0`, `off`
+`KernelConfig(rocm_quant_blas="hipblaslt")`, or the opt-out spellings `""`, `0`, `off`
 and `default`) opts back into hipBLASLt. It is faster but not reproducible
 across processes: `ROCBLAS_USE_HIPBLASLT=1` gave 224/483
 differing tensors across two GPTQ runs, and four
-`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` runs split into two kernel-selection
+`KernelConfig(rocm_quant_blas="hipblaslt")` runs split into two kernel-selection
 groups differing in 222/483 (the issue measured 224/482). GPT-QModel warns once
 whenever the pin is skipped, including the opt-out spellings.
 
 Cold hipBLASLt library loading also dominates a cold quantize on CDNA.
-hipBLASLt remains available as an explicit experiment:
+hipBLASLt remains available as an explicit experiment. Attach it to the
+quantization config so each quantization run installs it:
 
-```bash
-GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt python quantize.py
+```python
+from gptqmodel import CalibrationConfig, GPTQModel
+from gptqmodel.backend import RuntimeConfig
+from gptqmodel.quantization import QuantizeConfig
+
+qcfg = QuantizeConfig(bits=4, runtime=RuntimeConfig(rocm_quant_blas="hipblaslt"))
+model = GPTQModel.load("org/model", quantize_config=qcfg)
+model.quantize(CalibrationConfig(dataset=calibration_dataset))
 ```
+
+A bare `configure_kernel(KernelConfig(rocm_quant_blas="hipblaslt"))` call does
+not last: every `GPTQModel.load` and both quantization loopers install the
+policy their config resolves to, so a process-wide policy set beforehand is
+reset to the default.
 
 `gptqmodel.utils.rocm.quantize_tuning(device)` returns
 `{"blas_backend", "amp", "prewarm_ops"}`; `amp` stays disabled on ROCm
@@ -143,18 +180,24 @@ caller-provided value. See
 [ROCm default process environment](rocm-default-environment.md) for the flow,
 the precedence rules and the before/after numbers.
 
-### ParoQuant Triton
+### Paro Triton
 
-`ParoQuantTritonLinear` now declares `DEVICE.ROCM` alongside `DEVICE.CUDA`,
+`ParoTritonLinear` now declares `DEVICE.ROCM` alongside `DEVICE.CUDA`,
 which resolves the contradiction with the HIP `libdevice` branch in
-`quantization/paroquant/modules/triton/sym_ste.py`. The decision is based on
+`quantization/paro/modules/triton/sym_ste.py`. The decision is based on
 inspection, not hardware: the runtime GEMM/GEMV kernels use only portable
 Triton (`tl.load`/`tl.store`, shifts, `tl.interleave`, `tl.dot`) with no
 CUDA-only intrinsic, inline PTX, or libdevice call, and the launch path uses
 `torch.cuda.device`, which HIP also provides.
 
-`SUPPORTS_FORMATS[FORMAT.PAROQUANT] = 0` means `PAROQUANT_TRITON` is never
-chosen by `AUTO`; selecting it explicitly is required on every platform.
+`ParoTritonLinear.SUPPORTS_FORMATS = {FORMAT.PARO: 10}` makes it AUTO-eligible,
+and `auto_select_priority()` returns that rank on ROCm. It therefore wins AUTO
+over `ParoLinear`, whose ROCm rank is demoted to 0 because its AWQ GEMM is
+CUDA-only and it would dequantize the whole packed weight on every forward
+(#4914). On CUDA `ParoTritonLinear` returns 0 and `ParoLinear` keeps its higher
+rank, so an explicit `BACKEND.PARO_TRITON` is still required there. A Paro
+checkpoint reloaded with `backend="auto"` resolves to `ParoTritonLinear` on
+ROCm; on CPU it resolves to `ParoLinear`.
 
 **Verified on gfx1201.** Both Triton kernels (`decode` and `prefill` launch
 configs) were A/B'd against an independent FP64 Torch oracle that unpacks the
@@ -164,21 +207,21 @@ and BF16 activations:
 
 | Check | Result |
 |---|---|
-| `paroquant_dequantize_triton` vs FP64 oracle | max abs err 7.5e-09, max rel err 6.0e-08 (FP32 output = exact) |
+| `paro_dequantize_triton` vs FP64 oracle | max abs err 7.5e-09, max rel err 6.0e-08 (FP32 output = exact) |
 | `decode` / `prefill` GEMM, FP16 | arithmetic error 2.8e-04 to 3.1e-04 relative to an FP64 truth; output dtype == input dtype |
 | `decode` / `prefill` GEMM, BF16 | arithmetic error 2.2e-03 to 2.4e-03 relative; output dtype == input dtype |
 
 The BF16 relative error is dominated by the BF16 output rounding, not the
 kernel: against the output rounded once to BF16 the max absolute error is
 4.8e-02 for a value range whose half-ULP is 5.8e-02 (< 1 ULP), and the FP16 case
-is 5.4e-03 against a 7.2e-03 half-ULP (0.75 ULP). The fused ParoQuant rotation
-(`gptqmodel_ext/paroquant`) also loads and runs on gfx1201; its error versus an
+is 5.4e-03 against a 7.2e-03 half-ULP (0.75 ULP). The fused Paro rotation
+(`gptqmodel_ext/paro`) also loads and runs on gfx1201; its error versus an
 FP64 no-rounding oracle is smaller than the pure-Torch reference path's
 (FP16 3.7e-04 vs 4.4e-04 at K=1024, BF16 3.4e-03 vs 3.6e-03).
 
-### ParoQuant per-family launch table
+### Paro per-family launch table
 
-`quantization/paroquant/modules/triton/gemm.py` used to hardcode the CUDA tiles
+`quantization/paro/modules/triton/gemm.py` used to hardcode the CUDA tiles
 for every GPU: decode `(BLOCK_M=4, BLOCK_N=128, BLOCK_K=32, warps=4, stages=2)`
 and prefill `(32, 128, 32, warps=8, stages=4)`. Those are wave64/CDNA shapes;
 `num_warps=8` is 256 threads with a wave32 mapping on RDNA4, which is not the
@@ -299,9 +342,9 @@ BLAS backend `rocblas` throughout; single process, one R9700):
 | GPTQ | 0.47 | 32.39 | 0.31 | 33.62 | 413.8 |
 | AWQ | 0.41 | 47.84 | 0.35 | 48.90 | 354.2 |
 | QQQ | 0.41 | 17.58 | 0.46 | 18.82 | 88.0 |
-| ParoQuant | 0.53 | 194.61 | 0.41 | 195.84 | 298.1 |
+| Paro | 0.53 | 194.61 | 0.41 | 195.84 | 298.1 |
 
-ParoQuant's quantize stage includes the JIT build/load of the fused rotation
+Paro's quantize stage includes the JIT build/load of the fused rotation
 extension, so it is a cold-cache number. These are wall-clock measurements of a
 single run, not a tuned or repeated benchmark.
 
@@ -316,7 +359,7 @@ cases on an RDNA4 host. Dense-weight residency is judged from the module's
 persistent state after the first *and* repeated forwards (the fused GEMV/GEMM,
 the RDNA4 BF16 split path, and the CPU dequantize+matmul fallback at M=1 and
 small M): no dense/dequantized copy is installed, `qweight`/`scales`/`qzeros`
-remain the only full-size resident tensors, and `GPTQ_TORCH_CACHE_WEIGHTS` stays
+remain the only full-size resident tensors, and `KernelConfig.torch_cache_weights` stays
 unset.
 
 ### Bias epilogue on ROCm (fused before rounding)
@@ -621,14 +664,118 @@ within 3.5e-04 (FP16) and 2.7e-03 (BF16) of the output maximum.
 
 Ada keeps bitsandbytes' cublas-backed kernels, which are measured faster than
 the Triton tile on every shape tested; the `ada` launch entry exists for the
-parity contract and for forced A/B runs (`GPTQMODEL_BNB_TRITON=1`).
+parity contract and for forced A/B runs (`KernelConfig(bitsandbytes_triton=True)`).
+
+### EXL3 on RDNA4 (native HIP GEMV, WMMA GEMM and hipBLAS baseline)
+
+EXL3 exposes three forward paths on ROCm:
+
+- `EXL3_TORCH` (`ExllamaV3TorchLinear`, the AUTO fallback on CDNA, other ROCm
+  targets and hosts without the HIP extension) decodes the packed trellis in
+  portable Torch and runs a hipBLAS matmul. It is the correctness reference
+  and the slow path.
+- `LinearEXL3.forward` dispatches to the native HIP kernels when they cover
+  the shape: the native GEMV for `bsz <= 8` and the native RDNA4 WMMA GEMM for
+  up to 512 rows with K and N multiples of 128. AUTO selects this path on
+  gfx120x when the extension is loadable or buildable (#5836). Everything else
+  runs `ext.reconstruct` (dense FP16 weight), `ext.hgemm` (hipBLAS) and the
+  output `ext.had_r_128`. See
+  [RDNA4 HIP dispatch](exl3-native-decode.md#rdna4-hip-dispatch).
+- The packed tensor-core entry point (`bc_linear_exl3_run` / `exl3_gemm`)
+  reports `EXL3_HIP_DISPATCH_NATIVE` (93) or `EXL3_HIP_DISPATCH_FALLBACK` (94);
+  the benchmark's `native` backend times it directly.
+
+A public-load regression on gfx1201 (R9700, one 256->512 EXL3 3.0 bpw `mul1`
+projection, FP16, median of 100 forwards) measures the selection end to end
+through `GPTQModel.load`:
+
+| M | `EXL3_TORCH` ms | AUTO (`EXL3_EXLLAMA_V3`) ms | speedup | max abs drift vs FP64 oracle |
+|---:|---:|---:|---:|---:|
+| 1 | 0.533 | 0.046 | 11.5x | 3.5e-05 |
+| 8 | 0.527 | 0.047 | 11.3x | 4.6e-05 |
+| 9 | 0.557 | 0.047 | 11.8x | 5.3e-05 |
+
+The decode batches (M=1/8) call `bc_linear_exl3_run_hip_gemv`; M=9 takes the
+fused WMMA GEMM. Peak transient GPU allocation for the M=1 forward is 3.4 KiB
+native versus 80.5 MiB for the portable decode, while both retain the same
+50,688-byte packed payload (49,152-byte trellis). The native output stays
+within 3.7e-04 relative Frobenius error of the independent FP64 oracle.
+`tests/kernels/test_exl3_public_load_hip_5836.py` pins the selection, the
+GEMV/GEMM split and the numerics.
+
+`tests/kernels/test_exl3_rocm_parity.py` pins both paths against the
+independent bitstream oracle in `tests/test_exllamav3_torch_padding.py`
+(30 passed, 1 skipped on gfx1201). The skip is `r4nx`, which this tree does
+not expose (no marker and no `r4nx` keyword). Integer `mcg` and `mul1` at
+2/3/4 bpw quantize through `quantize_exl3` and match the oracle exactly after
+decode; `mul1` at 2.5/3.5 bpw and `q4nx` at 2.5/3/3.5 bpw expose their
+quantizers as CUDA-only on ROCm (`requires NVIDIA CUDA`) and are exercised
+from a synthetic packed trellis instead. The portable and
+reconstruct+hgemm forwards match the FP64 oracle at `rtol=atol=2e-3`
+(5e-3 for the packed synthetic cases).
+
+`tests/benchmark_exl3_rocm_rdna4.py` measures the same paths on a synthetic
+packed projection (inference only; no quantization in the timed region). The
+default grid is `m {1, 8, 32, 128} x k {2048, 4096, 8192} x
+n {2048, 4096, 8192, 16384} x bpw {2, 3, 4}`; every region is bracketed by
+`torch.cuda.synchronize()`, the default is 20 timed reps after 5 warm-ups, and
+a row whose block median moves more than 20% is re-measured. The table is the
+`k=4096`, 3 bpw slice of one run on an R9700 (gfx1201, one device, no
+contention re-measures; maximum block spread 11.2%):
+
+| m | n | `EXL3_TORCH` ms | reconstruct+hgemm ms | `module` ms | speedup |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 2048 | 6.260 | 0.144 | 0.151 | 43.3x |
+| 1 | 4096 | 12.198 | 0.199 | 0.210 | 61.3x |
+| 1 | 8192 | 24.354 | 0.380 | 0.394 | 64.0x |
+| 1 | 16384 | 48.308 | 0.725 | 0.733 | 66.7x |
+| 8 | 2048 | 6.246 | 0.145 | 0.152 | 43.2x |
+| 8 | 4096 | 12.152 | 0.202 | 0.212 | 60.2x |
+| 8 | 8192 | 24.237 | 0.386 | 0.395 | 62.8x |
+| 8 | 16384 | 47.994 | 0.742 | 0.745 | 64.7x |
+| 32 | 2048 | 6.247 | 0.147 | 0.155 | 42.5x |
+| 32 | 4096 | 12.198 | 0.215 | 0.224 | 56.8x |
+| 32 | 8192 | 24.164 | 0.406 | 0.415 | 59.5x |
+| 32 | 16384 | 47.833 | 0.625 | 0.649 | 76.6x |
+| 128 | 2048 | 6.233 | 0.242 | 0.258 | 25.8x |
+| 128 | 4096 | 12.298 | 0.435 | 0.466 | 28.2x |
+| 128 | 8192 | 24.014 | 0.854 | 0.870 | 28.1x |
+| 128 | 16384 | 48.059 | 1.644 | 1.630 | 29.2x |
+
+`EXL3_TORCH` is almost flat in `m` because it decodes the whole weight per
+call (6.2 ms at `n=2048` through 48.3 ms at `n=16384`); reconstruct+hgemm
+scales with `m`. Across all 144 shapes and bitrates reconstruct+hgemm is
+18.1x-81.2x faster than `EXL3_TORCH` (median 45.1x, geomean 42.4x), and the
+`LinearEXL3` wrapper adds no measurable work (module/reconstruct 0.96x-1.11x,
+median 1.04x). At `k=n=8192`, 3 bpw, reconstruct+hgemm takes 0.739 ms at
+`m=1` (0.2 TFLOP/s) and 1.682 ms at `m=128` (10.2 TFLOP/s). The reconstruct
+path materializes a dense FP16 weight, so these numbers are a
+memory-bandwidth-bound lower bound for a packed native kernel, not a
+packed-kernel measurement.
+
+The native RDNA4 WMMA GEMM now beats that baseline on the GEMM rows: across 60
+2.0 bpw shapes (`m` 16-256, `k` 2048-8192, `n` 2048-16384) it is 1.14x-5.48x
+faster than reconstruct+hgemm (median 2.88x, geomean 2.66x, no regressions),
+and 1.2x-3.9x on a 3.0/4.0 bpw sample. Its maximum relative error against the
+reconstruct oracle is 2.6e-05 for an FP32 destination (4.4e-04 for FP16).
+Decode-sized batches use the native GEMV instead.
+
+Both the parity result and the table were measured with the local
+`#include <cuda_bf16.h>` workaround for the HIP JIT build break tracked in
+#5760. On the unpatched tree the extension cannot build, and the parity module
+reports the quantizer and reconstruct+hgemm cases as skipped (the portable
+synthetic-trellis cases still run).
 
 ## Known limitations
 
-- **EXL3:** the tensor-core GEMM implementation has no ROCm kernel (all entries
-  are `nullptr` and the loader already raises a clear `TORCH_CHECK`). Loading
-  EXL3 on ROCm uses `EXL3_TORCH`; AUTO now does the same instead of selecting
-  `EXL3_EXLLAMA_V3`.
+- **EXL3:** the CUDA tensor-core tables are still `nullptr` on ROCm. AUTO
+  loads `EXL3_EXLLAMA_V3` on RDNA4 (gfx120x) when every selected ordinal is
+  covered and the extension is loadable or buildable; CDNA, other ROCm targets
+  and hosts without the HIP ops keep `EXL3_TORCH`. On RDNA4 the in-module
+  forward (`LinearEXL3.forward`) reaches the native HIP GEMV and WMMA GEMM,
+  which reconstruct + hgemm internally when the shape is out of range.
+  `tests/kernels/test_exl3_rocm_parity.py` pins the numerics and
+  `tests/benchmark_exl3_rocm_rdna4.py` records the baseline.
 - **hipBLASLt:** libraries are shipped but not tuned for RDNA4; rocBLAS
   forwarding to hipBLASLt is disabled by default (`ROCBLAS_USE_HIPBLASLT=0`)
   because it picks a different kernel per process.
@@ -849,6 +996,7 @@ rejects the device when `allspark_hip_available()` is false (lines 87-92).
 | `tests/test_allspark_hip.py::test_arch_allowlist` | gfx1250 is rejected at runtime |
 | `tests/test_marlin_jit.py::test_marlin_extra_cuda_cflags_skip_nvcc_only_flag_on_rocm` | no nvcc-only flag on ROCm |
 | `tests/test_machete_jit.py::test_machete_extra_cuda_cflags_skip_nvcc_only_flag_on_rocm` | same for Machete |
+| `tests/kernels/test_exl3_rocm_parity.py` | every ROCm EXL3 codebook decodes exactly to the bitstream oracle; portable and reconstruct+hgemm forwards match it; CUDA-only quantizers are reported, not silently skipped |
 
 ## Verification commands
 
@@ -865,6 +1013,10 @@ cd $REPO && $ROCM_PY -m pytest tests/test_arch.py -p no:cacheprovider
 
 # RDNA4 kernels + numerics (requires gfx120*)
 cd $REPO && $ROCM_PY -m pytest tests/kernels/test_gptq_rocm_gemv.py tests/kernels/test_gptq_rocm_gemm.py -p no:cacheprovider
+
+# EXL3 parity and baseline (requires gfx12xx)
+cd $REPO && $ROCM_PY -m pytest tests/kernels/test_exl3_rocm_parity.py -p no:cacheprovider
+cd $REPO && HIP_VISIBLE_DEVICES=3 $ROCM_PY tests/benchmark_exl3_rocm_rdna4.py --device 0 --reps 20 --json /tmp/exl3_rdna4.json --pivot
 
 # Benchmarks
 cd $REPO && $ROCM_PY scripts/benchmark_rdna4_quant.py --model <local-model> --method gptq --bits 4

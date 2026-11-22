@@ -127,8 +127,8 @@ after folding a neutral scale):
 | --- | --- | --- |
 | Offset-gain detection | `isinstance(ln, GemmaRMSNorm) or isinstance(ln, Gemma2RMSNorm)` at `gptqmodel/quantization/awq/quantize/scale.py:145` (origin/main) | `_norm_gain_offset` -> `resolve_gain_offset` at `gptqmodel/quantization/awq/quantize/scale.py:75` |
 | Offset fold precision | `ln.weight += 1; ln.weight.div_(scales); ln.weight -= 1` in the stored dtype | float32 `folded.add_(1).div_(s).sub_(1)` then cast back, `gptqmodel/quantization/awq/quantize/scale.py:189` |
-| `prev_op` for a run of non-quantized blocks | first block of the run; subsequent blocks skipped at `gptqmodel/models/base.py:4415` (origin/main) | all blocks collected in `pending_nonquant`; consumer picks the matching gain norm via `_select_prev_op` at `gptqmodel/models/base.py:4443` |
-| Sandwich post-norms | not distinguishable from a source norm; LFM3 selected `post_operator_norm` / `post_ffn_norm` | `:postnorm` excludes them from `_select_prev_op`, `gptqmodel/models/base.py:420` and `:1202` |
+| `prev_op` for a run of non-quantized blocks | first block of the run; subsequent blocks skipped at `gptqmodel/models/base.py:4415` (origin/main) | all blocks collected in `pending_nonquant`; consumer picks the matching gain norm via `gptqmodel/models/base.py::_select_prev_op` |
+| Sandwich post-norms | not distinguishable from a source norm; LFM3 selected `post_operator_norm` / `post_ffn_norm` | `:postnorm` (`gptqmodel/models/base.py:560`) excludes them from `gptqmodel/models/base.py::_select_prev_op` |
 | Gain probe failure | grep the forward source for `1.0+self.weight` and fold as offset, `gptqmodel/quantization/awq/quantize/scale.py:62` (origin/main) | raise `UnresolvableGainOffset`; `apply_scale` skips the group, `gptqmodel/quantization/awq/quantize/scale.py:65` and `:150` |
 | Empty block inside a run | skipped only because the first-of-run rule skipped every later block | explicitly skipped without breaking the run, `gptqmodel/models/base.py:4442` |
 
@@ -144,6 +144,8 @@ after folding a neutral scale):
 | Gemma2 MLP fold, layer-output relative L2 | 0.561 | < 1e-5 |
 | LFM3 conv/FFN `prev_op` | `post_operator_norm` / `post_ffn_norm` | `operator_norm` / `ffn_norm` |
 | LFM3 layer-output relative L2 | 0.569 (fixture) / 0.688 (real model, issue #4002) | 1.57e-07 |
+| LFM3 attention fold targets | `operator_norm` -> Q/K/V/O; `g_proj` gate uncompensated (issue #5371) | `operator_norm` -> Q/K/V with `g_proj` consumer; `o_proj` plain |
+| LFM3 attention layer-output relative L2 | 0.313 (fixture, issue #5371) | 2.8e-07 |
 | `MuseSparkTextInputScaledRMSNorm` fold relative L2 | 0.113 (fp32) | scale skipped; output unchanged |
 | Gemma-3-1B AWQ4 wikitext-2 PPL, `max(s) ≈ 1.4e3` | 848.5 | 67.8 |
 | Gemma-3-1B RTN4 / base PPL (same harness) | 72.6 / 59.6 | 72.6 / 59.6 |
@@ -168,7 +170,9 @@ independent oracles.
   the historical `last_module` fallback is retained unless that module is a
   post-norm, in which case the block is skipped.
 - The selected norm must be a module that `apply_scale` can fold into
-  (`scale_ln_fcs`). A non-norm candidate is never selected.
+  (`scale_ln_fcs`). A non-norm candidate is never selected. A `:!`/`:?`
+  Linear is not a norm and has no compensation step, so it is never a fold
+  source either (rule 6 in [AWQ scaling groups](awq-scaling-groups.md)).
 - An unresolvable gain is fail-closed: the group is skipped, not folded with
   an assumed offset.
 - Low-precision checkpoints keep their stored dtype; only the intermediate

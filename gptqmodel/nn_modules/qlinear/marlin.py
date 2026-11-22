@@ -25,7 +25,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
     _marlin_all_visible_devices_supported,
@@ -39,6 +39,7 @@ from ...utils.marlin import (
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_pad_dim,
+    marlin_pad_packed_qzeros,
     marlin_pad_qweight,
     marlin_pad_scales,
     marlin_padded_nk,
@@ -48,18 +49,20 @@ from ...utils.marlin import (
     marlin_runtime_available,
     marlin_runtime_error,
     marlin_sort_g_idx,
+    marlin_stream_workspace,
     marlin_validate_runtime_device,
+    marlin_zero_points,
     replace_parameter,
+    unpack_cols,
 )
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
 
-# SM 7.5 is supported through the FP16-only Turing path.
-_MARLIN_SM75_CAPABILITY = (7, 5)
-_MARLIN_MIN_CAPABILITY = _MARLIN_SM75_CAPABILITY
+_MARLIN_MIN_CAPABILITY = (8, 0)
 
 
 def _g_idx_is_contiguous(g_idx: Optional[torch.Tensor], in_features: int, group_size: int) -> bool:
@@ -91,7 +94,10 @@ class MarlinLinear(GPTQQuantLinear):
     SUPPORTS_BITS = [4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
-    SUPPORTS_SYM = [True]
+    # Asymmetric checkpoints reach the native ``kU4``/``kU8`` zero-point
+    # kernels for every generated group size; activation order has no
+    # zero-point instantiation and stays on the fallbacks (``_validate``).
+    SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     # Tile padding is handled below; group boundaries must still divide K.
@@ -106,15 +112,35 @@ class MarlinLinear(GPTQQuantLinear):
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
-    REQUIRES_FORMAT_V2 = False
+    # The asymmetric path decodes logical zero points (``w = (q - z) * s``),
+    # so a v1 checkpoint (stored zero minus one) is converted once at load
+    # time instead of being shifted per layer. Symmetric layers keep their
+    # implicit ``uint4b8``/``uint8b128`` zero point and never read the words.
+    REQUIRES_FORMAT_V2 = True
+
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): the eager forward and an explicit
+    # ``torch.cuda.graph`` capture both run, and the replayed output matches
+    # eager. ``apply_gptq_marlin_linear`` has no fake/meta implementation, so
+    # ``torch.compile`` still stops at EAGER.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
+
+    # The Marlin evaluator adds the bias to its FP32 accumulator before the
+    # visible cast, so the buffer keeps its checkpoint width instead of
+    # following the model dtype at load time.
+    MODEL_DTYPE_BUFFERS = ()
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "marlin"
 
-    # (num_bits, is_sym) -> quant_type
+    # (num_bits, is_sym) -> quant_type. The symmetric types carry an implicit
+    # ``2 ** (bits - 1)`` zero point; the asymmetric types read the packed
+    # zero-point table built by ``post_init``.
     TYPE_MAP = {
         (4, True): scalar_types.uint4b8,
         (8, True): scalar_types.uint8b128,
+        (4, False): scalar_types.uint4,
+        (8, False): scalar_types.uint8,
     }
 
     def __init__(
@@ -143,6 +169,17 @@ class MarlinLinear(GPTQQuantLinear):
             # (since we have only one group per output channel)
             desc_act = False
 
+        if not sym and desc_act:
+            # ``generate_kernels.py`` has no activation-order instantiation of
+            # the integer zero-point types. Raising here is what lets
+            # ``create_quant_layer`` keep an AUTO-selected layer on the next
+            # compatible backend; an explicit BACKEND.MARLIN surfaces it.
+            raise NotImplementedError(
+                "Marlin asymmetric zero-point kernels are not generated for "
+                f"activation-order layers (desc_act=True, group_size={group_size}); "
+                "load with ExLlamaV2/Triton or re-quantize with desc_act=False."
+            )
+
         selected_backend = kwargs.pop("backend", BACKEND.MARLIN)
         # Padding adds work to every forward, so automatic selection stays conservative.
         if selected_backend in (BACKEND.AUTO, BACKEND.AUTO_TRAINABLE) and not marlin_is_tile_aligned(
@@ -155,7 +192,6 @@ class MarlinLinear(GPTQQuantLinear):
             )
 
         self.compute_dtype = kwargs.get("dtype") or torch.float16
-        self.fp32 = env_flag("GPTQMODEL_MARLIN_USE_FP32", default=True)
 
         super().__init__(
             bits=bits,
@@ -171,9 +207,10 @@ class MarlinLinear(GPTQQuantLinear):
             register_buffers=False, # do not register buffers in super()
             **kwargs)
 
+        self.fp32 = resolve_kernel_config(self).marlin_fp32
         if not self.fp32:
             log.warn.once(
-                "Kernel: GPTQMODEL_MARLIN_USE_FP32 is disabled. Marlin will use reduced-precision reduction.")
+                "Kernel: KernelConfig.marlin_fp32 is disabled. Marlin will use reduced-precision reduction.")
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
@@ -299,24 +336,22 @@ class MarlinLinear(GPTQQuantLinear):
         out_features = args.get("out_features")
         desc_act = args.get("desc_act", False)
         group_size = args.get("group_size", -1)
-        device = args.get("device")
-        dtype = args.get("dtype")
-        if dtype == torch.bfloat16 and not IS_ROCM:
-            if isinstance(device, torch.device) and device.type == "cuda":
-                capabilities = (torch.cuda.get_device_capability(device),)
-            elif device == DEVICE.CUDA:
-                capabilities = tuple(
-                    torch.cuda.get_device_capability(index)
-                    for index in range(torch.cuda.device_count())
-                )
-            else:
-                capabilities = ()
-            if _MARLIN_SM75_CAPABILITY in capabilities:
-                return False, NotImplementedError(
-                    "GPTQ Marlin on compute capability 7.5 requires dtype=torch.float16."
-                )
+        sym = args.get("sym", True)
         if in_features is None or out_features is None:
             return True, None
+
+        effective_desc_act = desc_act and group_size not in (-1, in_features)
+        if not sym and effective_desc_act:
+            # ``generate_kernels.py`` instantiates the integer zero-point types
+            # only for ``group_blocks`` in ``-1/2/4/8``; ``0`` is the
+            # activation-order tile and exists for ``kU4B8``/``kU8B128`` only.
+            # Reject the contract here so AUTO keeps the layer on the next
+            # compatible backend instead of selecting a missing kernel.
+            return False, NotImplementedError(
+                "Marlin asymmetric zero-point kernels are not generated for "
+                f"activation-order layers (desc_act=True, group_size={group_size}); "
+                "load with ExLlamaV2/Triton or re-quantize with desc_act=False."
+            )
 
         pack_factor = 32 // bits
         # Tile padding cannot repair a partially packed int32 row or column.
@@ -327,7 +362,6 @@ class MarlinLinear(GPTQQuantLinear):
                 f"N={out_features}."
             )
 
-        effective_desc_act = desc_act and group_size not in (-1, in_features)
         # Act-order indices only describe the original K dimension.
         if effective_desc_act and not marlin_is_tile_aligned(
             out_features, in_features
@@ -347,7 +381,7 @@ class MarlinLinear(GPTQQuantLinear):
                 raise NotImplementedError("Marlin kernel is not supported on ROCm.")
             if isinstance(device, DEVICE):
                 if not _marlin_all_visible_devices_supported(_MARLIN_MIN_CAPABILITY):
-                    raise NotImplementedError("Marlin kernel only supports compute capability >= 7.5.")
+                    raise NotImplementedError("Marlin kernel only supports compute capability >= 8.0.")
                 return
             target = device if isinstance(device, torch.device) else device.to_torch_device()
             try:
@@ -361,15 +395,11 @@ class MarlinLinear(GPTQQuantLinear):
 
     def post_init(self):
         device = self.qweight.device
-        capability = marlin_validate_runtime_device(
+        marlin_validate_runtime_device(
             device,
             min_capability=_MARLIN_MIN_CAPABILITY,
             backend_name="GPTQ Marlin",
         )
-        if capability == _MARLIN_SM75_CAPABILITY and self.compute_dtype != torch.float16:
-            raise ValueError(
-                "GPTQ Marlin on compute capability 7.5 requires dtype=torch.float16."
-            )
 
         if not marlin_runtime_available(self.compute_dtype):
             raise ModuleNotFoundError(
@@ -386,6 +416,16 @@ class MarlinLinear(GPTQQuantLinear):
             self.in_features,
             self.requested_group_size,
         ):
+            if not self.sym:
+                # Fail closed: the activation-order flip below has no integer
+                # zero-point kernel, and silently dropping the index would
+                # decode a permuted weight with the wrong order.
+                raise NotImplementedError(
+                    "GPTQ Marlin: checkpoint g_idx is non-contiguous while "
+                    "`desc_act=False`, but the asymmetric zero-point kernels "
+                    "have no activation-order instantiation. Load this layer "
+                    "with a non-Marlin backend."
+                )
             if not marlin_is_tile_aligned(self.out_features, self.in_features):
                 raise NotImplementedError(
                     "GPTQ Marlin: checkpoint g_idx is non-contiguous but "
@@ -400,10 +440,19 @@ class MarlinLinear(GPTQQuantLinear):
             effective_desc_act = True
             self.desc_act = True
 
+        if not self.sym and effective_desc_act:
+            # Covers a caller that mutated ``desc_act`` after construction.
+            raise NotImplementedError(
+                "Marlin asymmetric zero-point kernels have no activation-order "
+                "instantiation; load this layer with a non-Marlin backend."
+            )
+
         self.is_k_full = marlin_is_k_full(effective_desc_act, is_row_parallel=False)
 
-        # Allocate marlin workspace.
+        # Allocate marlin workspace. Each CUDA stream that runs this module
+        # gets its own zeroed copy of these lock counters (#4683).
         self.workspace = marlin_make_workspace_new(device)
+        self._marlin_stream_workspaces = {}
 
         # GPTQModel also accepts group_size=K as channelwise quantization.
         marlin_group_size = (
@@ -469,15 +518,27 @@ class MarlinLinear(GPTQQuantLinear):
             setattr(self, "g_idx", marlin_make_empty_g_idx(device))
             self.g_idx_sort_indices = torch.empty(0, dtype=torch.int, device=device)
 
-        setattr(self, "qzeros", marlin_make_empty_g_idx(device))
+        if self.sym:
+            # ``uint4b8``/``uint8b128`` carry the zero point in the scalar
+            # type and the kernel never reads the words.
+            setattr(self, "qzeros", marlin_make_empty_g_idx(device))
+        else:
+            replace_parameter(
+                self,
+                "qzeros",
+                self._marlin_zero_points(marlin_group_size, padded_n, padded_k),
+            )
 
         _transform_param(self, "qweight", transform_w_q)
         _transform_param(self, "scales", transform_w_s)
 
         if hasattr(self, "bias") and self.bias is not None:
-            self.bias.data = marlin_permute_bias(
-                marlin_pad_dim(self.bias, self.out_features, padded_n)
-            )
+            # The kernel addresses the bias in its padded tile order, so the
+            # launch operand is derived per call (``_kernel_bias``) instead of
+            # replacing the registered buffer. ``self.bias`` therefore keeps
+            # the checkpoint width and order, and a value the activation dtype
+            # cannot hold is never narrowed here.
+            self._marlin_bias_padding = (self.out_features, padded_n)
 
         # The checkpoint's GPTQ words are now Marlin-tile-permuted and the
         # original zero points are gone. Mark the module so a state-dict save
@@ -485,6 +546,32 @@ class MarlinLinear(GPTQQuantLinear):
         self._marlin_repacked = True
 
         super().post_init()
+
+    def _marlin_zero_points(self, marlin_group_size: int, padded_n: int,
+                            padded_k: int) -> torch.Tensor:
+        """Permute GPTQ packed zero points into Marlin's runtime layout.
+
+        GPTQ packs consecutive output lanes into each int32 word (the same
+        natural order ``unpack_qzero_lanes`` reads), so ``unpack_cols`` already
+        yields the column order ``marlin_zero_points`` permutes. Unlike AWQ
+        there is no dequantizer interleave to undo first. Padded columns and
+        groups carry a zero zero point and stay inert because their weights and
+        scales are zero too.
+        """
+
+        padded_groups = 1 if marlin_group_size == -1 else padded_k // marlin_group_size
+        padded = marlin_pad_packed_qzeros(
+            self.qzeros.contiguous(),
+            self.out_features,
+            self.in_features,
+            padded_n,
+            padded_k,
+            marlin_group_size,
+            self.bits,
+            layout="GPTQ",
+        )
+        logical = unpack_cols(padded, self.bits, padded_groups, padded_n)
+        return marlin_zero_points(logical, padded_groups, padded_n, self.bits)
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         if getattr(self, "_marlin_repacked", False):
@@ -499,6 +586,30 @@ class MarlinLinear(GPTQQuantLinear):
                 )
         super()._save_to_state_dict(destination, prefix, keep_vars)
 
+    def _kernel_bias(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        """Return the FP32, tile-ordered bias operand for this call.
+
+        ``self.bias`` keeps the checkpoint width and order. The kernel reads a
+        padded, Marlin-permuted operand and adds it in FP32, so a wide stored
+        value has to reach the launch without an intermediate 16-bit cast. The
+        derivation is a temporary operand: nothing is written back to the
+        registered buffer, and no state is retained across calls.
+        """
+
+        bias = self.bias
+        if bias is None:
+            return None
+        if bias.device != x.device:
+            bias = bias.to(device=x.device)
+        source, padded = getattr(
+            self, "_marlin_bias_padding", (self.out_features, self.out_features)
+        )
+        if bias.dtype != torch.float32:
+            bias = bias.to(dtype=torch.float32)
+        if bias.shape != (source,):
+            bias = bias.reshape(-1)
+        return marlin_permute_bias(marlin_pad_dim(bias, source, padded))
+
     def forward(self, x: torch.Tensor):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
@@ -508,8 +619,8 @@ class MarlinLinear(GPTQQuantLinear):
         # make sure scales is synced with x/input
         if x.dtype != self.scales.dtype:
             replace_parameter(self, "scales", self.scales.to(dtype=x.dtype))
-        if self.bias is not None and self.bias.dtype != x.dtype:
-            self.bias.data = self.bias.data.to(dtype=x.dtype)
+        bias = self._kernel_bias(x)
+        workspace = marlin_stream_workspace(self)
 
         # Keep aligned layers on the original decode-sensitive call path.
         if self._marlin_tile_padding is None:
@@ -520,12 +631,12 @@ class MarlinLinear(GPTQQuantLinear):
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
-                workspace=self.workspace,
+                workspace=workspace,
                 wtype=self.weight_type,
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
                 is_k_full=self.is_k_full,
-                bias=self.bias,
+                bias=bias,
                 use_fp32_reduce=self.fp32,
                 use_atomics=False, # reduces accuracy with slightly faster performance
             )
@@ -538,12 +649,12 @@ class MarlinLinear(GPTQQuantLinear):
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
-                workspace=self.workspace,
+                workspace=workspace,
                 wtype=self.weight_type,
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
                 is_k_full=self.is_k_full,
-                bias=self.bias,
+                bias=bias,
                 use_fp32_reduce=self.fp32,
                 use_atomics=False,
             )

@@ -232,6 +232,32 @@ def test_dynamo_guard_assertion_falls_back_to_eager(monkeypatch):
     assert calls == [3, 4]
 
 
+def test_key_error_from_dynamo_frame_falls_back_to_eager(monkeypatch):
+    """A dynamo-internal ``KeyError`` must not abort a plain forward (#5127).
+
+    Under ``PYTHON_GIL=0``, a compile that races another thread's
+    ``torch.set_default_dtype`` can raise ``KeyError`` from
+    ``torch/_dynamo/utils.py:get_guard_fail_reason``. It originates in dynamo,
+    so it is a compiler failure and the eager path must serve the call.
+    """
+
+    calls = []
+
+    def eager(value):
+        calls.append(value)
+        return value * 11
+
+    error = _error_from_dynamo_frame(KeyError, 5190054990720)
+    _dynamo_compile(monkeypatch, error)
+    compiled = torch_utils.torch_compile(eager)
+
+    assert compiled(3) == 33
+    assert calls == [3]
+    # Sticky fallback: the broken compiler is not retried.
+    assert compiled(4) == 44
+    assert calls == [3, 4]
+
+
 def test_user_assertion_is_not_misread_as_a_compiler_failure():
     calls = []
 
@@ -243,3 +269,52 @@ def test_user_assertion_is_not_misread_as_a_compiler_failure():
     with pytest.raises(AssertionError, match="user invariant failed"):
         compiled(1)
     assert calls == [1]
+
+
+def _error_from_dynamo_frame(error_type, message):
+    """Raise ``error_type(message)`` from a real ``torch/_dynamo`` filename."""
+
+    source = (
+        "def raise_from_dynamo():\n"
+        f"    raise {error_type.__name__}({message!r})\n"
+    )
+    namespace = {"__builtins__": __builtins__}
+    exec(compile(source, "/site-packages/torch/_dynamo/guards.py", "exec"), namespace)
+    try:
+        namespace["raise_from_dynamo"]()
+    except error_type as exc:
+        return exc
+    raise AssertionError("the fake dynamo frame did not raise")
+
+
+def test_non_guard_assertion_from_dynamo_frame_propagates(monkeypatch):
+    """Only dynamo's own guard message is a compiler failure, not every assertion."""
+
+    calls = []
+
+    def eager(_value):
+        calls.append(1)
+        raise _error_from_dynamo_frame(AssertionError, "user invariant failed")
+
+    _dynamo_compile(monkeypatch, _error_from_dynamo_frame(AssertionError, "user invariant failed"))
+    compiled = torch_utils.torch_compile(eager)
+    with pytest.raises(AssertionError, match="user invariant failed"):
+        compiled(1)
+    # The error came from the compiler call itself, so eager must not run.
+    assert calls == []
+
+
+def test_non_runtime_error_from_compiler_frame_propagates(monkeypatch):
+    """A compiler-frame ValueError is still user-visible, not a fallback trigger."""
+
+    calls = []
+
+    def eager(_value):
+        calls.append(1)
+        raise _error_from_dynamo_frame(ValueError, "bad shape")
+
+    _dynamo_compile(monkeypatch, _error_from_dynamo_frame(ValueError, "bad shape"))
+    compiled = torch_utils.torch_compile(eager)
+    with pytest.raises(ValueError, match="bad shape"):
+        compiled(1)
+    assert calls == []

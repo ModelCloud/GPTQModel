@@ -268,19 +268,15 @@ def test_quantize_config_dispatches_fp8_constructor():
     assert cfg.uses_weight_only_lifecycle() is True
 
 
-def test_quantize_config_dispatches_fp8_from_weight_only_method():
-    cfg = QuantizeConfig(
-        weight_only=WeightOnlyConfig(method="fp8", smooth=SmoothMAD(k=1.5)),
-        weight_scale_method="block",
-        weight_block_size=[128, 128],
-    )
+def test_quantize_config_rejects_fp8_from_weight_only_method():
+    """Weight-only FP8 export was removed; FP8 is load-only."""
 
-    assert isinstance(cfg, FP8Config)
-    assert cfg.quant_method == METHOD.FP8
-    assert cfg.format == "float8_e4m3fn"
-    assert cfg.weight_scale_method == "block"
-    assert cfg.weight_block_size == [128, 128]
-    assert cfg.smooth is not None
+    with pytest.raises(ValueError, match="weight-only FP8 export was removed"):
+        QuantizeConfig(
+            weight_only=WeightOnlyConfig(method="fp8", smooth=SmoothMAD(k=1.5)),
+            weight_scale_method="block",
+            weight_block_size=[128, 128],
+        )
 
 
 @pytest.mark.parametrize(("format_value", "expected"), _fp8_alias_cases())

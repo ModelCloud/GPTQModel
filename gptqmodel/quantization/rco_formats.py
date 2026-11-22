@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, T
 
 import torch
 
+from ..utils.quant_metrics import relative_error_from_energies
 from .config import (
     FORMAT_FIELD_CODE,
     METHOD,
@@ -486,7 +487,7 @@ def relative_reconstruction_error(
     error = dequantized.detach().to(device=reference.device, dtype=torch.float64) - reference
     if hessian is None:
         numerator = error.pow(2).sum()
-        denominator = reference.pow(2).sum().clamp_min(1e-30)
+        denominator = reference.pow(2).sum()
     else:
         h = hessian.detach().to(device=reference.device, dtype=torch.float64)
         if h.shape != (reference.shape[1], reference.shape[1]):
@@ -497,8 +498,12 @@ def relative_reconstruction_error(
         err_h = error @ h
         ref_h = reference @ h
         numerator = (err_h * error).sum()
-        denominator = (ref_h * reference).sum().clamp_min(1e-30)
-    value = float(numerator / denominator)
+        denominator = (ref_h * reference).sum()
+    # Never floor a positive reference energy: it would report total signal
+    # loss on a small reference as a near-zero error (#5635).
+    value = relative_error_from_energies(
+        float(numerator.item()), float(denominator.item())
+    )
     if not math.isfinite(value) or value < 0:
         raise RCOFormatError(f"RCO reconstruction error is not finite: {value!r}")
     return value

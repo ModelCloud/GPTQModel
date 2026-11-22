@@ -29,7 +29,7 @@ from ..utils.checkpoint_paths import (
     resolve_checkpoint_path,
 )
 from ..utils.device_telemetry import emit_device_telemetry
-from ..utils.offload import set_submodule
+from ..utils.offload import attach_disk_offload_hook, set_submodule
 from ..utils.tensor import tensor_bytes
 from .checkpoint_devices import checkpoint_device_topology
 from .checkpoint_modules import (
@@ -267,7 +267,12 @@ def checkpoint_session(config, model):
         # Checkpointed quantization deliberately uses the same disk-offload
         # mechanism as ordinary quantization, but each attempt gets a private
         # directory so a failed run cannot overwrite a prior attempt's bundles.
-        model.quantize_config.offload_to_disk_path = attempt
+        # Keep that directory as run-owned state instead of writing it through
+        # ``model.quantize_config``: the config is commonly shared by several
+        # models, and a later model's automatic checkpoint would otherwise
+        # resolve inside this model's explicit checkpoint directory (#5361).
+        previous_attempt = getattr(model, "_checkpoint_offload_attempt_root", None)
+        model._checkpoint_offload_attempt_root = attempt
         handlers = {
             sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)
         }
@@ -280,6 +285,13 @@ def checkpoint_session(config, model):
                 signal.signal(sig, request_stop)
             yield extension
         finally:
+            if previous_attempt is None:
+                try:
+                    del model._checkpoint_offload_attempt_root
+                except AttributeError:
+                    pass
+            else:
+                model._checkpoint_offload_attempt_root = previous_attempt
             for sig, handler in handlers.items():
                 signal.signal(sig, handler)
 
@@ -378,11 +390,10 @@ class QuantizationCheckpointAdapter:
             ),
             "source": _source_identity(self.model),
             "quantization": config,
-            "calibration": hashlib.sha256(
-                ContinuationCodec.dumps(
-                    [processor.inputs_cache.unwrap() for processor in self.processors]
-                )
-            ).hexdigest(),
+            "calibration": ContinuationCodec.sha256(
+                [processor.inputs_cache.unwrap() for processor in self.processors],
+                self.offload,
+            ),
             "processors": [type(processor).__name__ for processor in self.processors],
             "packed_kernel": str(self.model.qlinear_kernel),
             "runtime": {
@@ -471,7 +482,7 @@ class QuantizationCheckpointAdapter:
                 "numpy_rng": numpy_rng,
             }
             # The caller serializes immediately while the boundary is quiescent;
-            # preserve source device tags until the codec makes CPU-owned copies.
+            # preserve source device tags until the codec writes CPU-owned copies.
         emit_device_telemetry(
             "checkpoint_execution_captured",
             execution=state["execution"],
@@ -611,6 +622,11 @@ class QuantizationCheckpointAdapter:
                 }
             (directory / "index.json").write_text(json.dumps(index))
             set_submodule(self.model.model, name, module)
+            # The #4498 contract materializes disk-offloaded modules at loop
+            # exit. A resumed module is meta with no hook, so register it with
+            # the same hook the loop installs; otherwise it stays meta and the
+            # in-session forward fails silently (issue #4562).
+            attach_disk_offload_hook(module, str(directory))
         for module, key, value, parameter, requires_grad in dense_targets:
             setattr(
                 module,

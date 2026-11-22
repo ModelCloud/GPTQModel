@@ -1,11 +1,18 @@
 ---
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-tokenizer-normalization
 description: Diagnose and correct GPT-QModel tokenizer initialization, tokenization normalization, special-token handling, prompt rendering, and chat-template problems. Use when inference or evaluation quality suggests wrong token IDs or prompts, when a model needs tokenizer load kwargs or compatibility patches, or when tokenizer behavior is being changed in GPT-QModel; reusable corrective behavior must be implemented, tested, versioned, pushed, and submitted upstream to github.com/ModelCloud/Tokenicer.
 ---
 
 # GPT-QModel tokenizer normalization
 
-Treat [ModelCloud/Tokenicer](https://github.com/ModelCloud/Tokenicer) as the source of truth for reusable tokenizer loading and normalization. GPT-QModel depends on Tokenicer; model loaders should consume its behavior rather than accumulate model-specific tokenizer patches.
+## At a glance
+
+For tokenizer, chat-template or generation-quality changes, compare the dense
+baseline, rendered prompts and input IDs first. Repair reusable normalization
+in [Tokenicer](https://github.com/ModelCloud/Tokenicer); consume its release
+through `Tokenicer.load()` rather than patching individual GPT-QModel loaders.
 
 ## Diagnose the boundary
 
@@ -19,7 +26,7 @@ Do not suppress a correctness warning or hard-code a GPT-QModel model-name check
 
 ## Implement upstream first
 
-1. Use an existing `/root/tokenicer` clone, or clone `https://github.com/ModelCloud/Tokenicer` when it is absent.
+1. Use a task-specific clone of [Tokenicer](https://github.com/ModelCloud/Tokenicer) under the [workspace and draft PR rules](../gptqmodel-agent-workflow/SKILL.md).
 2. Sync Tokenicer's default branch and create a focused branch. Preserve unrelated worktree files.
 3. Implement the smallest general normalization in Tokenicer and make every tokenizer load and fallback path apply it consistently.
 4. Add focused unit tests for the default correction, explicit override behavior, and fallback paths. Add a lightweight end-to-end tokenizer assertion when it materially strengthens the regression.

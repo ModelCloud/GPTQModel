@@ -457,6 +457,53 @@ class HookedLinear(torch.nn.Linear):
         return _restore_output_device(output, original_device)
 
 
+def restore_linear_from_hooked(module: "HookedLinear") -> torch.nn.Linear:
+    """Rebuild the plain float projection a cancelled run left wrapped.
+
+    ``HookedLinear.forward`` always runs in inference mode, so a layer caught
+    mid-finalization mixes inference-mode outputs with ordinary packed modules
+    and a default grad-mode forward raises "Inference tensors cannot be saved
+    for backward". Run-exit recovery returns such a layer to its original
+    float modules, sharing the same parameter storage (issue #5089).
+    """
+
+    restored = torch.nn.Linear.__new__(torch.nn.Linear)
+    torch.nn.Module.__init__(restored)
+    restored.in_features = module.in_features
+    restored.out_features = module.out_features
+    restored.weight = module.weight
+    restored.bias = module.bias
+    return restored
+
+
+def unwrap_hooked_linears(module: torch.nn.Module) -> int:
+    """Replace every plain ``HookedLinear`` under ``module`` with a linear.
+
+    A hook-owning wrapper is skipped: packing-time kernels are never
+    ``HookedLinear``, so a wrapper that still holds a capture closure or a
+    registered PyTorch hook is left to its owner. Quantized kernels and
+    offloaded shells are not ``HookedLinear`` and are untouched. Run-exit
+    recovery uses this to return a cancelled run's float projections to
+    ordinary modules (issue #5089).
+    """
+
+    replaced = 0
+    for child_name, child in list(module.named_children()):
+        if isinstance(child, HookedLinear):
+            if getattr(child, "forward_hook", None) is not None:
+                continue
+            if getattr(child, "_w4a_replay_input_hook_active", False):
+                continue
+            weight = getattr(child, "weight", None)
+            if weight is not None and weight.device.type == "meta":
+                continue
+            setattr(module, child_name, restore_linear_from_hooked(child))
+            replaced += 1
+            continue
+        replaced += unwrap_hooked_linears(child)
+    return replaced
+
+
 def _replace_module(module, child, name, level: int = 0, debug: bool = False) -> bool:
     level_indent = "---" * level
     instance_type = type(child)
@@ -464,7 +511,15 @@ def _replace_module(module, child, name, level: int = 0, debug: bool = False) ->
         log.info(f"{level_indent} Hook: {instance_type.__name__}: {name}")
 
     # Replace nn.Linear with HookedLinear, except PhimoeTopKRouter which returns a tuple in forward()
-    if isinstance(child, torch.nn.Linear) and child.__class__.__name__ != "PhimoeTopKRouter":
+    # and packed-source linears. Those keep a kernel forward (JIT decode) for
+    # calibration/Hessian collection and only materialize a dense bf16 weight
+    # when a quantization processor asks for it; wrapping them in HookedLinear
+    # would decode the checkpoint up front.
+    if (
+        isinstance(child, torch.nn.Linear)
+        and child.__class__.__name__ != "PhimoeTopKRouter"
+        and not getattr(child, "_packed_source_linear", False)
+    ):
         setattr(module, name, HookedLinear.from_linear(child))
     elif isinstance(child, transformers.Conv1D):
         setattr(module, name, HookedTransformerConv1D.from_conv1d(child))

@@ -23,7 +23,7 @@
 #define L2_CACHEHINT(size)
 #endif
 
-#define KERNEL_LAUNCH_CODE                                                                                                                              \
+#define KERNEL_LAUNCH_CODE(OUT_T)                                                                                                                       \
   int num_mn_tiles = (num_in_feats + CTA_M - 1) / CTA_M * (num_out_channels + CTA_N - 1) / CTA_N;                                                       \
   /* Split-K tiles use these semaphores for inter-CTA ordering, so they must start at zero. */                                                          \
   torch::Tensor _semaphores;                                                                                                                          \
@@ -43,10 +43,23 @@
   int j_factors1 = num_out_channels / CTA_N / 1;                                                                                                        \
   dim3 num_blocks((num_out_feats + CTA_M - 1) / CTA_M * j_factors1 * SPLITK);                                                                           \
   dim3 threads_per_block(WARP_SIZE, NUM_WARPS);                                                                                                         \
-  auto kernel_func = gemm_w4a16_T1<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G, SPLITK>;                                                     \
+  auto kernel_func = gemm_w4a16_T1<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G, SPLITK, OUT_T>;                                              \
   cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);                                                        \
   kernel_func<<<num_blocks, threads_per_block, kSmemByteSize, at::cuda::getCurrentCUDAStream()>>>(                                                                                        \
-      in_feats, kernel, scales, zeros, partials, out_feats, semaphores, num_in_feats, num_out_channels, num_in_channels);
+      in_feats, kernel, scales, zeros, partials, reinterpret_cast<OUT_T *>(out_feats), semaphores, num_in_feats, num_out_channels, num_in_channels);
+
+// The prefill kernels accumulate the whole reduction (including split-K) in
+// FP32. A caller with a bias to add requests FP32 output so the bias joins the
+// complete reduction and the result is rounded exactly once.
+static inline __device__ void store_gemm_output(half *ptr, float value)
+{
+  *ptr = __float2half(value);
+}
+
+static inline __device__ void store_gemm_output(float *ptr, float value)
+{
+  *ptr = value;
+}
 
 template <int N>
 __inline__ __host__ __device__ int get_log_tile(int n)
@@ -153,7 +166,7 @@ __device__ __inline__ void global_to_share_one_stage_A(half *src, half *dst, int
     int ld_row = global_iter * cta_step_m_or_n + threadIdx.y * warp_step_m_or_n + (threadIdx.x / threads_per_row);
     int ld_col_swizzled = (ld_col ^ (ld_row) & 7) * PACK_SIZE;
     void *dst_ptr = (void *)(dst + ld_row * kSmemCol + ld_col_swizzled);
-    uint4 *src_ptr = (uint4 *)(src + (ld_row + cta_offset_m) * global_ncols + ld_col * PACK_SIZE + global_iter_k * CTA_K + cta_offset_k); // cta_offset_m * global_ncols + global_iter * cta_step_m_or_n * global_ncols + threadIdx.y * warp_step_m_or_n * global_ncols + (threadIdx.x / threads_per_row) * global_ncols + global_iter_k * CTA_K + (threadIdx.x % threads_per_row) * PACK_SIZE);
+    uint4 *src_ptr = (uint4 *)(src + static_cast<int64_t>(ld_row + cta_offset_m) * global_ncols + ld_col * PACK_SIZE + global_iter_k * CTA_K + cta_offset_k); // cta_offset_m * global_ncols + global_iter * cta_step_m_or_n * global_ncols + threadIdx.y * warp_step_m_or_n * global_ncols + (threadIdx.x / threads_per_row) * global_ncols + global_iter_k * CTA_K + (threadIdx.x % threads_per_row) * PACK_SIZE);
     if constexpr (STAGES > 1)
     {
       uint32_t addr = cast_smem_ptr_to_uint(dst_ptr);
@@ -293,8 +306,8 @@ __device__ __inline__ void share_to_reg_one_stage_B(half *src, half *src_scales,
   }
 }
 
-template <int CTA_M, int CTA_N, int CTA_K, int WARP_M, int WARP_N, int WARP_K, int STAGES, int G, int SPLITK>
-__global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *__restrict__ scales, half *__restrict__ zeros, float *__restrict__ C, half *__restrict__ output, int *__restrict__ semaphores, int M, int N, int K)
+template <int CTA_M, int CTA_N, int CTA_K, int WARP_M, int WARP_N, int WARP_K, int STAGES, int G, int SPLITK, typename output_t>
+__global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *__restrict__ scales, half *__restrict__ zeros, float *__restrict__ C, output_t *__restrict__ output, int *__restrict__ semaphores, int M, int N, int K)
 {
   constexpr int NUM_WARPS_MN = CTA_M / WARP_M * CTA_N / WARP_N;
   constexpr int NUM_WARPS = NUM_WARPS_MN * CTA_K / WARP_K;
@@ -548,7 +561,7 @@ __global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *
           int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
           if (write_row < M)
           {
-            int index = write_row * N + cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
+            int64_t index = static_cast<int64_t>(write_row) * N + cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
                         (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2;
             float2 value = *reinterpret_cast<float2 *>(
                 C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id);
@@ -559,7 +572,10 @@ __global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *
               value.y += previous.y;
             }
             if (blockIdx_z + 1 == SPLITK)
-              *reinterpret_cast<half2 *>(output + index) = __floats2half2_rn(value.x, value.y);
+            {
+              store_gemm_output(output + index, value.x);
+              store_gemm_output(output + index + 1, value.y);
+            }
             else
               *reinterpret_cast<float2 *>(C + index) = value;
           }
@@ -605,7 +621,7 @@ __device__ __inline__ void global_to_share_one_stage_A_T2(half *src, half *dst, 
     int ld_row = global_iter * cta_step_m_or_n + threadIdx.y * warp_step_m_or_n + (threadIdx.x / threads_per_row);
     int ld_col_swizzled = (ld_col ^ (ld_row) & 7) * PACK_SIZE;
     void *dst_ptr = (void *)(dst + ld_row * kSmemCol + ld_col_swizzled);
-    uint4 *src_ptr = (uint4 *)(src + (ld_row + cta_offset_m) * global_ncols + ld_col * PACK_SIZE + global_iter_k * CTA_K); // cta_offset_m * global_ncols + global_iter * cta_step_m_or_n * global_ncols + threadIdx.y * warp_step_m_or_n * global_ncols + (threadIdx.x / threads_per_row) * global_ncols + global_iter_k * CTA_K + (threadIdx.x % threads_per_row) * PACK_SIZE);
+    uint4 *src_ptr = (uint4 *)(src + static_cast<int64_t>(ld_row + cta_offset_m) * global_ncols + ld_col * PACK_SIZE + global_iter_k * CTA_K); // cta_offset_m * global_ncols + global_iter * cta_step_m_or_n * global_ncols + threadIdx.y * warp_step_m_or_n * global_ncols + (threadIdx.x / threads_per_row) * global_ncols + global_iter_k * CTA_K + (threadIdx.x % threads_per_row) * PACK_SIZE);
     if constexpr (STAGES > 1)
     {
       uint32_t addr = cast_smem_ptr_to_uint(dst_ptr);
@@ -743,8 +759,8 @@ __device__ __inline__ void share_to_reg_one_stage_B_T2(half *src, half *src_scal
   }
 }
 
-template <int CTA_M, int CTA_N, int CTA_K, int WARP_M, int WARP_N, int WARP_K, int STAGES, int G>
-__global__ void gemm_w4a16_T2(half *__restrict__ A, half *__restrict__ B, half *__restrict__ scales, half *__restrict__ zeros, half *__restrict__ C, int M, int N, int K)
+template <int CTA_M, int CTA_N, int CTA_K, int WARP_M, int WARP_N, int WARP_K, int STAGES, int G, typename output_t>
+__global__ void gemm_w4a16_T2(half *__restrict__ A, half *__restrict__ B, half *__restrict__ scales, half *__restrict__ zeros, output_t *__restrict__ C, int M, int N, int K)
 {
   constexpr int NUM_WARPS = CTA_M / WARP_M * CTA_N / WARP_N;
   constexpr int CTA_SIZE = NUM_WARPS * WARP_SIZE;
@@ -916,10 +932,11 @@ __global__ void gemm_w4a16_T2(half *__restrict__ A, half *__restrict__ B, half *
         {
           const float2 value = *reinterpret_cast<float2 *>(
               C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id);
-          *reinterpret_cast<half2 *>(
-              C + write_row * N + cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
-              (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2) =
-              __floats2half2_rn(value.x, value.y);
+          const int64_t store_index = static_cast<int64_t>(write_row) * N + cta_offset_n +
+              warp_offset_n + ax1_0_1 * 16 + (local_id / 4) * 8 + (local_id % 2) +
+              (threadIdx.x % 4) * 2;
+          store_gemm_output(C + store_index, value.x);
+          store_gemm_output(C + store_index + 1, value.y);
         }
       };
     }
@@ -930,7 +947,8 @@ torch::Tensor gemm_forward_cuda_prefill(
     torch::Tensor _in_feats,
     torch::Tensor _kernel,
     torch::Tensor _scales,
-    torch::Tensor _zeros)
+    torch::Tensor _zeros,
+    bool fp32_output)
 {
   std::vector<int64_t> output_shape = _in_feats.sizes().vec();
   output_shape.back() = _kernel.size(0) * kInterleave;
@@ -944,7 +962,11 @@ torch::Tensor gemm_forward_cuda_prefill(
       torch::TensorOptions().dtype(torch::kFloat32).device(_in_feats.device());
   auto options_int =
       torch::TensorOptions().dtype(torch::kInt32).device(_in_feats.device());
-  at::Tensor _out_feats = torch::empty(output_shape, _in_feats.options());
+  // A caller with a bias to add asks for FP32 output so the bias joins the
+  // complete FP32 reduction and the result is rounded exactly once.
+  at::Tensor _out_feats = torch::empty(
+      output_shape,
+      fp32_output ? _in_feats.options().dtype(torch::kFloat32) : _in_feats.options());
   // Only M <= 32 uses split-K. Larger prefills write the final dtype directly.
   at::Tensor _partials;
   float *partials = nullptr;
@@ -954,7 +976,7 @@ torch::Tensor gemm_forward_cuda_prefill(
   }
   int num_out_feats = _out_feats.numel() / _out_feats.size(-1);
   int num_out_channels = _out_feats.size(-1);
-  auto out_feats = reinterpret_cast<half *>(_out_feats.data_ptr<at::Half>());
+  void *out_feats = _out_feats.data_ptr();
 
   if (num_out_feats <= 32)
   {
@@ -967,7 +989,7 @@ torch::Tensor gemm_forward_cuda_prefill(
     constexpr int WARP_K = 64;
     constexpr int SPLITK = 2;
     constexpr int STAGES = 4;
-    KERNEL_LAUNCH_CODE
+    if (fp32_output) { KERNEL_LAUNCH_CODE(float) } else { KERNEL_LAUNCH_CODE(half) }
   }
   else if (num_out_feats <= 64)
   {
@@ -981,7 +1003,7 @@ torch::Tensor gemm_forward_cuda_prefill(
     constexpr int WARP_K = 64;
     constexpr int SPLITK = 1;
     constexpr int STAGES = 3;
-    KERNEL_LAUNCH_CODE
+    if (fp32_output) { KERNEL_LAUNCH_CODE(float) } else { KERNEL_LAUNCH_CODE(half) }
   }
   else if (num_out_feats <= 128)
   {
@@ -994,7 +1016,7 @@ torch::Tensor gemm_forward_cuda_prefill(
     constexpr int WARP_K = 64;
     constexpr int SPLITK = 1;
     constexpr int STAGES = 4;
-    KERNEL_LAUNCH_CODE
+    if (fp32_output) { KERNEL_LAUNCH_CODE(float) } else { KERNEL_LAUNCH_CODE(half) }
   }
   else if (num_out_feats <= 192)
   {
@@ -1007,7 +1029,7 @@ torch::Tensor gemm_forward_cuda_prefill(
     constexpr int WARP_K = 64;
     constexpr int SPLITK = 1;
     constexpr int STAGES = 4;
-    KERNEL_LAUNCH_CODE
+    if (fp32_output) { KERNEL_LAUNCH_CODE(float) } else { KERNEL_LAUNCH_CODE(half) }
   }
   else
   {
@@ -1030,10 +1052,20 @@ torch::Tensor gemm_forward_cuda_prefill(
     int j_factors1 = num_out_channels / CTA_N / 1;
     dim3 num_blocks((num_out_feats + CTA_M - 1) / CTA_M * j_factors1);
     dim3 threads_per_block(WARP_SIZE, NUM_WARPS);
-    auto kernel_func = gemm_w4a16_T2<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G>;
-    cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);
-    kernel_func<<<num_blocks, threads_per_block, kSmemByteSize, at::cuda::getCurrentCUDAStream()>>>(
-        in_feats, kernel, scales, zeros, out_feats, num_in_feats, num_out_channels, num_in_channels);
+    if (fp32_output)
+    {
+      auto kernel_func = gemm_w4a16_T2<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G, float>;
+      cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);
+      kernel_func<<<num_blocks, threads_per_block, kSmemByteSize, at::cuda::getCurrentCUDAStream()>>>(
+          in_feats, kernel, scales, zeros, reinterpret_cast<float *>(out_feats), num_in_feats, num_out_channels, num_in_channels);
+    }
+    else
+    {
+      auto kernel_func = gemm_w4a16_T2<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G, half>;
+      cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);
+      kernel_func<<<num_blocks, threads_per_block, kSmemByteSize, at::cuda::getCurrentCUDAStream()>>>(
+          in_feats, kernel, scales, zeros, reinterpret_cast<half *>(out_feats), num_in_feats, num_out_channels, num_in_channels);
+    }
   }
 
   return _out_feats;

@@ -46,7 +46,7 @@ _MARLIN_REQUIRED_CUDA_HEADERS = (
 
 
 def _marlin_capability_supported(major: int, minor: int) -> bool:
-    return major > 7 or (major == 7 and minor >= 5)
+    return major >= 8
 
 
 def _marlin_all_visible_devices_supported(min_capability: Tuple[int, int]) -> bool:
@@ -105,7 +105,7 @@ def _marlin_environment_error() -> str:
     except Exception as exc:  # pragma: no cover - depends on host CUDA runtime
         return f"Marlin kernel failed to query CUDA device capability: {exc}"
     if not _marlin_capability_supported(major, minor):
-        return f"Marlin kernel requires compute capability >= 7.5, got {major}.{minor}."
+        return f"Marlin kernel requires compute capability >= 8.0, got {major}.{minor}."
     return ""
 
 
@@ -412,7 +412,10 @@ def marlin_device_profile(
                 f"Marlin device profile: device index {raw_index} is out of range "
                 f"[0, {count})."
             )
-        target = torch.device(device)
+        # A bare ordinal names a CUDA device here. ``torch.device(int)`` instead
+        # resolves it against the current accelerator, which raises when torch
+        # sees no accelerator and picks another backend on a mixed host.
+        target = torch.device("cuda", raw_index) if isinstance(device, int) and not isinstance(device, bool) else torch.device(device)
         if target.type != "cuda":
             raise ValueError(
                 f"Marlin device profile requires a CUDA device, got {target!r}."
@@ -484,6 +487,71 @@ def marlin_make_workspace_new(device: torch.device,
                        requires_grad=False)
 
 
+def marlin_stream_key(device: torch.device) -> int:
+    """Identify the CUDA stream currently active on ``device``.
+
+    ``torch.cuda.current_stream()`` builds a Python wrapper on every call
+    (~6 us), which is a large fraction of a decode-sized Marlin launch. The
+    raw handle is the same identity the kernel sees and costs a C call.
+    """
+
+    index = device.index
+    if index is None:
+        index = torch.cuda.current_device()
+    raw_stream = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+    if raw_stream is not None:
+        try:
+            return int(raw_stream(index))
+        except Exception:  # pragma: no cover - fallback for other torch builds
+            pass
+    return int(torch.cuda.current_stream(index).cuda_stream)
+
+
+def marlin_stream_workspace(module) -> torch.Tensor:
+    """Return the Marlin lock workspace that belongs to the calling stream.
+
+    ``gptq_marlin.cu`` spins on, advances, and resets the ``int32`` counters in
+    this buffer (``locks_off = blockIdx.x``). One buffer per module therefore
+    lets two streams serving the same module consume each other's counter
+    values: the launches either deadlock in ``barrier_acquire`` or fold a
+    partial sum, so an identical input can return a different result depending
+    on what else is running (#4683). ``QQQLinear._split_k_locks`` allocates per
+    call for the same reason (#4665); Marlin keeps one buffer per stream, so
+    the steady state costs a dictionary lookup instead of an allocation.
+
+    Every launch returns the counters to zero, so a cached buffer is reused
+    as-is. ``module.workspace`` stays the canonical, checkpoint-visible buffer
+    (``models/fusion.py`` validates and clones it); it is simply no longer the
+    one a launch borrows.
+    """
+
+    workspace = getattr(module, "workspace", None)
+    if workspace is None or workspace.numel() == 0:
+        # ``forward`` asserts on this with an actionable message.
+        return workspace
+
+    device = workspace.device
+    key = marlin_stream_key(device)
+    cache = getattr(module, "_marlin_stream_workspaces", None)
+    if cache is None:
+        cache = {}
+        module._marlin_stream_workspaces = cache
+
+    cached = cache.get(key)
+    if (
+        cached is not None
+        and cached.device == device
+        and cached.numel() == workspace.numel()
+    ):
+        return cached
+
+    # A fresh zeroed buffer on this stream: the memset and the launch are
+    # ordered on the same stream, so the counters are visible as zero.
+    cached = torch.zeros_like(workspace)
+    cache[key] = cached
+    return cached
+
+
 def _round_up(value: int, multiple: int) -> int:
     """Round value up to the next multiple."""
     return ((value + multiple - 1) // multiple) * multiple
@@ -552,23 +620,48 @@ def marlin_pad_awq_qweight(qweight: torch.Tensor, size_n: int, size_k: int,
     )
 
 
-def marlin_pad_awq_qzeros(qzeros: torch.Tensor, size_n: int, size_k: int,
-                          padded_n: int, padded_k: int, group_size: int,
-                          num_bits: int) -> torch.Tensor:
-    """Zero-pad AWQ packed zero-points to the padded group and N extents."""
+def marlin_pad_packed_qzeros(qzeros: torch.Tensor, size_n: int, size_k: int,
+                             padded_n: int, padded_k: int, group_size: int,
+                             num_bits: int, *,
+                             layout: str = "Packed") -> torch.Tensor:
+    """Zero-pad packed zero-point words to the padded group and N extents.
+
+    GPTQ and AWQ both store ``pack_factor`` consecutive output lanes per int32
+    word along N, so one helper pads either checkpoint layout before the Marlin
+    zero-point permutation. ``size_k`` is the logical input width and the group
+    count follows ``group_size`` (``-1`` is one channelwise group). Zero
+    padding keeps padded columns and groups inert once the matching weights and
+    scales are also zero.
+    """
     pack_factor = 32 // num_bits
     groups = size_k // group_size if group_size > 0 else 1
     padded_groups = padded_k // group_size if group_size > 0 else 1
     expected_shape = (groups, size_n // pack_factor)
     if tuple(qzeros.shape) != expected_shape:
         raise ValueError(
-            f"AWQ qzeros shape must be {expected_shape}, got {tuple(qzeros.shape)}."
+            f"{layout} qzeros shape must be {expected_shape}, got {tuple(qzeros.shape)}."
         )
     if (padded_n, padded_k) == (size_n, size_k):
         return qzeros
     return torch.nn.functional.pad(
         qzeros,
         (0, (padded_n - size_n) // pack_factor, 0, padded_groups - groups),
+    )
+
+
+def marlin_pad_awq_qzeros(qzeros: torch.Tensor, size_n: int, size_k: int,
+                          padded_n: int, padded_k: int, group_size: int,
+                          num_bits: int) -> torch.Tensor:
+    """Zero-pad AWQ packed zero-points to the padded group and N extents."""
+    return marlin_pad_packed_qzeros(
+        qzeros,
+        size_n,
+        size_k,
+        padded_n,
+        padded_k,
+        group_size,
+        num_bits,
+        layout="AWQ",
     )
 
 
@@ -682,6 +775,97 @@ def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
     return s
 
 
+def marlin_interleave_8bit_scales(marlin_scales: torch.Tensor) -> torch.Tensor:
+    """Pack Marlin-permuted 8-bit group scales into the kernel's paired layout.
+
+    ``marlin_template.h`` reads 8-bit scales (``is_8bit_scale``: E8M0 for
+    MXFP4/MXFP8, E4M3 for NVFP4) two groups at a time. One 16-bit slot holds the
+    scales of two adjacent groups, and each thread's 8 scales are reordered for
+    ``dequant_fp8_scales``. The input is the output of ``marlin_permute_scales``
+    as a ``(groups, size_n)`` tensor of any 1-byte dtype; the result keeps that
+    dtype and shape.
+    """
+
+    if marlin_scales.element_size() != 1:
+        raise ValueError("marlin_interleave_8bit_scales expects a 1-byte scale tensor")
+    if marlin_scales.size(0) % 2 != 0:
+        raise ValueError("8-bit Marlin scales need an even number of groups along K")
+    groups = marlin_scales.size(0)
+    # Each thread consumes 8 scales; pair groups (2g, 2g+1) per 8-scale chunk.
+    s = marlin_scales.view(groups // 2, 2, -1, 8).permute(0, 2, 1, 3).reshape(groups, -1)
+    # Match the byte order dequant_fp8_scales expands into scalar_t2 pairs.
+    return s.view(-1, 4)[:, [0, 2, 1, 3]].reshape(groups, -1).contiguous()
+
+
+def pack_fp8_to_int32(fp8_weight: torch.Tensor) -> torch.Tensor:
+    """Pack an ``(N, K)`` float8_e4m3fn weight into the ``(K // 4, N)`` int32 GPTQ layout."""
+
+    if fp8_weight.dtype != torch.float8_e4m3fn or fp8_weight.ndim != 2:
+        raise ValueError("pack_fp8_to_int32 expects a 2-D float8_e4m3fn (N, K) weight")
+    if fp8_weight.shape[1] % 4 != 0:
+        raise ValueError("pack_fp8_to_int32 needs K divisible by 4")
+    return fp8_weight.contiguous().view(torch.int32).T.contiguous()
+
+
+MXFP8_GROUP_SIZE = 32
+
+
+def _microscaling_marlin_prepare(
+    packed: torch.Tensor, scales: torch.Tensor, size_k: int, size_n: int, num_bits: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    scale_shape = (size_n, size_k // MXFP8_GROUP_SIZE)
+    if scales.dtype != torch.float8_e8m0fnu or scales.shape != scale_shape:
+        raise ValueError(
+            f"MXFP{num_bits} scales must be float8_e8m0fnu with shape {scale_shape}, "
+            f"got {scales.dtype} {tuple(scales.shape)}"
+        )
+    if size_k % MXFP8_GROUP_SIZE != 0:
+        raise ValueError(f"MXFP{num_bits} needs in_features divisible by {MXFP8_GROUP_SIZE}, got {size_k}")
+
+    qweight = gptq_marlin_repack(
+        packed,
+        perm=torch.empty(0, dtype=torch.int32, device=packed.device),
+        size_k=size_k,
+        size_n=size_n,
+        num_bits=num_bits,
+        dtype=torch.bfloat16,
+    )
+    # Permute the raw exponent bytes so no float round trip can touch them.
+    marlin_scales = marlin_permute_scales(
+        scales.view(torch.uint8).T.contiguous(), size_k=size_k, size_n=size_n,
+        group_size=MXFP8_GROUP_SIZE,
+    )
+    marlin_scales = marlin_interleave_8bit_scales(marlin_scales)
+    return qweight, marlin_scales.view(torch.float8_e8m0fnu)
+
+
+def mxfp4_marlin_prepare(
+    weight: torch.Tensor, scales: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Repack low-nibble-first FP4 weights and per-row E8M0 scales for Marlin."""
+    if weight.ndim != 2 or weight.dtype not in (torch.uint8, torch.int8) or weight.size(1) % 4:
+        raise ValueError("MXFP4 expects a 2-D byte tensor holding eight FP4 values per int32 word")
+    size_n, packed_k = weight.shape
+    packed = weight.contiguous().view(torch.int32).T.contiguous()
+    return _microscaling_marlin_prepare(packed, scales, 2 * packed_k, size_n, 4)
+
+
+def mxfp8_marlin_prepare(
+    weight: torch.Tensor, scales: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Convert an OCP MXFP8 weight into Marlin's bf16 ``kFE4M3fn`` + ``kFE8M0fnu`` operands.
+
+    ``weight`` is ``(N, K)`` float8_e4m3fn and ``scales`` is ``(N, K // 32)``
+    float8_e8m0fnu, so the dequantized weight is ``weight * 2 ** (scale - 127)``.
+    Returns ``(marlin_qweight, marlin_scales)`` for ``gptq_marlin_gemm`` with
+    ``b_q_type = scalar_types.float8_e4m3fn`` and bfloat16 activations.
+    """
+
+    packed = pack_fp8_to_int32(weight)
+    size_n, size_k = weight.shape
+    return _microscaling_marlin_prepare(packed, scales, size_k, size_n, 8)
+
+
 def get_scale_perms():
     scale_perm: List[int] = []
     for i in range(8):
@@ -773,6 +957,11 @@ def apply_gptq_marlin_linear(
     weight = weight.contiguous()
     weight_scale = weight_scale.contiguous()
     weight_zp = weight_zp.contiguous()
+    # Marlin's GEMM requires a unit stride on the contraction axis. A
+    # transposed prefill view (for example Mamba's ``scan_output``) collapses
+    # to a 2-D view with stride(-1) > 1; copy only in that case.
+    if input.stride(-1) != 1:
+        input = input.contiguous()
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
@@ -860,6 +1049,11 @@ def apply_awq_marlin_linear(
     weight = weight.contiguous()
     weight_scale = weight_scale.contiguous()
     weight_zp = weight_zp.contiguous()
+    # Marlin's GEMM requires a unit stride on the contraction axis. A
+    # transposed prefill view (for example Mamba's ``scan_output``) collapses
+    # to a 2-D view with stride(-1) > 1; copy only in that case.
+    if input.stride(-1) != 1:
+        input = input.contiguous()
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
@@ -945,7 +1139,16 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False,
                      c_tmp: Optional[torch.Tensor] = None,
-                     a_tmp: Optional[torch.Tensor] = None) -> torch.Tensor:
+                     a_tmp: Optional[torch.Tensor] = None,
+                     thread_k: int = -1,
+                     thread_n: int = -1,
+                     num_threads: int = -1) -> torch.Tensor:
+    """Launch the Marlin GEMM.
+
+    ``thread_k``/``thread_n``/``num_threads`` select an explicit thread tile
+    instead of the shape planner; the defaults keep auto selection. They exist
+    so tests and tuning can compare two tiles on the same operands.
+    """
     # The context owns the lock workspace as well as the optional
     # reduction/activation buffers for the duration of this call.
     context = active_marlin_scratch_context()
@@ -1010,11 +1213,15 @@ def gptq_marlin_gemm(a: torch.Tensor,
             use_fp32_reduce,
             is_zp_float,
         )
+        tile_override = thread_k != -1 or thread_n != -1 or num_threads != -1
+        if use_owned_scratch and tile_override:
+            return op(*arguments, c_tmp, a_tmp, thread_k, thread_n, num_threads)
         if use_owned_scratch:
-            # Keep the historical 18-argument ABI for the default path.  The
-            # appended arguments are only sent to extensions built with the
-            # caller-owned scratch ABI.
+            # Keep the historical 20-argument caller-owned scratch ABI.
             return op(*arguments, c_tmp, a_tmp)
+        if tile_override:
+            # An explicit tile is appended after the optional scratch pair.
+            return op(*arguments, None, None, thread_k, thread_n, num_threads)
         return op(*arguments)
     finally:
         if context_borrowed:

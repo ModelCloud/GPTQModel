@@ -10,13 +10,12 @@ from gptqmodel.models import auto
 from gptqmodel.models.definitions.ovis2_6_moe import Ovis2_6_MoeQModel
 
 
-def test_ovis2_6_moe_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="ovis2_6_moe")
+def test_ovis2_6_moe_model_type_selects_definition(tmp_path):
+    from tests.test_ovis2_6_moe_local_port import tiny_config
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    tiny_config().save_pretrained(tmp_path)
 
-    assert auto.check_and_get_model_definition("/tmp/ovis2_6_moe") is Ovis2_6_MoeQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is Ovis2_6_MoeQModel
     assert Ovis2_6_MoeQModel.extract_layers_node() == ["llm.model.layers"]
 
 

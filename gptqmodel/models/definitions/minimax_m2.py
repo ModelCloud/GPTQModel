@@ -4,19 +4,23 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class MiniMaxM2GPTQ(BaseQModel):
     """
-    GPTQ config for MiniMax-M2 (HF: MiniMaxM2*), featuring:
+    Native Transformers 5 MiniMax-M2:
       - Per-layer RMSNorm before/after attention
       - Standard attention with q/k normalization parameters
       - Sparse MoE block (MiniMaxM2SparseMoeBlock) with up to 256 experts
     """
-    fusable = FusableConfig("minimax_m2").merge(LlamaFusableConfig(), profiles=("qkv",))
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
 
+    fusable = None
 
     pre_lm_head_norm_module = "model.norm"
 
@@ -44,12 +48,14 @@ class MiniMaxM2GPTQ(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {  # MoE module
                 "gate": ("gate:!",),
+                "e_score_correction_bias": ("e_score_correction_bias:!",),
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
             },
         },
     ]
+
 
 
 class MiniMaxQModel(BaseQModel):
@@ -62,7 +68,12 @@ class MiniMaxQModel(BaseQModel):
     ``mlp.experts`` with per-expert ``gate_proj``/``up_proj``/``down_proj``
     leaves after Defuser expansion.
     """
-    fusable = FusableConfig("minimax").merge(LlamaFusableConfig(), profiles=("qkv",))
+    fusable = None
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.minimax_m2.configuration_minimax.MiniMaxText01Config",
+        model_class="gptqmodel.models.ports.minimax_m2.modeling_minimax.MiniMaxText01ForCausalLM",
+    )
 
 
     pre_lm_head_norm_module = "model.norm"
@@ -97,8 +108,11 @@ class MiniMaxQModel(BaseQModel):
                 # non-source and `out_proj` keeps its own group.
                 "output_gate:0:nosrc",
                 "out_proj:2",
+                "norm:!:nosrc",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!:nosrc",),
+            "shared_mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "coefficient": ("coefficient:!",),
             "mlp:moe": {  # MoE module
                 "gate": ("gate:!",),
                 "experts": {

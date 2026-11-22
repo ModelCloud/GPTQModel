@@ -2,15 +2,13 @@ from types import SimpleNamespace
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.hy_v3 import HYV3QModel
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
 
-def test_hy_v3_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="hy_v3")
+def test_hy_v3_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["hy_v3"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/hy_v3") is HYV3QModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is HYV3QModel
 
 
 def test_hy_v3_module_tree_expands_dense_and_sparse_moe_paths():

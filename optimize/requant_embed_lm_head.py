@@ -31,6 +31,7 @@ from optimize._common import (
     verify_visible_uuids,
 )
 
+
 set_env()
 
 
@@ -52,7 +53,7 @@ def requant_embed_lm_head(args: argparse.Namespace) -> Path:
     """Run embedding requantization after GPU visibility has been configured."""
     import torch
 
-    from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
     from gptqmodel.quantization.config import QuantizeEmbed
 
     set_torch_threads()
@@ -100,7 +101,6 @@ def requant_embed_lm_head(args: argparse.Namespace) -> Path:
         "sym": True,
         "desc_act": args.desc_act,
         "act_group_aware": not args.no_act_group_aware,
-        "scale_search": args.scale_search,
     }
     # Dynamic lookups are cached because configs are otherwise immutable after
     # construction. Build a new mapping so lookups performed during checkpoint
@@ -138,11 +138,13 @@ def requant_embed_lm_head(args: argparse.Namespace) -> Path:
     print(f"[requant] Requantizing embeddings with mode={mode.value} ...", flush=True)
     start = time.time()
     model.requantize(
-        calibration=calibration,
-        calibration_concat_size=args.calibration_concat_size,
-        calibration_concat_separator=args.calibration_concat_separator,
-        calibration_sort=args.calibration_sort,
-        batch_size=args.batch_size,
+        calibration=CalibrationConfig(
+            dataset=calibration,
+            concat_size=args.calibration_concat_size,
+            concat_separator=args.calibration_concat_separator,
+            sort=args.calibration_sort,
+            batch_size=args.batch_size,
+        ),
         backend=BACKEND.AUTO,
         embed_quant_mode=mode,
     )

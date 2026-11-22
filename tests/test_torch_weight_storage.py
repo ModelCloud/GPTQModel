@@ -9,6 +9,7 @@ import torch
 
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import FORMAT
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 FORMATS = [(bits, FORMAT.GPTQ_P) for bits in range(2, 9)] + [
@@ -104,8 +105,7 @@ def test_eager_oracle_and_no_retained_weights(monkeypatch, bits, fmt, dtype, gro
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_legacy_opt_ins_cannot_retain_weights(monkeypatch, dtype):
-    monkeypatch.setenv("GPTQ_TORCH_CACHE_WEIGHTS", "1")
-    monkeypatch.setenv("GPTQ_TORCH_LOOKAHEAD", "1")
+    configure_kernel(KernelConfig(torch_cache_weights=True, torch_lookahead=True))
     with pytest.warns(FutureWarning, match="Dense weight"):
         module, weight = build_case(dtype=dtype)
         module.enable_weight_cache().enable_lookahead().set_lookahead_next(module)
@@ -164,8 +164,9 @@ def test_metadata_lifecycle_with_inference_tensors(operation):
             state["qzeros"].zero_()
             module.load_state_dict(state)
         elif operation == "move":
-            module.to(torch.bfloat16)
-            activation = activation.bfloat16()
+            # Device move; dtype casts after a forward are rejected
+            # (contracts/kernel/forward-dtype.md).
+            module.to("cpu")
         else:
             module.qzeros.zero_()
             module.g_idx.zero_()

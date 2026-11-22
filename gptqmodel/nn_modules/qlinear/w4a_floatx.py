@@ -13,6 +13,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import PackableQuantLinear
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
@@ -31,6 +32,12 @@ W4A_ROCM_UNSUPPORTED = (
 
 
 class W4AFP8Linear(PackableQuantLinear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
+    # torch.cuda.graph capture succeeds, but `forward` is decorated with
+    # `@torch.compiler.disable`, so dynamo always breaks: EAGER only.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
+
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_W4AFP8]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     # A saved activation policy selects this backend. Ordinary GPTQ loads do not.

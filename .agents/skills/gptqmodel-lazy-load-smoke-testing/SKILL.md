@@ -1,29 +1,32 @@
 ---
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-lazy-load-smoke-testing
 description: End-to-end smoke test for GPT-QModel's lazy checkpoint load (LazyTurtle) and first-layer materialization through StageInputsCapture.cache_inputs. Use when verifying lazy-load behavior, first-layer input capture, shell_module_materialize module_path propagation, or CPU-only GPTQ quantization from a tiny fixture.
 ---
 
 # GPT-QModel lazy-load smoke testing
 
-This skill describes how to exercise the lazy checkpoint path on CPU and verify that the first decoder layer is correctly materialized during `StageInputsCapture.cache_inputs`.
+## At a glance
 
-## When to use
-
-- A PR touches `gptqmodel/looper/module_looper.py`, `gptqmodel/looper/stage_inputs_capture.py`, `gptqmodel/models/base.py`, or `gptqmodel/utils/structure.py`.
-- You need to verify that `shell_module_materialize` receives a dotted `module_path` such as `model.layers.0` instead of `None` or a class name.
-- You want to confirm that `LazyTurtle.materialize_submodule` loads real parameters/buffers (not `meta`) and that forward/generate runs without `AttributeError` or `NaN`.
-
-## Devin Secrets Needed
-
-None for CPU-only smoke testing. If GPU testing is required, set `CUDA_VISIBLE_DEVICES` as appropriate and use `device="cuda"`.
+For changes to `gptqmodel/looper/{module_looper,stage_inputs_capture}.py`,
+`gptqmodel/models/base.py` or `gptqmodel/utils/structure.py`, run the snippets
+below in order from the repository root (no committed smoke script). The tiny
+CPU Llama must lazy-load, pass the dotted `model.layers.0` path to
+`shell_module_materialize`, materialize real parameters/buffers rather than
+`meta`, quantize, save, reload and generate without NaNs or `AttributeError`.
+This smoke test does not replace a [focused regression](../gptqmodel-regression-test-design/SKILL.md);
+extend `tests/test_stage_inputs_capture.py` for path-resolution bugs.
 
 ## Environment prerequisites
 
-1. Install system development headers; otherwise torch inductor / `cpp_extension` JIT builds for `pack_block_cpu` fail with `Python.h: No such file or directory`:
-   ```bash
-   sudo apt-get update -qq && sudo apt-get install -y -qq python3-dev python3.10-dev
-   ```
-2. Install the CPU torch stack and project dependencies:
+No credentials are needed. For a GPU run, select the device explicitly and pass
+`device="cuda:N"` (see `gptqmodel-device-families`).
+
+1. Install the Python development headers for your interpreter (for example
+   `python3-dev` on Debian/Ubuntu); otherwise JIT extension builds fail with
+   `Python.h: No such file or directory`.
+2. On a fresh CPU-only machine, install a CPU torch build and the project:
    ```bash
    pip install -U pip
    pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
@@ -73,8 +76,7 @@ hf_tokenizer.save_pretrained(tmp)
 ## Lazy-load + input-capture test
 
 ```python
-from gptqmodel import GPTQModel, BACKEND
-from gptqmodel.models.base import QUANT_CONFIG_NAME
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.quantization.config import QuantizeConfig
 
 calibration = [
@@ -111,10 +113,8 @@ def capture(*args, **kwargs):
 
 model.shell_module_materialize = capture
 model.quantize(
-    calibration,
-    batch_size=1,
+    CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
     backend=BACKEND.GPTQ_TORCH,
-    calibration_data_min_length=1,
 )
 
 first_call_args, first_call_kwargs = calls[0]
@@ -157,20 +157,13 @@ assert not torch.isnan(out).any()
 
 ## Expected log signals
 
-- `INFO  Loader: using checkpoint-backed lazy turtle source for /tmp/...`
-- `INFO  ModuleLooper: capturing layer inputs from N calibration batches`
-- `[test] first materialized module path: 'model.layers.0'`
-- `[test] generate output shape: torch.Size([1, 6])`
-- `[test] PASS`
+- `Loader: using checkpoint-backed lazy turtle source for /tmp/...`
+- `ModuleLooper: capturing layer inputs from N calibration batches`
+
+The assertions above, not log lines, are the pass criteria.
 
 ## Common issues
 
-- `Python.h: No such file or directory` during `TorchLinear` forward: install `python3-dev`/`python3.10-dev` and rerun.
 - `torchao` extension load warnings (`_C_cutlass_90a.so`, `_C_mxfp8...so`) are non-fatal on CPU.
 - `Calibration dataset size should be more than 256` warnings are expected for tiny smoke fixtures.
 - If `module_path` is `None`, the new resolution logic in `stage_inputs_capture.py` was not reached or `layer_names` was not propagated from `module_looper.py`.
-
-## Regression test reference
-
-- `tests/test_stage_inputs_capture.py` covers the `module_path` resolution paths.
-- For end-to-end validation, run `smoke_lazy_load.py` from the repo root.

@@ -9,6 +9,7 @@ import torch.nn as nn
 
 import gptqmodel.nn_modules.qlinear.fp8 as fp8_module
 from gptqmodel.quantization.dtype import available_float8_dtype_names
+from tests.fp8_test_utils import pack_fp8_module, quantize_fp8_weight
 
 
 def _available_fp8_quant_formats():
@@ -32,7 +33,7 @@ def _make_fp8_kernel(*, in_features: int = 64, out_features: int = 64) -> fp8_mo
         weight_block_size=None,
         register_buffers=False,
     )
-    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    pack_fp8_module(kernel, linear)
     return kernel.eval()
 
 
@@ -40,6 +41,11 @@ def _weight_only_oracle(kernel: fp8_module.TorchFP8Linear, x: torch.Tensor) -> t
     """Decode the packed FP8 payload with independent FP64 arithmetic.
 
     This does not call ``dequantize_weight`` or any other code under test.
+    For range-safe row/tensor scales the native W8A16 GEMM casts the exact FP8
+    codes and applies the scale to an FP32 output (#5146), so the oracle keeps
+    the decoded weight un-narrowed. Block scales still divide the exact codes
+    into the activation dtype (FP32 opmath, one rounding), so that oracle keeps
+    the same weight narrowing as the kernel.
     """
 
     codes = kernel.weight.to(torch.float64)
@@ -66,6 +72,8 @@ def _weight_only_oracle(kernel: fp8_module.TorchFP8Linear, x: torch.Tensor) -> t
             scale[:, None, :, None],
         ).reshape(kernel.out_features, kernel.in_features)
 
+    if kernel.weight_scale_method == "block":
+        decoded = decoded.to(x.dtype).to(torch.float64)
     output = x.to(torch.float64) @ decoded.t()
     if kernel.bias is not None:
         output = output + kernel.bias.to(torch.float64)
@@ -87,7 +95,7 @@ def test_fp8_empty_cuda_forward_preserves_scaled_mm_for_later_tokens(monkeypatch
         format="float8_e4m3fn", weight_scale_method="tensor",
         activation_quant_method="per_token",
     )
-    module.pack_original(linear, scales=None, zeros=None)
+    pack_fp8_module(module, linear)
     module = module.eval().to(device="cuda")
     x = torch.randn(*prefix, 64, device="cuda", dtype=dtype)
     empty = x[:0]
@@ -152,9 +160,9 @@ def test_fp8_pack_matches_reference_quantizer(fmt: str, weight_scale_method: str
         weight_block_size=block_size,
         register_buffers=False,
     )
-    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    pack_fp8_module(kernel, linear)
 
-    expected_weight, expected_scale_inv = fp8_module.quantize_fp8_weight(
+    expected_weight, expected_scale_inv = quantize_fp8_weight(
         linear.weight.detach().to(torch.float32),
         format=fmt,
         weight_scale_method=weight_scale_method,
@@ -187,7 +195,7 @@ def test_fp8_pack_rejects_e8m0fnu(weight_scale_method: str):
     )
 
     with pytest.raises(ValueError, match="dequantization of existing checkpoints"):
-        kernel.pack_original(linear=linear, scales=None, zeros=None)
+        pack_fp8_module(kernel, linear)
 
 
 @pytest.mark.parametrize("fmt", _available_fp8_quant_formats())
@@ -212,7 +220,7 @@ def test_fp8_forward_matches_dequantized_reference(fmt: str, weight_scale_method
         weight_block_size=block_size,
         register_buffers=False,
     )
-    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    pack_fp8_module(kernel, linear)
     kernel = kernel.to(device=device).eval()
 
     x_dtype = torch.float32 if device == "cpu" else torch.float16
@@ -261,7 +269,7 @@ def _packed_gpu_kernel(
         register_buffers=False,
         **kwargs,
     )
-    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    pack_fp8_module(kernel, linear)
     return kernel.eval()
 
 
@@ -285,7 +293,39 @@ def test_fp8_default_forward_is_w8a16(fmt: str, weight_scale_method: str, dtype:
 
     oracle = _weight_only_oracle(kernel, x)
     assert out.dtype == dtype
+    # With the weight narrowing matched, only the FP32-vs-FP64 reduction and
+    # the final output rounding remain. Half a bf16 ulp at unity is
+    # 2^-9 ~= 2e-3, which is the bound this tolerance allows; an oracle built
+    # from the un-narrowed FP32 weight differs by a full bf16 ulp (2^-8) and
+    # still fails here.
     torch.testing.assert_close(out, oracle.to(dtype), rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+@pytest.mark.parametrize("weight_scale_method", ["tensor", "row"])
+def test_fp8_per_token_forward_matches_the_dense_contract(dtype, weight_scale_method):
+    """W8A8 output is correct whether or not the native path is usable (#5174).
+
+    Some devices accept the row-wise ``_scaled_mm`` layout and return a result
+    ~1e3x off without raising (sm_121, torch 2.11.0+cu130, ``float16`` output),
+    so the module must fall back to dequantize + matmul instead of trusting it.
+    """
+
+    kernel = _packed_gpu_kernel(
+        bias=False,
+        weight_scale_method=weight_scale_method,
+        activation_quant_method="per_token",
+    ).to("cuda")
+    x = torch.randn(7, 64, device="cuda", dtype=dtype)
+    with torch.inference_mode():
+        out = kernel(x)
+        codes, scale_a = kernel._quantize_input_for_scaled_mm(x)
+        dense = (codes.to(dtype) * scale_a.to(dtype)) @ kernel.dequantize_weight(
+            device="cuda", dtype=dtype
+        )
+
+    torch.testing.assert_close(out, dense, rtol=5e-2, atol=5e-2)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
@@ -317,7 +357,13 @@ def test_fp8_w8a8_is_opt_in_and_uses_per_token_scales():
     outlier = torch.full((1, 64), 2000.0, device="cuda", dtype=torch.float16)
 
     assert not default._can_use_scaled_mm(rows)
-    assert opted._can_use_scaled_mm(rows)
+    # The method is the switch; whether the device's rowwise `_scaled_mm` is
+    # usable is the second gate. Some devices accept the layout and return a
+    # wrong result without raising, so the module measures the contract instead
+    # of trusting it (#5174).
+    assert opted._can_use_scaled_mm(rows) is fp8_module._scaled_mm_row_scale_supported(
+        rows.device, opted._scaled_mm_out_dtype(rows)
+    )
 
     with torch.inference_mode():
         codes_alone, scale_alone = opted._quantize_input_for_scaled_mm(rows)
@@ -333,7 +379,9 @@ def test_fp8_w8a8_is_opt_in_and_uses_per_token_scales():
 
     # The method is the switch; the default module never takes the path.
     default.set_activation_quant_method("per_token")
-    assert default._can_use_scaled_mm(rows)
+    assert default._can_use_scaled_mm(rows) is fp8_module._scaled_mm_row_scale_supported(
+        rows.device, default._scaled_mm_out_dtype(rows)
+    )
     default.set_activation_quant_method("none")
     assert not default._can_use_scaled_mm(rows)
     with pytest.raises(ValueError, match="activation quantization"):
@@ -520,7 +568,7 @@ def test_fp8_scaled_mm_matches_dense_reference(fmt: str, weight_scale_method: st
         activation_quant_method="per_token",
         register_buffers=False,
     )
-    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    pack_fp8_module(kernel, linear)
     kernel = kernel.to(device="cuda").eval()
 
     x = torch.randn(7, 64, device="cuda", dtype=torch.float16)

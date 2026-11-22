@@ -60,7 +60,6 @@ def test_unsupported_checkpoint_fails_before_model_or_disk_mutation(
     ):
         BaseQModel.quantize(
             model,
-            calibration=None,
             checkpoint=CheckpointConfig(root),
         )
     assert config.to_dict() == config_before
@@ -88,6 +87,7 @@ def test_unsupported_checkpoint_fails_before_model_or_disk_mutation(
         "kill-hessian-early",
     ],
 )
+@pytest.mark.checkpoint_recovery
 def test_eora_checkpoint_recovery(tmp_path, monkeypatch, family, mode):
     import os
 
@@ -107,6 +107,7 @@ def test_eora_checkpoint_recovery(tmp_path, monkeypatch, family, mode):
 @pytest.mark.parametrize("family", ["llama", "qwen3_moe"])
 @pytest.mark.parametrize("mode", ["term", "kill-before", "kill-after", "error"])
 @pytest.mark.parametrize("eora", [False, True])
+@pytest.mark.checkpoint_recovery
 def test_awq_checkpoint_recovery(tmp_path, family, mode, eora):
     from test_checkpoint_quantization import test_subprocess_recovery
 
@@ -117,8 +118,9 @@ def test_awq_checkpoint_recovery(tmp_path, family, mode, eora):
     )
 
 
-@pytest.mark.parametrize("method", ["rtn", "fp8", "gguf", "bitsandbytes"])
+@pytest.mark.parametrize("method", ["rtn", "gguf", "bitsandbytes"])
 @pytest.mark.parametrize("mode", ["term", "kill-before", "kill-after", "error"])
+@pytest.mark.checkpoint_recovery
 def test_weight_only_checkpoint_recovery(tmp_path, method, mode):
     from test_checkpoint_quantization import test_subprocess_recovery
 
@@ -129,6 +131,7 @@ def test_weight_only_checkpoint_recovery(tmp_path, method, mode):
 
 @pytest.mark.parametrize("method", ["qqq", "paro", "exl3"])
 @pytest.mark.parametrize("mode", ["term", "kill-before", "kill-after", "error"])
+@pytest.mark.checkpoint_recovery
 def test_specialized_checkpoint_recovery(tmp_path, method, mode):
     from test_checkpoint_quantization import test_subprocess_recovery
 
@@ -137,6 +140,7 @@ def test_specialized_checkpoint_recovery(tmp_path, method, mode):
     test_subprocess_recovery(tmp_path, "llama", mode, device="cuda:0", method=method)
 
 
+@pytest.mark.checkpoint_recovery
 def test_paro_eager_checkpoint_recovery(tmp_path):
     from test_checkpoint_quantization import test_subprocess_recovery
 
@@ -155,6 +159,7 @@ def test_paro_eager_checkpoint_recovery(tmp_path):
 @pytest.mark.parametrize("method", ["qqq", "paro"])
 @pytest.mark.parametrize("family", ["llama", "qwen3_moe"])
 @pytest.mark.parametrize("mode", ["term", "kill-before"])
+@pytest.mark.checkpoint_recovery
 def test_specialized_eora_checkpoint_recovery(tmp_path, method, family, mode):
     from test_checkpoint_quantization import test_subprocess_recovery
 
@@ -166,9 +171,10 @@ def test_specialized_eora_checkpoint_recovery(tmp_path, method, family, mode):
 
 
 @pytest.mark.parametrize(
-    "method", ["rtn", "fp8", "gguf", "bitsandbytes", "qqq", "paro", "exl3"]
+    "method", ["rtn", "gguf", "bitsandbytes", "qqq", "paro", "exl3"]
 )
 @pytest.mark.parametrize("mode", ["term", "kill-before"])
+@pytest.mark.checkpoint_recovery
 def test_moe_method_checkpoint_recovery(tmp_path, method, mode):
     from test_checkpoint_quantization import test_subprocess_recovery
 
@@ -188,11 +194,11 @@ def test_moe_method_checkpoint_recovery(tmp_path, method, mode):
         ("awq", "gemv_fast"),
         ("awq", "llm-awq"),
         ("awq", "bitblas"),
-        ("fp8", "float8_e5m2"),
         ("bitsandbytes", "fp4"),
         ("bitsandbytes", "int8"),
     ],
 )
+@pytest.mark.checkpoint_recovery
 def test_format_checkpoint_recovery(tmp_path, method, format):
     from test_checkpoint_quantization import test_subprocess_recovery
 
@@ -226,6 +232,7 @@ def test_gptq_bitblas_is_repack_only_not_a_quantization_export():
         ("awq", "llm-awq"),
     ],
 )
+@pytest.mark.checkpoint_recovery
 def test_eora_format_checkpoint_recovery(tmp_path, method, format):
     from test_checkpoint_quantization import test_subprocess_recovery
 

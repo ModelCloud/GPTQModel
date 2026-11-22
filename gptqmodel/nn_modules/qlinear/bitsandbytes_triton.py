@@ -32,7 +32,7 @@ iterations), fused kernel vs ``bnb.matmul_4bit``::
 Ada (RTX 4090, SM 8.9) keeps bitsandbytes' native CUDA kernels by default:
 they are cublas-backed and measured faster than this tile on every shape
 tested, so the ``ada`` entry exists for the hardware-parity contract and for
-forced A/B runs (``GPTQMODEL_BNB_TRITON=1``), not as the default.
+forced A/B runs (``KernelConfig.bitsandbytes_triton=True``), not as the default.
 """
 
 from __future__ import annotations
@@ -42,6 +42,8 @@ from typing import NamedTuple, Optional
 import torch
 import triton
 import triton.language as tl
+
+from gptqmodel.utils.triton_jit import jit as triton_jit
 
 from ...utils.arch import tuning_family
 from ...utils.rocm import IS_ROCM
@@ -94,33 +96,49 @@ def tuned_families() -> tuple[str, ...]:
     return tuple(sorted(_BNB_GEMM_LAUNCH))
 
 
-def available_for(device=None, dtype: Optional[torch.dtype] = None) -> bool:
+def available_for(
+    device=None,
+    dtype: Optional[torch.dtype] = None,
+    *,
+    kernel=None,
+) -> bool:
     """Return whether the Triton path is enabled for this device and dtype.
 
     Enabled on ROCm for a family with a measured tile. Elsewhere it is off
-    unless ``GPTQMODEL_BNB_TRITON`` is set, because the vendor kernels are the
-    measured winner on CUDA.
-    """
+    unless ``KernelConfig.bitsandbytes_triton`` is set, because the vendor
+    kernels are the measured winner on CUDA.
 
-    from ...utils.env import env_flag
+    ``kernel`` is the module's snapshotted policy. ``None`` keeps the
+    process-wide fallback for callers that do not own a module.
+    """
 
     if dtype is not None and dtype not in (torch.float16, torch.bfloat16):
         return False
-    forced = env_flag("GPTQMODEL_BNB_TRITON", default=False)
+    if kernel is None:
+        from ...utils.kernel import get_kernel_config
+
+        kernel = get_kernel_config()
+    forced = kernel.bitsandbytes_triton
     if not forced and not IS_ROCM:
         return False
     return _family(device) in _BNB_GEMM_LAUNCH
 
 
-def should_use(device=None, dtype: Optional[torch.dtype] = None, rows: int = 0) -> bool:
+def should_use(
+    device=None,
+    dtype: Optional[torch.dtype] = None,
+    rows: int = 0,
+    *,
+    kernel=None,
+) -> bool:
     """Return whether a forward with ``rows`` rows should use the fused kernel."""
 
     if rows < gemm_launch(device).min_m:
         return False
-    return available_for(device, dtype)
+    return available_for(device, dtype, kernel=kernel)
 
 
-@triton.jit
+@triton_jit
 def _bnb_4bit_gemm_kernel(
     x_ptr, q_ptr, am_ptr, code_ptr, bias_ptr, out_ptr, m,
     K: tl.constexpr, N: tl.constexpr, BS: tl.constexpr,
@@ -130,6 +148,10 @@ def _bnb_4bit_gemm_kernel(
     pid_n = tl.program_id(1)
     rows = pid_m * BM + tl.arange(0, BM)
     cols = pid_n * BN + tl.arange(0, BN)
+    # Rows index the whole activation and output. A long prefill can make
+    # ``rows * K`` or ``rows * N`` exceed 2^31 elements, so the row offset is
+    # computed in 64-bit; a 32-bit product wraps the address.
+    rows64 = rows.to(tl.int64)
     mmask = rows < m
     nmask = cols < N
     kk = tl.arange(0, BK)
@@ -169,7 +191,7 @@ def _bnb_4bit_gemm_kernel(
         cw = tl.load(code_ptr + codes, mask=valid, other=0.0).to(tl.float32)
         w = (cw * am).to(acc_dtype)
         xv = tl.load(
-            x_ptr + rows[:, None] * K + ks[None, :],
+            x_ptr + rows64[:, None] * K + ks[None, :],
             mask=mmask[:, None] & kvalid[None, :], other=0.0,
         )
         acc = tl.dot(xv, tl.trans(w), acc)
@@ -177,13 +199,13 @@ def _bnb_4bit_gemm_kernel(
     if HAS_BIAS:
         acc += tl.load(bias_ptr + cols, mask=nmask, other=0.0)[None, :].to(tl.float32)
     tl.store(
-        out_ptr + rows[:, None] * N + cols[None, :],
+        out_ptr + rows64[:, None] * N + cols[None, :],
         acc.to(out_ptr.dtype.element_ty),
         mmask[:, None] & nmask[None, :],
     )
 
 
-@triton.jit
+@triton_jit
 def _bnb_4bit_dequant_kernel(
     q_ptr, am_ptr, code_ptr, out_ptr,
     K: tl.constexpr, N: tl.constexpr, BS: tl.constexpr,

@@ -37,7 +37,7 @@ def test_qwen3_vl_video_missing_dependency_has_install_hint(monkeypatch):
         }
     ]
 
-    with pytest.raises(ImportError, match="pip install qwen-vl-utils"):
+    with pytest.raises(ImportError, match=r"pip install 'gptqmodel\[video\]'"):
         base_qwen3_vl.BaseQwen3VLGPTQ.process_vision_info(messages)
 
 
@@ -59,13 +59,20 @@ def test_qwen3_vl_image_only_process_vision_info_returns_image_list():
     assert image_inputs == [image]
 
 
+class _LanguageModel(nn.Module):
+    """Minimal module layout the deepstack hook can register on."""
+
+    def __init__(self, embed_tokens, rotary_emb):
+        super().__init__()
+        self.embed_tokens = embed_tokens
+        self.rotary_emb = rotary_emb
+
+
 def test_qwen3_vl_pre_quantize_hooks_use_inner_model_layout():
     instance = object.__new__(base_qwen3_vl.BaseQwen3VLGPTQ)
+    nn.Module.__init__(instance)
     inner_model = types.SimpleNamespace(
-        language_model=types.SimpleNamespace(
-            embed_tokens=nn.Embedding(4, 4),
-            rotary_emb=nn.Identity(),
-        ),
+        language_model=_LanguageModel(nn.Embedding(4, 4), nn.Identity()),
         visual=nn.Identity(),
     )
     instance.model = types.SimpleNamespace(model=inner_model)
@@ -83,11 +90,9 @@ def test_qwen3_vl_pre_quantize_hooks_use_inner_model_layout():
 
 def test_qwen3_vl_pre_quantize_hooks_support_direct_layout():
     instance = object.__new__(base_qwen3_vl.BaseQwen3VLGPTQ)
+    nn.Module.__init__(instance)
     instance.model = types.SimpleNamespace(
-        language_model=types.SimpleNamespace(
-            embed_tokens=nn.Embedding(4, 4),
-            rotary_emb=nn.Identity(),
-        ),
+        language_model=_LanguageModel(nn.Embedding(4, 4), nn.Identity()),
         visual=nn.Identity(),
     )
     instance.quantize_config = types.SimpleNamespace(
@@ -127,11 +132,12 @@ def test_qwen3_vl_layout_resolution_supports_nested_wrapper():
 
 def test_qwen3_vl_pre_quantize_hooks_materialize_meta_modules_with_nested_layout():
     instance = object.__new__(base_qwen3_vl.BaseQwen3VLGPTQ)
+    nn.Module.__init__(instance)
     instance.model = types.SimpleNamespace(
         model=types.SimpleNamespace(
-            language_model=types.SimpleNamespace(
-                embed_tokens=nn.Embedding(4, 4, device="meta"),
-                rotary_emb=nn.Linear(4, 4, device="meta"),
+            language_model=_LanguageModel(
+                nn.Embedding(4, 4, device="meta"),
+                nn.Linear(4, 4, device="meta"),
             ),
             visual=nn.Linear(4, 4, device="meta"),
         )

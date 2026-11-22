@@ -1,9 +1,34 @@
 # GGUF Triton packed metadata cache
 
 `GGUFTritonKernel` decodes compact scales, minima, and bit layouts from packed
-GGUF `qweight` blocks once per device and format. The decoded metadata remains
-packed or block-sized; a full dequantized layer is never retained. The cache
-must be rebuilt whenever the source `qweight` changes.
+GGUF `qweight` blocks once per device and format. The cache holds only compact
+derived metadata: the per-sub-block scale/min values and, for Q1_0, the u32
+sign words used by the SM80 specialization. The packed code bytes (`qs`, `ql`,
+`qh`, and the Q1_0 sign bytes) are strided views of `qweight` itself, so they
+add no resident memory. A full dequantized layer and a second copy of the
+packed codes are never retained. The cache must be rebuilt whenever the source
+`qweight` changes.
+
+## Resident memory cost
+
+Beyond `qweight`, the cache keeps the scale/min metadata only:
+
+| Format | Packed bytes per block/row | Retained metadata per block/row | Extra VRAM |
+| --- | ---: | ---: | ---: |
+| Q1_0 | 130 | 2 (scale) | 0.015x |
+| Q4_K | 144 | 32 (scale + min, FP16) | 0.22x |
+| Q5_K | 176 | 32 (scale + min, FP16) | 0.18x |
+| Q6_K | 210 | 32 (16 signed scales, FP16) | 0.15x |
+
+The metadata widens to FP32 when the K-scale range guard flags a block, which
+doubles those columns. The code bytes stay zero-copy regardless.
+
+Before #4748 the cache also materialized a permuted contiguous copy of every
+code array, so a model held roughly 2.1x its packed weight bytes. On an RTX
+4090 with Llama-3.1-8B Q4_K_M that was 5.61 GiB after load and 9.68 GiB after
+one token, with a 4.06 GiB cache against 3.66 GiB of packed weights. With the
+views the same model retains the packed weights plus about 0.5 GiB of
+scale/min metadata.
 
 ## Cache flow
 
@@ -14,7 +39,7 @@ flowchart TD
     C --> D{"Stored key matches?"}
     D -- "Yes" --> E["Reuse compact metadata"]
     D -- "No" --> F["_build_triton_cache decodes packed blocks"]
-    F --> G["Replace old cache entry"]
+    F --> G["Publish the entry (one cold build per module)"]
     E --> H["Launch GGUF Triton kernel"]
     G --> H
     I["In-place qweight write"] --> J{"Inference tensor?"}
@@ -48,6 +73,12 @@ GGUF decoder and FP64 Torch dot product. They also cover buffer replacement,
 checkpoint load, device move, repeated cache hits, and the explicit-clear
 contract for inference tensors.
 
+`tests/kernels/test_gguf_triton_packed_weight_memory_4748.py` measures the real
+device bytes retained after one forward. For Q4_K, Q5_K, and Q6_K it requires
+the retained bytes to stay below 0.6x the packed weight bytes, and it checks
+the strided-code forward against an independent FP64 dequantized oracle at
+M=1 and M=16.
+
 On an NVIDIA GB10 (SM 12.1), PyTorch 2.15.0+cu132, and Triton 3.9.0,
 Q4_K with K=N=1024 retained 655,360 bytes (0.625 MiB) of compact metadata
 after cache construction. Cold construction peaked 0.703 MiB above the
@@ -66,6 +97,48 @@ only the cache-hit check. No weight was updated during timing.
 
 This cache contract was corrected in
 [PR #3664](https://github.com/ModelCloud/GPTQModel/pull/3664).
+
+## Concurrency contract
+
+One module serves many threads, each on its own CUDA stream, so the cache is
+shared mutable state. Three rules keep it safe; they are enforced by
+`GGUFTritonKernel._get_triton_cache`,
+`_publish_triton_cache_ready`/`_wait_for_triton_cache_ready`, and
+`clear_weight_cache`.
+
+1. **Publish, then hand over.** `_build_triton_cache` only *enqueues* the
+   re-layout kernels, so the builder records its stream and an event
+   (`_publish_triton_cache_ready`) before the entry becomes visible. A consumer
+   on another stream waits on that event and `record_stream`s the entry's
+   tensors, which is what orders the fused matmul after the decode and keeps
+   the allocator from recycling the metadata while the kernel runs (#4797).
+2. **Retire once, then never touch a stream API.** The first consumer that
+   observes the event complete pops the handshake (`_retire_triton_cache_ready`).
+   From then on a lookup is a dict read plus a key compare: no stream query, no
+   `record_stream` (#4956). That is only sound because of rule 3.
+3. **A published entry is never dropped by a peer cold build.** The entry owns
+   the `scale`/`min` tensors that every consumer stream reads. The cold build is
+   serialized per module (`_triton_cache_build_lock`, a weak map keyed by the
+   module so it is not module state), so an N-thread cold burst builds once and
+   every thread launches against the entry the module publishes. Without it each
+   thread built and stored its own cache, the last store dropped the entry a peer
+   had already picked up through the retired path, and the allocator handed those
+   blocks to the building stream under a pending kernel: the first concurrent
+   forward returned NaN or garbage while warm forwards stayed correct (#5008).
+
+The forward path never iterates or mutates the cache dict; the publish step
+snapshots the tensors into an immutable tuple, and retirement is a pair of
+single-key pops (#4962). `clear_weight_cache` also takes the build lock, so a
+concurrent build cannot re-publish an entry into a dict that was just cleared.
+Replacing an entry is reserved for a genuine invalidation — an in-place weight
+write, a checkpoint load, or a device/dtype move — none of which may run
+concurrently with a forward on that module.
+
+`tests/kernels/test_gguf_triton_cold_cache_contention_5008.py` pins rule 3
+deterministically (the first builder is parked, so the second thread provably
+reaches the cold path) and end to end (a cold burst must match a serially
+warmed twin). `test_gguf_triton_ready_event_retirement_4956.py` and
+`test_gguf_triton_concurrent_ready_4962.py` pin rules 1 and 2.
 
 ## Q4_K and Q5_K scale range
 

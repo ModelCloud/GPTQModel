@@ -22,9 +22,10 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils import BACKEND
-from ...utils.env import env_flag
+from ...utils.kernel import get_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
@@ -112,7 +113,7 @@ def _load_cuda_libraries() -> bool:
 
 def _is_bitblas_available() -> bool:
     # Allow disabling BitBLAS probing in environments where TVM import is unstable.
-    if env_flag("GPTQMODEL_DISABLE_BITBLAS", default="0"):
+    if get_kernel_config().disable_bitblas:
         return False
 
     try:
@@ -270,7 +271,6 @@ def import_bitblas():
     if BITBLAS_TARGET is None:
         from .bitblas_target_detector import patched_auto_detect_nvidia_target
 
-        bitblas.auto_detect_nvidia_target = patched_auto_detect_nvidia_target
         # device_smi resolves ``cuda:N`` against CUDA_VISIBLE_DEVICES, so N is a
         # logical index. The env entry itself may be a physical id, UUID or MIG
         # name and must not be parsed as one.
@@ -482,6 +482,12 @@ class BitblasQuantizationConfig:
 
 
 class BitblasBaseQuantLinear(GroupedQuantLinear):
+    # BitBLAS stores its packed weight, scales and (asymmetric) zero points in
+    # the checkpoint. A symmetric layer registers an empty ``qzeros``, so that
+    # suffix is only required when the live buffer holds data.
+    CHECKPOINT_REQUIRED_BUFFERS = ("qweight", "scales", "qzeros")
+    CHECKPOINT_OPTIONAL_EMPTY_BUFFERS = ("qzeros",)
+
     OPT_FEATURES = BITBLAS_OPTIMIZE_FEATURES
     TORCH_DTYPE = torch.float16
 
@@ -945,6 +951,12 @@ class BitblasLinear(BitblasBaseQuantLinear):
     SUPPORTS_ADAPTERS = [Lora]
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    # bitblas is not installed on this host. The forward hands raw pointers to
+    # a ctypes CUDA library and enters a device context, so dynamo breaks:
+    # conservative EAGER, no capture measured.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     QUANT_TYPE = "gptq_bitblas"
     SUPPORTS_METHODS = [METHOD.GPTQ]

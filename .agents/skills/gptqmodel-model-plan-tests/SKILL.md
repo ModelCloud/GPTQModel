@@ -1,22 +1,27 @@
 ---
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-model-plan-tests
-description: Add and validate module-plan unit tests when registering a model type, changing a model definition, or changing module-tree consumption in GPTQModel.
+description: Add and validate module-plan unit tests and fusion eligibility when registering a model type or alias, changing a model definition, or changing module-tree consumption in GPT-QModel.
 ---
 
 # Model support requires module-plan tests
+
+## At a glance
+
+Treat the model's `module_tree` as the inventory of checkpoint-owned weights.
+Pin the registry, real model and fusion eligibility for every type and alias.
+For new models and definition changes, also qualify AWQ under the
+[AWQ onboarding skill](../gptqmodel-awq-model-onboarding/SKILL.md); a correct
+inventory does not prove scale sources, consumers or search objectives.
+
+## Registry and model-specific tests
 
 Every new `MODEL_MAP` entry, including an alias, must add an explicit case to
 `tests/module_tree/fixtures/registered_module_plans.json` and a model-specific
 module-plan unit test under `tests/module_tree/`. Changes to a definition's
 paths, tags, variants, or method overrides must update its tests in the same PR.
 The always-run registry contract fails for an unlisted model or method case.
-
-Also follow `gptqmodel-awq-model-onboarding` in
-`.agents/skills/gptqmodel-awq-model-onboarding/SKILL.md` for every new model/alias
-and definition or AWQ-consumer change. A correct weight inventory does not prove
-valid scale sources, complete consumers, or a correct search objective. Require
-native fold/search/replay evidence or a tested conservative AWQ policy; do not
-infer AWQ qualification from registry, shape, or generation tests alone.
 
 Use `tests/module_tree/test_registered_module_plans.py` for the fast compiler
 and consumer contract. Its inventory pins decoder prefixes and ordered blocks
@@ -30,14 +35,24 @@ plan through `model.module_plan()` when testing a loaded wrapper. Verify:
 
 - Declared quantizable paths resolve on the real decoder layers, including
   dense/MoE and hybrid attention branches used by the model.
-- Checkpoint-owned weight owners resolve through `plan.find()` and carry
-  quantization, exclusion, or capture tags. Include non-quantized weights.
 - Declared roles and routed/shared expert families reach the actual consumers,
   including looper grouping and lifecycle hooks where applicable.
 - Similar prefixes/suffixes and undeclared descendants are rejected.
 
-`state_dict()` is a useful architecture fixture for parameters and persistent
-buffers. For an actual checkpoint audit, use checkpoint keys and declared
+Every checkpoint-owned decoder-layer weight, quantized or not, must satisfy
+all three:
+
+- Its deepest owning module resolves through `ModulePlan.find()`.
+- A quantized owner is declared by `simple_layer_modules()`.
+- A non-quantized owner carries an explicit `:!` (not quantized) or `:?`
+  (capture-only) tag.
+
+The registry contract runs without an opt-in flag and must not skip supported
+definitions.
+
+Use `state_dict()` (parameters and persistent buffers) as the architecture
+fixture, not `named_modules()`, `named_parameters()`, or `named_buffers()`
+alone. For an actual checkpoint audit, use checkpoint keys and declared
 conversion mappings to distinguish checkpoint weights from tensors created
 after loading; runtime-only tensors do not create model-definition obligations.
 Do not substitute a tree-generated fake model for real model validation.

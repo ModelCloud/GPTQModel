@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -15,7 +15,12 @@ class Qwen4ExpQModel(BaseQModel):
     fusable = FusableConfig("qwen4_exp").merge(LlamaFusableConfig(), profiles=("qkv",))
 
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
     require_load_processor = True
     layer_modules_strict = False
 
@@ -35,13 +40,22 @@ class Qwen4ExpQModel(BaseQModel):
     # GQA makes o_proj shape-incompatible with the Q/K/V AWQ scale group.
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
 
-    # Only unmarked entries are quantized; PLE and hyper weights are omitted.
+    # Only unmarked entries are quantized. PLE and the hyper-connection
+    # transforms stay dense on purpose, so they carry `:!` instead of being
+    # left undeclared (an undeclared Linear silently stays BF16).
     module_tree = [
         "model",
         "language_model",
         "layers",
         "#",
         {
+            # PLE is optional per layer (`ple_layer_ids`) and injects hashed
+            # n-gram features; its projections, depthwise conv and embedding
+            # remain in the checkpoint dtype.
+            "ple:!": (),
+            # The hyper-connection mixers are gated low-rank transforms of the
+            # residual stream, not quantization candidates.
+            "attn_hyper_connection:!": (),
             "self_attn": (
                 "indexer.index_qk_proj:!",
                 "indexer.q_layernorm:!",
@@ -70,6 +84,7 @@ class Qwen4ExpQModel(BaseQModel):
                 # shared-expert input.
                 "out_proj:2:nosrc",
             ),
+            "mlp_hyper_connection:!": (),
             "mlp:moe": {
                 # Keep shared experts separate so placeholder expansion does not duplicate them.
                 "shared_expert": ("gate_proj:0", "up_proj:0", "down_proj:1"),
@@ -89,7 +104,10 @@ class Qwen4ExpTextQModel(Qwen4ExpQModel):
 
 
     # Text-only checkpoints use the causal-LM loader and have no processor.
-    loader = AutoModelForCausalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     require_load_processor = False
 
     # The text model stores its decoder directly under ``model`` rather than

@@ -6,8 +6,9 @@
 import copy
 import math
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch as t  # conflict with torch.py
@@ -19,7 +20,9 @@ from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM, normalize_device
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.backend_config import resolve_backend_config
 from ...utils.checkpoint_state import is_checkpoint_serialization
+from ...utils.kernel import snapshot_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.planar_packing import (
     PLANAR_BITS,
@@ -29,13 +32,134 @@ from ...utils.planar_packing import (
     planar_unpack_cols,
     planar_unpack_rows,
 )
-from ...utils.safe import THREADPOOLCTL
+from ...utils.safe import threadpool_limits
+from ...utils.torch import dynamo_is_compiling
 from ..compiled_state import compiled_module_getstate
-from ._fused_train_state import QZEROS_FORMAT_BUFFER
+from ..forward_dtype_lock import (  # noqa: F401 - re-exported
+    FORWARD_DTYPE_CONTRACT,
+    ForwardDtypeLockMixin,
+    _check_forward_dtype,
+    require_no_forward,
+)
+from ._compile_support import COMPILE_LEVEL
+from ._decode_dtype import decode_dtype_for_scales
+from ._fused_train_state import QZEROS_FORMAT_BUFFER, _materialize_snapshot_entry
 from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
+
+
+def new_validation_error(error_type, message):
+    """Rebuild a validation error from cached ``(type, message)`` metadata.
+
+    Validation caches must not hold exception objects: a raised exception's
+    ``__traceback__``, ``__cause__`` and ``__context__`` keep the frames that
+    were live at the failure, and through ``f_back`` every caller frame,
+    including a model being loaded. Each caller gets a fresh exception instead.
+    """
+
+    if error_type is None:
+        return None
+    try:
+        return error_type(message)
+    except Exception:
+        return ValueError(message)
+
+
+def _cache_validation_status(validate_once):
+    """``lru_cache`` a ``validate_once`` result as immutable status metadata.
+
+    The cache stores ``(ok, error_type, message)`` and each call returns a new
+    exception, so a failed probe never pins the frames it failed in and a
+    caller that raises the returned error cannot attach a traceback to the
+    cached entry. ``cache_clear`` and ``cache_info`` stay on the wrapper.
+    """
+
+    @lru_cache(maxsize=1024)
+    def status(cls):
+        ok, error = validate_once(cls)
+        if not ok and error is not None:
+            message = str(error)
+            error_type = type(error) if isinstance(error, BaseException) else ValueError
+            return False, error_type, message
+        return True, None, None
+
+    @wraps(validate_once)
+    def cached(cls):
+        ok, error_type, message = status(cls)
+        return ok, new_validation_error(error_type, message)
+
+    cached.cache_clear = status.cache_clear
+    cached.cache_info = status.cache_info
+    return cached
+
+
+#: Element budget for one ``pack_gpu`` input block. The packer keeps several
+#: ``[out_features, block_in]`` tensors live (fp32 rounding, int32 transpose,
+#: int64 shifts), about 32 bytes per element, so a whole-matrix block peaks at
+#: ~15x the fp16 weight. Capping the block keeps the transient bounded without
+#: changing the packed output: blocks only partition the input axis into
+#: disjoint output rows.
+PACK_GPU_MAX_BLOCK_ELEMS = 4 << 20
+
+
+#: Element budget for one ``pack_block`` input block. The CPU packer keeps the
+#: fp32 block, its int32 codes, and the int64 pack view live at once, so a
+#: whole-matrix block on a 4096x4096 layer peaks at several times the weight.
+#: The block only partitions the input axis, so capping it bounds the transient
+#: without changing the packed words.
+PACK_BLOCK_MAX_BLOCK_ELEMS = 1 << 20
+
+
+def _pack_block_block_in(out_features: int, block_in: int, word_bits: int) -> int:
+    """Cap ``pack_block``'s input block by :data:`PACK_BLOCK_MAX_BLOCK_ELEMS`.
+
+    Rounded down to a whole packing word so every block ends on a word
+    boundary, and never below one word.
+    """
+
+    max_block_in = (
+        PACK_BLOCK_MAX_BLOCK_ELEMS // max(out_features, 1) // word_bits * word_bits
+    )
+    block_in = min(block_in, max_block_in)
+    return max(word_bits, (block_in // word_bits) * word_bits)
+
+
+#: Element budget for one ``pack_original`` input block. The quant math keeps an
+#: FP32 block, the two gathered affine operands and the int32 codes live at
+#: once, so a whole-matrix block peaks at roughly six times the BF16 weight
+#: (#5728). The block only partitions the input axis, so capping it bounds the
+#: transient without changing a single packed word.
+PACK_ORIGINAL_MAX_BLOCK_ELEMS = 1 << 20
+
+
+def _pack_original_block_rows(out_features: int, unit: int) -> int:
+    """Cap ``pack_original``'s input block by :data:`PACK_ORIGINAL_MAX_BLOCK_ELEMS`.
+
+    Rounded down to a whole packing unit so every block ends on a storage word
+    (2/4/8-bit) or a 32-input group (3-bit and planar), and never below one
+    unit.
+    """
+
+    max_rows = PACK_ORIGINAL_MAX_BLOCK_ELEMS // max(out_features, 1)
+    return max(unit, (max_rows // unit) * unit)
+
+
+def _pack_gpu_block_in(out_features: int, block_in: int, word_bits: int) -> int:
+    """Cap ``pack_gpu``'s input block by :data:`PACK_GPU_MAX_BLOCK_ELEMS`.
+
+    The per-block transient is roughly ``out_features * block_in`` elements
+    times the number of live dtype views, so bounding the element count bounds
+    peak memory independently of the matrix width. Rounded down to a whole
+    packing word so every block ends on a word boundary.
+    """
+
+    max_block_in = (
+        PACK_GPU_MAX_BLOCK_ELEMS // max(out_features, 1) // word_bits * word_bits
+    )
+    block_in = min(block_in, max_block_in)
+    return max(word_bits, (block_in // word_bits) * word_bits)
 
 
 def _device_family(device: DEVICE | t.device | str):
@@ -78,9 +202,26 @@ def input_rows(x: t.Tensor) -> int:
     batch dimension, so a 4D input has ``B * S * T`` matrix rows.
     """
 
-    if x.ndim == 0:
+    shape = x.shape
+    if len(shape) == 0:
         raise ValueError("Linear input must have at least one dimension")
-    return math.prod(x.shape[:-1])
+    return math.prod(shape[:-1])
+
+
+def _named_tensor(module: nn.Module, name: str):
+    """Resolve a checkpoint tensor name (possibly dotted) without raising.
+
+    ``CHECKPOINT_REQUIRED_BUFFERS`` may name a tensor owned by a submodule
+    (VPTQ's ``centroids.weight``). A suffix whose live tensor is absent is
+    skipped by the checkpoint validator, so this probe skips it too.
+    """
+
+    owner_name, _, leaf = name.rpartition(".")
+    try:
+        owner = module.get_submodule(owner_name) if owner_name else module
+    except AttributeError:
+        return None
+    return getattr(owner, leaf, None)
 
 
 def empty_linear_output(x: t.Tensor, out_features: int) -> t.Tensor:
@@ -96,6 +237,41 @@ def empty_linear_output(x: t.Tensor, out_features: int) -> t.Tensor:
         dtype=x.dtype,
         device=x.device,
     )
+
+
+def detach_cpu_operand(tensor):
+    """Return ``tensor`` as a private allocation instead of a checkpoint view.
+
+    A CPU load keeps quantized tensors as zero-copy views of the shard's
+    ``safetensors`` mapping. The CPU int4 repack replaces ``qweight`` and
+    ``qzeros`` with private tensors, but keeps small per-column metadata
+    (``g_idx``, and ``scales`` on the ATen path) as views of that mapping. A
+    single surviving view pins the whole shard: every page the loader touched
+    stays resident even though the packed weights were replaced, so the model
+    counts its quantized weights twice (#4785).
+
+    These operands are per-column metadata, so one copy at repack time is cheap
+    next to the shard pages it releases. ``None`` and non-tensors pass through
+    unchanged.
+
+    Only a tensor that actually aliases the checkpoint is copied. A storage
+    backed by a mapped file is non-resizable (that is how ``safetensors`` and
+    ``torch.frombuffer`` on an ``mmap`` create it); an ordinary allocation is
+    resizable and is returned unchanged so its object identity survives
+    (``scales`` must stay the loader's tensor, #4395).
+    """
+
+    if tensor is None or not isinstance(tensor, t.Tensor):
+        return tensor
+    if tensor.device.type != "cpu":
+        return tensor
+    try:
+        aliases_checkpoint = not tensor.untyped_storage().resizable()
+    except Exception:
+        return tensor
+    if not aliases_checkpoint:
+        return tensor
+    return tensor.clone()
 
 
 # Packed quantized weights are unpacked through shift operations in several
@@ -137,7 +313,33 @@ def _pack_shifts(bits: int, pack_factor: int) -> t.Tensor:
     return (t.arange(pack_factor, dtype=t.int32) * bits).view(1, pack_factor, 1)
 
 
-@t.inference_mode()
+def unpack_qzero_lanes(
+        qzeros: t.Tensor,
+        shifts: t.Tensor,
+        *,
+        pack_factor: int,
+        maxq: int,
+        dtype: t.dtype,
+        out_features: int,
+) -> t.Tensor:
+    """Decode continuous 2/4/8-bit GPTQ zero words to ``[groups, out_features]``.
+
+    Each 32-bit word packs ``pack_factor`` output lanes, so the decoded width is
+    ``ceil(out_features / pack_factor) * pack_factor``. The lanes past the
+    logical width are padding: reshaping the decoded lanes straight to the
+    scale shape fails for e.g. ``out_features=5`` (8 lanes). Cropping here is
+    what keeps the logical width for every caller.
+    """
+    lanes = _torch_right_shift(
+        t.unsqueeze(qzeros, 2).expand(-1, -1, pack_factor),
+        shifts,
+    ).to(dtype)
+    lanes = t.bitwise_and(lanes, maxq).reshape(qzeros.shape[0], -1)
+    return lanes[:, :out_features]
+
+
+@t.no_grad()
+@t.inference_mode(False)
 def _pack_codes_to_words(
         codes: t.Tensor,
         pack_factor: int,
@@ -163,46 +365,58 @@ def _pack_codes_to_words(
     return packed
 
 
-@t.inference_mode()
-def _pack_block_rows_2_4_8(
-        block_32xN: t.Tensor,
-        dst: t.Tensor,
-        dst_rows_base: int,
-        bits: int,
-        pack_factor: int,
-        shifts: t.Tensor,
-):
-    """Pack one 32-input block into ``bits`` rows of ``dst`` (32-bit words)."""
-    dst[dst_rows_base:dst_rows_base + bits] = _pack_codes_to_words(
-        block_32xN, pack_factor, 32, shifts
-    )
+@t.no_grad()
+@t.inference_mode(False)
+def _pack_rows_3(codes: t.Tensor) -> t.Tensor:
+    """Pack every 32-input group of ``codes`` with the 10 | 1 | 10 | 1 | 10 scheme.
 
-
-@t.inference_mode()
-def _pack_block_rows_3(block_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
-    """Pack one 32-input block into 3 rows using the 10 | 1 | 10 | 1 | 10 scheme.
+    ``codes`` is ``[rows, N]`` with ``rows`` a multiple of 32; the result is
+    ``[rows // 32 * 3, N]``. One vectorized shift/reduce covers every 32-row
+    group instead of one small dispatch chain per group, and the result is
+    bit-identical to packing the groups one at a time.
 
     int32 arithmetic wraps exactly like the old uint32 path, so the shifts and
     sums below need no explicit 32-bit mask.
     """
-    x = block_32xN.to(t.int32)  # [32, N]
-    offsets = t.arange(10, dtype=t.int32).view(-1, 1) * 3
+    rows, cols = codes.shape
+    if rows % 32 != 0:
+        raise ValueError(f"3-bit packing expects 32-aligned rows, got shape {tuple(codes.shape)}")
+    groups = rows // 32
+    x = codes.to(t.int32).view(groups, 32, cols)
+    offsets = t.arange(10, dtype=t.int32, device=codes.device).view(1, -1, 1) * 3
     # A: first 10 values at bit offsets {0,3,6,...,27} plus low 2 bits of the 11th at bit 30
-    A = (x[0:10] << offsets).sum(dim=0, dtype=t.int32)
-    A = A | (x[10] << 30)
+    A = (x[:, 0:10] << offsets).sum(dim=1, dtype=t.int32)
+    A = A | (x[:, 10] << 30)
     # B: carry bit 2 of the 11th into bit 0, then 10 values at offsets {1,4,7,...,28}, then bit 31 from the 22nd
-    B = (x[10] >> 2) & 1
-    B = B | (x[11:21] << (offsets + 1)).sum(dim=0, dtype=t.int32)
-    B = B | (x[21] << 31)
+    B = (x[:, 10] >> 2) & 1
+    B = B | (x[:, 11:21] << (offsets + 1)).sum(dim=1, dtype=t.int32)
+    B = B | (x[:, 21] << 31)
     # C: carry bits 1..0 of the 22nd into bits 0..1, then 10 values at offsets {2,5,8,...,29}
-    C = (x[21] >> 1) & 0x3
-    C = C | (x[22:32] << (offsets + 2)).sum(dim=0, dtype=t.int32)
-    dst[dst_rows_base + 0] = A
-    dst[dst_rows_base + 1] = B
-    dst[dst_rows_base + 2] = C
+    C = (x[:, 21] >> 1) & 0x3
+    C = C | (x[:, 22:32] << (offsets + 2)).sum(dim=1, dtype=t.int32)
+    return t.stack((A, B, C), dim=1).reshape(groups * 3, cols)
 
 
-@t.inference_mode()
+@t.no_grad()
+@t.inference_mode(False)
+def _pack_gpu_block_3_or_planar(codes: t.Tensor, *, bits: int, planar: bool) -> t.Tensor:
+    """Pack one whole ``pack_gpu`` input block for the 3-bit or planar layouts.
+
+    Both layouts pack whole 32-input groups, so one vectorized shift/reduce
+    covers every group in the block. ``pack_gpu`` previously dispatched a
+    per-32-row-group helper here, which issued roughly 25 tiny kernels per
+    group on the accelerator (#5733). The result is bit-identical.
+    """
+
+    if bits == 3 and not planar:
+        return _pack_rows_3(codes)
+    if planar:
+        return planar_pack_rows(codes, bits)
+    raise NotImplementedError(f"Unsupported bits={bits}")
+
+
+@t.no_grad()
+@t.inference_mode(False)
 def _pack_code_cols_2_4_8(values: t.Tensor, bits: int, pack_factor: int) -> t.Tensor:
     """Pack codes stored along the last dimension into 2/4/8-bit words.
 
@@ -216,18 +430,43 @@ def _pack_code_cols_2_4_8(values: t.Tensor, bits: int, pack_factor: int) -> t.Te
     return (viewed << shifts).sum(dim=2, dtype=t.int32)
 
 
-@t.inference_mode()
+@t.no_grad()
+@t.inference_mode(False)
 def _pack_code_cols_3(values: t.Tensor) -> t.Tensor:
     """Pack 3-bit codes stored along the last dimension (10 | 1 | 10 | 1 | 10)."""
     rows, count = values.shape
+    if count % 32 != 0:
+        raise ValueError(
+            f"3-bit packing expects a 32-aligned code count, got shape {tuple(values.shape)}"
+        )
     transposed = values.T.contiguous()  # [count, rows]: codes become the 32-row axis
-    packed = t.zeros((count // 32 * 3, rows), dtype=t.int32)
-    for block in range(count // 32):
-        _pack_block_rows_3(transposed[block * 32:(block + 1) * 32], packed, block * 3)
-    return packed.T.contiguous()
+    return _pack_rows_3(transposed).T.contiguous()
 
 
-class BaseQuantLinear(nn.Module):
+def checkpoint_qzeros_layout(format_code) -> int | None:
+    """Checkpoint qzero word layout for a GPTQ-family checkpoint format.
+
+    ``gptq`` (and its ``gemm`` alias) store the v1 ``zero_point - 1``
+    convention. ``gptq_v2`` and the planar ``gptq_p`` layout store logical
+    zero points on disk. Other formats have no GPTQ qzero layout, so callers
+    keep their runtime or unknown-layout behavior.
+    """
+
+    if format_code in (FORMAT.GPTQ, "gptq", FORMAT.GEMM, "gemm"):
+        return 1
+    if format_code in (FORMAT.GPTQ_V2, "gptq_v2", FORMAT.GPTQ_P, "gptq_p"):
+        return 2
+    return None
+
+
+class BaseQuantLinear(ForwardDtypeLockMixin, nn.Module):
+    # CPU int4pack kernels rewrite checkpoint buffers into their runtime layout
+    # on the first forward. Serialize that cold check-and-transform so a
+    # concurrent first forward cannot observe half-converted tensors or repack
+    # already-packed words (issue #4565). One process-wide lock is enough: the
+    # transform runs once per module and avoids per-instance lock pickling.
+    _cpu_transform_lock = threading.RLock()
+
     SUPPORTS_BACKENDS: List[BACKEND] = None
     # False for role-specific modules that are instantiated explicitly and
     # must never participate in general backend discovery.
@@ -241,6 +480,59 @@ class BaseQuantLinear(nn.Module):
 
     # IPEX kernel will use Torch for training only and switches back to IPEX for eval/inference
     SUPPORTS_TRAINING_USE_TORCH_KERNEL: bool = False
+
+    # Whether a compiled generation path (transformers' static-cache
+    # auto-compile, a CUDA-graph decode loop) beats this kernel's eager
+    # forward. The bar is *trace-clean*: ``torch.compile(fullgraph=True)`` must
+    # trace the forward with zero graph breaks **and** a compiled decode must
+    # measure faster on the hardware the declaration claims. Either half alone
+    # is not enough: a graph-breaking kernel pays for dozens of graph fragments
+    # and guard checks per decode step (#4669), and a clean trace of a forward
+    # whose eager path is already fast is a wash. A single timing on one
+    # architecture does not qualify a kernel (#4739). The default is False: no
+    # measurement, no opt-in.
+    SUPPORTS_COMPILE: bool = False
+
+    # Why a kernel that declares ``SUPPORTS_COMPILE_LEVEL >= INDUCTOR`` still
+    # keeps ``SUPPORTS_COMPILE = False``: the measured loss that makes the
+    # static-cache auto-compile a pessimization for this kernel (#4984). A
+    # compile-capable level and an opted-out policy are two declarations that
+    # drift apart silently otherwise, so an opt-out from a level at or above
+    # ``INDUCTOR`` must record its reason here.
+    # `tests/kernels/test_kernel_compile_protocol.py` enforces the pairing and
+    # `docs/kernel-compile-matrix.md` publishes it. The empty string means "no
+    # reason recorded" and is the right value for a kernel that opts in
+    # (`SUPPORTS_COMPILE = True`) or declares a level below `INDUCTOR`; it is
+    # not `None` because `verify_supports_params()` treats a `None` default as
+    # a declaration every concrete kernel has to repeat.
+    SUPPORTS_COMPILE_EAGER_REASON: str = ""
+
+    # Highest `torch.compile` level this kernel's `forward` reaches, measured
+    # with the probes in `_compile_support.LEVEL_PROBES`. Every concrete kernel
+    # must declare it explicitly (no silent inheritance), because the answer
+    # differs per kernel and a wrong `CUDAGRAPH` claim turns a decode loop into
+    # a capture failure. See docs/kernel-compile-matrix.md.
+    SUPPORTS_COMPILE_LEVEL: COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+
+    # Whether the eager `forward` may run inside `torch.cuda.graph(...)`:
+    # no host sync, no tensor->host transfer, no Python allocation or device
+    # decision, no data-dependent branch. Independent of dynamo tracing: a
+    # custom op without a fake implementation can be capture-safe and still
+    # fail to trace. Every concrete kernel declares it explicitly.
+    SUPPORTS_GRAPH_CAPTURE: bool = False
+
+    # Checkpoint tensor suffixes this kernel cannot rebuild without them.
+    # ``validate_checkpoint_qweights`` fails a load when one is missing, so a
+    # truncated checkpoint raises instead of leaving uninitialized buffers
+    # (#5010). Empty means this kernel does not publish a payload of its own.
+    CHECKPOINT_REQUIRED_BUFFERS: Tuple[str, ...] = ()
+
+    # Required suffixes whose checkpoint entry may be absent when the live
+    # module's buffer is legitimately empty. A per-channel QQQ layer keeps
+    # ``s_group = torch.empty(0)`` because the kernel derives it from
+    # ``s_channel``; checkpoints written before the save de-dup fix (#5126)
+    # omitted that key. Non-empty buffers stay required.
+    CHECKPOINT_OPTIONAL_EMPTY_BUFFERS: Tuple[str, ...] = ()
 
     SUPPORTS_AUTO_PADDING: bool = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
@@ -263,6 +555,14 @@ class BaseQuantLinear(nn.Module):
     REQUIRES_FORMAT_V2: bool = False
     AUTOTUNE: bool = False
 
+    # Floating buffers whose dtype follows the model dtype at load time:
+    # activation-side operands the forward consumes at the activation dtype.
+    # Every other persistent floating buffer is quantization state (scales,
+    # zero points, codebook scales, sign vectors, ...) and loads at the dtype
+    # the checkpoint stores, because the kernel computes with that precision.
+    # See docs/checkpoint-and-runtime-contracts.md section 4.
+    MODEL_DTYPE_BUFFERS: Tuple[str, ...] = ("bias",)
+
     def __init__(self,
                  bits: int,
                  in_features: int,
@@ -279,13 +579,16 @@ class BaseQuantLinear(nn.Module):
                  validate_kwargs: Optional[Dict[str, Any]] = None,
                  **kwargs):
         super().__init__()
+        # Forward dtype contract: set by the first eager forward.
+        self._forward_dtype_lock = None
         if name is None:
             name = f"{self.__class__.__module__}.{self.__class__.__qualname__}"
         self.name = name # full path module name in model weights
         self.in_features = in_features
         self.out_features = out_features
         self.bits = bits
-        self.backend = backend
+        self.backend, kernel = resolve_backend_config(backend, kwargs.get("kernel"))
+        self.kernel = snapshot_kernel_config(kernel)
         # Quantized checkpoints keep their non-quantized biases at the model
         # dtype. ``dtype`` is the activation dtype used for kernel validation
         # and may be unsupported for a storage-only rebuild (FP32), so a
@@ -363,6 +666,16 @@ class BaseQuantLinear(nn.Module):
             #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
             # )
 
+    def checkpoint_required_buffers(self) -> Tuple[str, ...]:
+        """Checkpoint tensor suffixes this module instance cannot rebuild.
+
+        The class declaration is the default. A kernel whose required payload
+        depends on its configuration overrides this (GPTQ activation order
+        needs ``g_idx`` only when ``desc_act`` is set).
+        """
+
+        return self.CHECKPOINT_REQUIRED_BUFFERS
+
     def list_buffers(self) -> List:
         tensors = []
         seen = set()
@@ -376,6 +689,42 @@ class BaseQuantLinear(nn.Module):
                 seen.add(tensor_id)
                 tensors.append(tensor)
         return tensors
+
+    def checkpoint_payload_tensors(self) -> Tuple[t.Tensor, ...]:
+        """Persistent tensors that carry this module's checkpoint payload.
+
+        ``post_init`` reads the payload, so a loader that has replaced it with
+        meta placeholders (disk offload) must materialize the layer first.
+        Every kernel family declares its payload in
+        ``CHECKPOINT_REQUIRED_BUFFERS`` -- the names the checkpoint validator
+        already requires -- so this probe follows that declaration instead of
+        assuming the GPTQ name ``qweight``. A kernel that declares nothing, or
+        whose declared tensors are all absent (a QQQ layer whose derived
+        cache replaced them), falls back to every tensor the module
+        registers.
+        """
+
+        tensors = []
+        for name in self.checkpoint_required_buffers():
+            tensor = _named_tensor(self, name)
+            if isinstance(tensor, t.Tensor):
+                tensors.append(tensor)
+        if not tensors:
+            tensors = self.list_buffers()
+        return tuple(tensors)
+
+    def checkpoint_payload_is_meta(self) -> bool:
+        """Whether this module's checkpoint payload is an offloaded placeholder.
+
+        A disk-offloaded layer owns no resident checkpoint tensors: Accelerate
+        replaces them with meta placeholders and replays the real values from
+        its offload map. ``gptqmodel_post_init`` uses this to route such a
+        layer through ``_post_init_offloaded`` instead of running
+        ``post_init`` on meta. A module with no payload tensors is resident by
+        definition.
+        """
+
+        return any(tensor.is_meta for tensor in self.checkpoint_payload_tensors())
 
     def runtime_device(self) -> Optional[t.device]:
         # Prefer the real quantized storage tensor over adapter scratch buffers.
@@ -424,6 +773,43 @@ class BaseQuantLinear(nn.Module):
         if callable(clear):
             clear()
 
+    def iter_runtime_weight_tensors(self):
+        """Yield weight tensors kept outside the parameter/buffer registry.
+
+        A kernel may replace its checkpoint buffers with a derived packed
+        cache (QQQ does, #4856). Those tensors own real weight storage that
+        ``parameters()``/``buffers()`` cannot see, so resource reporting would
+        undercount the module (#5810). Backends that keep such a cache
+        override this; the default owns nothing extra.
+        """
+
+        return ()
+
+    def iter_runtime_device_allocations(self):
+        """Yield accelerator weight storage kept outside Torch's registry.
+
+        A native runtime can hold packed weights in its own allocator: TTNN
+        keeps them as device tensors on the mesh, where neither ``parameters()``
+        nor ``iter_runtime_weight_tensors`` can see them (#5810). Each entry is
+        a :class:`~gptqmodel.utils.resource_budget.DeviceAllocation` naming its
+        backend and that backend's device ordinal. Backends that own such
+        storage override this; the default owns nothing extra.
+        """
+
+        return ()
+
+    def materialize_checkpoint_layout_for_export(self) -> bool:
+        """Restore checkpoint buffers a derived cache replaced; True if restored.
+
+        A kernel may drop its checkpoint buffers once the first forward has
+        built a packed cache (QQQ does, #4856). ``named_buffers`` skips a
+        ``None`` buffer, so a save that walks the module tree instead of
+        calling ``state_dict()`` would silently omit the quantized weights
+        (#5010). The export path calls this first.
+        """
+
+        return False
+
     def _load_from_state_dict(self, *args, **kwargs):
         """Restore checkpoint layout, then load, then invalidate derived caches.
 
@@ -461,6 +847,11 @@ class BaseQuantLinear(nn.Module):
                     f"{self.__class__.__name__} cannot load mixed or invalid CPU int4pack "
                     "operand shapes; supply one checkpoint or runtime layout."
                 )
+            from ._fused_train_state import (
+                materialize_fused_runtime_state,
+                runtime_state_matches_live,
+            )
+
             if layout == "checkpoint":
                 # Only a checkpoint load restores the snapshot. The cache clear
                 # hook keeps the live packed buffers authoritative for moves and
@@ -477,11 +868,7 @@ class BaseQuantLinear(nn.Module):
                 # is deliberately replacing. Keep the live transformed tensors
                 # the load is about to write, and let the clear below rebuild
                 # derived metadata from them.
-                from ._fused_train_state import (
-                    materialize_fused_runtime_state,
-                    runtime_state_matches_live,
-                )
-
+                #
                 # Keep the checkpoint snapshot for a true self round-trip.
                 # A modified runtime layout has no guaranteed inverse back to
                 # checkpoint zero codes, so export must fail explicitly.
@@ -489,14 +876,17 @@ class BaseQuantLinear(nn.Module):
                     getattr(self, "_fused_train_state_exportable", True)
                     and runtime_state_matches_live(self, state_dict, prefix)
                 )
-                local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
-                assign = isinstance(local_metadata, dict) and bool(
-                    local_metadata.get("assign_to_params_buffers", False)
-                )
-                if not assign:
-                    # A forward ran the transform inside ``inference_mode``;
-                    # copying into inference tensors outside it is rejected.
-                    materialize_fused_runtime_state(self, state_dict, prefix)
+
+            local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
+            assign = isinstance(local_metadata, dict) and bool(
+                local_metadata.get("assign_to_params_buffers", False)
+            )
+            if not assign:
+                # A forward ran the transform inside ``inference_mode``;
+                # copying into inference tensors outside it is rejected.
+                # ``g_idx`` is not part of the snapshot, so this applies to
+                # checkpoint loads as well as runtime ones.
+                materialize_fused_runtime_state(self, state_dict, prefix)
         super()._load_from_state_dict(*args, **kwargs)
         if layout == "runtime":
             # Invalidate derived metadata without restoring the snapshot that
@@ -559,15 +949,9 @@ class BaseQuantLinear(nn.Module):
         return self._autotune_result
 
     @classmethod
-    @lru_cache(maxsize=1024)
+    @_cache_validation_status
     def cached_validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        ok, exp = cls.validate_once()
-
-        if not ok and exp is not None:
-            exp.with_traceback(None)
-            return False, exp
-
-        return True, None
+        return cls.validate_once()
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -648,6 +1032,18 @@ class BaseQuantLinear(nn.Module):
             return True
         supported = cls.SUPPORTS_DTYPES
         return supported is None or dtype in supported
+
+    @classmethod
+    def auto_select_priority(cls, fmt: FORMAT, dtype: Optional[t.dtype] = None) -> int:
+        """AUTO-selection rank for one format and activation dtype.
+
+        ``SUPPORTS_FORMATS`` is a dtype-independent rank. A kernel whose
+        non-native dtype path is a slow fallback can lower its rank for that
+        dtype here without giving up explicit backend selection. ``dtype=None``
+        means the caller did not constrain the activation dtype, so the
+        declared rank is returned unchanged.
+        """
+        return cls.SUPPORTS_FORMATS.get(fmt, 0)
 
     @classmethod
     def supports_gguf_qtype(cls, bits) -> bool:
@@ -1055,6 +1451,14 @@ class GroupedQuantLinear(BaseQuantLinear):
 
 
 class PackedGroupedQuantLinear(GroupedQuantLinear):
+    # GPTQ/AWQ/Marlin/BitBLAS-family checkpoints publish the packed weight as
+    # `qweight` plus its per-group `scales`; a checkpoint missing either loads
+    # uninitialized buffers (NaN logits). `qzeros` is required whenever the
+    # live kernel owns zero-point storage. AllSpark has no `qzeros` buffer at
+    # all, so the validator skips that suffix for it instead of refusing every
+    # AllSpark load.
+    CHECKPOINT_REQUIRED_BUFFERS = ("qweight", "scales", "qzeros")
+
     def __init__(self, *args, pack_dtype: t.dtype, **kwargs):
         super().__init__(*args, pack_dtype=pack_dtype, **kwargs)
 
@@ -1117,6 +1521,71 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
             for flag in ("_marlin_repacked", "_native_shuffled", "_awq_repacked")
         )
 
+    #: CPU int4pack family whose runtime words have a verified inverse:
+    #: ``"gptq"``, ``"awq"``, ``"avx512_gptq"`` or ``"avx512_awq"``. ``None``
+    #: keeps a full checkpoint snapshot.
+    _FUSED_TRAIN_STATE_REBUILD = None
+
+    def _can_rebuild_checkpoint_qweight(self) -> bool:
+        """Whether the checkpoint ``qweight`` can be rebuilt on demand.
+
+        Only the CPU int4pack permutations have an inverse: the ATen layout
+        (``"gptq"``/``"awq"``) and the AVX512 layouts
+        (``"avx512_gptq"``/``"avx512_awq"``, pure-Torch inverses of the two
+        AVX512-BF16 packers). The XPU packing uses a different layout, so its
+        subclass leaves ``_FUSED_TRAIN_STATE_REBUILD`` as ``None``.
+
+        This is only a cheap pre-filter: the clone is dropped by
+        ``finalize_fused_train_state`` only after the rebuilt words match the
+        checkpoint bytes this module actually carried.
+        """
+
+        kind = self._FUSED_TRAIN_STATE_REBUILD
+        if kind is None:
+            return False
+        weight = getattr(self, "qweight", None)
+        if not isinstance(weight, t.Tensor) or weight.device.type != "cpu":
+            return False
+        if weight.dtype != t.int32:
+            # The rebuilt words are int32; any other checkpoint dtype keeps
+            # its snapshot. This runs before the transform, so ``qweight`` is
+            # still the checkpoint tensor here.
+            return False
+        if kind in ("avx512_gptq", "avx512_awq"):
+            # ``unpack_hf_int4`` is the verified inverse of ``pack_hf_int4`` and
+            # the AWQ packer is the same kind of pure nibble permutation, so
+            # these paths need no ATen int4pack support and can undo the
+            # ``ret_idx`` channel reorder of a ``desc_act`` checkpoint.
+            return True
+        from ._cpu_int4pack_layout import int4pack_block_size
+
+        if int4pack_block_size() is None:
+            return False
+        return True
+
+    def _rebuild_checkpoint_qweight(self) -> t.Tensor:
+        """Rebuild the checkpoint ``qweight`` from the live runtime layout."""
+
+        kind = self._FUSED_TRAIN_STATE_REBUILD
+        if kind is None:
+            raise RuntimeError(
+                f"{self.__class__.__name__} cannot rebuild its checkpoint qweight"
+            )
+        from ._cpu_int4pack_layout import (
+            rebuild_avx512_awq_qweight,
+            rebuild_avx512_qweight,
+            rebuild_awq_qweight,
+            rebuild_gptq_qweight,
+        )
+
+        if kind == "awq":
+            return rebuild_awq_qweight(self)
+        if kind == "avx512_awq":
+            return rebuild_avx512_awq_qweight(self)
+        if kind == "avx512_gptq":
+            return rebuild_avx512_qweight(self)
+        return rebuild_gptq_qweight(self)
+
     def _write_fused_train_state_snapshot(self, destination, prefix: str, keep_vars: bool) -> None:
         """Emit the checkpoint-layout tensors captured before a CPU transform.
 
@@ -1125,8 +1594,9 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         runtime operands are not a checkpoint: the integer v1/v2 conversion
         turns float offsets into `inf`/`65536`, and the int4pack `qweight` has a
         different shape. The snapshot taken by `capture_fused_train_state`
-        still holds the checkpoint tensors, so serialization emits those
-        instead of the transformed buffers.
+        holds the checkpoint tensors (or, for `qweight`, the verified inverse
+        rebuilt on demand), so serialization emits those instead of the
+        transformed buffers.
 
         A modified runtime layout has no inverse snapshot; exporting it must
         fail closed rather than write garbage.
@@ -1141,25 +1611,33 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
                 "that cannot be converted back to the checkpoint layout. Load "
                 "checkpoint-layout weights before saving."
             )
-        for name, buffer_name in snapshot.items():
-            tensor = self._buffers.get(buffer_name)
+        for name, entry in snapshot.items():
+            tensor = _materialize_snapshot_entry(self, entry)
             if isinstance(tensor, t.Tensor):
                 destination[prefix + name] = tensor if keep_vars else tensor.detach()
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
-        if self._is_runtime_layout():
-            from ...utils.checkpoint_state import is_checkpoint_serialization
+        # The first forward rewrites `_buffers` (register_buffer for the fused
+        # snapshot, rebinding `qweight`/`qzeros`, and popping the clone in
+        # `finalize_fused_train_state`). Serialize with that transform: without
+        # the lock `nn.Module._save_to_state_dict` iterates a dict that is being
+        # resized ("dictionary changed size during iteration"), and under
+        # free-threading it can also emit the runtime int4pack words under the
+        # checkpoint `qweight` key or drop tensors (issue #4788).
+        with self._cpu_transform_lock:
+            if self._is_runtime_layout():
+                from ...utils.checkpoint_state import is_checkpoint_serialization
 
-            if is_checkpoint_serialization():
-                raise RuntimeError(
-                    f"{self.__class__.__name__} rewrites packed tensors into a "
-                    "kernel-private runtime layout; the original checkpoint tensors "
-                    "cannot be reconstructed. Use `GPTQModel.save()`/`save_quantized()` "
-                    "for a loadable checkpoint, or reload the original checkpoint."
-                )
-        super()._save_to_state_dict(destination, prefix, keep_vars)
-        self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
-        self._write_state_dict_layout_marker(destination, prefix, keep_vars)
+                if is_checkpoint_serialization():
+                    raise RuntimeError(
+                        f"{self.__class__.__name__} rewrites packed tensors into a "
+                        "kernel-private runtime layout; the original checkpoint tensors "
+                        "cannot be reconstructed. Use `GPTQModel.save()`/`save_quantized()` "
+                        "for a loadable checkpoint, or reload the original checkpoint."
+                    )
+            super()._save_to_state_dict(destination, prefix, keep_vars)
+            self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
+            self._write_state_dict_layout_marker(destination, prefix, keep_vars)
 
     def _write_state_dict_layout_marker(self, destination, prefix: str, keep_vars: bool) -> None:
         """Emit the layout code as a tensor so in-process transports keep it.
@@ -1172,7 +1650,7 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         reporting an unexpected key.
 
         A checkpoint write is the one transport that must not carry the marker.
-        HF ``save_pretrained()`` runs inside ``checkpoint_serialization()``, so
+        GPT-QModel's checkpoint writer runs inside ``checkpoint_serialization()``, so
         without this guard the writer persisted an extra ``*.qzeros_format``
         tensor per quantized layer: a key neither ``config.json`` nor the
         GPTQ/AWQ format describes. A reloaded checkpoint takes its layout from
@@ -1198,6 +1676,14 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         )
 
     def _load_from_state_dict(self, *args, **kwargs):
+        # `restore_fused_train_state` rebinds `qweight`/`qzeros` and the fused
+        # snapshot buffers, so a concurrent first forward must not interleave
+        # with it (issue #4788). The lock is re-entrant, so a nested call from a
+        # save path or from `load_state_dict` is safe.
+        with self._cpu_transform_lock:
+            return self._load_from_state_dict_locked(*args, **kwargs)
+
+    def _load_from_state_dict_locked(self, *args, **kwargs):
         state_dict = args[0] if args else kwargs.get("state_dict")
         prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
         missing_keys = args[4] if len(args) > 4 else kwargs.get("missing_keys")
@@ -1257,6 +1743,71 @@ def _scales_for_storage(scales: t.Tensor, *, name: str) -> t.Tensor:
             f"{magnitude}."
         )
     return stored
+
+
+def _own_float_dtype(module: nn.Module) -> Optional[t.dtype]:
+    """Return the dtype of ``module``'s own floating parameters/persistent buffers."""
+
+    for tensor in module._parameters.values():
+        if isinstance(tensor, t.Tensor) and tensor.is_floating_point():
+            return tensor.dtype
+    for name, tensor in module._buffers.items():
+        if name in module._non_persistent_buffers_set:
+            continue
+        if isinstance(tensor, t.Tensor) and tensor.is_floating_point():
+            return tensor.dtype
+    return None
+
+
+def resolve_dequantize_dtype(
+    model: nn.Module,
+    module: nn.Module,
+    dtype: Optional[t.dtype] = None,
+) -> t.dtype:
+    """Resolve the dense dtype that ``dequantize_model`` must materialize.
+
+    Quantized checkpoints store their scales in the checkpoint's storage dtype
+    (GPTQ always writes FP16 scales), independently of the dtype the model was
+    loaded with. Deriving the dense dtype from ``scales.dtype`` therefore
+    turned a BF16 model into FP16 dense layers whose forward mixed dtypes.
+
+    Prefer an explicit request, then the dtype of the surrounding non-quantized
+    parameters/persistent buffers (embeddings, norms, lm_head), which describe
+    the model's compute dtype. Only when the model owns no such tensors (a bare
+    quantized layer) fall back to the layer's bias/scales storage dtype.
+    """
+
+    if dtype is not None:
+        return dtype
+
+    quantized_subtree = {
+        id(submodule)
+        for quantized in model.modules()
+        if isinstance(quantized, BaseQuantLinear)
+        for submodule in quantized.modules()
+    }
+    candidates = []
+    for candidate in model.modules():
+        if id(candidate) in quantized_subtree:
+            continue
+        candidate_dtype = _own_float_dtype(candidate)
+        if candidate_dtype is not None:
+            candidates.append(candidate_dtype)
+    # Prefer a low-precision compute dtype over an incidental FP32 buffer
+    # (e.g. a norm kept in FP32) so the dense layers match the activations.
+    for candidate_dtype in candidates:
+        if candidate_dtype in (t.float16, t.bfloat16):
+            return candidate_dtype
+    if candidates:
+        return candidates[0]
+
+    bias = getattr(module, "bias", None)
+    if isinstance(bias, t.Tensor) and bias.is_floating_point():
+        return bias.dtype
+    scales = getattr(module, "scales", None)
+    if isinstance(scales, t.Tensor) and scales.is_floating_point():
+        return scales.dtype
+    return t.float16
 
 
 class WeightOnlyQuantLinear(BaseQuantLinear):
@@ -1353,6 +1904,12 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
 
         # GPTQ v1/v2 conversions only apply to GPTQ-style qzero storage.
         self._qzeros_format = 1
+        # The line above is only a placeholder: a fresh module owns no words in
+        # a known layout yet. ``qzero_format(format=...)`` records a resolved
+        # layout (packing, loading, an explicit conversion); the load hook must
+        # not mistake the placeholder for a layout that matches an incoming
+        # marker (issue #4377).
+        self._qzeros_format_established = False
 
         if register_buffers:
             self._register_gptq_buffers(
@@ -1361,6 +1918,15 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
                 register_buffers_out_features=register_buffers_out_features,
                 bias_dtype=self.bias_dtype,
             )
+
+    def checkpoint_required_buffers(self) -> Tuple[str, ...]:
+        # Activation-order GPTQ stores the group assignment in `g_idx`; the
+        # kernel cannot derive it from the packed weight. Plain contiguous
+        # quantization derives the canonical mapping, so it stays optional.
+        required = super().checkpoint_required_buffers()
+        if getattr(self, "desc_act", False) and "g_idx" not in required:
+            required = required + ("g_idx",)
+        return required
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
@@ -1463,6 +2029,34 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
 
         return getattr(self, "_qzeros_format", 1)
 
+    def _load_target_qzeros_format(self) -> int:
+        """Layout this module's kernel decodes once the load completes.
+
+        ``_qzeros_format`` starts as a constructor placeholder (v1) and only
+        records a real layout after :meth:`qzero_format` resolves it (packing,
+        loading, or an explicit conversion). A ``REQUIRES_FORMAT_V2`` kernel
+        decodes v2 even while that placeholder still says v1, so a copied v1
+        marker must be converted instead of being treated as an exact match
+        (issue #4377). The planar ``gptq_p`` layout also stores logical words
+        for every kernel that supports it. An established v1 layout is left
+        alone: the public ``convert_gptq_v2_to_v1_format`` path deliberately
+        holds v1 words.
+        """
+
+        runtime_format = self._runtime_qzeros_format()
+        if (
+            runtime_format == 1
+            and not getattr(self, "_qzeros_format_established", False)
+            and (
+                getattr(self, "REQUIRES_FORMAT_V2", False)
+                # The planar ``gptq_p`` words are logical for every kernel that
+                # supports the format, independent of REQUIRES_FORMAT_V2.
+                or getattr(self, "format", None) == FORMAT.GPTQ_P
+            )
+        ):
+            return 2
+        return runtime_format
+
     def qzero_format(self, format: int = None) -> int:
         if format is None:
             return self._runtime_qzeros_format()
@@ -1471,12 +2065,20 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             raise ValueError("Unsupported qzero format. Only 1 and 2 are supported.")
 
         self._qzeros_format = format
+        self._qzeros_format_established = True
         # Keep the persistent marker in sync with the words actually held by the
         # live buffers. ``accelerate`` builds a shard's load dict from these
         # buffers, so a stale placeholder would label v2 words as v1 and make
         # ``_load_from_state_dict`` convert them a second time.
         marker = self._buffers.get(QZEROS_FORMAT_BUFFER)
         if isinstance(marker, t.Tensor) and marker.numel() == 1:
+            if marker.is_inference():
+                # A module built inside ``torch.inference_mode()`` owns an
+                # inference marker. Replace it with a normal tensor so packing
+                # can keep the persistent checkpoint marker in sync (#5814).
+                with t.inference_mode(False):
+                    marker = marker.clone()
+                self.register_buffer(QZEROS_FORMAT_BUFFER, marker)
             marker.fill_(format)
         return self._qzeros_format
 
@@ -1490,10 +2092,9 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         """
 
         checkpoint_format = self._checkpoint_qzeros_format()
-        if checkpoint_format in (FORMAT.GPTQ, "gptq", "gemm"):
-            return 1
-        if checkpoint_format in (FORMAT.GPTQ_V2, "gptq_v2"):
-            return 2
+        layout = checkpoint_qzeros_layout(checkpoint_format)
+        if layout is not None:
+            return layout
         return int(self._runtime_qzeros_format())
 
     def _checkpoint_qzeros_format(self):
@@ -1574,14 +2175,15 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         if checkpoint_format is None:
             return None
         runtime_format = self._runtime_qzeros_format()
+        checkpoint_layout = checkpoint_qzeros_layout(checkpoint_format)
         planar = bool(getattr(self, "planar", False))
-        if runtime_format == 2 and checkpoint_format in (FORMAT.GPTQ, "gptq", "gemm"):
+        if runtime_format == 2 and checkpoint_layout == 1:
             from ...utils.model_dequant import _revert_gptq_v1_qzeros_correction
 
             return _revert_gptq_v1_qzeros_correction(
                 qzeros, self.bits, planar=planar,
             )
-        if runtime_format == 1 and checkpoint_format in (FORMAT.GPTQ_V2, "gptq_v2"):
+        if runtime_format == 1 and checkpoint_layout == 2:
             from ...utils.model_dequant import _correct_gptq_v1_qzeros
 
             return _correct_gptq_v1_qzeros(
@@ -1637,18 +2239,15 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             if isinstance(recorded, int) and recorded in (1, 2):
                 return int(recorded)
 
-        on_disk_format = getattr(self, "_checkpoint_format_on_disk", None)
-        if on_disk_format in (FORMAT.GPTQ, "gptq", "gemm"):
-            return 1
-        if on_disk_format in (FORMAT.GPTQ_V2, "gptq_v2"):
-            return 2
-        if self.format in (FORMAT.GPTQ, "gptq", "gemm"):
+        layout = checkpoint_qzeros_layout(getattr(self, "_checkpoint_format_on_disk", None))
+        if layout is not None:
+            return layout
+        layout = checkpoint_qzeros_layout(getattr(self, "format", None))
+        if layout is not None:
             # An export shell being filled by accelerate, or a directly
             # constructed module. Keep the historical restore from the format
             # the module was built for; the caller owns any word conversion.
-            return 1
-        if self.format in (FORMAT.GPTQ_V2, "gptq_v2"):
-            return 2
+            return layout
         return None
 
     def _incoming_qzeros_is_live(self, state_dict, prefix: str) -> bool:
@@ -1661,6 +2260,11 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         words, so converting them again would shift every zero point once per
         shard (issue #4166). A real checkpoint tensor always has its own
         storage.
+
+        Call this *before* ``super()._load_from_state_dict``. With
+        ``assign=True`` the copy rebinds ``self.qzeros`` to the incoming
+        tensor, after which every genuine checkpoint load aliases the live
+        buffer and would be mistaken for a refill (issue #4304).
         """
 
         incoming = state_dict.get(prefix + "qzeros") if state_dict is not None else None
@@ -1678,22 +2282,45 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
                 return False
             return (
                 incoming_ptr == live_ptr
+                and incoming.device == live.device
                 and tuple(incoming.shape) == tuple(live.shape)
                 and incoming.dtype == live.dtype
             )
         except RuntimeError:
             return False
 
-    def _restore_qzeros_format(self, incoming_format: int) -> None:
+    def _own_assigned_qzeros(self) -> None:
+        """Give an assign-loaded ``qzeros`` buffer its own storage.
+
+        ``load_state_dict(assign=True)`` rebinds ``self.qzeros`` to the caller's
+        tensor. Both layout converters rewrite those words in place, so without
+        this copy they mutate the caller's payload and a reused checkpoint gets
+        converted a second time (#5805).
+        """
+
+        qzeros = getattr(self, "qzeros", None)
+        if isinstance(qzeros, nn.Parameter):
+            self.qzeros = nn.Parameter(
+                qzeros.detach().clone(), requires_grad=qzeros.requires_grad,
+            )
+        elif isinstance(qzeros, t.Tensor):
+            self.qzeros = qzeros.clone()
+
+    def _restore_qzeros_format(self, incoming_format: int, *, assign: bool = False) -> None:
         """Convert the copied qzeros words to this kernel's runtime layout."""
 
-        requires_v2 = getattr(self, "REQUIRES_FORMAT_V2", False)
+        logical_layout = getattr(self, "REQUIRES_FORMAT_V2", False) or (
+            getattr(self, "format", None) == FORMAT.GPTQ_P
+        )
+        self._qzeros_format_established = True
         if incoming_format == 1:
-            if requires_v2:
+            if logical_layout:
                 # The checkpoint v1 convention stores `zero_point - 1`, but
-                # this kernel always decodes v2. Convert the loaded words in
-                # place so a `load_state_dict(state_dict())` round trip keeps
-                # the same zero points.
+                # this kernel decodes logical (v2) words. Convert the loaded
+                # words in place so a `load_state_dict(state_dict())` round
+                # trip keeps the same zero points.
+                if assign:
+                    self._own_assigned_qzeros()
                 from ...utils.model import convert_gptq_v1_to_v2_format_module
 
                 convert_gptq_v1_to_v2_format_module(
@@ -1704,12 +2331,14 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             return
 
         if incoming_format == 2:
-            if requires_v2:
+            if logical_layout:
                 self._qzeros_format = 2
                 return
             # A v2 source copied into a kernel that decodes v1 words. Marlin
             # drops qzeros during post_init, so only convert real words.
             if getattr(self, "qzeros", None) is not None and self.qzeros.numel() > 0:
+                if assign:
+                    self._own_assigned_qzeros()
                 from ...quantization import QuantizeConfig
                 from ...utils.model import convert_gptq_v2_to_v1_format_module
 
@@ -1725,9 +2354,28 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
 
         layout_code = self._incoming_layout_code(state_dict, prefix, local_metadata)
+        assign = bool(kwargs.get("assign", False))
+        if not assign and isinstance(local_metadata, dict):
+            # Torch >= 2.5 forwards ``assign`` through ``local_metadata`` rather
+            # than as a keyword argument to this hook.
+            assign = bool(local_metadata.get("assign_to_params_buffers", False))
+        # Decide before the copy whether the incoming words are the module's own
+        # live buffer. ``assign=True`` rebinds ``self.qzeros`` to the incoming
+        # tensor, so asking afterwards would label every genuine checkpoint
+        # load as an accelerate refill and skip the v1->v2 conversion (#4304).
+        incoming_qzeros_is_live = self._incoming_qzeros_is_live(state_dict, prefix)
         # ``PackedGroupedQuantLinear`` rejects a runtime-layout payload and
         # tolerates a missing layout marker before the copy.
         super()._load_from_state_dict(*args, **kwargs)
+
+        if assign and state_dict is not None:
+            # The same assignment aliases the layout marker. ``qzero_format()``
+            # fills it in place during conversion, so own it before writing.
+            marker_key = prefix + QZEROS_FORMAT_BUFFER
+            if marker_key in state_dict:
+                marker = self._buffers.get(QZEROS_FORMAT_BUFFER)
+                if isinstance(marker, t.Tensor):
+                    self._buffers[QZEROS_FORMAT_BUFFER] = marker.clone()
 
         # A partial load (for example a PEFT adapter) carries no qzeros. Leave
         # the runtime layout alone: relabelling the live v2 words as v1 would
@@ -1736,17 +2384,23 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             if layout_code in (1, 2):
                 # The marker travels with the words it labels. When it already
                 # matches this kernel's live layout the copy is a no-op, which
-                # is what makes a repeated load idempotent.
-                if layout_code != self._runtime_qzeros_format():
-                    self._restore_qzeros_format(layout_code)
+                # is what makes a repeated load idempotent. A fresh module only
+                # holds the constructor placeholder, so even a matching marker
+                # must resolve the label; ``_restore_qzeros_format`` leaves the
+                # words untouched when no conversion is required.
+                if (
+                    layout_code != self._load_target_qzeros_format()
+                    or not getattr(self, "_qzeros_format_established", False)
+                ):
+                    self._restore_qzeros_format(layout_code, assign=assign)
             elif layout_code == 0:
                 # A runtime-layout payload; the receiver is in the same layout
                 # or ``PackedGroupedQuantLinear`` already refused it above.
                 pass
-            elif not self._incoming_qzeros_is_live(state_dict, prefix):
+            elif not incoming_qzeros_is_live:
                 incoming_format = self._incoming_qzeros_format(local_metadata)
                 if incoming_format is not None:
-                    self._restore_qzeros_format(incoming_format)
+                    self._restore_qzeros_format(incoming_format, assign=assign)
         # Derived packed layouts depend on both the loaded words and the
         # checkpoint format. Invalidate only after the format has been restored.
         self._clear_runtime_weight_cache()
@@ -1767,14 +2421,28 @@ class PackableQuantLinear(GPTQQuantLinear):
         forwards stay O(1).
 
         Subclasses that reorder activations must implement ``_build_ret_idx``.
+
+        The verdict is stored as a plain Python ``bool``: every caller uses it
+        in an ``if``, and ``bool(tensor)`` would force a host read that a
+        traced graph cannot perform. ``tensor_cache_key``
+        (``is_inference``/``_version``/``data_ptr``) is a hard dynamo graph
+        break as well, so a traced forward reads the verdict the eager warmup
+        cached instead of re-keying the buffer.
         """
         cached = getattr(self, "_ret_idx_identity", None)
-        if cached is not None and getattr(self, "_ret_idx_key", None) == tensor_cache_key(self.g_idx):
-            return cached
+        if cached is not None:
+            if dynamo_is_compiling():
+                return cached
+            if getattr(self, "_ret_idx_key", None) == tensor_cache_key(self.g_idx):
+                return cached
         ret_idx = self._build_ret_idx()
-        identity = t.equal(
-            ret_idx,
-            t.arange(ret_idx.numel(), dtype=ret_idx.dtype, device=ret_idx.device),
+        # ``torch.equal`` already returns a Python ``bool`` (it is not a
+        # 0-dim tensor), so this stays host-side without a tensor ``__bool__``.
+        identity = bool(
+            t.equal(
+                ret_idx,
+                t.arange(ret_idx.numel(), dtype=ret_idx.dtype, device=ret_idx.device),
+            )
         )
         self._ret_idx_identity = identity
         return identity
@@ -1786,12 +2454,38 @@ class PackableQuantLinear(GPTQQuantLinear):
             return self.qweight.device
         raise RuntimeError(f"{self.__class__.__name__} cannot initialize wf buffers without qweight or g_idx.")
 
-    def _init_wf_unsqueeze_buffers(self):
+    def _has_packed_operands(self) -> bool:
+        """Whether ``qweight``/``g_idx`` exist, even as meta offload placeholders."""
+
+        return getattr(self, "qweight", None) is not None or getattr(self, "g_idx", None) is not None
+
+    def _detach_wf_unsqueeze_buffers(self) -> dict:
+        """Take the shift tables out of ``_buffers`` before ``_apply`` runs.
+
+        ``_apply`` rewrites every buffer through ``fn``, so a device move, a
+        dtype cast, or ``to_empty`` would otherwise decide their storage. They
+        are derived metadata, not checkpoint state, so ``_apply`` reattaches or
+        rebuilds them from the operands' final state instead.
+        """
+
+        detached = {}
+        for name in ("wf_unsqueeze_zero", "wf_unsqueeze_neg_one"):
+            tensor = self._buffers.pop(name, None)
+            if tensor is not None:
+                detached[name] = tensor
+        return detached
+
+    def _attach_wf_unsqueeze_buffers(self, buffers: dict) -> None:
+        for name, tensor in buffers.items():
+            self.register_buffer(name, tensor, persistent=False)
+
+    def _init_wf_unsqueeze_buffers(self, force: bool = False):
         if not self.enable_wf_unsqueeze:
             return
 
         if (
-            getattr(self, "wf_unsqueeze_zero", None) is not None
+            not force
+            and getattr(self, "wf_unsqueeze_zero", None) is not None
             and getattr(self, "wf_unsqueeze_neg_one", None) is not None
         ):
             return
@@ -1802,6 +2496,14 @@ class PackableQuantLinear(GPTQQuantLinear):
             return
 
         device = self._wf_device()
+
+        if device.type == "meta":
+            # A disk offload replaces the packed leaves with meta placeholders
+            # (#5788). Keep the live tables (or leave them absent) until the
+            # operands are materialized; rebuilding them here would put the
+            # derived metadata on meta, where accelerate's detach hook cannot
+            # restore it.
+            return
 
         if self.bits in [2, 4, 8]:
             wf = t.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=t.int32).unsqueeze(0).to(
@@ -1831,8 +2533,37 @@ class PackableQuantLinear(GPTQQuantLinear):
         else:
             self.wf_unsqueeze_neg_one = wf_neg_one
 
+    def _apply(self, fn, recurse=True):
+        # ``wf_unsqueeze_*`` are non-persistent shift tables derived from
+        # ``bits``/``pack_dtype``. Detach them before ``fn`` runs so a device
+        # move cannot relocate them and ``to_empty`` cannot materialize them
+        # from uninitialized storage, then rebuild them for the operands
+        # ``fn`` just produced.
+        detached = self._detach_wf_unsqueeze_buffers() if self.enable_wf_unsqueeze else {}
+        try:
+            result = super()._apply(fn, recurse=recurse)
+        except Exception:
+            self._attach_wf_unsqueeze_buffers(detached)
+            raise
+        if self.enable_wf_unsqueeze and not getattr(self, "planar", False):
+            if self._has_packed_operands() and self._wf_device().type != "meta":
+                self._init_wf_unsqueeze_buffers()
+            else:
+                # A disk offload replaces the packed leaves with meta
+                # placeholders (#5788). Accelerate records the buffer names
+                # when it attaches its hook and looks them up when detaching,
+                # so keep the last live tables instead of rebuilding them from
+                # the placeholder device; the decode path rebuilds them once
+                # the operands are materialized.
+                self._attach_wf_unsqueeze_buffers(detached)
+        return result
+
     def post_init(self, **kwargs):
-        self._init_wf_unsqueeze_buffers()
+        # The shift tables are derived metadata, not checkpoint state.
+        # Transformers can materialize their non-persistent slots with
+        # `empty_like` before this runs, so rebuild them from the assigned
+        # operands instead of trusting an existing value (issue #5843).
+        self._init_wf_unsqueeze_buffers(force=True)
         super().post_init(**kwargs)
 
     def list_buffers(self):
@@ -1863,12 +2594,14 @@ class PackableQuantLinear(GPTQQuantLinear):
             )
 
         if self.bits in [2, 4, 8]:
-            zeros = _torch_right_shift(
-                t.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
+            return unpack_qzero_lanes(
+                self.qzeros,
                 wf_zero,
-            ).to(self.dequant_dtype)
-            zeros = t.bitwise_and(zeros, self.maxq).reshape(self.qzeros.shape[0], -1)
-            return zeros[:, :self.scales.shape[1]]
+                pack_factor=self.pack_factor,
+                maxq=self.maxq,
+                dtype=self.dequant_dtype,
+                out_features=self.scales.shape[1],
+            )
 
         if self.bits != 3:
             raise NotImplementedError(
@@ -1887,11 +2620,11 @@ class PackableQuantLinear(GPTQQuantLinear):
             dim=2,
         ).reshape(self.scales.shape)
 
-    def dequantize_weight(self, num_itr: int = 1):
+    def dequantize_weight(self, num_itr: int = 1, dtype: t.dtype | None = None):
         zeros = self.unpack_zero_points()
         if self.planar:
             weight = planar_unpack_rows(self.qweight, self.bits)
-            return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+            return self._dequantize_from_codes(weight, zeros, num_itr=num_itr, dtype=dtype)
 
         wf_neg_one = getattr(self, "wf_unsqueeze_neg_one", None)
         if wf_neg_one is None:
@@ -1923,16 +2656,33 @@ class PackableQuantLinear(GPTQQuantLinear):
             )
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
-        return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+        return self._dequantize_from_codes(weight, zeros, num_itr=num_itr, dtype=dtype)
 
-    def _dequantize_from_codes(self, weight: t.Tensor, zeros: t.Tensor, num_itr: int = 1):
+    def _dequantize_from_codes(
+        self,
+        weight: t.Tensor,
+        zeros: t.Tensor,
+        num_itr: int = 1,
+        dtype: t.dtype | None = None,
+    ):
         # Packed words may contain zero-filled tail codes when an embedding
         # vocabulary is not divisible by the packing width. The runtime
         # embedding contract remains the original vocabulary size.
         if weight.shape[0] > self.in_features:
             weight = weight[:self.in_features]
+        # Decode in a dtype that holds every decoded weight: a half-precision
+        # scale can overflow before the caller widens the result (#5577). The
+        # narrow path is unchanged when the stored scales already fit.
+        if dtype is None:
+            dtype = decode_dtype_for_scales(self.scales, self.bits)
+        wide = dtype != self.scales.dtype
+        scales = self.scales.to(dtype) if wide else self.scales
+        if wide:
+            zeros = zeros.to(dtype)
         if num_itr == 1:
-            weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
+            idx = self.g_idx.long()
+            weight_i = weight.to(dtype) if wide else weight
+            weights = scales[idx] * (weight_i - zeros[idx])
         else:
             num_dim = self.g_idx.shape[0] // num_itr
             out_dim = weight.shape[1] // num_itr
@@ -1943,8 +2693,10 @@ class PackableQuantLinear(GPTQQuantLinear):
                 col_start = i * out_dim
                 col_end = (i + 1) * out_dim if i < (num_itr - 1) else weight.shape[1]
 
-                scale_i = self.scales[:, col_start:col_end]
+                scale_i = scales[:, col_start:col_end]
                 weight_i = weight[row_start:row_end, col_start:col_end]
+                if wide:
+                    weight_i = weight_i.to(dtype)
                 zeros_i = zeros[:, col_start:col_end]
                 g_idx_i = self.g_idx[row_start:row_end].long()
                 weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
@@ -1964,7 +2716,8 @@ class PackableQuantLinear(GPTQQuantLinear):
     ):
         self.pack_block(linear, scales, zeros, g_idx, block_in, workers)
 
-    @t.inference_mode()
+    @t.no_grad()
+    @t.inference_mode(False)
     def pack_block(
             self,
             linear: nn.Module,
@@ -1988,6 +2741,23 @@ class PackableQuantLinear(GPTQQuantLinear):
           workers:  number of worker threads (1 -> single-thread).
         """
 
+        # Embeddings pack along their vocabulary axis, which is the transpose of
+        # this packer's layout. Reject them before touching ``.bias`` so callers
+        # take their documented ValueError fallback instead of dying on an
+        # nn.Embedding that has no bias attribute (#5381).
+        if isinstance(linear, nn.Embedding):
+            raise ValueError("pack_block does not support embedding layers")
+
+        # Block packing writes 32-bit storage words only. Reject narrow words
+        # before mutating module state so callers take their documented
+        # ValueError fallback to ``pack_original`` (#5806).
+        word_bits = int(self.pack_dtype_bits)
+        if word_bits != 32:
+            raise ValueError(
+                "pack_block requires 32-bit packing words; "
+                f"got {word_bits}-bit words. Use pack_original for narrower words."
+            )
+
         # ---------- normalize weight to [out, in] (same as your code) ----------
         W = linear.weight.detach()
         if isinstance(linear, _ConvNd):
@@ -1995,6 +2765,15 @@ class PackableQuantLinear(GPTQQuantLinear):
         if isinstance(linear, transformers.pytorch_utils.Conv1D):
             W = W.T
         W = W.to("cpu", copy=False)
+        try:
+            # A loader can hand us a weight whose storage was created under
+            # ``inference_mode()`` (so it has no version counter) while the
+            # tensor itself is not flagged as an inference tensor. Slicing such
+            # a tensor raises "Inference tensors do not track version counter"
+            # on recent Torch, so materialize one that follows the active mode.
+            W._version
+        except RuntimeError:
+            W = W.clone()
         out_features, in_features = W.shape
 
         # ---------- g_idx buffer ----------
@@ -2013,15 +2792,14 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         # small buffers
         self.register_buffer("scales", _scales_for_storage(scales, name=f"{self.name}.scales"))
-        if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.detach().to("cpu"))
+        bias = getattr(linear, "bias", None)
+        if bias is not None:
+            self.register_buffer("bias", bias.detach().to("cpu"))
         elif not hasattr(self, "bias"):
             self.bias = None
 
         # ---------- constants ----------
         bits = int(self.bits)  # 2,3,4,8
-        word_bits = int(self.pack_dtype_bits)  # expect 32
-        assert word_bits == 32, "Only 32-bit packing words supported."
         if (in_features % word_bits) != 0:
             raise ValueError("in_features must be divisible by 32")
         if (out_features % word_bits) != 0:
@@ -2057,14 +2835,36 @@ class PackableQuantLinear(GPTQQuantLinear):
             shifts_pf64 = _pack_shifts(bits, pack_factor)
 
         # ---------- thread task: process a single [i0,i1) block ----------
-        block_in = max(word_bits, (block_in // word_bits) * word_bits)
+        # Cap the block by an element budget: the quant math transient, the
+        # int32 codes and the pack view are all [block_in, out_features], so a
+        # wide matrix must not force a whole-matrix block. Blocks partition the
+        # input axis only and every block ends on a packing-word boundary, so
+        # the packed words do not depend on the block size.
+        block_in = _pack_block_block_in(out_features, block_in, word_bits)
+
+        @t.inference_mode()
+        def _pack_block_code_rows(i0: int, int_block: t.Tensor):
+            """Pack ``int_block`` (``[blk, out]`` codes) into its qweight rows.
+
+            Every supported layout packs whole 32-input groups, so the whole
+            block is packed by one vectorized shift/reduce instead of ``bits``
+            small dispatch chains per 32-row group.
+            """
+            dst_rows = (i0 // word_bits) * rows_per_group
+            if bits in (2, 4, 8):
+                packed = _pack_codes_to_words(int_block, pack_factor, word_bits, shifts_pf64)
+            elif bits == 3 and not planar:
+                packed = _pack_rows_3(int_block)
+            elif planar:
+                packed = planar_pack_rows(int_block, bits)
+            else:
+                raise NotImplementedError(f"Unsupported bits={bits}")
+            qweight[dst_rows:dst_rows + packed.shape[0]] = packed
 
         @t.inference_mode()
         def _process_block(i0: int, i1: int):
             blk = i1 - i0
-            # [out, blk]
-            Wblk = W[:, i0:i1]
-            # select group rows for these inputs from [G, out] -> [blk, out], then T -> [out, blk]
+            # select group rows for these inputs from [G, out] -> [blk, out]
             gsel = g_idx[i0:i1].to(dtype=t.int64, copy=False)  # [blk]
             if gsel.numel() == 0:
                 return
@@ -2081,37 +2881,26 @@ class PackableQuantLinear(GPTQQuantLinear):
                     f"pack_block: g_idx values out of range after normalization (min={gsel_min}, max={gsel_max}, groups={num_groups})."
                 )
 
-            sz_blk_T = scale_zeros.index_select(0, gsel).T  # [out, blk]
-            s_blk_T = scales.index_select(0, gsel).T  # [out, blk]
-
             # int_block = round((W + scale_zeros[g_idx]^T) / scales[g_idx]^T)
-            # The add allocates the one temporary we need; divide/round/clamp
-            # then run in place instead of materializing two more full copies.
-            int_block = Wblk.to(t.float32) + sz_blk_T  # [out, blk]
-            int_block.div_(s_blk_T)
+            # Quantize directly in the [blk, out] layout the packer consumes:
+            # the transpose happens once on the fp16 weight instead of on the
+            # larger fp32 intermediate. `copy_` always allocates, so an fp32
+            # caller weight is never mutated by the in-place math below.
+            int_block = t.empty((blk, out_features), dtype=t.float32)  # [blk, out]
+            int_block.copy_(W[:, i0:i1].T)
+            int_block += scale_zeros.index_select(0, gsel)
+            int_block /= scales.index_select(0, gsel)
             int_block.round_()
             # Values that drift outside the representable range must saturate.
             # Bit-packing an unchecked value wraps it modulo 2**bits and turns
             # a small reconstruction error into a full-range weight error.
             int_block.clamp_(0, self.maxq)
-            int_block = int_block.to(t.int32).T.contiguous()  # [blk, out]
+            int_block = int_block.to(t.int32)  # [blk, out]
 
-            groups32 = blk // word_bits
-            base_group = (i0 // word_bits)
-            for g in range(groups32):
-                sub = int_block[g * word_bits:(g + 1) * word_bits]  # [32, out] int32
-                dst_rows = (base_group + g) * rows_per_group
-                if bits in (2, 4, 8):
-                    _pack_block_rows_2_4_8(sub, qweight, dst_rows, bits, pack_factor, shifts_pf64)
-                elif bits == 3 and not planar:
-                    _pack_block_rows_3(sub, qweight, dst_rows)
-                elif planar:
-                    qweight[dst_rows:dst_rows + bits] = planar_pack_rows(sub, bits)
-                else:
-                    raise NotImplementedError(f"Unsupported bits={bits}")
+            _pack_block_code_rows(i0, int_block)
 
             # free temps
-            del Wblk, gsel, sz_blk_T, s_blk_T, int_block
+            del gsel, int_block
 
         # ---------- schedule blocks across a thread pool ----------
         starts = list(range(0, in_features, block_in))
@@ -2193,7 +2982,8 @@ class PackableQuantLinear(GPTQQuantLinear):
         # words under the constructor's v1 label (issue #4167).
         self.qzero_format(format=2)
 
-    @t.inference_mode()
+    @t.no_grad()
+    @t.inference_mode(False)
     def pack_gpu(
         self,
         linear: nn.Module,
@@ -2217,6 +3007,11 @@ class PackableQuantLinear(GPTQQuantLinear):
         target_device = t.device(device) if device is not None else t.device("cuda")
         if target_device.type != "cuda":
             raise ValueError(f"pack_gpu expected a CUDA device, got `{target_device}`.")
+
+        # Validate the word width before staging the dense weight on the device.
+        word_bits = int(self.pack_dtype_bits)
+        if word_bits != 32:
+            raise ValueError("pack_gpu currently supports 32-bit packing words only.")
 
         MASK32 = (1 << 32) - 1
         mask_tensor = t.tensor(MASK32, dtype=t.int64, device=target_device)
@@ -2252,15 +3047,13 @@ class PackableQuantLinear(GPTQQuantLinear):
         scale_zeros_dev = scale_zeros_g.to(device=target_device)
 
         self.register_buffer("scales", _scales_for_storage(scales_g, name=f"{self.name}.scales").to(device="cpu"))
-        if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.detach().to(device="cpu"))
+        bias = getattr(linear, "bias", None)
+        if bias is not None:
+            self.register_buffer("bias", bias.detach().to(device="cpu"))
         else:
             self.bias = None
 
         bits = int(self.bits)
-        word_bits = int(self.pack_dtype_bits)
-        if word_bits != 32:
-            raise ValueError("pack_gpu currently supports 32-bit packing words only.")
         if in_features % word_bits != 0:
             raise ValueError("in_features must be divisible by 32 for pack_gpu")
 
@@ -2284,28 +3077,12 @@ class PackableQuantLinear(GPTQQuantLinear):
             device=target_device,
         )
 
-        range10 = t.arange(10, dtype=t.int64, device=target_device).view(-1, 1)
-
-        @t.inference_mode()
-        def _pack_rows_3_values(int32_blk_32xN: t.Tensor) -> t.Tensor:
-            x = int32_blk_32xN.to(t.int64)
-            A = ((x[0:10] << (range10 * 3)).sum(dim=0, dtype=t.int64)) & mask_tensor
-            A = (A | ((x[10] << 30) & mask_tensor)) & mask_tensor
-
-            B = (((x[10] >> 2) & 1) & mask_tensor)
-            B = (B | ((x[11:21] << (range10 * 3 + 1)).sum(dim=0, dtype=t.int64))) & mask_tensor
-            B = (B | ((x[21] << 31) & mask_tensor)) & mask_tensor
-
-            C = (((x[21] >> 1) & 0x3) & mask_tensor)
-            C = (C | ((x[22:32] << (range10 * 3 + 2)).sum(dim=0, dtype=t.int64))) & mask_tensor
-
-            return t.stack([A, B, C], dim=0)
-
-        def _pack_rows_3(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
-            packed = _pack_rows_3_values(int32_blk_32xN)
-            dst[dst_rows_base:dst_rows_base + 3] = packed.to(self.pack_dtype)
-
-        block_in = max(word_bits, (block_in // word_bits) * word_bits)
+        # Derive the block from an element budget instead of trusting the
+        # caller's 8192 default, which covers a whole 4096-wide matrix and
+        # peaks at ~15x the fp16 weight transient. The input-axis split only
+        # assigns disjoint output rows, so qweight/qzeros stay bitwise
+        # identical.
+        block_in = _pack_gpu_block_in(out_features, block_in, word_bits)
         for i0 in range(0, in_features, block_in):
             i1 = min(i0 + block_in, in_features)
             blk = i1 - i0
@@ -2335,15 +3112,12 @@ class PackableQuantLinear(GPTQQuantLinear):
                     packed.to(self.pack_dtype)
                 )
             else:
-                for g in range(groups32):
-                    sub = int_block[g * word_bits:(g + 1) * word_bits]
-                    dst_rows = (base_group + g) * rows_per_group
-                    if bits == 3 and not self.planar:
-                        _pack_rows_3(sub, qweight_dev, dst_rows)
-                    elif self.planar:
-                        qweight_dev[dst_rows:dst_rows + bits] = planar_pack_rows(sub, bits).to(self.pack_dtype)
-                    else:
-                        raise NotImplementedError(f"Unsupported bits={bits}")
+                # 3-bit and planar layouts pack whole 32-input groups, so one
+                # vectorized call covers every group in the block. The former
+                # per-group loop issued ~25 tiny launches per 32-row group.
+                row_lo = base_group * rows_per_group
+                packed = _pack_gpu_block_3_or_planar(int_block, bits=bits, planar=self.planar)
+                qweight_dev[row_lo:row_lo + packed.shape[0]] = packed.to(self.pack_dtype)
 
         zeros_int = zeros_dev.to(dtype=t.int64)
         if bits in (2, 4, 8):
@@ -2367,13 +3141,9 @@ class PackableQuantLinear(GPTQQuantLinear):
                     "3-bit packing requires out_features to be divisible by 32, "
                     f"got out_features={zeros_int.shape[1]}"
                 )
-            groups = zeros_int.shape[1] // word_bits
-            qzeros_chunks: List[t.Tensor] = []
-            for g in range(groups):
-                block = zeros_int[:, g * word_bits:(g + 1) * word_bits]
-                packed = _pack_rows_3_values(block.T).transpose(0, 1)
-                qzeros_chunks.append(packed.to(dtype=self.pack_dtype))
-            qzeros_dev = t.cat(qzeros_chunks, dim=1)
+            # Pack every 32-column group in one vectorized call; the former
+            # per-group loop concatenated one small chunk per group.
+            qzeros_dev = _pack_code_cols_3(zeros_int).to(dtype=self.pack_dtype)
         elif self.planar:
             qzeros_dev = planar_pack_cols(zeros_int, bits).to(dtype=self.pack_dtype)
         else:
@@ -2387,8 +3157,117 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         del weight, scales_dev, zeros_dev, scale_zeros_dev, qweight_dev, qzeros_dev
 
+    def _pack_original_qweight(
+            self,
+            W: t.Tensor,
+            *,
+            is_embedding: bool,
+            scale_zeros: t.Tensor,
+            scales: t.Tensor,
+    ) -> t.Tensor:
+        """Quantize and pack ``qweight`` in input-axis blocks (#5728).
+
+        ``W`` is ``[out, in]`` for a linear and ``[in, out]`` for an embedding;
+        both pack along the input axis, so a block is a slice of that axis in
+        either case. Each block computes its own codes and writes only its own
+        rows of ``qweight``, which bounds the FP32 scratch by the block instead
+        of the whole weight. Blocks end on a storage word (2/4/8-bit) or a
+        32-input group (3-bit and planar), so the packed words are identical to
+        the previous whole-matrix form.
+        """
+
+        bits = int(self.bits)
+        word_bits = int(self.pack_dtype_bits)
+        planar = bool(self.planar)
+        g_idx = self.g_idx
+        in_features = W.shape[0] if is_embedding else W.shape[1]
+        out_features = W.shape[1] if is_embedding else W.shape[0]
+        if g_idx.numel() != in_features:
+            raise ValueError(
+                f"g_idx length {g_idx.numel()} != in_features {in_features}"
+            )
+
+        qweight_rows = math.ceil(in_features * bits / word_bits)
+        qweight = t.empty((qweight_rows, out_features), dtype=t.int32)
+
+        if bits in (2, 4, 8):
+            pack_factor = max(1, int(self.pack_factor))
+            shifts = _pack_shifts(bits, pack_factor)
+            unit = pack_factor
+            aligned = (in_features // pack_factor) * pack_factor
+        elif planar or bits == 3:
+            pack_factor = None
+            shifts = None
+            unit = 32
+            aligned = (in_features // 32) * 32
+        else:
+            raise NotImplementedError(f"Unsupported bits={bits}")
+
+        def _codes(i0: int, i1: int) -> t.Tensor:
+            """Codes for inputs ``[i0, i1)`` in the packer's ``[blk, out]`` layout."""
+            gsel = g_idx[i0:i1].to(dtype=t.int64)
+            neg = gsel < 0
+            if bool(neg.any()):
+                # Match the previous advanced indexing: a negative group id
+                # wraps to the end of the group axis.
+                gsel = gsel.clone()
+                gsel[neg] += int(scale_zeros.shape[0])
+            src = W[i0:i1] if is_embedding else W[:, i0:i1].T
+            block = t.empty((i1 - i0, out_features), dtype=t.float32, device=W.device)
+            # ``copy_`` always allocates, so an FP32 caller weight is never
+            # mutated by the in-place math below.
+            block.copy_(src)
+            block += scale_zeros.index_select(0, gsel)
+            block /= scales.index_select(0, gsel)
+            block.round_()
+            # Values that drift outside the representable range must saturate.
+            # Bit-packing an unchecked value wraps it modulo 2**bits and turns
+            # a small reconstruction error into a full-range weight error.
+            block.clamp_(0, self.maxq)
+            return block.to(device="cpu", dtype=t.int32)
+
+        def _pack_rows(codes: t.Tensor, i0: int):
+            """Pack one block's codes; return ``(words, first_dst_row)``."""
+            if bits in (2, 4, 8):
+                return (
+                    _pack_codes_to_words(codes, pack_factor, word_bits, shifts),
+                    i0 // pack_factor,
+                )
+            if planar:
+                return (
+                    planar_pack_rows(codes, bits, pack_dtype=self.pack_dtype),
+                    (i0 // 32) * bits,
+                )
+            return _pack_rows_3(codes), (i0 // 32) * 3
+
+        block = _pack_original_block_rows(out_features, unit)
+        for i0 in range(0, aligned, block):
+            i1 = min(i0 + block, aligned)
+            packed, dst = _pack_rows(_codes(i0, i1), i0)
+            qweight[dst:dst + packed.shape[0]] = packed
+
+        if aligned < in_features:
+            if pack_factor is None:
+                # 3-bit and planar packing are defined on whole 32-input
+                # groups, and both reject a partial group, as before.
+                raise ValueError(
+                    f"{'planar' if planar else '3-bit'} packing expects a 32-aligned "
+                    f"input width, got in_features={in_features}"
+                )
+            # A non-word-aligned tail (``group_size=-1`` with
+            # ``in % pack_factor != 0``) fills only the low lanes of the final
+            # word. Start that word from zero and OR the remaining codes, which
+            # is what the previous scalar row loop did for every row.
+            tail = _codes(aligned, in_features)
+            first_row = aligned // pack_factor
+            qweight[first_row:qweight_rows] = 0
+            for lane in range(in_features - aligned):
+                qweight[first_row] |= tail[lane] << (bits * lane)
+
+        return qweight.to(dtype=self.pack_dtype)
+
     def pack_original(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
-        with THREADPOOLCTL.threadpool_limits(1):
+        with threadpool_limits(limits=1):
             # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?
             # W = linear.weight.data.clone()
             W = linear.weight.data
@@ -2403,8 +3282,8 @@ class PackableQuantLinear(GPTQQuantLinear):
             self.register_buffer("g_idx", g_idx if g_idx is not None else self.g_idx )
 
             # Widen before multiplying/adding, not after a low-precision
-            # intermediate has already overflowed or rounded an endpoint.
-            W = W.to(t.float32)
+            # intermediate has already overflowed or rounded an endpoint. The
+            # affine tables are small: they are per group, not per weight.
             scales = scales.T.to(t.float32).contiguous()
             zeros = zeros.T.to(t.float32).contiguous()
             scale_zeros = zeros * scales
@@ -2420,92 +3299,18 @@ class PackableQuantLinear(GPTQQuantLinear):
             elif not hasattr(self, "bias"):
                 self.bias = None
 
-            if is_embedding:
-                # Embedding weights already use [token, feature] orientation;
-                # the GPTQ embedding result is transposed only for quantizing.
-                int_weight = W + scale_zeros[self.g_idx]
-                int_weight.div_(scales[self.g_idx])
-            else:
-                int_weight = W + scale_zeros[self.g_idx].T
-                int_weight.div_(scales[self.g_idx].T)
-            int_weight.round_()
-            int_weight.clamp_(0, self.maxq)
-            int_weight = int_weight.to(t.int32)
-            if not is_embedding:
-                int_weight = int_weight.T.contiguous()
-            else:
-                int_weight = int_weight.contiguous()
-            # int32 words: signed left shifts wrap exactly like the NumPy
-            # uint32 packing this replaces, so the bit pattern is identical and
-            # the intermediate stays half the size of an int64 buffer.
-            int_weight = int_weight.to(device="cpu", dtype=t.int32)
-
-            qweight = t.empty(
-                (math.ceil(int_weight.shape[0] * self.bits / self.pack_dtype_bits), int_weight.shape[1]),
-                dtype=t.int32,
+            # Quantize and pack one input block at a time (#5728). The
+            # previous whole-matrix form materialized the FP32 weight, two full
+            # ``[in, out]`` FP32 gathers (``scale_zeros[g_idx]`` and
+            # ``scales[g_idx]``), the FP32 result, its int32 cast and a
+            # transposed contiguous copy: about six times the BF16 weight of
+            # scratch, while the packed output is only ``bits/16`` of it.
+            qweight = self._pack_original_qweight(
+                W,
+                is_embedding=is_embedding,
+                scale_zeros=scale_zeros,
+                scales=scales,
             )
-            if self.bits in [2, 4, 8]:
-                pf = self.pack_factor
-                if pf == 1:
-                    # One code per word: packing is the identity.
-                    qweight = int_weight.contiguous()
-                elif int_weight.shape[0] % pf == 0:
-                    # Pack a chunk of rows per step instead of one row at a time:
-                    # same layout, orders of magnitude fewer Torch dispatches.
-                    # The chunk bounds the temporary int64 copy.
-                    shifts = _pack_shifts(self.bits, pf)
-                    rows = int_weight.shape[0] // pf
-                    chunk = max(1, 4_000_000 // max(1, int_weight.shape[1] * pf))
-                    for start in range(0, rows, chunk):
-                        stop = min(start + chunk, rows)
-                        qweight[start:stop] = _pack_codes_to_words(
-                            int_weight[start * pf:stop * pf],
-                            pf,
-                            self.pack_dtype_bits,
-                            shifts,
-                        )
-                else:
-                    qweight = t.zeros_like(qweight)
-                    for row in range(qweight.shape[0]):
-                        for j in range(min(self.pack_factor, int_weight.shape[0] - row * self.pack_factor)):
-                            qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
-            elif self.bits == 3 and not self.planar:
-                if self.pack_dtype_bits == 32 and int_weight.shape[0] % 32 == 0:
-                    for blk in range(int_weight.shape[0] // 32):
-                        _pack_block_rows_3(
-                            int_weight[blk * 32:(blk + 1) * 32], qweight, blk * 3
-                        )
-                else:
-                    qweight = t.zeros_like(qweight)
-                    i = 0
-                    row = 0
-                    while row < qweight.shape[0]:
-                        for j in range(i, i + 10):
-                            qweight[row] |= int_weight[j] << (3 * (j - i))
-                        i += 10
-                        qweight[row] |= int_weight[i] << 30
-                        row += 1
-                        qweight[row] |= (int_weight[i] >> 2) & 1
-                        i += 1
-                        for j in range(i, i + 10):
-                            qweight[row] |= int_weight[j] << (3 * (j - i) + 1)
-                        i += 10
-                        qweight[row] |= int_weight[i] << 31
-                        row += 1
-                        qweight[row] |= (int_weight[i] >> 1) & 0x3
-                        i += 1
-                        for j in range(i, i + 10):
-                            qweight[row] |= int_weight[j] << (3 * (j - i) + 2)
-                        i += 10
-                        row += 1
-            elif self.planar:
-                qweight = planar_pack_rows(
-                    int_weight,
-                    self.bits,
-                    pack_dtype=self.pack_dtype,
-                )
-            else:
-                raise NotImplementedError(f"Unsupported bits={self.bits}")
 
             self.register_buffer("qweight", qweight.to(dtype=self.pack_dtype))
 

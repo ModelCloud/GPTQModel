@@ -1,0 +1,96 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "adapter_rank": 128,
+  "add_bias_linear": false,
+  "architectures": null,
+  "attention_dropout": 0.0,
+  "attention_head_dim": 16,
+  "attention_hidden_size": 32,
+  "attention_probs_dropout_prob": 0.1,
+  "bos_token_id": 1,
+  "chunk_size": 8,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "eos_token_id": 2,
+  "hidden_act": "gelu",
+  "hidden_dropout_prob": 0.1,
+  "hidden_mamba_act": "silu",
+  "hidden_size": 16,
+  "hybrid_layer_ids": [
+   1,
+   2
+  ],
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_range": 0.02,
+  "intermediate_size": 4,
+  "is_decoder": true,
+  "is_encoder_decoder": false,
+  "kv_channels": 8,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "layers_block_type": [
+   "linear_attention",
+   "hybrid",
+   "hybrid"
+  ],
+  "mamba_d_conv": 4,
+  "mamba_d_state": 2,
+  "mamba_dt_rank": "auto",
+  "mamba_expand": 2,
+  "mamba_headdim": 4,
+  "mamba_ngroups": 8,
+  "max_position_embeddings": 512,
+  "model_type": "zamba2",
+  "n_mamba_heads": 8,
+  "num_attention_heads": 2,
+  "num_hidden_layers": 3,
+  "num_key_value_heads": 2,
+  "num_logits_to_keep": 1,
+  "num_mem_blocks": 1,
+  "num_query_groups": 2,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 0,
+  "problem_type": null,
+  "return_dict": true,
+  "rms_norm_eps": 1e-05,
+  "rope_parameters": {
+   "rope_theta": 10000.0,
+   "rope_type": "default"
+  },
+  "tie_word_embeddings": true,
+  "time_step_floor": 0.0001,
+  "time_step_max": 0.1,
+  "time_step_min": 0.001,
+  "transformers_version": "5.23.0",
+  "type_vocab_size": 16,
+  "use_cache": true,
+  "use_conv_bias": true,
+  "use_long_context": false,
+  "use_mamba_kernels": true,
+  "use_mem_eff_path": false,
+  "use_mem_rope": true,
+  "use_shared_attention_adapter": false,
+  "vocab_size": 99
+ },
+ "config_class": "Zamba2Config",
+ "config_module": "configuration_zamba2",
+ "extra_inputs": {},
+ "float_inputs": {},
+ "model_classes": [
+  [
+   "modeling_zamba2",
+   "Zamba2Model"
+  ],
+  [
+   "modeling_zamba2",
+   "Zamba2ForCausalLM"
+  ]
+ ]
+}

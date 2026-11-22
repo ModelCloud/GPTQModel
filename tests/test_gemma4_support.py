@@ -24,13 +24,10 @@ def test_gemma4_local_variants_select_multimodal_definition(model_path):
     assert auto.check_and_get_model_definition(model_path) is Gemma4ForConditionalGenerationGPTQ
 
 
-def test_gemma4_text_model_type_selects_text_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="gemma4_text")
+def test_gemma4_text_model_type_selects_text_definition(tmp_path):
+    _tiny_gemma4_causal_lm(num_kv_shared_layers=0).config.save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/gemma4-text") is Gemma4TextQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is Gemma4TextQModel
 
 
 def test_gemma4_module_tree_keeps_optional_variant_paths_non_strict():
@@ -185,7 +182,8 @@ def test_gemma4_capture_kwargs_preserve_all_per_layer_inputs():
 
 
 def _tiny_gemma4_causal_lm(num_kv_shared_layers):
-    from transformers import Gemma4ForCausalLM, Gemma4TextConfig
+    from gptqmodel.models.ports.native.gemma4.configuration_gemma4 import Gemma4TextConfig
+    from gptqmodel.models.ports.native.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 
     config = Gemma4TextConfig(
         vocab_size=64,
@@ -205,41 +203,19 @@ def _tiny_gemma4_causal_lm(num_kv_shared_layers):
     return Gemma4ForCausalLM(config).eval()
 
 
-def _text_model_def(model):
-    model_def = object.__new__(Gemma4TextQModel)
-    nn.Module.__init__(model_def)
-    model_def.model = model
-    return model_def
-
-
 def _store_flags(model):
     return [layer.self_attn.store_full_length_kv for layer in model.model.layers]
 
 
-def test_gemma4_disables_unused_full_length_kv_store():
-    model = _tiny_gemma4_causal_lm(num_kv_shared_layers=0)
-
-    # Transformers flags the last layer of each attention type even without a KV-shared tail.
-    assert _store_flags(model) == [False, False, True, True]
-    assert not any(layer.self_attn.is_kv_shared_layer for layer in model.model.layers)
-
-    _text_model_def(model).pre_quantize_generate_hook_start()
-
-    assert _store_flags(model) == [False, False, False, False]
-
-
-def test_gemma4_unused_kv_store_no_longer_grows_captured_shared_kv_states():
+def test_gemma4_without_kv_shared_tail_never_stores_full_length_kv():
+    # Cached replay keeps one captured shared_kv_states dict per calibration
+    # batch; a stored full-length K/V there OOMed gemma-4-31B-it calibration.
+    # Transformers 5.23 only stores K/V when a KV-shared tail exists.
     model = _tiny_gemma4_causal_lm(num_kv_shared_layers=0)
     input_ids = torch.randint(0, model.config.vocab_size, (1, 6))
 
-    # Cached replay reuses one captured dict per batch; before the fix every
-    # storing layer leaves its full-length K/V behind in it.
-    captured = {}
-    with torch.no_grad():
-        model(input_ids=input_ids, shared_kv_states=captured, use_cache=False)
-    assert set(captured) == {"sliding_attention", "full_attention"}
-
-    _text_model_def(model).pre_quantize_generate_hook_start()
+    assert _store_flags(model) == [False, False, False, False]
+    assert not any(layer.self_attn.is_kv_shared_layer for layer in model.model.layers)
 
     captured = {}
     with torch.no_grad():
@@ -249,12 +225,9 @@ def test_gemma4_unused_kv_store_no_longer_grows_captured_shared_kv_states():
     assert torch.equal(reference, replayed)
 
 
-def test_gemma4_keeps_kv_store_for_kv_shared_variants():
+def test_gemma4_kv_shared_variants_store_producer_kv():
     # Layers 2-3 read the K/V stored by layers 0-1, so the store must stay enabled.
     model = _tiny_gemma4_causal_lm(num_kv_shared_layers=2)
-    flags_before = _store_flags(model)
-    assert flags_before == [True, True, False, False]
 
-    _text_model_def(model).pre_quantize_generate_hook_start()
-
-    assert _store_flags(model) == flags_before
+    assert _store_flags(model) == [True, True, False, False]
+    assert [layer.self_attn.is_kv_shared_layer for layer in model.model.layers] == [False, False, True, True]

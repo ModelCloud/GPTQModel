@@ -553,7 +553,9 @@ def prepare_llama_gsq_export(model, run, *, blocks=None):
 
     Returns its matching quantization configuration. A public lifecycle caller
     can retain its existing wrapper and install this configuration only after
-    successful preparation. This converts floating runtime tensors to FP16.
+    successful preparation. The model keeps its dtype: the packed blocks have
+    already run forwards in it, and weight dtypes are frozen after the first
+    forward (contracts/kernel/forward-dtype.md).
     """
     from ..nn_modules.qlinear.torch import TorchLinear
     from ..quantization.config import FORMAT, GPTQConfig
@@ -608,14 +610,6 @@ def prepare_llama_gsq_export(model, run, *, blocks=None):
         qcfg.meta['gsq_projection_bits'] = dict(sorted(projection_bits.items()))
     qcfg.meta['gsq_training'] = run['gsq_training']
     qcfg.meta['gsq_training_recipe'] = 'experimental_staged_llama_v1'
-    model.half()
-    # RoPE inverse frequencies are nonpersistent. Casting their FP32 values to
-    # FP16 would change the live runtime while reload reconstructs them from
-    # config in FP32. Rebuild the same canonical rotary state as a fresh load.
-    # The public loader constructs these frequencies on CPU before transfer;
-    # constructing directly on CUDA can differ by FP32 ulps in pow/division.
-    model.model.rotary_emb = type(model.model.rotary_emb)(model.config).to(
-        model.model.embed_tokens.weight.device).eval()
     return qcfg
 
 
@@ -658,9 +652,7 @@ def quantize_llama_gsq_prepared(wrapper, prepared, *, gsq):
     return run
 
 
-def quantize_llama_gsq_public(wrapper, *, calibration, tokenizer, backend,
-                              calibration_concat_size, calibration_sort, calibration_data_min_length,
-                              calibration_concat_separator, unsupported):
+def quantize_llama_gsq_public(wrapper, *, calibration, tokenizer, backend, unsupported):
     """Experimental public GPTQ dispatch for a uniform materialized Llama model.
 
     GSQTrainingConfig owns the staged prior and optimization recipe. Additional
@@ -670,7 +662,7 @@ def quantize_llama_gsq_public(wrapper, *, calibration, tokenizer, backend,
     from ..utils.backend import BACKEND, normalize_backend
 
     qcfg = wrapper.quantize_config
-    if wrapper.quantized or calibration is None:
+    if wrapper.quantized or calibration.dataset is None:
         raise ValueError('Staged GSQ requires an unquantized model and calibration')
     if qcfg.method != METHOD.GPTQ or qcfg.format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
         raise ValueError('Public staged GSQ requires GPTQ scalar export')
@@ -702,11 +694,13 @@ def quantize_llama_gsq_public(wrapper, *, calibration, tokenizer, backend,
         raise ValueError('Public staged GSQ requires eager attention')
     if tokenizer is not None:
         wrapper.tokenizer = tokenizer
+    # Staged GSQ trains on single-document rows, so ``calibration.batch_size``
+    # does not apply here.
     prepared = wrapper.prepare_dataset(
-        calibration, calibration_dataset_concat_size=calibration_concat_size,
-        calibration_dataset_sort=calibration_sort, batch_size=1,
-        calibration_data_min_length=calibration_data_min_length,
-        calibration_concat_separator=calibration_concat_separator)
+        calibration.dataset, calibration_dataset_concat_size=calibration.concat_size,
+        calibration_dataset_sort=calibration.sort, batch_size=1,
+        calibration_data_min_length=calibration.min_length,
+        calibration_concat_separator=calibration.concat_separator)
     staged = qcfg.gsq_training
     if layer_bits is None:
         run = quantize_llama_gsq_prepared(wrapper, prepared, gsq=staged)

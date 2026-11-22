@@ -14,6 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
+from gptqmodel.utils.triton_jit import jit as triton_jit
+
 from ...utils.rocm import IS_ROCM
 
 
@@ -86,7 +88,7 @@ def _launch_device(device: torch.device):
     return nullcontext()
 
 
-@triton.jit
+@triton_jit
 def _to_e4m3_rn(value):
     """Round f32 to E4M3 with round-to-nearest-even on every architecture.
 
@@ -106,7 +108,7 @@ def _to_e4m3_rn(value):
     )
 
 
-@triton.jit
+@triton_jit
 def _token_fp8_quant(X, Q, RowScale, K: tl.constexpr, BK: tl.constexpr):
     # rows * K can exceed 2^31 for a very large prefill batch; compute the row
     # offset in 64-bit so the load/store addresses do not wrap.
@@ -195,7 +197,7 @@ def fp8_linear(x: torch.Tensor, weight_e4m3: torch.Tensor, scales: torch.Tensor,
     return fp8_linear_prepacked(q, row_scale, weight_e4m3, scales, bias, x.dtype).reshape(shape)
 
 
-@triton.jit
+@triton_jit
 def _unpack_int4_to_e4m3(Packed, Out, K: tl.constexpr, N: tl.constexpr,
                          BW: tl.constexpr, BN: tl.constexpr,
                          PACKED_ROW_STRIDE: tl.constexpr, PACKED_COL_STRIDE: tl.constexpr,

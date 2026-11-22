@@ -94,11 +94,14 @@ hf_pack_layer(
 )
 ```
 
-`pack_impl` accepts `"original"`, `"block"`/`"cpu"` and `"gpu"`; block/GPU
-requests fall back to the original packer when the kernel or device does not
-support them. Pass `post_init=True` to run the kernel's `post_init()` after
-packing, and `post_init_kwargs={...}` to forward arguments such as the
-ExllamaV2 scratch space.
+`pack_impl` accepts `"auto"`, `"original"`, `"block"`/`"cpu"` and `"gpu"`;
+block/GPU requests fall back to the original packer when the kernel or device
+does not support them. `"auto"` honours the `device` target: an explicit CPU
+`device` selects the block packer even when a GPU is visible (see
+[packing implementation selection](#packing-implementation-selection)). Pass
+`post_init=True` to run the kernel's `post_init()` after packing, and
+`post_init_kwargs={...}` to forward arguments such as the ExllamaV2 scratch
+space.
 
 Packing is a CPU-storage operation: even `pack_impl="gpu"` registers the packed
 buffers on CPU (the GPU is used only as a compute accelerator), matching the
@@ -128,6 +131,83 @@ flowchart TD
 | --- | --- | --- |
 | AWQ recognition (`gptqmodel/utils/packing.py:609`) | `QUANT_TYPE` prefix `awq_` or exact `llm-awq` only | prefix **or** declared `METHOD.AWQ` in `SUPPORTS_METHODS` |
 | AllSpark (`QUANT_TYPE="allspark"`, `METHOD.AWQ`) | fell through to the `pack_original` branch and raised `ValueError` | routed to its AWQ `pack()` |
+
+### Packing implementation selection
+
+Inside the GPTQ-family branch, `pack_impl="auto"` picks one of `pack_gpu`,
+`pack_block` or `pack_original` per layer. The decision starts from the
+caller's resolved target, not only from device availability: an explicit CPU
+target selects the bounded CPU block packer even when a CUDA/ROCm GPU is
+visible, and the reported packer names the implementation that actually
+finished the layer (#5761).
+
+`_pack_target_family` (`gptqmodel/utils/packing.py:100`) resolves the target
+through `normalize_device`, so the HIP distinction stays in the family
+resolver: a `cuda:N` target names `DEVICE.ROCM` on a HIP build and
+`DEVICE.CUDA` on NVIDIA, and only those two families are eligible for
+`pack_gpu`.
+
+```mermaid
+flowchart TD
+    A["pack_module / hf_pack_layer<br/>pack_impl + resolved target"] --> B{"embedding or<br/>pack_dtype_bits != 32?"}
+    B -->|yes| C["original"]
+    B -->|no| D["_pack_target_family<br/>normalize_device(target)"]
+    D --> E{"target None or<br/>family CUDA/ROCM?"}
+    E -->|"no: explicit CPU/XPU/NPU/MPS"| F["block<br/>CPU block packer"]
+    E -->|yes| G{"torch.cuda.is_available()<br/>and module has pack_gpu?"}
+    G -->|yes| H["gpu"]
+    G -->|no| F
+    H --> I["pack_gpu(device=target)"]
+    I -->|"ValueError/NotImplementedError<br/>under AUTO"| J["pack_block"]
+    I -->|"ValueError/NotImplementedError<br/>explicit gpu"| K["pack_original"]
+    J -->|ValueError/NotImplementedError| K
+    classDef fail fill:#fde2e2,stroke:#b42318,color:#7a271a
+    class K fail
+```
+
+The model path resolves the concrete target first
+(`resolve_pack_device`, `gptqmodel/utils/model.py:1320`) and passes it into
+AUTO (`gptqmodel/utils/model.py:1448`). The layer API passes its `device`
+argument (`gptqmodel/utils/packing.py:704`). `resolve_pack_device` honours an
+explicit CPU `QuantizeConfig.device`; a non-CPU assigned device still
+overrides the configured family, and an unspecified target stays `None` so
+AUTO keeps its accelerator preference.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| AUTO decision input (`gptqmodel/utils/packing.py:99`) | `torch.cuda.is_available()` plus method presence; the target never reached the selector | `_auto_pack_impl(..., target=...)` keeps the GPU branch only for `None` or `DEVICE.CUDA`/`DEVICE.ROCM` (`gptqmodel/utils/packing.py:131-162`) |
+| Model path (`gptqmodel/utils/model.py:1434`) | resolved `target_device`, then `_auto_pack_impl(module=module, linear=layer)` without it | passes `target_device` (`gptqmodel/utils/model.py:1448-1450`) |
+| Layer API (`gptqmodel/utils/packing.py:639`) | `_normalize_pack_impl(pack_impl, module, linear)` | `_normalize_pack_impl(..., target=device)` (`gptqmodel/utils/packing.py:703-706`) |
+| Profiling label (`gptqmodel/utils/model.py:1449-1455`) | assigned before the attempt, so a rejected `pack_gpu` still reported `module.pack_gpu` while `pack_original` ran | assigned after the fallback chain (`gptqmodel/utils/model.py:1479-1562`) |
+| AUTO GPU rejection | `pack_gpu` then `pack_original` | `pack_gpu` then `pack_block`, then `pack_original` (`gptqmodel/utils/model.py:1479-1536`, `gptqmodel/utils/packing.py:717-750`) |
+| Explicit `pack_impl="gpu"` with a CPU target | `pack_gpu` raised, then `pack_original` | warning and the CPU block packer when the kernel has it (`gptqmodel/utils/packing.py:194-207`, `gptqmodel/utils/model.py:1451-1464`) |
+
+#### Failure and ambiguity paths
+
+| Situation | Behaviour |
+| --- | --- |
+| Explicit CPU target and a visible GPU | `block`; `pack_gpu` is never attempted, so no CPU-target rejection and no slower original fallback |
+| Unspecified target and a visible GPU | `gpu`; AUTO's accelerator preference is unchanged |
+| Explicit `cuda:N` or `DEVICE.CUDA` target | `gpu`; the concrete ordinal is preserved for placement |
+| `cuda:N` or `rocm` target on a HIP build | `gpu`; `normalize_device` resolves the HIP family to `DEVICE.ROCM` |
+| Explicit `pack_impl="gpu"` with a CPU/XPU/NPU/MPS/XLA target | warning, then `block` when the kernel has `pack_block`, otherwise `original` |
+| AUTO selected `gpu`, but the layer's geometry or word width is rejected | try `block`, then `original`; the label follows the packer that finished |
+| Embedding source | `original` always (the packed words follow the vocabulary axis, #5381) |
+| `pack_dtype_bits != 32` | `original` (narrow words are unsupported by the accelerated packers, #5806) |
+| Explicit CPU target on a kernel without `pack_block` | `original` |
+
+The tests pin these decisions in `tests/test_pack_auto_explicit_cpu_5761.py`:
+
+| Invariant | Test |
+| --- | --- |
+| Explicit CPU resolves to `block` with a visible accelerator, with and without one | `test_explicit_cpu_target_resolves_to_block_with_visible_gpu`, `test_explicit_cpu_target_resolves_to_block_without_accelerator` |
+| `pack_module` reports `module.pack_block` and never attempts `pack_gpu` | `test_pack_module_reports_block_for_explicit_cpu`, `test_explicit_cpu_with_real_gpu_packs_on_cpu` |
+| `hf_pack_layer` uses the block packer for an explicit CPU target | `test_hf_pack_layer_uses_block_for_explicit_cpu` |
+| AUTO with a visible GPU still selects the GPU path | `test_auto_with_visible_gpu_keeps_gpu_path`, `test_auto_with_real_gpu_packs_on_gpu` |
+| AUTO GPU rejection falls back to block and relabels | `test_auto_gpu_rejection_falls_back_to_block_and_relabels` |
+| Explicit GPU requests keep the GPU path for accelerator targets | `test_explicit_gpu_request_on_cpu_target_uses_cpu_packer` |
+| Packed buffers are byte-identical to explicit block and original packing | `test_explicit_cpu_payload_matches_block_and_original` |
+
 
 ### Split pack / initialize lifecycle
 
@@ -198,7 +278,7 @@ Three guarantees keep copy-based repacking numerically correct:
   finite instead of becoming infinity or zero. The kernel's `post_init()` still
   performs any ABI conversion it needs.
 * Kernels that repack their buffers into a private runtime ABI inside
-  `post_init()` (Marlin, Machete, Swordfish, BitBLAS) are valid repack targets
+  `post_init()` (Marlin, Machete, Swordfish, BitBLAS, Humming) are valid repack targets
   but are rejected as repack *sources*, because their buffers no longer hold
   the checkpoint layout. Repack from the kernel holding the checkpoint layout
   (for example a Torch kernel) instead.

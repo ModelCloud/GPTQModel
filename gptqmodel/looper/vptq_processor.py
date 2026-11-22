@@ -12,15 +12,14 @@ from torch.nn import Module
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CalibrationTypes,
     ForwardConfig,
-    LoopProcessor,
     ProcessorLifecycleConfig,
     bind_resolved_module_config,
     get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
+from ..looper.shared_input import SharedInputCaptureProcessor
 from ..models import BaseQModel
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
@@ -33,19 +32,20 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..nn_modules.qlinear.vptq_torch import VPTQLinear
-from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization.config import FORMAT, METHOD, CalibrationConfig, QuantizeConfig, resolve_quant_format
 from ..quantization.vptq import VPTQ
 from ..utils.backend import BACKEND
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, move_to
+from ..utils.model import create_quant_module, install_quant_module, move_to
+from ..utils.module_locks import parent_module_lock
 from ..utils.torch import CPU
 
 
 log = setup_logger()
 
 
-class VPTQProcessor(LoopProcessor):
+class VPTQProcessor(SharedInputCaptureProcessor):
     """Captures activations and quantizes modules with the VPTQ workflow.
 
     The calibration forward passes feed the same Hessian accumulator used by
@@ -68,12 +68,20 @@ class VPTQProcessor(LoopProcessor):
     ):
         """Initializes VPTQ processing and optional weight-delta tracking."""
 
+        if calibration is not None and calibration.exclude_attention_sinks:
+            # Dropping the sink rows from the VPTQ Hessian made wikitext-2 PPL
+            # 4.5-4.7x worse on Llama-3.2-1B and Llama-3.2-1B-Instruct, so
+            # refuse instead of producing a much worse checkpoint.
+            raise ValueError(
+                "VPTQ does not support `CalibrationConfig.exclude_attention_sinks`; leave it False."
+            )
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
             calibration=calibration,
             forward=forward,
         )
+        self._init_shared_input_capture()
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
@@ -116,6 +124,13 @@ class VPTQProcessor(LoopProcessor):
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the VPTQ task."""
+
+        if self.shared_input_leader(name) is not None:
+            def skip(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+                """Follower of a shared-input group: the leader collects this Hessian."""
+
+                del inp, out
+            return skip
 
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             """Records one activation batch for the module Hessian."""
@@ -252,7 +267,7 @@ class VPTQProcessor(LoopProcessor):
             logger=log,
             module_name=module_label,
         ):
-            create_quant_module(
+            qmodule = create_quant_module(
                 name=module.full_name,
                 linear_cls=VPTQLinear,
                 bits=self.qcfg.runtime_bits,
@@ -271,9 +286,14 @@ class VPTQProcessor(LoopProcessor):
                 init_kwargs=self.qcfg.quant_linear_init_kwargs(),
                 dtype=module.module_dtype,
                 resolved_module_config=get_resolved_module_config(module),
+                install=False,
             )
 
-        qmodule = model.model.get_submodule(module.full_name)
+        if qmodule is None:
+            raise RuntimeError(
+                f"VPTQProcessor: module `{module.full_name}` resolved to an excluded "
+                "quant config but still reached packing."
+            )
         with log_time_block(
             "module.pack",
             logger=log,
@@ -285,6 +305,11 @@ class VPTQProcessor(LoopProcessor):
         with self.lock:
             self.result_pop(module.full_name)
 
+        # Publish the packed kernel with one assignment; installing it before
+        # packing left an unusable projection behind when packing was
+        # interrupted (issue #5089).
+        with parent_module_lock(module.full_name):
+            install_quant_module(model.model, module.full_name, qmodule)
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):

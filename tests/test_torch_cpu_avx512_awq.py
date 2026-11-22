@@ -400,10 +400,23 @@ def test_awq_layer_train_mode_uses_differentiable_dequant_path(bias):
     assert layer.linear_mode == "train"
     assert layer._cpu_transformed is True
     assert output.dtype == torch.bfloat16
-    reference = x.detach() @ weight
+    # The training fallback reduces in FP32 and rounds once, so the reference
+    # must not add a BF16 accumulation round of its own: ``x @ weight`` in BF16
+    # differs from that by a full output ulp.
+    reference = x.detach().float() @ weight.float()
     if bias:
-        reference = (reference.float() + layer.bias.float()).to(torch.bfloat16)
-    torch.testing.assert_close(output, reference, atol=2e-3, rtol=2e-3)
+        reference = reference + layer.bias.float()
+    reference = reference.to(torch.bfloat16)
+    visible_ulp = (
+        torch.nextafter(reference, torch.full_like(reference, float("inf"))).float()
+        - reference.float()
+    ).abs().max().item()
+    torch.testing.assert_close(
+        output.float(),
+        reference.float(),
+        rtol=0,
+        atol=max(visible_ulp, torch.finfo(torch.bfloat16).tiny),
+    )
     expected_grad = torch.ones(5, out_features, dtype=torch.bfloat16) @ weight.t()
     torch.testing.assert_close(x.grad, expected_grad, atol=2e-3, rtol=2e-3)
 
@@ -526,7 +539,10 @@ def test_awq_layer_preserves_activation_dtype_and_rank(dtype):
         assert layer.linear_mode == "inference"
         assert layer._cpu_transformed is True
     else:
-        assert layer.linear_mode == "train"
+        # ``#5447`` removed the eval-mode training latch. FP16 has no fused
+        # layout here, so the call takes the dense fall-back without pinning a
+        # mode; only a training-mode forward latches ``"train"``.
+        assert layer.linear_mode is None
         assert layer._cpu_transformed is False
     torch.testing.assert_close(output, reference, atol=0.25, rtol=0.02)
 
@@ -612,7 +628,10 @@ def test_aten_awq_layer_matches_affine_oracle(dtype, checkpoint_scale_dtype):
     assert layer.linear_mode == "inference"
     assert layer._cpu_transformed is True
     assert layer._cpu_transform_dtype == dtype
-    assert layer.scales.dtype == torch.float32
+    # The checkpoint scale buffer keeps the dtype it was loaded with (#4178);
+    # the wider FP32 affine metadata is the packed runtime tensor.
+    assert layer.scales.dtype == checkpoint_scale_dtype
+    assert layer.scales_and_zeros.dtype == torch.float32
     torch.testing.assert_close(output, reference_fp32.to(dtype), atol=2e-3, rtol=2e-3)
     normalized_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
     assert normalized_error.item() < 2e-3
@@ -699,14 +718,14 @@ def test_awq_auto_selection_prefers_shared_avx512_kernel():
 
 
 @pytest.mark.parametrize("dtype", (torch.float32, torch.float16, torch.bfloat16))
-def test_fused_layer_keeps_fp32_affine_abi_across_dtype_moves(dtype):
-    """A dtype move must not narrow the FP32 affine operands the kernel requires.
+def test_fused_layer_keeps_fp32_affine_abi_after_forward(dtype):
+    """Post-forward dtype moves are rejected; the FP32 affine ABI stays intact.
 
     ``transform_cpu`` packs the weight once and keeps ``scales``/``bias`` in
     FP32 because the shared AVX512 kernel rejects any other ``absmax`` dtype.
-    ``nn.Module._apply`` casts registered floating buffers, so a plain
-    ``model.float()``/``.half()``/``.to(dtype)`` used to leave a BF16 absmax
-    behind and the next forward raised ``absmax must be float32``.
+    Weight dtypes are frozen after the first forward
+    (contracts/kernel/forward-dtype.md), so a cast that would change any tensor
+    raises before touching the layer. A cast that changes nothing is a no-op.
     """
 
     _skip_unless_avx512_bf16()
@@ -741,15 +760,20 @@ def test_fused_layer_keeps_fp32_affine_abi_across_dtype_moves(dtype):
         expected.reshape(-1, out_features), oracle.to(torch.bfloat16), rtol=2e-2, atol=2e-2
     )
 
-    for move in ("to", "float", "half"):
+    targets = {"to": dtype, "float": torch.float32, "half": torch.float16}
+    for move, target in targets.items():
         moved = layer
-        if move == "to":
-            moved.to(dtype)
-        elif move == "float":
-            moved.float()
+        changes = any(
+            tensor.is_floating_point() and tensor.dtype != target
+            for tensor in (*layer.parameters(), *layer.buffers())
+        )
+        cast = {"to": lambda: moved.to(dtype), "float": moved.float, "half": moved.half}[move]
+        if changes:
+            with pytest.raises(RuntimeError, match="frozen after the first forward"):
+                cast()
         else:
-            moved.half()
-        # Whatever dtype the module reports, the kernel operands stay FP32.
+            cast()
+        # The kernel operands stay FP32 either way.
         assert moved.scales.dtype == torch.float32, move
         assert moved.bias is None or moved.bias.dtype == torch.float32, move
         with torch.inference_mode():

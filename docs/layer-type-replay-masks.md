@@ -72,6 +72,23 @@ The mask builder is `LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING` from
 Gemma bidirectional overlay all come from the same table the model uses. A type
 whose builder is missing or is a `hybrid` dict keeps the incoming kwargs.
 
+## Recurrent mixers take a planar mask, never the attention grid
+
+`linear_attention` and `conv` are the two entries whose builder is
+`create_recurrent_attention_mask`. That builder returns `None` for an unpadded
+batch -- the default at `batch_size=1` -- because the mixer applies its own
+causal convolution/scan. A Mamba/conv layer multiplies its input by the mask as
+`hidden * attention_mask[:, :, None]`, so it can never consume the additive
+`[1, 1, T, T]` grid an attention layer takes: the extra singleton dims raise
+`tensor a (768) must match tensor b (366)`.
+
+`BaseQModel._resolve_layer_replay_type` therefore also consults a layer's
+`block_type` and its mixer sibling's `layer_type`/`layer_idx` (GraniteMoE-Hybrid
+exposes the mixer as `mamba`, not `self_attn`), and the AWQ token-row replay
+uses that type to switch to a planar `[1, retained]` keep mask
+(`_is_recurrent_attention_layer_type`, issue #4671). GPTQ layer replay keeps the
+captured `None` mask, which is exactly what the model passed.
+
 ## Definition overrides must call the base hook first
 
 `BaseQModel.prepare_layer_replay_kwargs` is where the private capture key is
@@ -101,12 +118,12 @@ flowchart LR
     style B5 fill:#f6ffed,stroke:#389e0d
 ```
 
-The fixed overrides are `Olmo3QModel` (`gptqmodel/models/definitions/olmo3.py:83`),
+The fixed overrides are `Olmo3QModel` (`gptqmodel/models/definitions/olmo3.py:53`),
 both Gemma 4 text and composite classes
 (`gptqmodel/models/definitions/gemma4.py:218` and `:287`), both Gemma 4 unified
 classes (`gptqmodel/models/definitions/gemma4_unified.py:106` and `:138`), both
 Gemma 3n classes (`gptqmodel/models/definitions/gemma3n.py:259` and `:311`), and
-`Raon1MiniQModel` (`gptqmodel/models/definitions/raon1_mini.py:46`).
+`Raon1MiniQModel` (`gptqmodel/models/definitions/raon1_mini.py:8`).
 
 ## AWQ needs the same per-layer-type rotary
 
@@ -117,7 +134,7 @@ embeddings take a required `layer_type` / `attention_type` argument, so the old
 `rotary(x, position_ids)` call raised
 `TypeError: Gemma3RotaryEmbedding.forward() missing 1 required positional
 argument: 'layer_type'` for every Gemma 3 text model.
-`_rotary_layer_type_kwargs` (`gptqmodel/looper/awq_processor.py:2835`) inspects
+`_rotary_layer_type_kwargs` (`gptqmodel/looper/awq_processor.py::_rotary_layer_type_kwargs`) inspects
 the rotary signature and supplies the attention module's declared type. Rotaries
 without that parameter are called exactly as before.
 
@@ -139,7 +156,7 @@ flowchart TD
 
 For `support_batch_quantize=False`, `prepare_calibration_dataset` emitted only
 `input_ids` (`gptqmodel/utils/calibration.py:680`). A padded tail block from
-`calibration_dataset_concat_size`, and any user row that already carried padding,
+`CalibrationConfig.concat_size`, and any user row that already carried padding,
 therefore entered the Hessian as real activations. The non-batched branch now
 keeps the normalized `attention_mask`
 (`gptqmodel/utils/calibration.py:684`). Batch size stays 1; downstream capture
@@ -221,4 +238,4 @@ and `::test_replay_kwargs_match_native_layer_type`).
 
 - `stage_subset.py:1341` removes hooks outside a `finally`; a failed quantization
   already leaves the model unusable, so this is unchanged.
-- `calibration_data_min_length` still checks the padded length of the first row.
+- `CalibrationConfig.min_length` still checks the padded length of the first row.

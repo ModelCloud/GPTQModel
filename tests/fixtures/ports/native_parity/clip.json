@@ -1,0 +1,116 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_factor": 1.0,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "logit_scale_init_value": 2.6592,
+  "model_type": "clip",
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "problem_type": null,
+  "projection_dim": 64,
+  "return_dict": true,
+  "text_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.1,
+   "bos_token_id": 49406,
+   "chunk_size_feed_forward": 0,
+   "dropout": 0.1,
+   "dtype": null,
+   "eos_token_id": 49407,
+   "hidden_act": "quick_gelu",
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "initializer_factor": 1.0,
+   "initializer_range": 0.02,
+   "intermediate_size": 37,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_norm_eps": 1e-05,
+   "max_position_embeddings": 512,
+   "model_type": "clip_text_model",
+   "num_attention_heads": 4,
+   "num_hidden_layers": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "pad_token_id": 1,
+   "problem_type": null,
+   "projection_dim": 32,
+   "return_dict": true,
+   "vocab_size": 99
+  },
+  "transformers_version": "5.23.0",
+  "vision_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.1,
+   "chunk_size_feed_forward": 0,
+   "dropout": 0.1,
+   "dtype": null,
+   "hidden_act": "quick_gelu",
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "image_size": 30,
+   "initializer_factor": 1.0,
+   "initializer_range": 0.02,
+   "intermediate_size": 37,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_norm_eps": 1e-05,
+   "model_type": "clip_vision_model",
+   "num_attention_heads": 4,
+   "num_channels": 3,
+   "num_hidden_layers": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "patch_size": 2,
+   "problem_type": null,
+   "projection_dim": 32,
+   "return_dict": true
+  }
+ },
+ "config_class": "CLIPConfig",
+ "config_module": "configuration_clip",
+ "extra_inputs": {},
+ "float_inputs": {
+  "pixel_values": {
+   "dtype": "float32",
+   "shape": [
+    12,
+    3,
+    30,
+    30
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_clip",
+   "CLIPForImageClassification"
+  ]
+ ]
+}

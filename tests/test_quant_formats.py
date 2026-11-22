@@ -8,7 +8,9 @@ import os
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+# The allocator default belongs to ``gptqmodel/_alloc_conf.py``, which is
+# backend-aware and defers to the caller; pinning it here forced
+# ``expandable_segments`` on ROCm and overrode the caller (#4821).
 
 # -- end do not touch
 
@@ -21,7 +23,7 @@ from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel, __version__, get_best_device  # noqa: E402
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, __version__, get_best_device  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME  # noqa: E402
 from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL, QuantizeConfig  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
@@ -82,8 +84,9 @@ class TestQuantization(ModelTest):
             quantize_config=quantize_config,
         )
         model.quantize(
-            calibration=self.calibration_dataset,
-            calibration_concat_size=0,
+            CalibrationConfig(
+                dataset=self.calibration_dataset,
+            ),
         )
 
         with tempfile.TemporaryDirectory() as tmpdirname:

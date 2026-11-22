@@ -18,14 +18,27 @@ from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.importer import clear_validation_cache, select_quant_linear
 
 
-def _mock_machete_available(monkeypatch) -> None:
-    """Pretend the host is an SM90 machine with a built Machete extension."""
+@pytest.fixture
+def machete_available(monkeypatch) -> None:
+    """Pretend the host is an SM90 machine with a built Machete extension.
+
+    ``cached_validate_once`` is an ``lru_cache`` on the class, so the mocked
+    answer outlives ``monkeypatch.undo()`` and every later selector test would
+    keep seeing a Hopper-only kernel on this host. Clear both caches again on
+    teardown, after the patches are removed, so the probe is re-evaluated with
+    the real environment.
+    """
 
     monkeypatch.setattr(machete_awq, "machete_extension_available", lambda: True)
     monkeypatch.setattr(
         machete_awq, "_validate_machete_device_support", lambda device=None: True
     )
     clear_validation_cache()
+    try:
+        yield
+    finally:
+        AwqMacheteLinear.cached_validate_once.cache_clear()
+        clear_validation_cache()
 
 
 def _validate(group_size: int):
@@ -70,23 +83,19 @@ def test_declares_only_native_machete_group_sizes():
 
 
 @pytest.mark.parametrize("group_size", [-1, 64, 128])
-def test_validate_accepts_native_group_sizes(group_size, monkeypatch):
-    _mock_machete_available(monkeypatch)
+def test_validate_accepts_native_group_sizes(group_size, machete_available):
     ok, error = _validate(group_size)
     assert ok, error
 
 
 @pytest.mark.parametrize("group_size", [32])
-def test_validate_rejects_group_size_32(group_size, monkeypatch):
-    _mock_machete_available(monkeypatch)
+def test_validate_rejects_group_size_32(group_size, machete_available):
     ok, error = _validate(group_size)
     assert not ok
     assert "group_size" in str(error)
 
 
-def test_auto_selection_drops_awq_machete_for_group_size_32(monkeypatch):
-    _mock_machete_available(monkeypatch)
-
+def test_auto_selection_drops_awq_machete_for_group_size_32(machete_available):
     candidates_32 = _auto_candidates(32)
     # AwqMarlinLinear is the intended fallback, but its extension is not built
     # in this environment, so assert the broken candidate is dropped instead.

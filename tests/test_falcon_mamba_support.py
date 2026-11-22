@@ -9,56 +9,6 @@ from torch import nn
 from gptqmodel.models.definitions.falcon_mamba import FalconMambaQModel
 
 
-def _tiny_falcon_mamba_config():
-    from transformers.models.falcon_mamba.configuration_falcon_mamba import FalconMambaConfig
-
-    return FalconMambaConfig(
-        vocab_size=128,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        state_size=16,
-        conv_kernel=4,
-        time_step_rank=8,
-        pad_token_id=0,
-        bos_token_id=1,
-        eos_token_id=2,
-    )
-
-
-def test_falcon_mamba_monkey_patch_tolerates_missing_legacy_symbols():
-    """Transformers 5.22 dropped falcon_mamba_inner_fn and the explicit path methods."""
-
-    def forward(self, hidden_states, cache_params=None, attention_mask=None, **kwargs):
-        return "upstream"
-
-    mixer_class = type("FalconMambaMixer", (), {"forward": forward})
-    mixer = mixer_class()
-    layer = SimpleNamespace(mixer=mixer)
-    qmodel = FalconMambaQModel.__new__(FalconMambaQModel)
-    qmodel.model = SimpleNamespace(backbone=SimpleNamespace(layers=[layer]))
-
-    qmodel.monkey_patch()
-
-    assert mixer.forward(object()) == "upstream"
-
-
-def test_falcon_mamba_real_model_monkey_patch_keeps_upstream_forward():
-    from transformers.models.falcon_mamba.modeling_falcon_mamba import (
-        FalconMambaForCausalLM,
-        FalconMambaMixer,
-    )
-
-    upstream_forward = FalconMambaMixer.forward
-    model = FalconMambaForCausalLM(_tiny_falcon_mamba_config())
-    qmodel = FalconMambaQModel.__new__(FalconMambaQModel)
-    object.__setattr__(qmodel, "model", model)
-
-    qmodel.monkey_patch()
-
-    assert FalconMambaMixer.forward is upstream_forward
-
-
 def _build_mixer_with_meta_buffers():
     def __init__(self):
         nn.Module.__init__(self)

@@ -1,0 +1,4 @@
+# Preserve the pinned release assets byte-for-byte, including upstream whitespace.
+config.json -text -whitespace
+chat_template.jinja -text -whitespace
+tokenizer_config.json -text -whitespace

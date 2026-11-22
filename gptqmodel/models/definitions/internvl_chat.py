@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 
 import torch
 from PIL import Image
-from transformers import AutoModel, GenerationConfig
+from transformers import GenerationConfig
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import fetch_image
@@ -18,6 +18,8 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
+from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
@@ -30,7 +32,15 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 class InternVLChatQModel(BaseQModel):
-    loader = AutoModel
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.internvl_chat.configuration_internvl_chat.InternVLChatConfig",
+        model_class="gptqmodel.models.ports.internvl_chat.modeling_internvl_chat.InternVLChatModel",
+        tokenizer_class="gptqmodel.models.ports.internvl_chat.tokenization_internvl_chat.InternVLTokenizerFactory",
+        tokenicer_options=(("normalize_sentencepiece", True),),
+    )
+    dynamic_expert_index = "num_experts"
+    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
+    defuser_module_paths = ("language_model",)
 
     lm_head = "language_model.lm_head"
     pre_lm_head_norm_module = "language_model.model.norm"
@@ -57,8 +67,53 @@ class InternVLChatQModel(BaseQModel):
     ]
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
-    require_trust_remote_code = True
     support_batch_quantize = False
+
+    @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
+        config = getattr(model, "config", None)
+        architectures = getattr(getattr(config, "llm_config", None), "architectures", None)
+        architecture = architectures[0] if architectures else None
+        blocks = tree[-1]
+        if architecture == "InternLM2ForCausalLM":
+            tree[-1] = {
+                "attention_norm": ("attention_norm:!",),
+                "attention": ("wqkv:0", "wo:1"),
+                "ffn_norm": ("ffn_norm:!",),
+                "feed_forward": ("w1:0", "w3:0", "w2:1"),
+            }
+        elif architecture == "Phi3ForCausalLM":
+            blocks["self_attn"] = ("qkv_proj:0", "o_proj:1")
+        elif architecture == "Qwen3MoeForCausalLM" and "mlp:moe:?" not in blocks:
+            blocks.pop("mlp", None)
+            blocks["mlp:moe:?"] = {
+                "gate": ("gate:!",),
+                "experts": {"#": ("gate_proj:0", "up_proj:0", "down_proj:1")},
+            }
+        return tree
+
+    @classmethod
+    def get_num_experts(cls, model_config):
+        return getattr(model_config.llm_config, "num_experts", None)
+
+    @classmethod
+    def _expert_count_config(cls, model_config, field_name=None):
+        return model_config.llm_config
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The base AWQ feature policy is a classmethod over the class tree, which
+        # declares a dense `mlp`. The Qwen3-MoE `mlp:moe` root exists only in
+        # this instance's effective tree, so resolve the policy from that plan.
+        self.__dict__["awq_input_feature_aggregation"] = self._effective_awq_input_feature_aggregation
+
+    def _effective_awq_input_feature_aggregation(self, module_name):
+        # The routed gate/up scale group replays the whole MoE block from its
+        # shared pre-router input, so that root input must be captured.
+        if module_name in {spec.template for spec in self.module_plan().moe_roots()}:
+            return {"mode": "token_rows", "capture_root": True}
+        return type(self).awq_input_feature_aggregation(module_name)
 
     IMG_START_TOKEN = "<img>"
     IMG_END_TOKEN = "</img>"
@@ -360,27 +415,31 @@ class InternVLChatQModel(BaseQModel):
         return tokenized
 
     def pre_quantize_generate_hook_start(self):
-        self.model.language_model.model.embed_tokens = self.pre_quantize(
-            self.model.language_model.model.embed_tokens
-        )
-        self.model.language_model.model.rotary_emb = self.pre_quantize(
-            self.model.language_model.model.rotary_emb
-        )
+        self.model.set_input_embeddings(self.pre_quantize(self.model.get_input_embeddings()))
+        for path in self._decoder_rotary_paths():
+            self.model.set_submodule(path, self.pre_quantize(self.model.get_submodule(path)))
         self.model.vision_model = self.pre_quantize(self.model.vision_model)
         self.model.mlp1 = self.pre_quantize(self.model.mlp1)
+
+    def _decoder_rotary_paths(self):
+        core = self.model.language_model.model
+        if hasattr(core, "rotary_emb"):
+            return ["language_model.model.rotary_emb"]
+        return [f"language_model.model.layers.{index}.attention.rotary_emb" for index in range(len(core.layers))]
 
     def pre_quantize_generate_hook_end(self):
         if self.quantize_config.offload_to_disk:
             offload_to_disk(
                 model=self.model.language_model.model,
-                module=self.model.language_model.model.embed_tokens,
+                module=self.model.get_input_embeddings(),
                 disk_path=self.quantize_config.offload_to_disk_path,
             )
-            offload_to_disk(
-                model=self.model.language_model.model,
-                module=self.model.language_model.model.rotary_emb,
-                disk_path=self.quantize_config.offload_to_disk_path,
-            )
+            for path in self._decoder_rotary_paths():
+                offload_to_disk(
+                    model=self.model.language_model.model,
+                    module=self.model.get_submodule(path),
+                    disk_path=self.quantize_config.offload_to_disk_path,
+                )
             offload_to_disk(
                 model=self.model,
                 module=self.model.vision_model,
@@ -393,14 +452,9 @@ class InternVLChatQModel(BaseQModel):
             )
             return
 
-        self.model.language_model.model.embed_tokens = move_to(
-            self.model.language_model.model.embed_tokens,
-            device=CPU,
-        )
-        self.model.language_model.model.rotary_emb = move_to(
-            self.model.language_model.model.rotary_emb,
-            device=CPU,
-        )
+        self.model.set_input_embeddings(move_to(self.model.get_input_embeddings(), device=CPU))
+        for path in self._decoder_rotary_paths():
+            self.model.set_submodule(path, move_to(self.model.get_submodule(path), device=CPU))
         self.model.vision_model = move_to(self.model.vision_model, device=CPU)
         self.model.mlp1 = move_to(self.model.mlp1, device=CPU)
 
@@ -429,7 +483,9 @@ class InternVLChatQModel(BaseQModel):
         return example
 
     def run_input_capture(self, example, use_cache: bool, data_device):
-        del use_cache, data_device
+        del data_device
+        if "img_context_token_id" not in example:
+            return self.model(**example, use_cache=use_cache)
         self.model.img_context_token_id = int(example["img_context_token_id"])
 
         tokenizer = self._get_tokenizer()

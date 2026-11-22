@@ -11,8 +11,10 @@ native ggml CPU kernels without leaving the quantized representation.
 from __future__ import annotations
 
 import ctypes
+import functools
 import threading
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -42,6 +44,7 @@ from gptqmodel.quantization.config import (
     _normalize_gguf_public_format,
 )
 from gptqmodel.utils import internal_gguf as ig
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 # llama-cpp-python is imported on demand by the kernel now, so load it here
@@ -70,6 +73,83 @@ def _forward_rel_bound(alias: str) -> float:
     if alias.startswith(("iq2", "iq3", "q2_k", "q3_k")):
         return 1.0
     return 0.5
+
+
+def _visible_one_ulp(dtype: torch.dtype, expected: torch.Tensor) -> float:
+    """Largest one-step rounding error of ``expected`` at ``dtype``.
+
+    ``expected`` is already the once-rounded visible result, so the kernel is
+    allowed at most the adjacent representable step (which also covers the
+    FP16/BF16 subnormal range). Kernels may not accumulate in the activation
+    dtype and then round again.
+    """
+    upper = torch.nextafter(expected, torch.full_like(expected, float("inf")))
+    # ``nextafter`` runs in ``dtype``, so the step is that dtype's ulp (it also
+    # reports the fixed step of zero and subnormal values).
+    step = (upper.float() - expected.float()).abs()
+    return float(max(step.max().item(), torch.finfo(dtype).tiny))
+
+
+@functools.lru_cache(maxsize=None)
+def _cpp_kernel_unavailable_reason() -> str:
+    """Why the llama.cpp-backed CPU kernel cannot run on this host, if it cannot.
+
+    ``llama_cpp`` can import while its shared library still fails to load (for
+    example a wheel built against a different CUDA runtime). The bridge probe is
+    the honest check: a kernel that cannot construct is unavailable, not broken.
+    """
+
+    try:
+        _get_ggml_bridge()
+        GGUFCppKernel(
+            bits="q4_0", group_size=-1, sym=True, desc_act=False,
+            in_features=32, out_features=16,
+        )
+    except Exception as exc:  # noqa: BLE001 - optional native dependency
+        return f"{type(exc).__name__}: {exc}"
+    return ""
+
+
+@functools.lru_cache(maxsize=None)
+def _quantizer_available(qtype: str) -> bool:
+    """Whether this host can *produce* ``qtype`` (not merely decode it).
+
+    ``_quantize_gguf_tensor_numpy`` prefers ``gguf``'s reference quantizer, then
+    the internal numpy fallback, then llama.cpp's ggml runtime. Formats outside
+    that coverage would otherwise fail with a dependency ``NotImplementedError``
+    instead of skipping, which hides real regressions behind an unrelated
+    environment gap.
+    """
+
+    block = _GGUF_TYPE_INFO[qtype]["block_size"]
+    probe = np.zeros((1, block), dtype=np.float32)
+    probe[0, 0] = 1.0
+    try:
+        _quantize_gguf_tensor_numpy(probe, qtype)
+    except NotImplementedError:
+        return False
+    return True
+
+
+def _dequantizer_unavailable(qtype: str) -> bool:
+    """Whether this host cannot decode ``qtype`` at all."""
+
+    type_size = _GGUF_TYPE_INFO[qtype]["type_size"]
+    try:
+        _dequantize_gguf_tensor_numpy(np.zeros((1, type_size), np.uint8), qtype)
+    except NotImplementedError:
+        return True
+    return False
+
+
+def _skip_without_quantizer(qtype: str) -> None:
+    if not _quantizer_available(qtype):
+        pytest.skip(
+            f"no quantizer for {qtype} on this host: the `gguf` reference package "
+            f"is {'installed' if _GGUF_AVAILABLE else 'missing'}, the numpy fallback "
+            "does not implement it, and llama.cpp's ggml runtime is "
+            f"{'available' if _llama_cpp_lib is not None else 'unavailable'}"
+        )
 
 
 def _weight_rows(qtype: str) -> int:
@@ -116,10 +196,154 @@ def _cpp_from_torch(module):
     return cpp.eval()
 
 
+_Q8_1_HEADER_BYTES = 4
+_Q8_1_OVERFLOW_BLOCKS = [
+    # 32 x 3000: d = 23.62 is finite in FP16, but s = 96000 is not.
+    pytest.param(np.full(32, 3000.0, dtype=np.float32), "auxiliary scale-sum s", id="scale-sum-3000"),
+    # FP16 rounds 65536 up to inf, while its neighbouring 65504 is still finite.
+    pytest.param(np.full(32, 2048.0, dtype=np.float32), "auxiliary scale-sum s", id="scale-sum-2048"),
+    pytest.param(np.full(32, -2048.0, dtype=np.float32), "auxiliary scale-sum s", id="scale-sum-neg-2048"),
+    # 1e7 makes the block scale itself leave the FP16 range.
+    pytest.param(np.full(32, 1e7, dtype=np.float32), "block scale d", id="block-scale-1e7"),
+]
+_Q8_1_ACCEPTED_BLOCKS = [
+    # 2047 * 32 = 65504 exactly: the largest finite FP16 scale-sum.
+    pytest.param(np.full(32, 2047.0, dtype=np.float32), id="scale-sum-max-finite"),
+    pytest.param(np.full(32, -2047.0, dtype=np.float32), id="scale-sum-max-finite-negative"),
+    pytest.param(np.zeros(32, dtype=np.float32), id="zero-block"),
+    pytest.param(np.linspace(-1.0, 1.0, 32, dtype=np.float32), id="ordinary-block"),
+]
+
+
+def _q8_1_fields(packed: np.ndarray):
+    blocks = np.asarray(packed, dtype=np.uint8).reshape(-1, _GGUF_TYPE_INFO["Q8_1"]["type_size"])
+    scale = blocks[:, :2].copy().view(np.float16).reshape(-1)
+    scale_sum = blocks[:, 2:4].copy().view(np.float16).reshape(-1)
+    codes = blocks[:, _Q8_1_HEADER_BYTES:].copy().view(np.int8).reshape(-1, 32)
+    return scale, scale_sum, codes
+
+
+@pytest.mark.parametrize("block,reason", _Q8_1_OVERFLOW_BLOCKS)
+def test_q8_1_rejects_auxiliary_fields_that_overflow_fp16(block, reason):
+    """Q8_1 must not publish an FP16 ``d``/``s`` header that rounds to infinity.
+
+    ``d = max|x| / 127`` is finite for all of these blocks, so checking only the
+    decoded weight or ``d`` accepts them. The auxiliary ``s = d * sum(qs)`` is
+    what leaves FP16 range, and any reader that folds ``s`` into its dot product
+    then produces a non-finite result. The format's header dtype is fixed, so
+    the packer fails closed with the offending field named instead of emitting
+    an unreadable block.
+    """
+
+    _skip_without_quantizer("Q8_1")
+    weight = block.reshape(1, -1)
+
+    with pytest.raises(ValueError) as excinfo:
+        _quantize_gguf_tensor_numpy(weight, "Q8_1")
+
+    message = str(excinfo.value)
+    assert "Q8_1" in message
+    assert reason in message
+    assert "block 0 of 1" in message
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected_scale = np.abs(block).max() / np.float32(127.0)
+        expected_sum = np.float32(sum(np.copysign(
+            np.trunc(np.abs(block / expected_scale))
+            + (np.abs(block / expected_scale) - np.trunc(np.abs(block / expected_scale)) >= 0.5),
+            block,
+        ).astype(np.int32))) * expected_scale
+    assert np.isfinite(expected_scale)
+    if reason == "auxiliary scale-sum s":
+        # The reported trigger is the auxiliary field: d stays finite while the
+        # independently computed scale-sum does not.
+        assert np.isfinite(np.float16(expected_scale))
+        assert not np.isfinite(np.float16(expected_sum))
+    else:
+        assert not np.isfinite(np.float16(expected_scale))
+
+
+def test_q8_1_reports_the_first_unrepresentable_block():
+    """A mixed matrix must name the failing block, not the first accepted one."""
+
+    _skip_without_quantizer("Q8_1")
+    weight = np.zeros((1, 64), dtype=np.float32)
+    weight[0, :32] = 1.0
+    weight[0, 32:] = 3000.0
+
+    with pytest.raises(ValueError) as excinfo:
+        _quantize_gguf_tensor_numpy(weight, "Q8_1")
+
+    message = str(excinfo.value)
+    assert "block 1 of 2" in message
+    assert "scale-sum s" in message
+
+
+def test_q8_1_rejects_packed_bytes_with_a_nonfinite_header():
+    """The shared entry point validates bytes from any packer, not just the fallback."""
+
+    from gptqmodel.nn_modules.qlinear.gguf import _check_packed_q8_1_fields
+
+    packed = np.zeros((1, _GGUF_TYPE_INFO["Q8_1"]["type_size"]), dtype=np.uint8)
+    # block_q8_1 stores fp16 d first, then fp16 s; 0x7C00 is positive infinity.
+    packed[0, :4] = np.array([0x0000, 0x7C00], dtype=np.uint16).view(np.uint8)
+    with pytest.raises(ValueError, match=r"auxiliary scale-sum s.*block 0 of 1"):
+        _check_packed_q8_1_fields(packed)
+
+    packed[0, :4] = np.array([0x7C00, 0x0000], dtype=np.uint16).view(np.uint8)
+    with pytest.raises(ValueError, match=r"block scale d.*block 0 of 1"):
+        _check_packed_q8_1_fields(packed)
+
+    _check_packed_q8_1_fields(
+        _quantize_gguf_tensor_numpy(np.full((1, 32), 2047.0, dtype=np.float32), "Q8_1")
+    )
+
+
+@pytest.mark.parametrize("block", _Q8_1_ACCEPTED_BLOCKS)
+def test_q8_1_in_range_fields_stay_bit_exact(block):
+    """Blocks that fit FP16 must keep the existing ggml bit layout and values."""
+
+    _skip_without_quantizer("Q8_1")
+    weight = block.reshape(1, -1)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        packed = _quantize_gguf_tensor_numpy(weight, "Q8_1")
+
+    overflow_warnings = [
+        str(item.message)
+        for item in caught
+        if issubclass(item.category, RuntimeWarning) and "overflow" in str(item.message)
+    ]
+    assert not overflow_warnings, overflow_warnings
+
+    scale, scale_sum, codes = _q8_1_fields(packed)
+    assert np.isfinite(scale).all()
+    assert np.isfinite(scale_sum).all()
+    float32_scale = np.float32(np.abs(block).max() / np.float32(127.0))
+    assert scale[0] == np.float16(float32_scale)
+    # ``s`` is accumulated in FP32 from the unrounded scale and rounded once to
+    # FP16, so comparing against a product of the stored FP16 scale would hide
+    # the rounding ``ggml`` performs.
+    np.testing.assert_array_equal(
+        scale_sum[0],
+        np.float16(np.float32(codes[0].astype(np.float32).sum()) * float32_scale),
+    )
+    # The scale-sum is a stored field, so the dequantized weight alone cannot
+    # prove it was written correctly.
+    expected = (scale[0].astype(np.float64) * codes[0].astype(np.float64))
+    np.testing.assert_allclose(
+        _dequantize_gguf_tensor_numpy(packed, "Q8_1")[0],
+        expected,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
 @pytest.mark.parametrize("alias", ALL_ALIASES)
 def test_gguf_quantize_dequantize_roundtrip(alias):
     """Pack every alias and verify dequant stays inside its precision budget."""
     qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
     info = _GGUF_TYPE_INFO[qtype]
     rows = _weight_rows(qtype)
     rng = np.random.default_rng(0)
@@ -145,6 +369,7 @@ def test_gguf_quantize_dequantize_roundtrip(alias):
 def test_gguf_dequantize_matches_native_and_reference(alias):
     """Our dequantizer must agree bit-exactly with ggml and the `gguf` package."""
     qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
     info = _GGUF_TYPE_INFO[qtype]
     rng = np.random.default_rng(1)
     weight = rng.standard_normal((2, info["block_size"])).astype(np.float32)
@@ -175,6 +400,7 @@ def test_gguf_dequantize_matches_native_and_reference(alias):
 def test_gguf_torch_linear_forward(alias):
     """GGUFTorchLinear packs a Linear and stays close to the fp32 reference."""
     qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
     block = _GGUF_TYPE_INFO[qtype]["block_size"]
     lin, x = _lin_and_x(block)
 
@@ -203,6 +429,51 @@ def test_gguf_torch_linear_forward(alias):
     assert out.shape == ref.shape
     err = (out - ref).abs().mean()
     assert err <= max(0.02, _forward_rel_bound(alias) * ref.abs().mean())
+
+
+@pytest.mark.parametrize("alias", ["q1_0", "q1_0_g128"])
+def test_sign_only_padding_keeps_tail_block_scale(alias):
+    """Zero padding must not shrink the final partial block's scale (#5842).
+
+    The sign-only encoder stores one scale per block: the mean magnitude over
+    its 128 columns. Padding the source with synthetic zeros therefore diluted
+    the tail block by the real/padded ratio, even though the forward path
+    always zero-pads activations and the wire format can hold the real mean.
+    """
+    qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
+    info = _GGUF_TYPE_INFO[qtype]
+    block = info["block_size"]
+    in_features = block + 8
+    out_features = 4
+    lin = torch.nn.Linear(in_features, out_features, bias=False)
+    with torch.no_grad():
+        lin.weight.fill_(1.0)
+
+    module = GGUFTorchLinear(
+        bits=alias,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        register_buffers=False,
+    )
+    module.pack_original(linear=lin, scales=None, zeros=None, g_idx=None)
+    module.post_init()
+    assert module.padded_in_features == 2 * block
+
+    for row in range(out_features):
+        scales = [
+            module.qweight[row, start:start + 2].contiguous().view(torch.float16).item()
+            for start in (0, info["type_size"])
+        ]
+        assert scales == [1.0, 1.0]
+
+    # Consumer: the last real column of the partial block still decodes to the
+    # source magnitude, and padded activations contribute nothing.
+    x = torch.eye(in_features)[[block - 1, in_features - 1]]
+    torch.testing.assert_close(module(x)[:, 0], torch.ones(2), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("alias", ALL_ALIASES)
@@ -300,6 +571,10 @@ def test_gguf_public_format_normalization():
 def test_internal_gguf_dequantize_and_torch(alias):
     """The shared internal_gguf helpers cover every alias in both numpy and torch."""
     qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    # The decode table is independent of the quantizer, but ``internal_gguf``
+    # delegates exotic types to the same llama.cpp/`gguf` chain.
+    if _dequantizer_unavailable(qtype):
+        pytest.skip(f"no dequantizer for {qtype} on this host")
     enum = getattr(ig.GGMLQuantizationType, qtype)
     block_size, type_size = ig.GGML_QUANT_SIZES[enum]
     data = np.zeros((2, type_size), dtype=np.uint8)
@@ -369,14 +644,108 @@ def test_q8_pack_boundaries_match_torch_and_ggml(qtype, dtype):
         np.testing.assert_array_equal(packed, native)
 
 
+def _q8_k_parts(packed: np.ndarray):
+    blocks = np.asarray(packed, dtype=np.uint8).reshape(-1, _GGUF_TYPE_INFO["Q8_K"]["type_size"])
+    scale = blocks[:, :4].copy().view(np.float32).reshape(-1)
+    codes = blocks[:, 4:260].copy().view(np.int8).reshape(-1, 256)
+    sums = blocks[:, 260:].copy().view(np.int16).reshape(-1, 16)
+    return scale, codes, sums
+
+
+_Q8_K_OVERFLOW_PEAKS = [
+    pytest.param(np.float32(127.0) / np.finfo(np.float32).max, id="reciprocal-threshold"),
+    pytest.param(
+        np.nextafter(np.float32(127.0) / np.finfo(np.float32).max, np.float32(0)),
+        id="reciprocal-overflows",
+    ),
+    pytest.param(np.float32(1e-36), id="subnormal-control"),
+    pytest.param(np.float32(1e-37), id="positive-1e-37"),
+    pytest.param(np.float32(-1e-37), id="negative-1e-37"),
+    pytest.param(np.float32(1e-42), id="deep-subnormal"),
+    pytest.param(np.float32(0.0), id="zero"),
+    pytest.param(np.nextafter(np.float32(0.0), np.float32(1.0)), id="scale-unrepresentable"),
+]
+
+
+@pytest.mark.parametrize("peak", _Q8_K_OVERFLOW_PEAKS)
+def test_q8_k_overflowing_reciprocal_keeps_representable_scale(peak):
+    """A subnormal Q8_K scale must not become zero through a reciprocal overflow.
+
+    This is the CPU NumPy packer, so the assertions pin IEEE-754 gradual
+    underflow for the stored fp32 scale instead of assuming a device's
+    flush-to-zero mode. The direct quotient ``-peak / 127`` is the independent
+    FP64 oracle, rounded once to fp32.
+    """
+
+    ratios = np.array([1.0, -1.0, 0.5, -0.5, 0.9, -0.9, 0.75, -0.75], dtype=np.float32)
+    block = (np.resize(ratios, 256) * peak).astype(np.float32)
+    block[0] = peak  # Keep the requested peak even when a ratio underflows.
+    weight = block.reshape(1, -1)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        packed = _quantize_gguf_tensor_numpy(weight, "Q8_K")
+
+    overflow_warnings = [
+        str(item.message)
+        for item in caught
+        if issubclass(item.category, RuntimeWarning) and "overflow" in str(item.message)
+    ]
+    assert not overflow_warnings, overflow_warnings
+
+    scale, codes, sums = _q8_k_parts(packed)
+    np.testing.assert_array_equal(sums, codes.reshape(1, 16, 16).sum(axis=2).astype(np.int16))
+    assert np.isfinite(scale).all()
+
+    expected_scale = np.float32(-float(peak) / 127.0)
+    uniform = np.full((1, 256), peak, dtype=np.float32)
+    uniform_scale, uniform_codes, _ = _q8_k_parts(
+        _quantize_gguf_tensor_numpy(uniform, "Q8_K")
+    )
+    assert uniform_scale[0] == expected_scale
+    if expected_scale == 0:
+        np.testing.assert_array_equal(uniform_codes, 0)
+    else:
+        np.testing.assert_allclose(
+            uniform_scale[0] * uniform_codes[0].astype(np.float64),
+            uniform[0],
+            rtol=0.02,
+            atol=0,
+        )
+
+    if peak == 0 or expected_scale == 0:
+        # No nonzero fp32 scale represents this block. Pack the canonical zero
+        # block instead of deriving codes from an Inf reciprocal.
+        assert scale[0] == 0
+        np.testing.assert_array_equal(codes, 0)
+        np.testing.assert_array_equal(scale[0] * codes[0].astype(np.float64), np.zeros(256))
+        return
+
+    assert scale[0] == expected_scale
+    if abs(float(expected_scale)) < np.finfo(np.float32).tiny:
+        assert scale[0] != 0  # Stored as a subnormal, not flushed to zero.
+    assert codes[0, 0] < 0  # The peak and its opposite-signed scale stay negative.
+    assert np.unique(codes).size > 2  # Codes are not all saturated by an Inf reciprocal.
+    np.testing.assert_allclose(
+        scale[0] * codes[0].astype(np.float64),
+        block,
+        rtol=0.02,
+        atol=0,
+    )
+
+
 @pytest.mark.parametrize("alias", ["q8_1", "q8_k"])
 @pytest.mark.parametrize("override", ["1", "0", None])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_cpp_unsupported_native_types_always_fall_back(alias, override, dtype, monkeypatch):
-    if override is None:
-        monkeypatch.delenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", raising=False)
-    else:
-        monkeypatch.setenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", override)
+    unavailable = _cpp_kernel_unavailable_reason()
+    if unavailable:
+        pytest.skip(f"GGUF C++ kernel unavailable: {unavailable}")
+    configure_kernel(
+        KernelConfig(
+            gguf_cpp_native_matmul=None if override is None else override == "1"
+        )
+    )
     qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
     width = _GGUF_TYPE_INFO[qtype]["block_size"] + 3
     lin, x = _lin_and_x(width)
@@ -391,8 +760,12 @@ def test_cpp_unsupported_native_types_always_fall_back(alias, override, dtype, m
     # CPU fused execution accumulates the full-precision reconstructed weight.
     monkeypatch.setattr(cpp, "_should_use_fused_k_forward", lambda _: False)
     expected = x @ weight.T
+    # The fused reference rounds once at the output dtype. A bf16 output has a
+    # one-ULP step of 2**-7 at unit magnitude, so fp16/fp32 keep the tighter
+    # 2e-3 absolute bound while bf16 allows exactly one dtype ULP.
+    atol = max(2e-3, torch.finfo(dtype).eps)
     for _ in range(2):
-        torch.testing.assert_close(cpp(x), expected, rtol=2e-3, atol=2e-3)
+        torch.testing.assert_close(cpp(x), expected, rtol=2e-3, atol=atol)
         assert cpp._use_ggml_cpu_matmul(x.reshape(-1, width)) is False
         assert cpp.qweight.dtype == torch.uint8
         assert all(not isinstance(v, torch.Tensor) for v in vars(cpp).values())
@@ -417,6 +790,9 @@ def test_native_dequant_rejects_truncated_block():
 
 
 def test_cpp_rejects_wrong_input_width_and_clears_autotune():
+    unavailable = _cpp_kernel_unavailable_reason()
+    if unavailable:
+        pytest.skip(f"GGUF C++ kernel unavailable: {unavailable}")
     cpp = GGUFCppKernel(bits="q4_0", group_size=-1, sym=True, desc_act=False, in_features=33, out_features=16)
     with pytest.raises(ValueError, match="last dimension"):
         cpp(torch.zeros(1, 34))
@@ -442,6 +818,13 @@ def test_gguf_kernel_independent_packed_oracle(alias, dtype, path, monkeypatch):
     qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
     if path == "native" and (qtype in _GGML_MATMUL_SKIP_QTYPES or _llama_cpp_lib is None):
         pytest.skip("native ggml matmul unavailable for this format")
+    if not _quantizer_available(qtype):
+        pytest.skip(
+            f"no quantizer for {qtype} on this host: `gguf` is "
+            f"{'installed' if _GGUF_AVAILABLE else 'missing'}, the numpy fallback "
+            "does not implement it, and llama.cpp's ggml runtime is "
+            f"{'available' if _llama_cpp_lib is not None else 'unavailable'}"
+        )
     block = _GGUF_TYPE_INFO[qtype]["block_size"]
     width = block * 2 - 3
     lin, _ = _lin_and_x(width)
@@ -459,20 +842,35 @@ def test_gguf_kernel_independent_packed_oracle(alias, dtype, path, monkeypatch):
     x = torch.randint(-126, 127, (4, width), generator=generator).float()
     x[:, ::32] = 127
     x = (x / 128).to(dtype)
+    # Every path computes the exact FP32 product and rounds once, so compare
+    # against that single rounding. Rounding the reference weight to the
+    # activation dtype first (the old ``dense`` expectation) double-rounds:
+    # for wide block formats it differs from the kernel by more than the
+    # 2e-3 tolerance even though both are exact.
+    expected = (x.float() @ weight.T).to(dtype)
     if path == "native":
         module = _cpp_from_torch(module)
-        monkeypatch.setenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", "1")
-        expected = (x.float() @ weight.T).to(dtype)
+        configure_kernel(KernelConfig(gguf_cpp_native_matmul=True))
     elif path == "dense":
         monkeypatch.setattr(module, "_should_use_fused_k_forward", lambda _: False)
-        expected = x @ weight.to(dtype).T
     else:
         monkeypatch.setattr(module, "_should_use_fused_k_forward", lambda _: True)
-        expected = (x.float() @ weight.T).to(dtype)
     for _ in range(2):
         result = module(x)
         assert result.dtype == dtype
-        torch.testing.assert_close(result, expected, rtol=2e-3, atol=2e-3)
+        # A single visible rounding step of the exact product is the tightest
+        # device-independent bound: the fused BF16/FP16 intermediate the dense
+        # path used before this assertion cost up to one extra output ulp. FP32
+        # output has no such cast, so it keeps the strict kernel tolerance.
+        if dtype == torch.float32:
+            torch.testing.assert_close(result, expected, rtol=2e-3, atol=2e-3)
+        else:
+            torch.testing.assert_close(
+                result.float(),
+                expected.float(),
+                rtol=0,
+                atol=_visible_one_ulp(dtype, expected),
+            )
         assert module.qweight.dtype == torch.uint8
         assert set(module._buffers) == {"qweight"}
         assert module._parameters == {}

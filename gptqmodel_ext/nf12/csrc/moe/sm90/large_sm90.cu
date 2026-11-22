@@ -122,13 +122,9 @@ class MoeProblem {
     w.kb0 = 0;
     w.kb1 = p_.kb;
     w.base_x4 = p_.exp_base != nullptr ? exp_base_x4(__ldg(p_.exp_base + w.e)) : 0u;
-    w.escapes = nullptr;
-    w.num_escapes = 0;
-    if (p_.escapes != nullptr) {
-      const int64_t e0 = __ldg(p_.escape_offsets + w.e);
-      w.escapes = p_.escapes + e0;
-      w.num_escapes = static_cast<uint32_t>(__ldg(p_.escape_offsets + w.e + 1) - e0);
-    }
+    const MoeExpertCodec slice = moe_escape_slice(p_.escapes, p_.escape_offsets, w.e);
+    w.escapes = slice.escapes;
+    w.num_escapes = slice.num_escapes;
     return true;
   }
 
@@ -284,13 +280,9 @@ class MoeClusterProblem {
     w.kb0 = 0;
     w.kb1 = p_.kb;
     w.base_x4 = p_.exp_base != nullptr ? exp_base_x4(__ldg(p_.exp_base + w.e)) : 0u;
-    w.escapes = nullptr;
-    w.num_escapes = 0;
-    if (p_.escapes != nullptr) {
-      const int64_t e0 = __ldg(p_.escape_offsets + w.e);
-      w.escapes = p_.escapes + e0;
-      w.num_escapes = static_cast<uint32_t>(__ldg(p_.escape_offsets + w.e + 1) - e0);
-    }
+    const MoeExpertCodec slice = moe_escape_slice(p_.escapes, p_.escape_offsets, w.e);
+    w.escapes = slice.escapes;
+    w.num_escapes = slice.num_escapes;
     return true;
   }
 

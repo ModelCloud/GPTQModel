@@ -21,3 +21,9 @@ void pack_signs
     at::Tensor packed,
     at::Tensor unpacked
 );
+
+// R4NX / Q4NX trellis packing: 64 kv-bit states per tile into 4 * kv uint16
+// words, kv in {10, 12, 14, 16}. Codebook independent; available on ROCm.
+void pack_trellis_r4nx(at::Tensor packed, at::Tensor states, int kv);
+
+void unpack_trellis_r4nx(at::Tensor states, at::Tensor packed, int kv);

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import copy
-import ctypes
 import gc
 import math
 import os
@@ -24,20 +23,22 @@ from torch.nn.modules.conv import _ConvNd
 from ..exllamav3.modules.quant.exl3_lib.quantize import (
     EXL3_HESSIAN_NUMERICAL_CONTRACT,
     EXL3_HESSIAN_SYMMETRY_CONTRACT,
+    clear_tile_workspace,
     quantize_exl3,
     reconstruct_exl3_tensors,
     validate_exl3_quantization_geometry,
 )
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, validate_trellis_k
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CheckpointSupport,
     ForwardConfig,
-    LoopProcessor,
     ProcessorLifecycleConfig,
+    active_padding_mask,
 )
 from ..looper.named_module import NamedModule
+from ..looper.shared_input import SharedInputCaptureProcessor
 from ..models import BaseQModel
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
@@ -53,16 +54,20 @@ from ..models.writer import (
 )
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, EXL3Config, GPTQConfig
+from ..quantization.config import (
+    FORMAT,
+    METHOD,
+    CalibrationConfig,
+    EXL3Config,
+    FallbackStrategy,
+    GPTQConfig,
+)
 from ..quantization.gptq import GPTQ
 from ..utils.device import get_device
 from ..utils.exl3_capture_batch_spool import (
-    CAPTURE_BATCH_CHECKPOINT_INTERVAL_ENV,
-    CAPTURE_BATCH_SPOOL_ENV,
     EXL3CaptureBatchSpool,
 )
 from ..utils.exl3_capture_frontier import (
-    CAPTURE_FRONTIER_ENV,
     EXL3CaptureDescriptor,
     EXL3CaptureFrontierStore,
     EXL3CaptureRecord,
@@ -118,23 +123,92 @@ from ..utils.exl3_router_candidates import (
     learned_router_ranked_choices,
 )
 from ..utils.exllamav3 import _resolve_linear_shape, create_exllamav3_module
+from ..utils.fallback import (
+    resolve_fallback_strategy,
+    resolve_threshold,
+    should_use_fallback,
+)
+from ..utils.host_memory import malloc_trim
+from ..utils.kernel import get_kernel_config, resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.model import recurse_setattr
 from ..utils.module_locks import parent_module_lock
 from ..utils.offload import offload_to_disk, offload_to_safetensors_reference
+from ..utils.torch import as_torch_device
 
 
-HOST_RSS_LIMIT_ENV = "GPTQMODEL_EXL3_HOST_RSS_LIMIT_BYTES"
-CUDA_ALLOCATION_LIMIT_ENV = "GPTQMODEL_EXL3_CUDA_ALLOCATION_LIMIT_BYTES"
-MEMORY_TELEMETRY_INTERVAL_ENV = (
-    "GPTQMODEL_EXL3_MEMORY_TELEMETRY_INTERVAL_BATCHES"
-)
 HESSIAN_OWNER_POLICY_META = "ds4rt_hessian_owner_policy"
 HESSIAN_OWNER_WEIGHTED_ROUND_ROBIN = (
     "ds4rt.exl3-hessian-owner-weighted-round-robin-v1"
 )
 
 log = setup_logger()
+
+
+def _expand_family_owner_devices(
+    devices: list[torch.device],
+) -> list[torch.device]:
+    """Give every index-less runtime family a concrete ordinal (#5093).
+
+    A Hessian accumulator is shared by the data-parallel forward workers and
+    keyed by device, so an index-less ``torch.device("cuda")`` cannot name an
+    owner: ``Tensor.to("cuda")`` resolves to the calling worker's current
+    device while the accumulator key stays ``"cuda"``, and the second worker's
+    partial is then added to a tensor living on another device.
+
+    Expanding a bare family to the visible ordinals of the active runtime makes
+    ownership deterministic. ``torch.cuda.device_count`` is safe to call from
+    workers (see ``pytorch_gil_0_compat.md``) and already reflects the
+    process's visibility settings, so the ordinals are the ones the looper's
+    device pool uses. CPU and already-indexed entries are preserved.
+    """
+
+    expanded: list[torch.device] = []
+    for device in devices:
+        if device.index is None and device.type == "cuda":
+            count = torch.cuda.device_count()
+            candidates = (
+                [torch.device(device.type, index) for index in range(count)]
+                if count > 0
+                else [device]
+            )
+        else:
+            candidates = [device]
+        for candidate in candidates:
+            if candidate not in expanded:
+                expanded.append(candidate)
+    return expanded
+
+
+def routed_expert_owner_devices(qcfg, pool=None) -> list[torch.device]:
+    """Devices a routed expert's Hessian may be owned by.
+
+    ``DEVICE.ROCM`` has the value ``"rocm"``, which ``torch.device`` rejects, so
+    every configured entry goes through ``as_torch_device`` (#4667). Dense
+    modules never reach this path, which is why EXL3 worked on ROCm for them.
+
+    ``pool`` is the looper's resolved MoE quantization pool
+    (``ModuleLooper._moe_quant_devices`` after ``compute_device_filter``).
+    Prefer it over re-deriving the devices from the config: the pool is
+    already concrete and filtered to what this run may use. Otherwise a bare
+    ``qcfg.device`` family is expanded to its visible ordinals (#5093).
+    """
+
+    devices = [
+        as_torch_device(device)
+        for device in (getattr(qcfg, "moe_vram_strategy_devices", None) or [])
+    ]
+    if devices:
+        return _expand_family_owner_devices(devices)
+    if pool:
+        return _expand_family_owner_devices(
+            [torch.device(device) for device in pool]
+        )
+    configured = getattr(qcfg, "device", None)
+    if configured is None:
+        return []
+    return _expand_family_owner_devices([as_torch_device(configured)])
+
 
 _EXL3_SIGMA_REG = 0.025
 _DEFERRED_RUNTIME_WEIGHT_STATE = "exl3_deferred_runtime_weight"
@@ -145,6 +219,30 @@ _OUT_SCALES_TO_ARG = {
     "auto": None,
     None: None,
 }
+
+
+def build_exl3_quant_args(
+    config: EXL3Config, *, bits: int | float, device: torch.device,
+) -> Dict[str, object]:
+    """Build the common arguments for one resolved EXL3 projection."""
+    codebook = config.codebook
+    validate_trellis_k(
+        bits,
+        codebook == "mcg",
+        codebook == "mul1",
+        q4nx=codebook == "q4nx",
+        r4nx=codebook == "r4nx",
+    )
+    quant_args: Dict[str, object] = {
+        "K": bits,
+        "devices": [device],
+        "apply_out_scales": _OUT_SCALES_TO_ARG.get(config.out_scales, None),
+        "sigma_reg": _EXL3_SIGMA_REG,
+        "seed": 787,
+    }
+    if codebook in EXL3_CODEBOOK_MARKERS:
+        quant_args[codebook] = True
+    return quant_args
 
 
 def _inline_candidate_role(policy) -> str:
@@ -189,15 +287,107 @@ def resolve_hessian_owner_device(
     raise AssertionError("validated Hessian owner weights did not select a device")
 
 
+_EXL3_STARVED_MODULE_REMEDIES = (
+    "provide more calibration data so the router selects the expert",
+    "force the expert to be routed with `MoEConfig(routing=ExpertsRoutingOverride(...))`",
+    "enable zero-route recovery",
+    "configure a fallback threshold, for example "
+    '`EXL3Config(fallback=Fallback(strategy=FallbackStrategy.RTN, threshold="0.5%"))`',
+)
+
+
+def resolve_exl3_hessian_fallback(
+    capture: GPTQ,
+    *,
+    fallback: Any = None,
+    expected_nsamples: Optional[int] = None,
+) -> Optional[str]:
+    """Decide whether EXL3 must quantize a module without a captured Hessian.
+
+    Returns ``"zero_samples"`` or ``"below_threshold"`` when the module has no
+    usable curvature and must take EXL3's uncalibrated ``fallback_quant`` path,
+    and ``None`` when the capture is usable.
+
+    A zero-sample capture is always quantized data-free: a zero Hessian has no
+    curvature, and EXL3's uncalibrated grid is the only data-independent one,
+    so it is used even when the configured threshold fallback is disabled --
+    the same choice GPTQ makes in ``quantization/gptq.py``. EXL3 used to abort
+    the whole run for such an expert (#4995).
+    """
+
+    nsamples = int(getattr(capture, "nsamples", 0) or 0)
+    if nsamples <= 0:
+        return "zero_samples"
+    if should_use_fallback(fallback, float(nsamples), expected_nsamples):
+        return "below_threshold"
+    return None
+
+
+def _release_exl3_capture_partials(capture: GPTQ) -> None:
+    """Drop a starved capture's partials instead of reducing them into a zero H.
+
+    Mirrors GPTQ's fallback path: the Hessian is not read, so the fp32 X^T X
+    partials must not stay resident through the EXL3 solve.
+    """
+
+    lock = getattr(capture, "lock", None)
+    if lock is not None:
+        with lock:
+            for attribute in (
+                "_device_hessian_partials",
+                "_device_hessian_partial_ready",
+                "_device_sample_counts",
+            ):
+                mapping = getattr(capture, attribute, None)
+                if mapping is not None:
+                    mapping.clear()
+            capture._hessian_dirty = False
+    release = getattr(capture, "_release_deferred_hessian_sources", None)
+    if callable(release):
+        release()
+
+
 def prepare_exl3_hessian(
     capture: GPTQ,
     *,
     target_device: torch.device,
     module_full_name: str,
+    fallback: Any = None,
+    expected_nsamples: Optional[int] = None,
 ) -> torch.Tensor:
-    """Restore GPTQ's normalized capture to EXL3's raw X^T X contract."""
+    """Restore GPTQ's normalized capture to EXL3's raw X^T X contract.
+
+    A starved module (no calibration activations, or fewer than the configured
+    fallback threshold) gets a data-free identity proxy Hessian instead of
+    aborting the run. The caller passes ``count=0`` to EXL3 for that module, so
+    the quantizer takes its uncalibrated ``fallback_quant`` path -- the
+    RTN-equivalent trellis grid (#4995). Modules with enough samples keep the
+    captured Hessian, bit for bit.
+    """
+
+    fallback_reason = resolve_exl3_hessian_fallback(
+        capture,
+        fallback=fallback,
+        expected_nsamples=expected_nsamples,
+    )
+    if fallback_reason is not None:
+        _release_exl3_capture_partials(capture)
+        columns = int(getattr(capture, "columns", 0) or 0)
+        if columns <= 0:
+            raise RuntimeError(
+                f"EXL3 cannot build a data-free proxy Hessian for module "
+                f"`{module_full_name}`: the capture reports no input width."
+            )
+        return torch.eye(columns, dtype=torch.float32, device=target_device)
 
     capture.finalize_hessian(target_device=target_device)
+    # ``materialize_global_hessian`` has already reduced every per-device
+    # partial into ``capture.H`` and only defers their release until the
+    # consuming stream drains.  GPTQ's own ``quantize()`` releases them before
+    # its memory-heavy phase; no EXL3 path did, so one fp32 C^2 partial stayed
+    # live through the fp64 congruence, LDL and tile solve.  Nothing reads the
+    # partials after finalization, so drain them now.
+    capture._release_deferred_hessian_sources()
     hessian = capture.H
     if hessian is None:
         raise RuntimeError(
@@ -220,6 +410,19 @@ def prepare_exl3_hessian(
         )
     hessian.mul_(float(capture.nsamples) / 2.0)
     return hessian
+
+
+def exl3_hessian_count(capture: GPTQ, fallback_reason: Optional[str]) -> int:
+    """Return the sample count handed to EXL3 with a projection's Hessian.
+
+    ``count=0`` selects EXL3's uncalibrated ``fallback_quant`` path, which is
+    how a starved module gets the RTN-equivalent grid (#4995). A calibrated
+    projection keeps its captured count so the quantizer divides by it.
+    """
+
+    if fallback_reason is not None:
+        return 0
+    return int(getattr(capture, "nsamples", 0) or 0)
 
 
 def _router_recovery_candidates(
@@ -394,7 +597,9 @@ class _EXL3NaturalRouteCapture:
         # below must continue to retain only calibration-valid rows.
         verification_router_input = router_input
         verification_top_indices = indices
-        keep_mask = getattr(getattr(self.processor, "_mask_tls", None), "value", None)
+        # Expert hooks receive every routed row, the BOS sinks included, so
+        # route evidence keeps the same padding-only row set.
+        keep_mask = active_padding_mask(self.processor)
         if keep_mask is None:
             mask_mode = "absent"
         else:
@@ -668,6 +873,8 @@ class _EXL3NaturalRouteCapture:
 def clone_exllamav3_config_for_module(
     qcfg: EXL3Config,
     module_full_name: str,
+    *,
+    lm_head_name: str = "lm_head",
 ) -> Optional[EXL3Config]:
     """Clones and applies per-module EXL3 dynamic overrides, or skips the module."""
 
@@ -679,28 +886,34 @@ def clone_exllamav3_config_for_module(
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
+    is_head = lm_head_name in (module_full_name, module_full_name.rsplit(".", 1)[-1])
+    qcfg_clone.head_bits = resolved_cfg.get("head_bits", qcfg.head_bits) if is_head else None
 
     if qcfg.dynamic is not None:
         qcfg_clone.bits = resolved_cfg.get("bits", qcfg_clone.bits)
-        qcfg_clone.head_bits = resolved_cfg.get("head_bits", qcfg_clone.head_bits)
 
         out_scales_override = resolved_cfg.get("out_scales", None)
         if out_scales_override is not None:
             qcfg_clone.out_scales = out_scales_override
 
         codebook_override = resolved_cfg.get("codebook", None)
-        if codebook_override is not None:
+        if codebook_override is not None and codebook_override != qcfg.codebook:
             qcfg_clone.codebook = codebook_override
+            if qcfg_clone.head_bits is not None:
+                qcfg_clone.bits = qcfg_clone.head_bits
 
         calibration_override = resolved_cfg.get("calibration", None)
         if calibration_override is not None:
             qcfg_clone.calibration = calibration_override
 
+    # The rules were normalized against the model defaults. This clone already
+    # resolved its module, so its codebook must not reinterpret another rule.
+    qcfg_clone.dynamic = None
     qcfg_clone.__post_init__()
     return qcfg_clone
 
 
-class EXL3Processor(LoopProcessor):
+class EXL3Processor(SharedInputCaptureProcessor):
     """Captures activations and repacks modules into ExLlamaV3 format."""
 
     lifecycle = ProcessorLifecycleConfig(
@@ -728,6 +941,7 @@ class EXL3Processor(LoopProcessor):
             calibration=calibration,
             forward=forward,
         )
+        self._init_shared_input_capture()
 
         self.avg_losses = []
         self.lm_head_name = lm_head_name
@@ -742,9 +956,18 @@ class EXL3Processor(LoopProcessor):
         self._capture_frontier_store_initialized = False
         self._capture_frontier_store = None
         self._distributed_local_quant_locks: dict[str, threading.Lock] = {}
+        # Packed projections whose dense replay weight has not been published
+        # yet. A cancelled run must install the packed module instead of
+        # leaving the placeholder weight in place (#5083).
+        self._deferred_runtime_modules: dict[str, NamedModule] = {}
+        self._deferred_runtime_lock = threading.Lock()
         self._hessian_family_owners: dict[
             tuple[str, int, int], tuple[str, GPTQ]
         ] = {}
+        # The looper's resolved MoE quantization pool; bound after the looper
+        # computes it. Routed-expert Hessian ownership prefers it so capture
+        # stays on devices `compute_device_filter` allowed (#5093).
+        self.moe_quant_devices: list[torch.device] | None = None
         self._pending_hessian_family_aliases: dict[
             tuple[str, int, int], list[tuple[str, GPTQ]]
         ] = {}
@@ -836,7 +1059,7 @@ class EXL3Processor(LoopProcessor):
     ) -> EXL3CaptureFrontierStore | None:
         """Construct the opt-in durable Hessian store at most once per run."""
 
-        configured_root = os.getenv(CAPTURE_FRONTIER_ENV)
+        configured_root = get_kernel_config().exl3_capture_frontier
         root = Path(configured_root).expanduser().resolve() if configured_root else None
         family_join = (
             provenance.get("family_join")
@@ -936,20 +1159,13 @@ class EXL3Processor(LoopProcessor):
     ) -> frozenset[int]:
         """Rebuild live Hessians from durable batches before missing forwards."""
 
-        configured_root = os.getenv(CAPTURE_BATCH_SPOOL_ENV)
+        configured_root = get_kernel_config().exl3_capture_batch_spool
         if not configured_root:
             self._active_capture_batch_spool = None
             self._active_capture_batch_layer = None
             return frozenset()
         phase, identities = self._subset_capture_phase(subset)
-        try:
-            checkpoint_interval = int(
-                os.getenv(CAPTURE_BATCH_CHECKPOINT_INTERVAL_ENV, "1")
-            )
-        except ValueError as error:
-            raise RuntimeError(
-                "EXL3 capture checkpoint interval is invalid"
-            ) from error
+        checkpoint_interval = get_kernel_config().exl3_capture_batch_checkpoint_interval
         if checkpoint_interval <= 0:
             raise RuntimeError("EXL3 capture checkpoint interval must be positive")
         family_ids = {
@@ -1070,7 +1286,7 @@ class EXL3Processor(LoopProcessor):
             self, "_active_capture_batch_layer", None
         ) == layer_index:
             capture.commit_batch(batch_index)
-            interval = int(os.getenv(MEMORY_TELEMETRY_INTERVAL_ENV, "0"))
+            interval = get_kernel_config().exl3_memory_telemetry_interval_batches
             spool = getattr(self, "_active_capture_batch_spool", None)
             complete = (
                 spool is not None
@@ -1085,11 +1301,9 @@ class EXL3Processor(LoopProcessor):
     def _enforce_capture_memory_limits(self, *, context: str) -> dict[str, Any]:
         """Stop after a durable batch if host or device capture memory is unsafe."""
 
-        try:
-            host_limit = int(os.getenv(HOST_RSS_LIMIT_ENV, "0"))
-            cuda_limit = int(os.getenv(CUDA_ALLOCATION_LIMIT_ENV, "0"))
-        except ValueError as error:
-            raise RuntimeError("EXL3 memory-safety environment is invalid") from error
+        kernel = get_kernel_config()
+        host_limit = kernel.exl3_host_rss_limit_bytes
+        cuda_limit = kernel.exl3_cuda_allocation_limit_bytes
         summary = self.log_capture_memory_summary(context)
         rss = int(summary.get("process_rss_bytes", 0))
         if host_limit > 0 and rss > host_limit:
@@ -1619,13 +1833,7 @@ class EXL3Processor(LoopProcessor):
     def _malloc_trim() -> int | None:
         """Return unused glibc arenas when the platform exposes malloc_trim."""
 
-        try:
-            trim = getattr(ctypes.CDLL(None), "malloc_trim")
-        except (AttributeError, OSError):
-            return None
-        trim.argtypes = [ctypes.c_size_t]
-        trim.restype = ctypes.c_int
-        return int(trim(0))
+        return malloc_trim()
 
     def release_host_memory(
         self, context: str, model: Any | None = None
@@ -2141,11 +2349,21 @@ class EXL3Processor(LoopProcessor):
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Builds the capture task and resolved EXL3 config for one module."""
 
-        del fallback, kwargs
+        del kwargs
 
-        module_qcfg = clone_exllamav3_config_for_module(self.qcfg, module.full_name)
+        module_qcfg = clone_exllamav3_config_for_module(
+            self.qcfg, module.full_name, lm_head_name=getattr(self, "lm_head_name", "lm_head"),
+        )
         if module_qcfg is None:
             return
+        # The fallback is honoured for starved modules at quantization time
+        # (#4995); EXL3 used to discard it here. An explicitly passed fallback
+        # wins over the (deep-copied) module config.
+        resolved_fallback = (
+            fallback
+            if fallback is not None
+            else getattr(module_qcfg, "fallback", None)
+        )
 
         in_features, out_features = _resolve_linear_shape(module)
         validate_exl3_quantization_geometry(
@@ -2155,7 +2373,9 @@ class EXL3Processor(LoopProcessor):
         )
 
         capture_qcfg = GPTQConfig(
-            bits=max(1, module_qcfg.runtime_bits),
+            # This GPTQ object captures the Hessian. The EXL3 packer uses
+            # the precise rate from module_qcfg when quantization starts.
+            bits=max(2, int(module_qcfg.runtime_bits)),
             group_size=-1,
             desc_act=False,
             sym=True,
@@ -2178,14 +2398,9 @@ class EXL3Processor(LoopProcessor):
         identity = self._routed_expert_identity(module.full_name)
         capture_contract = None
         if identity is not None:
-            configured_devices = list(
-                getattr(self.qcfg, "moe_vram_strategy_devices", None) or []
+            devices = routed_expert_owner_devices(
+                self.qcfg, getattr(self, "moe_quant_devices", None)
             )
-            devices = [torch.device(device) for device in configured_devices]
-            if not devices:
-                configured = getattr(self.qcfg, "device", None)
-                if configured is not None:
-                    devices = [torch.device(configured)]
             owner_policy = (
                 self.qcfg.meta.get(HESSIAN_OWNER_POLICY_META)
                 if isinstance(self.qcfg.meta, dict)
@@ -2246,6 +2461,7 @@ class EXL3Processor(LoopProcessor):
             "capture": task,
             "qcfg": module_qcfg,
             "hessian_capture": capture_contract,
+            "fallback": resolved_fallback,
         }
         remote_client = self._remote_client_for_run(self._ledger_provenance())
         if remote_client is not None:
@@ -2258,6 +2474,11 @@ class EXL3Processor(LoopProcessor):
         """Reports whether preprocessing omitted this module from EXL3 work."""
 
         return self.tasks.get(module.name, False) is False
+
+    def bind_moe_quant_devices(self, devices) -> None:
+        """Record the looper's resolved routed-expert quantization pool (#5093)."""
+
+        self.moe_quant_devices = [torch.device(device) for device in devices]
 
     def has_captured_input_ids(self, name: str) -> bool:
         """Report live or lazily restored calibration coverage."""
@@ -2273,6 +2494,18 @@ class EXL3Processor(LoopProcessor):
     ) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the EXL3 task."""
 
+        if self.shared_input_leader(name) is not None:
+            def skip(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+                """Follower of a shared-input group: the leader collects this Hessian."""
+
+                active_batch_capture = getattr(
+                    self, "_active_natural_route_capture", None
+                )
+                if active_batch_capture is not None:
+                    active_batch_capture.capture_expert_input(name, inp[0].data)
+                del module, inp, out
+            return skip
+
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             """Records one activation batch for the EXL3 capture task."""
 
@@ -2283,22 +2516,53 @@ class EXL3Processor(LoopProcessor):
             )
             if active_batch_capture is not None:
                 active_batch_capture.capture_expert_input(name, inp[0].data)
-            capture.add_batch(inp[0].data, out.data, batch_index=batch_idx)
+            capture.add_batch(
+                self.calibration_rows(inp[0].data), out.data, batch_index=batch_idx
+            )
             del inp, out
 
         return tmp
+
+    # -- shared-input Hessian dedup ----------------------------------------
+
+    def _shared_input_task(self, name: str):
+        entry = self.tasks.get(name)
+        if not isinstance(entry, dict):
+            return None
+        return entry.get("capture")
+
+    def _shared_input_task_enabled(self, capture: GPTQ) -> bool:
+        # `w3` aliases an already-shared `w1` accumulator and captures nothing;
+        # a shared state is already deduplicated by `share_hessian_state_from`.
+        if capture is None:
+            return False
+        if not getattr(capture, "_hessian_capture_enabled", True):
+            return False
+        return not capture.hessian_is_shared
+
+    def _shared_input_task_signature(self, capture: GPTQ):
+        if type(capture) is not GPTQ:
+            return None
+        hessian = capture.qcfg.hessian
+        return (
+            "gptq",
+            int(capture.columns),
+            str(hessian.staging_dtype),
+            hessian.chunk_size,
+            hessian.chunk_bytes,
+        )
 
     def _is_lm_head(self, module: NamedModule) -> bool:
         """Returns whether the named module corresponds to the model lm_head."""
 
         return module.full_name == self.lm_head_name or module.name == self.lm_head_name
 
-    def _target_bits(self, module: NamedModule, module_qcfg: EXL3Config) -> int:
+    def _target_bits(self, module: NamedModule, module_qcfg: EXL3Config) -> int | float:
         """Chooses lm_head-specific bitwidth overrides when configured."""
 
         if self._is_lm_head(module) and module_qcfg.head_bits is not None:
-            return max(1, int(module_qcfg.head_bits))
-        return max(1, module_qcfg.runtime_bits)
+            return module_qcfg.head_bits
+        return module_qcfg.runtime_bits
 
     def _build_quant_args(
         self,
@@ -2306,28 +2570,12 @@ class EXL3Processor(LoopProcessor):
         module_qcfg: EXL3Config,
         device: torch.device,
         *,
-        bits_override: int | None = None,
+        bits_override: int | float | None = None,
     ) -> Dict[str, object]:
         """Builds the argument bundle passed into the EXL3 quantizer."""
 
-        quant_args: Dict[str, object] = {
-            "K": (
-                self._target_bits(module, module_qcfg)
-                if bits_override is None
-                else int(bits_override)
-            ),
-            "devices": [device],
-            "apply_out_scales": _OUT_SCALES_TO_ARG.get(module_qcfg.out_scales, None),
-            "sigma_reg": _EXL3_SIGMA_REG,
-            "seed": 787,
-        }
-
-        if module_qcfg.codebook == "mcg":
-            quant_args["mcg"] = True
-        elif module_qcfg.codebook == "mul1":
-            quant_args["mul1"] = True
-
-        return quant_args
+        bits = self._target_bits(module, module_qcfg) if bits_override is None else bits_override
+        return build_exl3_quant_args(module_qcfg, bits=bits, device=device)
 
     def _quant_input_weight(self, capture: GPTQ, device: torch.device) -> torch.Tensor:
         """Exports the captured dense weight in EXL3's padded quantizer layout.
@@ -2425,6 +2673,11 @@ class EXL3Processor(LoopProcessor):
             target.weight = placeholder
             module.state[_DEFERRED_RUNTIME_WEIGHT_STATE] = marker
         module.state.pop("quant_source_module", None)
+        # Record the projection so a run that never reaches the next replay can
+        # still publish it. The mapping is keyed by full name because the
+        # placeholder outlives this subset's `NamedModule` wrapper.
+        with self._deferred_runtime_guard():
+            self._deferred_runtime_registry()[module.full_name] = module
 
     def prepare_runtime_weight_for_forward(
         self,
@@ -2455,7 +2708,7 @@ class EXL3Processor(LoopProcessor):
             )
 
         module.stream_sync()
-        packed_names = ("trellis", "suh", "svh", "su", "sv", "mcg", "mul1")
+        packed_names = ("trellis", "suh", "svh", "su", "sv", *EXL3_CODEBOOK_MARKERS)
         packed = {
             name: module.state[name]
             for name in packed_names
@@ -2481,6 +2734,8 @@ class EXL3Processor(LoopProcessor):
             with parent_module_lock(module.full_name):
                 target.weight = replay_weight
                 module.state.pop(_DEFERRED_RUNTIME_WEIGHT_STATE, None)
+            with self._deferred_runtime_guard():
+                self._deferred_runtime_registry().pop(module.full_name, None)
             if target_device.type == "cuda":
                 torch.cuda.synchronize(target_device)
             del runtime_weight, restored_weight
@@ -2537,6 +2792,10 @@ class EXL3Processor(LoopProcessor):
                 target.weight = sentinel
                 module.state[_DEFERRED_FINALIZE_WEIGHT_STATE] = marker
                 module.state.pop(_DEFERRED_RUNTIME_WEIGHT_STATE, None)
+            # ``submodule_finalize`` retires this projection next, so recovery
+            # must not publish it a second time.
+            with self._deferred_runtime_guard():
+                self._deferred_runtime_registry().pop(module.full_name, None)
 
     def _publish_inline_candidate(self, task_entry: dict[str, Any]) -> None:
         """Promote an unselected K2 candidate into the authoritative journal."""
@@ -2593,7 +2852,7 @@ class EXL3Processor(LoopProcessor):
         if not isinstance(candidate_request_sha256, str):
             raise RuntimeError("EXL3 selected tier lacks its candidate checkpoint")
 
-        target_device = torch.device(
+        target_device = as_torch_device(
             task_entry.get("inline_source_device", self.qcfg.device)
         )
         prepared = model.shell_module_materialize(
@@ -2735,7 +2994,7 @@ class EXL3Processor(LoopProcessor):
         futures = []
         for module_name in sorted(selected):
             module, task_entry = candidate_by_name[module_name]
-            target_device = torch.device(
+            target_device = as_torch_device(
                 task_entry.get("inline_source_device", self.qcfg.device)
             )
             futures.append(
@@ -2835,6 +3094,82 @@ class EXL3Processor(LoopProcessor):
             if execution_lease is not None:
                 execution_lease.release()
 
+    def _log_calibration_fallback(
+        self,
+        module: NamedModule,
+        capture: GPTQ,
+        fallback: Any,
+        reason: str,
+    ) -> None:
+        """Report a starved module the way GPTQ's fallback path does (#4995)."""
+
+        strategy = resolve_fallback_strategy(fallback)
+        threshold, _ = resolve_threshold(
+            fallback, getattr(capture, "expected_nsamples", None)
+        )
+        if reason == "zero_samples":
+            log.warn(
+                "EXL3: Module `%s` -> no calibration samples reached this module; "
+                "quantizing with a data-free proxy Hessian (EXL3's uncalibrated, "
+                "RTN-equivalent grid) instead of quantizing a zero Hessian.",
+                module.full_name,
+            )
+        else:
+            log.warn(
+                "EXL3: Module `%s` -> %d calibration samples are below the configured "
+                "fallback threshold; quantizing with a data-free proxy Hessian "
+                "(EXL3's uncalibrated, RTN-equivalent grid).",
+                module.full_name,
+                int(getattr(capture, "nsamples", 0) or 0),
+            )
+        if threshold is None:
+            log.warn(
+                "EXL3: Module `%s` -> `EXL3Config.fallback` disables the threshold "
+                "fallback, but a zero-sample module cannot use a captured Hessian. "
+                "Remedies: %s.",
+                module.full_name,
+                "; ".join(_EXL3_STARVED_MODULE_REMEDIES),
+            )
+        if strategy is not FallbackStrategy.RTN:
+            log.warn(
+                "EXL3: Module `%s` -> the configured `%s` fallback strategy has no "
+                "data-free EXL3 equivalent; the RTN-equivalent proxy grid is used.",
+                module.full_name,
+                strategy.value,
+            )
+
+    def _hessian_for_module(
+        self,
+        module: NamedModule,
+        capture: GPTQ,
+        task_entry: dict[str, Any],
+        staging_device: torch.device,
+    ) -> tuple[torch.Tensor, Optional[str]]:
+        """Prepare a projection's Hessian, honouring the starved-module fallback.
+
+        Returns the Hessian and the fallback reason (``None`` for a calibrated
+        projection). The reason decides the ``count`` handed to EXL3 and the
+        Hessian-metric contract the packed result must satisfy (#4995).
+        """
+
+        fallback = task_entry.get("fallback")
+        expected_nsamples = getattr(capture, "expected_nsamples", None)
+        fallback_reason = resolve_exl3_hessian_fallback(
+            capture,
+            fallback=fallback,
+            expected_nsamples=expected_nsamples,
+        )
+        if fallback_reason is not None:
+            self._log_calibration_fallback(module, capture, fallback, fallback_reason)
+        hessian = prepare_exl3_hessian(
+            capture,
+            target_device=staging_device,
+            module_full_name=module.full_name,
+            fallback=fallback,
+            expected_nsamples=expected_nsamples,
+        )
+        return hessian, fallback_reason
+
     def _process_on_slot(
         self,
         *,
@@ -2844,7 +3179,7 @@ class EXL3Processor(LoopProcessor):
         remote_client,
         execution_slot,
         execution_lease: ExecutionSlotLease | None,
-        bits_override: int | None = None,
+        bits_override: int | float | None = None,
         inline_context: dict[str, Any] | None = None,
         defer_stats: bool = False,
     ):
@@ -2885,12 +3220,12 @@ class EXL3Processor(LoopProcessor):
             target_device=staging_device,
             retain_for_inline=candidate_pass,
         )
-        hessian = prepare_exl3_hessian(
+        hessian, fallback_reason = self._hessian_for_module(
+            module,
             capture,
-            target_device=staging_device,
-            module_full_name=module.full_name,
+            task_entry,
+            staging_device,
         )
-
         remote_endpoint = None
         execution_contract = None
         projection_provenance = ledger_provenance
@@ -2931,7 +3266,7 @@ class EXL3Processor(LoopProcessor):
                 else None
             )
             quantizer_contract = {
-                "bits": int(quant_args["K"]),
+                "bits": quant_args["K"],
                 "codebook": module_qcfg.codebook,
                 "apply_out_scales": quant_args["apply_out_scales"],
                 "sigma_reg": float(quant_args["sigma_reg"]),
@@ -2961,6 +3296,7 @@ class EXL3Processor(LoopProcessor):
                 family_join=family_join,
                 route_evidence=task_entry.get("route_evidence"),
                 zero_route_recovery=task_entry.get("zero_route_recovery"),
+                uncalibrated=fallback_reason is not None,
             )
             checkpoint_store.reserve_module_request(checkpoint_request)
             loaded_checkpoint = checkpoint_store.load(checkpoint_request)
@@ -3040,8 +3376,11 @@ class EXL3Processor(LoopProcessor):
                     torch.cuda.synchronize(target_device)
                     h_data = {
                         "H": hessian,
+                        # A starved module is quantized against the data-free
+                        # proxy with count=0, which selects EXL3's uncalibrated
+                        # `fallback_quant` path (#4995).
+                        "count": exl3_hessian_count(capture, fallback_reason),
                         "single_use": True,
-                        "count": capture.nsamples,
                         "finalized": False,
                     }
                     quant_started = time.perf_counter()
@@ -3092,6 +3431,7 @@ class EXL3Processor(LoopProcessor):
                     quantizer_metrics,
                     sample_count=capture.nsamples,
                     sigma_reg=float(quant_args["sigma_reg"]),
+                    uncalibrated=fallback_reason is not None,
                 )
             except RuntimeError as error:
                 raise RuntimeError(
@@ -3107,7 +3447,7 @@ class EXL3Processor(LoopProcessor):
             ledger_record = build_projection_record(
                 module_full_name=module.full_name,
                 layer_index=module.layer_index,
-                bits=int(quant_args["K"]),
+                bits=quant_args["K"],
                 codebook=module_qcfg.codebook,
                 sample_count=capture.nsamples,
                 duration_seconds=duration,
@@ -3161,7 +3501,7 @@ class EXL3Processor(LoopProcessor):
             expected_ledger_record = build_projection_record(
                 module_full_name=module.full_name,
                 layer_index=module.layer_index,
-                bits=int(quant_args["K"]),
+                bits=quant_args["K"],
                 codebook=module_qcfg.codebook,
                 sample_count=capture.nsamples,
                 duration_seconds=duration,
@@ -3176,7 +3516,7 @@ class EXL3Processor(LoopProcessor):
                 legacy_ledger_record = build_projection_record(
                     module_full_name=module.full_name,
                     layer_index=module.layer_index,
-                    bits=int(quant_args["K"]),
+                    bits=quant_args["K"],
                     codebook=module_qcfg.codebook,
                     sample_count=capture.nsamples,
                     duration_seconds=duration,
@@ -3340,8 +3680,7 @@ class EXL3Processor(LoopProcessor):
                 "su",
                 "sv",
                 "bias",
-                "mcg",
-                "mul1",
+                *EXL3_CODEBOOK_MARKERS,
             ):
                 tensor = module.state.pop(tensor_name, None)
                 if tensor is not None:
@@ -3354,11 +3693,14 @@ class EXL3Processor(LoopProcessor):
                 name=module.full_name,
                 submodule=module,
                 tensors=tensors,
+                kernel=resolve_kernel_config(self.qcfg),
             )
 
         module.unregister_parameter("weight")
         if getattr(module, "bias", None) is not None:
             module.unregister_parameter("bias")
+        with self._deferred_runtime_guard():
+            self._deferred_runtime_registry().pop(module.full_name, None)
 
     def completed_layer_checkpoint_entries(
         self, layer_index: int
@@ -3849,6 +4191,7 @@ class EXL3Processor(LoopProcessor):
                 name=module_name,
                 submodule=named,
                 tensors=tensors,
+                kernel=resolve_kernel_config(self.qcfg),
             )
             if materialize_device is None:
                 # Preserve scalar multiplier values before replacing every
@@ -4012,6 +4355,7 @@ class EXL3Processor(LoopProcessor):
                 name=module_name,
                 tensor_storage=tensor_storage,
                 out_dtype=packed.out_dtype,
+                kernel=packed.kernel,
             )
             recurse_setattr(model.model, module_name, placeholder)
 
@@ -4070,6 +4414,94 @@ class EXL3Processor(LoopProcessor):
         model.quantize_config.format = FORMAT.EXL3
         model.qlinear_kernel = ExllamaV3Linear
         super().finalize(model=model, **kwargs)
+
+    def finalize_deferred_runtime_weights(self, model: BaseQModel) -> None:
+        """Publish packed projections whose replay weight a stop left deferred.
+
+        ``_stage_runtime_weight`` replaces each packed projection's dense weight
+        with a META placeholder and records the module here. Only the next
+        layer replay (``prepare_runtime_weight_for_forward``) rebuilt the dense
+        weight, so a stop at ``quant_complete`` -- or any exception or Ctrl-C
+        between a packed subset and the next replay -- left the in-flight
+        layer's projections on META and the session model could not forward
+        (#5083). ``offload_to_disk=True`` happened to escape because its layer
+        shells are restored from the checkpoint instead.
+
+        Install the packed ``ExllamaV3Linear`` for those modules, exactly as
+        ``submodule_finalize`` does on the success path. That reuses the packed
+        trellis already staged in ``NamedModule.state``, so it adds no dense
+        copy, and it is what a completed run leaves for a processor whose
+        layers are finalized. Each module is independent: one failure is logged
+        and the rest still run.
+        """
+
+        with self._deferred_runtime_guard():
+            registry = self._deferred_runtime_registry()
+            pending = list(registry.values())
+            registry.clear()
+        for module in pending:
+            try:
+                self._publish_deferred_runtime_module(module=module, model=model)
+            except Exception:
+                log.warning(
+                    "EXL3: failed to publish the deferred runtime weight of `%s` "
+                    "while recovering a cancelled or failed run",
+                    getattr(module, "full_name", getattr(module, "name", "?")),
+                    exc_info=True,
+                )
+
+    def _deferred_runtime_guard(self) -> threading.Lock:
+        """Return the registry lock, creating it for ``__new__``-built fixtures.
+
+        ``EXL3Processor.__new__`` tests drive ``process()`` without ``__init__``;
+        a missing registry must not make the staging path fail.
+        """
+
+        lock = getattr(self, "_deferred_runtime_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._deferred_runtime_lock = lock
+        return lock
+
+    def _deferred_runtime_registry(self) -> dict[str, NamedModule]:
+        """Return the deferred-weight registry, creating it on first use."""
+
+        registry = getattr(self, "_deferred_runtime_modules", None)
+        if registry is None:
+            registry = {}
+            self._deferred_runtime_modules = registry
+        return registry
+
+    def _publish_deferred_runtime_module(
+        self, *, module: NamedModule, model: BaseQModel
+    ) -> None:
+        """Install one deferred projection's packed module in the model tree."""
+
+        if module.state.get(_DEFERRED_RUNTIME_WEIGHT_STATE) is None:
+            return
+        weight = getattr(module.module, "weight", None)
+        if not isinstance(weight, torch.Tensor):
+            module.state.pop(_DEFERRED_RUNTIME_WEIGHT_STATE, None)
+            return
+        if not weight.is_meta:
+            # The next replay published the dense replay weight already.
+            module.state.pop(_DEFERRED_RUNTIME_WEIGHT_STATE, None)
+            return
+        if module.state.get(_DEFERRED_FINALIZE_WEIGHT_STATE) is not None:
+            # `prepare_layer_post_quantize` already retired this projection to
+            # its terminal sentinel; its own finalize owns the publication.
+            module.state.pop(_DEFERRED_RUNTIME_WEIGHT_STATE, None)
+            return
+        # ``submodule_finalize`` installs the packed module and consumes the
+        # staged trellis/sign tensors, so no dense copy is retained.
+        self.submodule_finalize(module, model)
+
+    def release_run_workspace(self) -> None:
+        """Drop the per-stream EXL3 tile scratch cached for this run."""
+
+        with self._deferred_runtime_guard():
+            self._deferred_runtime_registry().clear()
+        clear_tile_workspace()
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         """Ensures EXL3 received calibration data before the quantization loop starts."""

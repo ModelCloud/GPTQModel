@@ -1,0 +1,127 @@
+--- a/timm_wrapper/modeling_timm_wrapper.py
++++ b/timm_wrapper/modeling_timm_wrapper.py
+@@ -1,5 +1,6 @@
+ # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
+ # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
++# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
+ # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+ #
+ # Licensed under the Apache License, Version 2.0 (the "License");
+@@ -17,12 +18,11 @@
+ from dataclasses import dataclass
+ 
+ import torch
+-from torch import Tensor
+ 
+ from transformers.modeling_outputs import ImageClassifierOutput, ModelOutput
+ from transformers.modeling_utils import PreTrainedModel
+ from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
+-from transformers.utils import auto_docstring, is_timm_available, logging, requires_backends
++from transformers.utils import auto_docstring, can_return_tuple, is_timm_available, logging, requires_backends
+ from .configuration_timm_wrapper import TimmWrapperConfig
+ 
+ 
+@@ -152,7 +152,14 @@
+         except Exception:
+             return False
+ 
+-    def _set_gradient_checkpointing(self, enable: bool = True, *args, **kwargs):
++    # `PreTrainedModel.activation_checkpointing_enable/disable` toggle every module's `gradient_checkpointing`
++    # attribute; on the wrapper that attribute is the wrapped `timm` model's own checkpointing switch.
++    @property
++    def gradient_checkpointing(self) -> bool:
++        return bool(getattr(self.timm_model, "grad_checkpointing", False))
++
++    @gradient_checkpointing.setter
++    def gradient_checkpointing(self, enable: bool):
+         self.timm_model.set_grad_checkpointing(enable)
+ 
+     def get_input_embeddings(self):
+@@ -177,17 +184,17 @@
+         self.timm_model = _create_timm_model_with_error_handling(config, num_classes=0, **extra_init_kwargs)
+         self.post_init()
+ 
++    @can_return_tuple
+     @auto_docstring
+     def forward(
+         self,
+         pixel_values: torch.Tensor,
+         output_attentions: bool | None = None,
+         output_hidden_states: bool | list[int] | None = None,
+-        return_dict: bool | None = None,
+         do_pooling: bool | None = None,
+         use_cache: bool | None = None,
+         **kwargs,
+-    ) -> TimmWrapperModelOutput | tuple[Tensor, ...]:
++    ) -> TimmWrapperModelOutput:
+         r"""
+         output_attentions (`bool`, *optional*):
+             Whether or not to return the attentions tensors of all attention layers. Not compatible with timm wrapped models.
+@@ -228,7 +235,6 @@
+         >>> last_hidden_state = outputs.last_hidden_state
+         ```
+         """
+-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+         output_hidden_states = (
+             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+         )
+@@ -268,11 +274,6 @@
+             else:
+                 pooler_output = None
+ 
+-        if not return_dict:
+-            outputs = (last_hidden_state, pooler_output, hidden_states)
+-            outputs = tuple(output for output in outputs if output is not None)
+-            return outputs
+-
+         return TimmWrapperModelOutput(
+             last_hidden_state=last_hidden_state,
+             pooler_output=pooler_output,
+@@ -303,6 +304,7 @@
+         self.num_labels = config.num_labels
+         self.post_init()
+ 
++    @can_return_tuple
+     @auto_docstring
+     def forward(
+         self,
+@@ -310,17 +312,14 @@
+         labels: torch.LongTensor | None = None,
+         output_attentions: bool | None = None,
+         output_hidden_states: bool | list[int] | None = None,
+-        return_dict: bool | None = None,
+         **kwargs,
+-    ) -> ImageClassifierOutput | tuple[Tensor, ...]:
++    ) -> ImageClassifierOutput:
+         r"""
+         output_attentions (`bool`, *optional*):
+             Whether or not to return the attentions tensors of all attention layers. Not compatible with timm wrapped models.
+         output_hidden_states (`bool`, *optional*):
+             Whether or not to return the hidden states of all layers. Not compatible with timm wrapped models.
+-        return_dict (`bool`, *optional*):
+-            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+-            **kwargs:
++        **kwargs:
+             Additional keyword arguments passed along to the `timm` model forward.
+ 
+         Examples:
+@@ -351,7 +350,6 @@
+         >>> top5_probabilities, top5_class_indices = torch.topk(logits.softmax(dim=1) * 100, k=5)
+         ```
+         """
+-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+         output_hidden_states = (
+             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+         )
+@@ -384,11 +382,6 @@
+         if labels is not None:
+             loss = self.loss_function(labels, logits, self.config)
+ 
+-        if not return_dict:
+-            outputs = (loss, logits, hidden_states)
+-            outputs = tuple(output for output in outputs if output is not None)
+-            return outputs
+-
+         return ImageClassifierOutput(
+             loss=loss,
+             logits=logits,

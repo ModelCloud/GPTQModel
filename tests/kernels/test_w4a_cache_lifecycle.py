@@ -260,7 +260,9 @@ def test_post_init_retains_no_expanded_weight():
     assert fresh._w4a_weights_ready is False
     assert "_weight_e4m3" not in fresh.__dict__
 
-    assert set(module.state_dict()) == {"qweight", "qzeros", "scales", "g_idx"}
+    assert set(module.state_dict()) == {
+        "qweight", "qzeros", "scales", "g_idx", "qzeros_format",
+    }
 
 
 # --------------------------------------------------------------------------
@@ -545,7 +547,9 @@ def test_persistent_weight_bytes():
     assert native == K * N // 2 + (K // 128) * (N // 8) * 4 + (K // 128) * N * 2 + K * 4
     assert native == 18048
 
-    native_names = {"qweight", "qzeros", "scales", "g_idx"}
+    # `qzeros_format` is the scalar runtime marker (#4125/#4134), not a derived
+    # weight cache, so it belongs with the native checkpoint tensors.
+    native_names = {"qweight", "qzeros", "scales", "g_idx", "qzeros_format"}
     retained = sum(
         _bytes(value) for name, value in module._buffers.items() if name not in native_names
     )
@@ -758,6 +762,7 @@ def test_rocm_rejects_the_w4a_backend(monkeypatch, cls):
 
 def test_rocm_kernels_refuse_before_lowering(monkeypatch):
     """Direct kernel calls must report the platform, not a PassManager crash."""
+    pytest.importorskip("triton")
     from gptqmodel.nn_modules.qlinear import w4a_nvfp4_triton as nvfp4_triton
     from gptqmodel.nn_modules.qlinear import w4a_triton
 
@@ -1052,6 +1057,7 @@ def test_nvfp4_post_init_retains_only_packed_planes():
     assert _expanded_weight_tensors(module) == []
     assert set(module.state_dict()) == {
         "qweight", "qzeros", "scales", "g_idx", "activation_global_scale_bits",
+        "qzeros_format",
     }
 
     # Independent E2M1 decode: the packed planes must reconstruct every

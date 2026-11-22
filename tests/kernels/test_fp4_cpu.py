@@ -314,3 +314,63 @@ def test_fp4_cpu_forward_uses_the_exact_cast_gate(monkeypatch):
 
     assert seen == []
     assert wide_bias == [torch.float32]
+
+
+def test_fp4_wide_bias_path_does_not_narrow_the_weight(monkeypatch):
+    """A wide bias must not fall back to a narrow weight decode.
+
+    An in-range pack with an out-of-range bias used to decode the weight to the
+    activation dtype and then call ``linear_wide_bias``. That will fail (or
+    lose information) the moment the effective scale leaves the activation
+    dtype's range. Both halves have to stay wide together.
+    """
+
+    module = _make_cancellation_linear(bias_dtype=torch.float32, bias_value=-65536.0)
+    # The stored scale is E4M3 here, whose largest value is 448; a ModelOpt
+    # effective scale (``weight_scale * weight_scale_2``) is FP32 instead.
+    module.weight_scale = torch.full_like(module.weight_scale, 16384.0, dtype=torch.float32)
+    assert module._epilogue_bias(
+        torch.zeros(1, 16, dtype=torch.float16), module.bias
+    )[1] is True
+    targets = []
+    original_dequantize = fp4_module.dequantize_f4_e2m1
+
+    def tracked_dequantize(*args, **kwargs):
+        targets.append(kwargs.get("target_dtype"))
+        return original_dequantize(*args, **kwargs)
+
+    monkeypatch.setattr(fp4_module, "dequantize_f4_e2m1", tracked_dequantize)
+    x = torch.zeros(1, 16, dtype=torch.float16)
+    x[0, 0] = 0.5
+
+    with torch.inference_mode():
+        output = module(x)
+
+    # The codes decode at BF16 (exact for every E2M1 code) and the scale is
+    # applied in FP32; the activation dtype is never a decode target, and the
+    # stored bias still cancels the widened product.
+    assert targets and torch.float16 not in targets
+    assert float(output.item()) == 49152.0 - 65536.0
+
+
+def test_fp4_forward_locks_the_activation_dtype():
+    """``TorchFP4Linear`` is a kernel module: one activation dtype per instance."""
+
+    module = _make_fp4_linear()
+    x = torch.randn(5, module.in_features, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        module(x)
+
+    with pytest.raises(RuntimeError, match="never switches activation dtype"):
+        module(x.to(torch.float16))
+
+
+def test_fp4_rejects_a_post_forward_dtype_cast():
+    module = _make_fp4_linear()
+    x = torch.randn(5, module.in_features, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        module(x)
+
+    with pytest.raises(RuntimeError, match="Weight dtypes are frozen after the first forward"):
+        module.to(torch.float32)
+    assert module.bias.dtype is torch.bfloat16

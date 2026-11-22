@@ -11,9 +11,9 @@ checkpoint before ``get_state_dict_for_save`` could restore the offload bundle.
 The saved checkpoint then carried the original weights next to the packed
 scale, which reloads as garbage (PPL 1e38).
 
-These tests pin both halves of the contract: the writer skips modules that
-declare a ``QUANT_TYPE``, and a real FP8 quantize -> save -> reload round trip
-keeps the packed codes and a sane perplexity.
+These tests pin the writer half of the contract: it skips modules that
+declare a ``QUANT_TYPE`` so a packed FP8 payload is never replaced by the
+dense source tensor.
 """
 
 import json
@@ -22,7 +22,6 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -168,53 +167,3 @@ def _held_out_ppl(model, tokenizer, text: str, device) -> float:
         reduction="mean",
     )
     return math.exp(loss.item())
-
-
-@pytest.mark.model
-@pytest.mark.slow
-@pytest.mark.skipif(
-    not os.path.isdir(QWEN_MODEL_ID),
-    reason=f"model fixture {QWEN_MODEL_ID} is not available",
-)
-def test_fp8_default_offload_save_round_trip_keeps_packed_codes(tmp_path):
-    from transformers import AutoTokenizer
-
-    from gptqmodel import GPTQModel
-    from gptqmodel.quantization import METHOD
-    from gptqmodel.quantization.config import QuantizeConfig
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL_ID)
-    qcfg = QuantizeConfig(quant_method=METHOD.FP8, format="float8_e4m3fn", bits=8)
-    assert qcfg.offload_to_disk is True
-
-    model = GPTQModel.load(QWEN_MODEL_ID, quantize_config=qcfg, device=device)
-    model.quantize(QWEN_CALIBRATION, batch_size=1, backend="torch")
-
-    # The offload bundle is written from module.state_dict() at pack time, so it
-    # holds the in-memory packed codes that the checkpoint must preserve.
-    offload_dir = os.path.join(
-        model.quantize_config.offload_to_disk_path,
-        "model.layers.0.self_attn.q_proj",
-    )
-    packed_codes = _read_safetensors_key(offload_dir, "weight")
-    assert packed_codes.dtype == torch.float8_e4m3fn
-    packed_absmax = float(packed_codes.float().abs().max())
-    assert packed_absmax > 100.0
-
-    save_dir = tmp_path / "fp8"
-    model.save(str(save_dir))
-    del model
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
-    saved = _read_safetensors_key(str(save_dir), "model.layers.0.self_attn.q_proj.weight")
-    assert saved.dtype == torch.float8_e4m3fn
-    assert torch.equal(saved.view(torch.uint8), packed_codes.view(torch.uint8))
-
-    source = _read_safetensors_key(QWEN_MODEL_ID, "model.layers.0.self_attn.q_proj.weight")
-    assert float(source.float().abs().max()) < 10.0
-
-    reloaded = GPTQModel.load(str(save_dir), device=device)
-    ppl = _held_out_ppl(reloaded.model, tokenizer, QWEN_EVAL_TEXT, device)
-    assert math.isfinite(ppl)
-    assert ppl < 50.0

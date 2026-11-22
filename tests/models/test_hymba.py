@@ -8,7 +8,7 @@ from gptqmodel import BACKEND
 
 
 class TestHymba(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Hymba-1.5B-Instruct/"  # "baichuan-inc/Baichuan2-7B-Chat"
+    NATIVE_MODEL_ID = "nvidia/Hymba-1.5B-Instruct"
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,
@@ -18,17 +18,17 @@ class TestHymba(ModelTest):
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     MODEL_MAX_LEN = 8192
-    TRUST_REMOTE_CODE = True
-    # Hymba currently only supports a batch size of 1.
-    # See https://huggingface.co/nvidia/Hymba-1.5B-Instruct
+    TRUST_REMOTE_CODE = False
+    # Preserve the published checkpoint's existing evaluation recipe.
     EVAL_BATCH_SIZE = 1
 
-    # Hymba currently tests that DESC_ACT=False to get better results.
-    # If DESC_ACT=False, the output will be terrible.
+    # Keep the existing no-act-order calibration recipe.
     DESC_ACT = False
-    OFFLOAD_TO_DISK = False # FIXME the issue where hymba does not work with OFFLOAD_TO_DISK=True
     LOAD_BACKEND = BACKEND.AUTO
-    USE_FLASH_ATTN = True
+    USE_FLASH_ATTN = False  # package-owned SDPA/portable SSM reference implementation
+    # ARC alone never calls generate(), so a broken transformers-5 cache
+    # contract stayed invisible (#5090).
+    ASSERT_INFERENCE = True
 
 
     def test_hymba(self):

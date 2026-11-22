@@ -26,25 +26,41 @@ flowchart TD
     E --> F{"lora_cfg.use_rslora"}
     F -- yes --> G["lora_scale = alpha / sqrt(rank)"]
     F -- no --> H["lora_scale = alpha / rank"]
-    G --> I["lora_B.mul_(lora_scale)"]
+    G --> I{"_fold_scale_into_b: is every scaled B element finite<br/>and every nonzero B element still nonzero?"}
     H --> I
-    I --> J["Lora.apply composes x @ lora_A @ lora_B"]
-    K["Missing A/B or non-positive rank/alpha"] --> L["fail closed with an error"]
-    style K fill:#fee,stroke:#c00
-    style L fill:#fee,stroke:#c00
+    I -- yes --> J["lora_B.mul_(lora_scale)"]
+    I -- no --> K["keep the raw lora_B"]
+    J --> L["Lora.apply composes x @ lora_A @ lora_B"]
+    K --> M["Lora.apply composes (x @ lora_A @ lora_B) * lora_scale"]
+    N["Missing A/B or non-positive rank/alpha"] --> O["fail closed with an error"]
+    style N fill:#fee,stroke:#c00
+    style O fill:#fee,stroke:#c00
+    style M fill:#eef,stroke:#36c
 ```
 
 The scale is folded into the private contiguous `lora_B` clone once during
-`Lora.post_init`. `Lora.apply` remains a single adapter multiply, and the
+`Lora.post_init`, so `Lora.apply` remains a single adapter multiply, and the
 immutable tensors in `AdapterCache` stay unscaled. An exported PEFT adapter
 therefore retains its original `lora_A` and `lora_B` values.
+
+The fold runs in `lora_B`'s storage dtype, which is FP16 or BF16 for a saved
+adapter. PEFT multiplies `alpha / rank` after both projections, so a fold can
+overflow to `inf` (or flush a nonzero element to zero) even though the scaled
+product with a small activation is finite: FP16 `B = 32768` with
+`alpha / rank = 4` and `x = 0.125` is a finite 16384, but the folded `B` is
+`inf` (#5426). `_fold_scale_into_b` therefore folds only when every scaled
+element stays finite and no nonzero element becomes zero; otherwise it keeps
+the raw `lora_B` and `Lora.apply` multiplies the product by `lora_scale`, which
+is exactly PEFT's order. Both paths produce the same effective delta for an
+in-range adapter, and the fallback only costs one extra multiply per forward
+for an adapter that would otherwise overflow.
 
 ## EoRA export
 
 ```mermaid
 flowchart TD
-    A["_eora_save"] --> B["extract_adapter_rank_patterns()"]
-    B --> C["rank_pattern"]
+    A["_eora_save"] --> B["extract_adapter_rank_patterns(module_ranks)"]
+    B --> C["rank_pattern: one exact key per trained rank"]
     C --> D["alpha_pattern = dict(rank_pattern)"]
     D --> E["LoraConfig.save_pretrained"]
     E --> F["PEFT resolves alpha_module / rank_module"]
@@ -58,7 +74,10 @@ flowchart TD
 
 EoRA's low-rank factorization already targets the quantized residual at scale
 one. Mirroring each dynamic rank into `alpha_pattern` preserves that target
-when the same directory is loaded by GPT-QModel, PEFT, or vLLM.
+when the same directory is loaded by GPT-QModel, PEFT, or vLLM. `module_ranks`
+comes from each `Lora.rank`, so the exported keys describe the ranks that were
+actually built rather than the text of the `dynamic` rules; see
+[adapter rank-pattern matching](adapter-rank-pattern-matching.md).
 
 ## EoRA covariance accumulation
 
@@ -88,7 +107,8 @@ and the number of calibration batches cannot change a token's weight.
 | Mechanism at `origin/main` (`00163850`) | Old location | New location | Failure removed |
 | --- | --- | --- | --- |
 | `Lora.apply` used the adapter delta at implicit scale 1 | `gptqmodel/adapter/adapter.py:203-227` | `gptqmodel/adapter/adapter.py:328-357` resolves alpha/rank and folds the scale once | Global alpha, `alpha_pattern`, and rsLoRA were ignored |
-| `_eora_save` wrote `rank_pattern` without matching alphas | `gptqmodel/models/writer.py:1565-1578` | `gptqmodel/models/writer.py:1565-1579` mirrors ranks into `alpha_pattern` | PEFT applied `global_alpha / module_rank` |
+| Folding `alpha / rank` into an FP16 `lora_B` overflowed to `inf` | `gptqmodel/adapter/adapter.py:479` | `Lora._fold_scale_into_b` folds only when the scaled tensor stays finite and nonzero; otherwise `apply` scales the product | A finite adapter output became `inf` (#5426) |
+| `_eora_save` wrote `rank_pattern` without matching alphas | `gptqmodel/models/writer.py:1565-1578` | `gptqmodel/models/writer.py:1978-1998` mirrors ranks into `alpha_pattern` | PEFT applied `global_alpha / module_rank` |
 | `eora_process_input` divided by `sample_size` and returned a geometric decay factor | `gptqmodel/eora/eora.py:28-56` | `gptqmodel/eora/eora.py:26-51` returns raw `XᵀX` and token count | Earlier batches decayed exponentially |
 | `_accumulate_eora_contribution` rescaled the running total by `N / (N + batch)` | `gptqmodel/looper/eora_processor.py:170-227` | `gptqmodel/looper/eora_processor.py:167-203` adds raw sums and token counts | Effective use of only the last batches |
 | `merge_eora_segments` combined scaled segment products | `gptqmodel/eora/eora.py:59-80` and `gptqmodel/looper/eora_processor.py:229-257` | `_finalize_eigen_scaling_matrix` at `gptqmodel/looper/eora_processor.py:205-237` normalizes the total once | Segment order became numerically significant |

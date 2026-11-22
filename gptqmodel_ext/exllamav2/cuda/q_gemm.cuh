@@ -34,6 +34,22 @@ void gemm_half_half_cuda
     bool clear
 );
 
+// Same FP16 operands as gemm_half_half_cuda, but the FP32 accumulator is
+// written straight to a CUDA_R_32F output instead of being rounded to FP16.
+// Callers use it when an exact wide bias epilogue must run before the single
+// visible cast, so the operands stay in FP16 and no FP32 copies are made.
+void gemm_half_half_float_cuda
+(
+    cublasHandle_t cublas_handle,
+    const half* a,
+    const half* b,
+    float* c,
+    int size_m,
+    int size_n,
+    int size_k,
+    bool clear
+);
+
 void clear_tensor_cuda
 (
     half* c,

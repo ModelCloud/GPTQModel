@@ -65,7 +65,8 @@ cudaError_t blockfloat_decompose(const float* x, int bits, int64_t rows, int64_t
 cudaError_t blockfloat_linear(const void* x, int dtype,
                               const uint8_t* codes, const int8_t* exponents, int bits,
                               int64_t m, int64_t n, int64_t k,
-                              const void* bias, void* out, cudaStream_t stream);
+                              const void* bias, void* out, cudaStream_t stream,
+                              int32_t allow_cublas);
 
 // Writes a sentinel so callers can prove device code actually ran.
 cudaError_t blockfloat_selftest(int32_t* out, cudaStream_t stream);

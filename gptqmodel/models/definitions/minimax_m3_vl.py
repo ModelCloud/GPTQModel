@@ -6,20 +6,25 @@
 from typing import Dict, Optional
 
 from PIL import Image
-from transformers import AutoModelForImageTextToText, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class MiniMaxM3VLGPTQ(BaseQModel):
     fusable = FusableConfig("minimax_m3_vl").merge(LlamaFusableConfig(), profiles=("qkv",))
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+    )
 
     # The language tower consumes image embeddings at inference time, so the
     # calibration stream must include image-conditioned activations as well.
@@ -91,27 +96,34 @@ class MiniMaxM3VLGPTQ(BaseQModel):
         # The checkpoint advertises a remote `processing_minimax.MiniMaxVLProcessor`
         # that requires trust_remote_code; enabling that globally also swaps in a
         # remote config class that cannot rebuild the model. Build the equivalent
-        # native processor from the local image/tokenizer/video components instead.
-        from transformers import (
-            AutoImageProcessor,
-            AutoTokenizer,
-            AutoVideoProcessor,
+        # vendored processor from the local image/tokenizer/video components instead.
+        from ..ports.native.minimax_m3_vl.image_processing_minimax_m3_vl import (
+            MiniMaxM3VLImageProcessor,
         )
-        from transformers.models.minimax_m3_vl.processing_minimax_m3_vl import (
+        from ..ports.native.minimax_m3_vl.processing_minimax_m3_vl import (
             MiniMaxM3VLProcessor,
         )
+        from ..ports.native.minimax_m3_vl.video_processing_minimax_m3_vl import (
+            MiniMaxM3VLVideoProcessor,
+        )
 
+        tokenizer = getattr(self, "tokenizer", None)
+        tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
+        if tokenizer is None:
+            from ..ports.native.auto import NativeTokenizer
+
+            tokenizer = NativeTokenizer.from_pretrained(self.model_local_path)
         return MiniMaxM3VLProcessor(
-            image_processor=AutoImageProcessor.from_pretrained(
+            image_processor=MiniMaxM3VLImageProcessor.from_pretrained(
                 self.model_local_path
             ),
-            tokenizer=AutoTokenizer.from_pretrained(self.model_local_path),
-            video_processor=AutoVideoProcessor.from_pretrained(
+            tokenizer=tokenizer,
+            video_processor=MiniMaxM3VLVideoProcessor.from_pretrained(
                 self.model_local_path
             ),
         )
 
-    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+    def _prepare_calibration_batches(self, conversations, batch_size):
         processor = self.__dict__.get("processor") or self.load_processor()
         tokenizer = getattr(processor, "tokenizer", None)
         if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
@@ -122,7 +134,7 @@ class MiniMaxM3VLGPTQ(BaseQModel):
         calib_data = []
         for batch_index, batch in enumerate(
             batched_conversations(
-                calibration_dataset,
+                conversations,
                 batch_size,
                 process_func=self.preprocess_dataset,
             )
@@ -160,8 +172,16 @@ class MiniMaxM3VLGPTQ(BaseQModel):
                     )
             calib_data.append(inputs)
 
-        del processor
         return calib_data
+
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+        )
 
 
 __all__ = ["MiniMaxM3VLGPTQ"]

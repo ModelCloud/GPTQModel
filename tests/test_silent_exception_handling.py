@@ -20,7 +20,6 @@ import threading
 import pytest
 import torch
 
-import gptqmodel
 import gptqmodel.utils.looper_helpers as looper_helpers
 import gptqmodel.utils.torch as torch_utils
 from gptqmodel.looper.module_looper import ModuleLooper
@@ -36,22 +35,6 @@ def _captured_stderr(fn) -> str:
 # ---------------------------------------------------------------------------
 # 1. Compatibility shims must not fail silently
 # ---------------------------------------------------------------------------
-
-
-def test_transformers_device_map_compat_reports_upstream_api_change(monkeypatch):
-    """An upstream rename must produce a visible warning, not a silent no-op."""
-    import transformers.quantizers.quantizer_gptq as quantizer_gptq
-
-    recording = _RecordingLogger()
-    monkeypatch.setattr(gptqmodel, "log", recording)
-    monkeypatch.delattr(quantizer_gptq, "GptqHfQuantizer")
-
-    gptqmodel._patch_transformers_gptq_device_map_compat()
-
-    assert recording.warning_calls, "an upstream rename was reported at no level at all"
-    msg, exc_info = recording.warning_calls[0]
-    assert "device-map compat is inactive" in msg
-    assert exc_info is True, "the warning must carry the upstream traceback"
 
 
 class _RecordingLogger:
@@ -79,117 +62,6 @@ def _block_imports(monkeypatch, prefix, exc_factory):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-
-
-def test_openvino_compat_stays_quiet_when_dependency_is_absent(monkeypatch):
-    """A genuinely optional dependency must not spam warnings when missing."""
-    recording = _RecordingLogger()
-    monkeypatch.setattr(gptqmodel, "log", recording)
-    _block_imports(monkeypatch, "openvino", lambda: ImportError("openvino not installed"))
-
-    gptqmodel._patch_openvino_gptqmodel_compat()
-
-    assert not recording.warning_calls, (
-        f"a missing optional dependency must not log at warning level: {recording.warning_calls}"
-    )
-    assert any("OpenVINO" in msg for msg, _ in recording.debug_calls), (
-        f"the skipped OpenVINO shim was not recorded at debug level: {recording.debug_calls}"
-    )
-
-
-def test_openvino_compat_reports_unexpected_probe_failure(monkeypatch):
-    """A broken (not merely missing) OpenVINO install must be visible."""
-    recording = _RecordingLogger()
-    monkeypatch.setattr(gptqmodel, "log", recording)
-    _block_imports(
-        monkeypatch,
-        "openvino",
-        lambda: RuntimeError("openvino native library is corrupt"),
-    )
-
-    gptqmodel._patch_openvino_gptqmodel_compat()
-
-    assert recording.warning_calls, "an unexpected OpenVINO probe failure was silently dropped"
-    assert recording.warning_calls[0][1] is True, "the warning must carry the traceback"
-
-
-def test_triton_patch_failure_is_reported_by_import_guard(monkeypatch):
-    """The import-time guard must log instead of using a bare ``pass``."""
-    import ast
-    from pathlib import Path
-
-    init_py = Path(gptqmodel.__file__)
-    tree = ast.parse(init_py.read_text(encoding="utf-8"))
-
-    triton_guard = None
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Try):
-            continue
-        names = [ast.unparse(handler.type) for handler in node.handlers if handler.type is not None]
-        if "Exception" not in names:
-            continue
-        if any(
-            isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Attribute)
-            and isinstance(call.func.value, ast.Name)
-            and call.func.value.id == "TritonPatch"
-            for stmt in node.body
-            for call in ast.walk(stmt)
-        ):
-            triton_guard = node
-            break
-
-    assert triton_guard is not None, "TritonPatch.apply() import guard not found"
-    handler = triton_guard.handlers[0]
-    assert not any(isinstance(stmt, ast.Pass) for stmt in handler.body), (
-        "TritonPatch.apply() failures are swallowed by a bare `pass`"
-    )
-    log_calls = [
-        call
-        for stmt in handler.body
-        for call in ast.walk(stmt)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and call.func.attr in {"warning", "warn", "error", "exception"}
-    ]
-    assert log_calls, "TritonPatch.apply() failures are not logged"
-
-    # The traceback is the only way to diagnose which triton API moved.
-    assert any(
-        any(
-            kw.arg == "exc_info"
-            and isinstance(kw.value, ast.Constant)
-            and kw.value.value is True
-            for kw in call.keywords
-        )
-        for call in log_calls
-    ), "the TritonPatch.apply() warning must pass exc_info=True"
-
-
-def test_causal_conv1d_compat_reports_upstream_api_change(monkeypatch):
-    """A renamed transformers integration must not fail silently."""
-    real_import = __import__
-
-    def renamed_integration_import(name, globals=None, locals=None, fromlist=(), level=0):
-        # Break only the shim's own `from transformers.integrations import
-        # hub_kernels`; every other import must keep working.
-        if name == "transformers.integrations" and fromlist and "hub_kernels" in fromlist:
-            raise ImportError("cannot import name 'hub_kernels' from 'transformers.integrations'")
-        return real_import(name, globals, locals, fromlist, level)
-
-    recording = _RecordingLogger()
-    monkeypatch.setattr(gptqmodel, "log", recording)
-    monkeypatch.setattr("builtins.__import__", renamed_integration_import)
-
-    gptqmodel._patch_transformers_causal_conv1d_hub_kernel_compat()
-
-    assert recording.warning_calls, "a broken causal-conv1d shim was silently ignored"
-    msg, exc_info = recording.warning_calls[0]
-    assert "causal-conv1d" in msg
-    assert "inactive" in msg, (
-        f"the shim must report that it is inert, not a generic probe failure: {msg!r}"
-    )
-    assert exc_info is True
 
 
 # ---------------------------------------------------------------------------
@@ -410,25 +282,16 @@ def test_subset_callback_in_place_propagates_without_spurious_warning(monkeypatc
 # ---------------------------------------------------------------------------
 
 
-def test_unreadable_config_json_is_reported(tmp_path, monkeypatch):
-    """A corrupt config.json must not silently read as "not DeepSeek-VL2"."""
+def test_unreadable_config_json_is_reported(tmp_path):
+    """A corrupt config.json must fail the public config loader before dispatch."""
     from gptqmodel.utils import hf as hf_utils
 
     model_dir = tmp_path / "broken-model"
     model_dir.mkdir()
     (model_dir / "config.json").write_text("{ this is not json", encoding="utf-8")
 
-    calls = []
-
-    class FakeLogger:
-        def debug(self, msg, *args, **kwargs):
-            calls.append((msg, kwargs.get("exc_info")))
-
-    monkeypatch.setattr(hf_utils, "log", FakeLogger())
-
-    assert hf_utils._is_deepseek_vl_v2_model_path(str(model_dir)) is False
-    assert calls, "a corrupt config.json was silently ignored"
-    assert calls[0][1] is True
+    with pytest.raises(OSError, match="not a valid JSON file"):
+        hf_utils.load_model_config(str(model_dir))
 
 
 def test_generation_config_is_loaded_not_silently_skipped(tmp_path):
@@ -444,8 +307,8 @@ def test_generation_config_is_loaded_not_silently_skipped(tmp_path):
 
     assert cfg is not None, "generation config silently failed to load"
     assert cfg.max_new_tokens == 7
-    # _sanitize_generation_config forces sampling on.
-    assert cfg.do_sample is True
+    # The checkpoint declared greedy decoding; normalization must preserve it.
+    assert cfg.do_sample is False
 
 
 def test_generation_config_enables_sampling_before_validation(tmp_path):

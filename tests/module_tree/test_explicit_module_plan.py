@@ -8,7 +8,6 @@ import pytest
 import torch.nn as nn
 
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.models.definitions.hymba import HymbaQModel
 from gptqmodel.models.module_plan import ModulePlan, _model_module_plan
 from gptqmodel.models.moe_lifecycle import MoELifecycleHooks
 from gptqmodel.models.moe_lifecycle import _module_plan as _hook_module_plan
@@ -96,7 +95,14 @@ def test_expert_queries_reject_undeclared_descendants():
 
 
 def test_fixed_index_expert_definition_is_not_a_shared_expert():
-    plan = ModulePlan.from_tree(HymbaQModel.module_tree)
+    # Hymba's current port has a dynamic expert bank. Keep the fixed-index
+    # contract under test explicit rather than inheriting a changing model.
+    class FixedExpertDefinition(BaseQModel):
+        module_tree = ["model", "layers", "#", {
+            "moe:moe": {"experts": {"0": ("gate_proj:0", "up_proj:0", "down_proj:1")}},
+        }]
+
+    plan = ModulePlan.from_tree(FixedExpertDefinition.module_tree)
     assert plan.expert_containers() == ("moe.experts",)
     assert plan.shared_expert_containers() == ()
     assert plan.expert_container_leaf("moe") == "experts"
@@ -106,7 +112,7 @@ def test_fixed_index_expert_definition_is_not_a_shared_expert():
 
     block = nn.Module()
     block.experts = nn.ModuleList([nn.Linear(2, 2)])
-    assert MoELifecycleHooks().get_experts_module(block, HymbaQModel) is block.experts
+    assert MoELifecycleHooks().get_experts_module(block, FixedExpertDefinition) is block.experts
 
 
 def test_unbound_moe_hook_compiles_definition_plan_instead_of_using_method():

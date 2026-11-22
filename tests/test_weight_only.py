@@ -307,7 +307,7 @@ def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
         tokenizer=None,
     )
 
-    result = model.quantize(calibration=None, backend=BACKEND.TORCH)
+    result = model.quantize(backend=BACKEND.TORCH)
 
     assert "weight_only_rtn" in result
     assert model.quantized is True
@@ -321,7 +321,8 @@ def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
         original_weight = original_state[f"{name}.weight"].to(dtype=torch.float16)
         expected_qweight, expected_g_idx = _reference_rtn_quantized_weight(original_weight, device=device, smooth=smooth)
 
-        assert qmodule.qzero_format() == 1
+        # ``pack()`` writes logical (v2) zero points and records that layout.
+        assert qmodule.qzero_format() == 2
         assert qmodule.qweight.device.type == "cpu"
         assert qmodule.qzeros.device.type == "cpu"
         assert qmodule.scales.device.type == "cpu"
@@ -364,7 +365,7 @@ def test_baseqmodel_quantize_accepts_string_backend_and_describes_plan():
         tokenizer=None,
     )
 
-    model.quantize(calibration=None, backend="torch")
+    model.quantize(backend="torch")
 
     assert model.quantized is True
     described = model.quantization_run_plan.describe()
@@ -399,7 +400,7 @@ def test_baseqmodel_quantize_allows_rtn_awq_export():
         tokenizer=None,
     )
 
-    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+    result = model.quantize(backend=BACKEND.AUTO)
 
     assert "weight_only_rtn" in result
     assert model.quantized is True
@@ -455,7 +456,7 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
         tokenizer=None,
     )
 
-    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+    result = model.quantize(backend=BACKEND.AUTO)
 
     assert "weight_only_gguf" in result
     assert model.quantized is True
@@ -463,13 +464,11 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
     assert model.quantize_config.bits == bit_width
     assert model.quantize_config.quant_method == METHOD.GGUF
     assert model.quantize_config.export_quant_method() == METHOD.GGUF
-    # The fused Triton kernel only implements a subset of the ggml layouts;
-    # Q4_0/Q5_0 must fall back to the portable Torch kernel even on CUDA.
-    fused_qtype = tensor_qtype in GGUFTritonKernel.SUPPORTS_GGUF_QTYPES
-    expected_kernel = (
-        GGUFTritonKernel if device_type == "cuda" and fused_qtype else GGUFTorchLinear
-    )
-    assert model.qlinear_kernel is expected_kernel
+    # ``quantize()`` re-homes the in-session model onto a kernel that supports
+    # the device the packed layers actually live on. ``post_quantize`` leaves
+    # them on CPU, so even a CUDA host ends on the portable Torch kernel
+    # (issue #4381).
+    assert model.qlinear_kernel is GGUFTorchLinear
 
     qmodules = find_modules(model.model, [model.qlinear_kernel])
     assert len(qmodules) == 4
@@ -537,16 +536,19 @@ def test_baseqmodel_quantize_gguf_dynamic_qtype_falls_back_to_torch():
         tokenizer=None,
     )
 
-    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+    result = model.quantize(backend=BACKEND.AUTO)
 
     assert "weight_only_gguf" in result
-    assert model.qlinear_kernel is GGUFTritonKernel
+    # The dynamic Q4_0 module must fall back to the portable kernel while
+    # packing; the post-quantize re-home then moves every layer onto that
+    # kernel because the finished model lives on CPU (issue #4381).
+    assert model.qlinear_kernel is GGUFTorchLinear
     up_proj = model.model.model.layers[0].mlp.up_proj
     down_proj = model.model.model.layers[0].mlp.down_proj
     assert up_proj.gguf_tensor_qtype == "Q4_0"
     assert isinstance(up_proj, GGUFTorchLinear)
     assert down_proj.gguf_tensor_qtype == "Q4_K"
-    assert isinstance(down_proj, GGUFTritonKernel)
+    assert isinstance(down_proj, GGUFTorchLinear)
 
 
 def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):
@@ -575,7 +577,7 @@ def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):
 
     monkeypatch.setattr(RTN, "quantize", _fail_quantize)
 
-    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+    result = model.quantize(backend=BACKEND.AUTO)
 
     assert "weight_only_gguf" in result
     assert model.quantized is True
@@ -613,7 +615,7 @@ def test_baseqmodel_quantize_gguf_weight_only_applies_auto_module_decoder(monkey
 
     monkeypatch.setattr(BaseQModel, "shell_module_materialize", _spy_shell_module_materialize)
 
-    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+    result = model.quantize(backend=BACKEND.AUTO)
 
     assert "weight_only_gguf" in result
     assert materialize_calls.count("quant_source") == 4
@@ -752,8 +754,17 @@ def test_gguf_dequantize_weight_accepts_requested_dtype_and_device(bits: str):
     torch.testing.assert_close(direct, baseline, atol=2e-3, rtol=0.0)
 
 
-def test_gguf_forward_requests_dequantized_weight_in_input_dtype(monkeypatch):
-    dtype = torch.float16 if torch.cuda.is_available() else torch.bfloat16
+@pytest.mark.parametrize(
+    ("dtype", "expected_dtype"),
+    [
+        # Finite Q4_0 scales let an FP16 activation dequantize narrow.
+        (torch.float16, torch.float16),
+        # BF16 activations always reconstruct the dense fallback in FP32 so the
+        # output (and bias) are rounded once (``_use_fp32_gguf_weight``).
+        (torch.bfloat16, torch.float32),
+    ],
+)
+def test_gguf_forward_requests_dequantized_weight_in_input_dtype(monkeypatch, dtype, expected_dtype):
     case = _build_rtn_microbench_case(dtype, bits="q4_0")
     module = _build_rtn_gguf_module(case)
     module.gguf_fused_cpu_max_rows = 0
@@ -774,7 +785,7 @@ def test_gguf_forward_requests_dequantized_weight_in_input_dtype(monkeypatch):
     module(case["inputs"])
 
     assert observed["device"] == case["inputs"].device
-    assert observed["dtype"] == case["inputs"].dtype
+    assert observed["dtype"] == expected_dtype
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF K-path CUDA tests")
@@ -912,6 +923,9 @@ def test_gguf_triton_q1_0_g128_fused_forward_matches_dense_baseline():
 
 
 def test_gguf_triton_kernel_rejects_unsupported_formats():
+    # Construction validates the Triton runtime before the format check.
+    pytest.importorskip("triton")
+
     with pytest.raises(NotImplementedError, match="only supports fused GGUF Triton formats"):
         GGUFTritonKernel(
             bits="q4_0",
@@ -1841,119 +1855,54 @@ def test_gguf_forward_uses_fused_k_path_for_small_cpu_batches():
     assert calls == {"dense": 1, "fused": 0}
 
 
-def test_gguf_forward_autotunes_once_per_instance_with_fused_plan_on_cpu(monkeypatch):
+def test_gguf_forward_uses_the_static_gates_not_a_timed_plan(monkeypatch):
+    """The path is chosen from the shape gates only; nothing times the paths (#4590)."""
+
     case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
     module = _build_rtn_gguf_module(case).cpu().eval()
     inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
 
     module.gguf_fused_cpu_max_rows = inputs.shape[0]
     module.gguf_fused_cpu_min_matrix_elements = 0
-    module.autotune_enabled = True
-    module.clear_autotune()
     module.clear_weight_cache()
+
+    def timing_forbidden(*args, **kwargs):
+        raise AssertionError("GGUF fused dispatch must not benchmark the two paths")
+
+    for attr in ("_autotune", "_benchmark_forward_runner", "_benchmark_dense_forward", "_benchmark_fused_forward"):
+        if hasattr(GGUFTorchLinear, attr):
+            monkeypatch.setattr(GGUFTorchLinear, attr, timing_forbidden)
 
     calls = {"dense": 0, "fused": 0}
 
-    def _dense(self, x_flat):
+    def _dense(self, x_flat, bias=None):
         calls["dense"] += 1
-        return 2.0
+        return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 
-    def _fused(self, x_flat):
+    def _fused(self, x_flat, bias=None):
         calls["fused"] += 1
-        return 1.0
+        return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _dense)
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fused)
+    module._forward_dequant_matmul = _dense.__get__(module, GGUFTorchLinear)
+    module._forward_fused_k = _fused.__get__(module, GGUFTorchLinear)
 
-    module(inputs)
+    with torch.inference_mode():
+        module(inputs)
+        module(inputs)
+        assert calls == {"dense": 0, "fused": 2}
+        assert module.get_autotune_result() is None
 
-    assert calls == {"dense": 1, "fused": 1}
-    assert module.get_autotune_result() is True
+        module.gguf_fused_cpu_max_rows = 1
+        calls = {"dense": 0, "fused": 0}
+        module(inputs)
+        assert calls == {"dense": 1, "fused": 0}
 
-    def _fail(self, x_flat):
-        raise AssertionError("autotune benchmark should not rerun for cached fused plan")
-
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _fail)
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fail)
-
-    module(inputs)
-    assert module.get_autotune_result() is True
-
-
-def test_gguf_forward_autotunes_once_per_instance_with_dense_plan_on_cpu(monkeypatch):
-    case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
-    module = _build_rtn_gguf_module(case).cpu().eval()
-    inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
-
-    module.gguf_fused_cpu_max_rows = inputs.shape[0]
-    module.gguf_fused_cpu_min_matrix_elements = 0
-    module.autotune_enabled = True
-    module.clear_autotune()
-    module.clear_weight_cache()
-
-    calls = {"dense": 0, "fused": 0}
-
-    def _dense(self, x_flat):
-        calls["dense"] += 1
-        return 1.0
-
-    def _fused(self, x_flat):
-        calls["fused"] += 1
-        return 2.0
-
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _dense)
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fused)
-
-    module(inputs)
-
-    assert calls == {"dense": 1, "fused": 1}
-    assert module.get_autotune_result() is False
-
-    def _fail(self, x_flat):
-        raise AssertionError("autotune benchmark should not rerun for cached dense plan")
-
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _fail)
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fail)
-
-    module(inputs)
-    assert module.get_autotune_result() is False
-
-
-def test_gguf_forward_autotunes_once_per_module_instance(monkeypatch):
-    case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
-    inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
-    module_a = _build_rtn_gguf_module(case).cpu().eval()
-    module_b = _build_rtn_gguf_module(case).cpu().eval()
-
-    for module in (module_a, module_b):
+        # Widening the gate again returns to the fused path: the choice is not
+        # cached from an earlier shape.
         module.gguf_fused_cpu_max_rows = inputs.shape[0]
-        module.gguf_fused_cpu_min_matrix_elements = 0
-        module.autotune_enabled = True
-        module.clear_autotune()
-        module.clear_weight_cache()
-
-    calls = {"dense": 0, "fused": 0}
-
-    def _dense(self, x_flat):
-        calls["dense"] += 1
-        return 2.0
-
-    def _fused(self, x_flat):
-        calls["fused"] += 1
-        return 1.0
-
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _dense)
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fused)
-
-    module_a(inputs)
-
-    assert calls == {"dense": 1, "fused": 1}
-    assert module_a.get_autotune_result() is True
-
-    module_b(inputs)
-
-    assert calls == {"dense": 2, "fused": 2}
-    assert module_b.get_autotune_result() is True
+        calls = {"dense": 0, "fused": 0}
+        module(inputs)
+        assert calls == {"dense": 0, "fused": 1}
 
 
 @pytest.mark.parametrize(

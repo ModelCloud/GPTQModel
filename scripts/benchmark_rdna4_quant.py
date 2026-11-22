@@ -4,7 +4,7 @@
 
 """Stage-by-stage quantization benchmark for RDNA4 (gfx1200/gfx1201/gfx1250).
 
-Measures, per quantization method (GPTQ / AWQ / QQQ / ParoQuant):
+Measures, per quantization method (GPTQ / AWQ / QQQ / Paro):
 
 * load time        - ``GPTQModel.load`` with the quantization config attached
 * calibration time - tokenizer encode of the built-in calibration text
@@ -18,9 +18,9 @@ The BLAS probe enters ``gptqmodel.utils.rocm.quant_blas_backend()`` and reads
 backend that a real quantize would use, not just the user's torch default.
 hipBLASLt ships gfx1200/gfx1201 Tensile libraries but is *not* tuned for RDNA4;
 rocBLAS is the default and hipBLASLt is only an experimental opt-in via
-``GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt``.
+``KernelConfig(rocm_quant_blas="hipblaslt")``.
 
-This script never enables ``GPTQ_TORCH_CACHE_WEIGHTS``: quantization benchmarks
+This script never enables ``KernelConfig.torch_cache_weights``: quantization benchmarks
 measure the packing path, and the dense-weight cache is forbidden for inference.
 
 No GPU is required for ``--dry-run``: the plan (arguments, stages, arch probe,
@@ -45,7 +45,7 @@ import torch
 
 
 DEFAULT_MODEL = "/monster/data/model/Llama-3.2-1B-Instruct"
-METHOD_CHOICES = ("gptq", "awq", "qqq", "paroquant")
+METHOD_CHOICES = ("gptq", "awq", "qqq", "paro")
 
 # Deterministic calibration text: this benchmark measures wall time and VRAM,
 # not quantization quality, so a network/dataset dependency would only add
@@ -79,6 +79,14 @@ def parse_args() -> argparse.Namespace:
 
 def _dtype(name: str) -> torch.dtype:
     return {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[name]
+
+
+def _torch_cache_weights() -> bool:
+    """Report ``KernelConfig.torch_cache_weights`` for this run."""
+
+    from gptqmodel.utils.kernel import get_kernel_config
+
+    return get_kernel_config().torch_cache_weights
 
 
 def _device_report(device: torch.device) -> dict[str, Any]:
@@ -128,7 +136,10 @@ def _blas_report() -> dict[str, Any]:
     except Exception as exc:  # pragma: no cover - import failure is informative
         return {"is_rocm": None, "error": f"import gptqmodel.utils.rocm failed: {exc}"}
 
-    requested = os.getenv(rocm.QUANT_BLAS_BACKEND_ENV, rocm.QUANT_BLAS_BACKEND_DEFAULT)
+    from gptqmodel.utils.kernel import get_kernel_config
+
+    configured = get_kernel_config().rocm_quant_blas
+    requested = rocm.QUANT_BLAS_BACKEND_DEFAULT if configured is None else configured
     default_backend = rocm.preferred_blas_library()
     effective = default_backend
     error = None
@@ -155,7 +166,7 @@ def _quant_config(method: str, bits: int, group_size: int):
         "gptq": (METHOD.GPTQ, FORMAT.GPTQ),
         "awq": (METHOD.AWQ, FORMAT.GEMM),
         "qqq": (METHOD.QQQ, FORMAT.QQQ),
-        "paroquant": (METHOD.PARO, FORMAT.PAROQUANT),
+        "paro": (METHOD.PARO, FORMAT.PARO),
     }[method]
     kwargs: dict[str, Any] = {
         "method": method_format[0],
@@ -163,7 +174,7 @@ def _quant_config(method: str, bits: int, group_size: int):
         "bits": bits,
         "group_size": group_size,
     }
-    if method == "paroquant":
+    if method == "paro":
         kwargs["krot"] = 8
     return QuantizeConfig(**kwargs)
 
@@ -200,9 +211,9 @@ def _plan(args: argparse.Namespace, reason: str) -> dict[str, Any]:
             "save (model.save)",
         ],
         "recorded": ["seconds per stage", "peak VRAM MiB per stage", "BLAS backend per stage"],
-        "env": {
-            "GPTQMODEL_ROCM_QUANT_BLAS": os.getenv("GPTQMODEL_ROCM_QUANT_BLAS", "<unset -> rocblas>"),
-            "GPTQ_TORCH_CACHE_WEIGHTS": os.getenv("GPTQ_TORCH_CACHE_WEIGHTS", "0"),
+        "kernel_policy": {
+            "rocm_quant_blas": rocm.quantize_tuning(device)["blas_backend"],
+            "torch_cache_weights": _torch_cache_weights(),
         },
         "device_info": _device_report(device),
         "blas": _blas_report(),
@@ -249,7 +260,7 @@ def _timed(device: torch.device, fn) -> tuple[float, Any]:
 def run(args: argparse.Namespace) -> int:
     from transformers import AutoTokenizer
 
-    from gptqmodel import GPTQModel
+    from gptqmodel import CalibrationConfig, GPTQModel
     from gptqmodel.utils.backend import BACKEND
 
     device = torch.device(args.device)
@@ -307,7 +318,7 @@ def run(args: argparse.Namespace) -> int:
     )
     record("model_load", seconds)
 
-    seconds, _ = _timed(device, lambda: model.quantize(calibration, batch_size=1, backend=BACKEND.AUTO))
+    seconds, _ = _timed(device, lambda: model.quantize(CalibrationConfig(dataset=calibration, batch_size=1), backend=BACKEND.AUTO))
     record("quantize", seconds)
     blas_during = _blas_report()
 
@@ -330,7 +341,7 @@ def run(args: argparse.Namespace) -> int:
         "rows": rows,
         "total_seconds": round(sum(row["seconds"] for row in rows), 4),
         "peak_vram_mib": max(row["peak_mib"] for row in rows),
-        "dense_weight_cache_enabled": os.getenv("GPTQ_TORCH_CACHE_WEIGHTS", "0") == "1",
+        "dense_weight_cache_enabled": _torch_cache_weights(),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     if args.output_json is not None:

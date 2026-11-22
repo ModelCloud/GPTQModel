@@ -42,10 +42,7 @@ def test_prepare_locateanything_dataset_reuses_shared_dataset(monkeypatch):
 
 class TestLocateAnything(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/LocateAnything-3B"  # nvidia/LocateAnything-3B
-    TRUST_REMOTE_CODE = True
-    # The bundled Qwen forward implements its mask path for SDPA (and Magi),
-    # but rejects both eager and FlashAttention 2. The compatibility shim maps
-    # ModelTest's eager request to SDPA for this checkpoint.
+    # The package-owned port supports CPU eager and SDPA block-diffusion masks.
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 16
     EVAL_TASKS_SLOW = {

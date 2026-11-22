@@ -36,6 +36,7 @@ from ..quantization.config import VPTQConfig
 from ..utils.fallback import should_use_fallback
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
+from ..utils.quant_metrics import relative_error_from_energies
 from ..utils.vptq import (
     vptq_group_for_column,
     vptq_group_setting,
@@ -50,6 +51,61 @@ _HESSIAN_DTYPE = torch.float64
 _DISTANCE_CHUNK_BYTES = 256 * 1024 * 1024
 _LOSS_CHUNK_BYTES = 64 * 1024 * 1024
 _EPS = 1e-12
+
+
+@dataclass(frozen=True)
+class _SegmentPlan:
+    """Bucket metadata shared by every reduction over one assignment.
+
+    A k-means iteration reduces the same assignment more than once: the
+    weighted vector sum and the weight sum see identical buckets, so the stable
+    sort, ``bincount`` and non-empty mask only have to be computed once per
+    iteration. ``order`` is ``None`` for an empty assignment, which needs no
+    sorting and produces all-zero buckets.
+    """
+
+    num_buckets: int
+    order: Optional[torch.Tensor]
+    nonzero: Optional[torch.Tensor]
+    lengths: Optional[torch.Tensor]
+
+
+def _segment_plan(num_buckets: int, index: torch.Tensor) -> _SegmentPlan:
+    """Sort ``index`` by bucket once and cache what the reductions need."""
+
+    if index.numel() == 0:
+        return _SegmentPlan(
+            num_buckets=num_buckets, order=None, nonzero=None, lengths=None
+        )
+
+    counts = torch.bincount(index, minlength=num_buckets)
+    nonzero = counts > 0
+    return _SegmentPlan(
+        num_buckets=num_buckets,
+        order=torch.argsort(index, stable=True),
+        nonzero=nonzero,
+        lengths=counts[nonzero],
+    )
+
+
+def _segment_sum_with_plan(plan: _SegmentPlan, source: torch.Tensor) -> torch.Tensor:
+    """Sum ``source`` rows into the plan's buckets, in the plan's fixed order."""
+
+    result = torch.zeros(
+        (plan.num_buckets, *source.shape[1:]),
+        dtype=source.dtype,
+        device=source.device,
+    )
+    if plan.order is None:
+        return result
+
+    sorted_source = source.index_select(0, plan.order)
+    # A float32 reduction over a whole bucket loses low bits, so accumulate in
+    # float64 and round once at the end. The result is still a fixed-order
+    # reduction.
+    totals = torch.segment_reduce(sorted_source.double(), "sum", lengths=plan.lengths)
+    result[plan.nonzero] = totals.to(source.dtype)
+    return result
 
 
 def _deterministic_segment_sum(
@@ -77,24 +133,9 @@ def _deterministic_segment_sum(
     kernels and can raise for an op that has no deterministic implementation.
     """
 
-    result = torch.zeros(
-        (num_buckets, *source.shape[1:]), dtype=source.dtype, device=source.device
-    )
-    if index.numel() == 0:
-        return result
-
-    order = torch.argsort(index, stable=True)
-    sorted_source = source.index_select(0, order)
-    counts = torch.bincount(index, minlength=num_buckets)
-    nonzero = counts > 0
-    # A float32 reduction over a whole bucket loses low bits, so accumulate in
-    # float64 and round once at the end. The result is still a fixed-order
-    # reduction.
-    totals = torch.segment_reduce(
-        sorted_source.double(), "sum", lengths=counts[nonzero]
-    )
-    result[nonzero] = totals.to(source.dtype)
-    return result
+    # One reduction builds the plan locally. Callers that reduce the same
+    # assignment several times build it once and reuse it (_segment_plan).
+    return _segment_sum_with_plan(_segment_plan(num_buckets, index), source)
 
 
 def _matrix_to_vectors(data: torch.Tensor, vector_len: int) -> Tuple[torch.Tensor, int]:
@@ -149,8 +190,17 @@ def _chunked_assign(
         # `||c||^2 - 2 x.c` is the expanded squared distance minus `||x||^2`.
         # The omitted term is constant per row, so it cannot change the argmin,
         # but the returned residual must add it back to be a true distance.
-        distance = centroids_norm.unsqueeze(0) - 2.0 * (block @ centroids.t())
+        #
+        # `addmm` fuses the scaling and the subtraction into the GEMM epilogue,
+        # so only one chunk-sized buffer is live instead of the matmul result,
+        # its `2.0 *` product and their difference. `alpha=-2.0` is a power of
+        # two, so the fused form is bitwise identical to the expanded one.
+        distance = torch.addmm(
+            centroids_norm.unsqueeze(0), block, centroids.t(), alpha=-2.0
+        )
         best_distance, best_index = distance.min(dim=1)
+        # Release the distance block before the residual allocates `block * block`.
+        del distance
         assignment[start:end] = best_index
         residual[start:end] = best_distance + (block * block).sum(dim=1)
     return assignment, residual
@@ -206,11 +256,40 @@ def _weighted_kmeans(
         assignment, residual = _chunked_assign(data, centroids)
         inertia = (residual.double() * weights.double()).sum()
 
-        weighted = data * weights.unsqueeze(1)
-        sums = _deterministic_segment_sum(num_centroids, assignment, weighted)
-        counts = _deterministic_segment_sum(num_centroids, assignment, weights)
-        updated = sums / counts.clamp_min(_EPS).unsqueeze(1)
+        # Both reductions cover the same assignment, so the stable sort, bucket
+        # lengths and non-empty mask are built once and shared. Computing them
+        # twice per Lloyd iteration was pure duplicated work, and the
+        # reduction order (and therefore the codebook bits) is unchanged.
+        plan = _segment_plan(num_centroids, assignment)
+        counts = _segment_sum_with_plan(plan, weights)
         empty = counts <= 0
+        # The centroid is the weighted mean `sum(w * x) / sum(w)`, so a
+        # non-empty bucket must divide by its own total weight even when that
+        # total is tiny. Clamping the divisor to `_EPS` kept the true weighted
+        # sum but inflated the denominator: a bucket holding one sample of
+        # weight `1e-14` became `1e-14 * x / 1e-12 = 0.01 * x`. Only a bucket
+        # with a non-positive total has no mean; it keeps its old centroid.
+        divisor = torch.where(empty, torch.ones_like(counts), counts)
+        # Subnormal weight totals would underflow `w * x` to zero before the
+        # division could cancel the scale. Rescale only those buckets, by the
+        # same factor on both the products and the divisor, so the mean is
+        # unchanged while the arithmetic stays in the normal range. The
+        # reciprocal is bounded by the dtype maximum so a subnormal total
+        # cannot produce `inf`. Every other bucket keeps factor 1, and
+        # multiplying by an exact 1.0 leaves its previous bits unchanged.
+        tiny = ~empty & (counts < torch.finfo(counts.dtype).tiny)
+        if bool(tiny.any()):
+            factor = torch.where(
+                tiny,
+                divisor.reciprocal().clamp(max=torch.finfo(counts.dtype).max),
+                torch.ones_like(counts),
+            )
+            weighted = data * (weights * factor[assignment]).unsqueeze(1)
+            divisor = divisor * factor
+        else:
+            weighted = data * weights.unsqueeze(1)
+        sums = _segment_sum_with_plan(plan, weighted)
+        updated = sums / divisor.unsqueeze(1)
         centroids = torch.where(empty.unsqueeze(1), centroids, updated)
 
         # Enqueue the independent centroid update before waiting for inertia.
@@ -402,6 +481,44 @@ class VPTQ:
         self._device_sample_counts.clear()
         return self.H2
 
+    def adopt_hessian_from(self, leader: "VPTQ") -> None:
+        """Replace this task's Hessian with a private copy of ``leader``'s.
+
+        Sibling projections of one ``:in=<tag>`` group see the same activation
+        tensor, so their float64 means are bitwise identical.  The leader's
+        partials are folded into ``H2`` first, and the copy stays independent
+        because ``quantize_weight(..., owns_hessian=True)`` normalizes the
+        buffer in place.
+        """
+
+        if leader is self:
+            return
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"VPTQ: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+
+        source = leader.materialize_hessian(self.dev)
+        with leader.lock:
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            materialized_samples = leader._materialized_samples
+            copy = safe_move_to(
+                source.detach(),
+                self.dev,
+                dtype=_HESSIAN_DTYPE,
+                copy=True,
+            )
+
+        with self.lock:
+            self.H2 = copy
+            self.nsamples = nsamples
+            self.fwd_counter = fwd_counter
+            self._materialized_samples = materialized_samples
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+
     def _layer_weight(self) -> torch.Tensor:
         weight = self.layer.weight.data
         if isinstance(self.layer, transformers.Conv1D):
@@ -430,7 +547,11 @@ class VPTQ:
         start = time.time()
         hessian = self.materialize_hessian(self.dev)
         weight = self._layer_weight().to(self.dev)
-        result, loss = self.quantize_weight(weight, hessian)
+        # Transfer ownership of the Hessian: `quantize_weight` normalizes the
+        # buffer in place, and the quantizer must not keep a second reference
+        # alive for the duration of the pass.
+        self.free()
+        result, loss = self.quantize_weight(weight, hessian, owns_hessian=True)
         duration = time.time() - start
         result.stats["loss"] = loss
         result.stats["nsamples"] = self.nsamples
@@ -444,8 +565,17 @@ class VPTQ:
         weight: torch.Tensor,
         hessian: torch.Tensor,
         target_dtype: Optional[torch.dtype] = None,
+        *,
+        owns_hessian: bool = False,
     ) -> Tuple[VPTQQuantResult, float]:
-        """Quantize `weight` (`[out_features, in_features]`) with `hessian`."""
+        """Quantize `weight` (`[out_features, in_features]`) with `hessian`.
+
+        When `owns_hessian` is true the caller transfers ownership of a
+        same-device, `_HESSIAN_DTYPE` buffer that is no longer needed after
+        this call. The quantizer then normalizes it in place instead of
+        allocating a private copy, which removes one `n x n` float64 temporary
+        at the peak for large layers.
+        """
 
         qcfg = self.qcfg
         device = weight.device
@@ -470,7 +600,13 @@ class VPTQ:
         self._outlier_size = outlier_size
         self._group_size = group_size
 
-        hessian = hessian.to(device=device, dtype=_HESSIAN_DTYPE).clone()
+        owns_hessian = (
+            owns_hessian
+            and hessian.device == device
+            and hessian.dtype == _HESSIAN_DTYPE
+        )
+        if not owns_hessian:
+            hessian = hessian.to(device=device, dtype=_HESSIAN_DTYPE).clone()
         if not self._hessian_is_usable(hessian):
             # A module that never received calibration traffic has no Hessian at
             # all. The per-column rule for dead channels would zero the whole
@@ -497,7 +633,13 @@ class VPTQ:
         weight = weight_original
 
         mean_diag = torch.diagonal(hessian).mean()
-        hessian = hessian / torch.where(mean_diag > 0, mean_diag, torch.ones_like(mean_diag))
+        hessian_scale = torch.where(
+            mean_diag > 0, mean_diag, torch.ones_like(mean_diag)
+        )
+        if owns_hessian:
+            hessian.div_(hessian_scale)
+        else:
+            hessian = hessian / hessian_scale
 
         weight_scale = None
         weight_bias = None
@@ -521,6 +663,17 @@ class VPTQ:
             hessian = hessian[perm][:, perm]
             if kmeans_weight is not None:
                 kmeans_weight = kmeans_weight[:, perm]
+
+        # ``norm_dim=0`` divides each input channel by its own scale, so the
+        # error in the original weight space is ``D * e`` with
+        # ``D = diag(scale)``. Error feedback must minimize
+        # ``e^T (D H D) e``; using the raw Hessian biases the compensation
+        # toward channels whose normalization happened to be large.
+        pass_hessian = hessian
+        if qcfg.enable_norm and int(qcfg.norm_dim) == 0 and weight_scale is not None:
+            channel_scale = weight_scale[perm] if perm is not None else weight_scale
+            channel_scale = channel_scale.to(dtype=hessian.dtype, device=hessian.device)
+            pass_hessian = hessian * channel_scale.unsqueeze(0) * channel_scale.unsqueeze(1)
 
         group_bounds = [(0, outlier_size)] + [
             (
@@ -562,9 +715,16 @@ class VPTQ:
         working_res_centroids: Dict[int, Optional[torch.Tensor]] = dict.fromkeys(centroids)
         enable_residual = num_res_centroids[1] > 1
 
+        # Both passes use the same damped inverse Hessian. Factorize it once:
+        # the fp64 Cholesky is the dominant temporary for large layers, and the
+        # residual pass previously recomputed it from identical inputs.
+        inv_hessian = self._inverse_hessian_cholesky(pass_hessian).to(
+            dtype=torch.float32
+        )
+
         quantized, qerror, indices, res_indices = self._vptq_pass(
             weight=weight,
-            hessian=hessian,
+            inv_hessian=inv_hessian,
             group_bounds=group_bounds,
             vector_lens=vector_lens,
             centroids=working_centroids,
@@ -596,7 +756,7 @@ class VPTQ:
 
             quantized, qerror, indices, res_indices = self._vptq_pass(
                 weight=weight,
-                hessian=hessian,
+                inv_hessian=inv_hessian,
                 group_bounds=group_bounds,
                 vector_lens=vector_lens,
                 centroids=working_centroids,
@@ -655,15 +815,23 @@ class VPTQ:
                 f"VPTQ: Hessian for `{self.name}` is not positive definite; "
                 "increase `percdamp` or provide more calibration data."
             ) from exc
-        inverse = torch.cholesky_inverse(cholesky)
-        return torch.linalg.cholesky(inverse, upper=True)
+        # The damped copy is only needed for the factorization. Release it
+        # before the inversion so the peak stays at two `n x n` buffers.
+        del damped
+
+        # Invert and re-factor in place. `cholesky_inverse` allocates its own
+        # output, so reusing the factor buffer avoids one more `n x n`
+        # temporary; the alias is bitwise identical to the out-of-place call.
+        torch.cholesky_inverse(cholesky, out=cholesky)
+        torch.linalg.cholesky(cholesky, upper=True, out=cholesky)
+        return cholesky
 
     @torch.no_grad()
     def _vptq_pass(
         self,
         *,
         weight: torch.Tensor,
-        hessian: torch.Tensor,
+        inv_hessian: torch.Tensor,
         group_bounds,
         vector_lens,
         centroids: Dict[int, Optional[torch.Tensor]],
@@ -693,7 +861,6 @@ class VPTQ:
             else:
                 res_index_tensors[cidx] = None
 
-        inv_hessian = self._inverse_hessian_cholesky(hessian).to(dtype=torch.float32)
         diag = torch.diagonal(inv_hessian)
         if bool((diag <= 0).any()):
             raise RuntimeError(f"VPTQ: non-positive inverse-Hessian diagonal for `{self.name}`.")
@@ -808,5 +975,8 @@ class VPTQ:
             error_sum.add_((error_block * delta[start:end]).sum())
             weight_sum.add_((weight_block * weight_original[start:end].to(torch.float64)).sum())
 
-        denominator = torch.clamp(weight_sum.abs(), min=_EPS)
-        return float((error_sum / denominator).item())
+        # Keep the reference energy as-is: an absolute floor turned total
+        # signal loss on a small reference into a near-zero error (#5635).
+        return relative_error_from_energies(
+            float(error_sum.item()), float(weight_sum.abs().item())
+        )

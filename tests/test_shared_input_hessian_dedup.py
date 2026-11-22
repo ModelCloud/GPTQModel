@@ -5,6 +5,7 @@
 
 """Looper-side Hessian dedup for explicit `:in=<tag>` shared-input groups (CPU only)."""
 
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Dict, List, Optional
@@ -15,17 +16,38 @@ from torch import nn
 
 from gptqmodel.looper import stage_subset
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor
+from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY
 from gptqmodel.models.shared_input import SharedInputPlan, build_shared_input_plan
 from gptqmodel.quantization import GPTQ
-from gptqmodel.quantization.config import METHOD, HessianConfig, QuantizeConfig
+from gptqmodel.quantization.config import (
+    METHOD,
+    CalibrationConfig,
+    FOEMConfig,
+    GPTAQConfig,
+    HessianConfig,
+    QuantizeConfig,
+)
 
 
 _IN = 8
 _OUT = 6
 _QKV_TREE = ["model", "layers", "#", {"self_attn": ("q:0:in=x", "k:0:in=x", "v:0:in=x", "o:1"), "mlp": ("g:0:in=x", "u:0:in=x", "d:1")}]
 _LAYER_MODULES = [["self_attn.q", "self_attn.k", "self_attn.v"], ["self_attn.o"], ["mlp.g", "mlp.u"], ["mlp.d"]]
+
+
+class _PendingCudaEvent:
+    """CPU stand-in for a CUDA event whose stream work has not finished yet."""
+
+    def __init__(self) -> None:
+        self.completed = False
+
+    def query(self) -> bool:
+        return self.completed
+
+    def synchronize(self) -> None:
+        self.completed = True
 
 
 def _named_linear(name: str, in_features: int = _IN, out_features: int = _OUT, seed: int = 0) -> NamedModule:
@@ -413,6 +435,124 @@ class TestProcessorLeaderElection:
         assert proc.shared_input_leader("self_attn.k") is None
 
 
+class TestSinkCapCaptureSignature:
+    """The effective sink-row cap is part of every GPTQ-family sharing key (#5855)."""
+
+    _NAMES = ["self_attn.q", "self_attn.k"]
+
+    @staticmethod
+    def _qcfg(kind: str, *, dedup: bool, desc_act: bool = True, dynamic=None) -> QuantizeConfig:
+        family = {
+            "GPTQ": {},
+            "GPTAQ": {"gptaq": GPTAQConfig(alpha=0.25)},
+            "FOEM": {"foem": FOEMConfig(alpha=0.25, beta=0.25)},
+        }[kind]
+        return QuantizeConfig(
+            method=METHOD.GPTQ,
+            bits=4,
+            group_size=4,
+            sym=False,
+            desc_act=desc_act,
+            act_group_aware=False,
+            hessian=HessianConfig(dedup_shared_inputs=dedup, sink_row_cap_median_multiple=4),
+            dynamic=dynamic,
+            **family,
+        )
+
+    @staticmethod
+    def _sink_batches(n: int = 3, tokens: int = 6, seed: int = 5):
+        g = torch.Generator().manual_seed(seed)
+        batches = [torch.randn(1, tokens, _IN, generator=g) for _ in range(n)]
+        # One massive-activation row makes the median-multiple cap bind, so a
+        # disabled or different cap changes the accumulated Hessian.
+        batches[0][0, 0] *= 100.0
+        return batches
+
+    @staticmethod
+    def _codes(task) -> torch.Tensor:
+        weight, scales, zeros, groups, _, _, _, _ = task.quantize()
+        return (weight.double() / scales[:, groups].double()).round() + zeros[:, groups].double()
+
+    def _run(self, kind: str, *, dedup: bool, desc_act: bool = True, dynamic=None):
+        batches = self._sink_batches()
+        qcfg = self._qcfg(kind, dedup=dedup, desc_act=desc_act, dynamic=dynamic)
+        proc = _processor(qcfg)
+        plan = build_shared_input_plan(_QKV_TREE, _LAYER_MODULES)
+        modules = {}
+        for i, name in enumerate(self._NAMES):
+            nm = _named_linear(name, seed=i)
+            if kind != "GPTQ":
+                nm.state[NATIVE_INPUTS_STATE_KEY] = [
+                    (batch_index, batch * 0.875) for batch_index, batch in enumerate(batches)
+                ]
+            proc.preprocess(nm)
+            modules[name] = nm
+
+        leaders = proc.begin_shared_input_capture(_fake_model(plan, proc.qcfg), self._NAMES)
+        _feed(proc, modules, self._NAMES, batches)
+        capture_counts = {name: proc.tasks[name].fwd_counter for name in self._NAMES}
+        proc.end_shared_input_capture(self._NAMES)
+        if kind == "GPTQ":
+            # GPTAQ/FOEM keep ``H`` as their live single-device buffer and
+            # finalize it through their own adoption path.
+            for task in proc.tasks.values():
+                task.materialize_global_hessian()
+        return proc, leaders, capture_counts
+
+    @pytest.mark.parametrize("kind", ["GPTQ", "GPTAQ", "FOEM"])
+    def test_dynamic_desc_act_policy_mismatch_is_not_shared(self, kind):
+        # Same configured cap (4) on both projections; only the follower enables
+        # desc_act, which switches the cap on (effective None vs 4).
+        dynamic = {r".*\.self_attn\.k$": {"desc_act": True}}
+        dedup, leaders, counts = self._run(kind, dedup=True, desc_act=False, dynamic=dynamic)
+        base, _, base_counts = self._run(kind, dedup=False, desc_act=False, dynamic=dynamic)
+
+        assert leaders == {}
+        assert counts == base_counts == {name: len(self._sink_batches()) for name in self._NAMES}
+        for name in self._NAMES:
+            task, control = dedup.tasks[name], base.tasks[name]
+            assert torch.equal(task.H, control.H), name
+            if kind != "GPTQ":
+                assert torch.equal(task.dXXT, control.dXXT), name
+            assert torch.equal(self._codes(task), self._codes(control)), name
+
+    @pytest.mark.parametrize("kind", ["GPTQ", "GPTAQ", "FOEM"])
+    def test_dynamic_effective_cap_mismatch_is_not_shared(self, kind):
+        # Both projections have desc_act=True but a different effective cap.
+        dynamic = {r".*\.self_attn\.k$": {"hessian": {"sink_row_cap_median_multiple": 2}}}
+        dedup, leaders, counts = self._run(kind, dedup=True, desc_act=True, dynamic=dynamic)
+        base, _, base_counts = self._run(kind, dedup=False, desc_act=True, dynamic=dynamic)
+
+        assert dedup.tasks["self_attn.q"].sink_row_cap_median_multiple() == 4
+        assert dedup.tasks["self_attn.k"].sink_row_cap_median_multiple() == 2
+        assert leaders == {}
+        assert counts == base_counts
+        for name in self._NAMES:
+            task, control = dedup.tasks[name], base.tasks[name]
+            assert torch.equal(task.H, control.H), name
+            if kind != "GPTQ":
+                assert torch.equal(task.dXXT, control.dXXT), name
+            assert torch.equal(self._codes(task), self._codes(control)), name
+
+    @pytest.mark.parametrize("kind", ["GPTQ", "GPTAQ", "FOEM"])
+    def test_matching_effective_cap_still_shares_and_matches_independent(self, kind):
+        dedup, leaders, counts = self._run(kind, dedup=True, desc_act=True)
+        base, _, base_counts = self._run(kind, dedup=False, desc_act=True)
+
+        assert leaders == {"self_attn.k": "self_attn.q"}
+        # The follower skipped capture entirely; only the leader accumulated.
+        assert counts == {"self_attn.q": len(self._sink_batches()), "self_attn.k": 0}
+        assert base_counts == {name: len(self._sink_batches()) for name in self._NAMES}
+        assert dedup.shared_input_dedup_count == 1
+        assert dedup.tasks["self_attn.k"].H.data_ptr() != dedup.tasks["self_attn.q"].H.data_ptr()
+        for name in self._NAMES:
+            task, control = dedup.tasks[name], base.tasks[name]
+            assert torch.equal(task.H, control.H), name
+            if kind != "GPTQ":
+                assert torch.equal(task.dXXT, control.dXXT), name
+            assert torch.equal(self._codes(task), self._codes(control)), name
+
+
 class TestProcessorCaptureAndAdopt:
     def test_concurrent_followers_adopt_independent_copies(self):
         qcfg = QuantizeConfig(method=METHOD.GPTQ)
@@ -510,6 +650,70 @@ class TestProcessorCaptureAndAdopt:
         for name in names:
             assert torch.allclose(dedup.tasks[name].H, base.tasks[name].H, atol=1e-6), name
             assert dedup.tasks[name].nsamples == base.tasks[name].nsamples
+
+    def test_adoption_releases_deferred_sources_and_preserves_quantized_weights(self):
+        batches = _batches(n=4, tokens=16)
+        names = ["self_attn.q", "self_attn.k"]
+        plan = build_shared_input_plan(_QKV_TREE, _LAYER_MODULES)
+
+        def run(dedup: bool):
+            qcfg = QuantizeConfig(
+                method=METHOD.GPTQ,
+                bits=4,
+                group_size=4,
+                desc_act=False,
+                hessian=HessianConfig(dedup_shared_inputs=dedup),
+            )
+            proc = _processor(qcfg)
+            modules = _setup(proc, names)
+            proc.begin_shared_input_capture(_fake_model(plan, proc.qcfg), names)
+            _feed(proc, modules, names, batches)
+            return proc
+
+        proc = run(dedup=True)
+        leader = proc.tasks["self_attn.q"]
+        follower = proc.tasks["self_attn.k"]
+
+        # Recompute the value the old (zero-initialised accumulation) path
+        # produced for the leader's single fp32 partial.
+        partial = next(iter(leader._device_hessian_partials.values()))
+        total_samples = sum(leader._device_sample_counts.values())
+        old_path_hessian = torch.zeros_like(partial).add_(
+            partial, alpha=2.0 / float(total_samples)
+        )
+
+        # CPU builds have no CUDA events, so the deferred-source registry stays
+        # empty. Park the same sources a CUDA build keeps alive behind a
+        # not-yet-complete event to exercise the release lifecycle.
+        partial_ref = weakref.ref(partial)
+        follower_source = torch.empty_like(partial)
+        follower_source_ref = weakref.ref(follower_source)
+        leader._deferred_hessian_sources = [(partial, _PendingCudaEvent())]
+        follower._deferred_hessian_sources = [(follower_source, _PendingCudaEvent())]
+        del partial, follower_source
+
+        proc.end_shared_input_capture(names)
+
+        assert torch.equal(leader.H, old_path_hessian)
+        assert torch.equal(follower.H, old_path_hessian)
+        assert follower.H.data_ptr() != leader.H.data_ptr()
+
+        # Adoption is the last consumer of the leader's reduction partial and
+        # of the follower's source reference.
+        assert leader._deferred_hessian_sources == []
+        assert follower._deferred_hessian_sources == []
+        assert partial_ref() is None
+        assert follower_source_ref() is None
+
+        wq_leader, *_ = leader.quantize()
+        wq_follower, *_ = follower.quantize()
+
+        base = run(dedup=False)
+        wq_leader_base, *_ = base.tasks["self_attn.q"].quantize()
+        wq_follower_base, *_ = base.tasks["self_attn.k"].quantize()
+
+        assert torch.equal(wq_leader, wq_leader_base)
+        assert torch.equal(wq_follower, wq_follower_base)
 
     def test_low_precision_staging_override_matches_independent_collection(self):
         # fp16 activations whose values are not bf16-representable: bf16 staging on the

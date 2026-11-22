@@ -3,10 +3,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ..local import LocalModelLoader
 from . import LlamaQModel
 
 
 class InternLMQModel(LlamaQModel):
     fusable = None  # No qualified executor for this definition.
 
-    require_pkgs = ["transformers<=4.44.2"]
+    loader = LocalModelLoader(
+        "gptqmodel.models.ports.internlm.configuration_internlm.InternLMConfig",
+        "gptqmodel.models.ports.internlm.modeling_internlm.InternLMForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.internlm.tokenization_internlm.InternLMTokenizer",
+    )
+
+    # Original InternLM checkpoints serialize per-layer rotary inv_freq. It is
+    # a checkpoint-owned non-quantized buffer, not an undeclared runtime cache.
+    module_tree = [
+        "model", "layers", "#",
+        {
+            "input_layernorm": ("input_layernorm:!:norm",),
+            "self_attn": ("rotary_emb:!", "q_proj:0:q:in=x", "k_proj:0:k:in=x",
+                          "v_proj:0:v:in=x", "o_proj:1:o"),
+            "post_attention_layernorm": ("post_attention_layernorm:!:norm",),
+            "mlp": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
+        },
+    ]

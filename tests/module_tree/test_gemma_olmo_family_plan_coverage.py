@@ -31,8 +31,21 @@ from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native import auto as native_auto
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
+
+
+def _auto_config(model_type, **kwargs):
+    """Build the default config with the class the definition's loader expects."""
+    loader = getattr(MODEL_MAP.get(model_type), "loader", None)
+    # Package-owned loaders only accept the vendored config classes.
+    if isinstance(loader, LocalModelLoader) and (
+        loader.config_class.startswith("gptqmodel.models.ports.native.") or model_type in native_auto.CONFIG_MAPPING
+    ):
+        return native_auto.AutoConfig.for_model(model_type, **kwargs)
+    return transformers.AutoConfig.for_model(model_type, **kwargs)
 
 
 QC = SimpleNamespace(dynamic=None)
@@ -210,7 +223,7 @@ def _normalize_owner(owner: str) -> str:
 
 
 def _build_meta_case(case: FamilyCase) -> SimpleNamespace:
-    config = transformers.AutoConfig.for_model(case.model_type)
+    config = _auto_config(case.model_type)
     definition = MODEL_MAP[case.model_type]
     with torch.device("meta"):
         model = definition.loader.from_config(config)

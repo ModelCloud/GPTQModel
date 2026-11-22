@@ -3,11 +3,11 @@
 ## Usage
 
 ```python
-from gptqmodel import CheckpointConfig, CheckpointStopped
+from gptqmodel import CalibrationConfig, CheckpointConfig, CheckpointStopped
 
 try:
     model.quantize(
-        calibration,
+        CalibrationConfig(dataset=calibration),
         checkpoint=CheckpointConfig(
             # Defaults to the quantization config's offload_to_disk_path.
             path="auto",
@@ -21,10 +21,11 @@ except CheckpointStopped:
     pass
 ```
 
-The adapter supports the GPTQ (including RTN), AWQ, QQQ, ParoQuant, EXL3,
-FP8, GGUF and bitsandbytes processor paths for Llama and Qwen3 MoE, with
-`offload_to_disk=True`. EoRA continuation is supported for GPTQ, AWQ, QQQ
-and ParoQuant, the methods that support EoRA generation without checkpointing.
+The adapter supports the GPTQ (including RTN), AWQ, QQQ, Paro, EXL3,
+GGUF, bitsandbytes, MACaQ and NF12 processor paths for Llama, Qwen2 and
+Qwen3 MoE, with `offload_to_disk=True`. EoRA continuation is supported for
+GPTQ, AWQ, QQQ and Paro, the methods that support EoRA generation without
+checkpointing.
 Packed formats use explicit constructor schemas and the same kernel/config
 validation as ordinary quantization; checkpointing does not enable unavailable
 kernels or deprecated export formats. Other model families, rotation,
@@ -64,8 +65,8 @@ from each attempt's private offload directory, so rerunning with the same
 | CheckpointExtension | Frequency, safe-stop policy, capture/publish coordination |
 | QuantizationCheckpointAdapter | Compose packed modules, dense weights, processor continuations, scheduler and RNG |
 | Processor continuation protocol | Own caches, counters, results, statistics and method-specific state |
-| Packed-module schemas | Explicit constructors for standard, QQQ, ParoQuant, EXL3 and BNB modules |
-| ContinuationCodec | Versioned tagged values and tensors; no pickle |
+| Packed-module schemas | Explicit constructors for standard, QQQ, Paro, EXL3 and BNB modules |
+| ContinuationCodec | Versioned tagged values and tensors; no pickle; streamed single-read file codec |
 | CheckpointStore | Writer lease, immutable objects, publication and integrity |
 
 Both the calibration looper and weight-only looper expose the same extension
@@ -86,10 +87,10 @@ Without a checkpoint extension, normal asynchronous finalization is preserved.
 2. Freeze the complete InputCache (masks, positions, kwargs and source inputs),
    shared state, every processor's continuation, Python/NumPy/Torch CPU/CUDA RNG
    state, scheduler/device assignments and quantized-module specifications.
-   Preserve materialized nonpacked weights/buffers as well: AWQ/ParoQuant can
+   Preserve materialized nonpacked weights/buffers as well: AWQ/Paro can
    modify normalization weights. Preserve tied parameter identity. EoRA stores
    completed LoRA tensors and rank/path metadata through an explicit schema;
-   ParoQuant stores clean replay inputs and AWQ stores calibration counters.
+   Paro stores clean replay inputs and AWQ stores calibration counters.
 3. Stream new finalized artifacts into content-addressed objects. Earlier
    artifacts are reused by immutable reference, not recopied into RAM.
 4. Persist a manifest naming the continuation and **all** completed artifacts.
@@ -144,8 +145,11 @@ Its round-robin device-assignment cursor and module-device map are checkpointed,
 so skipping completed layers does not restart GPU assignment from device zero.
 Continuation tensors and device-valued metadata retain explicit device indices;
 CPU tensors stay on CPU and active CUDA tensors return to their recorded GPUs.
-Completed packed modules intentionally remain offloaded/meta until saving,
-except EXL3, whose ordinary completed state uses CPU buffers read by its writer.
+Completed packed modules are restored into memory at loop exit with the same
+hook a freshly offloaded module carries, so they do not remain offloaded/meta
+until saving ([in-session model after offload](in-session-model-after-offload.md)).
+EXL3 is the exception: its ordinary completed state uses CPU buffers read by its
+writer.
 The composed adapter schema is version 4; topology and tensor codec schemas
 remain version 2. Older adapter checkpoints are rejected rather than guessed
 or migrated.
@@ -194,13 +198,87 @@ All calibration batches and earlier subsets within that interrupted layer are
 re-executed. Only fully committed layers are skipped.
 Cross-device Hessian partials are reduced in stable device-index order, not
 worker-arrival order, to avoid restart-dependent floating-point rounding.
-ParoQuant activation batches are ordered by calibration index before optimizer
+Paro activation batches are ordered by calibration index before optimizer
 sample selection. EXL3 uses private, seeded random generators rather than
 resetting global RNG state from concurrent workers. CUDA events order EXL3's
 shared writable scratch-buffer use across streams without allocating a large
 workspace per thread. These guarantees apply to
 uninterrupted execution too; a checkpoint cannot repair nondeterministic inputs
 or shared random-state races in the underlying algorithm.
+
+## Continuation capture and restore I/O
+
+Continuation capture streams the encoded payload into the store instead of
+building it in memory twice. `ContinuationCodec.dump_file()` writes the
+safetensors object straight to the private path from `CheckpointStore.stage()`;
+`CheckpointStore.put_file()` hashes, fsyncs and renames that file into
+`objects/<sha256>` without loading it. `ContinuationCodec.dumps()` remains the
+in-memory form for tests and callers that need bytes, and
+`ContinuationCodec.sha256()` hashes exactly those bytes from a temporary file
+under the offload root for the calibration identity.
+
+Encoding writes one payload entry per distinct tensor object. Repeated
+references to the same tensor share that entry, so aliases restore to the same
+object. Already-CPU tensors are written from the live state without a clone;
+non-CPU tensors are moved to CPU. A tensor view whose storage overlaps another
+entry is the only case that is copied, because safetensors rejects entries with
+shared storage.
+
+Resume hashes the continuation once. `CheckpointStore._manifest()` verifies
+every referenced object with `object_path()`, which streams the file through
+SHA-256, and records the continuation's verified path in
+`_verified_continuations`. `CheckpointExtension.prepare()` asks
+`continuation_path()` for that recorded path and decodes it with
+`ContinuationCodec.load_file()` (`safetensors.safe_open`), materializing each
+payload tensor once for all of its aliases. Bitwise verification compares the
+decoded tensor against its own live bytes and `_version`, so an in-place
+transfer that mutates its source is detected; inference tensors, which do not
+track a version counter, keep a cloned reference for the comparison.
+
+```mermaid
+flowchart TD
+    A["CheckpointExtension.on_boundary"] --> B["adapter.capture"]
+    B --> C["ContinuationCodec.dump_file"]
+    C --> D["ContinuationCodec._encode"]
+    D --> E{"device is CPU?"}
+    E -- "yes" --> F["Write live tensor; clone only overlapping views"]
+    E -- "no" --> G["tensor.to(device=cpu)"]
+    F --> H["save_file into CheckpointStore.stage path"]
+    G --> H
+    H --> I["CheckpointStore.put_file: hash, fsync, rename to objects/sha256"]
+    I --> J["CheckpointStore.commit: object_path checks"]
+    J --> K["Manifest published; CURRENT replaced"]
+    L["CheckpointExtension.prepare"] --> M["CheckpointStore.load: _manifest calls object_path"]
+    M --> N["_verified_continuations records the hashed path"]
+    N --> O["continuation_path returns the recorded path"]
+    O --> P["ContinuationCodec.load_file: safe_open"]
+    P --> Q["_decode materializes each tensor once"]
+    Q --> R{"version and raw bytes match?"}
+    R -- "no" --> X["ValueError; checkpoint_restore_failed"]
+    R -- "yes" --> S["adapter.restore; committed cursor"]
+    M -- "checksum mismatch" --> Y["CheckpointCorrupt; try the older generation"]
+    I -. "exception" .-> Z["stage deletes its temp file"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X,Y,Z failure
+```
+
+| Mechanism | Before | Now |
+| --- | --- | --- |
+| Capture buffer | `gptqmodel/looper/continuation.py:34` cloned every tensor (`.to(device="cpu").contiguous().clone()`), then `gptqmodel/looper/checkpoint.py:151` built a second full `bytes` buffer with `dumps()`, which `put()` copied again. | `dump_file()` streams the payload into `CheckpointStore.stage()`; `put_file()` hashes and renames it without a second buffer. CPU tensors are written as-is. |
+| Repeated references | Each reference to the same tensor produced its own payload entry and clone. | `_encode()` registers one entry per distinct tensor object (`id`); aliases restore to the same object. |
+| Calibration identity | `gptqmodel/looper/gptq_checkpoint.py:393` serialized the whole continuation to `bytes` to hash it. | `ContinuationCodec.sha256()` hashes the same bytes from a temporary file in the offload root. |
+| Manifest verification | `gptqmodel/looper/checkpoint_store.py:267` called `get()`, reading and hashing the whole payload into memory only to discard it. | `_manifest()` calls `object_path()`, which streams and hashes the file, and records the verified path. |
+| Resume decode | `gptqmodel/looper/checkpoint.py:110` called `loads(store.get(...))`: one full `bytes` read, a header parse, then `safetensors.load()` copied the payload again. | `load_file()` decodes with `safe_open`; each payload tensor is materialized once and shared by aliases. |
+| Bitwise verification | Compared every stored tensor against a cloned copy. | Compares the live decoded tensor and its `_version`; inference tensors keep a cloned reference. |
+
+Failure paths stay fail-closed. A checksum mismatch during manifest
+verification raises `CheckpointCorrupt` and recovery tries the preceding
+generation. A staged file is deleted on success and on exception, and
+`CheckpointStore.collect()` removes stray `.<32 hex>.tmp` staging files. The
+continuation is hashed when the manifest is verified and then decoded from that
+same path, so a file changed between verification and decode is not re-hashed;
+that is the existing no-external-edit contract, now with one streaming hash
+instead of a full read plus a second hash at prepare time.
 
 ## Disk-backed layer-output staging and reads
 
@@ -259,18 +337,52 @@ flowchart TD
 | Uncommitted batch recovery | Incomplete batches existed only in process RAM and disappeared on abort. | Staged files are removed by `abort()` or the next writer initialization; only shards recorded in `progress.json` are reusable. |
 | Concurrent sequential appends | `gptqmodel/looper/input_cache.py:581-585` computed an index and released the lock before `put()`, allowing another caller to choose the same index. | `append()` holds the writer's reentrant lock through `put()`, so each call claims one distinct index. |
 | Reads after opening | `gptqmodel/looper/input_cache.py:320-329` checked shape but did not recheck the shard hash. | `__getitem__()` checks containment and the manifest's shard hash on every read before issuing the tensor. |
+| Placement of pending disk-backed batches | `gptqmodel/looper/forward_executor.py:738-752` materialized every pending batch to test presence and device, and dispatch at `:790` read it again; `balanced` materialized it a third time. | `batch_placement()` answers presence and CPU device from the validated manifest; dispatch performs the one shard open and hash. |
+
+Multi-device scheduling must not call `__getitem__()` to decide placement.
+`ForwardExecutor.run_parallel()` asks a lazy sequence for
+`batch_placement(index)`, which `DiskBackedLayerOutputSequence` answers from
+its validated manifest: every declared batch is present and every payload is
+issued on CPU. The default split and `calibration_data_device="balanced"` both
+place batches from that metadata, then each dispatched worker performs exactly
+one `__getitem__()`: one shard open and one integrity hash per pending batch.
+Ordinary list-backed replay still probes the in-memory slot, so empty slots are
+skipped as before, and a changed shard still fails closed at the dispatch read.
+
+```mermaid
+flowchart TD
+    A["ForwardExecutor.run_parallel"] --> B{"layer_inputs has batch_placement?"}
+    B -- "yes" --> C["DiskBackedLayerOutputSequence.batch_placement"]
+    C --> D["present, device=cpu from validated manifest"]
+    B -- "no" --> E["layer_inputs[index]"]
+    E --> F{"slot non-empty?"}
+    F -- "no" --> G["Skip batch; no worker"]
+    F -- "yes" --> H["present, device=slot[0].device"]
+    D --> I["Assign batch to a device segment"]
+    H --> I
+    I --> J["Dispatch worker: layer_inputs[index]"]
+    J --> K["safe_open shard"]
+    K --> L{"xxh3_128 matches manifest?"}
+    L -- "no" --> X["ValueError; batch not forwarded"]
+    L -- "yes" --> M["Forward on the replica"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X failure
+```
 
 The disk-backed writer was introduced in PR #3588. Focused regressions in
 `tests/test_disk_backed_layer_outputs.py` cover out-of-order payload spills,
 restart cleanup, staged-file mutation, and same-shape shard replacement after
-both `finalize()` and `open()`.
+both `finalize()` and `open()`. `tests/test_disk_backed_replay_single_read_5789.py`
+pins one shard hash per dispatched batch in default and `balanced` scheduling,
+corruption detection at dispatch, and empty-slot skipping for list-backed replay.
 
 ## Scope and operational limits
 
 - Initial calibration capture is still reconstructed for identity validation
   on restart; completed transformer layers are not replayed.
 - Source hashing and integrity checks favor correctness over startup speed.
-  Continuation serialization copies activation tensors to CPU.
+  Continuation serialization writes CPU-owned copies; already-CPU tensors are
+  streamed without an extra copy, and only overlapping storage views are cloned.
 - Each attempt gets a private offload directory, retained because live model
   save references may depend on it. After saving and discarding live
   quantization objects, users may remove the checkpoint directory.
@@ -281,6 +393,11 @@ both `finalize()` and `open()`.
   The lease excludes competing checkpoint runs, not arbitrary external tools.
 
 ## Validation
+
+`tests/test_checkpoint_continuation_stream_5749.py` pins byte-identical staged
+files and digests, alias deduplication, clone-free CPU encoding, bounded commit
+peak RSS with no full-payload store reads, bitwise resume restore and corrupted
+continuation rejection.
 
 Storage tests cover publication errors, corruption/fallback, missing artifacts,
 unpublished orphans, retention, leases, thread ownership and SIGTERM/SIGKILL
@@ -344,17 +461,17 @@ Completed validation includes:
 | Dual-GPU recovery, looper and thread-pool regression suite | 121 passed, 2 skipped, 1 xpassed |
 | CPU dense/MoE recovery, including partial-Hessian kills | 16 passed |
 | Full local Llama-3.2-1B, SIGTERM and mid-Hessian SIGKILL | 2 passed, exact saved tensors and GPU placement |
-| QQQ/ParoQuant with EoRA, dense/MoE signal and kill recovery | 8 passed |
+| QQQ/Paro with EoRA, dense/MoE signal and kill recovery | 8 passed |
 | AWQ with EoRA, dense/MoE signal, kill and publication-error recovery | 8 passed |
 | GPTQ with EoRA, dense/MoE seven fault modes | All 14 cases passed, including the repeated timeout case noted below |
 | AWQ without EoRA, dense/MoE four fault modes | 8 passed |
 | RTN/FP8/GGUF/BNB dense four fault modes | 16 passed |
-| RTN/FP8/GGUF/BNB/QQQ/ParoQuant/EXL3 MoE signal and kill recovery | All 14 cases passed after the EXL3 workspace fix |
+| RTN/FP8/GGUF/BNB/QQQ/Paro/EXL3 MoE signal and kill recovery | All 14 cases passed after the EXL3 workspace fix |
 | Additional GPTQ v2/P and AWQ GEMV/GEMV_FAST/LLM-AWQ layouts with EoRA | 5 passed |
-| QQQ/ParoQuant/EXL3 dense faults plus ParoQuant eager-mode recovery | 13 passed |
+| QQQ/Paro/EXL3 dense faults plus Paro eager-mode recovery | 13 passed |
 | Export-layout tests and unsupported-export guards | 11 passed; optional BitBLAS skipped in the default environment |
 | AWQ BitBLAS, explicitly installed with CUDA toolchain configured | 1 passed, exact SIGKILL/resume comparison |
-| Explicit packed schemas: GPTQ widths/layouts, every GGUF alias, FP8 scales, BNB, QQQ, ParoQuant, EXL3 | 33 passed (also included above) |
+| Explicit packed schemas: GPTQ widths/layouts, every GGUF alias, FP8 scales, BNB, QQQ, Paro, EXL3 | 33 passed (also included above) |
 
 The method matrix is executed in separate selections, not as the entire
 repository test suite. GPTQ/GPTQ+EoRA device tests assert that both GPU indices

@@ -46,17 +46,28 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.tt_packing import TT_GPTQ_PACK_FACTOR, _repack_zero_words, _require_4bit_gptq
+from ...utils.resource_budget import DeviceAllocation, RuntimeAllocationUnavailable
+from ...utils.tt_packing import (
+    TT_GPTQ_PACK_BITS,
+    TT_GPTQ_PACK_FACTOR,
+    _repack_zero_words,
+    _require_4bit_gptq,
+)
 from ...utils.ttnn_runtime import (
     TTNNMesh,
     TTNNUnavailable,
     close_mesh,
     current_mesh,
+    dram_allocated_bytes,
+    hold_mesh_lease,
     import_ttnn,
     is_ttnn_available,
+    mesh_device_ids,
     open_mesh,
+    release_mesh_lease,
     ttnn_device_count,
 )
+from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 
 
@@ -78,10 +89,77 @@ class TTNNPackedLayer:
     shard_out_features: int
     device_count: int
     compute_config: object
+    # A checkpoint bias that BF16 cannot represent is uploaded as FP32 and
+    # added to the FP32 accumulator after the GEMM (#5808).
+    wide_bias: bool = False
+    # BF16 residual of a checkpoint scale that BF16 cannot represent. When it
+    # is present the dequantized weight is kept in FP32 (#5822).
+    scale_residual: Optional[object] = None
 
 
 def _ceil_div(value: int, divisor: int) -> int:
     return (value + divisor - 1) // divisor
+
+
+def _bias_fits_bf16(bias: torch.Tensor) -> bool:
+    """Whether a checkpoint bias survives a BF16 round trip exactly (#5808).
+
+    The fused launch operand is BF16, so a wider FP16 checkpoint value would
+    be rounded before the GEMM epilogue sees it. Values that round-trip are
+    kept on the cheap fused path; the rest take the FP32 add.
+    """
+
+    return bool(torch.equal(bias.to(torch.bfloat16).to(bias.dtype), bias))
+
+
+def _scales_fit_bf16(scales: torch.Tensor) -> bool:
+    """Whether every checkpoint scale survives a BF16 round trip exactly."""
+
+    return bool(torch.equal(scales.to(torch.bfloat16).to(scales.dtype), scales))
+
+
+def _split_bf16_residual(values: torch.Tensor):
+    """Return BF16 high and BF16 residual tables whose FP32 sum is exact.
+
+    ``ttnn.embedding`` only accepts BF16 tables, so a wider checkpoint scale
+    is carried as two BF16 operands and recombined in FP32 (#5822).
+    """
+
+    high = values.to(torch.bfloat16)
+    residual = (values.to(torch.float32) - high.to(torch.float32)).to(torch.bfloat16)
+    return high, residual
+
+
+def _shard_zero_words(
+    zero_words: torch.Tensor, *, out_features: int, device_count: int
+) -> torch.Tensor:
+    """Repack the global zero table into one padded word row per mesh shard.
+
+    A checkpoint packs zero points along the full output width, so a word can
+    straddle a shard boundary: with ``out_features=40`` and four chips each
+    shard owns ten columns but needs two whole words, while the global table has
+    only five. Sharding those words by column gives a shard neither the whole
+    word nor the right bit lane. Decode the logical nibbles, split by output
+    column, and pack each shard separately so the column mapper receives
+    ``device_count * ceil(shard_out / 8)`` words.
+    """
+
+    if device_count == 1:
+        return zero_words
+    groups = zero_words.shape[0]
+    lane_shifts = torch.arange(0, 32, TT_GPTQ_PACK_BITS, dtype=torch.int64).view(1, 1, -1)
+    nibbles = (zero_words.to(torch.int64).unsqueeze(-1) >> lane_shifts) & 0xF
+    logical = nibbles.reshape(groups, -1)[:, :out_features]
+    shard_out = out_features // device_count
+    shifts = torch.arange(0, 32, TT_GPTQ_PACK_BITS, dtype=torch.int64)
+    packed = []
+    for shard in logical.split(shard_out, dim=1):
+        pad = (-shard_out) % TT_GPTQ_PACK_FACTOR
+        if pad:
+            shard = torch.nn.functional.pad(shard, (0, pad))
+        words = (shard.reshape(groups, -1, TT_GPTQ_PACK_FACTOR) << shifts).sum(-1)
+        packed.append(words.to(torch.uint32))
+    return torch.cat(packed, dim=1).contiguous()
 
 
 def _ttnn_arch(ttnn):
@@ -104,6 +182,10 @@ def _ttnn_arch(ttnn):
 
 class TTNNLinear(GPTQQuantLinear):
     """Packed 4-bit GPTQ linear executed by native TTNN ops on Tenstorrent."""
+
+    # TTNN device tensors; no torch graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TTNN]
     SUPPORTS_METHODS = [METHOD.GPTQ]
@@ -161,6 +243,10 @@ class TTNNLinear(GPTQQuantLinear):
         )
         self._ttnn_layer: Optional[TTNNPackedLayer] = None
         self._ttnn_key = None
+        # Per-chip storage measured when this layer uploaded its tensors, and
+        # the chip ordinals those bytes live on (#5810).
+        self._ttnn_device_ids = ()
+        self._ttnn_device_bytes: Optional[int] = None
 
     # -- capability -------------------------------------------------------
 
@@ -203,19 +289,30 @@ class TTNNLinear(GPTQQuantLinear):
     # -- placement --------------------------------------------------------
 
     def _mesh(self) -> TTNNMesh:
-        """Return the mesh this layer is placed on, opening it if needed."""
+        """Return the mesh this layer is placed on, opening it if needed.
 
-        mesh = current_mesh()
-        if mesh is not None:
-            return mesh
-        count = self._requested_device_count()
-        return open_mesh(device_count=count, fabric=self._fabric_config())
+        This goes through ``open_mesh`` even when a handle is already live so the
+        runtime can reject a mesh whose chip count, ordinal, fabric or trace
+        reservation does not match this layer's request.
+        """
+
+        return open_mesh(
+            device_count=self._requested_device_count(),
+            fabric=self._fabric_config(),
+            device_id=self._requested_device_id(),
+        )
 
     def _requested_device_count(self) -> int:
         requested = getattr(self, "ttnn_device_count", None)
         if requested is None:
             return 1
         return int(requested)
+
+    def _requested_device_id(self) -> int:
+        # The loader resolves an explicit `xla:N` request to this ordinal; a
+        # bare `xla` or an unplaced load keeps the historical chip 0.
+        requested = getattr(self, "ttnn_device_id", None)
+        return 0 if requested is None else int(requested)
 
     def _fabric_config(self) -> str:
         # Collectives are only used when more than one chip participates.
@@ -235,6 +332,7 @@ class TTNNLinear(GPTQQuantLinear):
             tuple(tensor_cache_key(t) for t in tensors),
             self.qzero_format(),
             self._requested_device_count(),
+            self._requested_device_id(),
         )
 
     def _build_layer(self) -> TTNNPackedLayer:
@@ -268,8 +366,19 @@ class TTNNLinear(GPTQQuantLinear):
         )
 
         mesh = self._mesh()
+        # Own a lease for as long as this layer keeps device tensors, so a
+        # model's release_device closes the shared mesh only after its last
+        # kernel lets go of it.
+        hold_mesh_lease(self)
         dev = mesh.device
         device_count = mesh.num_devices
+        # Measure the allocator before the upload so the budget can report the
+        # exact per-chip storage these tensors add, including tile padding and
+        # page rounding. An unreadable view is reported as unknown, not zero.
+        try:
+            allocated_before = dram_allocated_bytes(dev)
+        except Exception:
+            allocated_before = None
 
         # Tensor parallel: every chip owns a contiguous slice of out_features.
         if self.out_features % device_count:
@@ -280,48 +389,99 @@ class TTNNLinear(GPTQQuantLinear):
         shard_out = self.out_features // device_count
         out_words_per_device = _ceil_div(shard_out, TT_GPTQ_PACK_FACTOR)
         zero_words_per_group = _ceil_div(self.out_features, TT_GPTQ_PACK_FACTOR)
+        # Repack per shard before the column mapper: a globally packed word may
+        # straddle two shards and cannot be sliced at a column boundary.
+        zero_words = _shard_zero_words(
+            zero_words, out_features=self.out_features, device_count=device_count
+        )
 
-        def _upload(tensor, dtype, mesh_mapper=None):
+        def _upload(tensor, dtype, mesh_mapper=None, layout=ttnn.TILE_LAYOUT):
             host = ttnn.from_torch(
                 tensor,
                 dtype=dtype,
-                layout=ttnn.TILE_LAYOUT,
+                layout=layout,
                 mesh_mapper=mesh_mapper,
             )
             return ttnn.to_device(host, dev)
 
+        # ``g_idx`` is a lookup table consumed by ``ttnn.embedding``. Tiled
+        # storage pads its single logical row to 32 physical rows: 96 KiB for
+        # a 768-input projection instead of 24 KiB row-major (#5854). The
+        # embedding operator accepts a row-major index tensor, so keep it
+        # unpadded on the device.
+        indices_layout = ttnn.ROW_MAJOR_LAYOUT
+
+        bias_cpu = None
+        bias_dtype = None
+        wide_bias = False
+        if self.bias is not None:
+            bias_cpu = self.bias.detach().to("cpu").reshape(1, -1).contiguous()
+            wide_bias = not _bias_fits_bf16(bias_cpu)
+            if wide_bias:
+                bias_dtype = ttnn.float32
+                bias_cpu = bias_cpu.to(torch.float32)
+            else:
+                bias_dtype = ttnn.bfloat16
+                bias_cpu = bias_cpu.to(torch.bfloat16)
+
+        scales_cpu = self.scales.detach().to("cpu").contiguous()
+        if _scales_fit_bf16(scales_cpu):
+            scales_high = scales_cpu.to(torch.bfloat16).contiguous()
+            scales_residual = None
+        else:
+            scales_high, scales_residual = _split_bf16_residual(scales_cpu)
+            scales_high = scales_high.contiguous()
+            scales_residual = scales_residual.contiguous()
+
         if device_count == 1:
             weight = _upload(weight_words, ttnn.uint32)
             zeros = _upload(zero_words, ttnn.uint32)
-            scales = _upload(self.scales.detach().to("cpu", torch.bfloat16).contiguous(), ttnn.bfloat16)
+            scales = _upload(scales_high, ttnn.bfloat16)
+            scale_residual = (
+                None if scales_residual is None else _upload(scales_residual, ttnn.bfloat16)
+            )
             indices = _upload(
-                g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(), ttnn.uint32
+                g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(),
+                ttnn.uint32,
+                layout=indices_layout,
             )
             bias = None
-            if self.bias is not None:
-                bias = _upload(
-                    self.bias.detach().to("cpu", torch.bfloat16).reshape(1, -1).contiguous(),
-                    ttnn.bfloat16,
-                )
+            if bias_cpu is not None:
+                bias = _upload(bias_cpu, bias_dtype)
         else:
             shard_rows = ttnn.shard_tensor_to_mesh_mapper(dev, 0)
             shard_cols = ttnn.shard_tensor_to_mesh_mapper(dev, 1)
             replicate = ttnn.replicate_tensor_to_mesh_mapper(dev)
             weight = _upload(weight_words, ttnn.uint32, shard_rows)
             zeros = _upload(zero_words, ttnn.uint32, shard_cols)
-            scales = _upload(
-                self.scales.detach().to("cpu", torch.bfloat16).contiguous(),
-                ttnn.bfloat16, shard_cols,
+            scales = _upload(scales_high, ttnn.bfloat16, shard_cols)
+            scale_residual = (
+                None
+                if scales_residual is None
+                else _upload(scales_residual, ttnn.bfloat16, shard_cols)
             )
             indices = _upload(
-                g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(), ttnn.uint32, replicate
+                g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(),
+                ttnn.uint32,
+                replicate,
+                layout=indices_layout,
             )
             bias = None
-            if self.bias is not None:
-                bias = _upload(
-                    self.bias.detach().to("cpu", torch.bfloat16).reshape(1, -1).contiguous(),
-                    ttnn.bfloat16, shard_cols,
-                )
+            if bias_cpu is not None:
+                bias = _upload(bias_cpu, bias_dtype, shard_cols)
+
+        device_bytes = None
+        if allocated_before is not None:
+            try:
+                allocated_after = dram_allocated_bytes(dev)
+            except Exception:
+                allocated_after = None
+            if allocated_after is not None and allocated_after > allocated_before:
+                device_bytes = allocated_after - allocated_before
+        try:
+            device_ids = mesh_device_ids(mesh)
+        except Exception:
+            device_ids = ()
 
         # Validate the sharded packed shapes once, here, so a checkpoint whose
         # layout cannot serve this mesh fails at load rather than mid-forward.
@@ -360,8 +520,12 @@ class TTNNLinear(GPTQQuantLinear):
             shard_out_features=shard_out,
             device_count=device_count,
             compute_config=compute_config,
+            wide_bias=wide_bias,
+            scale_residual=scale_residual,
         )
         self._ttnn_key = key
+        self._ttnn_device_ids = device_ids
+        self._ttnn_device_bytes = device_bytes
         return self._ttnn_layer
 
     # -- lifecycle --------------------------------------------------------
@@ -372,12 +536,14 @@ class TTNNLinear(GPTQQuantLinear):
     def clear_weight_cache(self) -> None:
         layer, self._ttnn_layer = self._ttnn_layer, None
         self._ttnn_key = None
+        self._ttnn_device_ids = ()
+        self._ttnn_device_bytes = None
         if layer is None:
             return
         ttnn = import_ttnn()
         for tensor in (
             layer.weight_words, layer.zero_words, layer.scales,
-            layer.g_idx, layer.bias,
+            layer.g_idx, layer.bias, getattr(layer, "scale_residual", None),
         ):
             if tensor is not None:
                 try:
@@ -385,13 +551,40 @@ class TTNNLinear(GPTQQuantLinear):
                 except Exception:  # pragma: no cover - best-effort release
                     pass
 
-    def release_device(self) -> None:
-        """Close the mesh this layer opened, if it still owns it."""
+    def iter_runtime_device_allocations(self):
+        """Report the packed device tensors this layer owns (#5810).
+
+        The bytes are the per-chip DRAM delta measured when the tensors were
+        uploaded, so tile padding, allocator page rounding and replicated
+        operands are included exactly as the device holds them. A layer that
+        was never built owns no device storage; a built layer whose allocator
+        could not be read reports its backend as unmeasured instead of zero.
+        """
+
+        if self._ttnn_layer is None:
+            return
+        if self._ttnn_device_bytes is None or not self._ttnn_device_ids:
+            raise RuntimeAllocationUnavailable("ttnn")
+        for index in self._ttnn_device_ids:
+            yield DeviceAllocation(
+                backend="ttnn", index=index, weights_bytes=self._ttnn_device_bytes
+            )
+
+    def release_device(self) -> bool:
+        """Drop this layer's mesh lease and close the mesh when it is last.
+
+        Returns ``True`` only when this call closed the shared mesh.  Another
+        model's kernels can hold the same process-wide handle, so clearing this
+        layer's tensors is not on its own a reason to tear the device down.
+        """
 
         self.clear_weight_cache()
+        if not release_mesh_lease(self):
+            return False
         mesh = current_mesh()
         if mesh is not None:
             close_mesh(owner=mesh.owner)
+        return True
 
     def pack(self, linear, scales, zeros, g_idx, **kwargs):
         self.clear_weight_cache()
@@ -440,8 +633,10 @@ class TTNNLinear(GPTQQuantLinear):
         return ttnn.typecast(stacked, ttnn.bfloat16)
 
     def _dequantize(self, ttnn, layer: TTNNPackedLayer):
-        """Build the transient BF16 weight tile ``[in, shard_out]`` on device."""
+        """Build the transient weight tile ``[in, shard_out]`` on device."""
 
+        if layer.scale_residual is not None:
+            return self._dequantize_wide(ttnn, layer)
         codes = ttnn.typecast(
             self._extract_codes(ttnn, layer.weight_words, layer.shard_out_features), ttnn.bfloat16
         )
@@ -457,6 +652,36 @@ class TTNNLinear(GPTQQuantLinear):
         weights = ttnn.multiply(ttnn.subtract(codes, group_zeros), group_scales)
         return ttnn.typecast(weights, ttnn.bfloat16)
 
+    def _dequantize_wide(self, ttnn, layer: TTNNPackedLayer):
+        """Build the transient FP32 weight tile ``[in, shard_out]`` (#5822).
+
+        ``ttnn.embedding`` only accepts BF16 tables, so the scale is gathered
+        from its BF16 high and residual tables and recombined in FP32. The
+        decoded weight is then kept in FP32 all the way into the GEMM: a BF16
+        weight tile would round a value such as ``1.00390625`` back to ``1``
+        and erase a finite cancellation even when the scale itself was exact.
+        """
+
+        # Codes and zero points are small integers, so their difference is
+        # exact in BF16; only the scale multiply needs FP32 (#5822).
+        codes = ttnn.typecast(
+            self._extract_codes(ttnn, layer.weight_words, layer.shard_out_features), ttnn.bfloat16
+        )
+        codes = ttnn.transpose(codes, 0, 1)
+        zeros = self._logical_zeros(
+            ttnn, layer.zero_words, int(self.scales.shape[0]), layer.shard_out_features
+        )
+        high = ttnn.embedding(layer.g_idx, layer.scales, layout=ttnn.TILE_LAYOUT)
+        residual = ttnn.embedding(layer.g_idx, layer.scale_residual, layout=ttnn.TILE_LAYOUT)
+        # ``dtype=float32`` makes the binary op read BF16 and write FP32, so
+        # the recombined scale is exact without a separate typecast tile.
+        group_scales = ttnn.add(high, residual, dtype=ttnn.float32)
+        group_scales = ttnn.reshape(group_scales, (self.in_features, layer.shard_out_features))
+        group_zeros = ttnn.embedding(layer.g_idx, zeros, layout=ttnn.TILE_LAYOUT)
+        group_zeros = ttnn.reshape(group_zeros, (self.in_features, layer.shard_out_features))
+        codes = ttnn.subtract(codes, group_zeros, dtype=ttnn.float32)
+        return ttnn.multiply(codes, group_scales, dtype=ttnn.float32)
+
     def _compute_on_device(self, ttnn, layer: TTNNPackedLayer, activation):
         """Run dequant + GEMM (+ all_gather) on a resident activation.
 
@@ -466,10 +691,44 @@ class TTNNLinear(GPTQQuantLinear):
 
         weights = self._dequantize(ttnn, layer)
         try:
-            output = ttnn.linear(
-                activation, weights, bias=layer.bias,
-                compute_kernel_config=layer.compute_config,
-            )
+            if layer.wide_bias or layer.scale_residual is not None:
+                # A checkpoint bias or scale needs more bits than BF16 carries.
+                # Run the dot wide and round the public output once, after the
+                # FP32 bias add, so the fused BF16 operands cannot erase a
+                # finite residual (#5808, #5822).
+                if layer.scale_residual is not None:
+                    dot_activation = ttnn.typecast(activation, ttnn.float32)
+                    try:
+                        wide = ttnn.linear(
+                            dot_activation, weights, dtype=ttnn.float32,
+                            compute_kernel_config=layer.compute_config,
+                        )
+                    finally:
+                        ttnn.deallocate(dot_activation)
+                else:
+                    wide = ttnn.linear(
+                        activation, weights, dtype=ttnn.float32,
+                        compute_kernel_config=layer.compute_config,
+                    )
+                try:
+                    if layer.bias is not None:
+                        bias = layer.bias
+                        cast_bias = bias.dtype != ttnn.float32
+                        if cast_bias:
+                            bias = ttnn.typecast(layer.bias, ttnn.float32)
+                        biased = ttnn.add(wide, bias)
+                        if cast_bias:
+                            ttnn.deallocate(bias)
+                        ttnn.deallocate(wide)
+                        wide = biased
+                    output = ttnn.typecast(wide, ttnn.bfloat16)
+                finally:
+                    ttnn.deallocate(wide)
+            else:
+                output = ttnn.linear(
+                    activation, weights, bias=layer.bias,
+                    compute_kernel_config=layer.compute_config,
+                )
         finally:
             ttnn.deallocate(weights)
 

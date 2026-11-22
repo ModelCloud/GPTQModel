@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shutil
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,7 +18,7 @@ import torch
 import torch.nn.functional as F
 
 import gptqmodel_nf12 as nf12
-from tests.accelerator_gates import nf12_skip_reason
+from tests.accelerator_gates import nf12_skip_reason, requires_nvidia_cuda
 from tests.nf12_embedding_cases import (
     OBSERVED_LITE_PREFILL_CASES,
     assert_embedding_lookup_exact,
@@ -141,6 +142,9 @@ def test_repeat4_uses_single_copy_from_preloaded_legacy_namespace(monkeypatch):
                        single.unsqueeze(-2).repeat(1, 1, 4, 1).view(torch.int16))
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="the native NF12 loader is NVIDIA CUDA only"
+)
 def test_preloaded_partial_namespace_is_reused_without_a_second_load(monkeypatch):
     """A legacy namespace must not trigger a JIT/load attempt (#3886)."""
     from gptqmodel_nf12 import _library
@@ -164,6 +168,9 @@ def test_preloaded_partial_namespace_is_reused_without_a_second_load(monkeypatch
     assert _library.has_ops("embedding", "decode")
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="the native NF12 loader is NVIDIA CUDA only"
+)
 def test_require_reports_only_the_missing_operator(monkeypatch):
     from gptqmodel_nf12 import _library
 
@@ -692,6 +699,130 @@ def test_native_fused_moe_matches_dense_torch_oracle():
     oracle = _moe_oracle(x, w13, w2, topk_weights, topk_ids)
     assert actual.dtype == torch.bfloat16
     torch.testing.assert_close(actual, oracle, rtol=2e-3, atol=2e-3)
+
+
+def _moe_graph_fixture(device, *, tokens=4, experts=2, k=128, inter=64, topk=1):
+    generator = torch.Generator(device=device).manual_seed(4484 + tokens)
+    x = (torch.randn((tokens, k), generator=generator, device=device) * 0.05).bfloat16()
+    w13 = (torch.randn((experts, 2 * inter, k), generator=generator, device=device) * 0.02).bfloat16()
+    w2 = (torch.randn((experts, k, inter), generator=generator, device=device) * 0.02).bfloat16()
+    topk_ids = torch.randint(0, experts, (tokens, topk), generator=generator, device=device)
+    topk_weights = torch.rand((tokens, topk), generator=generator, device=device)
+    return x, w13, w2, topk_ids, topk_weights
+
+
+def test_moe_forward_path_never_copies_offsets_to_the_host():
+    """``moe_weight_view`` must not stage a D2H copy or synchronize the stream.
+
+    That pair made every CUDA MoE forward wait for the device and made the ops
+    uncapturable in a CUDA graph (issue #4547). Offsets are validated once by
+    ``NF12MoEWeight``; the kernels bound the local escape index instead.
+    """
+
+    source = (
+        Path(__file__).resolve().parents[1] / "gptqmodel_ext/nf12/csrc/torch/ops.cpp"
+    ).read_text(encoding="utf-8")
+    start = source.index("nf12_moe_weight_t moe_weight_view(")
+    end = source.index("\n}\n", start)
+    body = source[start:end]
+    for forbidden in ("cudaMemcpyAsync", "cudaMemcpy", "cudaStreamSynchronize", "cudaStreamIsCapturing"):
+        assert forbidden not in body, f"moe_weight_view must not call {forbidden}"
+    # The three public MoE entry points share that view: fused_weight_view (used
+    # twice by fused_moe), moe_linear and moe_decode.
+    assert source.count("moe_weight_view(packed") == 3
+    assert "fused_weight_view(packed13" in source and "fused_weight_view(packed2" in source
+
+
+@pytest.mark.parametrize("tokens", [1, 4])
+def test_moe_ops_capture_into_cuda_graphs(tokens):
+    """A captured MoE forward must replay, which requires zero host syncs."""
+
+    device = _cuda()
+    x, w13, w2, topk_ids, topk_weights = _moe_graph_fixture(device, tokens=tokens)
+    packed13, packed2 = nf12.encode_moe(w13), nf12.encode_moe(w2)
+    sorted_ids, expert_offsets = nf12.moe_align(topk_ids, w13.shape[0])
+
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        eager = nf12.fused_moe(x, packed13, packed2, topk_weights, topk_ids)
+        nf12.moe_linear(x, packed13, expert_offsets, gather=sorted_ids, scatter=sorted_ids)
+    stream.synchronize()
+    torch.testing.assert_close(eager, _moe_oracle(x, w13, w2, topk_weights, topk_ids), rtol=2e-3, atol=2e-3)
+
+    fused_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(fused_graph, stream=stream):
+        captured = nf12.fused_moe(x, packed13, packed2, topk_weights, topk_ids)
+    linear_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(linear_graph, stream=stream):
+        captured_linear = nf12.moe_linear(
+            x, packed13, expert_offsets, gather=sorted_ids, scatter=sorted_ids
+        )
+    torch.cuda.current_stream(device).wait_stream(stream)
+
+    x.mul_(0.5)
+    topk_weights.mul_(0.75)
+    fused_graph.replay()
+    linear_graph.replay()
+    torch.testing.assert_close(
+        captured, _moe_oracle(x, w13, w2, topk_weights, topk_ids), rtol=2e-3, atol=2e-3
+    )
+    replayed_eager = nf12.moe_linear(
+        x, packed13, expert_offsets, gather=sorted_ids, scatter=sorted_ids
+    )
+    torch.testing.assert_close(captured_linear, replayed_eager, rtol=2e-3, atol=2e-3)
+
+
+def _moe_linear_oracle(x, weight, expert_offsets):
+    """Independent fp64 row oracle for ``moe_linear`` without gather/scatter."""
+
+    out = torch.zeros((x.shape[0], weight.shape[1]), dtype=torch.float64, device=x.device)
+    for expert in range(weight.shape[0]):
+        lo = int(expert_offsets[expert])
+        hi = int(expert_offsets[expert + 1])
+        if hi > lo:
+            out[lo:hi] = F.linear(x[lo:hi].double(), weight[expert].double())
+    return out.bfloat16()
+
+
+def test_moe_escape_offsets_are_clamped_on_device():
+    """A corrupt offset pair must not walk before the escape table.
+
+    The host check that used to reject this also synchronized every forward, so
+    the bound moved to the kernels: the base is clamped to the table start and a
+    decreasing pair yields an empty slice.
+    """
+
+    device = _cuda()
+    x, w13, _w2, topk_ids, _topk_weights = _moe_graph_fixture(device)
+    w13 = w13.clone()
+    w13[0, 0, 0] = 2.0**-20
+    w13[1, 3, 5] = 2.0**-20
+    weight = nf12.encode_moe(w13)
+    escapes = weight.escapes
+    escape_offsets = weight.escape_offsets
+    assert escapes.shape[0] > 0, "fixture must exercise the escape table"
+    rows = escapes.shape[0]
+    assert int(escape_offsets[-1]) == rows
+    _sorted, expert_offsets = nf12.moe_align(topk_ids, w13.shape[0])
+
+    def run(offsets):
+        return torch.ops.nf12.moe_linear(
+            x, weight.packed, escapes, offsets, weight.exp_base, expert_offsets, None, 1, None, None, False
+        )
+
+    reference = run(escape_offsets)
+    torch.testing.assert_close(reference, _moe_linear_oracle(x, w13, expert_offsets), rtol=2e-3, atol=2e-3)
+
+    negative = escape_offsets.clone()
+    negative[0] = -2
+    torch.testing.assert_close(run(negative), reference, rtol=0, atol=0)
+
+    decreasing = escape_offsets.clone()
+    decreasing[1] = 0
+    empty_first = torch.zeros_like(escape_offsets)
+    empty_first[-1] = rows
+    torch.testing.assert_close(run(decreasing), run(empty_first), rtol=0, atol=0)
 
 
 def test_large_markov_shortlist_uses_packed_selected_rows():

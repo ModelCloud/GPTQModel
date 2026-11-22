@@ -30,7 +30,7 @@ plan = model.fuse(overrides={"model.layers.0.mlp": False})
 
 # Optional opt-in at loading or quantization finalization.
 model = GPTQModel.load("/path/to/quantized-llama", fuse=True)
-# source_model.quantize(calibration, fuse=True)
+# source_model.quantize(CalibrationConfig(dataset=calibration), fuse=True)
 # plan = model.fuse()                      # Reapply and receive the current plan
 ```
 
@@ -415,14 +415,14 @@ forward must pass source validation; custom forwards require dedicated tests.
 flowchart LR
     SOURCE["Original checkpoint-owned projections"] --> REFRESH["_refresh validates configuration and live tensors"]
     REFRESH --> BUILD["Packed concatenation and separate Marlin workspace"] --> VIEWS["_share_operands rebinds source weights to disjoint views<br/>release separate allocations"]
-    VIEWS --> DESCRIPTOR["Cached bound executor, widths, dtype/device, mutation guard"]
-    DESCRIPTOR --> VALID{"execute: guard valid?"}
+    VIEWS --> DESCRIPTOR["Published record: bound executor, widths, dtype/device, mutation guard"]
+    DESCRIPTOR --> VALID{"execute: lease record, guard valid?"}
     VALID -->|"yes"| USE["One existing native kernel call"]
     VALID -->|"no"| REFRESH
     REFRESH -->|"incompatible"| FALLBACK["Original continuation; native preamble is not repeated"]
     USE --> OUT["Split outputs: forward locals only"]
     OUT --> RELEASE["Return or exception releases activations"]
-    MUTATE["clear_weight_cache / load_state_dict / device or dtype move"] --> INVALID["invalidate: retire guard and clear its bindings<br/>release operands and descriptor"]
+    MUTATE["clear_weight_cache / load_state_dict / device or dtype move"] --> INVALID["invalidate: retire published record<br/>release storage when its last lease returns"]
     INVALID --> REFRESH
     DIRECT["Direct projection API or fallback parent"] --> LEAF["Original source kernel<br/>temporary contiguous packed copies when needed"]
     OFF["fuse(False)"] --> RESTORE["Clone source views to independent contiguous tensors<br/>release fused executor and workspace"]
@@ -435,6 +435,13 @@ to disjoint views into that allocation. Their checkpoint names, shapes, and
 values remain intact; their former separate allocations are released. The wider
 native kernel consumes the contiguous fused tensors directly, so source views
 add no projection work to the normal fused token path.
+
+`_FusionGroup.execute()` leases the published record for the whole forward. A
+`clear_weight_cache()` or a sibling's refresh retires that record, but
+`_retire()` clears the guard globals and releases the packed storage only after
+the last lease returns, so an in-flight executor never loses its operands. A
+cold caller that lost the refresh race reuses the record published while it
+waited instead of rebuilding the same operands.
 
 A kernel that caches a change detector over its bound operands must also drop
 that cache when its storage is replaced. `FusionKernelSpec.release_operand_snapshots()`
@@ -511,9 +518,9 @@ execution performs neither collection nor compiler-cache resets.
 | Execution concern | Fusion disabled | Fusion enabled | Implementation |
 | --- | --- | --- | --- |
 | Projection launches | Original separate calls | One native packed call; split outputs feed the original continuation | `gptqmodel/models/fusion.py:58` (`_parent_template`) |
-| Persistent packed operands | Independent source allocations | One contiguous fused allocation with disjoint source views | `gptqmodel/models/fusion.py:435` (`_share_operands`) |
-| Group selection | No fusion execution installed | Validated definition policy plus compiled-tree roles and live parents | `gptqmodel/models/fusion.py:637` (`FusionPlanner`) |
-| Model lifecycle | Ordinary model execution | Explicit apply/remove; failed admission preserves the installed plan | `gptqmodel/models/base.py:683` (`BaseQModel.fuse`) |
+| Persistent packed operands | Independent source allocations | One contiguous fused allocation with disjoint source views | `gptqmodel/models/fusion.py:525` (`_share_operands`) |
+| Group selection | No fusion execution installed | Validated definition policy plus compiled-tree roles and live parents | `gptqmodel/models/fusion.py:711` (`FusionPlanner`) |
+| Model lifecycle | Ordinary model execution | Explicit apply/remove; failed admission preserves the installed plan | `gptqmodel/models/base.py:1173` (`BaseQModel.fuse`) |
 
 Fusion preserves registered state-dict keys and tensor values. Saving serializes
 each projection view under its checkpoint key; loading rebuilds the ordinary modules and
@@ -739,7 +746,7 @@ calibration fixture for comparing execution, not a model-quality claim:
 
 ```python
 import torch
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.quantization import AWQConfig
 from gptqmodel.utils.backend import BACKEND
 
@@ -749,7 +756,7 @@ model = GPTQModel.load("/path/to/Llama-3.2-1B-Instruct", qcfg, device="cuda:0",
                        dtype=torch.float16, fuse=False, attn_implementation="eager")
 text = ("The capital of France is Paris. Science and mathematics explain the "
         "natural world. Good software tests verify every important result. ")
-model.quantize([text * 12 for _ in range(16)], batch_size=1,
+model.quantize(CalibrationConfig(dataset=[text * 12 for _ in range(16)], batch_size=1),
                backend=BACKEND.AWQ_TORCH)
 model.save("/path/to/symmetric-llama32-awq")
 ```

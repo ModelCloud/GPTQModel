@@ -15,6 +15,7 @@ import torch
 from ..utils.logger import setup_logger
 from .peft import LoraConfig
 from .remote import resolve_checkpoint_adapter_path, resolve_path, validate_remote_pin
+from .targeting import module_matches_targets
 
 
 log = setup_logger()
@@ -22,6 +23,35 @@ LORA_MERGED_WEIGHT_PATHS = [None, ""]
 HF_ADAPTER_FILE_NAME = "adapter_model.safetensors"
 HF_ADAPTER_CONFIG_FILE_NAME = "adapter_config.json"
 HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
+# The narrowest activation dtype a model can hand ``Lora.apply()``. The fold
+# must survive the cast to it, not only the adapter's storage dtype (#5501).
+LORA_FOLD_COMPUTE_DTYPE = torch.float16
+
+
+def _local_adapter_generation(path) -> Optional[Tuple]:
+    """Return a cheap signature of a local adapter's files.
+
+    An unpinned local adapter is cached by path, but the files can be rewritten
+    in place (re-exporting to the same directory). Stat the two artifact files
+    so an overwrite starts a new cache entry instead of serving the previous
+    tensors (#5423).
+    """
+
+    try:
+        path = os.fspath(path)
+    except TypeError:
+        return None
+    if not isinstance(path, str) or not os.path.isdir(path):
+        return None
+    generation = []
+    for filename in (HF_ADAPTER_CONFIG_FILE_NAME, HF_ADAPTER_FILE_NAME):
+        try:
+            stat = os.stat(os.path.join(path, filename))
+        except OSError:
+            generation.append((filename, None, None, None))
+        else:
+            generation.append((filename, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size))
+    return tuple(generation)
 
 
 def _rank_pattern_matches(pattern: str, weight_key: str, *, ignore_case: bool = False) -> bool:
@@ -42,6 +72,94 @@ def _rank_pattern_matches(pattern: str, weight_key: str, *, ignore_case: bool = 
 
     flags = pcre.IGNORECASE if ignore_case else 0
     return pcre.compile(rf"(.*\.)?({pattern})$", flags).match(weight_key) is not None
+
+
+def _pattern_override_candidates(
+    patterns: Dict[str, object], weight_key: str
+) -> List[Tuple[str, object]]:
+    """List ``(pattern, value)`` in PEFT's precedence order for ``weight_key``.
+
+    Exact, case-sensitive matches come first, in declaration order, because
+    that is the order PEFT itself applies. The legacy case-insensitive fallback
+    runs only when no pattern matched exactly: trying it per pattern let an
+    earlier lowercase rule capture a later rule's canonical mixed-case module
+    (`alpha_pattern={"proj": 8, "Proj": 2}` applied 8 to `block.Proj`, #5422).
+
+    The fallback keeps its old reach: it applies only when the pattern or the
+    module name is written in lowercase, which is what a legacy GPT-QModel
+    export produces. A canonical pattern is never case-folded onto a canonical
+    name.
+    """
+
+    exact: List[str] = []
+    folded: List[str] = []
+    for pattern in patterns:
+        if _rank_pattern_matches(pattern, weight_key):
+            exact.append(pattern)
+        elif pattern == pattern.lower() or weight_key == weight_key.lower():
+            if _rank_pattern_matches(pattern, weight_key, ignore_case=True):
+                folded.append(pattern)
+    return [(pattern, patterns[pattern]) for pattern in exact + folded]
+
+
+# PEFT layouts whose tensors the LoRA forward cannot consume. A checkpoint that
+# carries them but no `lora_A`/`lora_B` would attach nothing and run as the bare
+# model, so they are rejected by name too (the config `peft_type` check is the
+# primary guard; this catches a config that lies or predates the field).
+_UNSUPPORTED_PEFT_TENSOR_MARKERS = (
+    (".ia3_l", "IA3"),
+    (".hada_", "LoHa"),
+    (".lokr_", "LoKr"),
+    (".oft_blocks", "OFT"),
+    (".boft_blocks", "BOFT"),
+    (".vera_lambda_", "VeRA"),
+    (".lora_E", "AdaLoRA"),
+)
+
+
+def _reject_unsupported_adapter_tensors(weights: Dict[str, torch.Tensor]) -> None:
+    """Fail closed on adapter tensors this runtime cannot apply.
+
+    The LoRA path consumes only `lora_A` / `lora_B`. A checkpoint that also
+    carries DoRA magnitude vectors, `trainable_token_indices` deltas, trained
+    biases, or `modules_to_save` parameters would have those tensors dropped, so
+    the adapter would load and run as a different (plain LoRA) model. Rejecting
+    them keeps the load honest instead of silently wrong.
+    """
+
+    for key in weights:
+        for marker, feature in _UNSUPPORTED_PEFT_TENSOR_MARKERS:
+            if marker in key:
+                raise ValueError(
+                    f"Adapter: {feature} adapter tensors are not supported (`{key}`); "
+                    "only LoRA `lora_A`/`lora_B` can be loaded"
+                )
+        if ".lora_embedding_" in key:
+            # PEFT writes `lora_embedding_A`/`lora_embedding_B` for
+            # `target_modules=["embed_tokens"]`. The runtime attaches only
+            # `lora_A`/`lora_B` to linear layers, so the embedding delta used to
+            # be dropped and the model ran as the bare checkpoint (#5508).
+            raise ValueError(
+                "Adapter: LoRA on an embedding layer is not supported "
+                f"(`{key}`); PEFT stores those tensors as `lora_embedding_A`/"
+                "`lora_embedding_B`, which this runtime cannot apply. Fold the "
+                "embedding delta into the base weights, or drop `embed_tokens` "
+                "from the adapter targets."
+            )
+        if ".lora_magnitude_vector" in key:
+            raise ValueError(
+                f"Adapter: DoRA is not supported (`lora_magnitude_vector` tensor found: `{key}`)"
+            )
+        if ".modules_to_save." in key:
+            raise ValueError(f"Adapter: `modules_to_save` is not supported (`{key}`)")
+        if ".trainable_tokens_delta" in key:
+            raise ValueError(
+                "Adapter: `trainable_token_indices` is not supported "
+                f"(`trainable_tokens_delta` tensor found: `{key}`); "
+                "load a plain LoRA adapter or fold the trained token deltas into the base model"
+            )
+        if key.endswith(".bias"):
+            raise ValueError(f"Adapter: adapter bias tensors are not supported (`{key}`)")
 
 
 class AdapterCache():
@@ -143,6 +261,26 @@ class Adapter():
 
         pass
 
+    def targets_module(self, module_name: str) -> bool:
+        """Whether this adapter applies to ``module_name``.
+
+        The base adapter has no target metadata, so it keeps the historical
+        attach-to-every-module behavior. Subclasses with a PEFT config override
+        this to honour ``target_modules`` / ``exclude_modules``.
+        """
+
+        return True
+
+    def has_weights(self, module_name: str) -> bool:
+        """Whether the adapter source carries A and B tensors for ``module_name``.
+
+        The base adapter has no tensor metadata; subclasses that can inspect
+        their source override this. Target matching alone is not enough when a
+        PEFT export only contains the layers it transformed.
+        """
+
+        return True
+
     # override me
     def optimize(self):
         """Applies optional backend-specific optimizations after loading."""
@@ -176,6 +314,10 @@ class Lora(Adapter):
         self.lora_A = lora_A
         self.lora_B = lora_B
         self.lora_scale = 1.0
+        # Whether ``lora_scale`` was multiplied into ``lora_B`` at load time.
+        # ``apply()`` multiplies the product when it was not.
+        self._lora_scale_folded = True
+        self._lora_config: Optional[LoraConfig] = None
 
     @classmethod
     def name(cls) -> str:
@@ -209,6 +351,11 @@ class Lora(Adapter):
             self.lora_B = self.lora_B.to(device=x.device, dtype=x.dtype)
 
         update = (x @ self.lora_A) @ self.lora_B
+        if not self._lora_scale_folded:
+            # Folding overflowed (or flushed a value) in the adapter dtype, so
+            # the raw B stays stored and the effective scale is applied to the
+            # product, which is the PEFT order (#5426).
+            update = update * self.lora_scale
 
         # fix batch for lora
         # Some kernels do not reshape x, such as marlin / exllama / exllamav2.
@@ -222,17 +369,8 @@ class Lora(Adapter):
         result = out + update
         return result.view(original_shape) if original_shape is not None else result
 
-    def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
-        """Loads, caches, and materializes LoRA tensors for the target module."""
-
-        # self.register_buffer("lora_A", lora_A)
-        # self.register_buffer("lora_B", lora_B)
-
-        # we need since lora A/B weights may be merged into model tensors and not separate
-        if lora_A is not None and lora_B is not None:
-            # print(f"Adapter has preloaded lora_A and lora_B")
-            self.lora_A, self.lora_B = lora_A, lora_B
-            return
+    def _resolve_source(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Resolve the adapter source path and its explicit remote pin."""
 
         if self._gptqmodel_checkpoint_source is not None:
             checkpoint_path, manifest_path = self._gptqmodel_checkpoint_source
@@ -243,23 +381,42 @@ class Lora(Adapter):
         validate_remote_pin(remote_revision, remote_sha256)
         if remote_revision is None and isinstance(self.path, str) and os.path.isdir(self.path):
             self.path = os.path.abspath(self.path)
-        cache_key = (self.path, remote_revision, remote_sha256)
+        return self.path, remote_revision, remote_sha256
+
+    def _adapter_cache_key(self, path, remote_revision, remote_sha256):
+        """Build the cache key, adding a local artifact generation when unpinned.
+
+        Pinned remote sources are immutable, and a non-local path has no files to
+        stat, so those keep the historical three-part key.
+        """
+
+        if remote_revision is None and remote_sha256 is None:
+            generation = _local_adapter_generation(path)
+            if generation is not None:
+                return (path, None, None, generation)
+        return (path, remote_revision, remote_sha256)
+
+    def _load_adapter(self) -> Tuple[LoraConfig, Dict[str, torch.Tensor]]:
+        """Load and cache the adapter config and weights for this source."""
+
+        path, remote_revision, remote_sha256 = self._resolve_source()
+        cache_key = self._adapter_cache_key(path, remote_revision, remote_sha256)
         lora_cache = AdapterCache.get(cache_key)
         if lora_cache is None:
             # get lora config
             lora_cfg = LoraConfig.from_pretrained(
-                path=self.path,
+                path=path,
                 filename=HF_ADAPTER_CONFIG_FILE_NAME,
                 allow_remote=remote_revision is not None,
                 revision=remote_revision,
             )
-            lora_cfg.gptqmodel_path = self.path  # hack: save this
+            lora_cfg.gptqmodel_path = path  # hack: save this
 
             if not isinstance(lora_cfg, LoraConfig):
-                raise ValueError(f"Adapter: Expected `LoraConfig` in `{self.path}`, actual = `{lora_cfg}`")
+                raise ValueError(f"Adapter: Expected `LoraConfig` in `{path}`, actual = `{lora_cfg}`")
 
             lora_path = resolve_path(
-                self.path,
+                path,
                 HF_ADAPTER_FILE_NAME,
                 allow_remote=remote_revision is not None,
                 revision=remote_revision,
@@ -272,8 +429,105 @@ class Lora(Adapter):
             lora_cache = AdapterCache.get(cache_key)
             assert lora_cache is not None
 
-        # lora_cache result is a tuple
         lora_cfg, lora_weights = lora_cache
+        _reject_unsupported_adapter_tensors(lora_weights)
+        self._lora_config = lora_cfg
+        return lora_cfg, lora_weights
+
+    def adapter_config(self) -> Optional[LoraConfig]:
+        """Return the PEFT config for this adapter, if it has one on disk.
+
+        ``None`` covers adapters whose weights are merged into the model
+        (EoRA) and output directories that have not been saved yet. Those keep
+        the historical attach-to-every-module behavior.
+        """
+
+        if self._lora_config is not None:
+            return self._lora_config
+        if self.path in LORA_MERGED_WEIGHT_PATHS:
+            return None
+        path, remote_revision, _ = self._resolve_source()
+        if not path or path in LORA_MERGED_WEIGHT_PATHS:
+            return None
+        if remote_revision is None:
+            # A local EoRA output directory (or any adapter that has not been
+            # saved yet) has no target list. Do not turn that into a hard error
+            # while merely deciding which modules may attach the adapter.
+            if not os.path.isdir(path):
+                return None
+            if not os.path.isfile(os.path.join(path, HF_ADAPTER_CONFIG_FILE_NAME)):
+                return None
+        lora_cfg, _ = self._load_adapter()
+        return lora_cfg
+
+    def targets_module(self, module_name: str) -> bool:
+        """Whether this adapter's ``target_modules`` selects ``module_name``."""
+
+        if self.lora_A is not None and self.lora_B is not None:
+            # Preloaded merged A/B tensors carry no target list.
+            return True
+        lora_cfg = self.adapter_config()
+        if lora_cfg is None:
+            return True
+        if module_matches_targets(
+            module_name,
+            lora_cfg.target_modules,
+            lora_cfg.exclude_modules,
+        ):
+            return True
+        # Legacy EoRA exports wrote the target list and tensor keys in lowercase
+        # (`wqkv` for `Wqkv`). `has_weights` already accepts that spelling, but
+        # this target check is evaluated first and rejected the module. Accept
+        # the lowercase spelling only when the adapter's tensor pair confirms
+        # it, so canonical PEFT files keep case-sensitive targeting (#5418).
+        lowered = module_name.lower()
+        if lowered == module_name:
+            return False
+        if not module_matches_targets(
+            lowered,
+            lora_cfg.target_modules,
+            lora_cfg.exclude_modules,
+        ):
+            return False
+        return self.has_weights(module_name)
+
+    def has_weights(self, module_name: str) -> bool:
+        """Whether the adapter source has both A and B tensors for a module."""
+
+        if self.lora_A is not None and self.lora_B is not None:
+            return True
+        if self.adapter_config() is None:
+            return True
+        _, lora_weights = self._load_adapter()
+        for key in (module_name, module_name.lower()):
+            found_a = any(
+                name.endswith(f"{key}.lora_A.weight") for name in lora_weights
+            )
+            found_b = any(
+                name.endswith(f"{key}.lora_B.weight") for name in lora_weights
+            )
+            if found_a and found_b:
+                return True
+        return False
+
+    def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
+        """Loads, caches, and materializes LoRA tensors for the target module."""
+
+        # self.register_buffer("lora_A", lora_A)
+        # self.register_buffer("lora_B", lora_B)
+
+        # we need since lora A/B weights may be merged into model tensors and not separate
+        if lora_A is not None and lora_B is not None:
+            # print(f"Adapter has preloaded lora_A and lora_B")
+            self.lora_A, self.lora_B = lora_A, lora_B
+            return
+
+        lora_cfg, lora_weights = self._load_adapter()
+        cache_key = self._adapter_cache_key(
+            self.path,
+            getattr(self, "_gptqmodel_remote_revision", None),
+            getattr(self, "_gptqmodel_remote_sha256", None),
+        )
         if self.rank is None:
             self.rank = lora_cfg.r
         elif self.rank != lora_cfg.r:
@@ -348,11 +602,51 @@ class Lora(Adapter):
         )
         # `lora_B` is already a private contiguous clone from the immutable
         # adapter cache. Fold the scale once here so every forward uses the
-        # PEFT effective scale without adding another multiply.
-        self.lora_B.mul_(self.lora_scale)
+        # PEFT effective scale without adding another multiply, unless the fold
+        # would not survive `lora_B`'s storage dtype (#5426).
+        self._lora_scale_folded = self._fold_scale_into_b()
 
         #print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
         #print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
+
+    def _fold_scale_into_b(self) -> bool:
+        """Fold ``lora_scale`` into ``lora_B`` only when that is lossless enough.
+
+        The fold saves one multiply per forward, but it runs in the adapter's
+        storage dtype. PEFT multiplies the low-rank product by ``alpha / rank``
+        after both projections, so a large ``B`` (or a large scale) can overflow
+        FP16 to ``inf`` even though the scaled product with a small activation
+        is finite (#5426). Folding can also flush a nonzero element to zero.
+
+        ``apply()`` casts both projections to the activation dtype on the first
+        forward, so the folded value must also survive that cast. A trained
+        adapter is stored in FP32 (or BF16) while the model may run in FP16: a
+        fold that is finite in FP32 still becomes ``inf`` when ``apply()``
+        narrows it, which is the #5426 failure through the storage-vs-compute
+        dtype path (#5501). Validate in :data:`LORA_FOLD_COMPUTE_DTYPE` too.
+
+        Returns ``True`` when the scale was folded into ``lora_B``, ``False``
+        when ``apply()`` must multiply the product instead.
+        """
+
+        scale = float(self.lora_scale)
+        if self.lora_B is None or scale == 1.0:
+            return True
+        with torch.no_grad():
+            folded = self.lora_B * scale
+            if not bool(torch.isfinite(folded).all()):
+                return False
+            if bool(((folded == 0) & (self.lora_B != 0)).any()):
+                return False
+            if self.lora_B.dtype != LORA_FOLD_COMPUTE_DTYPE:
+                # The first ``apply()`` casts the folded B down to this dtype.
+                narrowed = folded.to(LORA_FOLD_COMPUTE_DTYPE)
+                if not bool(torch.isfinite(narrowed).all()):
+                    return False
+                if bool(((narrowed == 0) & (self.lora_B != 0)).any()):
+                    return False
+            self.lora_B.mul_(scale)
+        return True
 
     def dynamic_rank_override(self, lora_cfg: LoraConfig, weight_key: str) -> bool:
         """Overrides the adapter rank when the config defines a matching rank pattern."""
@@ -362,18 +656,14 @@ class Lora(Adapter):
             for k, v in lora_cfg.rank_pattern.items():
                 assert isinstance(k, str) and isinstance(v, int)
                 assert v > 0 # check for invalid rank range
-                # Match the pattern exactly as written: full name, then suffix,
-                # then regex. Lowercasing here silently missed canonical
-                # mixed-case module names and inverted regex escapes.
-                matched = _rank_pattern_matches(k, weight_key)
-                if not matched and (k != k.lower() or weight_key != weight_key.lower()):
-                    # Legacy GPT-QModel exports lowercased module names. Retry
-                    # case-insensitively without rewriting the pattern.
-                    matched = _rank_pattern_matches(k, weight_key, ignore_case=True)
-                if matched:
-                    self.rank = v
-                    log.info(f"Adapter: Base Lora `rank` = `{self.rank}` has been overridden by `{k}` due to dynamic `LoraConfig.rank_pattern` control.")
-                    return True
+            # Exact case-sensitive matches first, then the legacy fallback; see
+            # `_pattern_override_candidates` (#5422).
+            for pattern, override in _pattern_override_candidates(
+                lora_cfg.rank_pattern, weight_key
+            ):
+                self.rank = override
+                log.info(f"Adapter: Base Lora `rank` = `{self.rank}` has been overridden by `{pattern}` due to dynamic `LoraConfig.rank_pattern` control.")
+                return True
 
         return False
 
@@ -396,16 +686,17 @@ class Lora(Adapter):
                         f"Adapter: `alpha_pattern[{pattern!r}]` must be a positive real, "
                         f"actual = `{override}`."
                     )
-                matched = _rank_pattern_matches(pattern, weight_key)
-                if not matched and (pattern != pattern.lower() or weight_key != weight_key.lower()):
-                    matched = _rank_pattern_matches(pattern, weight_key, ignore_case=True)
-                if matched:
-                    alpha = float(override)
-                    log.info(
-                        f"Adapter: Base Lora `alpha` = `{base_alpha}` has been overridden by "
-                        f"`{pattern}` due to dynamic `LoraConfig.alpha_pattern` control."
-                    )
-                    break
+            # Exact case-sensitive matches first, then the legacy fallback; see
+            # `_pattern_override_candidates` (#5422).
+            for pattern, override in _pattern_override_candidates(
+                lora_cfg.alpha_pattern, weight_key
+            ):
+                alpha = float(override)
+                log.info(
+                    f"Adapter: Base Lora `alpha` = `{base_alpha}` has been overridden by "
+                    f"`{pattern}` due to dynamic `LoraConfig.alpha_pattern` control."
+                )
+                break
 
         return alpha
 

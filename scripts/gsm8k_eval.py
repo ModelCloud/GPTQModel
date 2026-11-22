@@ -140,7 +140,13 @@ def run_eval(
     verbose: bool = True,
     chat_template: bool = False,
 ) -> dict:
-    """Score ``model_id`` on GSM8K and return ``{"accuracy", "n", "correct", ...}``."""
+    """Score ``model_id`` on GSM8K and return ``{"accuracy", "n", "correct", ...}``.
+
+    A prompt longer than ``max_prompt_tokens`` is truncated from the *front*:
+    the demonstrations go, the question under test and its ``Answer:`` prefix
+    stay. The count of truncated prompts is returned and warned about, so a run
+    cannot silently score a prompt whose question was cut away (#5403).
+    """
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     os.environ.setdefault("USE_TORCH_XLA", "0")
@@ -188,6 +194,7 @@ def run_eval(
     shots = load_rows(shots_path)[:5] if shots_path else None
     n = min(limit, len(rows))
     correct = 0
+    truncated = 0
     started = time.time()
     with torch.no_grad():
         for i in range(n):
@@ -195,12 +202,19 @@ def run_eval(
             prompt, _applied = apply_chat_template_to_prompt(
                 tok, prompt, enabled=chat_template
             )
-            ids = tok(
-                prompt,
-                return_tensors="pt",
-                truncation=True,
-                max_length=max_prompt_tokens,
-            ).input_ids
+            # transformers truncates on the right by default, which removes the
+            # question under test from a few-shot prompt and grades the model on
+            # demonstrations alone (#5403). Keep the tail instead, and keep a
+            # leading BOS when the tokenizer has one.
+            ids = tok(prompt, return_tensors="pt", truncation=False).input_ids
+            if ids.shape[1] > max_prompt_tokens:
+                keep = max(1, int(max_prompt_tokens))
+                head = 0
+                bos = getattr(tok, "bos_token_id", None)
+                if keep > 1 and bos is not None and int(ids[0, 0]) == int(bos):
+                    head = 1
+                ids = torch.cat([ids[:, :head], ids[:, -(keep - head):]], dim=1)
+                truncated += 1
             out = model.generate(
                 ids, max_new_tokens=max_new_tokens, do_sample=False,
                 pad_token_id=tok.pad_token_id,
@@ -217,6 +231,12 @@ def run_eval(
                 )
 
     accuracy = correct / n if n else 0.0
+    if truncated:
+        print(
+            f"[E] WARNING: truncated {truncated}/{n} prompt(s) from the front to fit "
+            f"--max-prompt-tokens={max_prompt_tokens}; the question under test is kept.",
+            flush=True,
+        )
     result = {
         "model": model_id,
         "native": native,
@@ -224,6 +244,8 @@ def run_eval(
         "n": n,
         "correct": correct,
         "accuracy": accuracy,
+        "truncated_prompts": truncated,
+        "max_prompt_tokens": max_prompt_tokens,
         "seconds": round(time.time() - started, 1),
         "chat_template": chat_template,
         "tokenizer_has_template": templated,

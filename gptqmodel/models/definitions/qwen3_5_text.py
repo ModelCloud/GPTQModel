@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ..fusable import FusableConfig
+from ..local import LocalModelLoader
 from .qwen3 import Qwen3QModel
 from .qwen3_5 import Qwen3_5QModel
 
@@ -11,6 +12,11 @@ class Qwen3_5TextQModel(Qwen3QModel):
     Text-only Qwen 3.5 shells use the standard causal LM loader and keep their
     decoder stack directly under `model.layers`.
     """
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     fusable = FusableConfig("qwen3_5_text").merge(Qwen3_5QModel.fusable)
 
 

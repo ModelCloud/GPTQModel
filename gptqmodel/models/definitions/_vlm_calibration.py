@@ -10,17 +10,37 @@ conversations. Vision-language processors only understand conversations, so
 definitions that override ``prepare_dataset`` use these helpers to keep the
 base text path for pre-tokenized rows instead of handing token ids to
 ``processor.apply_chat_template`` (issue #4228).
+
+The base text path keeps only ``input_ids``/``attention_mask``. A row that also
+carries multimodal inputs (``pixel_values``, ``image_grid_thw``, ...) cannot use
+that path without silently dropping them, so the splitter rejects it with an
+actionable error instead of routing it to either path (issue #4371). Scalar or
+string metadata columns that ``datasets.map(tokenize)`` keeps (``id``, ``url``,
+``source``, ...) are not model inputs, so they do not block the text path
+(issue #4455).
 """
 
 from __future__ import annotations
 
 import itertools
+import numbers
 import random
-from collections.abc import Mapping
-from typing import Any, Iterable, Optional
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any, Optional
 
+import numpy as np
 import torch
 
+from ...utils.calibration import (
+    _columnar_mapping_examples,
+    _frame_columns,
+    _hf_dataset_rows,
+    _is_columnar_mapping,
+    _is_dataset_split_mapping,
+    _is_integer_sequence,
+    batched_conversations,
+    prepare_calibration_dataset,
+)
 from ...utils.logger import setup_logger
 
 
@@ -28,15 +48,178 @@ log = setup_logger()
 
 _MISSING = object()
 
+# Columns the base text path can consume or safely ignore. Any other column must
+# hold plain metadata (see `_is_metadata_value`); it may otherwise carry
+# multimodal model inputs that must not be dropped silently.
+_TEXT_ONLY_COLUMNS = frozenset(
+    {
+        "input_ids",
+        "attention_mask",
+        "text",
+        "messages",
+        "token_type_ids",
+        "labels",
+        "special_tokens_mask",
+        "position_ids",
+        "offset_mapping",
+        "overflow_to_sample_mapping",
+        "num_truncated_tokens",
+    }
+)
+
+
+# Column-name parts that identify multimodal model inputs or references to
+# them (``pixel_values``, ``image_grid_thw``, ``video_grid_thw``, ``image_url``,
+# ``input_features``, ...). Such a column is rejected even when it holds a
+# string or scalar: a path, URL or size for an image is still an image input.
+_MULTIMODAL_COLUMN_NAME_PARTS = frozenset(
+    {
+        "pixel",
+        "pixels",
+        "image",
+        "images",
+        "img",
+        "video",
+        "videos",
+        "audio",
+        "audios",
+        "vision",
+        "visual",
+        "thw",
+        "features",
+    }
+)
+
+
+def _is_multimodal_column_name(name: Any) -> bool:
+    parts = str(name).lower().replace("-", "_").split("_")
+    return any(part in _MULTIMODAL_COLUMN_NAME_PARTS for part in parts)
+
+
+def _is_metadata_value(value: Any) -> bool:
+    """Return whether ``value`` is plain row metadata, not a model input.
+
+    Scalars (``None``, bool, numbers, strings) and flat string lists are
+    metadata. Tensors, arrays, numeric sequences, bytes, mappings and any other
+    object may hold multimodal inputs and are not.
+    """
+
+    if value is None or isinstance(value, (bool, str)):
+        return True
+    if isinstance(value, np.generic):
+        return value.ndim == 0
+    if isinstance(value, numbers.Number):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(isinstance(item, str) for item in value)
+    return False
+
+
+def _non_text_columns(sample: Mapping, *, columnar: bool = False) -> list[str]:
+    """Return mapping columns the text calibration path would drop as model inputs.
+
+    ``columnar`` checks every row value of a column-major mapping.
+    """
+
+    columns = []
+    for name, value in sample.items():
+        if name in _TEXT_ONLY_COLUMNS:
+            continue
+        if _is_multimodal_column_name(name):
+            columns.append(str(name))
+            continue
+        if columnar and isinstance(value, (list, tuple)):
+            is_metadata = all(_is_metadata_value(item) for item in value)
+        else:
+            is_metadata = _is_metadata_value(value)
+        if not is_metadata:
+            columns.append(str(name))
+    return columns
+
+
+def _raise_non_text_columns(columns: list[str], *, label: str) -> None:
+    raise ValueError(
+        f"{label}: calibration row provides non-text column(s) {columns}. The VLM "
+        "text calibration path keeps only `input_ids`/`attention_mask`, so these "
+        "values would be silently dropped. Pass the source conversations and let "
+        "the model processor build the multimodal inputs, or remove the extra "
+        "columns for text-only calibration."
+    )
+
 
 def is_pretokenized_sample(sample: Any) -> bool:
-    """Return whether ``sample`` is a token-id row the base text path accepts."""
+    """Return whether ``sample`` is a token-id row the base text path accepts.
+
+    The base path keeps only ``input_ids``/``attention_mask`` from a mapping, so
+    extra text-only tokenizer columns (``token_type_ids``, ``labels``, ...) must
+    not divert the row to the processor path, where it would be wrapped as a
+    chat message. Rows with multimodal columns are not pre-tokenized text: the
+    splitter rejects them so their tensors are never dropped. NumPy arrays and
+    rows built from NumPy/0-D-tensor token ids are token ids too.
+    """
 
     if isinstance(sample, Mapping):
-        return "input_ids" in sample and set(sample.keys()) <= {"input_ids", "attention_mask"}
+        return "input_ids" in sample and not _non_text_columns(sample)
     if isinstance(sample, (list, tuple)):
-        return bool(sample) and all(isinstance(token, int) for token in sample)
+        return bool(sample) and _is_integer_sequence(sample)
+    if isinstance(sample, np.ndarray):
+        return True
     return torch.is_tensor(sample)
+
+
+def _mapping_rows(calibration_dataset: Mapping, *, label: str) -> list[Any]:
+    """Normalize a mapping calibration input the same way the base helper does."""
+
+    if len(calibration_dataset) == 0:
+        return []
+    if _is_columnar_mapping(calibration_dataset):
+        if "input_ids" in calibration_dataset:
+            columns = _non_text_columns(calibration_dataset, columnar=True)
+            if columns:
+                _raise_non_text_columns(columns, label=label)
+        return _columnar_mapping_examples(calibration_dataset)
+    if _is_dataset_split_mapping(calibration_dataset):
+        splits = ", ".join(repr(key) for key in calibration_dataset.keys())
+        raise ValueError(
+            f"{label}: calibration dataset is a mapping of dataset splits "
+            f"({splits}); select one split, e.g. `calibration_dataset['train']`."
+        )
+    if any(name in calibration_dataset for name in ("input_ids", "text", "messages")):
+        return [calibration_dataset]
+    raise ValueError(
+        f"{label}: calibration dataset mapping must provide `input_ids`, `text`, "
+        f"or `messages` columns, got keys={list(calibration_dataset.keys())}."
+    )
+
+
+def _reject_non_text_row(sample: Any, *, label: str) -> None:
+    """Reject a token-id row whose extra columns may hold multimodal tensors."""
+
+    if not isinstance(sample, Mapping) or "input_ids" not in sample:
+        return
+    columns = _non_text_columns(sample)
+    if columns:
+        _raise_non_text_columns(columns, label=label)
+
+
+def processor_prepared_rows(calibration_dataset: Any) -> Optional[list[dict]]:
+    """Return ``calibration_dataset`` as rows the model processor already built.
+
+    A processor-prepared row carries ``input_ids`` together with the
+    multimodal tensors (``pixel_values``, ``grid_thws``, ...) the processor
+    produced, so it is one ready model batch. Only a list or tuple whose every
+    row has that shape qualifies; any other input returns ``None`` and takes
+    the regular split, which rejects a lone multimodal row mixed with others.
+    """
+
+    if not isinstance(calibration_dataset, (list, tuple)) or not calibration_dataset:
+        return None
+    if not all(
+        isinstance(row, Mapping) and "input_ids" in row and _non_text_columns(row)
+        for row in calibration_dataset
+    ):
+        return None
+    return [dict(row) for row in calibration_dataset]
 
 
 def split_calibration_dataset(
@@ -49,19 +232,34 @@ def split_calibration_dataset(
     Returns ``(pretokenized_rows, conversations)``; exactly one of the two is
     ``None``. Mixing both row kinds in one dataset is rejected because the
     processor path cannot consume token ids and silently dropping them would
-    change the calibration set.
+    change the calibration set. A row that carries multimodal tensors is
+    rejected outright: neither path can forward them, and the text path would
+    drop them silently.
     """
+
+    frame_columns = _frame_columns(calibration_dataset)
+    if frame_columns is not None:
+        calibration_dataset = frame_columns
+
+    hf_rows = _hf_dataset_rows(calibration_dataset)
+    if hf_rows is not None:
+        calibration_dataset = hf_rows
+
+    if isinstance(calibration_dataset, Mapping):
+        calibration_dataset = _mapping_rows(calibration_dataset, label=label)
 
     iterator = iter(calibration_dataset)
     first = next(iterator, _MISSING)
     if first is _MISSING:
         # Let the base text path report the empty dataset.
         return [], None
+    _reject_non_text_row(first, label=label)
     if not is_pretokenized_sample(first):
         return None, itertools.chain((first,), iterator)
 
     rows = [first]
     for sample in iterator:
+        _reject_non_text_row(sample, label=label)
         if not is_pretokenized_sample(sample):
             raise ValueError(
                 f"{label}: calibration dataset mixes pre-tokenized rows with chat "
@@ -78,9 +276,9 @@ def pop_conversation_calibration_options(
 ) -> tuple[Optional[str], Optional[int]]:
     """Extract the calibration options the conversation path can honour.
 
-    ``calibration_concat_size`` is rejected: concatenating token ids would break
-    the image/token alignment the processor produced. ``calibration_sort`` and
-    ``calibration_data_min_length`` are returned so the conversation path can
+    ``CalibrationConfig.concat_size`` is rejected: concatenating token ids would break
+    the image/token alignment the processor produced. ``CalibrationConfig.sort`` and
+    ``CalibrationConfig.min_length`` are returned so the conversation path can
     apply them to the prepared batches.
     """
 
@@ -91,7 +289,7 @@ def pop_conversation_calibration_options(
 
     if concat_size is not None:
         raise ValueError(
-            f"{label}: `calibration_concat_size` is not supported for conversation "
+            f"{label}: `CalibrationConfig.concat_size` is not supported for conversation "
             f"calibration data (got {concat_size}) because concatenating token ids "
             "would break the image/token alignment. Pass pre-tokenized `input_ids` "
             "rows to use it."
@@ -138,7 +336,7 @@ def finalize_conversation_batches(
             log.warn(
                 f"{label}: {dropped} calibration conversation(s) with input_ids length "
                 f"<= {min_length} were removed. Use "
-                "quantize(calibration_data_min_length=...) to set a custom minimum length."
+                "CalibrationConfig(min_length=...) to set a custom minimum length."
             )
         batches = kept
 
@@ -150,3 +348,100 @@ def finalize_conversation_batches(
         random.shuffle(batches)
 
     return batches
+
+
+def _model_processor(model: Any) -> Any:
+    """Return the loaded processor, loading it only when the model has none.
+
+    ``__dict__`` is read first: an uninitialized wrapper built with
+    ``object.__new__`` cannot go through ``nn.Module.__getattr__``.
+    """
+
+    processor = getattr(model, "__dict__", {}).get("processor")
+    if processor is not None:
+        return processor
+    return model.load_processor()
+
+
+def prepare_vlm_calibration_dataset(
+    model: Any,
+    calibration_dataset: Any,
+    *,
+    batch_size: int = 1,
+    options: Optional[Mapping[str, Any]] = None,
+    prepare_batch: Optional[Callable[[Any, list[Any]], Any]] = None,
+    prepare_conversations: Optional[Callable[[Iterable[Any]], Iterable[Any]]] = None,
+    preprocess_func: Optional[Callable[[Any], Any]] = None,
+    processor: Any = None,
+    label: Optional[str] = None,
+    accept_processor_rows: bool = False,
+) -> list[Any]:
+    """Prepare VLM calibration data through the shared #4228/#4308 contract.
+
+    Every vision-language ``prepare_dataset`` override delegates here so the
+    contract cannot drift per model again:
+
+    * pre-tokenized rows (and columnar mappings) take the base text path;
+    * ``CalibrationConfig.concat_size`` is rejected for conversations;
+    * ``CalibrationConfig.sort`` / ``CalibrationConfig.min_length`` are applied;
+    * rows that mix token ids with conversations are rejected.
+
+    ``prepare_batch(processor, conversations)`` prepares one processor batch and
+    is the usual hook: it defaults to the model's
+    ``prepare_inputs_for_conversations``. Definitions whose input rows are not
+    chat conversations pass ``prepare_conversations`` instead; it receives the
+    raw non-tokenized rows and returns the prepared batches.
+
+    ``accept_processor_rows`` lets a definition take rows its own processor
+    already produced (see ``processor_prepared_rows``) as ready batches. They
+    follow the conversation contract: ``CalibrationConfig.concat_size`` is
+    rejected and ``sort``/``min_length`` are applied.
+    """
+
+    label = label or type(model).__name__
+    options = dict(options or {})
+
+    if accept_processor_rows:
+        prepared = processor_prepared_rows(calibration_dataset)
+        if prepared is not None:
+            sort, min_length = pop_conversation_calibration_options(options, label=label)
+            return finalize_conversation_batches(
+                prepared, sort=sort, min_length=min_length, label=label
+            )
+
+    pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+    if pretokenized is not None:
+        return prepare_calibration_dataset(
+            model,
+            calibration_dataset=pretokenized,
+            batch_size=batch_size,
+            **options,
+        )
+
+    sort, min_length = pop_conversation_calibration_options(options, label=label)
+
+    if prepare_conversations is not None:
+        if prepare_batch is not None:
+            raise ValueError(
+                f"{label}: pass either `prepare_batch` or `prepare_conversations`, not both."
+            )
+        batches = list(prepare_conversations(conversations))
+    else:
+        if prepare_batch is None:
+            prepare_batch = getattr(model, "prepare_inputs_for_conversations", None)
+            if prepare_batch is None:
+                raise ValueError(
+                    f"{label}: the VLM calibration helper needs a "
+                    "`prepare_inputs_for_conversations` hook or an explicit `prepare_batch`."
+                )
+        processor = processor if processor is not None else _model_processor(model)
+        batches = [
+            prepare_batch(processor, batch)
+            for batch in batched_conversations(
+                conversations, batch_size, process_func=preprocess_func
+            )
+        ]
+
+    return finalize_conversation_batches(
+        batches, sort=sort, min_length=min_length, label=label
+    )

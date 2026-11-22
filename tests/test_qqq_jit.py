@@ -5,6 +5,7 @@ import pytest
 import torch
 
 import gptqmodel.nn_modules.qlinear.qqq as qqq_module
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 def _build_module() -> qqq_module.QQQLinear:
@@ -116,6 +117,138 @@ def test_qqq_torch_cpu_int_mm_failure_is_shape_scoped(monkeypatch):
     assert output.shape == (x.shape[0], module.out_features)
 
 
+_LARGE_K_IN_FEATURES = 262144
+_LARGE_K_OUT_FEATURES = 64
+_LARGE_K_CHANNEL_SCALE = 1.0 / 65536.0
+
+
+def _build_large_k_cpu_module(*, mixed_signs: bool) -> qqq_module.QQQTorchLinear:
+    """Build a real channelwise QQQ module whose contraction crosses INT32.
+
+    ``in_features`` is 262144, twice the INT32 INT8-GEMM reduction limit, and
+    the packed words are ``0x88888888``: every signed INT4 code is -8, which
+    the Torch kernel expands to the INT8 value -128.  With an all-ones FP16
+    activation the exact integer accumulator is 262144 * 127 * (-128), far
+    outside the INT32 range, so a single-accumulator GEMM wraps silently.
+    """
+
+    in_features = _LARGE_K_IN_FEATURES
+    out_features = _LARGE_K_OUT_FEATURES
+    # Channelwise codes are signed INT4 scaled by 16: code -8 is the INT8 value
+    # -128, code 7 is +112.  Both products are exact in FP16 at this scale.
+    code_scale = 16.0 * _LARGE_K_CHANNEL_SCALE
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=torch.float16)
+    if mixed_signs:
+        negative = 7 * in_features // 8
+        linear.weight.data[:, :negative] = -8.0 * code_scale
+        linear.weight.data[:, negative:] = 7.0 * code_scale
+    else:
+        linear.weight.data.fill_(-8.0 * code_scale)
+    scales = torch.full((out_features, 1), code_scale, dtype=torch.float16)
+    module = qqq_module.QQQTorchLinear(
+        bits=4,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        register_buffers=False,
+    )
+    module.pack(linear, scales)
+    module.post_init()
+    return module.eval()
+
+
+def test_qqq_torch_cpu_int_mm_large_k_does_not_wrap():
+    """K=262144 with the most negative code must not wrap a 32-bit accumulator."""
+
+    if not hasattr(torch, "_int_mm"):
+        pytest.skip("torch._int_mm is unavailable")
+
+    module = _build_large_k_cpu_module(mixed_signs=False)
+    activation = torch.ones(1, module.in_features, dtype=torch.float16)
+    quant_a, _ = module.dynamic_quant(activation)
+    weight = module._int8_weight_for_forward()
+    assert torch.equal(weight, torch.full_like(weight, -128))
+    assert torch.equal(quant_a, torch.full_like(quant_a, 127))
+
+    exact = torch.matmul(quant_a.to(torch.int64), weight.to(torch.int64))
+    exact_value = exact[0, 0].item()
+    assert exact_value == -4261412864
+    assert exact_value < torch.iinfo(torch.int32).min
+
+    # The packed CPU kernel already declines this contraction; the Torch INT8
+    # path must handle it instead of handing it to a single-accumulator GEMM.
+    assert module._packed_cpu_matmul(quant_a) is None
+
+    accum = module._int8_matmul(quant_a, weight)
+    assert accum is not None
+    torch.testing.assert_close(accum, exact.to(torch.float32), rtol=0, atol=0)
+    # The pre-fix accumulator wrapped to +33554432, i.e. 2**32 away.
+    assert accum[0, 0].item() != float(2**32 + exact_value)
+    assert module._torch_int_mm_failed_shapes == set()
+
+    with torch.inference_mode():
+        output = module(activation)
+    assert output.dtype == torch.float16
+    # 262144 * 127 * (-128) / (127 * 65536) = -512, exactly representable.
+    torch.testing.assert_close(output, torch.full_like(output, -512.0), rtol=0, atol=0)
+
+
+def test_qqq_torch_cpu_int_mm_large_k_mixed_signs():
+    """A long contraction with both signs must still use the exact accumulator."""
+
+    if not hasattr(torch, "_int_mm"):
+        pytest.skip("torch._int_mm is unavailable")
+
+    module = _build_large_k_cpu_module(mixed_signs=True)
+    activation = torch.ones(1, module.in_features, dtype=torch.float16)
+    quant_a, s1 = module.dynamic_quant(activation)
+    weight = module._int8_weight_for_forward()
+    assert set(torch.unique(weight).tolist()) == {-128, 112}
+
+    exact = torch.matmul(quant_a.to(torch.int64), weight.to(torch.int64))
+    # 7/8 of the terms are -16256 and 1/8 are +14224; the sum is still outside
+    # the INT32 range, so a wrapped partial would not be cancelled by the
+    # opposing terms.
+    assert exact[0, 0].item() == -3262644224
+    assert exact[0, 0].item() < torch.iinfo(torch.int32).min
+
+    accum = module._int8_matmul(quant_a, weight)
+    assert accum is not None
+    torch.testing.assert_close(accum, exact.to(torch.float32), rtol=0, atol=0)
+
+    expected = (
+        exact.to(torch.float64)
+        * s1.to(torch.float64)
+        * module.s_channel.to(torch.float64)
+    ).to(torch.float16)
+    with torch.inference_mode():
+        output = module(activation)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "reduction",
+    [131071, 131072],
+)
+def test_qqq_torch_cpu_int_mm_reduction_boundary(reduction):
+    """The last in-range contraction and the first one that needs chunking."""
+
+    if not hasattr(torch, "_int_mm"):
+        pytest.skip("torch._int_mm is unavailable")
+
+    module = _build_cpu_torch_module()
+    quant_a = torch.full((2, reduction), -128, dtype=torch.int8)
+    weight = torch.full((reduction, 8), -128, dtype=torch.int8)
+    exact = torch.matmul(quant_a.to(torch.int64), weight.to(torch.int64))
+
+    accum = module._int8_matmul(quant_a, weight)
+    assert accum is not None
+    torch.testing.assert_close(accum, exact.to(torch.float32), rtol=0, atol=0)
+
+
 def test_qqq_torch_cpu_cache_invalidates_on_mutation_load_and_move():
     module = _build_cpu_torch_module()
     first_weight, _, first_channel = module._packed_weight_for_cpu()
@@ -124,6 +257,8 @@ def test_qqq_torch_cpu_cache_invalidates_on_mutation_load_and_move():
     assert first_weight.numel() == module.in_features * module.out_features // 2
     assert first_weight.untyped_storage().nbytes() == first_weight.numel()
 
+    # The packed cache replaced the checkpoint buffers (#4805).
+    assert module._materialize_dropped_checkpoint()
     module.s_channel.add_(1.0)
     second_weight, _, second_channel = module._packed_weight_for_cpu()
     assert second_weight is not first_weight
@@ -145,13 +280,19 @@ def test_qqq_torch_cpu_cache_invalidates_on_mutation_load_and_move():
     assert output.shape == (3, module.out_features)
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="QQQ (BACKEND.QQQ) has no ROCm kernel"
+)
 def test_qqq_forward_uses_jit_kernel(monkeypatch):
     module = _build_module()
     calls = {}
 
     monkeypatch.setattr(qqq_module, "qqq_runtime_available", lambda: True)
 
-    def fake_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par):
+    def fake_gemm(
+        A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par,
+        bias=None,
+    ):
         calls["gemm"] = {
             "A_shape": tuple(A.shape),
             "A_dtype": A.dtype,
@@ -165,12 +306,13 @@ def test_qqq_forward_uses_jit_kernel(monkeypatch):
             "thread_n": thread_n,
             "sms": sms,
             "max_par": max_par,
+            "bias": bias,
         }
         D.copy_(torch.full_like(D, 3.0))
 
     monkeypatch.setattr(qqq_module, "qqq_gemm", fake_gemm)
 
-    x = torch.randn((2, module.in_features), dtype=torch.float32)
+    x = torch.randn((2, module.in_features), dtype=torch.float16)
     out = module(x)
 
     assert calls["gemm"] == {
@@ -186,12 +328,16 @@ def test_qqq_forward_uses_jit_kernel(monkeypatch):
         "thread_n": -1,
         "sms": -1,
         "max_par": module.max_par,
+        "bias": None,
     }
     assert out.shape == (2, module.out_features)
-    assert out.dtype == torch.float32
+    assert out.dtype == torch.float16
     assert torch.allclose(out, torch.full_like(out, 3.0))
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="QQQ (BACKEND.QQQ) has no ROCm kernel"
+)
 def test_qqq_forward_raises_runtime_error_when_jit_ops_missing(monkeypatch):
     module = _build_module()
 
@@ -237,7 +383,7 @@ def _build_grouped_parity_modules(
 
 
 @pytest.mark.cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
 def test_qqq_grouped_cuda_matches_torch_rounding_and_saturation():
     if torch.cuda.get_device_capability()[0] < 8:
         pytest.skip("QQQ CUDA requires compute capability >= 8.0")
@@ -269,8 +415,8 @@ def test_qqq_grouped_cuda_matches_torch_rounding_and_saturation():
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("tokens", [1, 17])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
 def test_qqq_grouped_cuda_matches_torch_for_regular_values(tokens, dtype):
     if torch.cuda.get_device_capability()[0] < 8:
         pytest.skip("QQQ CUDA requires compute capability >= 8.0")
@@ -310,7 +456,22 @@ def test_qqq_grouped_cuda_matches_torch_for_regular_values(tokens, dtype):
 
 
 @pytest.mark.cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
+def test_qqq_grouped_cuda_rejects_bfloat16():
+    """QQQLinear is FP16-only; BF16 callers must use BACKEND.QQQ_TORCH."""
+
+    if torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip("QQQ CUDA requires compute capability >= 8.0")
+    if not qqq_module.qqq_runtime_available():
+        pytest.skip(qqq_module.qqq_runtime_error())
+
+    module = _build_module()
+    with pytest.raises(NotImplementedError, match="FP16 kernel"):
+        module(torch.randn(2, module.in_features, dtype=torch.bfloat16).cuda())
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
 def test_qqq_cuda_kernel_uses_tensor_device_context():
     """A module on a non-current device must run in that device's context.
 
@@ -378,3 +539,138 @@ def test_qqq_cuda_kernel_uses_tensor_device_context():
     # Same kernel, weights and input: only the device context changed.
     torch.testing.assert_close(actual, expected.cpu(), rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(actual, torch_output, rtol=2e-3, atol=2e-3)
+
+
+def _build_large_batch_parity_modules(
+    *,
+    group_size: int,
+    in_features: int = 512,
+    out_features: int = 1024,
+) -> tuple[qqq_module.QQQLinear, qqq_module.QQQTorchLinear]:
+    """Build native and Torch QQQ modules from one packed weight.
+
+    The per-group scales span a wide range so that a tile which consumes
+    another group's scale produces a large error instead of drifting inside
+    the FP16 rounding floor.
+    """
+
+    torch.manual_seed(4662 + group_size)
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=torch.float16)
+    linear.weight.data.normal_(0, 0.02)
+    groups = 1 if group_size == -1 else in_features // group_size
+    scales = torch.rand((out_features, groups), dtype=torch.float16) * 0.5 + 0.05
+    s_channel = torch.rand(out_features, dtype=torch.float32) * 0.001 + 0.002
+
+    modules = []
+    for module_cls in (qqq_module.QQQLinear, qqq_module.QQQTorchLinear):
+        module = module_cls(
+            bits=4,
+            group_size=group_size,
+            sym=True,
+            desc_act=False,
+            in_features=in_features,
+            out_features=out_features,
+            bias=False,
+            register_buffers=True,
+        )
+        module.pack(linear, scales, s_channel)
+        module.post_init()
+        modules.append(module.eval())
+
+    return modules[0].cuda(), modules[1]
+
+
+def _relative_error(output: torch.Tensor, expected: torch.Tensor) -> float:
+    return ((output - expected).norm() / expected.norm()).item()
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("group_size", [128, -1])
+@pytest.mark.parametrize("tokens", [17, 32, 64, 128])
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
+def test_qqq_large_batch_cuda_matches_torch_on_every_repeat(group_size, tokens):
+    """`prob_m > 16` selects the 64x256 tile; every repeat must be exact.
+
+    That tile is 64 k values wide while a group is 128 wide, so the per-group
+    scale has to stay resident for two consecutive tiles. Reusing its shared
+    memory stage for the next group before the second tile has consumed it
+    corrupted a timing-dependent subset of k tiles, so a single call can look
+    correct while the next one drifts by several percent.
+    """
+
+    if torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip("QQQ CUDA requires compute capability >= 8.0")
+    if not qqq_module.qqq_runtime_available():
+        pytest.skip(qqq_module.qqq_runtime_error())
+
+    native, oracle = _build_large_batch_parity_modules(group_size=group_size)
+    torch.manual_seed(4662 + tokens)
+    x = torch.randn((tokens, native.in_features), dtype=torch.float16, device="cuda")
+
+    with torch.inference_mode():
+        expected = oracle(x.cpu()).float().cuda()
+        # `tokens > 16` takes `large_batch_thread_configs`, whose default tile
+        # is `thread_k=64, thread_n=256`.
+        outputs = [native(x).float() for _ in range(10)]
+
+    assert expected.norm() > 0
+    for repeat, output in enumerate(outputs):
+        relative = _relative_error(output, expected)
+        assert relative < 1e-3, f"repeat {repeat}: relative error {relative:.6f}"
+    assert all(torch.equal(outputs[0], output) for output in outputs[1:])
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
+def test_qqq_gemm_64x256_tile_matches_torch_on_every_repeat():
+    """Pin the exact tile that `prob_m > 16` selects.
+
+    `qqq_gemm` is called with the explicit {64, 256} thread tile so the check
+    does not depend on the auto heuristic. Ten back-to-back calls on the same
+    input must all match the Torch oracle and each other.
+    """
+
+    if torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip("QQQ CUDA requires compute capability >= 8.0")
+    if not qqq_module.qqq_runtime_available():
+        pytest.skip(qqq_module.qqq_runtime_error())
+
+    from gptqmodel.utils.qqq import qqq_gemm
+
+    native, oracle = _build_large_batch_parity_modules(group_size=128)
+    tokens = 64
+    torch.manual_seed(4662 + tokens)
+    x = torch.randn((tokens, native.in_features), dtype=torch.float16, device="cuda")
+
+    with torch.inference_mode():
+        expected = oracle(x.cpu()).float().cuda()
+        quant_a, s1 = native.dynamic_quant(x)
+        outputs = []
+        for _ in range(10):
+            output = torch.empty(
+                tokens, native.out_features, dtype=torch.float16, device="cuda"
+            )
+            reduce = torch.empty(
+                16 * 64, native.out_features, dtype=torch.int32, device="cuda"
+            )
+            qqq_gemm(
+                quant_a,
+                native.B,
+                reduce,
+                output,
+                s1,
+                native.s_channel,
+                native.s_group,
+                native.workspace,
+                64,
+                256,
+                -1,
+                16,
+            )
+            outputs.append(output.float())
+
+    assert expected.norm() > 0
+    for repeat, output in enumerate(outputs):
+        relative = _relative_error(output, expected)
+        assert relative < 1e-3, f"repeat {repeat}: relative error {relative:.6f}"
+    assert all(torch.equal(outputs[0], output) for output in outputs[1:])

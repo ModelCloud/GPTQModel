@@ -31,6 +31,7 @@ from ...utils.swordfish import (
     swordfish_prepack_B,
     swordfish_runtime_error,
 )
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
@@ -69,6 +70,11 @@ class SwordfishLinear(GPTQQuantLinear):
     REQUIRES_FORMAT_V2 = True
 
     QUANT_TYPE = "swordfish"
+
+    # Swordfish's custom op has no fake/meta kernel, and the runtime only
+    # targets sm100/sm103/sm110 (this GB10 is sm_121); dynamo cannot trace it.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     TYPE_MAP = {
         (4, True): scalar_types.uint4b8,
@@ -367,6 +373,8 @@ class SwordfishLinear(GPTQQuantLinear):
             size_n=self.out_features,
             group_zps=group_zeros,
             num_bits=self.bits,
+            dense_m_override=self.kernel.swordfish_dense_m,
+            deterministic=self.kernel.swordfish_deterministic,
         )
 
         if self.bias is not None:
@@ -445,6 +453,11 @@ class AwqSwordfishLinear(AWQuantLinear):
     REQUIRES_FORMAT_V2 = False
 
     QUANT_TYPE = "awq_swordfish"
+
+    # Same Swordfish custom op as SwordfishLinear: no fake/meta kernel, and
+    # this GB10 (sm_121) is outside its sm100/sm103/sm110 targets.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     TYPE_MAP = {
         (4, True): scalar_types.uint4b8,
@@ -738,6 +751,8 @@ class AwqSwordfishLinear(AWQuantLinear):
             size_n=self.out_features,
             group_zps=group_zeros,
             num_bits=self.bits,
+            dense_m_override=self.kernel.swordfish_dense_m,
+            deterministic=self.kernel.swordfish_deterministic,
         )
 
         if self.bias is not None:

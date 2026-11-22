@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # GPU=-1
-"""ROCm gating for the native-only AWQ GEMV / GEMV_FAST / LLM_AWQ kernels.
+"""ROCm gating for the AWQ GEMV / GEMV_FAST / LLM_AWQ kernels.
 
 These tests are pure CPU: the HIP runtime is simulated with a monkeypatched
 ``IS_ROCM`` flag, so they assert the dispatch decision rather than claiming a
-kernel ran on ROCm.  Those three layouts are only readable by the
+kernel ran on ROCm.  The native classes are only readable by the
 ``gptqmodel_ext/awq`` CUDA JIT extension, which hipcc cannot build (the sources
 include ``cuda_fp16.h`` and CUDA-only inline asm, and the hipified wave-safe warp
-reduction rejects a 32-bit mask on wave32 RDNA4).
+reduction rejects a 32-bit mask on wave32 RDNA4).  ``FORMAT.GEMV`` has a
+portable Triton reader; ``FORMAT.GEMV_FAST``/``FORMAT.LLM_AWQ`` have portable
+Torch readers (#5109).
 """
 
 from __future__ import annotations
@@ -22,8 +24,14 @@ from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.gemv_awq import (
     AWQ_GEMV_ROCM_UNSUPPORTED,
     AwqGEMVLinear,
+    AwqGEMVTorchLinear,
 )
-from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
+from gptqmodel.nn_modules.qlinear.gemv_fast_awq import (
+    AwqGEMVFastLinear,
+    AwqGEMVFastTorchLinear,
+    LLMAwqLinear,
+    LLMAwqTorchLinear,
+)
 from gptqmodel.quantization import FORMAT
 
 
@@ -133,18 +141,29 @@ def test_native_awq_gemv_refusal_message_is_actionable():
         assert torch.float16 in cls.SUPPORTS_DTYPES, cls.__name__
 
 
-def test_loader_rejects_native_awq_gemv_layouts_on_rocm(monkeypatch):
-    # A ROCm *load* of these formats must fail with the actionable message at
+def test_loader_rejects_native_awq_gemv_gemv_on_rocm(monkeypatch):
+    # A ROCm *load* of FORMAT.GEMV must fail with the actionable message at
     # load time, not with a bare "No valid quant linear" from AUTO selection.
     import gptqmodel.models.loader as loader_module
     from gptqmodel.quantization import METHOD
 
     monkeypatch.setattr(loader_module, "IS_ROCM", True)
 
-    for fmt in (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
-        with pytest.raises(NotImplementedError) as excinfo:
-            loader_module._reject_native_awq_gemv_on_rocm(METHOD.AWQ, fmt)
-        assert "AWQ_GEMM_TRITON" in str(excinfo.value), fmt
+    with pytest.raises(NotImplementedError) as excinfo:
+        loader_module._reject_native_awq_gemv_on_rocm(METHOD.AWQ, FORMAT.GEMV)
+    assert "AWQ_GEMM_TRITON" in str(excinfo.value)
+
+
+def test_loader_allows_portable_gemv_fast_layouts_on_rocm(monkeypatch):
+    # #5109: FORMAT.GEMV_FAST / FORMAT.LLM_AWQ have portable Torch readers that
+    # declare ROCm, so an AUTO load must not be refused before selection.
+    import gptqmodel.models.loader as loader_module
+    from gptqmodel.quantization import METHOD
+
+    monkeypatch.setattr(loader_module, "IS_ROCM", True)
+
+    for fmt in (FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+        loader_module._reject_native_awq_gemv_on_rocm(METHOD.AWQ, fmt)
 
 
 def test_loader_rocm_rejection_is_scoped_to_native_awq_gemv(monkeypatch):
@@ -191,6 +210,68 @@ def test_loader_allows_explicit_triton_gemv_on_rocm(monkeypatch):
         )
 
 
+def test_loader_allows_gemv_cpu_placement_in_a_rocm_process(monkeypatch):
+    # #5219: the gate used to key on ``IS_ROCM`` alone, so a HIP torch wheel
+    # refused ``device="cpu"`` even though AwqGEMVTorchLinear serves exactly
+    # that layout. The refusal must follow the target family, not the wheel.
+    import gptqmodel.models.loader as loader_module
+    from gptqmodel.quantization import METHOD
+    from gptqmodel.utils.backend import BACKEND
+
+    monkeypatch.setattr(loader_module, "IS_ROCM", True)
+
+    for backend in (BACKEND.AUTO, BACKEND.AWQ_TORCH):
+        loader_module._reject_native_awq_gemv_on_rocm(
+            METHOD.AWQ, FORMAT.GEMV, backend, DEVICE.CPU
+        )
+    # An explicit accelerator family still gets the actionable refusal.
+    for backend in (BACKEND.AUTO, BACKEND.AWQ_TORCH):
+        with pytest.raises(NotImplementedError) as excinfo:
+            loader_module._reject_native_awq_gemv_on_rocm(
+                METHOD.AWQ, FORMAT.GEMV, backend, DEVICE.ROCM
+            )
+        assert "AWQ_GEMV_TRITON" in str(excinfo.value)
+
+
+def test_loader_gemv_cpu_placement_keeps_refusal_when_target_is_unresolved(monkeypatch):
+    # No placement argument means the caller has not resolved a target family;
+    # keep the conservative ROCm refusal rather than guessing.
+    import gptqmodel.models.loader as loader_module
+    from gptqmodel.quantization import METHOD
+
+    monkeypatch.setattr(loader_module, "IS_ROCM", True)
+
+    with pytest.raises(NotImplementedError):
+        loader_module._reject_native_awq_gemv_on_rocm(METHOD.AWQ, FORMAT.GEMV)
+
+
+@pytest.mark.parametrize("backend_name", ["AUTO", "AWQ_TORCH"])
+def test_awq_gemv_cpu_placement_selects_the_portable_torch_reader_on_rocm(
+    monkeypatch, backend_name
+):
+    # The load now falls through to selection, which must land on the portable
+    # CPU reader for the GEMV layout in a HIP process (#5219).
+    from gptqmodel.quantization import METHOD
+    from gptqmodel.utils.backend import BACKEND
+    from gptqmodel.utils.importer import select_quant_linear
+
+    monkeypatch.setattr("gptqmodel.models._const.IS_ROCM", True)
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=getattr(BACKEND, backend_name),
+        format=FORMAT.GEMV,
+        quant_method=METHOD.AWQ,
+        pack=True,
+        pack_dtype=torch.int32,
+    )
+    assert selected is AwqGEMVTorchLinear
+
+
 def test_triton_gemv_declares_rocm_and_native_stays_cuda_only():
     from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVTritonLinear
 
@@ -208,6 +289,62 @@ def test_awq_gemv_auto_backend_resolves_triton_on_rocm():
 
     assert awq_gemv_pack_backend(is_rocm=True) is BACKEND.AWQ_GEMV_TRITON
     assert awq_gemv_pack_backend(is_rocm=False) is BACKEND.AWQ_GEMV
+
+
+def test_awq_gemv_fast_auto_backend_resolves_portable_torch_on_rocm():
+    # #5109: GEMV_FAST/LLM_AWQ have no Triton kernel, so ROCm must pack with the
+    # portable Torch reader, not the CUDA-only native class or a backend that
+    # does not declare these formats.
+    from gptqmodel.utils.backend import BACKEND, awq_gemv_fast_pack_backend
+
+    for device_type in ("cuda", "rocm"):
+        assert (
+            awq_gemv_fast_pack_backend(device_type=device_type, is_rocm=True)
+            is BACKEND.AWQ_TORCH
+        )
+    assert awq_gemv_fast_pack_backend(device_type="cpu", is_rocm=False) is BACKEND.AWQ_TORCH
+    assert awq_gemv_fast_pack_backend(device_type="cuda", is_rocm=False) is BACKEND.AWQ_GEMV_FAST
+
+
+@pytest.mark.parametrize(
+    "fmt,torch_cls",
+    [
+        pytest.param(FORMAT.GEMV_FAST, AwqGEMVFastTorchLinear, id="gemv_fast"),
+        pytest.param(FORMAT.LLM_AWQ, LLMAwqTorchLinear, id="llm_awq"),
+    ],
+)
+def test_awq_gemv_fast_selects_the_portable_torch_reader_on_rocm(fmt, torch_cls):
+    # AUTO and the resolved pack backend must both land on the portable reader.
+    # This used to raise "No valid quant linear" (AUTO) or the CPU-only device
+    # rejection (AWQ_TORCH) before any calibration ran.
+    from gptqmodel.quantization import METHOD
+    from gptqmodel.utils.backend import BACKEND, awq_gemv_fast_pack_backend
+    from gptqmodel.utils.importer import select_quant_linear
+
+    for backend in (BACKEND.AUTO, awq_gemv_fast_pack_backend(device_type="cuda", is_rocm=True)):
+        selected = select_quant_linear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.ROCM,
+            backend=backend,
+            format=fmt,
+            quant_method=METHOD.AWQ,
+            pack=True,
+            pack_dtype=torch.int16,
+        )
+        assert selected is torch_cls, f"{fmt} via {backend}"
+
+
+def test_awq_gemv_fast_portable_readers_declare_rocm_and_cpu_only_native_ones_do_not():
+    for cls in (AwqGEMVFastTorchLinear, LLMAwqTorchLinear):
+        assert DEVICE.ROCM in cls.SUPPORTS_DEVICES, cls.__name__
+        assert DEVICE.CPU in cls.SUPPORTS_DEVICES, cls.__name__
+        # Explicit-only: AUTO order on CUDA must not change.
+        assert all(priority == 0 for priority in cls.SUPPORTS_FORMATS.values()), cls.__name__
+    for cls, _fmt in NATIVE_AWQ_GEMV_KERNELS:
+        assert DEVICE.ROCM not in cls.SUPPORTS_DEVICES, cls.__name__
 
 
 def test_awq_gemv_auto_quantize_selects_triton_on_rocm(monkeypatch):

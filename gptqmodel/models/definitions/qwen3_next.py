@@ -6,6 +6,7 @@
 from ...quantization import METHOD
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -16,6 +17,10 @@ class Qwen3NextGPTQ(BaseQModel):
       - Dense MLP (Qwen3NextMLP) and Sparse MoE (Qwen3NextSparseMoeBlock)
       - Dynamic expert indexing via config.num_experts
     """
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     fusable = FusableConfig("qwen3_next").merge(LlamaFusableConfig(), profiles=("qkv",))
 
 

@@ -22,12 +22,26 @@ from ..quantization.config import FallbackStrategy, MSEConfig, SmoothMSE
 from ..quantization.quantizer import HF_OPTIMUM, _mse_shrink_grid, _neutralize_dead_columns
 from ..utils import setup_logger
 from ..utils.device import get_device
-from ..utils.env import env_flag
+from ..utils.kernel import resolve_kernel_config
 from ..utils.p2p import safe_move_to
 from .conv_padding import conv_padding_pairs, pad_mode
-from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
-from .gptq import _uniform_column_group, get_number_of_rows_and_cols
-from .npu_linalg import npu_inverse_cholesky_factor
+from .fallback_smooth import (
+    affine_range_with_zero,
+    element_saliency_weights,
+    hessian_column_weights,
+    mse_optimal_quant,
+    smooth_applies,
+    smooth_block,
+    symmetric_range_from_bounds,
+)
+from .gptq import (
+    _is_memory_allocation_failure,
+    _move_static_groups,
+    _propagate_block_error,
+    _uniform_column_group,
+    get_number_of_rows_and_cols,
+    recover_damped_hessian_factor,
+)
 
 
 DEBUG = False
@@ -219,16 +233,24 @@ class Quantizer(nn.Module):
                 ).unsqueeze(1)
                 xmin1 = p * xmin.unsqueeze(0)
                 xmax1 = p * xmax.unsqueeze(0)
-                scale1 = (
-                    (xmax1 - xmin1) / self.maxq
-                    if not groupwise
-                    else xmax1 / self.maxq
-                )
-                zero1 = (
-                    torch.round(-xmin1 / scale1)
-                    if not self.sym
-                    else self.zero.unsqueeze(0).expand(steps, x.shape[0])
-                )
+                if self._maxq_value < 0:
+                    # Ternary levels are stored directly in scale/zero and
+                    # ``maxq == -1`` is a sentinel, so the affine grid would be
+                    # negative. Shrink the extrema themselves and keep the
+                    # unshrunk endpoints as the incumbent (#5601).
+                    scale1 = xmax1
+                    zero1 = xmin1
+                else:
+                    scale1 = (
+                        (xmax1 - xmin1) / self.maxq
+                        if not groupwise
+                        else xmax1 / self.maxq
+                    )
+                    zero1 = (
+                        torch.round(-xmin1 / scale1)
+                        if not self.sym
+                        else self.zero.unsqueeze(0).expand(steps, x.shape[0])
+                    )
                 self.scale, self.zero = _mse_shrink_grid(
                     x,
                     scale1,
@@ -391,12 +413,19 @@ class QQQ:
 
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
-    def _fallback_quantize(self, strategy: FallbackStrategy):
+    def _fallback_quantize(
+        self,
+        strategy: FallbackStrategy,
+        hessian_diag: Optional[torch.Tensor] = None,
+    ):
         maxq = 2 ** self.qcfg.bits - 1
         sigma = 3.0
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
         start_time = time.time()
         smooth_method = getattr(self.fallback, "smooth", None)
+        search_mse = isinstance(smooth_method, SmoothMSE) and smooth_applies(
+            smooth_method, group_size
+        )
         mse_steps = 32
         mse_maxshrink = 0.8
         if isinstance(smooth_method, SmoothMSE):
@@ -417,6 +446,19 @@ class QQQ:
                 device=W.device,
             )
             W = torch.cat((W, pad), dim=1)
+        # The Hessian diagonal carries the captured input-channel energy; use
+        # it so SmoothMSE does not clip weights that feed outlier activations.
+        # Without a Hessian, fall back to the weight-magnitude proxy rather
+        # than the uniform mean that rewards clipping a row's largest weight.
+        col_weights = None
+        if search_mse:
+            col_weights = hessian_column_weights(
+                getattr(self, "H", None), self.columns, device=W.device
+            )
+            if col_weights is None:
+                col_weights = hessian_column_weights(
+                    hessian_diag, self.columns, device=W.device
+                )
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
@@ -432,9 +474,10 @@ class QQQ:
 
             if self.qcfg.sym:
                 # Every symmetric kernel assumes zero = 2 ** (bits - 1);
-                # Marlin does not even read the stored qzeros. Fit the common
-                # symmetric range so all strategies store that fixed zero.
-                lo, hi = symmetric_range(block_mod)
+                # Marlin does not even read the stored qzeros. Zero-center the
+                # interval the strategy selected so STDCLIP/MEAN/MEDIAN keep
+                # their clipping decision instead of remeasuring the block.
+                lo, hi = symmetric_range_from_bounds(lo, hi)
             else:
                 lo, hi = affine_range_with_zero(lo, hi)
             scale = torch.clamp((hi - lo) / maxq, min=1e-8)
@@ -449,13 +492,15 @@ class QQQ:
             end = min(start + group_size, self.columns)
             block = W[:, start:end]
 
-            if isinstance(smooth_method, SmoothMSE):
+            if search_mse:
+                weights = element_saliency_weights(block) if col_weights is None else col_weights[start:end]
                 dequant, scale, zero = mse_optimal_quant(
                     block,
                     self.qcfg,
                     maxq,
                     steps=mse_steps,
                     maxshrink=mse_maxshrink,
+                    weights=weights,
                 )
             else:
                 block_mod, scale_factor = smooth_block(
@@ -545,7 +590,10 @@ class QQQ:
             # weight, not the original one: GPTQ error propagation can push
             # max|Q| above max|W|, and a scale fitted to W then saturates the
             # packed codes (and no longer reproduces the in-memory `wq`).
-            quantizer_extra.find_params(Q.clone(), weight=True)
+            # ``Q`` is back in the source ``Conv1D`` [in, out] orientation;
+            # the per-channel scale belongs to the output axis.
+            extra_weight = Q.t() if isinstance(self.layer, transformers.Conv1D) else Q
+            quantizer_extra.find_params(extra_weight.clone(), weight=True)
             scale_extra = quantizer_extra.scale
 
         duration = time.time() - start_time
@@ -564,7 +612,7 @@ class QQQ:
         if isinstance(self.layer, nn.Linear) or isinstance(
                 self.layer, transformers.Conv1D
         ):
-            if len(inp.shape) == 3:
+            if len(inp.shape) > 2:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
         if isinstance(self.layer, nn.Conv1d):
@@ -588,7 +636,9 @@ class QQQ:
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
         elif isinstance(self.layer, nn.Conv2d):
-            (left, right), (top, bottom) = conv_padding_pairs(self.layer)
+            # `conv_padding_pairs` reports pairs in the module's spatial order
+            # (height, width); `F.pad` wants the last dimension first.
+            (top, bottom), (left, right) = conv_padding_pairs(self.layer)
             inp = F.pad(
                 inp,
                 (left, right, top, bottom),
@@ -617,8 +667,18 @@ class QQQ:
                     previous[1].add_(cross)
                     self._gsq_moments[inp.device] = (previous[0], previous[1], previous[2] + count)
 
-        dev = torch.device(get_device(inp))
         batch_token_size = inp.shape[1]
+        if self.qcfg.mock_quantization and not self._gsq_enabled:
+            # Mock quantization never consumes the Hessian, so skip the
+            # ``columns**2`` accumulation buffer and its matmul. Only the sample
+            # count survives, because it is reported with the quantized block
+            # (#5839).
+            with self.lock:
+                self.fwd_counter += 1
+                self.nsamples += batch_token_size
+            return
+
+        dev = torch.device(get_device(inp))
         inp = inp.float()
         if self._tp_pad_cols:
             pad = inp.new_zeros((self._tp_pad_cols, inp.shape[1]))
@@ -698,6 +758,45 @@ class QQQ:
         self._device_sample_counts.clear()
         return self.H
 
+    def adopt_hessian_from(self, leader: "QQQ") -> None:
+        """Replace this task's Hessian with a private copy of ``leader``'s.
+
+        Both modules must consume the identical input tensor (see ``:in=<tag>``
+        in ``module_tree``).  ``quantize`` mutates ``H`` in place, so the copy
+        must be independent.  The leader's per-device partials are already
+        folded into ``H`` by :meth:`materialize_hessian`, which keeps the peak
+        at the same two matrices the independent path holds (leader ``H`` plus
+        the follower's copy).
+        """
+
+        if leader is self:
+            return
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"QQQ: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+
+        source = leader.materialize_hessian(self.dev)
+        with leader.lock:
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            materialized_samples = leader._materialized_samples
+            copy = safe_move_to(
+                source.detach(),
+                self.dev,
+                dtype=torch.float32,
+                copy=True,
+            )
+
+        with self.lock:
+            self.H = copy
+            self.nsamples = nsamples
+            self.fwd_counter = fwd_counter
+            self._materialized_samples = materialized_samples
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+
     @torch.inference_mode()
     def quantize(self, blocksize=128):
         if not self._gsq_enabled:
@@ -730,23 +829,45 @@ class QQQ:
         self._gsq_moments.clear()
         return tuple(result)
 
-    @torch.inference_mode()
-    def _quantize_impl(
-            self,
-            blocksize=128,
-    ):
-        start = time.time()
+    def _reject_unsupported_activation_order(self) -> None:
+        """Fail before Hessian work when the config asks for act ordering.
+
+        QQQ's packed runtime stores contiguous group scales and has no
+        ``g_idx`` buffer, so ``desc_act=True`` cannot be represented in the
+        checkpoint.
+        """
+
         if self.qcfg.desc_act:
             raise ValueError(
                 "QQQ quantization does not support `desc_act=True`; "
                 "use `desc_act=False`."
             )
 
+    @torch.inference_mode()
+    def _quantize_impl(
+            self,
+            blocksize=128,
+    ):
+        start = time.time()
+        self._reject_unsupported_activation_order()
+
         from ..utils.fallback import (
             resolve_fallback_strategy,
             resolve_threshold,
             should_use_fallback,
         )
+
+        # ``mock_quantization`` exists to skip the heavy calibration math, so it
+        # must not invert a Hessian or propagate errors. Select the
+        # data-independent RTN grid before materializing anything and keep the
+        # configured QQQ layout (#5839). The NaN-loss retry sets the same flag
+        # and re-enters here, so it lands on this path too.
+        if self.qcfg.mock_quantization:
+            self.H = None
+            self._materialized_samples = 0
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            return self._fallback_quantize(FallbackStrategy.RTN)
 
         resolved_strategy = resolve_fallback_strategy(self.fallback)
 
@@ -755,6 +876,65 @@ class QQQ:
         # cached branch returns a device-corrected value without moving the
         # cache, so the return value is the one to quantize with.
         self.H = self.materialize_hessian(self.layer.weight.device)
+
+        # No calibration rows reached this module (for example an unrouted
+        # expert). A zero Hessian makes every column look calibration-dead, so
+        # ``_neutralize_dead_columns`` would zero the whole weight and return an
+        # all-zero module. Absence of evidence is not evidence that every column
+        # is dead: use the data-independent RTN grid instead, matching GPTQ's
+        # zero-sample guard.
+        if self.nsamples == 0:
+            resolved_strategy = FallbackStrategy.RTN
+            log.warn(
+                "Quantization: Module `%s` -> no calibration samples reached this module; "
+                "forcing `%s` fallback quantization instead of quantizing a zero Hessian.",
+                self.name,
+                resolved_strategy.value,
+            )
+            self.H = None
+            self._materialized_samples = 0
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            return self._fallback_quantize(resolved_strategy)
+
+        # A module that received some calibration rows but fewer than the
+        # configured ``Fallback.threshold`` has a near rank-deficient Hessian
+        # (a rarely routed MoE expert is the typical case). GPTQ applies the
+        # documented low-sample policy before it uses the Hessian; QQQ used to
+        # consult the threshold only after a failed inverse, so these modules
+        # silently ran the full error-propagation loop. Apply the same check
+        # here, before the block pass, so the configured fallback is honoured
+        # for every module the policy selects.
+        if should_use_fallback(self.fallback, float(self.nsamples), self.expected_nsamples):
+            threshold_raw, is_percent = resolve_threshold(self.fallback, self.expected_nsamples)
+            threshold_text = str(getattr(self.fallback, "threshold", None))
+            extra = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
+            log.warn(
+                "Quantization: Module `%s` -> Using `%s` fallback quantization "
+                "(observed %s samples, threshold=%s%s, max_total=%s).",
+                self.name,
+                resolved_strategy.value,
+                self.nsamples,
+                threshold_text,
+                extra,
+                self.expected_nsamples,
+            )
+            # The fallback grid is data-independent, but SmoothMSE still
+            # weights its search by the captured input-channel energy. Keep
+            # only the diagonal (``columns`` floats) before releasing the
+            # near-singular matrix (#5300).
+            hessian_diag = (
+                self.H.diagonal().detach().clone()
+                if isinstance(getattr(self.fallback, "smooth", None), SmoothMSE)
+                else None
+            )
+            self.H = None
+            self._materialized_samples = 0
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            return self._fallback_quantize(
+                resolved_strategy, hessian_diag=hessian_diag
+            )
 
         percdamp = self.qcfg.damp_percent
         groupsize = self.qcfg.group_size
@@ -778,15 +958,19 @@ class QQQ:
 
         tick = time.time()
 
-        if not self.quantizer.ready():
-            self.quantizer.find_params(W, weight=True)
-
         H = self.H
         del self.H
         # The quantizer consumes and mutates this Hessian; it is no longer the
         # materialized calibration state, so later batches start a fresh merge.
         self._materialized_samples = 0
         _neutralize_dead_columns(H, W)
+
+        # Fit the whole-row grid after dead-column masking: a channel absent
+        # from every calibration sample carries no signal, so its weight must
+        # not set the per-channel scale that every live column is quantized
+        # with (#5611).
+        if not self.quantizer.ready():
+            self.quantizer.find_params(W, weight=True)
 
         g_idx = []
         scale = []
@@ -809,21 +993,69 @@ class QQQ:
             H = H[perm][:, perm]
             invperm = torch.argsort(perm)
 
-        damp = percdamp * torch.mean(torch.diag(H))
-        diag = torch.arange(self.columns, device=H.device)
-        H[diag, diag] += damp
         threshold_raw, is_percent = resolve_threshold(self.fallback, self.expected_nsamples)
         fallback_configured = threshold_raw is not None
 
+        # Damping recovery is shared with GPTQ (#5858): probe the configured
+        # `damp_percent` first, then the additive `damp_auto_increment` grid,
+        # then a diagonal floor. `damp_auto_increment=0` stays the explicit
+        # no-recovery control, so a rank-deficient Hessian still fails there.
+        # QQQ keeps its own factor convention: a lower Cholesky factor, then
+        # the inverse's upper factor.
+        orig_diag = H.diagonal().clone()
+        npu_block_size = (
+            resolve_kernel_config(self.qcfg).npu_cholesky_block_size
+            if H.device.type == "npu" else None
+        )
+
+        def _recover_factor(hessian: torch.Tensor):
+            """Return ``(inverse factor, applied damp)`` for ``hessian``."""
+
+            return recover_damped_hessian_factor(
+                hessian,
+                damp_percent=float(percdamp),
+                damp_auto_increment=float(self.qcfg.damp_auto_increment),
+                name=self.name,
+                npu_block_size=npu_block_size,
+            )
+
         try:
-            if H.device.type == "npu":
-                H = npu_inverse_cholesky_factor(H)
-            else:
-                H = torch.linalg.cholesky(H)
-                H = torch.cholesky_inverse(H)
-                H = torch.linalg.cholesky(H, upper=True)
-            Hinv = H
-        except Exception:
+            Hinv, used_damp = _recover_factor(H)
+        except Exception as exc:
+            # Reuse GPTQ's allocation classifier and CPU retry: cuSOLVER /
+            # hipSOLVER report a failed workspace allocation as
+            # ``*SOLVER_STATUS_ALLOC_FAILED``, which the old bare ``raise``
+            # turned into an aborted run. A non-positive-definite
+            # factorization is a numerical failure instead, and the shared
+            # policy already returned ``None`` for it (issue #4400).
+            if H.device.type != "cuda" or not _is_memory_allocation_failure(exc):
+                raise
+            log.warn(
+                "Quantization: Module `%s` -> CUDA OOM during Hessian inverse on %s; "
+                "falling back to CPU. Due to this fallback, the calculation may take "
+                "much longer than normal.",
+                self.name,
+                H.device,
+            )
+            cpu_device = torch.device("cpu")
+            # The failed attempt may have left the last diagonal floor applied.
+            H.diagonal().copy_(orig_diag)
+            H = H.to(device=cpu_device)
+            W = W.to(device=cpu_device)
+            if actorder:
+                # ``perm``/``invperm`` were built from the CUDA Hessian.
+                # The block pass now runs on the host, so the epilogue's
+                # ``Q[:, invperm]`` must not index a CPU tensor with a
+                # CUDA index tensor (issue #4538).
+                perm = perm.to(device=cpu_device)
+                invperm = invperm.to(device=cpu_device)
+            self.quantizer.find_params(W, weight=True)
+            if static_groups:
+                scale, zero = _move_static_groups(groups, cpu_device)
+            Hinv, used_damp = _recover_factor(H)
+
+        del H
+        if Hinv is None:
             fallback_requested = should_use_fallback(
                 self.fallback,
                 float(self.nsamples),
@@ -840,11 +1072,19 @@ class QQQ:
                     extra,
                     self.expected_nsamples,
                 )
-                if resolved_strategy != FallbackStrategy.RTN:
-                    return self._fallback_quantize(resolved_strategy)
-                Hinv = None
-            else:
-                raise
+                # The selected fallback is data-independent: it must never
+                # continue into the block loop with ``Hinv=None``. RTN used to
+                # fall through here and fail with
+                # ``TypeError: 'NoneType' object is not subscriptable``.
+                return self._fallback_quantize(resolved_strategy)
+            raise torch._C._LinAlgError(
+                f"QQQ: Hessian remained non positive-definite for `{self.name}` "
+                f"with `damp_percent={float(percdamp):.5f}` and "
+                f"`damp_auto_increment={float(self.qcfg.damp_auto_increment):.5f}`"
+            )
+
+        # Report the additive damping that was actually applied.
+        damp = used_damp * torch.mean(orig_diag)
 
         use_mlx = _should_use_mlx_qqq_quantization(
             W,
@@ -882,7 +1122,7 @@ class QQQ:
                 and groupsize != -1
                 and type(self.quantizer) is Quantizer
                 and not self.qcfg.mock_quantization
-                and not env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")
+                and resolve_kernel_config(self.qcfg).gptq_fused_block_update
             ):
                 from .gptq_cuda import block_update_available, gptq_block_update
 
@@ -1018,7 +1258,7 @@ class QQQ:
 
                 Losses1.div_(2)
 
-                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                _propagate_block_error(W[:, i2:], Err1, Hinv[i1:i2, i2:])
 
                 if DEBUG:
                     self.layer.weight.data[:, :i2] = Q[:, :i2]
@@ -1054,6 +1294,12 @@ class QQQ:
             avg_loss = f"{resolved_strategy.value} fallback" if fallback_configured else 999999999
 
         groupsize = groupsize if groupsize != -1 else self.columns
+        if actorder:
+            # A CPU retry can leave the permutation on the Hessian's device
+            # while ``Q`` is on the host; index on ``Q``'s device so the
+            # epilogue is device-agnostic (issue #4538).
+            perm = perm.to(device=Q.device)
+            invperm = invperm.to(device=Q.device)
         if static_groups and actorder:
             g_idx = (perm // groupsize).to(dtype=torch.int32, device=Q.device)
         else:
@@ -1104,7 +1350,10 @@ class QQQ:
             # from the pre-quantization `W`. Error propagation can raise
             # max|Q| above max|W|; a W-fitted scale then clamps packed codes
             # and the export no longer equals the in-memory `wq`.
-            quantizer_extra.find_params(Q.clone(), weight=True)
+            # ``Q`` is back in the source ``Conv1D`` [in, out] orientation;
+            # the per-channel scale belongs to the output axis.
+            extra_weight = Q.t() if isinstance(self.layer, transformers.Conv1D) else Q
+            quantizer_extra.find_params(extra_weight.clone(), weight=True)
             scale_extra = quantizer_extra.scale
 
         duration = time.time() - start

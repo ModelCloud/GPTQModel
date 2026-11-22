@@ -28,7 +28,7 @@ The pipeline is:
 
 No. GPT-QModel accumulates the Hessian online while it streams the calibration
 dataset through the model, exactly like GPTQ. You only need to pass a
-calibration dataset to `model.quantize(...)`; no offline Hessian files are
+calibration dataset to `model.quantize(CalibrationConfig(dataset=...))`; no offline Hessian files are
 required. Quantization without calibration is not supported for VPTQ and
 raises a `ValueError`.
 
@@ -48,7 +48,7 @@ non-finite), so a never-invoked module is never silently zeroed.
 
 ```py
 from datasets import load_dataset
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.quantization import VPTQConfig
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
@@ -67,7 +67,7 @@ qcfg = VPTQConfig(
 )
 
 model = GPTQModel.load(model_id, qcfg)
-model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.VPTQ_TORCH)
+model.quantize(CalibrationConfig(dataset=calibration_dataset, batch_size=1), backend=BACKEND.VPTQ_TORCH)
 model.save(quant_path)
 ```
 
@@ -150,6 +150,14 @@ quantizer; it does not toggle the process-global
 concurrent quantization worker's kernels and can raise for an op that has no
 deterministic implementation.
 
+One Lloyd iteration reduces two quantities over the same assignment: the
+weighted vector sums and the per-centroid weight totals. Both share a single
+`_SegmentPlan` — the stable `argsort`, bucket lengths and non-empty mask — that
+is built once per iteration and applied to each source array. Rebuilding that
+plan for the second reduction only repeated the sort and `bincount`; sharing it
+leaves the reduction order, the FP64 accumulation and the resulting codebook
+bits unchanged.
+
 Cross-device results are **not** bit-identical. `kmeans_seed` seeds the initial
 `randperm`, and CUDA and ROCm draw that permutation from different device RNG
 streams, so their initial centroids differ. Both streams are uniform, so
@@ -159,6 +167,26 @@ different held-out perplexity. A checkpoint produced on one device still runs
 on the other. Compare runs on one device when checking a change; a
 cross-platform comparison needs the same starting checkpoint, not the same
 seed.
+
+## Packed index writer
+
+`pack_vptq_indices()` serializes each group's `(residual << index_bits) | index`
+values into a little-endian 32-bit word stream. The writer accumulates word
+fragments instead of expanding every index into one int64 lane per bit: an
+element of `total_bits` bits touches at most two words, so two `scatter_add_`
+passes per element replace the per-bit expansion. Element fields never overlap,
+so the additions are equivalent to OR-ing, and the words stay bitwise identical
+to the per-bit writer (pinned by the pure-Python oracle in `tests/test_vptq.py`).
+
+The per-bit expansion allocated `2 * 8 * total_bits` bytes per index (about
+256 B at the default 12+4 bits) in two full-size temporaries, and
+`submodule_finalize()` runs the packers for gate/up/down concurrently on the CPU
+worker pool. A Llama-3.1-8B `down_proj` index set therefore crossed 5 GiB host
+`RssAnon`. The writer now processes bounded column blocks
+(`_PACK_BLOCK_ELEMENTS`), so its peak host memory no longer grows with the
+layer width: the same 7.34M-index set peaks at ~90 MiB instead of ~1.9 GiB and
+packs about four times faster. `test_vptq_pack_streams_words_without_per_bit_expansion`
+bounds the peak RSS so the expansion cannot return unnoticed (issue #5034).
 
 ## Group layout resolution
 
@@ -243,15 +271,48 @@ and trade extra quantization time for accuracy.
 
 ## Inference and checkpoint compatibility
 
-Checkpoints saved by GPT-QModel contain `FORMAT.VPTQ`. Use
-`GPTQModel.load(quant_path, backend=BACKEND.VPTQ_CUDA)` for CUDA inference;
-`BACKEND.VPTQ_TORCH` remains available as the reference implementation.
+Checkpoints saved by GPT-QModel contain `FORMAT.VPTQ`. `BACKEND.AUTO`, the
+default for `GPTQModel.load`, HF/optimum loading, and the evaluation harnesses,
+selects `BACKEND.VPTQ_CUDA` on an NVIDIA host where the extension builds;
+`BACKEND.VPTQ_TORCH` is the reference implementation and the fallback.
 For matching activation and codebook dtypes, the fused CUDA kernel is used
 through four activation rows across vector lengths and outlier configurations.
 Larger batches reconstruct the dense weight once with the CUDA dequantization
 op, then use Torch/cuBLAS GEMM. Dtype mismatches use the same dequantization plus
 GEMM path. FP16, BF16, and FP32 are supported when stored in the checkpoint.
 Torch inference also runs on CPU and other Torch devices.
+
+Selection is by declared `SUPPORTS_FORMATS` rank, then the kernel's
+`validate_once` probe. `VPTQCudaLinear` declares `FORMAT.VPTQ: 110` against the
+portable kernel's `100`, so AUTO orders the native kernel first. `validate_once`
+then has the final say: it rejects ROCm (CUDA-only sources), a host without a
+CUDA device, and a host where the VPTQ JIT extension cannot build. Any of those
+leaves AUTO on `VPTQLinear`, and `BACKEND.VPTQ_TORCH` always stays explicitly
+selectable.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| AUTO rank for `FORMAT.VPTQ` | [`vptq_cuda.py:33`](https://github.com/ModelCloud/GPTQModel/blob/50a5b9fe0/gptqmodel/nn_modules/qlinear/vptq_cuda.py#L33) and [`vptq_torch.py:49`](https://github.com/ModelCloud/GPTQModel/blob/50a5b9fe0/gptqmodel/nn_modules/qlinear/vptq_torch.py#L49) both declared `100`, so the selector's stable sort kept registry order and `VPTQ_TORCH` won. | `VPTQCudaLinear` declares `110`; the tie is gone and the native kernel is tried first. |
+| Availability check | `validate_once` only rejected ROCm and a missing CUDA device, so a raised rank would have selected a kernel whose JIT extension never built | `validate_once` also probes `vptq_cuda_runtime_available()` and returns that build error, so AUTO falls back to `VPTQLinear`. |
+| Benchmark script bias | `scripts/benchmark_vptq_cuda.py` passed the stored FP32 `module.bias` straight to the native op, which `RuntimeError`s on the dtype mismatch | The script narrows an exactly representable bias the way `VPTQCudaLinear.forward` does. |
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load(backend=BACKEND.AUTO or unset)"] --> B["select_quant_linear()<br/>METHOD.VPTQ / FORMAT.VPTQ"]
+    B --> C["Rank AUTO candidates by SUPPORTS_FORMATS<br/>VPTQCudaLinear 110, VPTQLinear 100"]
+    C --> D["VPTQCudaLinear.cached_validate_once()"]
+    D --> E{"IS_ROCM?"}
+    E -->|Yes| T["VPTQLinear<br/>portable Torch kernel"]
+    E -->|No| F{"torch.cuda.is_available()?"}
+    F -->|No| T
+    F -->|Yes| G{"vptq_cuda_runtime_available()<br/>JIT extension loaded?"}
+    G -->|No| T
+    G -->|Yes| H["VPTQCudaLinear<br/>fused native kernel"]
+    T --> I["Forward on CPU / HIP / no toolchain"]
+    H --> J["Fused GEMV up to 4 rows,<br/>native dequantize + GEMM above"]
+    classDef fallback fill:#ffe0e0,stroke:#b91c1c,color:#111;
+    class T fallback;
+```
 
 To compare `VPTQ_CUDA` directly with `VPTQ_TORCH` on a CUDA host, run
 `python scripts/benchmark_vptq_cuda.py /path/to/checkpoint --dtype float16`.

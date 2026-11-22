@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization import FORMAT, QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
@@ -135,7 +135,7 @@ def test_tiny_llama_fusion_after_fresh_quantization(tmp_path, automatic):
                           attn_implementation="eager")
     assert not model.quantized
     assert model._fusion_plan is None
-    model.quantize(["a b c d " * 16, "d c b a " * 16], backend=BACKEND.GPTQ_TORCH)
+    model.quantize(CalibrationConfig(dataset=["a b c d " * 16, "d c b a " * 16]), backend=BACKEND.GPTQ_TORCH)
     assert model.quantized
     if automatic:
         plan = model.fuse()

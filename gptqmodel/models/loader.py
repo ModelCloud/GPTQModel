@@ -8,24 +8,34 @@
 from __future__ import annotations
 
 import copy
+import difflib
+import inspect
 import json
 import os
 import shutil
 import threading
 import time
 import weakref
-from functools import partial, wraps
+from functools import lru_cache, partial, wraps
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
+from types import MethodType
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 
 import torch
-import transformers
 
+from ..utils.hf import _compile_keep_in_fp32_matcher
+from ..utils.kernel import KernelConfig, configure_kernel
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.p2p import P2PConfig, configure_p2p
 from ..utils.rocm import IS_ROCM, warn_unsupported_rocm
 from ..utils.structure import LazyTurtle, print_module_tree
+from ..utils.tied_weights import (
+    lm_head_is_tied,
+    retie_tied_weights,
+    word_embeddings_tied,
+)
 
 
 if ensure_modelscope_available():
@@ -35,14 +45,14 @@ else:
 
 import defuser
 from packaging.version import InvalidVersion, Version
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
 
 from ..adapter.adapter import Adapter, normalize_adapter
 from ..adapter.remote import configure_explicit_remote_adapter, resolve_checkpoint_adapter_path
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
-from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear, checkpoint_qzeros_layout
 from ..nn_modules.qlinear.allspark import AllSparkLinear
 from ..nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
@@ -62,7 +72,15 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
-from ..utils.backend import BACKEND, PROFILE, backend_for_activation, normalize_backend, normalize_profile
+from ..utils.backend import (
+    BACKEND,
+    NATIVE_TTNN_BACKENDS,
+    PROFILE,
+    backend_for_activation,
+    normalize_backend,
+    normalize_profile,
+)
+from ..utils.backend_config import Backend, RuntimeConfig, resolve_backend_config, resolve_quantize_backend
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
@@ -70,12 +88,11 @@ from ..utils.hf import (
     get_config_selection_kwargs,
     get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
-    has_native_transformers_causallm_support,
+    has_native_transformers_model_support,
     load_hf_tokenizer,
-    normalize_hf_config_compat,
+    load_model_config,
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
-    prepare_remote_model_init_compat,
     resolve_checkpoint_subfolder,
     resolve_trust_remote_code,
     set_hf_config_dtype,
@@ -84,6 +101,7 @@ from ..utils.hf import (
 from ..utils.importer import (
     _selector_devices,
     auto_select_device,
+    device_map_uses_cpu,
     expand_selector_device_family,
     get_kernel_for_backend,
     normalize_device_device_map,
@@ -95,6 +113,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import (
     apply_no_placement_to_device_map,
     auto_dtype,
+    co_locate_shared_module_aliases,
     convert_gptq_v1_to_v2_format,
     find_config_seq_len,
     find_modules,
@@ -110,7 +129,10 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
-from ..utils.torch import xla_device_count
+from ..utils.torch import (
+    _ModelGlobalStateLock,
+    xla_device_count,
+)
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
@@ -133,16 +155,76 @@ def __getattr__(name: str):
 log = setup_logger()
 
 
+def _model_keep_in_fp32_strict_names(model) -> Optional[List[str]]:
+    """Concrete runtime tensor names the model pins to fp32 for every half dtype.
+
+    transformers 5.x declares these on ``_keep_in_fp32_modules_strict`` and
+    keeps them fp32 for fp16 *and* bf16. Accelerate's loader only honors
+    ``keep_in_fp32_modules`` for fp16, so the quantized-load path restores
+    them explicitly (issue #5151). Buffers are included: the DeepSeek-V3 /
+    GLM-4.x routers store ``e_score_correction_bias`` as a buffer, and ERNIE
+    declares the ``gate.weight`` parameter.
+    """
+
+    matcher = _compile_keep_in_fp32_matcher(
+        model, attrs=("_keep_in_fp32_modules_strict",)
+    )
+    if matcher is None:
+        return None
+
+    names = [
+        name for name, _ in model.named_parameters() if matcher(name)
+    ]
+    names.extend(name for name, _ in model.named_buffers() if matcher(name))
+    return names or None
+
+
+# A source layout can need several declared renames before a key matches the
+# runtime shell (``deepseek_v4``: ``layers.N.attn.norm.weight`` needs
+# ``\.attn\.`` -> ``.self_attn.`` and then ``\.norm\.`` -> ``.kv_norm.``).
+# Bound the walk so two rules that rename each other cannot cycle.
+_MAX_CHECKPOINT_KEY_RENAMES = 8
+
+
+def _runtime_checkpoint_names(model) -> frozenset[str]:
+    """Names of every parameter and buffer the runtime shell can receive.
+
+    A GPT-QModel writer stores runtime names, so a checkpoint key in this set is
+    already in the layout Accelerate has to load. Tied weights keep both names
+    because ``remove_duplicate=False`` does not collapse them by storage.
+    Config-like stand-ins without modules return an empty set, which leaves the
+    raw Transformers conversion map in charge.
+    """
+
+    named_parameters = getattr(model, "named_parameters", None)
+    named_buffers = getattr(model, "named_buffers", None)
+    if not callable(named_parameters) or not callable(named_buffers):
+        return frozenset()
+
+    names = {name for name, _ in named_parameters(remove_duplicate=False)}
+    names.update(name for name, _ in named_buffers(remove_duplicate=False))
+    return frozenset(names)
+
+
 def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
-    """Return the key converter the quantized loader should apply.
+    r"""Return the key converter the quantized loader should apply.
 
     A definition may declare an explicit ``checkpoint_key_for_load`` /
     ``checkpoint_key_for_save``. Every other family falls back to its
     Transformers checkpoint conversion map, inferred from the live model, so a
     legacy-layout checkpoint (Transformers 4.x keys such as ``model.layers.*``
-    and ``visual.*``) is remapped to the runtime names. The map is idempotent
-    for checkpoints already written with runtime keys: their names do not match
-    the checkpoint-side patterns and pass through unchanged.
+    and ``visual.*``) is remapped to the runtime names.
+
+    That map describes a *source* layout only, and some families declare
+    patterns wide enough to also match runtime keys. ``deepseek_v4`` renames
+    ``\.norm\.`` -> ``.kv_norm.`` for the source key
+    ``layers.N.attn.norm.weight``, which also matches the runtime
+    ``model.norm.weight``; no runtime parameter is called
+    ``model.kv_norm.weight``, so the renamed final norm was reported missing
+    (#5131). The converter is therefore idempotent on the shell's own names: a
+    key that already names a runtime parameter or buffer is never renamed, and
+    a rename chain is only adopted when it lands on one. Converting a
+    checkpoint written by GPT-QModel is the identity.
     """
 
     explicit = getattr(
@@ -161,21 +243,58 @@ def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
     if mapping is None:
         return None
 
-    def convert(name: str) -> str:
+    # Runtime names only exist for the load direction. The save direction is
+    # asked for checkpoint-side names (for example quantized module aliases),
+    # where a module name is not a parameter name.
+    runtime_names = _runtime_checkpoint_names(model) if to_runtime else frozenset()
+
+    def rename_once(name: str) -> str:
         return LazyTurtle.convert_hf_checkpoint_key(name, mapping, to_runtime=to_runtime)
+
+    def convert(name: str) -> str:
+        renamed = rename_once(name)
+        if name in runtime_names:
+            # Idempotence check: the key already resolves on this shell, so a
+            # matching source-side pattern must not rename it again.
+            if renamed != name:
+                log.debug(
+                    "Loader: keeping runtime checkpoint key `%s`; the HF conversion map "
+                    "would rename it to `%s`, which is not a parameter of this model",
+                    name,
+                    renamed,
+                )
+            return name
+
+        if not to_runtime or renamed == name or renamed in runtime_names:
+            return renamed
+
+        # A source layout can need several renames before it matches the shell.
+        # Adopt the first chain result that resolves on this model; otherwise
+        # keep the single rename so families whose map matches once are
+        # unchanged.
+        current = renamed
+        for _ in range(_MAX_CHECKPOINT_KEY_RENAMES):
+            candidate = rename_once(current)
+            if candidate == current:
+                break
+            if candidate in runtime_names:
+                return candidate
+            current = candidate
+        return renamed
 
     return convert
 
 
-_GGUF_QUANTIZED_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER"
+def _native_quantized_loader_enabled(policy: Optional[KernelConfig] = None) -> bool:
+    """Resolve the GGUF parser selection from the load policy.
 
+    ``policy`` is the ``KernelConfig`` the public call resolved; ``None`` uses the
+    policy installed for the current load. Nothing here reads the environment:
+    the same call options must select the same parser in every process.
+    """
+    from ..utils.kernel import resolve_kernel_config
 
-def _native_quantized_loader_enabled() -> bool:
-    """Mirror internal_gguf's env check without importing its NumPy-backed module."""
-    raw = os.getenv(_GGUF_QUANTIZED_LOADER_ENV)
-    if raw is None:
-        return True
-    return str(raw).strip().lower() not in {"", "0", "false", "off", "no"}
+    return bool(resolve_kernel_config(policy).gguf_native_quantized_loader)
 
 
 def _ggml_quantization_type():
@@ -183,6 +302,16 @@ def _ggml_quantization_type():
     from ..utils.internal_gguf import GGMLQuantizationType
 
     return GGMLQuantizationType
+
+
+def _quantized_checkpoint_basenames(qcfg) -> List[str]:
+    """Checkpoint base names to probe, in resolution order.
+
+    ``save_quantized`` always writes the canonical ``model`` base name. The
+    legacy AutoGPTQ name is only a fallback: probing it first silently loaded a
+    stale export when a directory held both files (issue #5723).
+    """
+    return ["model", f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g"]
 
 
 ATTN_IMPLEMENTATION = "attn_implementation"
@@ -452,7 +581,9 @@ def _validate_external_backend_format(backend: BACKEND, format_code: FORMAT) -> 
     raise ValueError(f"{backend} backend only supports {supported}: actual = {format_code}")
 
 
-def _explicit_requested_devices(device) -> Optional[List[torch.device]]:
+def _explicit_requested_devices(
+    device, *, validate_families: bool = True
+) -> Optional[List[torch.device]]:
     """Return the concrete accelerators when the caller named specific devices.
 
     `device=("cuda:1", "cuda:2")` is a request for exactly those two GPUs.
@@ -463,6 +594,13 @@ def _explicit_requested_devices(device) -> Optional[List[torch.device]]:
     A sequence of one or more concrete ordinals requests exactly those devices. Integer
     ordinals use the active accelerator namespace. Mixing a concrete ordinal
     with an abstract selector is ambiguous and must not expand the request.
+
+    ``validate_families`` keeps the single-capability-group rule, which exists
+    because one inference kernel is selected for the whole placement map
+    (#4632/#4705/#4734). A *quantization* pool is not an inference map -- it
+    runs the dense model on CPU and picks no kernel for the pool -- so the
+    quantization entry points pass ``False`` and may span generations, exactly
+    like the default pool already does (#4875).
     """
     if not isinstance(device, (tuple, list)):
         return None
@@ -479,7 +617,8 @@ def _explicit_requested_devices(device) -> Optional[List[torch.device]]:
             "A device sequence cannot mix concrete accelerator ordinals with abstract selectors; "
             "use only concrete ordinals or one accelerator family."
         )
-    selector_device_family(targets)  # validate every selected family/capability
+    if validate_families:
+        selector_device_family(targets)  # validate every selected family/capability
     return concrete
 
 
@@ -562,7 +701,20 @@ def _layerwise_device_strings(
 
 def _native_ttnn_backend(backend: BACKEND) -> bool:
     """Return whether ``backend`` owns its chips without the Torch/XLA runtime."""
-    return backend in (BACKEND.GPTQ_TTNN,)
+    return backend in NATIVE_TTNN_BACKENDS
+
+
+def _apply_native_ttnn_ordinal(model, ordinal: int) -> None:
+    """Pin every native TTNN kernel in ``model`` to the requested chip.
+
+    The kernels open the process-wide mesh from ``post_init``, so the ordinal
+    has to be set before that runs. Only modules that expose the native
+    placement hook are touched; other backends never reach this helper.
+    """
+
+    for module in model.modules():
+        if hasattr(module, "_requested_device_id"):
+            module.ttnn_device_id = ordinal
 
 
 def _module_tensor_bytes(module: torch.nn.Module) -> int:
@@ -585,6 +737,29 @@ def _module_tensor_bytes(module: torch.nn.Module) -> int:
     return total
 
 
+def _default_accelerator_family() -> DEVICE:
+    """Return the accelerator an integer ``max_memory`` key refers to.
+
+    Accelerate treats integer keys as accelerator ordinals. When the caller
+    passed no ``device`` the family has to come from the runtime instead of
+    defaulting to CPU, otherwise ``{1: "20GiB"}`` would name ``cpu:1`` and the
+    budget would look accelerator-free (#4632).
+    """
+
+    if torch.cuda.is_available():
+        return DEVICE.ROCM if IS_ROCM else DEVICE.CUDA
+    for candidate in (DEVICE.XPU, DEVICE.NPU):
+        runtime = getattr(torch, candidate.type, None)
+        is_available = getattr(runtime, "is_available", None)
+        if is_available is not None:
+            try:
+                if is_available():
+                    return candidate
+            except Exception:
+                continue
+    return DEVICE.CPU
+
+
 def _normalize_max_memory(max_memory, device) -> List[tuple[str, int]]:
     """Normalize an Accelerate-style ``max_memory`` map into ordered budgets.
 
@@ -598,11 +773,21 @@ def _normalize_max_memory(max_memory, device) -> List[tuple[str, int]]:
 
     from accelerate.utils import convert_file_size_to_int
 
-    family = selector_device_family(device) or DEVICE.CPU
+    family = selector_device_family(device) or _default_accelerator_family()
     budgets: List[tuple[str, int]] = []
     seen = set()
     for key, value in max_memory.items():
         if isinstance(key, int):
+            # An integer key is an accelerator ordinal. Without an explicit
+            # `device` the family must come from the active accelerator, not
+            # from CPU: `max_memory={1: "20GiB"}` names `cuda:1` on a CUDA host
+            # (#4632).
+            if family == DEVICE.CPU:
+                raise ValueError(
+                    f"`max_memory` names the accelerator ordinal `{key}` but no "
+                    "accelerator is available; use the `\"cpu\"` key for a CPU-only "
+                    "budget."
+                )
             name = f"{family.type}:{key}"
         else:
             name = str(key).strip().lower()
@@ -629,18 +814,14 @@ def _normalize_max_memory(max_memory, device) -> List[tuple[str, int]]:
 
 
 def _device_map_uses_cpu(device_map) -> bool:
-    """Whether a placement map contains a CPU-resident entry."""
-    if not isinstance(device_map, dict):
-        return False
-    for value in device_map.values():
-        if value is None or isinstance(value, int):
-            continue
-        try:
-            if torch.device(value).type == "cpu":
-                return True
-        except (RuntimeError, ValueError):
-            continue
-    return False
+    """Whether a placement map contains a CPU-resident entry.
+
+    The HF bridge derives the same contract from the map Transformers hands it
+    (`utils.importer.device_map_uses_cpu`), so both loaders agree on which
+    kernels may serve an offloaded map (#5022).
+    """
+
+    return device_map_uses_cpu(device_map)
 
 
 def _assign_greedy_device_ids(
@@ -684,7 +865,19 @@ def _resolve_default_layerwise_device(device, backend: BACKEND):
         # chip. The native TTNN backend opens its own mesh and never consumes an
         # ``xla:N`` ordinal, so keep the abstract family unexpanded here.
         return selected
-    return expand_selector_device_family(selected)
+    # The default placement stays inside one compute-capability group so a host
+    # that mixes GPU generations still loads with no placement arguments (#4705).
+    resolved = expand_selector_device_family(selected, single_capability_group=True)
+    # Keep the resolved group explicit even when it holds one card. A scalar
+    # reads as an abstract family downstream: ``_layerwise_device_count`` then
+    # falls back to ``torch.cuda.device_count()`` and the map builder places
+    # layers on every visible GPU, including the generation the group excluded
+    # (#4734). The multi-device case already returns a tuple, so a one-card
+    # group must too, or the mixed-capability guard is bypassed instead of
+    # honored.
+    if isinstance(resolved, torch.device) and resolved.index is not None and resolved.type != "cpu":
+        return (resolved,)
+    return resolved
 
 
 _ACCELERATE_DEVICE_MAP_STRINGS = frozenset({"auto", "balanced", "sequential"})
@@ -746,13 +939,125 @@ def _normalize_requested_device_map(device, device_map):
 
 
 def _indexed_device_request(device) -> Optional[str]:
-    """Return an indexed ``device`` request as a placement string, if any."""
+    """Return an indexed ``device`` request as a placement string, if any.
+
+    A bare integer is an accelerator ordinal, matching the documented
+    ``device=(0, 1)`` sequence and ``device_map={"": N}`` semantics. Resolve
+    it to the active accelerator's concrete ``<family>:N`` target here so it
+    becomes a full-model map instead of a family selector that the layer-wise
+    resolver would spread across every visible GPU (#4384). A host without an
+    active accelerator cannot interpret the ordinal, so the selector
+    conversion raises rather than silently treating it as CPU.
+    """
+
+    if isinstance(device, int) and not isinstance(device, bool):
+        if device < 0:
+            raise ValueError(f"device={device} is not an accelerator ordinal; ordinals start at 0.")
+        targets = _selector_devices(device)
+        assert targets is not None
+        target = targets[0]
+        # Fail here with the visible range rather than later with the
+        # runtime's "invalid device ordinal".
+        runtime = getattr(torch, target.type, None)
+        count = runtime.device_count() if hasattr(runtime, "device_count") else None
+        if count is not None and device >= count:
+            raise ValueError(
+                f"device={device} is not a visible {target.type} ordinal; this process sees "
+                f"{count} {target.type} device(s)."
+            )
+        return str(target)
 
     if isinstance(device, str) and ":" in device:
         return device
     if isinstance(device, torch.device) and device.index is not None:
         return str(device)
     return None
+
+
+def _xla_chip_ordinals(value) -> Optional[List[int]]:
+    """Return the concrete ``xla:N`` ordinals a placement value names.
+
+    ``None`` when the value names no XLA chip: CPU, an abstract family such as
+    a bare ``xla``, or an Accelerate policy string. Only an explicit index
+    names a chip, so ``xla`` keeps the default chip 0 without pinning it.
+    Sequences are flattened so a device pool reports every chip it names.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, (tuple, list, set)):
+        collected: List[int] = []
+        for item in value:
+            ordinals = _xla_chip_ordinals(item)
+            if ordinals:
+                collected.extend(ordinals)
+        return collected or None
+    if isinstance(value, DEVICE):
+        return None
+    if isinstance(value, str) and value.strip().lower() in {
+        "auto", "balanced", "balanced_low_0", "sequential", "cpu",
+    }:
+        return None
+    try:
+        target = value if isinstance(value, torch.device) else torch.device(value)
+    except (RuntimeError, ValueError, TypeError):
+        return None
+    if target.type != "xla" or target.index is None:
+        return None
+    return [int(target.index)]
+
+
+def _native_ttnn_chip_ordinal(device, device_map, max_memory) -> Optional[int]:
+    """Resolve the chip a native TTNN load asked for, if it named one.
+
+    The native kernel stages packed weights on the host and uploads them
+    through TT-Metal, so an indexed ``xla:N`` request selects the chip that
+    ``open_mesh`` opens; it must not become Accelerate checkpoint placement
+    (#5853). A request that names several chips is rejected: the native kernel
+    owns one mesh per process and a per-layer ``xla:N`` map would initialize the
+    PJRT runtime, which cannot coexist with that mesh. A memory budget is a
+    layer-wise request and names no single chip.
+    """
+
+    if max_memory is not None:
+        return None
+
+    ordinals: List[int] = list(_xla_chip_ordinals(device) or [])
+    if isinstance(device_map, dict):
+        for value in device_map.values():
+            ordinals.extend(_xla_chip_ordinals(value) or [])
+    named = sorted(set(ordinals))
+    if not named:
+        return None
+    if len(named) > 1:
+        raise ValueError(
+            f"the native TTNN backend opens one chip per process, but this load "
+            f"requests chips {named} (`device={device!r}`, `device_map={device_map!r}`). "
+            "Pass a single `xla:N` device (or `xla` for chip 0); the mesh size is "
+            "chosen by the kernel, not by checkpoint placement."
+        )
+    return named[0]
+
+
+def _resolve_native_ttnn_placement(device, device_map, max_memory):
+    """Resolve placement for a backend that owns its chips without PJRT.
+
+    Returns ``(requested_device_map, explicit_device_map, ordinal)``. A named
+    chip keeps the execution device indexed for kernel selection while the
+    checkpoint itself is pinned to CPU staging. Without an ordinal the previous
+    contract stands: ``explicit_device_map`` is what the caller passed.
+    """
+
+    requested_device_map, explicit_device_map = _normalize_explicit_placement(
+        device, device_map, max_memory
+    )
+    ordinal = _native_ttnn_chip_ordinal(device, device_map, max_memory)
+    if ordinal is not None:
+        # The indexed device selects the chip, not checkpoint storage. Keeping
+        # `requested_device_map` None lets `device` stay `xla:N` for kernel
+        # selection instead of collapsing to the CPU placement map.
+        requested_device_map, explicit_device_map = None, {"": "cpu"}
+    return requested_device_map, explicit_device_map, ordinal
 
 
 def _normalize_explicit_placement(device, device_map, max_memory):
@@ -779,33 +1084,108 @@ def _normalize_explicit_placement(device, device_map, max_memory):
     return requested_device_map, explicit_device_map
 
 
-def _resolve_max_memory_device(max_memory, device) -> Optional[DEVICE]:
-    """Validate ``device`` against the devices a ``max_memory`` budget names.
+def _dense_placement_device_map(device, device_map, resolved_device):
+    """Return the placement map for the dense (non-quantized) Transformers load.
+
+    Transformers' ``"auto"`` policy fills the first visible accelerator, so an
+    explicit ``device="cpu"`` on a CUDA host silently loaded a CUDA model: the
+    requested device only selected the dtype and was then replaced by ``auto``
+    (#5373). An explicit ``device_map`` still wins; otherwise the requested
+    device becomes a full-model root mapping. A device pool is a layer-wise
+    request with no single root target, so it keeps the auto policy.
+    """
+
+    if device_map:
+        return device_map
+    if device is None or isinstance(resolved_device, tuple):
+        return "auto"
+    # ``_indexed_device_request`` keeps an accelerator ordinal that the family
+    # resolution below drops (``device=1`` resolves to the CUDA family).
+    target = _indexed_device_request(device)
+    if target is None:
+        if isinstance(resolved_device, DEVICE):
+            target = str(resolved_device.to_torch_device())
+        elif isinstance(resolved_device, torch.device):
+            target = str(resolved_device)
+        else:
+            return "auto"
+    return {"": target}
+
+
+def _max_memory_device_name_is_cpu(name: str) -> bool:
+    """Whether a normalized ``max_memory`` key is the CPU budget."""
+
+    if name == "cpu":
+        return True
+    try:
+        return torch.device(name).type == "cpu"
+    except (RuntimeError, ValueError):
+        return False
+
+
+def _resolve_max_memory_device(max_memory, device) -> Optional[Union[DEVICE, tuple]]:
+    """Resolve the devices a ``max_memory`` budget may place weights on.
 
     ``max_memory`` is the authoritative list of devices that may hold weights
-    (#4082). When every entry is ``cpu`` the budget can only place layers on
-    CPU, so kernel selection must use CPU too; otherwise a CUDA kernel is
-    selected for a CPU-resident model and the first forward raises
-    ``Expected a cuda device, but got: cpu`` (#4091 item 7).
+    (#4082), so kernel selection must see exactly the accelerator devices the
+    budget names. Expanding the CUDA family to every visible GPU made the
+    mixed-capability check reject budgets that never touched the other card: on
+    a 4090 + 5090 host even ``max_memory={0: "20GiB"}`` failed with
+    ``cuda:0=12.0, cuda:1=8.9`` (#4632).
 
-    Returns ``DEVICE.CPU`` for a CPU-only budget and ``None`` when the budget
-    admits an accelerator. An explicit accelerator ``device`` that contradicts
-    a CPU-only budget is rejected rather than silently ignored.
+    Returns ``DEVICE.CPU`` for a CPU-only budget, the tuple of concrete
+    accelerator devices for an accelerator budget, and ``None`` without a
+    budget. An explicit ``device`` that contradicts the budget is rejected
+    rather than silently ignored.
     """
 
     if max_memory is None:
         return None
-    if any(name != "cpu" for name, _ in _normalize_max_memory(max_memory, device)):
-        return None
+    budgets = _normalize_max_memory(max_memory, device)
+    accelerators: List[torch.device] = []
+    for name, _ in budgets:
+        if _max_memory_device_name_is_cpu(name):
+            continue
+        try:
+            target = torch.device(name)
+        except (RuntimeError, ValueError) as exc:
+            raise ValueError(
+                f"`max_memory` has an unsupported device key `{name}`."
+            ) from exc
+        if target not in accelerators:
+            accelerators.append(target)
+
     requested_family = selector_device_family(device) if device is not None else None
+    if not accelerators:
+        if requested_family is not None and requested_family != DEVICE.CPU:
+            raise ValueError(
+                "`max_memory` has no accelerator entry, so it can only place layers "
+                f"on CPU; that contradicts `device={device!r}`. Add an accelerator "
+                "entry to `max_memory`, or omit `device`/pass `device='cpu'` for "
+                "CPU-only placement."
+            )
+        return DEVICE.CPU
+
     if requested_family is not None and requested_family != DEVICE.CPU:
-        raise ValueError(
-            "`max_memory` has no accelerator entry, so it can only place layers "
-            f"on CPU; that contradicts `device={device!r}`. Add an accelerator "
-            "entry to `max_memory`, or omit `device`/pass `device='cpu'` for "
-            "CPU-only placement."
+        budget_family = selector_device_family(tuple(accelerators))
+        if requested_family != budget_family:
+            raise ValueError(
+                f"`device={device!r}` selects {requested_family.value} but `max_memory` "
+                f"funds {budget_family.value} devices ({', '.join(str(d) for d in accelerators)}). "
+                "Pass one placement argument, or make them agree."
+            )
+        explicit = _explicit_requested_devices(
+            device if isinstance(device, (tuple, list)) else (device,)
         )
-    return DEVICE.CPU
+        if explicit is not None:
+            missing = [target for target in explicit if target not in accelerators]
+            if missing:
+                raise ValueError(
+                    f"`device={device!r}` names {', '.join(str(d) for d in missing)} but "
+                    "`max_memory` does not fund it. Add that device to `max_memory`, or "
+                    "drop it from `device`."
+                )
+    return tuple(accelerators)
 
 
 def _external_runtime_device_kwargs(
@@ -886,7 +1266,7 @@ def _should_print_module_tree() -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 
-def _call_before_model_load(cls, *, model_local_path: str, load_quantized_model: bool) -> None:
+def _call_before_model_load(cls, *, model_local_path: str, load_quantized_model: bool, trust_remote_code: bool = False) -> None:
     """Run a definition's pre-load hook for every load path.
 
     `before_model_load` is a plain method on the definition class, not an
@@ -898,6 +1278,12 @@ def _call_before_model_load(cls, *, model_local_path: str, load_quantized_model:
     `generate()`/`forward()` on an unquantized model.
     """
 
+    if getattr(cls, "before_model_load_requires_remote_code", False):
+        if not trust_remote_code:
+            return
+        from ..utils.security import require_remote_code_permission
+
+        require_remote_code_permission(trust_remote_code)
     cls.before_model_load(
         cls,
         model_local_path=model_local_path,
@@ -912,13 +1298,10 @@ def _maybe_print_module_tree(model) -> None:
         print_module_tree(model=model)
 
 
-# `requirements.txt` pins `defuser>=0.0.31`. Older releases do not split the
-# fused 3-D expert tensors of afmoe / flint / granitemoe_swa, so their routed
-# experts stay fused and are silently left unquantized; the only symptom is a
-# "0 layer matches" line in the module-coverage report. Defuser 0.0.31 also
-# fixes the GLM-4.x replacement MoE blocks, which crashed on the Transformers
-# 5.22 router tuple.
-DEFUSER_MIN_VERSION = "0.0.31"
+# Defuser 0.0.33 adds Inkling 2 Mini expert conversion. It also includes the
+# Afmoe/Flint/GraniteMoeSWA fused-expert conversion, the GLM-4.x router tuple
+# fix and the device-scoped accelerator cache flush from 0.0.32 (#5105).
+DEFUSER_MIN_VERSION = "0.0.33"
 _defuser_version_warning_emitted = False
 
 
@@ -956,8 +1339,298 @@ def _check_defuser_version() -> None:
     )
 
 
+# Vendored Transformers 5.23 families live at
+# ``gptqmodel.models.ports.native.<family>.<module>.<Class>``; Defuser keys its
+# runtime patches, expert specs and construction-time replacements by the
+# matching ``transformers.models.<family>.<module>.<Class>`` path.
+_VENDORED_CLASS_PREFIX = "gptqmodel.models.ports.native."
+_DEFUSER_CLASS_PREFIX = "transformers.models."
+
+
+def _defuser_module_path(module_class) -> Optional[str]:
+    """Return Defuser's ``transformers.models`` module for a vendored class, else None."""
+
+    module_path = getattr(module_class, "__module__", "") or ""
+    if not module_path.startswith(_VENDORED_CLASS_PREFIX):
+        return None
+    return _DEFUSER_CLASS_PREFIX + module_path[len(_VENDORED_CLASS_PREFIX):]
+
+
+def _new_defuser_alias(original):
+    alias = type(original.__name__, (original,), {
+        "__module__": _defuser_module_path(original),
+        "__qualname__": original.__qualname__,
+    })
+    # GradientCheckpointingLayer wraps forward on every subclass. Inherit the
+    # vendored forward until Defuser decides whether to replace it.
+    if "forward" in vars(alias):
+        delattr(alias, "forward")
+    return alias
+
+
+def _defuser_bound_forwards(module, state):
+    return {
+        name: method.__func__
+        for name in ("forward", "_old_forward")
+        if isinstance(method := state.get(name), MethodType)
+        and method.__self__ is module
+        and (method.__func__.__module__.startswith("defuser.") or method.__func__ is _routed_experts_forward)
+    }
+
+
+# Defuser's construction-time replacement blocks whose expert loop is
+# ``defuser.modeling.unfused_moe.common.run_routed_experts`` (or the identical
+# Glm4MoeLite loop). GPT-QModel builds the vendored block and converts its
+# experts afterwards, so the converted experts get ``_routed_experts_forward``,
+# which feeds every expert the same token rows in the same order as that loop.
+_ROUTED_EXPERTS_REPLACEMENTS = frozenset({
+    "defuser.modeling.unfused_moe.mixtral.LinearMixtralSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen2_moe.LinearQwen2MoeSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen3_moe.LinearQwen3MoeSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen3_next.LinearQwen3NextSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen3_omni_moe.LinearQwen3OmniMoeThinkerTextSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen3_omni_moe.LinearQwen3OmniMoeTalkerTextSparseMoeBlock",
+    "defuser.modeling.unfused_moe.glm4_moe_lite.LinearGlm4MoeLiteMoE",
+})
+
+
+def _routed_experts_forward(self, hidden_states, top_k_index, top_k_weights):
+    """Run Defuser-converted per-expert linears in the eager routed-loop order.
+
+    Matches ``run_routed_experts`` (and the Transformers eager experts loop):
+    experts are visited in ascending index, each expert receives its token rows
+    ordered by top-k slot and then token (``torch.where`` over the
+    ``[top_k, tokens]`` mask), and weighted outputs are accumulated with
+    ``index_add_``. Calibration statistics that depend on row order (AWQ scale
+    search) therefore stay bit-identical to the replacement block.
+    """
+
+    shape = hidden_states.shape
+    hidden_dim = shape[-1]
+    hidden_states = hidden_states.reshape(-1, hidden_dim)
+    top_k_index = top_k_index.reshape(hidden_states.shape[0], -1)
+    top_k_weights = top_k_weights.reshape(hidden_states.shape[0], -1).to(hidden_states.dtype)
+    final_hidden_states = torch.zeros_like(hidden_states)
+
+    expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
+    expert_hit = torch.nonzero(expert_mask.sum(dim=(-1, -2)), as_tuple=False).flatten()
+    for expert_idx in expert_hit.tolist():
+        expert = getattr(self, str(expert_idx))
+        top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+        current_state = hidden_states[token_idx]
+        if hasattr(expert, "gate_proj"):
+            gate_out = expert.gate_proj(current_state)
+            up_out = expert.up_proj(current_state)
+            if hasattr(self, "_apply_gate"):
+                current = self._apply_gate(torch.cat([gate_out, up_out], dim=-1))
+            else:
+                current = self.act_fn(gate_out) * up_out
+        else:
+            current = self.act_fn(expert.up_proj(current_state))
+        current = expert.down_proj(current) * top_k_weights[token_idx, top_k_pos, None]
+        final_hidden_states.index_add_(0, token_idx, current.to(final_hidden_states.dtype))
+
+    return final_hidden_states.reshape(shape)
+
+
+def _bind_converted_experts_forwards(model, routed_blocks) -> None:
+    """Make every Defuser-converted experts module carry its own forward.
+
+    Defuser unfuses ``@use_experts_implementation`` experts in place and sets
+    ``config._experts_implementation = "linear_loop"``; the class forward then
+    resolves that name in Transformers' ``ALL_EXPERTS_FUNCTIONS`` on every call,
+    which only holds the entry in the process that ran the conversion. Binding
+    the implementation on the instance (as Defuser itself does for its
+    declarative ``experts_defuse`` specs) keeps the converted model
+    self-contained: pickled models load and run in a fresh process, and the
+    instance forward pickles by reference through ``_reduce_defused_module``.
+    """
+
+    from defuser.modeling.moe_experts_interface import LINEAR_LOOP_IMPL, linear_loop_experts_forward
+
+    if not callable(getattr(model, "modules", None)):
+        return
+    routed_experts = {id(getattr(block, "experts", None)) for block in routed_blocks}
+    for module in model.modules():
+        if "forward" in vars(module) or "0" not in module._modules:
+            continue
+        if not hasattr(type(module).forward, "__wrapped__"):
+            continue
+        if getattr(getattr(module, "config", None), "_experts_implementation", None) != LINEAR_LOOP_IMPL:
+            continue
+        forward = _routed_experts_forward if id(module) in routed_experts else linear_loop_experts_forward
+        module.forward = MethodType(forward, module)
+
+
+def _reduce_defused_module(module, protocol):
+    alias = type(module)
+    original = alias.__bases__[0]
+    state = module.__getstate__().copy()
+    forwards = _defuser_bound_forwards(module, state)
+    for name in forwards:
+        del state[name]
+    # Pickle resolves a bound method by attribute name on its owner. Defuser
+    # binds its functions as "forward", so persist the importable functions
+    # and bind them again after the module's state has been loaded.
+    compact_experts = "_compact_expert_repr_installed" in vars(alias)
+    omni = getattr(getattr(alias, "generate", None), "_defuser_qwen3_omni_text_runtime", False)
+    return _new_defused_module, (original, compact_experts, omni), (state, forwards)
+
+
+def _new_defused_module(original, compact_experts, omni):
+    return object.__new__(_restored_defuser_alias(original, compact_experts, omni))
+
+
+@lru_cache(maxsize=128)
+def _restored_defuser_alias(original, compact_experts, omni):
+    # Rebuild the private subclass in a fresh process without inserting it
+    # into a vendored or Transformers module under a synthetic global name.
+    alias = _new_defuser_alias(original)
+    module = object.__new__(alias)
+    if compact_experts:
+        from defuser.modeling.moe_experts_interface import _install_compact_expert_repr
+
+        _install_compact_expert_repr(module)
+    if omni:
+        from defuser.modeling.model_patches import patch_qwen3_omni_text_runtime
+
+        patch_qwen3_omni_text_runtime(module)
+    alias.__module__ = original.__module__
+    alias.__reduce_ex__ = _reduce_defused_module
+    alias.__setstate__ = _set_defused_module_state
+    return alias
+
+
+def _set_defused_module_state(module, state_and_forwards):
+    state, forwards = state_and_forwards
+    type(module).__bases__[0].__setstate__(module, state)
+    for name, forward in forwards.items():
+        setattr(module, name, MethodType(forward, module))
+
+
+class _DefuserClassPathAliases:
+    """Present vendored module classes to Defuser under their Transformers class path.
+
+    Each vendored instance temporarily gets a per-class subclass whose only
+    difference is ``__module__`` (``transformers.models.<family>.<module>``),
+    so every Defuser lookup by class path or class name matches exactly as it
+    does for the Transformers class. On exit an instance whose alias Defuser
+    left untouched gets its vendored class back. Instances with Defuser
+    behavior retain a subclass with a pickle reconstruction recipe.
+    """
+
+    def __init__(self, model):
+        self.model = model
+        self.aliases = {}
+        self.alias_names = {}
+
+    def _modules(self):
+        modules = getattr(self.model, "modules", None)
+        return list(modules()) if callable(modules) else []
+
+    def _alias(self, module_class):
+        alias = self.aliases.get(module_class)
+        if alias is None:
+            alias = _new_defuser_alias(module_class)
+            self.aliases[module_class] = alias
+            self.alias_names[alias] = (module_class, set(vars(alias)))
+        return alias
+
+    def __enter__(self):
+        for module in self._modules():
+            module_class = type(module)
+            if (
+                _defuser_module_path(module_class) is None
+                or module_class.__reduce_ex__ is _reduce_defused_module
+            ):
+                continue
+            module.__class__ = self._alias(module_class)
+        return self
+
+    def __exit__(self, *exc):
+        extended = {
+            alias for alias, (_, names) in self.alias_names.items() if set(vars(alias)) - names
+        }
+        retained = set()
+        for module in self._modules():
+            alias = type(module)
+            entry = self.alias_names.get(alias)
+            if entry is None:
+                continue
+            if alias in extended or _defuser_bound_forwards(module, vars(module)):
+                retained.add(alias)
+            else:
+                module.__class__ = entry[0]
+        for alias in retained:
+            alias.__module__ = self.alias_names[alias][0].__module__
+            alias.__reduce_ex__ = _reduce_defused_module
+            alias.__setstate__ = _set_defused_module_state
+        return False
+
+
 def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     _check_defuser_version()
+    # Defuser >= 0.0.32 flushes only the devices this model occupies, so a
+    # CPU/meta conversion never claims cuda:0 (#5105).
+    with _DefuserClassPathAliases(model):
+        converted = _run_defuser_conversion(cls, model, cleanup_original)
+        routed_blocks = _apply_vendored_construction_replacements(model)
+        _bind_converted_experts_forwards(model, routed_blocks)
+
+    after_conversion = getattr(cls, "after_defuser_conversion", None)
+    # Model-specific finalizers may also normalize metadata that Defuser does
+    # not own. Run them after the conversion attempt even when the installed
+    # Defuser has no matching registration and reports no structural change.
+    if callable(after_conversion):
+        after_conversion(model)
+
+    return converted
+
+
+def _apply_vendored_construction_replacements(model) -> list:
+    """Give vendored classes Defuser's construction-time block replacements.
+
+    ``defuser.replace_fused_blocks()`` swaps ``transformers.models`` classes
+    (and Transformers' checkpoint conversion mapping) before construction.
+    GPT-QModel never patches Transformers and vendored models are never built
+    from those modules, so the swap is applied here, after construction, under
+    the same class keys (this runs inside ``_DefuserClassPathAliases``). Fused
+    MoE blocks are already split per expert by Defuser's generic experts pass
+    with the replacement block's parameter names; a dense replacement (for
+    example ``Glm4vTextMLP`` -> ``LinearGlm4vTextMLP``) splits ``gate_up_proj``
+    with Defuser's own runtime split, which has the replacement's forward.
+    Returns the MoE blocks whose replacement runs the routed expert loop, so
+    their converted experts can keep that loop's token order.
+    """
+
+    from defuser.model_registry import MODEL_CONFIG, PATCH
+    from defuser.modeling.runtime_defusion import patch_split_gate_up_mlp
+
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    if not callable(getattr(model, "modules", None)):
+        return []
+    # Defuser 0.0.31's replace_fused_blocks consumes pairs of dotted class paths.
+    replaced = {}
+    for original, replacement in MODEL_CONFIG.get(model_type, {}).get(PATCH.REPLACE_MODULE, ()):
+        if not isinstance(original, str) or not isinstance(replacement, str):
+            raise TypeError(f"Defuser replacement entries for {model_type!r} must be pairs of dotted class paths.")
+        replaced[original] = replacement
+    routed_blocks = []
+    if not replaced:
+        return routed_blocks
+    for module in list(model.modules()):
+        module_class = type(module)
+        replacement = replaced.get(f"{module_class.__module__}.{module_class.__name__}")
+        if replacement is None:
+            continue
+        if replacement in _ROUTED_EXPERTS_REPLACEMENTS:
+            routed_blocks.append(module)
+        if isinstance(getattr(module, "gate_up_proj", None), torch.nn.Linear):
+            patch_split_gate_up_mlp(module, variant="standard")
+    return routed_blocks
+
+
+def _run_defuser_conversion(cls, model, cleanup_original: bool) -> bool:
     converted = defuser.convert_model(model, cleanup_original=cleanup_original)
 
     # Defuser gates `convert_model()` on its own model registry. Model types
@@ -980,31 +1653,162 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
                 continue
             converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
 
-    after_conversion = getattr(cls, "after_defuser_conversion", None)
-    # Model-specific finalizers may also normalize metadata that Defuser does
-    # not own. Run them after the conversion attempt even when the installed
-    # Defuser has no matching registration and reports no structural change.
-    if callable(after_conversion):
-        after_conversion(model)
-
     return converted
 
 
-def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
-    """Detect whether the resolved HF architecture exposes FA2 kernels."""
+# Fused expert projections that Defuser splits from one 3-D tensor into a
+# per-expert ``nn.Linear``. These names match
+# ``defuser.modeling.moe_experts_interface.KNOWN_PROJECTION_PATTERNS``.
+_FUSED_EXPERT_PROJECTION_NAMES = ("gate_up_proj", "gate_proj", "up_proj", "down_proj")
 
-    if not getattr(config, "architectures", None):
-        return False
 
-    model_class = getattr(transformers, config.architectures[0], None)
+def _meta_fused_expert_params(model) -> int:
+    """Park fused 3-D expert projections on meta before Defuser splits them.
+
+    Defuser's tensor defusion copies the whole fused projection to the host and
+    materializes one dense bf16 ``nn.Linear`` per expert. On the quantized-load
+    path those linears are replaced by quantized kernels and filled from the
+    checkpoint right afterwards, so the copies only inflate host memory: an
+    OLMoE-1B-7B 4-bit reload peaked at 12.17 GiB RssAnon for a 3.66 GiB
+    checkpoint (issue #4400).
+
+    Defuser skips tensors that already live on meta, so move the fused
+    projections (and their fused biases) there first; the checkpoint loader
+    then materializes the packed weights straight from disk. Only call this
+    from the quantized-load path: quantization needs the fused values in host
+    memory so Defuser can produce real per-expert linears to quantize.
+
+    Returns the number of parameters/buffers moved.
+    """
+
+    moved = 0
+    for module in model.modules():
+        for projection in _FUSED_EXPERT_PROJECTION_NAMES:
+            weight = module._parameters.get(projection)
+            if weight is None:
+                weight = module._buffers.get(projection)
+            if not isinstance(weight, torch.Tensor) or weight.dim() != 3:
+                continue
+            # The fused bias is a 2-D (num_experts, out_features) sibling.
+            for attr in (projection, f"{projection}_bias"):
+                parameter = module._parameters.get(attr)
+                buffer = module._buffers.get(attr)
+                tensor = parameter if parameter is not None else buffer
+                if not isinstance(tensor, torch.Tensor) or tensor.device.type == "meta":
+                    continue
+                empty = torch.empty_like(tensor, device="meta")
+                if parameter is not None:
+                    module._parameters[attr] = torch.nn.Parameter(
+                        empty, requires_grad=parameter.requires_grad
+                    )
+                else:
+                    module._buffers[attr] = empty
+                moved += 1
+    return moved
+
+
+def _materialize_meta_expert_linears(model) -> int:
+    """Restore real CPU storage for the linears Defuser built on meta.
+
+    Defuser materializes meta expert projections as meta ``nn.Linear`` shells
+    (see :func:`_meta_fused_expert_params`). ``to_empty`` allocates their
+    uninitialized storage without touching pages, so the host RSS stays flat;
+    ``make_quant`` then replaces them with kernels whose own buffers are
+    created on a real device. Without this step those kernels would inherit a
+    meta shell, leaving non-checkpoint buffers (``qzeros_format``, ``input_perm``,
+    ...) on meta and breaking the later ``model.to(device)`` dispatch.
+
+    Only fully-meta modules are touched, so the real CPU weights built by
+    ``from_config`` are never discarded.
+
+    Returns the number of modules materialized.
+    """
+
+    moved = 0
+    for module in model.modules():
+        tensors = [*module._parameters.values(), *module._buffers.values()]
+        tensors = [tensor for tensor in tensors if isinstance(tensor, torch.Tensor)]
+        if not tensors or not any(tensor.device.type == "meta" for tensor in tensors):
+            continue
+        if any(tensor.device.type != "meta" for tensor in tensors):
+            continue
+        module.to_empty(device="cpu")
+        moved += 1
+    return moved
+
+
+def _definition_model_class(definition, config: PretrainedConfig):
+    """Return the model class ``definition`` builds for ``config``, or None.
+
+    Resolved from the definition's own loader, never from a checkpoint-supplied
+    name looked up on the ``transformers`` package (``config.architectures`` is
+    checkpoint data and would import an arbitrary Transformers model module).
+    """
+
+    from transformers.modeling_utils import PreTrainedModel
+
+    from .local import LocalModelLoader, _local_class
+
+    loader = getattr(definition, "loader", None)
+    if not isinstance(loader, LocalModelLoader):
+        # Unsupported model (BaseQModel's Transformers Auto* loader): the class
+        # that Auto* builds for this config type.
+        mapping = getattr(loader, "_model_mapping", None)
+        try:
+            return mapping[type(config)] if mapping is not None else None
+        except (KeyError, ValueError):
+            return None
+
+    target = _local_class(loader.model_class)
+    resolver = getattr(target, "_model_class", None)
+    if callable(resolver):
+        # Native* loaders: the vendored class registered for config.model_type.
+        try:
+            return resolver(config)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(target, type) and issubclass(target, PreTrainedModel):
+        return target
+    # Port factory: the package class its module names for this architecture,
+    # else the vendored class registered for config.model_type.
+    def _package_model(candidate):
+        return (
+            isinstance(candidate, type)
+            and issubclass(candidate, PreTrainedModel)
+            and candidate.__module__.startswith("gptqmodel.")
+        )
+
+    architectures = getattr(config, "architectures", None) or ()
+    name = architectures[0] if architectures and isinstance(architectures[0], str) else None
+    if name is not None and name.isidentifier():
+        found = getattr(import_module(target.__module__), name, None)
+        if _package_model(found):
+            return found
+    from .ports.native.auto import _registry, _resolve
+
+    model_type = getattr(config, "model_type", None)
+    for table in (_registry.CAUSAL_LM, _registry.IMAGE_TEXT_TO_TEXT, _registry.MULTIMODAL_LM, _registry.MODEL):
+        if model_type in table:
+            found = _resolve(table, model_type, "model")
+            if _package_model(found):
+                return found
+    return None
+
+
+def _model_class_supports_flash_attn(model_class) -> bool | None:
     if model_class is None:
-        return False
-
+        return None
     if hasattr(model_class, "_supports_flash_attn_2"):
         return bool(getattr(model_class, "_supports_flash_attn_2"))
     if hasattr(model_class, "_supports_flash_attn"):
         return bool(getattr(model_class, "_supports_flash_attn"))
-    return False
+    return None
+
+
+def _supports_flash_attn_2(definition, config: PretrainedConfig) -> bool:
+    """Detect whether the class ``definition`` builds exposes FA2 kernels."""
+
+    return bool(_model_class_supports_flash_attn(_definition_model_class(definition, config)))
 
 
 def _iter_nested_pretrained_configs(config: PretrainedConfig):
@@ -1232,16 +2036,161 @@ def compare_versions(installed_version, required_version, operator):
 # through this lock; ``quantize()`` on already-loaded models stays concurrent.
 _MODEL_LOAD_LOCK = threading.RLock()
 
+# Compiled calls only read the process-global torch state (dynamo's
+# ``GLOBAL_STATE`` guard reads the default dtype on every call), while
+# transformers' construction changes it. This reader/writer lock lets compiled
+# forwards run concurrently and holds the writer only for the
+# ``local_torch_dtype`` window that saves/sets/restores the dtype -- not for a
+# load's weight I/O, packing or kernel post-init (#5268, #5304). The window
+# itself takes the writer (``gptqmodel.utils.torch``), so no call site can widen
+# it. It is separate from ``_MODEL_LOAD_LOCK`` so load-vs-load serialization
+# does not serialize inference.
+_MODEL_GLOBAL_STATE_LOCK = _ModelGlobalStateLock()
+
+
+def model_load_lock():
+    """Return the process-wide, re-entrant lock guarding model construction.
+
+    Every site that builds a model through transformers -- ``from_pretrained``,
+    ``from_quantized``, the save-side shell rebuild, the dequant path and the
+    TT block-float path -- must enter this same lock. Look the lock up through
+    this accessor (not a module-level import of ``_MODEL_LOAD_LOCK``) so the
+    single lock object is shared and can be spied on in tests.
+    """
+
+    return _MODEL_LOAD_LOCK
+
+
+def model_global_state_lock():
+    """Return the process-wide reader/writer lock for torch's default dtype.
+
+    Compiled calls take the shared reader side (``.reader()``); transformers'
+    ``local_torch_dtype`` window -- the only code that saves, sets and restores
+    ``torch.set_default_dtype`` -- takes the exclusive writer side (``with``).
+    Look the lock up through this accessor so tests and callers share one
+    object.
+    """
+
+    return _MODEL_GLOBAL_STATE_LOCK
+
+
+def _default_dtype_outside_construction() -> torch.dtype:
+    """Read torch's default dtype while no construction window can be open.
+
+    transformers' ``local_torch_dtype`` window saves, sets and restores the
+    process default dtype in the constructing thread. A bare
+    ``torch.get_default_dtype()`` at load entry or exit can therefore observe
+    another thread's temporary dtype and report a change the load did not make
+    (#5421). The writer excludes every construction window, so the value read
+    here is the process's settled default dtype.
+    """
+
+    with model_global_state_lock():
+        return torch.get_default_dtype()
+
 
 def _serialized_model_load(method):
     """Serialize a model-construction entry point across threads."""
 
     @wraps(method)
     def wrapper(*args, **kwargs):
-        with _MODEL_LOAD_LOCK:
+        if model_global_state_lock().holds_reader():
+            # The calling thread is inside a compiled call, which holds the
+            # shared side of the global-state lock. A load needs the writer;
+            # waiting for it here could deadlock against another load that
+            # holds the model-load lock and is waiting for this reader. Fail
+            # loudly instead of hanging the process.
+            raise RuntimeError(
+                "a model load cannot start inside a compiled call: the compiled "
+                "call holds the shared model-global-state lock"
+            )
+        with model_load_lock():
             return method(*args, **kwargs)
 
     return wrapper
+
+
+class _TrackedKwargs(dict):
+    """Keyword dict that records every key consumed by ``pop``.
+
+    ``from_quantized`` accepts a long list of keyword options and consumes
+    them with ``pop`` (HF cache selection, placement, GGUF internals, ...).
+    Recording the pops keeps the strict unknown-keyword check derived from the
+    code instead of a hand-maintained allow-list that drifts when an option is
+    added or removed (#4945).
+    """
+
+    __slots__ = ("consumed",)
+
+    # Tracking metadata is not a value: two tracked dicts compare equal only
+    # when both their contents and their consumed keys agree. Comparisons with
+    # a plain dict keep the ordinary dict semantics.
+    __hash__ = None
+
+    def __init__(self, *args, consumed=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.consumed = set(consumed)
+
+    def __eq__(self, other):
+        if isinstance(other, _TrackedKwargs):
+            return dict.__eq__(self, other) and self.consumed == other.consumed
+        if isinstance(other, dict):
+            return dict.__eq__(self, other)
+        return NotImplemented
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def pop(self, key, *default):
+        self.consumed.add(key)
+        return super().pop(key, *default)
+
+
+def _accepted_quantized_load_kwargs(cls, consumed):
+    """Keyword names a quantized load accepts, derived from its own code.
+
+    The explicit parameters are bound by Python. The keyword-only options are
+    exactly the keys ``from_quantized`` pops, plus the Hub snapshot-download
+    options it forwards while resolving a remote checkpoint.
+    """
+
+    try:
+        parameters = inspect.signature(cls.from_quantized).parameters
+    except (TypeError, ValueError):
+        # A callable without an inspectable signature (some C builtins) cannot
+        # contribute parameters; the recorded pops still describe the set.
+        parameters = {}
+    accepted = {
+        name for name in parameters if name not in {"cls", "kwargs", "model_id_or_path"}
+    }
+    accepted.update(consumed)
+    try:
+        accepted.update(inspect.signature(snapshot_download).parameters)
+    except (TypeError, ValueError):
+        # A shim without a Python signature: the Hub options are then simply
+        # not offered as close-match suggestions.
+        pass
+    return accepted
+
+
+def _raise_unexpected_quantized_load_kwargs(cls, leftover, accepted):
+    details = []
+    for key in sorted(leftover):
+        matches = difflib.get_close_matches(key, sorted(accepted), n=1)
+        details.append(
+            f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else "")
+        )
+    raise TypeError(
+        f"{cls.__name__}.from_quantized: unexpected keyword argument(s) for a "
+        "quantized checkpoint: "
+        + ", ".join(details)
+        + ". A quantized load accepts "
+        + ", ".join(f"`{name}`" for name in sorted(accepted))
+        + "."
+    )
 
 
 def _is_meta_shell_build_error(exc: Exception) -> bool:
@@ -1259,6 +2208,23 @@ def _is_broken_transformers_dynamic_module_error(exc: Exception) -> bool:
 
 
 def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_path: str, **kwargs):
+    """Build a model through ``loader.from_pretrained``.
+
+    transformers runs model construction inside ``local_torch_dtype``, a
+    process-global default-dtype window, and dynamo's ``preserve_global_state``
+    restores that dtype around every trace. A compiled call re-tracing inside
+    the window can therefore restore bf16 after the load restored fp32, or trip
+    ``assert_loaded_model_state`` (#5127/#5209), so that window must exclude
+    compiled forwards.
+
+    The writer is taken by ``local_torch_dtype`` itself (#5304), not here: the
+    window is milliseconds of a load, while the surrounding call is the whole
+    dense load (weight I/O, dtype casts, device placement, packing and kernel
+    post-init). Taking it here stalled every optimized forward for the full
+    load duration. The window-level guard also covers each call site and the
+    quantize path automatically, so a new site cannot be added unguarded.
+    """
+
     try:
         return loader.from_pretrained(model_local_path, **kwargs)
     except Exception as exc:
@@ -1312,7 +2278,7 @@ def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remot
     model_config = model.config.to_dict()
     seq_len = find_config_seq_len(
         model_config,
-        ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"],
+        ["max_position_embeddings", "max_seq_len", "seq_length", "n_positions", "multimodal_max_length"],
     )
     model.seqlen = seq_len if seq_len is not None else 4096
 
@@ -1339,26 +2305,46 @@ def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remot
     )
 
 
-def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=None) -> None:
-    """Refuse the CUDA-only AWQ GEMV/GEMV_FAST/LLM_AWQ layouts on ROCm.
+def _reject_native_awq_gemv_on_rocm(
+    export_quant_method, format_code, backend=None, device=None
+) -> None:
+    """Refuse a GEMV load only when the target placement itself is ROCm.
 
-    Those three layouts are only readable by the native CUDA AWQ extension
-    (``gemv_forward``/``gemmv2_forward``/``gemv_fast_forward_decode``), which
-    hipcc cannot build: the sources include ``cuda_fp16.h`` and CUDA-only inline
-    asm, and the hipified warp-sync reduction rejects wave32.  Without this check
-    an AUTO load fails later with a bare "No valid quant linear", so point at the
-    layout and kernels that do run on ROCm.
+    ``FORMAT.GEMV`` is read by the native CUDA AWQ extension
+    (``gemv_forward``/``gemmv2_forward``), which hipcc cannot build: the
+    sources include ``cuda_fp16.h`` and CUDA-only inline asm, and the hipified
+    warp-sync reduction rejects wave32.  Without this check an AUTO load fails
+    later with a bare "No valid quant linear", so point at the layout and
+    kernels that do run on ROCm.
+
+    The gate keys on the *target* device family, not on the installed torch
+    build (#5219).  A ROCm wheel can still serve ``device="cpu"``, where
+    ``AwqGEMVTorchLinear`` reads the identical packed layout, so refusing every
+    load in a HIP process would break a supported placement for a reason that
+    has nothing to do with where the weights run.
+
+    ``FORMAT.GEMV_FAST`` / ``FORMAT.LLM_AWQ`` are not refused here: their
+    portable Torch readers declare ROCm and read the identical interleaved
+    layout, so AUTO resolves to them on ROCm (issue #5109).  An explicit
+    selection of the CUDA-only native kernel still fails through
+    ``select_quant_linear`` with the device-family message.
     """
 
     if not IS_ROCM:
         return
     if export_quant_method != METHOD.AWQ:
         return
-    if format_code not in (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+    if format_code != FORMAT.GEMV:
         return
     # The portable Triton GEMV reads the GEMV layout without the extension, so an
     # explicit selection of it is a supported ROCm placement.
     if backend == BACKEND.AWQ_GEMV_TRITON:
+        return
+    # ``device=None`` means the caller did not resolve a placement; keep the
+    # conservative refusal.  A resolved non-ROCm family (CPU, XPU, ...) falls
+    # through to ``select_quant_linear``, whose ``PORTABLE_FALLBACK`` pass picks
+    # a reader that declares that family.
+    if device is not None and selector_device_family(device) != DEVICE.ROCM:
         return
 
     from ..nn_modules.qlinear.gemv_awq import AWQ_GEMV_ROCM_UNSUPPORTED
@@ -1366,24 +2352,56 @@ def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=No
     raise NotImplementedError(AWQ_GEMV_ROCM_UNSUPPORTED)
 
 
-def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
+# The GEMV/GEMV_FAST/LLM_AWQ layouts are read by kernels that declare
+# ``SUPPORTS_DTYPES = [torch.float16]``. AUTO has not resolved a concrete kernel
+# at load time, but every kernel AUTO can select for these layouts is fp16-only,
+# so the format alone decides the dtype.
+_AWQ_FP16_ONLY_FORMATS = (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ)
+
+
+def _coerce_quantized_awq_dtype(
+    *, backend: BACKEND, qcfg: QuantizeConfig, dtype, explicit_dtype: bool = False
+):
+    """Return a dtype the selected AWQ kernel can actually execute.
+
+    An unsupported explicit ``dtype=`` is a configuration conflict, so raise
+    here instead of letting layer-0 finalize fail after calibration has already
+    run. An auto-selected dtype is fixed to fp16 and logged, and the loader then
+    materializes the whole model in that dtype so the forward cannot mix dtypes.
+    """
     if qcfg.quant_method not in (METHOD.AWQ, METHOD.PARO):
-        return dtype
-    if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
         return dtype
     if not isinstance(dtype, torch.dtype):
         return dtype
 
-    try:
-        qlinear = get_kernel_for_backend(backend, qcfg.quant_method, qcfg.format)
-    except ValueError:
-        return dtype
+    format_code = resolve_quant_format(qcfg.format, qcfg.method)
+    if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
+        if format_code not in _AWQ_FP16_ONLY_FORMATS:
+            return dtype
+        supported_dtypes = [torch.float16]
+        kernel_name = f"FORMAT.{format_code.name} AWQ GEMV"
+    else:
+        try:
+            qlinear = get_kernel_for_backend(backend, qcfg.quant_method, format_code)
+        except ValueError:
+            return dtype
+        supported_dtypes = getattr(qlinear, "SUPPORTS_DTYPES", None) or []
+        kernel_name = qlinear.__name__
 
-    supported_dtypes = getattr(qlinear, "SUPPORTS_DTYPES", None) or []
     if dtype in supported_dtypes or torch.float16 not in supported_dtypes:
         return dtype
 
-    log.info(f"Loading Quantized Model: Auto fix `dtype` to `torch.float16` for `{qlinear.__name__}`")
+    if explicit_dtype:
+        raise ValueError(
+            f"`dtype={dtype}` is not supported by {kernel_name}: it only supports "
+            f"{supported_dtypes}. Pass `dtype=torch.float16`, or use a GEMM format "
+            "(for example `FORMAT.GEMM`) that supports bfloat16."
+        )
+
+    log.info(
+        f"Loader: Auto fix `dtype` from `{dtype}` to `torch.float16` for "
+        f"`{kernel_name}`"
+    )
     return torch.float16
 
 
@@ -1405,18 +2423,8 @@ def check_versions(model_class, requirements: List[str]):
 
 
 def set_dtype_compat(model_init_kwargs: dict, torch_dtype):
-    """
-    Set dtype argument in a version-compatible way for Transformers.
-    See: https://github.com/huggingface/transformers/releases/tag/v4.56.0
-
-    Args:
-        model_init_kwargs (dict): kwargs used to initialize model
-        torch_dtype: torch dtype (e.g. torch.float16)
-    """
-    if Version(transformers.__version__) >= Version("4.56.0"):
-        model_init_kwargs["dtype"] = torch_dtype
-    else:
-        model_init_kwargs["torch_dtype"] = torch_dtype
+    """Set the Transformers 5.23 ``dtype`` model-init argument."""
+    model_init_kwargs["dtype"] = torch_dtype
 
 def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
@@ -1432,6 +2440,20 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
         kwargs=kwargs,
         on_removed=_log_removed,
     )
+
+
+def _requires_tokenizer(cls) -> bool:
+    """Whether a definition needs the text path for this load.
+
+    Read defensively: only ``BaseQModel`` and its subclasses inherit the
+    ``require_load_tokenizer`` default that #4894 added, so plain-class test
+    doubles and third-party definitions raised ``AttributeError`` at this call
+    site (#4923, #4941). An absent attribute means "text model", which is the
+    behaviour every definition had before #4894; a definition that really has no
+    tokenizer declares ``require_load_tokenizer = False``.
+    """
+
+    return bool(getattr(cls, "require_load_tokenizer", True))
 
 
 def _get_tokenizer_load_kwargs(model_init_kwargs: Dict) -> Dict:
@@ -1461,8 +2483,10 @@ def _resolve_local_gguf_checkpoint_path(model_local_path: str, hf_gguf_load_kwar
 def _resolve_native_quantized_gguf_checkpoint(
     model_local_path: str,
     hf_gguf_load_kwargs: Dict[str, str],
+    *,
+    policy: Optional[KernelConfig] = None,
 ) -> tuple[Optional[str], Optional[internal_gguf.GGUFQuantizedCheckpointSpec]]:
-    if not _native_quantized_loader_enabled():
+    if not _native_quantized_loader_enabled(policy):
         return None, None
 
     gguf_checkpoint_path = _resolve_local_gguf_checkpoint_path(model_local_path, hf_gguf_load_kwargs)
@@ -1597,25 +2621,33 @@ def _load_quantized_gguf_checkpoint_into_model(
             + ", ".join(sorted(missing_qweights))
         )
 
-    model.tie_weights()
+    retie_tied_weights(model)
 
 
 def _resolve_exl3_auto_backend(device, *, cuda_available: Optional[bool] = None) -> "BACKEND":
     """Pick the EXL3 kernel for ``backend=AUTO``.
 
-    Only the CUDA family gets ``EXL3_EXLLAMA_V3``: its tensor-core GEMM dispatch
-    table is populated exclusively for CUDA.  On ROCm every entry of that table
-    is ``nullptr`` (``exl3_gemm.cu`` already rejects HIP with an explicit
-    ``TORCH_CHECK``), so the AUTO branch used to load a backend that cannot run.
-    ROCm -- CDNA and RDNA4 alike -- therefore resolves to ``EXL3_TORCH``, the
-    portable kernel that is the supported ROCm path.
+    The CUDA family keeps the native tensor-core kernel. On ROCm
+    ``exl3_gemm.cu`` forwards to ``exl3_gemm_hip.cu``, which runs a native
+    wave32 WMMA GEMM and the packed HIP GEMV on RDNA4 (gfx120x) and reconstruct
+    + hgemm everywhere else. AUTO selects that native wrapper only when every
+    selected device is a supported RDNA4 target and the EXL3 extension is
+    usable; CDNA, other ROCm targets and hosts whose build has no HIP ops keep
+    the portable ``EXL3_TORCH`` kernel instead of selecting a path that cannot
+    load.
     """
 
     if cuda_available is None:
         cuda_available = torch.cuda.is_available()
+    if not cuda_available:
+        return BACKEND.EXL3_TORCH
     device_family = selector_device_family(device)
-    if cuda_available and device_family in ExllamaV3Linear.SUPPORTS_DEVICES:
+    if device_family == DEVICE.CUDA:
         return BACKEND.EXL3_EXLLAMA_V3
+    if device_family == DEVICE.ROCM:
+        targets = _selector_devices(device) or ()
+        if targets and all(ExllamaV3Linear.supports_device(target) for target in targets):
+            return BACKEND.EXL3_EXLLAMA_V3
     return BACKEND.EXL3_TORCH
 
 
@@ -1683,7 +2715,7 @@ def ModelLoader(cls):
             cls,
             pretrained_model_id_or_path: str,
             quantize_config: BaseQuantizeConfig,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             dtype: [str | torch.dtype] = "auto",
@@ -1691,9 +2723,12 @@ def ModelLoader(cls):
             device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **model_init_kwargs,
     ):
+        backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
         if p2p is not None and quantize_config is not None:
             # The loopers read this field and install it before enabling peers.
             quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
@@ -1701,7 +2736,7 @@ def ModelLoader(cls):
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
         torch._dynamo.disable()
-        default_dtype_before = torch.get_default_dtype()
+        default_dtype_before = _default_dtype_outside_construction()
 
         pretrained_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             pretrained_model_id_or_path,
@@ -1722,19 +2757,18 @@ def ModelLoader(cls):
         model_init_kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
 
         tokenizer_trust_remote_code = model_init_kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
+        config_load_kwargs = {**get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs}
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs_without_internal)
-        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
+        # Hooks read files directly. Config, processor and writer lookups keep
+        # the repository root and selection kwargs as separate inputs.
+        checkpoint_dir = resolve_checkpoint_subfolder(model_local_path, config_load_kwargs.get("subfolder"))
+        trust_remote_code = resolve_trust_remote_code(
+            model_local_path, trust_remote_code=trust_remote_code, **config_load_kwargs
+        )
 
         model_init_kwargs_without_internal["trust_remote_code"] = trust_remote_code
 
-        config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs_without_internal, **hf_gguf_load_kwargs)
-
-        defuser.replace_fused_blocks(config.model_type)
-
-        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
-        prepare_remote_model_init_compat(
-            model_local_path, config, trust_remote_code=trust_remote_code
-        )
+        config = load_model_config(model_local_path, **model_init_kwargs_without_internal, **hf_gguf_load_kwargs)
 
         from ..utils.mimo import is_mimo_mixed_source
 
@@ -1746,7 +2780,11 @@ def ModelLoader(cls):
             log.info(f"Loader: overriding attn_implementation in config to `{atten_impl}`")
             _override_attn_implementation(config, atten_impl)
 
-        resolved_device = normalize_device_device_map(device, device_map)
+        # A quantization load selects no inference kernel for its pool, so an
+        # explicit sequence may span compute capabilities (#4875).
+        resolved_device = normalize_device_device_map(
+            device, device_map, validate_families=False
+        )
         resolved_device = auto_select_device(resolved_device, backend)
 
         if cls.require_dtype:
@@ -1759,6 +2797,18 @@ def ModelLoader(cls):
                 config=config,
                 device=dtype_device,
                 quant_inference=False,
+            )
+
+        # Resolve fp16-only AWQ kernels (the GEMV layouts) before the shell
+        # model is materialized, so every module -- including the non-quantized
+        # ones -- loads in one dtype and the failure cannot surface in layer-0
+        # finalize after calibration.
+        if isinstance(quantize_config, BaseQuantizeConfig):
+            dtype = _coerce_quantized_awq_dtype(
+                backend=backend,
+                qcfg=quantize_config,
+                dtype=dtype,
+                explicit_dtype=requested_dtype is not None,
             )
 
         if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
@@ -1781,16 +2831,25 @@ def ModelLoader(cls):
                 model_dtype=dtype,
             )
 
-        tokenizer = load_hf_tokenizer(
-            model_local_path,
-            model_config=config,
-            trust_remote_code=tokenizer_trust_remote_code,
-            **_get_tokenizer_load_kwargs(model_init_kwargs),
-        )
+        # Definitions that declare no tokenizer (Decision Transformer) skip the
+        # whole text path: these checkpoints never ship one and calibration
+        # samples are named tensors, so the loader must not require it.
+        if _requires_tokenizer(cls):
+            tokenizer = load_hf_tokenizer(
+                model_local_path,
+                model_config=config,
+                trust_remote_code=tokenizer_trust_remote_code,
+                # The local port reuses the normalized Tokenicer wrapper.
+                return_tokenicer=True,
+                **_get_tokenizer_load_kwargs(model_init_kwargs),
+            )
+        else:
+            tokenizer = None
 
         gguf_checkpoint_path, native_gguf_qspec = _resolve_native_quantized_gguf_checkpoint(
             model_local_path,
             hf_gguf_load_kwargs,
+            policy=kernel,
         )
         effective_profile = _resolve_native_gguf_profile(
             native_gguf_qspec=native_gguf_qspec,
@@ -1824,6 +2883,7 @@ def ModelLoader(cls):
                         device_map=device_map,
                         device=device,
                         backend=backend,
+                        kernel=kernel,
                         dtype=dtype,
                         trust_remote_code=trust_remote_code,
                         tokenizer_trust_remote_code=tokenizer_trust_remote_code,
@@ -1831,8 +2891,16 @@ def ModelLoader(cls):
                         **redirect_kwargs,
                     )
 
+            if hf_gguf_load_kwargs:
+                # The dense GGUF import runs inside transformers, whose checkpoint
+                # hook is process-wide. Install this call's policy first (we hold
+                # the model-load lock) so the dequant device and loader choice
+                # come from these arguments rather than the previous load.
+                configure_kernel(kernel)
             hf_model_init_kwargs = dict(model_init_kwargs_without_internal)
-            hf_model_init_kwargs["device_map"] = device_map if device_map else "auto"
+            hf_model_init_kwargs["device_map"] = _dense_placement_device_map(
+                device, device_map, resolved_device
+            )
             set_dtype_compat(hf_model_init_kwargs, dtype)
             hf_model_init_kwargs.update(hf_gguf_load_kwargs)
             if (
@@ -1840,7 +2908,7 @@ def ModelLoader(cls):
                 and native_gguf_qspec.tensor_qtype == _ggml_quantization_type().Q1_0
                 and atten_impl in {None, "auto"}
                 and _is_accelerated_attention_device(resolved_device)
-                and (config.model_type == "qwen3" or _supports_flash_attn_2(config))
+                and (config.model_type == "qwen3" or _supports_flash_attn_2(cls, config))
                 and is_flash_attn_2_available()
             ):
                 hf_model_init_kwargs[ATTN_IMPLEMENTATION] = "flash_attention_2"
@@ -1848,9 +2916,13 @@ def ModelLoader(cls):
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
             _call_before_model_load(
                 cls,
-                model_local_path=model_local_path,
+                trust_remote_code=trust_remote_code,
+                model_local_path=checkpoint_dir,
                 load_quantized_model=False,
             )
+            # transformers' ``from_pretrained`` wraps model construction in
+            # ``local_torch_dtype`` (a process-global default-dtype window).
+            # The helper takes the global-state writer for that call.
             model = _hf_loader_from_pretrained_with_dynamic_module_retry(
                 cls.loader,
                 model_local_path,
@@ -1874,6 +2946,8 @@ def ModelLoader(cls):
                 tokenizer=tokenizer,
                 trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
+                processor_load_kwargs=get_config_selection_kwargs(model_init_kwargs),
+                config_load_kwargs=config_load_kwargs,
             )
             _set_paged_attention_safe_cuda_graphs(instance.model)
 
@@ -1904,7 +2978,9 @@ def ModelLoader(cls):
             raise ValueError(f"{cls} only supports desc_act={cls.supports_desc_act}, "
                              f"but quantize_config.desc_act is {quantize_config.desc_act}.")
 
-        native_support = has_native_transformers_causallm_support(model_local_path)
+        native_support = has_native_transformers_model_support(
+            model_local_path, cls.loader, **get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs
+        )
         if cls.require_trust_remote_code and not trust_remote_code and not native_support:
             raise ValueError(
                 f"{pretrained_model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
@@ -1915,7 +2991,12 @@ def ModelLoader(cls):
         with suspend_hf_weight_init():
             # normalize and auto select quantization device is not passed
             if quantize_config.device is None:
-                requested_devices = _explicit_requested_devices(device)
+                # A quantization pool may span compute capabilities; the
+                # single-capability rule only guards inference kernel selection
+                # (#4875).
+                requested_devices = _explicit_requested_devices(
+                    device, validate_families=False
+                )
                 # `quantize_config.device` only carries an accelerator family
                 # (ordinals are stripped by `normalize_device`), so an explicit
                 # device list is expressed through the compute filter.
@@ -1943,7 +3024,8 @@ def ModelLoader(cls):
 
             _call_before_model_load(
                 cls,
-                model_local_path=model_local_path,
+                trust_remote_code=trust_remote_code,
+                model_local_path=checkpoint_dir,
                 load_quantized_model=False,
             )
             from ..utils.hf import build_shell_model
@@ -2008,6 +3090,11 @@ def ModelLoader(cls):
                             cls.resolve_hf_conversion_map_reversed(target_model=model)
                         ),
                         target_model=model,
+                        # A `.bin`/`.pt` source is converted to a full safetensors
+                        # copy.  Put that copy under the configured offload root
+                        # instead of the system TMPDIR; the turtle only falls back
+                        # to `tempfile.gettempdir()` when no path is configured.
+                        offload_path=getattr(quantize_config, "offload_to_disk_path", None),
                     )
 
                     if turtle_model is None:
@@ -2047,7 +3134,7 @@ def ModelLoader(cls):
         )
 
         model_config = model.config.to_dict()
-        seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
+        seq_len_keys = ["max_position_embeddings", "max_seq_len", "seq_length", "n_positions", "multimodal_max_length"]
         config_seq_len = find_config_seq_len(model_config, seq_len_keys)
         if config_seq_len is not None:
             model.seqlen = config_seq_len
@@ -2067,6 +3154,8 @@ def ModelLoader(cls):
             tokenizer=tokenizer,
             trust_remote_code=trust_remote_code,
             model_local_path=model_local_path,
+            processor_load_kwargs=get_config_selection_kwargs(model_init_kwargs),
+            config_load_kwargs=config_load_kwargs,
         )
         _set_paged_attention_safe_cuda_graphs(instance.model)
 
@@ -2101,7 +3190,7 @@ def ModelLoader(cls):
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
@@ -2110,16 +3199,20 @@ def ModelLoader(cls):
             adapter_sha256: Optional[str] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **kwargs,
     ):
+        kwargs = _TrackedKwargs(kwargs)
+        backend, kernel = resolve_backend_config(backend, kernel, runtime)
         warn_unsupported_rocm()
 
         # Tenstorrent loads can leave the GDDR hot from the previous model. Pace
         # this one before any device is claimed. The native TTNN backend also
         # gates its own mesh open; the two gates share one rate limit, so a load
         # never pays the cooldown twice.
-        if normalize_backend(backend) in (BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_XLA):
+        if normalize_backend(backend) in NATIVE_TTNN_BACKENDS | {BACKEND.GPTQ_TT_XLA}:
             from ..utils.tt_thermal import before_device_open
 
             before_device_open(owner=f"{cls.__name__}.from_quantized[{normalize_backend(backend).value}]")
@@ -2127,12 +3220,21 @@ def ModelLoader(cls):
         # Install the peer-to-peer policy before any multi-device load so the
         # pre-enablement below and the inference-time copies use it.
         configure_p2p(p2p)
+        # Install the kernel policy before any quantized module is built.
+        kernel_policy = configure_kernel(kernel)
 
-        # post-quant is safe with GIL=0 and torch.compile/graphs
-
-        import torch._dynamo
-        torch._dynamo.reset()
-        default_dtype_before = torch.get_default_dtype()
+        # A load must not reset dynamo's caches: ``torch._dynamo.reset()``
+        # discards every compiled frame in the process, including the graphs of
+        # other models that are already ``optimize()``d and still serving, and
+        # running it while another thread executes one of those frames crashed
+        # dynamo's frame evaluation (#5209). The load's bf16 default-dtype
+        # window is instead serialized with every compiled call through
+        # ``model_load_lock()`` (``gptqmodel/utils/torch.py``), so a concurrent
+        # trace can neither capture nor restore it. Compiled frames that belong
+        # to a discarded model are dropped with it: ``release_compile_trace_garbage``
+        # reclaims the trace cycles that keep a dropped model alive (#5020), so a
+        # load does not need a process-wide reset for them.
+        default_dtype_before = _default_dtype_outside_construction()
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,
@@ -2143,14 +3245,25 @@ def ModelLoader(cls):
             api_name=f"{cls.__name__}.from_quantized",
             explicit_dtype=dtype,
         )
+        requested_dtype = dtype if isinstance(dtype, torch.dtype) else None
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(kwargs)
-        kwargs_without_internal = dict(kwargs)
+        kwargs_without_internal = _TrackedKwargs(kwargs)
+        kwargs_without_internal.consumed.update(kwargs.consumed)
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
         max_memory = kwargs_without_internal.pop("max_memory", None)
         tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
-        requested_device_map, explicit_device_map = _normalize_explicit_placement(
-            device, device_map, max_memory
-        )
+        # Resolve the backend first: whether an indexed `device` is checkpoint
+        # placement depends on the runtime that will own the chip (#5853).
+        backend = normalize_backend(backend)
+        native_ttnn_ordinal = None
+        if _native_ttnn_backend(backend):
+            requested_device_map, explicit_device_map, native_ttnn_ordinal = (
+                _resolve_native_ttnn_placement(device, device_map, max_memory)
+            )
+        else:
+            requested_device_map, explicit_device_map = _normalize_explicit_placement(
+                device, device_map, max_memory
+            )
         # Kept for the block-float route, which builds on CPU and must not
         # silently ignore a placement request the caller made.
         requested_device = device
@@ -2166,7 +3279,10 @@ def ModelLoader(cls):
 
         # A CPU-resident layer runs `post_init` on CPU. AUTO must therefore not
         # select a CUDA-only kernel for a map that offloads some layers.
-        cpu_offload = _device_map_uses_cpu(explicit_device_map)
+        # The native TTNN backend stages every layer on the host by design, so
+        # its `{"": "cpu"}` staging map is not the Accelerate offload path; the
+        # kernel's `post_init` runs there and uploads on purpose (#5853).
+        cpu_offload = False if _native_ttnn_backend(backend) else _device_map_uses_cpu(explicit_device_map)
         if max_memory is not None and any(
             str(key).strip().lower() == "cpu" for key in max_memory
         ):
@@ -2182,49 +3298,27 @@ def ModelLoader(cls):
             # The explicit device map determines placement and kernel targets.
             device = auto_select_device(normalize_device_device_map(None, requested_device_map), backend)
 
+        config_load_kwargs = {**get_config_selection_kwargs(kwargs_without_internal), **hf_gguf_load_kwargs}
         model_local_path = get_model_local_path(model_id_or_path, **kwargs_without_internal)
-        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
-        native_support = has_native_transformers_causallm_support(model_local_path)
+        trust_remote_code = resolve_trust_remote_code(
+            model_local_path, trust_remote_code=trust_remote_code, **config_load_kwargs
+        )
 
         """load quantized model from local disk"""
-        if cls.require_trust_remote_code and not trust_remote_code and not native_support:
+        if (
+            cls.require_trust_remote_code
+            and not trust_remote_code
+            and not has_native_transformers_model_support(model_local_path, cls.loader, **config_load_kwargs)
+        ):
             raise ValueError(
                 f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
         check_versions(cls, cls.require_pkgs)
 
-        # A native block-float checkpoint carries none of the GPTQ keys this
-        # loader binds (qweight/qzeros/scales/g_idx): it stores packed mantissa
-        # codes plus one exponent per block of 16 values. Route it before any
-        # GPTQ parsing, otherwise every decoder layer reads as missing. The
-        # guards above still apply -- this path builds the model through
-        # transformers like any other, so the same version and
-        # trust_remote_code rules hold.
-        from .tt_blockfloat_loader import is_tt_blockfloat_checkpoint
-
-        if is_tt_blockfloat_checkpoint(model_local_path):
-            if requested_device_map is not None or (
-                requested_device is not None
-                and str(requested_device).split(":")[0].lower() != "cpu"
-            ):
-                # The block-float kernel is the portable correctness reference,
-                # not the device path. Accepting a placement request here and
-                # ignoring it would report a device the model is not on.
-                raise NotImplementedError(
-                    "tt-blockfloat checkpoints load on CPU; the block-float "
-                    "kernel is a correctness reference and device placement is "
-                    "the caller's dispatch step. Omit device/device_map, or pass "
-                    "device='cpu'."
-                )
-            return _load_tt_blockfloat_model(
-                cls,
-                model_local_path=model_local_path,
-                dtype=dtype,
-                trust_remote_code=trust_remote_code,
-            )
-
-        # Parameters related to loading from Hugging Face Hub
+        # Parameters related to loading from Hugging Face Hub. They are
+        # consumed before the block-float redirect so both routes validate the
+        # caller's keywords the same way.
         cache_dir = kwargs_without_internal.pop("cache_dir", None)
         force_download = kwargs_without_internal.pop("force_download", False)
         resume_download = kwargs_without_internal.pop("resume_download", False)
@@ -2240,6 +3334,69 @@ def ModelLoader(cls):
         checkpoint_dir = resolve_checkpoint_subfolder(model_local_path, subfolder)
         commit_hash = kwargs_without_internal.pop("_commit_hash", None)
         attn_implementation = kwargs_without_internal.pop("attn_implementation", None)
+        # ``QuantizeConfig.from_pretrained`` consumes ``format`` below. Pop it
+        # here so the strict keyword check sees it as accepted.
+        format_override = kwargs_without_internal.pop("format", None)
+        # Checkpoint-staging options are read later by
+        # ``load_checkpoint_in_model_then_tie_weights``. Pop them here so they
+        # are recorded as accepted while keeping their presence/absence.
+        offload_kwargs = {
+            name: kwargs_without_internal.pop(name)
+            for name in ("offload_folder", "offload_state_dict", "offload_buffers")
+            if name in kwargs_without_internal
+        }
+
+        # A quantized load has no ``from_pretrained`` passthrough, so a
+        # leftover keyword used to reach ``QuantizeConfig.from_pretrained`` and
+        # vanish. A typo of a real option therefore "succeeded" and changed
+        # nothing (#4945), unlike the unquantized path where the HF
+        # constructor raises. VLLM/SGLang are explicit passthrough engines and
+        # consume their own runtime options.
+        if backend not in (BACKEND.VLLM, BACKEND.SGLANG):
+            accepted = _accepted_quantized_load_kwargs(cls, kwargs_without_internal.consumed)
+            # The Hub staging options (`token`, `max_workers`, `local_dir`,
+            # `endpoint`, ...) are forwarded un-popped to `snapshot_download`
+            # above, so they are consumed by the load even though they never
+            # reach `pop`. Comparing against the accepted set keeps the check
+            # and its message consistent: rejecting a keyword the message lists
+            # as accepted made `GPTQModel.load(repo, token=...)` always fail
+            # (#5007).
+            leftover = set(kwargs_without_internal) - accepted
+            if leftover:
+                _raise_unexpected_quantized_load_kwargs(cls, leftover, accepted)
+
+        # A native block-float checkpoint carries none of the GPTQ keys this
+        # loader binds (qweight/qzeros/scales/g_idx): it stores packed mantissa
+        # codes plus one exponent per block of 16 values. Route it before any
+        # GPTQ parsing, otherwise every decoder layer reads as missing. The
+        # probe and the build both use the resolved checkpoint directory, so
+        # `subfolder=` selects the same artifact as passing that directory
+        # directly instead of falling through to the GPTQ config parser. The
+        # guards above still apply -- this path builds the model through
+        # transformers like any other, so the same version and
+        # trust_remote_code rules hold.
+        from .tt_blockfloat_loader import is_tt_blockfloat_checkpoint
+
+        if is_tt_blockfloat_checkpoint(checkpoint_dir):
+            if requested_device_map is not None or (
+                requested_device is not None
+                and str(requested_device).split(":")[0].lower() != "cpu"
+            ):
+                # The block-float kernel is the portable correctness reference,
+                # not the device path. Accepting a placement request here and
+                # ignoring it would report a device the model is not on.
+                raise NotImplementedError(
+                    "tt-blockfloat checkpoints load on CPU; the block-float "
+                    "kernel is a correctness reference and device placement is "
+                    "the caller's dispatch step. Omit device/device_map, or pass "
+                    "device='cpu'."
+                )
+            return _load_tt_blockfloat_model(
+                cls,
+                model_local_path=checkpoint_dir,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+            )
 
         cached_file_kwargs = {
             "cache_dir": cache_dir,
@@ -2254,20 +3411,14 @@ def ModelLoader(cls):
             "_commit_hash": commit_hash,
             "attn_implementation": attn_implementation,
         }
+        processor_load_kwargs = get_config_selection_kwargs({**kwargs_without_internal, **cached_file_kwargs})
 
         # == step1: prepare configs and file names == #
-        config: PretrainedConfig = AutoConfig.from_pretrained(
+        config: PretrainedConfig = load_model_config(
             model_local_path,
             trust_remote_code=trust_remote_code,
             **cached_file_kwargs,
             **hf_gguf_load_kwargs,
-        )
-
-        defuser.replace_fused_blocks(config.model_type)
-
-        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
-        prepare_remote_model_init_compat(
-            model_local_path, config, trust_remote_code=trust_remote_code
         )
 
         if cls.require_dtype:
@@ -2294,6 +3445,7 @@ def ModelLoader(cls):
         gguf_checkpoint_path, native_gguf_qspec = _resolve_native_quantized_gguf_checkpoint(
             model_local_path,
             hf_gguf_load_kwargs,
+            policy=kernel,
         )
         if native_gguf_qspec is not None:
             qcfg = QuantizeConfig(
@@ -2302,7 +3454,17 @@ def ModelLoader(cls):
                 lm_head=native_gguf_qspec.lm_head_quantized,
             )
         else:
-            qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
+            qcfg = QuantizeConfig.from_pretrained(
+                model_local_path,
+                format=format_override,
+                **cached_file_kwargs,
+                **kwargs_without_internal,
+            )
+
+        # Runtime policy belongs to this checkpoint's modules, not whichever
+        # model most recently installed a process policy. It is a resolved
+        # policy, not a caller-supplied `kernel=`, so keep it out of qcfg.kernel.
+        qcfg._resolved_kernel = kernel
 
         if adapter is None:
             if allow_remote_adapter or adapter_revision is not None or adapter_sha256 is not None:
@@ -2369,47 +3531,52 @@ def ModelLoader(cls):
                 backend = _resolve_exl3_auto_backend(device)
             if backend == BACKEND.EXL3_EXLLAMA_V3:
                 if not torch.cuda.is_available():
-                    raise ValueError("EXL3_EXLLAMA_V3 loading requires NVIDIA CUDA; use EXL3_TORCH instead.")
-                ExllamaV3Linear.validate_device(selector_device_family(device))
+                    raise ValueError("EXL3_EXLLAMA_V3 loading requires CUDA or ROCm; use EXL3_TORCH instead.")
+                ExllamaV3Linear.validate_device(device)
         elif format_code == FORMAT.BITSANDBYTES:
             if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES, BACKEND.MLX):
                 raise TypeError("FORMAT.BITSANDBYTES requires AUTO, BITSANDBYTES, or MLX backend.")
             if backend == BACKEND.AUTO:
                 backend = BACKEND.BITSANDBYTES
 
-        if export_quant_method == METHOD.AWQ and format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
-            # GEMV_FAST and LLM_AWQ only supports torch.float16
-            log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
-            dtype = torch.float16
+        _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend, device)
 
-        _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend)
-
-        dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
+        dtype = _coerce_quantized_awq_dtype(
+            backend=backend,
+            qcfg=qcfg,
+            dtype=dtype,
+            explicit_dtype=requested_dtype is not None,
+        )
 
         qcfg.calculate_bits_per_weight()
 
-        tokenizer = load_hf_tokenizer(
-            model_local_path,
-            model_config=config,
-            trust_remote_code=tokenizer_trust_remote_code,
-            # The tokenizer must come from the same directory and revision as
-            # the config and weights. A nested checkpoint keeps all of them in
-            # the requested subfolder, so resolving only the weights there would
-            # load the root tokenizer (or fail on a repo that has none).
-            **_get_tokenizer_load_kwargs(
-                {
-                    "cache_dir": cache_dir,
-                    "force_download": force_download,
-                    "resume_download": resume_download,
-                    "proxies": proxies,
-                    "local_files_only": local_files_only,
-                    "use_auth_token": use_auth_token,
-                    "revision": revision,
-                    "subfolder": subfolder,
-                }
-            ),
-            **hf_gguf_load_kwargs,
-        )
+        if _requires_tokenizer(cls):
+            tokenizer = load_hf_tokenizer(
+                model_local_path,
+                model_config=config,
+                trust_remote_code=tokenizer_trust_remote_code,
+                # The local port reuses the normalized Tokenicer wrapper.
+                return_tokenicer=True,
+                # The tokenizer must come from the same directory and revision as
+                # the config and weights. A nested checkpoint keeps all of them in
+                # the requested subfolder, so resolving only the weights there would
+                # load the root tokenizer (or fail on a repo that has none).
+                **_get_tokenizer_load_kwargs(
+                    {
+                        "cache_dir": cache_dir,
+                        "force_download": force_download,
+                        "resume_download": resume_download,
+                        "proxies": proxies,
+                        "local_files_only": local_files_only,
+                        "use_auth_token": use_auth_token,
+                        "revision": revision,
+                        "subfolder": subfolder,
+                    }
+                ),
+                **hf_gguf_load_kwargs,
+            )
+        else:
+            tokenizer = None
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             runtime_generate = None
@@ -2424,7 +3591,7 @@ def ModelLoader(cls):
                 )
 
                 model = load_model_by_vllm(
-                    model=model_local_path,
+                    model=checkpoint_dir,
                     trust_remote_code=trust_remote_code,
                     **kwargs_without_internal,
                 )
@@ -2445,7 +3612,7 @@ def ModelLoader(cls):
                     resolved_dtype=dtype,
                 )
                 model, hf_config = load_model_by_sglang(
-                    model=model_local_path,
+                    model=checkpoint_dir,
                     trust_remote_code=trust_remote_code,
                     config=config,
                     **sglang_kwargs,
@@ -2462,6 +3629,8 @@ def ModelLoader(cls):
                 load_quantized_model=True,
                 trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
+                processor_load_kwargs=processor_load_kwargs,
+                config_load_kwargs=config_load_kwargs,
             )
             instance._runtime_generate = runtime_generate
             _set_paged_attention_safe_cuda_graphs(instance.model)
@@ -2517,10 +3686,7 @@ def ModelLoader(cls):
             if format_code == FORMAT.EXL3:
                 possible_model_basenames = ["model"]
             else:
-                possible_model_basenames = [
-                    f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g",
-                    "model",
-                ]
+                possible_model_basenames = _quantized_checkpoint_basenames(qcfg)
 
             extensions = [".safetensors"]
 
@@ -2547,22 +3713,12 @@ def ModelLoader(cls):
         with suspend_hf_weight_init():
             _call_before_model_load(
                 cls,
-                model_local_path=model_local_path,
+                trust_remote_code=trust_remote_code,
+                model_local_path=checkpoint_dir,
                 load_quantized_model=True,
             )
 
-            if config.architectures:
-                model_class = getattr(transformers, config.architectures[0], None)
-                if model_class is not None:
-                    # backward-compatible fallback for "_supports_flash_attn" field
-                    if hasattr(model_class, "_supports_flash_attn_2"):
-                        supports_flash_attn = getattr(model_class, "_supports_flash_attn_2")
-                    elif hasattr(model_class, "_supports_flash_attn"):
-                        supports_flash_attn = getattr(model_class, "_supports_flash_attn")
-                else:
-                    supports_flash_attn = None
-            else:
-                supports_flash_attn = None
+            supports_flash_attn = _model_class_supports_flash_attn(_definition_model_class(cls, config))
 
             args = {}
             if supports_flash_attn and selector_device_family(device) in [DEVICE.CUDA, DEVICE.ROCM]:
@@ -2574,6 +3730,11 @@ def ModelLoader(cls):
             set_dtype_compat(args, dtype)
 
             try:
+                # ``from_config`` opens transformers' ``local_torch_dtype``
+                # window, and that window holds the model-global-state writer
+                # (#5304). Nothing else in this call is exclusive, so weight
+                # I/O, packing and kernel post-init stay concurrent with
+                # optimized forwards (#5209, #5268).
                 model = cls.loader.from_config(
                     config, trust_remote_code=trust_remote_code, **args
                 )
@@ -2616,7 +3777,15 @@ def ModelLoader(cls):
                     )
                 else:
                     raise
+            # This path replaces the fused experts with quantized kernels and
+            # fills them from the checkpoint, so keep Defuser's per-expert
+            # copies off the host (issue #4400).
+            _meta_fused_expert_params(model)
             _convert_model_with_defuser(cls, model, cleanup_original=True)
+            # Defuser built the split experts on meta; give them real (but
+            # uninitialized) host storage so the quantized kernels start on a
+            # materialized device.
+            _materialize_meta_expert_linears(model)
             model.checkpoint_file_name = model_save_name
             if native_gguf_qspec is not None:
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)
@@ -2652,12 +3821,22 @@ def ModelLoader(cls):
 
                 modules = find_modules(model)
                 ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
-                input_embeddings = model.get_input_embeddings()
-                output_embeddings = model.get_output_embeddings()
+                # Some supported models (Decision Transformer) are not causal
+                # LMs and do not implement the embedding accessors; Transformers
+                # raises NotImplementedError for them. They have no tied
+                # input/output embedding to preserve, so treat them as absent.
+                try:
+                    input_embeddings = model.get_input_embeddings()
+                except NotImplementedError:
+                    input_embeddings = None
+                try:
+                    output_embeddings = model.get_output_embeddings()
+                except NotImplementedError:
+                    output_embeddings = None
                 input_embed_name = get_module_name(model, input_embeddings) if input_embeddings is not None else None
                 output_embed_name = get_module_name(model, output_embeddings) if output_embeddings is not None else None
                 input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
-                    model_dir=model_local_path,
+                    model_dir=checkpoint_dir,
                     input_embed_name=input_embed_name,
                     output_embed_name=output_embed_name,
                 )
@@ -2747,6 +3926,7 @@ def ModelLoader(cls):
                     module_names=list(qcfg.tensor_storage.keys()),
                     tensor_storage=qcfg.tensor_storage,
                     module_cls=exl3_module_cls,
+                    kernel=kernel_policy,
                 )
                 preload_qlinear_kernel = exl3_module_cls
             else:
@@ -2762,11 +3942,21 @@ def ModelLoader(cls):
                     cpu_offload=cpu_offload,
                 )
 
+        # The shell replaced only the modules named by `module_tree`. Let the
+        # definition reattach any runtime modules it shares with those leaves
+        # before the checkpoint is loaded: the unmaterialized-parameter guard
+        # inside `load_checkpoint_in_model_then_tie_weights` would otherwise
+        # reject the sibling branch before `after_model_load` can fix it
+        # (#5514).
+        after_make_quant = getattr(cls, "after_make_quant", None)
+        if callable(after_make_quant):
+            model = after_make_quant(model)
+
         validate_checkpoint_qweights(
             model,
             model_save_name,
             format_code,
-            key_converter=_checkpoint_key_converter(cls, model, to_runtime=False),
+            key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
         )
 
         if isinstance(requested_device_map, str) and requested_device_map not in [
@@ -2824,6 +4014,7 @@ def ModelLoader(cls):
 
             device_ids = list(range(num_gpus))
             device_map: Dict[str, str] = {}
+            layers = list(dict.fromkeys(layers))
             mod2name = {m: n for n, m in model.named_modules()}
 
             def assign(mod, device_id):
@@ -2831,7 +4022,7 @@ def ModelLoader(cls):
                     return
                 name = mod2name.get(mod)
                 if name is not None:
-                    device_map[name] = device_strs[device_id]
+                    device_map.setdefault(name, device_strs[device_id])
 
             def default_fallback_device_id() -> int:
                 if device_budgets is None:
@@ -2919,7 +4110,10 @@ def ModelLoader(cls):
                         break
 
             if head is not None:
-                tie_cfg = bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False))
+                resolved_tie = lm_head_is_tied(model)
+                if resolved_tie is None:
+                    resolved_tie = word_embeddings_tied(getattr(model, "config", None))
+                tie_cfg = bool(resolved_tie)
                 if in_emb is not None and tie_cfg:
                     # A tied head is the same tensor as the input embedding, so
                     # it follows that placement instead of consuming budget.
@@ -2992,6 +4186,7 @@ def ModelLoader(cls):
                         device_map.setdefault(owner, device_strs[fallback_device])
                     else:
                         log.info(f"Loader: unable to map param '{param_name}' to a module; skipping fallback assignment.")
+            device_map = co_locate_shared_module_aliases(model, device_map)
             # optional logging for debug
             log.info(f"Loader: Built map across {num_gpus} GPU(s), "
                   f"{len(device_map)} entries. First 8: {list(device_map.items())[:8]}")
@@ -3045,17 +4240,34 @@ def ModelLoader(cls):
             enable_for_devices(map_devices)
 
         load_checkpoint_in_model = native_gguf_qspec is None
+        load_extra_kwargs = {}
+        if "offload_folder" in offload_kwargs:
+            load_extra_kwargs["offload_folder"] = offload_kwargs["offload_folder"]
+        elif (
+            getattr(qcfg, "offload_to_disk_path", None) is not None
+            and isinstance(device_map, dict)
+            and "disk" in device_map.values()
+        ):
+            load_extra_kwargs["offload_folder"] = qcfg.offload_to_disk_path
+
+        if "offload_state_dict" in offload_kwargs:
+            load_extra_kwargs["offload_state_dict"] = offload_kwargs["offload_state_dict"]
+        if "offload_buffers" in offload_kwargs:
+            load_extra_kwargs["offload_buffers"] = offload_kwargs["offload_buffers"]
+
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PAROQUANT]:
+        keep_in_fp32_strict_modules = _model_keep_in_fp32_strict_names(model)
+
+        if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PARO]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
+                keep_in_fp32_strict_modules=keep_in_fp32_strict_modules,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
-                offload_state_dict=True,
-                offload_buffers=True,
                 key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
+                **load_extra_kwargs,
             )
 
             load_checkpoint_in_model = False
@@ -3156,21 +4368,22 @@ def ModelLoader(cls):
                 model,
                 dtype=dtype,
                 keep_in_fp32_modules=keep_in_fp32_modules or None,
+                keep_in_fp32_strict_modules=keep_in_fp32_strict_modules,
                 fp32_bf16_buffer_names=fp32_bf16_buffer_names,
                 packed_fp8_buffer_dtypes=packed_fp8_buffer_dtypes,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
-                # offload_state_dict=True,
-                # offload_buffers=True,
                 key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
+                **load_extra_kwargs,
             )
 
-            if format_code == FORMAT.GPTQ_V2:
-                # Native v2 checkpoints store logical zero points; the v1->v2
-                # conversion above only runs for v1 checkpoints. Mark the
-                # loaded modules so decoders and repack bookkeeping read the
-                # words as v2 instead of misreading every zero point one high.
+            if checkpoint_qzeros_layout(format_code) == 2:
+                # Native v2 and planar gptq_p checkpoints store logical zero
+                # points; the v1->v2 conversion above only runs for v1
+                # checkpoints. Mark the loaded modules so decoders and repack
+                # bookkeeping read the words as v2 instead of misreading every
+                # zero point one high.
                 for m in model.modules():
                     if isinstance(m, GPTQQuantLinear):
                         m.qzero_format(format=2)
@@ -3207,13 +4420,18 @@ def ModelLoader(cls):
 
         # == step4: set seqlen == #
         model_config = model.config.to_dict()
-        seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
+        seq_len_keys = ["max_position_embeddings", "max_seq_len", "seq_length", "n_positions", "multimodal_max_length"]
         config_seq_len = find_config_seq_len(model_config, seq_len_keys)
         if config_seq_len is not None:
             model.seqlen = config_seq_len
         else:
             log.warn("can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
+
+        if native_ttnn_ordinal is not None:
+            # `post_init` opens the mesh, so the ordinal must be on every kernel
+            # before that call rather than after the model is built.
+            _apply_native_ttnn_ordinal(model, native_ttnn_ordinal)
 
         if format_code != FORMAT.EXL3:
             # Any post-initialization that require device information, for example buffers initialization on device.
@@ -3227,7 +4445,7 @@ def ModelLoader(cls):
                 from mlx_lm import load
                 from mlx_lm.utils import save_config, save_model
 
-                from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
+                from ..utils.mlx import _convert_gptq_to_mlx_weights, mlx_generate
             except ModuleNotFoundError as exception:
                 raise type(exception)(
                     "GPT-QModel load mlx model required dependencies are not installed.",
@@ -3235,7 +4453,7 @@ def ModelLoader(cls):
                 )
 
             with tempfile.TemporaryDirectory() as temp_dir:
-                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_local_path, model, qcfg.to_dict(), cls.lm_head)
+                mlx_weights, mlx_config = _convert_gptq_to_mlx_weights(model_local_path, model, qcfg.to_dict(), cls.lm_head)
                 if (mlx_config.pop("_gptqmodel_group16_runtime", False)
                         or mlx_config.pop("_gptqmodel_custom_mlx_runtime", False)):
                     model = mlx_weights
@@ -3265,6 +4483,8 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             model_local_path=model_local_path,
             effective_module_tree=effective_module_tree,
+            processor_load_kwargs=processor_load_kwargs,
+            config_load_kwargs=config_load_kwargs,
         )
         if backend == BACKEND.MLX:
             instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)

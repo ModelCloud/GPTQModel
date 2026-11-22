@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
@@ -961,13 +962,13 @@ def _run_single_subset_pass(
             )
 
     handle = []
-    subset_size = len(subset_names)
 
     if execute_forward:
         looper._prepare_layer_direct_state_for_forward(
             module,
             cur_layer_device,
             projection_modules=full,
+            module_path=layer_descriptor,
         )
         for named_module in subset.values():
             if isinstance(named_module, NamedModule):
@@ -1016,6 +1017,32 @@ def _run_single_subset_pass(
     if execute_forward and moe_block is not None and moe_block_name is not None:
         processor.register_moe_root_capture_hook(moe_block, moe_block_name, handle)
 
+    # AWQ's routed-expert gate/up scaling group reads the shared pre-router
+    # input of the declared MoE root. Resolve that root from the module plan so
+    # a definition without routing-lifecycle hooks still captures it: the root
+    # input is a plain pre-forward hook and does not need routing control.
+    # Without this, the root task stays empty and `awq_get_modules_for_scaling`
+    # silently drops the whole group (#4697).
+    if execute_forward and is_awq_processor:
+        registered_roots = {id(moe_block)} if moe_block is not None else set()
+        module_plan = _model_module_plan(looper.gptq_model)
+        if module_plan is not None and any(module_plan.is_expert(name) for name in full):
+            for spec in module_plan.moe_roots():
+                template = spec.template
+                # Only a layer-level root is addressable from this hook. A
+                # nested root keeps its existing fallback feature because the
+                # group builder reads a layer-level root feature.
+                if "." in template or "#" in template or "{" in template:
+                    continue
+                try:
+                    root = module.get_submodule(template)
+                except AttributeError:
+                    continue
+                if id(root) in registered_roots:
+                    continue
+                registered_roots.add(id(root))
+                processor.register_moe_root_capture_hook(root, template, handle)
+
     shared_input_leaders: Dict[str, str] = {}
     if execute_forward:
         # Explicit `:in=<tag>` groups collect the Hessian once (leader) and copy it
@@ -1034,13 +1061,48 @@ def _run_single_subset_pass(
                 shared_input_leaders,
             )
 
+    # A subset's declared order need not match the order the model calls the
+    # modules: Falcon-H1's MLP runs `up_proj` before `gate_proj`, and
+    # bailing_hybrid's hybrid attention runs `b_proj` before `g_proj`. Stopping
+    # on the declared-last member therefore starved its siblings of every
+    # calibration sample (#4679). Stop only once every hooked member of the
+    # subset has fired at least once.
+    pending_members = None
+    if execute_forward and (
+        forward.replay_after_process or forward.subset_early_stop
+    ):
+        pending_members = _SubsetEarlyStopState(subset_names)
+        # The pending set and the stop flag describe one forward pass, not the
+        # whole subset stage. The member that completes the subset keeps
+        # ``forward_hook_last`` set until the stage ends, and the set stays
+        # empty, so from the second calibration batch on the first member to
+        # fire stopped the forward and every sibling lost that batch (#4738).
+        # Refill both at the start of each batch: the layer module is forwarded
+        # once per batch before any of its subset members.
+        #
+        # ``run_parallel`` forwards one replica per device on its own worker
+        # thread. The replicas are deep copies, but a deep copy keeps this
+        # closure and the modules it captures, so one shared pending set lets
+        # one replica drain another's and flip the stop flag on a module the
+        # other replica is still forwarding (#4904). Keep the pending set in
+        # thread-local storage, and clear the flag on the member of the
+        # replica that is about to forward, not on the subset's original.
+        def _reset_subset_early_stop(_module, _inputs):
+            pending_members.reset()
+            for member_name in subset_names:
+                member = _subset_member_for_replica(
+                    _module, subset[member_name], member_name
+                )
+                member.forward_hook_last = False
+
+        handle.append(module.register_forward_pre_hook(_reset_subset_early_stop))
+
     if execute_forward:
         for idx, name in enumerate(subset_names):
             m = subset[name]
             # Register the forward hook that captures activations for quantization.
-            # The final module optionally flips a flag so processors can trigger
-            # once-per-subset logic after the forward pass.
-            is_last = idx == subset_size - 1
+            # The member that completes the subset optionally flips a flag so
+            # processors can trigger once-per-subset logic after the forward pass.
             hook_source = getattr(m, "full_name", None)
             if hook_source is None:
                 hook_source = getattr(m, "name", name)
@@ -1052,6 +1114,10 @@ def _run_single_subset_pass(
 
             if hasattr(subset[name], "forward_hook"):
                 original_hook = processor.pre_process_fwd_hook(name)
+                if pending_members is not None:
+                    original_hook = _mark_subset_member(
+                        original_hook, name, pending_members
+                    )
                 # Use pre-hook for MoE modules to fire before StopForward
                 if is_moe_module:
                     subset[name].forward_hook = looper._masked_pre_hook_wrapper(
@@ -1061,14 +1127,12 @@ def _run_single_subset_pass(
                     subset[name].forward_hook = looper._masked_hook_wrapper(
                         processor, original_hook, hook_source
                     )
-                enable_stop = (
-                    forward.replay_after_process
-                    or forward.subset_early_stop
-                )
-                if is_last and enable_stop:
-                    subset[name].forward_hook_last = True
             else:
                 original_hook = processor.pre_process_fwd_hook(name)
+                if pending_members is not None:
+                    original_hook = _mark_subset_member(
+                        original_hook, name, pending_members
+                    )
                 # Use pre-hook registration for MoE modules
                 if is_moe_module:
                     handle.append(
@@ -1107,6 +1171,25 @@ def _run_single_subset_pass(
                 len(subset),
             )
 
+    def _release_capture_hooks() -> None:
+        """Detach this subset's hooks and clear its inline hook state.
+
+        Safe to call twice: a removed ``RemovableHandle`` is inert and the
+        inline attributes are already ``None``/``False``. Every exit path uses
+        it, including a cancellation or a forward failure, so the model never
+        keeps a capture closure that retains the processor state or raises
+        ``StopForward`` on the next ordinary forward (#4470).
+        """
+
+        for hook in handle:
+            hook.remove()
+        handle.clear()
+        if execute_forward:
+            for name in subset_names:
+                if hasattr(subset[name], "forward_hook"):
+                    subset[name].forward_hook = None
+                    subset[name].forward_hook_last = False
+
     capture_layer_forward_context = (
         execute_forward and forward.capture_layer_context
     )
@@ -1123,14 +1206,21 @@ def _run_single_subset_pass(
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
     if execute_forward:
         if subset_event_cb:
-            subset_event_cb(
-                stage="forward_start",
-                layer_idx=layer_index,
-                subset_index=subset_index,
-                subset_total=subset_total,
-                module_names=subset_names,
-                processor=getattr(processor, "name", type(processor).__name__),
-            )
+            try:
+                subset_event_cb(
+                    stage="forward_start",
+                    layer_idx=layer_index,
+                    subset_index=subset_index,
+                    subset_total=subset_total,
+                    module_names=subset_names,
+                    processor=getattr(processor, "name", type(processor).__name__),
+                )
+            except BaseException:
+                # The hooks are already installed, and this callback is how a
+                # caller cancels the run (StopMainLoop). Release them before the
+                # stop unwinds past the success-path cleanup (#4470).
+                _release_capture_hooks()
+                raise
 
         fwd_start = time.perf_counter()
         reuse_kv = bool(getattr(module, "reuse_kv", False))
@@ -1151,11 +1241,17 @@ def _run_single_subset_pass(
     previous_forward_devices: Dict[str, torch.device] = {}
     preserve_devices = plan.preserve_module_devices
     if execute_forward and forward_device_map:
-        previous_forward_devices = looper._apply_forward_device_overrides(
-            subset,
-            forward_device_map,
-            fallback_modules=full,
-        )
+        try:
+            previous_forward_devices = looper._apply_forward_device_overrides(
+                subset,
+                forward_device_map,
+                fallback_modules=full,
+            )
+        except BaseException:
+            # Device placement runs after the hooks are installed and before the
+            # guarded forward, so release them here as well (#4470).
+            _release_capture_hooks()
+            raise
 
     forward_outputs = None
     if execute_forward:
@@ -1164,12 +1260,14 @@ def _run_single_subset_pass(
             "subset_forward_capture_context",
             None,
         )
-        capture_context = (
-            capture_context_factory(layer_module=module, subset=subset)
-            if callable(capture_context_factory)
-            else nullcontext()
-        )
         try:
+            # Build the capture context inside the guarded region so a failing
+            # factory cannot strand the installed hooks (#4470).
+            capture_context = (
+                capture_context_factory(layer_module=module, subset=subset)
+                if callable(capture_context_factory)
+                else nullcontext()
+            )
             # MoE lifecycle hooks need to know which subset is currently active.
             # Replay-only passes can disable that when they only need outputs.
             if disable_moe_hooks:
@@ -1234,6 +1332,12 @@ def _run_single_subset_pass(
                     force_serial=plan.subset_forward_serial,
                     preserve_module_devices=preserve_devices,
                 )
+        except BaseException:
+            # A cancellation (StopMainLoop/StopForward) or a forward failure
+            # unwinds before the success-path cleanup below, so release the
+            # capture hooks here as well (#4470).
+            _release_capture_hooks()
+            raise
         finally:
             if forward_device_map and plan.restore_forward_device_overrides:
                 looper._restore_forward_device_overrides(
@@ -1343,56 +1447,58 @@ def _run_single_subset_pass(
                     ),
                 )
 
-    returned_outputs = None
-    if execute_forward and capture_layer_forward_context:
-        processor.receive_layer_forward_context(
-            layer_index=layer_index,
-            layer_inputs=layer_inputs,
-            layer_input_kwargs=layer_input_kwargs,
-            layer_outputs=forward_outputs,
-            subset_index=subset_index,
-            subset_total=subset_total,
-        )
+    # The capture hooks are still installed here. A cancellation in this
+    # window (the documented `forward_end` stop point, a failing
+    # `receive_layer_*`, Ctrl-C) used to unwind past the success-path
+    # release below, leaving the in-flight layer's hooks and
+    # `forward_hook_last` set so every later forward raised StopForward
+    # (#5009). Release them on that path too.
+    try:
+        returned_outputs = None
+        if execute_forward and capture_layer_forward_context:
+            processor.receive_layer_forward_context(
+                layer_index=layer_index,
+                layer_inputs=layer_inputs,
+                layer_input_kwargs=layer_input_kwargs,
+                layer_outputs=forward_outputs,
+                subset_index=subset_index,
+                subset_total=subset_total,
+            )
 
-    if execute_forward and plan.need_forward_outputs:
-        # For pre-process consumers, the next stage needs the forward outputs
-        # immediately rather than after the later layer replay step.
-        processor.receive_layer_inputs(forward_outputs)
-        if return_outputs:
-            returned_outputs = processor.inputs_cache.layer_inputs
-        del forward_outputs
+        if execute_forward and plan.need_forward_outputs:
+            # For pre-process consumers, the next stage needs the forward outputs
+            # immediately rather than after the later layer replay step.
+            processor.receive_layer_inputs(forward_outputs)
+            if return_outputs:
+                returned_outputs = processor.inputs_cache.layer_inputs
+            del forward_outputs
 
-    if execute_forward and subset_event_cb:
-        subset_event_cb(
-            stage="forward_end",
-            layer_idx=layer_index,
-            subset_index=subset_index,
-            subset_total=subset_total,
-            module_names=subset_names,
-            processor=getattr(processor, "name", type(processor).__name__),
-        )
+        if execute_forward and subset_event_cb:
+            subset_event_cb(
+                stage="forward_end",
+                layer_idx=layer_index,
+                subset_index=subset_index,
+                subset_total=subset_total,
+                module_names=subset_names,
+                processor=getattr(processor, "name", type(processor).__name__),
+            )
 
-    fwd_time = (time.perf_counter() - fwd_start) if fwd_start is not None else 0.0
-    processor.set_fwd_time(fwd_time)
-    if region_timer is not None:
-        region_timer.record(
-            "pre_quant_forward",
-            fwd_time,
-            source=forward_source,
-        )
+        fwd_time = (time.perf_counter() - fwd_start) if fwd_start is not None else 0.0
+        processor.set_fwd_time(fwd_time)
+        if region_timer is not None:
+            region_timer.record(
+                "pre_quant_forward",
+                fwd_time,
+                source=forward_source,
+            )
+    except BaseException:
+        _release_capture_hooks()
+        raise
 
-    for h in handle:
-        # Detach temporary hooks to avoid leaking state into future passes.
-        h.remove()
+    # Detach temporary hooks to avoid leaking state into future passes.
+    _release_capture_hooks()
 
     if execute_forward:
-        for name in subset_names:
-            # Reset inline hook attributes on NamedModule wrappers so future passes
-            # do not reuse state from this subset run.
-            if hasattr(subset[name], "forward_hook"):
-                subset[name].forward_hook = None
-                subset[name].forward_hook_last = False
-
         # Followers adopt the leader's finalized Hessian before coverage checks and
         # before any worker may quantize (and mutate/free) the leader's copy.
         dedup_telemetry = processor.end_shared_input_capture(subset_names)
@@ -1445,9 +1551,29 @@ def _run_single_subset_pass(
         if calibration_coverage_policy.prune_uncovered_modules:
             for name in moe_skip_modules:
                 skipped_module = subset.pop(name)
-                task_map = getattr(processor, "tasks", None)
-                if task_map is not None:
-                    task_map.pop(name, None)
+                # The processor owns every per-module record created in
+                # `preprocess` (GPTQ tasks, AWQ layer state); a record left
+                # behind keeps waiting for a module that will never be processed.
+                processor.prune_uncovered_module(skipped_module)
+
+                # AUTO_NF12 stores the calibration source in `nf12_*` buffers
+                # and only the quant-source step restores the dense module.
+                # A pruned module never reaches that step below, so restore it
+                # here; otherwise the packed source survives into `save()` and
+                # the writer's NF12 ownership check aborts the export. Modules
+                # without a deferred source are already dense and stay as-is.
+                if (
+                    skipped_module.state.get("auto_dtype_cast_source_spec") is not None
+                    or isinstance(
+                        skipped_module.state.get("quant_source_module"), torch.nn.Module
+                    )
+                ):
+                    looper._prepare_named_module_for_quantization(
+                        processor=processor,
+                        named_module=skipped_module,
+                        fallback_device=cur_layer_device,
+                    )
+                    skipped_module.state.pop("auto_dtype_cast_was_applied", False)
 
                 # No calibration data was routed to these MoE expert modules.
                 # We skip quantization them and record them in `qcfg.dynamic` as dynamically excluded modules.
@@ -1633,6 +1759,74 @@ def _run_single_subset_pass(
         used_data_parallel = True
 
     return processed_subset, returned_outputs, used_data_parallel
+
+
+class _SubsetEarlyStopState:
+    """Per-thread pending-member set for the subset early-stop handshake.
+
+    ``ForwardExecutor.run_parallel`` forwards the replicas of one layer
+    concurrently, each on a device-dedicated worker thread. A single set
+    shared by every replica lets one replica drain the other's pending members
+    and stop its forward early (#4904). ``threading.local`` gives every worker
+    its own set; the layer pre-hook rebuilds it once per batch on the replica
+    that is about to run.
+    """
+
+    def __init__(self, member_names):
+        self._members = tuple(member_names)
+        self._local = threading.local()
+
+    def _pending(self):
+        pending = getattr(self._local, "pending", None)
+        if pending is None:
+            pending = set(self._members)
+            self._local.pending = pending
+        return pending
+
+    def reset(self):
+        self._local.pending = set(self._members)
+
+    def discard(self, member_name):
+        pending = self._pending()
+        pending.discard(member_name)
+        return not pending
+
+
+def _subset_member_for_replica(layer_module, named_module, member_name):
+    """Resolve a subset member on the replica that is forwarding the layer.
+
+    ``run_parallel`` deep-copies the layer for each device. The subset dict
+    keeps the original members, so clearing their flags would leave a replica's
+    flag set from the previous batch (#4904). Member names are layer-relative,
+    so the same path on the executing replica names its copy. Fall back to the
+    original member for subsets whose keys are not relative paths.
+    """
+
+    try:
+        member = layer_module.get_submodule(member_name)
+    except (AttributeError, TypeError):
+        return named_module
+    return member if isinstance(member, torch.nn.Module) else named_module
+
+
+def _mark_subset_member(hook, member_name, pending):
+    """Mark one subset member as captured and stop once the subset is complete.
+
+    ``HookedLinear`` raises ``StopForward`` after its hook when
+    ``forward_hook_last`` is set, so flipping the flag from inside the hook of
+    the member that actually completes the subset keeps the stop correct
+    whatever order the model calls the modules in (#4679).
+    """
+
+    def marked(_module, inputs, output):
+        hook(_module, inputs, output)
+        if pending.discard(member_name):
+            # Flag the module that actually ran. A data-parallel replica is a
+            # deep copy, so flagging the subset's original module stops a
+            # different replica mid-forward (#4904).
+            _module.forward_hook_last = True
+
+    return marked
 
 
 def run_subset_stage(

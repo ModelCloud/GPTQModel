@@ -74,6 +74,48 @@ flowchart LR
     style E fill:#fff3cd,stroke:#997404
 ```
 
+## GLM-4V fused gate/up conversion
+
+Transformers 5.22 builds `Glm4vTextMLP` with one fused `gate_up_proj` linear
+whose output is chunked into gate and up, while `Glm4vGPTQ` declares
+`mlp.gate_proj`/`mlp.up_proj` (`gptqmodel/models/definitions/glm4v.py:16-25` on
+`461b42023`). `defuser.replace_fused_blocks()` can replace the class before
+construction, but the module-plan registry sweep and any direct
+`loader.from_config()` call never run that patch. `_convert_model_with_defuser`
+still calls `after_defuser_conversion` after the conversion attempt
+(`gptqmodel/models/loader.py:1011-1016`), so GLM-4V defuses there.
+
+```mermaid
+flowchart TD
+    A["Glm4vGPTQ.loader.from_config"] --> B{"Defuser class patch<br/>applied before construction?"}
+    B -- "yes" --> C["LinearGlm4vTextMLP<br/>gate_proj / up_proj / down_proj"]
+    B -- "no" --> D["Glm4vTextMLP<br/>gate_up_proj + down_proj"]
+    D --> E["_convert_model_with_defuser"]
+    E --> F["Glm4vGPTQ.after_defuser_conversion"]
+    F --> G["chunk gate_up_proj on dim 0"]
+    G --> H["bind _defused_glm4v_mlp_forward"]
+    H --> C
+    C --> I["ModulePlan resolves gate/up/down"]
+    D -. "before #4481: no hook,<br/>plan misses mlp.gate_proj" .-> X["strict ValueError"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X,D failure;
+```
+
+| Mechanism | Location | Effect |
+| --- | --- | --- |
+| No GLM-4V conversion hook | `glm4v.py:16-25` on `461b42023` | Fused `gate_up_proj` survives conversion |
+| Declared gate/up leaves | `glm4v.py:16-25` on `461b42023` | Strict plan cannot resolve the fused weight |
+| `after_defuser_conversion` call | `gptqmodel/models/loader.py:1011-1016` | Hook runs even when Defuser reports no change |
+| New split + forward rebind | `gptqmodel/models/definitions/glm4v.py:39-98` | gate/up/down owned by the plan; module stays runnable |
+
+| Situation | Before | After |
+| --- | --- | --- |
+| Defuser class patch applied | split at construction | unchanged; hook finds no `gate_up_proj` |
+| Direct `loader.from_config()` | fused weight, strict `mlp.gate_proj` miss | split weight, strict resolution succeeds |
+| Defuser reports no structural change | hook absent | hook splits anyway |
+| Forward after split | class forward still referenced `gate_up_proj` | instance forward uses gate/up/down |
+| Second conversion pass | not applicable | idempotent, no `gate_up_proj` to split |
+
 ## Failure and ambiguity contract
 
 | Situation | Before | After |
@@ -92,5 +134,12 @@ Voxtral, Nemotron-H MoE, Ling `bailing_moe`, Llama-4 Maverick, Gemma-4 MoE,
 Phi-3 longrope, Zamba/Zamba2, PhiMoE, Falcon-H1, HRM-Text, Jamba, GRIN-MoE and
 native Kimi-Linear. The registry test runs every `MODEL_MAP` entry whose config
 is locally constructible.
+
+`tests/module_tree/test_granitemoehybrid_model_tree.py` covers Granite MoE
+Hybrid, which the registry sweep previously exempted. Its `state_dict()` owners
+include a Mamba `conv1d`, a gated `norm`, parameters owned directly by the
+`mamba` container, and the MoE router; the test requires an explicit
+quantize/exclude policy for each. The exemption is gone, so the registry sweep
+builds the model on every run.
 
 Issue #4174 introduced this contract.

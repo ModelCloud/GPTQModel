@@ -2,28 +2,35 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-torch-oracle-numerics
-description: Validate quantization math, packed formats, and inference kernels against a Torch oracle; enforce quantized persistent weight storage for inference implementations, dispatch, and cache changes; adjudicate near-tie mismatches.
+description: Validate quantization math, packed formats, and inference kernels against a Torch oracle, including linear bias storage and epilogues. Enforce quantized persistent weight storage for inference, dispatch, and cache changes. Adjudicate near-tie mismatches.
 ---
 
 # Torch oracle for numerical changes
 
-Apply this skill when adding or changing quantization math, a weight packer,
-an inference kernel, inference dispatch, or runtime weight storage, regardless
-of backend or performance intent. Also apply it when auditing existing kernels. Build
-deterministic A/B unit tests that feed the same inputs and configuration to the
-changed path and a separate Torch reference. The oracle must perform its own
-arithmetic; do not call the changed kernel or reuse its intermediate outputs as
-expected results.
+> **Contracts first.** Read and honour [`contracts/`](../../../contracts/README.md)
+> before acting. In particular, read the
+> [kernel forward dtype contract](../../../contracts/kernel/forward-dtype.md):
+> one activation dtype per module, and output dtype equals input dtype. A
+> different dtype on a later call is a bug. Contracts outrank this skill.
 
-Selecting a packer, thread count, or code path from an environment variable is
-not acceptable. Route the choice through the config object or an explicit
-argument, and test that argument directly. See *No environment-variable
-behaviour switches* in `AGENTS.md`.
+## At a glance
+
+For changes or audits of quantizers, packers, inference kernels, dispatch,
+fusion and weight storage, compare the path with an independent Torch oracle:
+same inputs/configuration, separate arithmetic, never the kernel's outputs or
+intermediates as expected values. Test boundaries, storage after repeated
+forwards, and the [acceptance limits](#acceptance-limits) on target hardware.
+Select packers, threads and paths via config/API arguments, not environment
+variables. Start in `gptqmodel/{quantization,nn_modules/qlinear}/` and
+`gptqmodel_ext/`; fusion and MLX test inventories are listed below.
 
 ## Persistent inference weight storage
 
 The repository-wide storage rule in `AGENTS.md` is an acceptance gate for all
-quantization methods and all inference backends/devices. After an operation
+quantization methods and all inference backends and devices. Temporary
+dequantization for the current computation is allowed; moving an expanded
+cache to another device, marking it non-persistent, or hiding it behind an
+opt-in flag does not make it allowed. After an operation
 finishes consuming temporary weights, no inference-owned reference may retain
 a dense, dequantized, or expanded copy for reuse. Apply the gate to optimized
 and fallback paths, eager execution, JIT/compiled execution, warmup, and
@@ -54,7 +61,9 @@ For changed inference/storage paths:
   that demonstrates no dense/expanded weight is retained; do not only check a
   cache's name or serialization behavior.
 - Verify allowed packed caches invalidate on weight/scale mutation or
-  replacement, checkpoint loading, and device/dtype moves. Exercise the shared
+  replacement, checkpoint loading, device moves, and dtype casts made before
+  the first forward. A dtype cast after a forward must raise
+  ([forward dtype contract](../../../contracts/kernel/forward-dtype.md)). Exercise the shared
   explicit-clear contract for inference tensors without version counters.
 - Report retained weight/cache bytes and temporary dequantization storage
   alongside accuracy and speed. Distinguish unchanged checkpoint storage,
@@ -64,6 +73,42 @@ For changed inference/storage paths:
 - Remove violations encountered in the implementation under review. Record
   any remaining audited violations with file references; do not claim that
   documentation alone establishes compliance for every existing kernel.
+
+## Fusion backends
+
+Fusion backend changes must preserve AUTO's native kernel selection. Each newly
+admitted kernel needs an explicit native-layout contract and actual-device
+numerical tests; a portable substitution or mocked dispatch does not qualify
+it. Cover supported activation dtypes, unequal QKV widths, gate/up, native
+shape boundaries, workspace and descriptor lifecycle, mutation, direct source
+calls, exact packed-weight restoration, and persistent storage. Keep the
+kernel inventory and measured device report in
+`tests/module_tree/test_fusion_kernel_backends.py` current; unavailable
+architectures, dependencies, and formats need explicit coverage reasons.
+Model-level fusion eligibility is covered by `gptqmodel-model-plan-tests`.
+
+## Linear bias
+
+Trace the bias from pack or load to the final epilogue for each affected path,
+including dispatch and fallbacks. Select regressions from the
+[kernel bias examples](references/kernel-bias.md).
+
+- Preserve the registered bias's checkpoint values, dtype, logical shape, and
+  column order through loading, `post_init`, forward, and re-save. At pack
+  time follow the format's bias storage contract independently of scales and
+  activations. Prove exact representability before a required narrowing or
+  reject the pack before writing the checkpoint. Derive padded, permuted, or
+  converted launch operands without rewriting the registered tensor.
+- For FP16/BF16 outputs, keep the floating reduction, scaled product, and
+  bias add at FP32 or higher. Scale integer accumulators in that wide
+  epilogue. Add the bias once to the complete reduction before the single
+  cast to the public output dtype. Reuse `_numerics.py` helpers whose selected
+  device and dtype branch preserves this ordering, including under autocast.
+- Keep eligible native paths for bias-free and representable cases. A narrow
+  launch operand requires an exact value round trip and a native epilogue that
+  adds it before rounding. For wider bias, use a supported wide native epilogue
+  or add the bias to a wide native result. Exercise the supported fallback or
+  explicit rejection when the native path cannot honor the contract.
 
 ## Acceptance limits
 
@@ -104,10 +149,21 @@ do not turn a broad numerical tolerance into a blanket code exception.
 Report total mismatches, adjudicated tie mismatches, maximum output drift,
 maximum floating drift away from ties, and the reference precision in the PR.
 
+For integer reductions or offset products, derive the last safe size from
+the operand bounds and intermediate dtype. Test it and the first overflowing
+size against an independently widened oracle (widen **before** multiplying).
+For reductions use same-sign extremal terms so cancellation cannot hide wrap;
+check the scaled public output as well as the [raw sum](../../../tests/test_qqq_jit.py).
+For offsets, probe the index arithmetic without allocating an oversized tensor.
+
+## Running and reporting
+
 Use representative sizes and supported dtypes. Synchronize asynchronous
 backends before reading results or timing them. Run the tests on the target
 hardware. Report the tested shapes, dtypes, tolerances, observed errors, and
 benchmark method in the pull request.
+
+## MLX kernels
 
 For MLX weight quantizers, packers, and inference kernels, include every
 projection in `tests/qwen38_27b_shapes.py`: full-attention Q/K/V/O, fused
@@ -130,9 +186,17 @@ error can be distinguished from mandatory output rounding. Report both error
 measurements; keep `rtol=atol=2e-3` or tighter and do not hide raw-oracle drift
 caused by low-precision output rounding.
 
+## Execution paths and failures
+
 Cover each execution path used by the kernel, including native and dense
 fallback paths when both exist. If FP16 or BF16 is unsupported, test its
 explicit rejection and document the limitation instead of omitting that dtype.
+
+For a graph-capture claim, warm up the actual format on device, capture, then
+replay with changed input and compare with eager output. A compile trace alone
+is not capture evidence. Check the negative dispatch case too: a per-format
+probe may narrow support, never re-enable a subclass that opted out. See the
+[GGUF capture tests](../../../tests/kernels/test_gguf_kquant_graph_capture_5014.py).
 
 If an optimized path exceeds a limit, investigate the numerical cause before
 changing it. Fix genuine arithmetic or format errors and rerun the A/B tests.

@@ -18,14 +18,14 @@ import torch
 import triton
 import triton.language as tl
 
-from gptqmodel.utils.env import env_flag
+from gptqmodel.utils.kernel import get_kernel_config
+from gptqmodel.utils.triton_jit import jit as triton_jit
 
 from .scheduler import SUPPORTED_GROUP_SIZES, validate_fused_config
 
 
 AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, *SUPPORTED_GROUP_SIZES]
-# Shared runtime default: fp32 accumulation trades a little speed for lower numerical drift.
-FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
+
 
 def get_same_device_cm(t):
     if t.device.type == 'xpu':
@@ -34,7 +34,7 @@ def get_same_device_cm(t):
         return torch.cuda.device(t.device.index)
 
 
-@triton.jit
+@triton_jit
 def awq_dequantize_kernel(
     qweight_ptr,  # quantized matrix
     scales_ptr,  # scales, per group
@@ -131,7 +131,7 @@ def awq_dequantize_kernel(
     tl.store(result_ptr + result_offsets, iweights, result_masks)
 
 
-@triton.jit
+@triton_jit
 def awq_gemm_kernel(
     a_ptr,
     b_ptr,
@@ -337,11 +337,13 @@ def awq_gemm_triton(
     block_size_m: int = 32,
     block_size_n: int = 32,
     block_size_k: int = 32,
-    fp32_accum: bool = FP32_ACCUM,
+    fp32_accum: bool = None,
     output_dtype: torch.dtype | None = None,
     num_warps: int | None = None,
     num_stages: int | None = None,
 ) -> torch.Tensor:
+    if fp32_accum is None:
+        fp32_accum = get_kernel_config().fp32_accum
     if input.ndim != 2 or qweight.ndim != 2 or qzeros.ndim != 2 or scales.ndim != 2:
         raise ValueError("AWQ Triton tensors must be rank-2")
     M, K = input.shape

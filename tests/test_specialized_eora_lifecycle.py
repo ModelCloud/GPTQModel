@@ -5,13 +5,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+from gptqmodel.looper.paro_processor import ParoProcessor
 from gptqmodel.looper.qqq_processor import QQQProcessor
 
 
 @pytest.mark.parametrize("method", ["qqq", "paro"])
 def test_eora_handoff_preserves_independent_reconstruction(method):
-    cls = QQQProcessor if method == "qqq" else ParoQuantProcessor
+    cls = QQQProcessor if method == "qqq" else ParoProcessor
     processor = object.__new__(cls)
     processor.lock = threading.Lock()
     processor.calculate_w_wq_diff = True
@@ -94,7 +94,7 @@ def test_qqq_packs_uncorrected_weight_after_eora():
     model = torch.nn.Module()
     model.proj = torch.nn.Linear(4, 4, bias=False)
 
-    def stop_before_packing():
+    def stop_before_packing(*_args, **_kwargs):
         raise RuntimeError("packing boundary")
 
     processor._quant_linear_kernel = stop_before_packing

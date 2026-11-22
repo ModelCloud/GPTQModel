@@ -8,6 +8,7 @@ architecture exclusions are explicit skips, never portable-kernel substitutions.
 """
 
 import copy
+import gc
 import weakref
 
 import pytest
@@ -48,6 +49,12 @@ EXCLUDED = {
     "AwqSwordfishLinear": "Swordfish requires Blackwell",
     "W4ANVFP4Linear": "NVFP4 requires SM121+",
     "TorchInt8AwqLinear": "Retired INT4-to-INT8 expanded-weight backend",
+    # Portable CPU readers for layouts whose native kernel is CUDA-only
+    # (#4554, #4736). They dequantize to a dense tile per forward, so no
+    # fused executor group can consume their packed storage.
+    "AwqGEMVTorchLinear": "CPU-only portable GEMV reader (#4554); no fusion adapter",
+    "AwqGEMVFastTorchLinear": "portable GEMV_FAST reader (#4736, #5109); no fusion adapter",
+    "LLMAwqTorchLinear": "portable LLM_AWQ reader (#4736, #5109); no fusion adapter",
 }
 
 
@@ -163,6 +170,9 @@ def _projection(cls, linear, dtype, device, *, uniform_scales=False, return_chec
             input_perm=module.int8_input_perm,
             group_lengths=module._int8_group_lengths,
             in_features=module.in_features,
+            group_offsets=module.int8_group_offsets,
+            group_widths=module._int8_group_widths,
+            out_features=module.out_features,
         )
     return module, weight.to(device), linear.bias.detach().to(device).clone(), checkpoint
 
@@ -224,10 +234,12 @@ def test_exllamav2_rebinds_shuffled_words_without_changing_output(cls, dtype):
     check(x, weight, bias)
     module.to(device)  # QuantLinear._apply clears a descriptor even for the same device.
     check(x, weight, bias)
-    module.to(dtype=torch.bfloat16)
-    check(x, weight, module.bias)
-    module.to(dtype=torch.float16)
-    check(x, weight, module.bias)
+    # Weight dtypes are frozen after the first forward
+    # (contracts/kernel/forward-dtype.md).
+    other = torch.float16 if dtype is torch.bfloat16 else torch.bfloat16
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        module.to(dtype=other)
+    check(x, weight, bias)
     module.post_init(None)
     check(x, weight, bias)
     if torch.cuda.device_count() > 1:
@@ -331,7 +343,7 @@ def test_exllamav2_fused_checkpoint_reload(cls):
     baseline = parent(x)
     decision = FusionDecision("gate_up", "mlp", ("mlp.gate_proj", "mlp.up_proj"))
     group = _FusionGroup(decision, parent, modules, activation_dtype=dtype)
-    bf16_output = None
+    fused_output = None
     try:
         group.install()
         torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
@@ -346,14 +358,15 @@ def test_exllamav2_fused_checkpoint_reload(cls):
                 torch.testing.assert_close(parent(moved), baseline.to("cuda:1"), rtol=2e-3, atol=2e-3)
             parent.to(device)
             torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
-        parent.to(dtype=torch.bfloat16)
-        x_bf16 = x.to(torch.bfloat16)
-        parent(x_bf16)
-        bf16_output = parent(x_bf16)
+        # Weight dtypes are frozen after the first forward
+        # (contracts/kernel/forward-dtype.md).
+        with pytest.raises(RuntimeError, match="frozen after the first forward"):
+            modules[0].to(dtype=torch.bfloat16)
+        fused_output = parent(x)
         assert group.packed is not None
     finally:
         group.remove()
-    torch.testing.assert_close(parent(x_bf16), bf16_output, rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(parent(x), fused_output, rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -485,6 +498,13 @@ def _check_native_fusion(cls, family, dtype, profile, record_property, *, unifor
     try:
         group.install()
         assert type(group.packed) is cls
+        # Since #4871 the module is a graph input of the compiled
+        # ``dequantize_weight``, so Dynamo leaves transient trace garbage
+        # (``LazyCache -> LazyVariableTracker -> ConstDictVariable`` of the
+        # module's buffers) that keeps the pre-fusion allocation alive until
+        # the cycle collector runs.  The contract is that no *live* owner
+        # remains, not that CPython never saw a temporary reference.
+        gc.collect()
         assert all(ref() is None for ref in refs), "Original native weight allocations were retained"
         with torch.inference_mode():
             for x, baseline in zip(xs, before):
@@ -536,9 +556,17 @@ def _check_native_fusion(cls, family, dtype, profile, record_property, *, unifor
         for x, baseline in zip(xs, before):
             torch.testing.assert_close(invoke(x), baseline, rtol=2e-3, atol=2e-3)
     for module, snapshot in zip(modules, snapshots):
+        packed_metadata = getattr(module, "scales_and_zeros", None)
         for name, expected in snapshot.items():
             actual = getattr(module, name)
-            assert actual.is_contiguous()
+            if name == "qzeros" and isinstance(packed_metadata, torch.Tensor):
+                # The CPU int4pack runtime keeps ``qzeros`` as a view of the
+                # zero column of the packed affine metadata instead of a
+                # second copy. It is still independent of the released fused
+                # allocation.
+                assert actual.untyped_storage().data_ptr() == packed_metadata.untyped_storage().data_ptr()
+            else:
+                assert actual.is_contiguous()
             assert torch.equal(actual, expected), name
     record_property("family", family.value)
     record_property("kernel", cls.__name__)

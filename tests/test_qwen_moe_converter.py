@@ -4,15 +4,32 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch
-from defuser import convert_model
-from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeConfig, Qwen2MoeForCausalLM
-from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
-from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextConfig, Qwen3NextForCausalLM
-from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeConfig
-from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeForConditionalGeneration
+from torch import nn
 
+from gptqmodel.models.auto import MODEL_MAP
+from gptqmodel.models.definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
+from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.ports.native.qwen2_moe.configuration_qwen2_moe import Qwen2MoeConfig
+from gptqmodel.models.ports.native.qwen2_moe.modeling_qwen2_moe import Qwen2MoeForCausalLM
+from gptqmodel.models.ports.native.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
+from gptqmodel.models.ports.native.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
+from gptqmodel.models.ports.native.qwen3_next.configuration_qwen3_next import Qwen3NextConfig
+from gptqmodel.models.ports.native.qwen3_next.modeling_qwen3_next import Qwen3NextForCausalLM
+from gptqmodel.models.ports.native.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeConfig
+from gptqmodel.models.ports.native.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeForConditionalGeneration
 from gptqmodel.nn_modules.converter import MODULE_CONVERTER_MAP
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.utils.model import get_layers_with_prefixes
+
+
+def _convert(model_type, model):
+    """Defuse through the loader path and return the definition's decoder layers."""
+
+    definition = MODEL_MAP[model_type]
+    _convert_model_with_defuser(definition, model, cleanup_original=False)
+    layers, _ = get_layers_with_prefixes(model, definition.extract_layers_node())
+    assert layers, model_type
+    return layers
 
 
 def _make_tiny_moe_config(config_cls):
@@ -90,8 +107,7 @@ def test_qwen2_moe_uses_defuser_for_fused_experts():
     assert "qwen2_moe" not in MODULE_CONVERTER_MAP
 
     model = Qwen2MoeForCausalLM(_make_tiny_moe_config(Qwen2MoeConfig))
-    convert_model(model, cleanup_original=False)
-    layer = model.model.layers[0]
+    layer = _convert("qwen2_moe", model)[0]
 
     assert hasattr(layer.mlp, "shared_expert")
     assert hasattr(layer.mlp, "shared_expert_gate")
@@ -102,8 +118,7 @@ def test_qwen3_moe_uses_defuser_for_fused_experts():
     assert "qwen3_moe" not in MODULE_CONVERTER_MAP
 
     model = Qwen3MoeForCausalLM(_make_tiny_moe_config(Qwen3MoeConfig))
-    convert_model(model, cleanup_original=False)
-    layer = model.model.layers[0]
+    layer = _convert("qwen3_moe", model)[0]
 
     assert not hasattr(layer.mlp, "shared_expert")
     _assert_converted_experts(layer, hidden_size=model.config.hidden_size)
@@ -113,8 +128,7 @@ def test_qwen3_next_uses_defuser_for_fused_experts():
     assert "qwen3_next" not in MODULE_CONVERTER_MAP
 
     model = Qwen3NextForCausalLM(_make_tiny_moe_config(Qwen3NextConfig))
-    convert_model(model, cleanup_original=False)
-    layer = model.model.layers[0]
+    layer = _convert("qwen3_next", model)[0]
 
     assert hasattr(layer.mlp, "shared_expert")
     assert hasattr(layer.mlp, "shared_expert_gate")
@@ -125,14 +139,29 @@ def test_qwen3_omni_uses_defuser_for_fused_experts():
     assert "qwen3_omni_moe" not in MODULE_CONVERTER_MAP
 
     model = Qwen3OmniMoeForConditionalGeneration(_make_tiny_qwen3_omni_config())
-    convert_model(model, cleanup_original=False, max_layers=1)
-    layer = model.thinker.model.layers[0]
+    layer = _convert("qwen3_omni_moe", model)[0]
 
     _assert_converted_experts(
         layer,
         hidden_size=model.config.get_text_config().hidden_size,
         dtype=next(layer.mlp.experts[0].gate_proj.parameters()).dtype,
     )
+
+
+def test_qwen3_omni_pre_lm_head_norm_resolves_before_model_load():
+    # The class declaration must resolve in the installed layout before
+    # `after_model_load` rewrites it from the runtime decoder prefix.
+    model = Qwen3OmniMoeForConditionalGeneration(_make_tiny_qwen3_omni_config())
+    instance = object.__new__(Qwen3OmniMoeGPTQ)
+    nn.Module.__init__(instance)
+    instance.model = model
+
+    resolved = instance._resolved_pre_lm_head_norm_candidates()
+
+    assert resolved == [
+        (model.thinker.model.language_model.norm, "thinker.model.language_model.norm")
+    ]
+
 
 def test_awq_single_bit_validation_allows_skip_only_dynamic_rules():
     ok, err = AwqTorchLinear.validate(

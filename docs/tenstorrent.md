@@ -6,13 +6,18 @@ required for both dispatch and correctness: Tenstorrent's current PJRT lowering
 does not provide the exact packed-word integer operations used by the portable
 Torch GPTQ kernel.
 
-There are two Tenstorrent backends, both validated on four Blackhole p300c
+There are three Tenstorrent backends, all validated on four Blackhole p300c
 cards:
 
 | Backend | Kernel | Execution path | Reaches TTNN |
 | --- | --- | --- | --- |
 | `BACKEND.GPTQ_TT_XLA` | `XLALinear` | Python -> Torch/XLA -> StableHLO -> PJRT TT -> TT-MLIR | indirectly, bundled in the PJRT plugin |
 | `BACKEND.GPTQ_TTNN` | `TTNNLinear` | Python -> `ttnn.MeshDevice` | directly, no StableHLO or PJRT |
+| `BACKEND.GPTQ_TT_BF8` | `TTNNBlockFloat8Linear` | Python -> `ttnn.MeshDevice`, weights converted to `bf8_b` | directly, no StableHLO or PJRT |
+
+The two `ttnn.MeshDevice` backends are grouped by
+`gptqmodel/utils/backend.py:NATIVE_TTNN_BACKENDS`; device selection, host
+staging, device counting and the thermal gate all branch on that one set.
 
 `AUTO` still resolves to `XLALinear` so an existing model load never changes
 execution backend silently; the native kernel must be requested explicitly.
@@ -115,6 +120,12 @@ modeling file subclasses the checkpoint's own causal-LM class; a fixed Llama
 base class only works for Llama. The class comes from the live model, with the
 declared `model_type` as the fallback for wrappers and subclasses.
 
+The quantization config records the shipped modeling file. Transformers has no
+`tt-blockfloat` quantizer, so it only warns `Unknown quantization type`, and the
+`auto_map` modeling file reads the packed state. GPT-QModel registers no
+refusing quantizer: a `tt-blockfloat` config with no shipped loader loads with
+random weights in plain Transformers; use `GPTQModel.load`.
+
 ```mermaid
 flowchart TD
     A["save_blockfloat_model(model)"] --> B{"type(model).__module__<br/>starts with transformers.?"}
@@ -161,7 +172,97 @@ flowchart LR
 A checkpoint whose architecture cannot be resolved fails at save time instead
 of writing an entry point that only loads Llama.
 
+## Native block-float checkpoint payload (`save_blockfloat_checkpoint`)
+
+`save_blockfloat_checkpoint()` writes the decoder blocks of a model into a
+single payload (`blockfloat.safetensors`) plus a sidecar manifest
+(`blockfloat.json`). It is the checkpoint format read by
+`read_blockfloat_checkpoint()`, `expand_native_layer()`,
+`load_native_checkpoint_into_dense_model()` and `load_blockfloat_into_model()`.
+It is not the HF-style directory written by `save_blockfloat_model()`, which
+publishes every tensor as sharded safetensors and has no sidecar manifest.
+
+A decoder tensor is only storable as codes when it is exactly on the block-float
+grid; `decompose_blockfloat()` raises `ValueError` otherwise. The writer catches
+that error and stores `<layer>.weight` (and its bias) as dense floats at the
+module's own dtype, so an off-grid layer is preserved rather than narrowed.
+
+The manifest used to list only the encoded layers. A dense fallback therefore
+had no entry: `read_blockfloat_checkpoint()` never returned it and
+`load_native_checkpoint_into_dense_model()` treated the missing entry as "no
+work to do". The load succeeded and left exactly those fallback layers at their
+initial values -- the weights the save path had just written.
+
+The manifest now lists both kinds of decoder layer, and the reader dispatches on
+the recorded `kind`:
+
+```mermaid
+flowchart TD
+    A["save_blockfloat_checkpoint: block.named_modules()"] --> B{"module.weight is 2D?"}
+    B -- no --> Z["skipped: not a decoder linear"]
+    B -- yes --> C{"decompose_blockfloat succeeds?"}
+    C -- yes --> D["codes + exponents + code_shape"]
+    D --> E["manifest entry kind=blockfloat<br/>bits, shape, numel, has_bias"]
+    C -- no --> F["dense src-dtype weight<br/>kind=dense, source dtype"]
+    F --> G["manifest entry kind=dense<br/>shape, dtype, has_bias"]
+    E --> H{"module.bias is a tensor?"}
+    G --> I{"module.bias is a tensor?"}
+    H -- yes --> J["payload .bias at source dtype<br/>manifest bias_dtype"]
+    I -- yes --> J
+    H -- no --> K["no .bias tensor"]
+    I -- no --> K
+    J --> L["blockfloat.safetensors<br/>format/version/bits/block"]
+    K --> L
+    L --> M["blockfloat.json<br/>layers: kind per layer"]
+    M --> N["read_blockfloat_checkpoint<br/>dispatch on kind"]
+    N --> O{"kind"}
+    O -- blockfloat --> P["entry codes/exponents/bits"]
+    O -- dense --> Q["entry weight/dtype"]
+    P --> R["expand_native_layer: recompose"]
+    Q --> S["expand_native_layer: return weight"]
+    R --> T["load_native_checkpoint_into_dense_model:<br/>copy weight + bias"]
+    S --> T
+    T --> U{"every manifest layer matched?"}
+    U -- no --> V["ValueError: no target module"]:::fail
+    U -- yes --> W["restored map"]
+
+    classDef fail fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d;
+```
+
+| Old mechanism | New mechanism | Evidence (before) |
+| --- | --- | --- |
+| dense fallback wrote `<layer>.weight` and `continue`d without a manifest entry | manifest entry `kind="dense"` with source dtype, shape and bias record | `gptqmodel/utils/tt_blockfloat_quant.py:1304-1307` (pre-change) |
+| `read_blockfloat_checkpoint` iterated only manifest layers and skipped missing codes | reader returns dense entries too; a declared layer with missing tensors raises | `gptqmodel/utils/tt_blockfloat_quant.py:1427-1434` (pre-change) |
+| loader `continue`d on any layer with no entry | loader expands either kind and raises when a manifest layer has no target module | `gptqmodel/utils/tt_blockfloat_quant.py:1473-1475` (pre-change) |
+
+A `dense` entry stores the tensor at the dtype the module had, and records that
+dtype in the manifest. A `blockfloat` entry keeps its packed codes and stores
+its bias unmodified, because a bias is dense state rather than part of the grid.
+Every manifest entry also records `has_bias` and, when present, `bias_dtype`, so
+a reader knows which tensors the payload must contain.
+
+Existing version-1 checkpoints keep loading: a manifest entry without a `kind`
+is treated as `blockfloat`, and an absent `bits` falls back to the global width.
+The dense tensors a version-1 writer emitted were never attributed to a layer,
+so they cannot be recovered from the file; re-saving such a checkpoint from a
+model that still holds them writes a version-2 manifest that lists them.
+`BLOCKFLOAT_SAVE_FORMAT_VERSION` is `2`.
+
+The native checkpoint still covers decoder blocks only. Embeddings, norms and
+the lm-head are `save_blockfloat_model()`'s job, not this writer's.
+
 ## Block-float kernel dispatch
+
+Out-axis checkpoints store `W.T` with one exponent per 16 output features.
+On NVIDIA sm_80 or newer with Triton, `TTBlockfloatLinear` and the tied output
+head read those bytes directly for FP16, BF16, and FP32 activations. Decode and
+short prefill can split the reduction across CUDA thread blocks. Only partial
+outputs go to scratch. The kernel decodes weights in FP32 and adds the stored
+bias to the FP32 reduction before rounding to the activation dtype.
+
+CPU, ROCm, installations without Triton, and calls that need autograd use the
+Torch out-axis path. In-axis checkpoints retain the CUDA/HIP extension path.
+Out-axis embedding lookup continues to use the Torch path.
 
 `TTBlockfloatEmbedding` accepts a wider `block` than the hardware format so a
 converted table can still be exercised on CPU. The native block-float kernels,
@@ -172,7 +273,11 @@ native geometry and must stay on the Torch reference path on every device.
 ```mermaid
 flowchart TD
     A["TTBlockfloatEmbedding._kernel_embedding"] --> B{"hip_dispatch(ids)"}
-    C["TTBlockfloatTiedHead.forward<br/>embedding._kernel_linear(hidden)"] --> D{"hip_dispatch(hidden)"}
+    C["TTBlockfloatLinear or TTBlockfloatTiedHead<br/>_BlockfloatStorage._kernel_linear"] --> M{"GPU out axis with block size 16?"}
+    M -- yes --> P{"linear_out_axis accepts operands?"}
+    M -- no --> D{"hip_dispatch(hidden)"}
+    P -- yes --> Q["Triton packed GEMV or GEMM"]
+    P -- no --> L
     B -- "yes: block == 16 and HIP ready" --> E["tt_blockfloat_hip.embedding"]
     D -- "yes: block == 16 and HIP ready" --> F["tt_blockfloat_hip.linear"]
     B -- no --> G{"cuda_dispatch(ids)"}
@@ -194,6 +299,7 @@ wider block never builds or enters the extension.
 
 | Old mechanism | New mechanism | Evidence |
 | --- | --- | --- |
+| Out-axis projection calls decoded the entire stored matrix for `F.linear` | `_kernel_linear()` tries `linear_out_axis()` and decodes one tile at a time on supported NVIDIA devices | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py`, `gptqmodel/utils/tt_blockfloat_triton.py` |
 | `_kernel_embedding()` checked device, bits, dtype and `ready()`, but not `block` | `cuda_dispatch()` rejects `block != 16` before `ready()` and the native call | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py:120-138`, `:454` |
 | `_kernel_linear()` had the same missing gate for the tied head | the same predicate covers the linear path | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py:247` |
 | HIP already required `block == 16` | unchanged | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py:102-118` |
@@ -275,6 +381,30 @@ packed words occupy 294,912 bytes versus 1,179,648 bytes for a dense BF16 copy,
 a 4x reduction. Retained `scales` and `bias` are the checkpoint's native
 metadata, which the storage rule permits.
 
+### Device weight accounting
+
+`model.budget()` reports the packed device tensors, not only the host
+checkpoint copy. A `TTNNLinear` uploads its five packed operands as
+`ttnn.Tensor` objects on the mesh allocator, which Torch's parameter and buffer
+registry never sees (#5810). Each kernel measures the DRAM allocator around its
+upload, so the reported bytes include tile padding, per-page rounding and
+replicated operands exactly as the chip holds them.
+
+The budget names the backend explicitly: a TTNN chip keeps its own ordinal
+under `backend="ttnn"`, separate from CUDA devices and the host. For a
+`768x768` OPT `q_proj` on one Blackhole chip:
+
+| Number | Bytes |
+| --- | --- |
+| host checkpoint staging | 311,048 |
+| TTNN chip 0 device tensors | 524,288 |
+| reported `weights_bytes` | 835,336 |
+
+Clearing the cache (`clear_weight_cache()` / `release_device()`) removes the
+chip entry; reopening on another chip reports the new ordinal. If the allocator
+cannot be read, the backend is listed in `budget.unmeasured_backends` and
+`budget.weights_coverage` is `partial` instead of silently reporting zero.
+
 ### GPTQ v1 zero-point correction
 
 `_repack_zero_words` in `gptqmodel/utils/tt_packing.py` normalizes GPTQ v1's
@@ -314,6 +444,14 @@ real OPT-125M `q_proj` data against an independent FP32 oracle:
 which measured no latency difference at row counts 6, 64 and 128. The residual
 is the Tensix FMA floor: storing inputs as `float32` instead of BF16 does not
 reduce it (`max abs 0.00164` against float64 with FP32 storage).
+
+`TTNNBlockFloat8Linear` uses the same configuration. On a `768x768` BF8
+projection whose weights are exactly representable and 16 BF16 activation rows,
+the default LoFi path measured relative L2 drift `6.9e-3` (4654 of 6144 values
+outside `atol=rtol=2e-3`) versus `8.4e-4` (602 outside) with HiFi4. The added
+fidelity cost 14 % of forward latency on one chip and 5 % on four chips at
+batch 8. LoFi also rounded the exact cancellation `258 + (-256)` to zero; HiFi4
+keeps the two.
 
 ## GDDR thermal pacing
 
@@ -427,13 +565,20 @@ sequenceDiagram
     P->>R: open_mesh device_count 4 fabric FABRIC_1D
     R->>R: set_fabric_config FABRIC_1D
     R->>M: open_mesh_device MeshShape 1 4
-    P->>M: weights shard dim 0, zeros and scales shard dim 1
+    P->>M: weights shard dim 0, zeros repacked per shard, scales shard dim 1
     P->>M: activations replicated
     M->>C: per-chip dequant and GEMM on out_features slice
     C-->>M: local output rows by 192 columns
     M->>M: all_gather dim 1
     M-->>P: 768 output features
 ```
+
+The checkpoint packs zero points along the full output width, so a word can
+straddle a shard boundary: `out_features=40` on four chips packs into five
+global words, while each ten-column shard needs two padded words.
+`_shard_zero_words` decodes the logical nibbles, splits by output column, and
+repacks every shard before the dim-1 mapper runs; slicing the global words by
+column instead fails the mesh shard-shape check at `post_init`.
 
 Operational requirements and measured behavior:
 
@@ -496,7 +641,7 @@ names the family. The distinction lives in `backend`:
 
 | `backend` | Runtime that owns the chips | Where activations live |
 | --- | --- | --- |
-| `GPTQ_TTNN` | TT-Metal mesh opened by `ttnn_runtime` | host between layers, device inside a resident chain |
+| `GPTQ_TTNN`, `GPTQ_TT_BF8` | TT-Metal mesh opened by `ttnn_runtime` | host between layers, device inside a resident chain |
 | `GPTQ_TT_XLA` | PJRT plugin (which wraps its own `MeshDevice`) | `xla:N` tensors |
 
 **Rule: decide with `backend`, never with `device`.** Resolving the *device*
@@ -509,11 +654,21 @@ which now take `backend` and count over PCIe for the native path.
 The native kernel uploads a layer's packed weights on demand in `forward`, so
 its parameters belong on the **host**. A layer-wise `xla:N` device map would
 send them through PJRT instead, which claims every chip and then collides with
-the mesh `post_init` opens. For `GPTQ_TTNN` the loader therefore pins
-`device_map = {"": "cpu"}`.
+the mesh `post_init` opens. For every backend in `NATIVE_TTNN_BACKENDS` the
+loader therefore pins `device_map = {"": "cpu"}`.
 
 This is also why `{"": "xla"}` is **not** a substitute: `simple_dispatch_model`
 would call `.to("xla")` and initialize PJRT anyway.
+
+An indexed request is therefore read as the **chip**, not as checkpoint
+placement. `device="xla:1"` stages the checkpoint on CPU and passes ordinal 1
+to every native kernel, which forwards it to
+`open_mesh(device_count=1, device_id=1, ...)`. A request that names more than
+one chip — a layer-wise `xla:N` map or a `device=(...)` pool — is rejected,
+because the kernel owns one mesh per process and the mesh size is chosen per
+layer, not by the checkpoint map. `xla:0` pins chip 0; a bare `xla` names no
+chip, so the kernel keeps its default of chip 0 and the loader sets no
+`ttnn_device_id` at all.
 
 ### 3. Context ownership is one owner per chip, per process
 
@@ -758,6 +913,11 @@ compatible base GPT-QModel dependencies plus the TT tools. After installing
 that complete set, the script installs the local GPT-QModel checkout with
 `--no-deps` so pip does not re-resolve and replace the validated Torch ABI.
 
+The Transformers 5 migration raises this manifest to Transformers 5.23.0 and
+Tokenicer 0.0.17 so that isolated installs retain package-owned model dispatch
+and the tokenizer trust policy. Dependency compatibility is checked by
+`tests/test_require_pkgs.py`; this update has not been requalified on TT hardware.
+
 ```bash
 PYTHON_BIN="$HOME/.pyenv/versions/3.12.16/bin/python" \
   requirements/install-tenstorrent-py312.sh /path/to/gptqmodel
@@ -868,9 +1028,52 @@ R9700: 207-208 us and 262 us against 185 us at the time.
 Any `in_features` that is a multiple of 16 is supported, including one that is
 not a multiple of the tile width: the last tile of such a `k` stages a partial
 span, and the kernel zero-fills past `k` instead of dropping the span. The
-quantiser likewise takes its base exponent candidate unconditionally, so a block
-whose squared error overflows -- inputs near `FLT_MAX` -- still produces the
-reference codes rather than zeros.
+quantiser's exponent search is scale invariant: it scores the base exponent and
+both neighbours on the block normalised by `2**base`, so a block whose raw
+squared error would overflow (near `FLT_MAX`) or underflow (a tiny block) still
+picks the closest exponent instead of keeping the binade index by default. The
+base exponent comes from the exact exponent field, and every candidate outside
+the storable `[-127, 127]` range is rejected before its error is compared, so no
+`2**128` scale can enter the search.
+
+### Shared exponent derivation and its range
+
+A block's shared exponent is the binade index of its largest magnitude, which
+must be read exactly. `log2`/`log2f`/`torch.log2` round to nearest, so they
+report `128` for `FLT_MAX` (one ulp below `2**128`) and `k` for a value one ulp
+below `2**k`; `floor` then yields an unusable exponent. Every implementation
+decodes the IEEE-754 exponent field instead (`frexp` in the Torch reference),
+which cannot round.
+
+```mermaid
+flowchart TD
+    A["block values"] --> B["magnitude = max(abs(block))"]
+    B --> C{"all finite?"}
+    C -- no --> R["ValueError: block-float storage<br/>cannot represent NaN or infinity"]
+    C -- yes --> D["safe = max(magnitude, FLT_MIN)<br/>(zero block keeps binade -126)"]
+    D --> E["base = exponent field - 127<br/>exact binade index"]
+    E --> F["candidates base, base-1, base+1"]
+    F --> G{"candidate exponent in<br/>-127 .. 127?"}
+    G -- no --> H["reject candidate<br/>(no representable 2**e)"]
+    G -- yes --> I["round onto the grid,<br/>compute squared error"]
+    I --> J{"error strictly lower?"}
+    J -- yes --> K["adopt candidate"]
+    J -- no --> L["keep earlier winner"]
+    H --> M["best = base candidate"]
+    K --> M
+    L --> M
+    M --> N["codes + int8 exponent"]
+    style R fill:#ffe0e0,stroke:#b00020
+    style H fill:#ffe0e0,stroke:#b00020
+```
+
+The storable range is `[-127, 127]`: the field stores `e + 127`, so `+128` is the
+all-ones pattern and `2**128` overflows, while `-128` has no normal scale. A
+candidate outside that range is rejected *before* its error is compared, so a
+NaN from `0 * inf` can never poison the per-block search. The base candidate is
+adopted before any comparison so that the winner and its codes are always
+initialised; the neighbours then have to beat it strictly, which keeps the tie
+order `base`, `base - 1`, `base + 1`.
 
 `bfloat2_b` is the third block-float width the Tensix packer understands
 (`DataFormat::Bfp2_b` in the Blackhole LLK, and Block FP2 appears among the

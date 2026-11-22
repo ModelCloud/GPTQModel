@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from module_tree.test_subset import _StubAWQProcessor
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import (
     FORMAT,
@@ -43,9 +44,17 @@ def test_dict_fallback_keeps_the_dataclass_threshold_default():
     for config_cls in (GPTQConfig, AWQConfig):
         plain = config_cls(bits=4, group_size=128)
         assert plain.fallback.threshold == default
-        for override in ({"strategy": "rtn"}, {"smooth": "mad"}):
+        for override in ({"strategy": "rtn"},):
             config = config_cls(bits=4, group_size=128, fallback=override)
             assert config.fallback.threshold == default, (config_cls.__name__, override)
+
+    # Only GPTQ/QQQ apply a fallback smoother; AWQ's fallback never did, and
+    # its `fallback.smooth` is refused (#5302).
+    for override in ({"strategy": "rtn"}, {"smooth": "mad"}):
+        config = GPTQConfig(bits=4, group_size=128, fallback=override)
+        assert config.fallback.threshold == default, override
+    with pytest.raises(ValueError, match="fallback.smooth"):
+        AWQConfig(bits=4, group_size=128, fallback={"smooth": "mad"})
 
     # An explicit threshold still wins.
     explicit = GPTQConfig(bits=4, group_size=128, fallback={"threshold": "2.0%"})
@@ -184,10 +193,12 @@ def test_dynamic_fallback_override_survives_a_real_quantize(tmp_path, monkeypatc
     )
     model = GPTQModel.load(str(model_dir), quantize_config=quantize_config, backend=BACKEND.TORCH)
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
 
     down_proj = "model.layers.0.mlp.down_proj"
@@ -239,8 +250,9 @@ def test_processor_merges_the_processor_fallback_under_the_override(method, monk
     override at all.
     """
 
-    from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor
+    from gptqmodel.looper.loop_processor import LoopProcessor
     from gptqmodel.looper.named_module import NamedModule
+    from gptqmodel.quantization.config import CalibrationConfig
 
     monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
 
@@ -254,15 +266,14 @@ def test_processor_merges_the_processor_fallback_under_the_override(method, monk
     processor = processor_cls(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=CalibrationConfig(
-            dataset=[{"input_ids": [0], "attention_mask": [1]}],
-            prepare_dataset=lambda calibration_dataset, **_kwargs: calibration_dataset,
-        ),
+        calibration=CalibrationConfig(dataset=[{"input_ids": [0], "attention_mask": [1]}]).bind(lambda calibration_dataset, **_kwargs: calibration_dataset),
     )
     processor_fallback = Fallback(strategy="rtn", threshold="5%")
 
+    # QQQ rejects module shapes its tiled kernels cannot pack at preprocess
+    # time, so the fixture uses a 64x256 shape both methods can pack.
     overridden = NamedModule(
-        nn.Linear(32, 32, bias=False), name="proj", full_name="model.proj", layer_index=0
+        nn.Linear(64, 256, bias=False), name="proj", full_name="model.proj", layer_index=0
     )
     processor.preprocess(overridden, fallback=processor_fallback)
     resolved = processor.tasks["proj"].fallback
@@ -270,7 +281,7 @@ def test_processor_merges_the_processor_fallback_under_the_override(method, monk
     assert resolved.threshold == "2%"
 
     sibling = NamedModule(
-        nn.Linear(32, 32, bias=False), name="other", full_name="model.other", layer_index=0
+        nn.Linear(64, 256, bias=False), name="other", full_name="model.other", layer_index=0
     )
     processor.preprocess(sibling, fallback=processor_fallback)
     inherited = processor.tasks["other"].fallback
@@ -290,8 +301,9 @@ def test_vptq_and_macaq_apply_the_processor_fallback_without_dynamic_overrides(m
     processor-level fallback must still land on the task.
     """
 
-    from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor
+    from gptqmodel.looper.loop_processor import LoopProcessor
     from gptqmodel.looper.named_module import NamedModule
+    from gptqmodel.quantization.config import CalibrationConfig
 
     monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
 
@@ -304,10 +316,7 @@ def test_vptq_and_macaq_apply_the_processor_fallback_without_dynamic_overrides(m
     processor = processor_cls(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=CalibrationConfig(
-            dataset=[{"input_ids": [0], "attention_mask": [1]}],
-            prepare_dataset=lambda calibration_dataset, **_kwargs: calibration_dataset,
-        ),
+        calibration=CalibrationConfig(dataset=[{"input_ids": [0], "attention_mask": [1]}]).bind(lambda calibration_dataset, **_kwargs: calibration_dataset),
     )
     module = NamedModule(
         nn.Linear(32, 32, bias=False), name="proj", full_name="model.proj", layer_index=0
@@ -720,7 +729,7 @@ def _assert_percentile_smoother_matches_reference(device: str) -> None:
     log_mu = math.log1p(8.0)
     log_vals = torch.log1p(block.abs() * 8.0) / log_mu
     log_threshold = torch.quantile(log_vals, 0.99, dim=1, keepdim=True)
-    log_linear_threshold = (torch.exp(log_threshold * log_mu) - 1.0) / 8.0
+    log_linear_threshold = torch.expm1(log_threshold * log_mu) / 8.0
     log_ref = torch.clamp(block, -log_linear_threshold, log_linear_threshold)
     torch.testing.assert_close(log_out, log_ref, atol=1e-5, rtol=1e-5)
 
@@ -1127,16 +1136,10 @@ def test_fallback_near_dead_scale_survives_smoothing_and_packing(device, strateg
     source = module.weight.detach().double()
     expected_scale = torch.full_like(scale, 2.0**-24, dtype=torch.float64)
     if smoothing == "mse" or strategy == FallbackStrategy.RTN:
-        expected_zero = (torch.full_like(expected_scale, 8) if sym else
-                         (-source.amin(1, keepdim=True) / expected_scale).round())
-        if smoothing == "mse":
-            codes = (source / expected_scale + expected_zero).round().clamp(0, 15)
-        else:
-            codes = ((source / expected_scale).round() + expected_zero).clamp(0, 15)
+        expected_zero = (-source.amin(1, keepdim=True) / expected_scale).round()
     elif strategy == FallbackStrategy.STDCLIP:
         lo = source.mean(1, keepdim=True) - 3 * source.std(1, keepdim=True, unbiased=False)
         expected_zero = (-lo / expected_scale).round().clamp(0, 15)
-        codes = (source / expected_scale + expected_zero).round().clamp(0, 15)
     else:
         if strategy == FallbackStrategy.MIDPOINT:
             lo = source.amin(1, keepdim=True)
@@ -1154,7 +1157,15 @@ def test_fallback_near_dead_scale_survives_smoothing_and_packing(device, strateg
         lo = torch.minimum(lo, torch.zeros_like(lo))
         hi = torch.maximum(hi, torch.zeros_like(hi))
         expected_zero = (-lo / expected_scale).round().clamp(0, 15)
+    if sym:
+        # Every symmetric kernel assumes zero == 2 ** (bits - 1); the fallback
+        # fits the zero-centered ``[-max|x|, max|x|]`` range for all strategies
+        # instead of the asymmetric endpoints used above.
+        expected_zero = torch.full_like(expected_scale, 8)
+    if smoothing == "mse" or strategy != FallbackStrategy.RTN:
         codes = (source / expected_scale + expected_zero).round().clamp(0, 15)
+    else:
+        codes = ((source / expected_scale).round() + expected_zero).clamp(0, 15)
     expected = (codes - expected_zero) * expected_scale
     torch.testing.assert_close(scale.double(), expected_scale, rtol=1e-6, atol=0)
     torch.testing.assert_close(zero.double(), expected_zero, rtol=0, atol=0)

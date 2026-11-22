@@ -8,8 +8,11 @@ import threading
 
 import pytest
 
+
+# CustomizedTritonAutoTuner subclasses Triton's autotuner.
+pytest.importorskip("triton")
+
 from gptqmodel.nn_modules.triton_utils.custom_autotune import CustomizedTritonAutoTuner
-from gptqmodel.utils import nogil_patcher
 
 
 def _require_free_threaded():
@@ -95,43 +98,6 @@ def _blocking_bench(observed, a_in, b_in, release_a, release_b, configs):
         return 1.0 if config is configs[0] else 2.0
 
     return bench
-
-
-def test_nogil_patch_keeps_autotuner_nargs_thread_local(monkeypatch):
-    _require_free_threaded()
-    triton_autotuner = pytest.importorskip("triton.runtime.autotuner")
-    configs = [_Config("a"), _Config("b")]
-    a_in, b_in = threading.Event(), threading.Event()
-    release_a, release_b = threading.Event(), threading.Event()
-    observed = {"A": [], "B": []}
-
-    class _FakeAutotuner:
-        def __init__(self):
-            self.arg_names = ["value"]
-            self.keys = ["value"]
-            self.configs = configs
-            self.cache = {}
-            self.cache_results = False
-            self.fn = _FakeFn()
-            self.bench_time = None
-            self.configs_timings = None
-
-        def prune_configs(self, kwargs):
-            return self.configs
-
-        def pre_hook(self, nargs, reset_only):
-            pass
-
-    _FakeAutotuner._bench = _blocking_bench(
-        observed, a_in, b_in, release_a, release_b, configs
-    )
-
-    monkeypatch.setattr(triton_autotuner, "Autotuner", _FakeAutotuner)
-    monkeypatch.setattr(triton_autotuner, "CacheFuture", None, raising=False)
-    monkeypatch.setattr(nogil_patcher, "version", lambda _package_name: "3.7.0")
-    nogil_patcher.patch_triton_autotuner()
-
-    _run_race(_FakeAutotuner(), a_in, b_in, release_a, release_b, observed)
 
 
 def test_custom_autotuner_keeps_nargs_thread_local():

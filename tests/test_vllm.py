@@ -18,7 +18,7 @@ from pathlib import Path  # noqa: E402
 import pytest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from tests.eval import evaluate, get_eval_task_metrics, import_evalution  # noqa: E402
@@ -37,7 +37,7 @@ class TestLoadVLLM(ModelTest):
         if ((importlib.util.find_spec("flashinfer") is None and importlib.util.find_spec("flashinfer-python") is None) or
                 importlib.util.find_spec("vllm") is None):
             raise unittest.SkipTest(
-                "flashinfer and vllm are required by this test. install via `pip install gptqmodel['vllm']`"
+                "flashinfer and vllm are required by this test. install via `pip install gptqmodel vllm flashinfer`"
             )
 
         try:
@@ -134,7 +134,7 @@ class TestLoadVLLM(ModelTest):
             self.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
-        model.quantize(calibration_dataset, batch_size=4)
+        model.quantize(CalibrationConfig(dataset=calibration_dataset, batch_size=4))
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tokenizer.save_pretrained(tmp_dir)

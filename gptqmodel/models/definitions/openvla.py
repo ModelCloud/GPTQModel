@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 import torch
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import fetch_image
@@ -18,6 +18,8 @@ from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class OpenVLAQModel(BaseQModel):
@@ -29,9 +31,12 @@ class OpenVLAQModel(BaseQModel):
     native dtype, matching the reference OpenVLA inference path.
     """
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.openvla.configuration_prismatic.OpenVLAConfig",
+        model_class="gptqmodel.models.ports.openvla.modeling_prismatic.OpenVLAForActionPrediction",
+        processor_class="gptqmodel.models.ports.openvla.processing_prismatic.PrismaticProcessor",
+    )
 
-    require_trust_remote_code = True
     require_load_processor = True
     support_batch_quantize = False
 
@@ -53,6 +58,11 @@ class OpenVLAQModel(BaseQModel):
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         },
     ]
+
+    def __init__(self, model, *args, **kwargs):
+        if model.config.text_config.model_type == "phi":
+            self.pre_lm_head_norm_module = "language_model.model.final_layernorm"
+        super().__init__(model, *args, **kwargs)
 
     @classmethod
     def extract_layers_node(cls):
@@ -85,9 +95,8 @@ class OpenVLAQModel(BaseQModel):
         self._materialize_module(
             language_model, "embed_tokens", "language_model.model.embed_tokens"
         )
-        self._materialize_module(
-            language_model, "norm", "language_model.model.norm"
-        )
+        norm_name = "norm" if hasattr(language_model, "norm") else "final_layernorm"
+        self._materialize_module(language_model, norm_name, f"language_model.model.{norm_name}")
         self._materialize_module(
             language_model, "rotary_emb", "language_model.model.rotary_emb"
         )
@@ -96,9 +105,10 @@ class OpenVLAQModel(BaseQModel):
 
     def pre_quantize_generate_hook_end(self):
         language_model = self.model.language_model.model
+        norm_name = "norm" if hasattr(language_model, "norm") else "final_layernorm"
         modules = (
             (language_model, "embed_tokens"),
-            (language_model, "norm"),
+            (language_model, norm_name),
             (language_model, "rotary_emb"),
             (self.model, "vision_backbone"),
             (self.model, "projector"),
@@ -172,22 +182,20 @@ class OpenVLAQModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(
+        if getattr(self, "processor", None) is not None:
+            return self.processor
+        tokenizer = getattr(self.tokenizer, "tokenizer", self.tokenizer)
+        return self.loader.load_processor(
             self.model_local_path,
-            trust_remote_code=self.trust_remote_code,
+            config=self.model.config,
+            tokenizer=tokenizer,
         )
 
-    def prepare_dataset(
-        self,
-        calibration_dataset,
-        batch_size: int = 1,
-        **kwargs,
-    ) -> list[Dict[str, Any]]:
-        del kwargs
+    def _prepare_calibration_batches(self, conversations, batch_size):
         processor = self.load_processor()
         calibration_data = []
         for batch in batched_conversations(
-            calibration_dataset,
+            conversations,
             batch_size,
             process_func=self.preprocess_dataset,
         ):
@@ -206,8 +214,21 @@ class OpenVLAQModel(BaseQModel):
                         return_tensors="pt",
                     )
                 calibration_data.append(dict(inputs))
-        del processor
         return calibration_data
+
+    def prepare_dataset(
+        self,
+        calibration_dataset,
+        batch_size: int = 1,
+        **kwargs,
+    ) -> list[Dict[str, Any]]:
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+        )
 
 
 __all__ = ["OpenVLAQModel"]

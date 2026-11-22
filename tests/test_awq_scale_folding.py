@@ -14,13 +14,14 @@ import types
 import pytest
 import torch
 from torch import nn
-from transformers import Gemma2Config, Gemma2ForCausalLM
+from transformers import Gemma2Config, Gemma2ForCausalLM, Lfm3Config, Lfm3ForCausalLM
 from transformers.models.gemma.modeling_gemma import GemmaRMSNorm
 from transformers.models.gemma2.modeling_gemma2 import Gemma2RMSNorm
 from transformers.models.gemma3.modeling_gemma3 import Gemma3RMSNorm
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextRMSNorm
 
+from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.models.definitions.gemma2 import Gemma2QModel
 from gptqmodel.models.definitions.lfm3 import LFM3QModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
@@ -29,6 +30,7 @@ from gptqmodel.quantization.awq.quantize.scale import (
     apply_scale,
     scale_ln_fcs,
 )
+from gptqmodel.quantization.awq.utils.module import get_op_name
 
 
 try:
@@ -455,34 +457,163 @@ def test_lfm3_sandwich_post_norms_are_not_fold_sources():
     qmodel = _bare_lfm3_qmodel()
 
     nodes = qmodel.awq_get_modules_for_scaling(layer, _lfm3_features(), {})
-    conv = next(node for node in nodes if any(module is layer.conv.in_proj for module in node["layers"]))
-    ffn = next(node for node in nodes if any(module is layer.feed_forward.w1 for module in node["layers"]))
-
+    conv = next(node for node in nodes if layer.conv.in_proj in node["layers"])
+    ffn = next(node for node in nodes if layer.feed_forward.w1 in node["layers"])
     assert conv["prev_op"] is layer.operator_norm
-    assert conv["prev_op"] is not layer.post_operator_norm
     assert ffn["prev_op"] is layer.ffn_norm
-    assert ffn["prev_op"] is not layer.post_ffn_norm
 
 
-def test_lfm3_sandwich_norm_fold_is_output_neutral():
+@pytest.mark.parametrize("layer_type", ["conv", "full_attention", "sliding_attention"])
+def test_lfm3_native_sandwich_norm_fold_is_output_neutral(layer_type):
+    from transformers import Lfm3Config, Lfm3ForCausalLM
+
     torch.manual_seed(0)
-    layer = _Lfm3DecoderLayer()
+    config = Lfm3Config(
+        vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=8,
+        layer_types=[layer_type], conv_L_cache=3, sliding_window=8,
+        max_position_embeddings=32, use_sandwich_norm=True, use_attention_gate=True,
+        pad_token_id=0, bos_token_id=1, eos_token_id=2,
+    )
+    model = Lfm3ForCausalLM(config).eval()
+    layer = model.model.layers[0]
     qmodel = _bare_lfm3_qmodel()
-    nodes = qmodel.awq_get_modules_for_scaling(layer, _lfm3_features(), {})
-    conv = next(node for node in nodes if any(module is layer.conv.in_proj for module in node["layers"]))
-    ffn = next(node for node in nodes if any(module is layer.feed_forward.w1 for module in node["layers"]))
-
-    x = torch.randn(4, 32)
+    ids = torch.tensor([[1, 3, 8, 5]])
     with torch.no_grad():
-        before = layer(x)
-        for node in (conv, ffn):
-            scales = torch.rand(32) + 0.5
-            scale_ln_fcs(node["prev_op"], node["layers"], scales)
-        after = layer(x)
-
-    # Folding into a post-norm changes the block output by ~0.57 on this
-    # fixture; the data-flow source keeps it at floating-point noise.
+        before = model(ids, use_cache=False).logits
+        features = {name: torch.randn(4, submodule.in_features)
+                    for name, submodule in layer.named_modules() if isinstance(submodule, nn.Linear)}
+        nodes = qmodel.awq_get_modules_for_scaling(layer, features, {})
+        expected_sources = {layer.ffn_norm, layer.operator_norm}
+        assert {node["prev_op"] for node in nodes} == expected_sources
+        scales = [
+            (get_op_name(layer, node["prev_op"]), [get_op_name(layer, target) for target in node["layers"]],
+             torch.rand(32) + 0.5, None)
+            for node in nodes
+        ]
+        consumers = {get_op_name(layer, node["prev_op"]): node.get("_scale_consumers", []) for node in nodes}
+        apply_scale(layer, scales, consumer_map=consumers)
+        after = model(ids, use_cache=False).logits
+    assert torch.isfinite(after).all()
     assert _relative_error(after, before) < 1e-5
+
+
+def _tiny_lfm3_attention_model():
+    torch.manual_seed(0)
+    config = Lfm3Config(
+        vocab_size=128,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        layer_types=["full_attention"],
+        use_attention_gate=True,
+        use_sandwich_norm=True,
+        max_position_embeddings=64,
+        attention_dropout=0.0,
+        use_cache=False,
+        tie_word_embeddings=False,
+        pad_token_id=0,
+        eos_token_id=1,
+        bos_token_id=0,
+    )
+    config._attn_implementation = "eager"
+    model = Lfm3ForCausalLM(config).eval()
+    layer = model.model.layers[0]
+
+    features = {}
+
+    def make_hook(name):
+        def hook(_module, args, kwargs):
+            value = args[0] if args else kwargs.get("hidden_states")
+            if isinstance(value, torch.Tensor):
+                features[name] = value.detach().clone()
+
+        return hook
+
+    handles = []
+    for name in (
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+        "feed_forward.w1",
+        "feed_forward.w3",
+        "feed_forward.w2",
+    ):
+        handles.append(
+            layer.get_submodule(name).register_forward_pre_hook(
+                make_hook(name), with_kwargs=True
+            )
+        )
+
+    input_ids = torch.randint(0, 128, (1, 8))
+    with torch.no_grad():
+        model(input_ids)
+    for handle in handles:
+        handle.remove()
+    return model, layer, input_ids, features
+
+
+def test_lfm3_attention_fold_targets_qkv_and_compensates_sigmoid_gate():
+    """`operator_norm` feeds Q/K/V and the sigmoid gate, never `o_proj`.
+
+    The legacy tree named `gate_proj`, so `o_proj` was folded into the attention
+    input norm while the live `g_proj` gate was left uncompensated.
+    """
+
+    model, layer, input_ids, features = _tiny_lfm3_attention_model()
+    qmodel = _bare_lfm3_qmodel()
+    qmodel.__dict__["model"] = model
+    qmodel.__dict__["effective_module_tree"] = LFM3QModel.module_tree
+    qmodel.__dict__["module_tree"] = LFM3QModel.module_tree
+
+    nodes = qmodel.awq_get_modules_for_scaling(layer, features, {})
+    node = next(node for node in nodes if node["prev_op"] is layer.operator_norm)
+    names = [get_op_name(layer, module) for module in node["layers"]]
+
+    assert names == [
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+    ]
+    assert node["_scale_consumers"] == ["self_attn.g_proj"]
+    for candidate in nodes:
+        assert "self_attn.o_proj" not in [
+            get_op_name(layer, module) for module in candidate["layers"]
+        ]
+
+    AWQProcessor._validate_scale_group(
+        layer,
+        node["prev_op"],
+        node["layers"],
+        node["inp"],
+        node["module2inspect"],
+        node["_scale_consumers"],
+    )
+
+    scales = torch.linspace(0.3, 2.0, 32)
+    with torch.no_grad():
+        before = model(input_ids).logits.clone()
+    o_proj_before = layer.self_attn.o_proj.weight.detach().clone()
+    gate_before = layer.self_attn.g_proj.weight.detach().clone()
+
+    apply_scale(
+        layer,
+        [("operator_norm", names, scales, None)],
+        consumer_map={"operator_norm": node["_scale_consumers"]},
+    )
+
+    with torch.no_grad():
+        after = model(input_ids).logits
+
+    assert _relative_error(after, before) < 1e-5
+    # `o_proj` is quantized plainly, so its weights stay untouched; the gate is
+    # a declared consumer and must absorb the inverse scale.
+    assert torch.equal(layer.self_attn.o_proj.weight, o_proj_before)
+    assert not torch.equal(layer.self_attn.g_proj.weight, gate_before)
 
 
 def _scaled_before_norm_class():

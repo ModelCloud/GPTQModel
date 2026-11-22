@@ -5,7 +5,6 @@
 from typing import Dict
 
 import torch
-from transformers import AutoModelForCausalLM, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import load_image_from_url
@@ -14,12 +13,22 @@ from ...utils.offload import offload_to_disk
 from ...utils.torch import as_torch_device
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class Ovis2_5QModel(BaseQModel):
-    loader = AutoModelForCausalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.ovis2_5.configuration_ovis2_5.Ovis2_5_Config",
+        model_class="gptqmodel.models.ports.ovis2_5.modeling_ovis2_5.Ovis2_5",
+        processor_class="gptqmodel.models.ports.ovis2_5.processing_ovis2_5.Ovis2_5Processor",
+    )
+    require_trust_remote_code = False
+    require_monkeypatch = True
+    lm_head = "llm.lm_head"
+    fusable = None
 
-    pre_lm_head_norm_module = "llm.model.model.norm"
+    pre_lm_head_norm_module = "llm.model.norm"
 
     module_tree = [
         "llm",
@@ -28,7 +37,7 @@ class Ovis2_5QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("q_proj:0", "q_norm:!", "k_proj:0", "k_norm:!", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
@@ -37,6 +46,15 @@ class Ovis2_5QModel(BaseQModel):
     modality = [MODALITY.IMAGE_TO_TEXT]
 
     require_load_processor = True
+
+    def monkey_patch(self):
+        self.model.processor = self.processor
+        self.model.visual_tokenizer.image_processor = self.processor.image_processor
+
+    def _sanitize_input_ids_for_embeddings(self, input_ids):
+        # These negative values are source-defined multimodal embeddings, not
+        # invalid text IDs. The model validates both the values and patch counts.
+        return input_ids
 
     def pre_quantize_generate_hook_start(self):
         self.shell_module_materialize(self.model.llm.model.embed_tokens, self.quantize_config.device)
@@ -80,9 +98,6 @@ class Ovis2_5QModel(BaseQModel):
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
 
-    def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path)
-
     @staticmethod
     def replace_image_with_pil(sample):
         """
@@ -90,18 +105,18 @@ class Ovis2_5QModel(BaseQModel):
         """
 
         for msg in sample:
-            if "content" not in msg and not isinstance(msg["content"], dict):
+            if not isinstance(msg.get("content"), list):
                 continue
 
             for item in msg["content"]:
-                if isinstance(item, dict) and item.get("type") == "image":
+                if isinstance(item, dict) and item.get("type") == "image" and isinstance(item.get("image"), str):
                     item["image"] = load_image_from_url(item["image"])
 
         return sample
 
-    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+    def _prepare_calibration_batches(self, conversations, batch_size):
         calib_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(conversations, batch_size, process_func=self.preprocess_dataset):
             for sample in batch:
                 sample = self.replace_image_with_pil(sample)
                 input_ids, pixel_values, grid_thws = self.model.preprocess_inputs(
@@ -122,3 +137,12 @@ class Ovis2_5QModel(BaseQModel):
                     }
                 )
         return calib_data
+
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+        )

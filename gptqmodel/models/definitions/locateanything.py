@@ -8,26 +8,29 @@ from __future__ import annotations
 from typing import Any, Dict
 
 import torch
-from transformers import AutoModel, AutoProcessor
 
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class LocateAnythingQModel(BaseQModel):
     """Quantize LocateAnything's Qwen decoder while keeping its vision path dense."""
 
-    loader = AutoModel
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.locateanything.configuration_locateanything.LocateAnythingConfig",
+        model_class="gptqmodel.models.ports.locateanything.modeling_locateanything.LocateAnythingForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.locateanything.processing_locateanything.LocateAnythingProcessor",
+    )
 
-    require_trust_remote_code = True
-    # Loading is on demand because Transformers 5 serializes this legacy
-    # processor into a shape that its own remote constructor cannot reload.
+    require_trust_remote_code = False
+    # Loaded on demand for calibration; text-only consumers need no media assets.
     require_load_processor = False
     support_batch_quantize = False
-    require_pkgs = ["peft", "decord", "lmdb"]
 
     out_of_model_tensors = {
         "files": [
@@ -64,10 +67,19 @@ class LocateAnythingQModel(BaseQModel):
         return base_modules
 
     def load_processor(self):
-        return AutoProcessor.from_pretrained(
+        return self.loader.load_processor(
             self.model_local_path,
-            trust_remote_code=self.trust_remote_code,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
         )
+
+    @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
+        config = getattr(model, "config", None)
+        if getattr(getattr(config, "text_config", None), "model_type", None) == "qwen3":
+            tree[-1]["self_attn"] = tuple(dict.fromkeys(("q_norm:!", "k_norm:!", *tree[-1]["self_attn"])))
+        return tree
 
     def pre_quantize_generate_hook_start(self):
         text_model = self.model.language_model.model
@@ -95,16 +107,10 @@ class LocateAnythingQModel(BaseQModel):
         self.model.vision_model = move_to(self.model.vision_model, device=CPU)
         self.model.mlp1 = move_to(self.model.mlp1, device=CPU)
 
-    def prepare_dataset(
-        self,
-        calibration_dataset,
-        batch_size: int = 1,
-        **kwargs,
-    ) -> list[Dict[str, Any]]:
-        del batch_size, kwargs
+    def _prepare_calibration_batches(self, conversations):
         processor = self.load_processor()
         calibration_data = []
-        for batch in batched_conversations(calibration_dataset, 1):
+        for batch in batched_conversations(conversations, 1):
             messages = batch[0]
             text = processor.py_apply_chat_template(
                 messages,
@@ -120,8 +126,21 @@ class LocateAnythingQModel(BaseQModel):
                     return_tensors="pt",
                 )
             )
-        del processor
         return calibration_data
+
+    def prepare_dataset(
+        self,
+        calibration_dataset,
+        batch_size: int = 1,
+        **kwargs,
+    ) -> list[Dict[str, Any]]:
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=self._prepare_calibration_batches,
+        )
 
     def move_input_capture_example(
         self,
@@ -169,11 +188,7 @@ class LocateAnythingQModel(BaseQModel):
         if vit_embeds:
             visual_features = self.model.mlp1(torch.cat(vit_embeds, dim=0))
 
-        # The outer remote-code forward replaces image-token embeddings and
-        # then calls the Qwen decoder with only inputs_embeds. Its SDPA mask
-        # path nevertheless indexes input_ids. The bundled decoder already
-        # exposes the equivalent visual_features path, which preserves
-        # input_ids and avoids that remote-code inconsistency during capture.
+        # Preserve IDs for block-diffusion visibility while injecting image features.
         return self.model.language_model(
             input_ids=input_ids,
             visual_features=visual_features,
@@ -193,15 +208,14 @@ class LocateAnythingQModel(BaseQModel):
         )
 
     def forward(self, *args, **kwargs):
-        # The checkpoint's multimodal wrapper requires pixel_values even for a
-        # text-only call. Language evaluations should exercise the same
-        # quantized Qwen decoder directly when no visual input is supplied.
+        # Text evaluations exercise the same quantized decoder directly.
         if not self._has_visual_inputs(None, kwargs):
             return self.model.language_model(*args, **kwargs)
         return self.model(*args, **kwargs)
 
     def generate(self, inputs=None, **kwargs):
         if self._has_visual_inputs(inputs, kwargs):
+            kwargs.setdefault("tokenizer", self.tokenizer)
             return super().generate(inputs=inputs, **kwargs)
 
         with torch.inference_mode():

@@ -131,13 +131,13 @@ validated on any ROCm host with only `hipcc`:
 hipcc --offload-arch=gfx1201 -O3 -std=c++17 \
     tt_blockfloat_hip.hip tt_blockfloat_hip_selftest.cpp -o ttbf_selftest
 ./ttbf_selftest --dump /tmp/ttbf_dump
-python verify_against_torch.py /tmp/ttbf_dump
+python ../../scripts/verify_tt_blockfloat_hip.py /tmp/ttbf_dump
 # throughput sweep instead of the default shapes
 ./ttbf_selftest --bench 32 4096 4096
 ```
 
 `ttbf_selftest` compares every kernel against an independent CPU
-implementation. `verify_against_torch.py` compares the same outputs against
+implementation. `scripts/verify_tt_blockfloat_hip.py` compares the same outputs against
 `gptqmodel.utils.tt_blockfloat_quant` (CPU torch is sufficient), so the
 checkpoint oracle is exercised even when the host has no ROCm-built PyTorch.
 
@@ -245,6 +245,15 @@ strictly below infinity.  For inputs near `FLT_MAX` every candidate's error
 overflows to infinity, so the winning codes were never initialised and the
 result was zero.  The base candidate is now taken unconditionally, matching the
 Torch reference, and the harness checks a `1e30` block against it.
+
+The same comparison pinned the base exponent at *both* ends of the range in the
+other direction too: for tiny blocks every candidate's squared error underflows
+to zero, so the strict `<` never replaced the base candidate even when a
+neighbour was clearly closer.  Candidates are now scored on the block
+normalised by `2**base`, which is exact for a power of two and keeps the error
+O(1), so the search is scale invariant.  The base exponent comes from the exact
+exponent field, and a candidate outside the storable `[-127, 127]` range is
+rejected before its error is compared, so no `2**128` scale enters the search.
 
 Hoisting the per-element `w_ok` test out of the staging loop while fixing the
 first one also helped the shapes with the widest spans, where the store loop is

@@ -14,6 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
+from gptqmodel.utils.triton_jit import jit as triton_jit
+
 from ...utils.rocm import IS_ROCM
 from .w4a_triton import _launch_device, _to_e4m3_rn
 
@@ -21,7 +23,7 @@ from .w4a_triton import _launch_device, _to_e4m3_rn
 _E4M3_SEARCH_RADIUS = tl.constexpr(8)
 
 
-@triton.jit
+@triton_jit
 def _e2m1_codes(x):
     magnitude = tl.minimum(tl.abs(x), 6.0)
     code = tl.full(magnitude.shape, 0, tl.uint8)
@@ -35,7 +37,7 @@ def _e2m1_codes(x):
     return code | (tl.cast(x < 0, tl.uint8) << 3)
 
 
-@triton.jit
+@triton_jit
 def _e2m1_values(codes):
     magnitude = codes & 7
     value = tl.full(codes.shape, 0.0, tl.float32)
@@ -49,7 +51,7 @@ def _e2m1_values(codes):
     return tl.where((codes & 8) != 0, -value, value)
 
 
-@triton.jit(do_not_specialize=["M", "PADDED_M"])
+@triton_jit(do_not_specialize=["M", "PADDED_M"])
 def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
                                    M, K: tl.constexpr,
                                    PADDED_M):
@@ -63,6 +65,13 @@ def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
                 row < M, other=0).to(tl.float32)
     global_scale = tl.load(GlobalScale).to(tl.float32)
     maximum = tl.max(tl.abs(x), axis=1)
+    # `tl.max` drops NaN, so a NaN block would keep a finite E4M3 scale and
+    # the NaN would fold into a finite code. E4M3 0x7F is NaN and every
+    # consumer multiplies by this scale; Inf has no finite scale either, so
+    # both take the same path and stay consistent across recipes.
+    nonfinite = (tl.max((x != x).to(tl.int32), axis=1) > 0) | (
+        maximum == float("inf")
+    )
     inverse_four = tl.minimum(tl.maximum(tl.div_rn(maximum, 4.0 * global_scale), 2.0**-9), 448.0)
     inverse_six = tl.minimum(tl.maximum(tl.div_rn(maximum, 6.0 * global_scale), 2.0**-9), 448.0)
     inverse_four = tl.where(maximum > 0, inverse_four, 1.0)
@@ -85,10 +94,12 @@ def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
         group * PADDED_M * 8 + (row // 128) * 1024 + (block // 4) * 512
         + (row % 32) * 16 + ((row % 128) // 32) * 4 + block % 4
     )
+    # Never store a finite scale for a block that held a NaN/Inf value.
+    local = tl.where(nonfinite, float("nan"), local.to(tl.float32))
     tl.store(SwizzledScales + scale_offset, tl.where(row < M, local, 0.0))
 
 
-@triton.jit(do_not_specialize=["M", "PADDED_M"])
+@triton_jit(do_not_specialize=["M", "PADDED_M"])
 def _quantize_nvfp4_input_nvidia(X, GlobalScale, Packed, SwizzledScales,
                                  M, K: tl.constexpr,
                                  PADDED_M):
@@ -102,6 +113,10 @@ def _quantize_nvfp4_input_nvidia(X, GlobalScale, Packed, SwizzledScales,
                 row < M, other=0).to(tl.float32)
     global_scale = tl.load(GlobalScale).to(tl.float32)
     maximum = tl.max(tl.abs(x), axis=1)
+    # Same NaN/Inf scale poisoning as `_quantize_nvfp4_input_four_six`.
+    nonfinite = (tl.max((x != x).to(tl.int32), axis=1) > 0) | (
+        maximum == float("inf")
+    )
     inverse = tl.minimum(
         tl.maximum(tl.div_rn(maximum, 6.0 * global_scale), 2.0**-9), 448.0
     )
@@ -115,10 +130,12 @@ def _quantize_nvfp4_input_nvidia(X, GlobalScale, Packed, SwizzledScales,
         group * PADDED_M * 8 + (row // 128) * 1024 + (block // 4) * 512
         + (row % 32) * 16 + ((row % 128) // 32) * 4 + block % 4
     )
+    # Never store a finite scale for a block that held a NaN/Inf value.
+    local = tl.where(nonfinite, float("nan"), local.to(tl.float32))
     tl.store(SwizzledScales + scale_offset, tl.where(row < M, local, 0.0))
 
 
-@triton.jit(do_not_specialize=["M", "PADDED_M"])
+@triton_jit(do_not_specialize=["M", "PADDED_M"])
 def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
                           M, K: tl.constexpr, PADDED_M,
                           GRID_SEARCH: tl.constexpr):
@@ -131,6 +148,10 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
                 row < M, other=0).to(tl.float32)
     global_scale = tl.load(GlobalScale).to(tl.float32)
     maximum = tl.max(tl.abs(x), axis=1)
+    # Same NaN/Inf scale poisoning as `_quantize_nvfp4_input_four_six`.
+    nonfinite = (tl.max((x != x).to(tl.int32), axis=1) > 0) | (
+        maximum == float("inf")
+    )
     inverse_four = tl.minimum(tl.maximum(tl.div_rn(maximum, 4.0 * global_scale), 2.0**-9), 448.0)
     inverse_six = tl.minimum(tl.maximum(tl.div_rn(maximum, 6.0 * global_scale), 2.0**-9), 448.0)
     inverse_four = tl.where(maximum > 0, inverse_four, 1.0)
@@ -231,6 +252,8 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
         group * PADDED_M * 8 + (row // 128) * 1024 + (block // 4) * 512
         + (row % 32) * 16 + ((row % 128) // 32) * 4 + block % 4
     )
+    # Never store a finite scale for a block that held a NaN/Inf value.
+    local = tl.where(nonfinite, float("nan"), local.to(tl.float32))
     tl.store(SwizzledScales + scale_offset, tl.where(row < M, local, 0.0))
 
 
@@ -283,7 +306,7 @@ def nvfp4_pack_and_swizzle(x: torch.Tensor, global_scale: torch.Tensor, *, recip
     return packed.view(torch.float4_e2m1fn_x2), scales
 
 
-@triton.jit(do_not_specialize=["M", "PADDED_M"])
+@triton_jit(do_not_specialize=["M", "PADDED_M"])
 def _decode_nvfp4(Packed, Scales, GlobalScale, Out,
                   M, K: tl.constexpr, PADDED_M):
     # rows * K can exceed 2^31; address rows with 64-bit offsets.
@@ -333,13 +356,17 @@ def nvfp4_decode(codes: torch.Tensor, scales: torch.Tensor, global_scale: torch.
     return output
 
 
-@triton.jit(do_not_specialize=["M"])
+@triton_jit(do_not_specialize=["M"])
 def _accumulate_fp4_planes(Both, GroupScales, GlobalScale, TokenScale, Bias, Accumulator, Output,
                            M, N: tl.constexpr, FIRST: tl.constexpr,
                            LAST: tl.constexpr, HAS_BIAS: tl.constexpr, HAS_TOKEN_SCALE: tl.constexpr,
                            BLOCK: tl.constexpr):
     index = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
-    active = index < M * N
+    # M is a runtime i32 and N is a constexpr, so `M * N` is evaluated in
+    # 32 bits and wraps negative once rows * N >= 2^31. Every lane then masks
+    # off and the output is left uninitialized. Widen the row count first.
+    total = M.to(tl.int64) * N
+    active = index < total
     plane_offset = (index // N) * (2 * N) + index % N
     low = tl.load(Both + plane_offset, active, other=0).to(tl.float32)
     high = tl.load(Both + plane_offset + N, active, other=0).to(tl.float32)

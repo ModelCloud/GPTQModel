@@ -177,6 +177,9 @@ class ForwardResult:
     total_ms: float
     mean_ms: float
 
+# Every case loads the checkpoint and the EoRA adapter onto ``DEVICE`` (cuda:0)
+# and compares GPU kernels against the torch kernel on that device.
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA or ROCm GPU required")
 class TestKernelOutput(unittest.TestCase):
     # model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
     model_path = "sliuau/Llama-3.2-3B_4bits_128group_size"
@@ -194,6 +197,24 @@ class TestKernelOutput(unittest.TestCase):
     m: List[Tuple[int, int]] = []
     random_input_sample_size = 0
 
+    @classmethod
+    def _fresh_adapter(cls) -> Lora:
+        """Return an unmaterialized adapter for a single ``load`` call.
+
+        ``setUpClass`` materializes A/B on ``data.adapter`` only to read ``k``.
+        Reusing that instance makes ``Lora.targets_module()`` answer True for
+        every module, including the dense ``lm_head``, which then fails the
+        A/B presence assertion in ``apply_dense_module_adapters`` (#4764).
+        """
+
+        adapter = Lora(rank=64, path=LORA_PATH)
+        configure_explicit_remote_adapter(
+            adapter,
+            allow_remote=True,
+            revision=LORA_REVISION,
+            sha256=LORA_SHA256,
+        )
+        return adapter
 
     @classmethod
     def setUpClass(cls):
@@ -249,6 +270,12 @@ class TestKernelOutput(unittest.TestCase):
             # map data to dtype
             cls.data[dtype] = data
 
+            # Materialize one module to learn ``k`` (the layer's in_features).
+            # This adapter is not passed to ``load``: a materialized adapter
+            # reports ``targets_module()`` for every module, so the dense
+            # ``lm_head`` would be targeted and ``apply_dense_module_adapters``
+            # asserts that A/B exist for it (#4764). Loads go through
+            # ``_fresh_adapter()`` instead.
             data.adapter = Lora(
                 rank=64,
                 path=lora_path)
@@ -272,7 +299,7 @@ class TestKernelOutput(unittest.TestCase):
             # TORCH as reference output
             data.torch_kernel = cls.forward(cls, backend=BACKEND.TORCH, dtype=dtype)
             data.torch_kernel_out = data.torch_kernel.outputs
-            data.torch_kernel_with_lora = cls.forward(cls, backend=BACKEND.TORCH, dtype=dtype, adapter=data.adapter)
+            data.torch_kernel_with_lora = cls.forward(cls, backend=BACKEND.TORCH, dtype=dtype, adapter=cls._fresh_adapter())
             data.torch_kernel_out_with_lora = data.torch_kernel_with_lora.outputs
 
 
@@ -472,9 +499,13 @@ class TestKernelOutput(unittest.TestCase):
             actual_mean_ms=out.mean_ms,
         )
 
+    # TritonV2's bf16 dequant rounds in bf16, so the smallest non-zero error is
+    # one ulp: 2^-8 at unity and 2^-6 at |y| ~ 4. The old 1e-5 was below bf16
+    # resolution and failed with and without a LoRA (measured 0.0078 non-LoRA,
+    # 0.0156 with LoRA, both exactly one ulp).
     bfloat16_cases = [
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
-        (BACKEND.TRITON, torch.bfloat16, 0.00001),
+        (BACKEND.TRITON, torch.bfloat16, 0.015625),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0080),
         (BACKEND.MACHETE, torch.bfloat16, 0.0080),
         (BACKEND.SWORDFISH, torch.bfloat16, 0.0060),
@@ -518,7 +549,7 @@ class TestKernelOutput(unittest.TestCase):
         self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
-        out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
+        out = self.forward(backend=backend, dtype=dtype, adapter=self._fresh_adapter())
         self._summarize_results(
             reference_outputs=data.torch_kernel_with_lora.outputs,
             actual_outputs=out.outputs,
@@ -533,7 +564,7 @@ class TestKernelOutput(unittest.TestCase):
 
     bfloat16_lora_cases = [
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
-        (BACKEND.TRITON, torch.bfloat16, 0.00001),
+        (BACKEND.TRITON, torch.bfloat16, 0.015625),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0160),
         (BACKEND.MACHETE, torch.bfloat16, 0.0080),
         (BACKEND.SWORDFISH, torch.bfloat16, 0.0080),
@@ -547,7 +578,7 @@ class TestKernelOutput(unittest.TestCase):
         self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
-        out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
+        out = self.forward(backend=backend, dtype=dtype, adapter=self._fresh_adapter())
         self._summarize_results(
             reference_outputs=data.torch_kernel_with_lora.outputs,
             actual_outputs=out.outputs,

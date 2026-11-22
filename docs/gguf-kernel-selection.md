@@ -11,6 +11,15 @@ GGUF quantization and loading share one kernel selector,
 | 25 | `GGUFCppKernel` | CPU ggml bridge formats |
 | 15 | `GGUFTorchLinear` | every `GGUFBits` layout |
 
+The native C++ engines are the fast path but not the exact one: `ggml_mul_mat`
+quantizes activations to Q8_0/Q8_1/Q8_K, so `GGUF_CPP` carries a
+5e-3..1.5e-2 relative error against an FP64 dequantized-weight oracle even for
+FP32 activations. That loss, its bound, and the static native-vs-exact path rule
+are documented in
+[GGUF C++ activation quantization](gguf-cpp-activation-quantization.md);
+`GGUF_TORCH` is the exact engine. The C++ engines stay ahead of `GGUF_TORCH` in
+AUTO because they are 40-97x faster per layer on CPU.
+
 A GGUF **bit width is not a layout**. Width 4 is Q4_0 by default, but Q4_K and
 IQ4_NL are also 4-bit; width 5 is Q5_K_M by default but Q5_0 is also 5-bit.
 Selection therefore resolves the concrete `GGUFBits` spec to a ggml tensor type
@@ -73,6 +82,104 @@ The fallback is only active for an AUTO request
 (`model.quantize_backend in {AUTO, AUTO_TRAINABLE}`). An explicit
 `BACKEND.GGUF_TRITON` with a non-fused layout keeps failing loudly, matching the
 load path.
+
+## CPU zero-copy packed weight
+
+`GGUFCppKernel` used to allocate a ggml backend buffer for the whole packed
+weight and copy it with `ggml_backend_tensor_set` on every forward. The CPU
+backend can read the caller's storage directly, so the forward now wraps the
+existing `qweight` with `ggml_backend_cpu_buffer_from_ptr` and binds it to the
+graph tensor with `ggml_backend_tensor_alloc`. `post_init()` first copies an
+unaligned packed buffer (a safetensors mmap view, for example) into a padded
+allocation so `qweight.data_ptr()` is 32-byte aligned.
+
+The copy path stays as the fallback: an unaligned, non-contiguous, or
+backend-rejected weight never reaches `ggml_backend_cpu_buffer_from_ptr` (its
+`GGML_ASSERT` would abort the process) and produces the same bytes through the
+old buffer.
+
+```mermaid
+flowchart TD
+    A["GGUFCppKernel.forward"] --> B["_use_ggml_cpu_matmul"]
+    B -- "no" --> T["_forward_torch_cpu"]
+    B -- "yes" --> C["quantized_matmul_cpu"]
+    C --> D["_can_wrap_cpu_weight<br/>cpu, uint8, contiguous, 32-byte aligned"]
+    D -- "no" --> E["_run_quantized_matmul<br/>zero_copy_weight=False<br/>allocate + ggml_backend_tensor_set"]
+    D -- "yes" --> F["_run_quantized_matmul<br/>zero_copy_weight=True"]
+    F --> G["ggml_backend_cpu_buffer_from_ptr + ggml_backend_tensor_alloc"]
+    G --> H{"backend accepts?"}
+    H -- "yes" --> I["graph compute; no weight copy"]
+    H -- "no" --> E
+    E --> J["graph compute; identical bytes"]
+    classDef fallback fill:#fff4e5,stroke:#b36b00,color:#111;
+    class E,H fallback;
+```
+
+| Case | Before | After |
+| --- | --- | --- |
+| 2048x8192 Q4_K layer, M=1 | backend buffer allocated, 9,437,184 B copied per forward | storage bound in place; 2.49x faster on this host, bitwise equal |
+| 2048x8192 Q4_K layer, M=128 | same copy | 1.04x faster; the copy was already small against the compute |
+| Unaligned mmap `qweight` | copy path | `post_init()` aligns once; if alignment is lost the copy path is used |
+| Backend rejects the wrapped buffer | not applicable | caught, logged at debug, retried through the copy path |
+
+`tests/kernels/test_gguf_cpp_zero_copy_4395.py` pins the selected path, the
+bitwise equality with the copy path, the unaligned fallback, and the
+`post_init()` alignment of a safetensors mmap tensor.
+
+### mmap pages after the aligned copy
+
+The aligned copy cut a Llama-3.2-1B q4_k_m token from 169 ms to 27 ms (#4395),
+but the safetensors mmap pages it read stayed mapped for the life of the model.
+Every `qweight` was then resident twice: 522 MiB of anonymous aligned copies
+plus 522 MiB of file pages (`RssFile`). Re-mapping cannot align the original:
+`mmap` preserves the file offset modulo the page size, and the safetensors
+header fixes the data offset modulo 32 (every `qweight` in that checkpoint
+starts at 24 mod 32; Qwen2.5-0.5B's happen to be aligned and are not copied).
+
+`_align_packed_weight` now calls `_reclaim_file_pages` on the source view once
+the copy exists, which `madvise(MADV_DONTNEED)`s the whole pages inside it.
+On a file mapping that only unmaps them: the data stays in the page cache, and
+any other holder of the view re-faults it.
+
+```mermaid
+flowchart TD
+    P["GGUFCppKernel.post_init"] --> AL{"qweight cpu uint8 contiguous<br/>and data_ptr % 32 != 0?"}
+    AL -- "no" --> Z["keep qweight in place<br/>(aligned mmap is read zero-copy)"]
+    AL -- "yes" --> C["aligned = padded torch.empty + copy_<br/>self.qweight = aligned"]
+    C --> R["_reclaim_file_pages(old view)"]
+    R --> L{"Linux, CPU, >= 1 whole page"}
+    L -- "no" --> K["keep pages mapped"]
+    L -- "yes" --> M{"_file_backed_range<br/>(/proc/self/maps inode != 0)"}
+    M -- "no: heap / anonymous" --> K
+    M -- "yes" --> W{"_only_file_pages<br/>(/proc/self/pagemap: no private<br/>copy-on-write or swapped page)"}
+    W -- "no: someone wrote the mapping" --> K
+    W -- "yes" --> D["madvise(MADV_DONTNEED) on whole pages<br/>inside the tensor only"]
+    classDef fallback fill:#fff4e5,stroke:#b36b00,color:#111;
+    class K fallback;
+```
+
+A private copy-on-write page exists only in this process, and dropping it
+would revert someone's write, so any such page skips the advice. Heap memory is
+never advised. Partial pages at either end are shared with neighbouring
+tensors and stay mapped.
+
+Measured per process (`/proc/self/status`, and `/proc/self/smaps` for the
+checkpoint mapping) on Llama-3.2-1B q4_k_m, `GGUF_CPP_CPU`, 8 threads:
+
+| | RssAnon | RssFile | VmRSS | checkpoint mmap Rss | M=1 token |
+| --- | --- | --- | --- | --- | --- |
+| after load, old | 1237 MiB | 943 MiB | 2181 MiB | 522 MiB | |
+| after load, new | 1237 MiB | 423 MiB | 1660 MiB | 2 MiB | |
+| after forwards, old | 1282 MiB | 1450 MiB | 2732 MiB | 1023 MiB | 28.4 / 31.4 ms |
+| after forwards, new | 1282 MiB | 930 MiB | 2212 MiB | 503 MiB | 27.4 / 22.8 ms |
+
+(The remaining ~500 MiB of checkpoint pages after a forward are the tied
+`embed_tokens`/`lm_head`, read in place.) Token time is unchanged within host
+noise (two alternating runs each, median of 30 tokens); logits and the saved
+checkpoint are bitwise identical. The aligned copy itself stays anonymous: it
+is now the only resident copy of the weight.
+`tests/kernels/test_gguf_cpp_cpu_mmap_residency.py` asserts per-page residency
+of the source range, the copy-on-write guard, and that heap memory is skipped.
 
 ## Failure contract
 

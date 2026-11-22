@@ -1,0 +1,457 @@
+{
+ "description": "Qwen2 decoder, GQA 4q/2kv, untied lm_head, 2-layer MoonViT",
+ "localization_generate": {
+  "text_slow": {
+   "response": "50,36,25,17,61,50,36,25,17,61,50,36",
+   "mtp_rounds": [],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     3,
+     3
+    ],
+    [
+     1,
+     4
+    ],
+    [
+     1,
+     5
+    ],
+    [
+     1,
+     6
+    ],
+    [
+     1,
+     7
+    ],
+    [
+     1,
+     8
+    ],
+    [
+     1,
+     9
+    ],
+    [
+     1,
+     10
+    ],
+    [
+     1,
+     11
+    ],
+    [
+     1,
+     12
+    ],
+    [
+     1,
+     13
+    ],
+    [
+     1,
+     14
+    ]
+   ]
+  },
+  "image_slow": {
+   "response": "6,50,6,50,6,50,6,40,48,16,52,51",
+   "mtp_rounds": [],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     9,
+     9
+    ],
+    [
+     1,
+     10
+    ],
+    [
+     1,
+     11
+    ],
+    [
+     1,
+     12
+    ],
+    [
+     1,
+     13
+    ],
+    [
+     1,
+     14
+    ],
+    [
+     1,
+     15
+    ],
+    [
+     1,
+     16
+    ],
+    [
+     1,
+     17
+    ],
+    [
+     1,
+     18
+    ],
+    [
+     1,
+     19
+    ],
+    [
+     1,
+     20
+    ]
+   ]
+  },
+  "text_fast": {
+   "response": "52,59,59,59,59,59,58,59,59,59,59,59",
+   "mtp_rounds": [
+    {
+     "kind": "mtp",
+     "candidate": [
+      52,
+      59,
+      59,
+      59,
+      59,
+      59
+     ],
+     "type": "ref_object",
+     "tokens": [
+      52,
+      59,
+      59,
+      59,
+      59,
+      59
+     ]
+    },
+    {
+     "kind": "mtp",
+     "candidate": [
+      58,
+      59,
+      59,
+      59,
+      59,
+      59
+     ],
+     "type": "ref_object",
+     "tokens": [
+      58,
+      59,
+      59,
+      59,
+      59,
+      59
+     ]
+    }
+   ],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     9,
+     9
+    ],
+    [
+     12,
+     15
+    ]
+   ]
+  },
+  "image_fast": {
+   "response": "6,52,52,16,52,52,51,59,59,59,59,59",
+   "mtp_rounds": [
+    {
+     "kind": "mtp",
+     "candidate": [
+      6,
+      52,
+      52,
+      16,
+      52,
+      52
+     ],
+     "type": "ref_object",
+     "tokens": [
+      6,
+      52,
+      52,
+      16,
+      52,
+      52
+     ]
+    },
+    {
+     "kind": "mtp",
+     "candidate": [
+      51,
+      59,
+      59,
+      59,
+      59,
+      59
+     ],
+     "type": "ref_object",
+     "tokens": [
+      51,
+      59,
+      59,
+      59,
+      59,
+      59
+     ]
+    }
+   ],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     15,
+     15
+    ],
+    [
+     12,
+     21
+    ]
+   ]
+  },
+  "text_hybrid": {
+   "response": "52,59,59,59,59,59,58,59,59,59,59,59",
+   "mtp_rounds": [
+    {
+     "kind": "mtp",
+     "candidate": [
+      52,
+      59,
+      59,
+      59,
+      59,
+      59
+     ],
+     "type": "ref_object",
+     "tokens": [
+      52,
+      59,
+      59,
+      59,
+      59,
+      59
+     ]
+    },
+    {
+     "kind": "mtp",
+     "candidate": [
+      58,
+      59,
+      59,
+      59,
+      59,
+      59
+     ],
+     "type": "ref_object",
+     "tokens": [
+      58,
+      59,
+      59,
+      59,
+      59,
+      59
+     ]
+    }
+   ],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     9,
+     9
+    ],
+    [
+     12,
+     15
+    ]
+   ]
+  },
+  "image_hybrid": {
+   "response": "6,52,52,16,52,52,51,59,59,59,59,59",
+   "mtp_rounds": [
+    {
+     "kind": "mtp",
+     "candidate": [
+      6,
+      52,
+      52,
+      16,
+      52,
+      52
+     ],
+     "type": "ref_object",
+     "tokens": [
+      6,
+      52,
+      52,
+      16,
+      52,
+      52
+     ]
+    },
+    {
+     "kind": "mtp",
+     "candidate": [
+      51,
+      59,
+      59,
+      59,
+      59,
+      59
+     ],
+     "type": "ref_object",
+     "tokens": [
+      51,
+      59,
+      59,
+      59,
+      59,
+      59
+     ]
+    }
+   ],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     15,
+     15
+    ],
+    [
+     12,
+     21
+    ]
+   ]
+  },
+  "rigged_slow": {
+   "response": "32,32,32,32,32,32,32,32",
+   "mtp_rounds": [],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     3,
+     3
+    ],
+    [
+     1,
+     4
+    ],
+    [
+     1,
+     5
+    ],
+    [
+     1,
+     6
+    ],
+    [
+     1,
+     7
+    ],
+    [
+     1,
+     8
+    ],
+    [
+     1,
+     9
+    ],
+    [
+     1,
+     10
+    ]
+   ]
+  },
+  "rigged_fast": {
+   "response": "32,32,32,32,32,32,32,32,32,32,32,32",
+   "mtp_rounds": [
+    {
+     "kind": "mtp",
+     "candidate": [
+      32,
+      32,
+      32,
+      32,
+      32,
+      32
+     ],
+     "type": "coord_box",
+     "tokens": [
+      32,
+      32,
+      32,
+      32,
+      32,
+      32
+     ]
+    },
+    {
+     "kind": "mtp",
+     "candidate": [
+      32,
+      32,
+      32,
+      32,
+      32,
+      32
+     ],
+     "type": "coord_box",
+     "tokens": [
+      32,
+      32,
+      32,
+      32,
+      32,
+      32
+     ]
+    }
+   ],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     9,
+     9
+    ],
+    [
+     12,
+     15
+    ]
+   ]
+  },
+  "rigged_hybrid": {
+   "response": "32,32",
+   "mtp_rounds": [
+    {
+     "kind": "mtp",
+     "candidate": [
+      32,
+      32,
+      32,
+      32,
+      32,
+      32
+     ],
+     "type": "error_box",
+     "tokens": [
+      32
+     ]
+    }
+   ],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     9,
+     9
+    ],
+    [
+     1,
+     4
+    ]
+   ]
+  }
+ },
+ "config_overrides_note": "see config.json; model_type/architecture=Qwen2ForCausalLM"
+}

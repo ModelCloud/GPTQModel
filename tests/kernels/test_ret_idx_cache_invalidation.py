@@ -11,7 +11,6 @@ real load path and compare against an independent re-derivation of the index.
 
 from __future__ import annotations
 
-import copy
 import weakref
 
 import pytest
@@ -334,41 +333,15 @@ def _fused_module(cls, checkpoint):
     )
     for name, value in checkpoint.items():
         setattr(module, name, value.clone())
+    # Raw buffer writes bypass the load hook, so declare the layout of the
+    # words just written, as every product writer does (the v1->v2 loader
+    # conversion, packing, the offload restore). These checkpoints store the
+    # logical zero codes the fused kernels decode, i.e. the v2 layout.
+    # Unresolved words are raw v1 checkpoint words to the load hook (#4377).
+    module.qzero_format(format=2)
     module.eval()
     module._init_wf_unsqueeze_buffers()
     return module
-
-
-@pytest.mark.parametrize("cls", [TorchFusedLinear, TorchAtenLinear])
-@pytest.mark.parametrize(
-    ("source_dtype", "target_dtype"),
-    ((torch.float16, torch.bfloat16), (torch.bfloat16, torch.float16)),
-)
-def test_low_precision_move_refinalizes_asymmetric_affine(cls, source_dtype, target_dtype):
-    """A narrowed affine pair must not decode with the pre-move offsets.
-
-    ``qzeros`` stores offsets computed from the scale dtype. Keeping the live
-    runtime layout across an FP16/BF16 move would pair the narrowed scales with
-    offsets built at the old precision, silently changing the decoded weights.
-    Compare with a checkpoint-layout copy moved before its first transform.
-    """
-
-    checkpoint = _asymmetric_checkpoint(source_dtype)
-    layer = _fused_module(cls, checkpoint)
-    fresh = copy.deepcopy(layer)
-    activation = torch.randn(4, IN_FEATURES, dtype=source_dtype)
-    with torch.no_grad():
-        layer(activation)
-
-    layer.to(dtype=target_dtype)
-    fresh.to(dtype=target_dtype)
-    moved_input = activation.to(target_dtype)
-    with torch.no_grad():
-        actual = layer(moved_input)
-        expected = fresh(moved_input)
-
-    assert actual.dtype == target_dtype
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def _dense_oracle(checkpoint, activation):
@@ -479,7 +452,9 @@ def test_fused_forward_observes_buffer_changes(cls, name, replace, dtype):
 
 
 @pytest.mark.parametrize("cls", [TorchFusedLinear, TorchAtenLinear])
-@pytest.mark.parametrize("operation", ["clear", "move", "load_assign"])
+# A post-forward dtype move is rejected by the forward dtype contract
+# (contracts/kernel/forward-dtype.md), so it is not a cache lifecycle event.
+@pytest.mark.parametrize("operation", ["clear", "load_assign"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_fused_cache_lifecycle_with_inference_tensors(cls, operation, dtype):
     with torch.inference_mode():
@@ -495,10 +470,7 @@ def test_fused_cache_lifecycle_with_inference_tensors(cls, operation, dtype):
             module.load_state_dict(state, assign=True)
         else:
             module.scales.mul_(2)
-            if operation == "clear":
-                module.clear_weight_cache()
-            else:
-                module.to(dtype=torch.float32)
+            module.clear_weight_cache()
         checkpoint["scales"].mul_(2)
         assert old_metadata() is None
         expected = _dense_oracle(checkpoint, activation)
@@ -537,7 +509,13 @@ def test_fused_refresh_preserves_wider_source_metadata(cls, dtype, operation):
     with torch.no_grad():
         module(activation)
         if operation == "load_assign":
-            state = {name: value.clone() for name, value in module.state_dict().items()}
+            # ``state_dict()`` emits the checkpoint snapshot layout (#4091), so
+            # a wider-dtype load of *runtime* metadata must be driven from the
+            # live packed buffers, not from ``state_dict()``.
+            state = {
+                name: getattr(module, name).detach().clone()
+                for name in ("qweight", "qzeros", "scales", "g_idx")
+            }
             state["scales"] = state["scales"].float().fill_(2049)
             state["qzeros"] = state["qzeros"].float().fill_(-2048)
             module.load_state_dict(state, assign=True)

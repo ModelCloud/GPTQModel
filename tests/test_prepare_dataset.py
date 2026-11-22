@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.quantization import METHOD
+from gptqmodel.quantization import METHOD, CalibrationConfig
 from gptqmodel.utils.calibration import batched_conversations, normalize_chat_calibration_sample
 from gptqmodel.utils.data import collate_data
 
@@ -243,9 +243,10 @@ def test_prepare_dataset_concat_preserves_every_row_of_a_2d_item():
 
     ids = [int(value) for batch in concat for value in batch["input_ids"][0].tolist()]
     masks = [int(value) for batch in concat for value in batch["attention_mask"][0].tolist()]
-    # Both rows are present in order; only trailing padding follows.
-    assert ids == [11, 12, 13, 21, 22, 23, 0, 0]
-    assert masks == [1, 1, 1] + [1, 0, 1] + [0, 0]
+    # Both rows are present in order; the masked position is stripped instead
+    # of being packed, and only trailing padding follows (#4311).
+    assert ids == [11, 12, 13, 21, 23, 0, 0, 0]
+    assert masks == [1, 1, 1, 1, 1, 0, 0, 0]
 
 
 def test_prepare_dataset_concat_separates_rows_of_a_2d_item():
@@ -284,7 +285,7 @@ def test_prepare_dataset_collapses_causal_attention_mask():
     assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1]]
 
 
-def test_quantize_with_calibration_honors_calibration_data_min_length(monkeypatch):
+def test_quantize_with_calibration_honors_calibration_min_length(monkeypatch):
     from gptqmodel.looper import gptq_processor, module_looper
 
     qmodel = _make_qmodel()
@@ -307,6 +308,7 @@ def test_quantize_with_calibration_honors_calibration_data_min_length(monkeypatc
                 calibration_dataset_concat_size=calibration.concat_size,
                 calibration_dataset_sort=calibration.sort,
                 batch_size=calibration.batch_size,
+                calibration_data_min_length=calibration.min_length,
                 calibration_concat_separator=calibration.concat_separator,
             )
             prepared_datasets.append(self.calibration_dataset)
@@ -323,14 +325,8 @@ def test_quantize_with_calibration_honors_calibration_data_min_length(monkeypatc
     monkeypatch.setattr(module_looper, "ModuleLooper", _StubModuleLooper)
 
     result = qmodel._quantize_with_calibration(
-        calibration=["short"],
-        calibration_concat_size=None,
-        calibration_sort=None,
-        calibration_data_min_length=1,
-        batch_size=1,
+        calibration=CalibrationConfig(dataset=["short"], sort=None, min_length=1),
         backend=None,
-        adapter_calibration_dataset=None,
-        calibration_concat_separator=None,
         embed_quant_config=None,
     )
 
@@ -372,6 +368,7 @@ def test_calibrated_preprocessor_factory_omits_primary_only_arguments(monkeypatc
                 calibration_dataset_concat_size=calibration.concat_size,
                 calibration_dataset_sort=calibration.sort,
                 batch_size=calibration.batch_size,
+                calibration_data_min_length=calibration.min_length,
                 calibration_concat_separator=calibration.concat_separator,
             )
             constructed.append(self)
@@ -391,14 +388,8 @@ def test_calibrated_preprocessor_factory_omits_primary_only_arguments(monkeypatc
     monkeypatch.setattr(module_looper, "ModuleLooper", _StubModuleLooper)
 
     result = qmodel._quantize_with_calibration(
-        calibration=["short"],
-        calibration_concat_size=None,
-        calibration_sort=None,
-        calibration_data_min_length=1,
-        batch_size=1,
+        calibration=CalibrationConfig(dataset=["short"], sort=None, min_length=1),
         backend=None,
-        adapter_calibration_dataset=None,
-        calibration_concat_separator=None,
         embed_quant_config=None,
         run_plan=SimpleNamespace(
             weight_only=False,
@@ -430,8 +421,10 @@ def test_prepare_dataset_normalizes_rank_4_attention_mask():
     )
 
     assert len(batches) == 1
-    assert batches[0]["input_ids"].tolist() == [[1, 2, 3, 0, 0]]
-    assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1, 0, 0]]
+    # The rank-4 mask collapses to the 2-D keep mask, and the trailing mask-0
+    # positions are tokenizer padding, stripped since #4889.
+    assert batches[0]["input_ids"].tolist() == [[1, 2, 3]]
+    assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1]]
 
 
 def test_prepare_dataset_prefers_apply_chat_template_for_messages():

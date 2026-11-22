@@ -22,7 +22,7 @@ unquantized modules add storage beyond the nominal weight bit width.
 | GPTQ | Integer 2, 3, 4, 5, 6, 7, or 8 bits | Normally FP16/BF16; kernel support varies by bit width | Required |
 | AWQ | Integer weights; start with 4 bits | Normally FP16/BF16; optimized kernels commonly require 4-bit weights | Required |
 | RTN | Rounded integer weights exported in GPTQ or AWQ layout | Normally FP16/BF16, according to the destination kernel | Not required |
-| ParoQuant | INT4 with learned rotations | FP16/BF16 | Required; includes optimization |
+| Paro | INT4 with learned rotations | FP16/BF16 | Required; includes optimization |
 | QQQ | Symmetric INT4, group size 128 or -1 | Dynamic INT8 activation quantization inside the linear operation; FP16/BF16 inputs and outputs | Required |
 | GGUF | Format-specific blocks, e.g. Q4_0 or Q4_K_M | Native kernels consume floating-point activations | Not required |
 | FP8 | E4M3 or E5M2 weights with scales | The native Torch path consumes floating-point activations; this config alone does not select W8A8 | Not required |
@@ -52,7 +52,7 @@ import gc
 
 import torch
 from datasets import load_dataset
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.quantization import GPTQConfig
 
 model_id = "Qwen/Qwen3-0.6B"
@@ -63,7 +63,7 @@ backend = BACKEND.TORCH
 
 # Calibration-based recipes need representative text. Streaming avoids
 # downloading the entire C4 shard. Weight-only recipes skip this step.
-calibration = None
+calibration = None  # weight-only recipes call `model.quantize()` without one
 if qcfg.requires_calibration_dataset():
     dataset = load_dataset(
         "allenai/c4",
@@ -71,10 +71,13 @@ if qcfg.requires_calibration_dataset():
         split="train",
         streaming=True,
     )
-    calibration = [row["text"] for row in dataset.take(256)]
+    calibration = CalibrationConfig(
+        dataset=[row["text"] for row in dataset.take(256)],
+        batch_size=1,
+    )
 
 model = GPTQModel.load(model_id, qcfg, device="cuda:0", dtype=torch.float16)
-model.quantize(calibration, batch_size=1, backend=backend)
+model.quantize(calibration, backend=backend)
 model.save(quant_path)
 
 # Release the first model before loading the saved checkpoint.
@@ -167,6 +170,52 @@ asymmetric weights where the chosen kernel supports them. `desc_act=True`
 enables GPTQ activation ordering and disables the default group-aware ordering;
 do not explicitly enable both `desc_act` and `act_group_aware`.
 
+Disabling the group-aware ordering also disables its per-group scale
+protection, so on models whose tokenizer emits a BOS token `desc_act=True`
+makes attention-sink damage much worse: the few sink rows own the largest
+Hessian diagonal, get ordered first with a tiny `Hinv[i, i]`, and their
+quantization error is amplified into every column correlated with the sink.
+On Llama-3.1-8B that saturated `layers.1.mlp.down_proj` and produced garbage
+perplexity (up to ~12000) on wikitext windows whose first token after BOS is a
+delimiter (issue #4742). To bound that, `desc_act=True` now caps each
+calibration row's norm at `min(p99.9, N x median)` before forming `X^T X`,
+where `N` is `HessianConfig.sink_row_cap_median_multiple` (default `4.0`).
+The cap keeps the sink direction but stops it from dominating the Hessian:
+
+```python
+from gptqmodel.quantization.config import GPTQConfig, HessianConfig
+
+qcfg = GPTQConfig(
+    bits=4,
+    group_size=128,
+    desc_act=True,
+    hessian=HessianConfig(sink_row_cap_median_multiple=4.0),  # default; 0 or None disables
+)
+```
+
+The cap is a no-op whenever `act_group_aware` is active, so the default GPTQ
+path is bit-for-bit unchanged. It is a mitigation, not a guarantee: still
+validate the checkpoint per model, and consider dropping the sink rows
+outright with `CalibrationConfig(exclude_attention_sinks=True)` below.
+
+Tokenizers that prepend a BOS token make it an attention sink: its activation
+norm can exceed the text tokens by hundreds of times, so a few rows dominate the
+input Hessian and the quantizer stops optimizing for text tokens (issue #4393).
+`CalibrationConfig(exclude_attention_sinks=True)` drops every attended BOS token (the
+leading one and each document-boundary BOS of concatenated calibration) from
+every calibration method's statistics (GPTQ, GPTAQ, FOEM, QQQ, MACaQ, EXL3, AWQ) while still running it through the forward:
+
+```python
+model.quantize(CalibrationConfig(dataset=texts, exclude_attention_sinks=True))
+```
+
+The default is `False`, which keeps the historical statistics bit for bit. A
+tokenizer without a BOS token (Qwen2.5/Qwen3) has no sink to drop, so the option
+changes nothing for it (issue #4459). VPTQ, Paro and staged GSQ reject the
+option. The effect is model-dependent, so validate it per model. See
+[calibration attention-sink exclusion](calibration-attention-sinks.md) for the
+exact token rule, the flow, and measurements.
+
 ### AWQ W4A16
 
 ```python
@@ -179,6 +228,23 @@ backend = BACKEND.AWQ_TORCH
 This writes the default AWQ GEMM format. Calibration is still required.
 Other AWQ layouts have different runtime and dtype restrictions; changing only
 the file's format label does not convert the packed tensors.
+
+`FORMAT.GEMV` checkpoints are packed with the native CUDA GEMV kernel on CUDA,
+with `AWQ_GEMV_TRITON` on ROCm, and with the portable Torch reader
+(`BACKEND.AWQ_TORCH`) on a CPU-only host. The CPU reader is also what
+`quantize()` re-homes the in-session model to after the packing loop leaves the
+layers on CPU, so `quantize()` -> `save()` completes on every host and still
+writes the requested GEMV checkpoint (issue #4554).
+
+`FORMAT.GEMV_FAST` and `FORMAT.LLM_AWQ` follow the same rule: the native
+CUDA GEMV_FAST kernel packs on CUDA, and the portable Torch readers
+(`AwqGEMVFastTorchLinear`, `LLMAwqTorchLinear`, `BACKEND.AWQ_TORCH`) pack on
+every host without that extension - a CPU-only host (#4736) and ROCm, where
+hipcc cannot build it (#5109) - and serve as the in-session kernel, so
+`quantize()` -> `save()` keeps the calibration and writes the requested
+interleaved checkpoint. On CUDA an AUTO load still selects the native kernel;
+on CPU and ROCm the same AUTO load resolves the portable reader, because these
+two layouts have no Triton kernel.
 
 ### RTN W4A16 without calibration
 
@@ -206,73 +272,33 @@ Use a compatible NVIDIA GPU and CUDA build for `BACKEND.QQQ`;
 `group_size=-1`. Activation ordering is unsupported. INT8 activation operands
 inside QQQ do not change the model's public FP16/BF16 input/output dtype.
 
-### FP8 weights
+### FP8 weights (load-only)
 
-```python
-from gptqmodel.quantization import FP8Config
+FP8 is a production checkpoint format, not a GPT-QModel quantization recipe.
+GPT-QModel no longer quantizes or exports FP8 weights: `FP8Config` exists to
+describe a checkpoint you load, and `GPTQModel.quantize()` refuses it with a
+`ValueError`. Load production FP8 checkpoints with `GPTQModel.load` (or
+`transformers` directly):
 
-qcfg = FP8Config(bits=8, format="float8_e4m3fn", weight_scale_method="row")
-backend = BACKEND.FP8_TORCH
-```
+- `transformers` `FineGrainedFP8` and DeepSeek/Qwen block scales, which store
+  `amax / 448` under `weight_scale_inv` and multiply it;
+- NVIDIA ModelOpt per-tensor scales;
+- MXFP8 and NVFP8 on hardware that supports them.
 
-Use `format="float8_e5m2"` for E5M2. This recipe quantizes weights without
-calibration; it does not enable the experimental GPTQ FP8 activation stream.
+A loaded checkpoint may use `float8_e4m3fn` or `float8_e5m2`. Legacy
+GPT-QModel checkpoints that store an inverse scale still load when they
+declare `weight_scale_semantics="inverse"`; that spelling is accepted on load
+and never written. The legacy `quant_method: "gptqmodel_fp8"` name is also
+accepted on load and normalized to `fp8`; it is never written again.
 
 `TorchFP8Linear` is **weight-only (W8A16)**: the packed FP8 weight tile is
 dequantized for the current matmul and activations keep their FP16/BF16 input
-dtype. The GPU `torch._scaled_mm` path is not used by this recipe. It is
-reachable only through the explicit
+dtype. The GPU `torch._scaled_mm` path is not used by default. It is reachable
+only through the explicit
 `TorchFP8Linear.set_activation_quant_method("per_token")` opt-in, which makes
 the layer **W8A8** with one activation scale per token. There is no per-tensor
 activation mode, because it would make a row's output depend on its batch
 neighbours. See [FP8 weight-only dispatch](fp8-weight-only-dispatch.md).
-
-#### FP8 source weight validation
-
-FP8 quantization requires finite dense source weights that remain finite when
-converted to FP32. `quantize_fp8_weight` rejects Inf, NaN, and values outside
-FP32's range by checking the already-computed absolute maxima before inverse
-scales. `TorchFP8Linear.pack_original` checks the source before an optional
-smoother and before MLX dispatch; the ordinary Torch path uses the direct
-quantizer's check. This contract was introduced in PR #3742.
-
-| Previous path | Current path |
-| --- | --- |
-| `quantize_fp8_weight` computed `amax` and inverse scales from the FP32 copy without validating the source (`gptqmodel/nn_modules/qlinear/fp8.py:131` at the previous revision). | `_require_finite_fp8_source` checks each method's computed absolute maxima before inverse scales. |
-| `TorchFP8Linear.pack_original` smoothed and selected the packer directly (`gptqmodel/nn_modules/qlinear/fp8.py:348` at the previous revision). | It validates before smoothing or MLX dispatch; the Torch path checks its maxima. |
-
-```mermaid
-flowchart TD
-    A["TorchFP8Linear.pack_original"] --> B["Convert source to CPU FP32"]
-    B --> C{"Smoother configured?"}
-    C -- Yes --> D["_require_finite_fp8_source before smoothing"]
-    D --> D2{"Finite?"}
-    D2 -- Yes --> E["Optional smoothing"]
-    D2 -- No --> X["ValueError before packed buffers change"]
-    C -- No --> E
-    E --> F{"MLX large-weight path selected?"}
-    F -- Yes --> V["_require_finite_fp8_source before MLX"]
-    V --> V2{"Finite?"}
-    V2 -- Yes --> G["quantize_fp8_weight_mlx validates and packs"]
-    V2 -- No --> X
-    F -- No --> H["quantize_fp8_weight"]
-    Q["Direct quantize_fp8_weight"] --> H
-    H --> I["Convert source to CPU FP32 and compute abs maxima"]
-    I --> K["_require_finite_fp8_source on maxima"]
-    K --> K2{"Finite?"}
-    K2 -- No --> X
-    K2 -- Yes --> L["Compute inverse scales and FP8 codes"]
-    G --> R["Return FP8 codes and inverse scales"]
-    L --> R
-    R --> N{"Called by pack_original?"}
-    N -- Yes --> J["Install packed weight and scale buffers"]
-    N -- No --> U["Return to direct caller"]
-    classDef failure fill:#fdd,stroke:#c00,color:#000
-    class X failure
-```
-
-The validation creates no persistent weight cache. Packed FP8 weights and
-inverse scales remain the only weight storage installed by the packer.
 
 ### GGUF block quantization
 
@@ -311,17 +337,17 @@ requires FP32 scales. Compressed 4-bit statistics can also cause a
 by leaving statistics uncompressed and reloading in FP32. Its reloaded model
 therefore uses FP32 activations, rather than the W4A16 workflow above.
 
-### ParoQuant W4A16
+### Paro W4A16
 
 ```python
 from gptqmodel.quantization import ParoConfig
 
 qcfg = ParoConfig(bits=4, group_size=128)
-backend = BACKEND.PAROQUANT_CUDA
+backend = BACKEND.PARO_CUDA
 ```
 
-ParoQuant learns rotations during calibration. Budget for optimization time
-and activation memory; see [optimization scopes and checkpointing](paroquant.md).
+Paro learns rotations during calibration. Budget for optimization time
+and activation memory; see [optimization scopes and checkpointing](paro.md).
 The CUDA recipe requires a compatible GPU and build toolchain.
 
 ### EXL3 variable bitrate
@@ -332,6 +358,9 @@ from gptqmodel.quantization import EXL3Config
 qcfg = EXL3Config(bits=4.0, codebook="mcg")
 backend = BACKEND.EXL3_EXLLAMA_V3
 ```
+
+Set `codebook="q4nx"` with `bits=2.5`, `3.0`, or `3.5` to use EXL3's Q4NX
+codebook on NVIDIA CUDA. [Q4NX checkpoint layout and per-projection recipe](exl3-native-decode.md#q4nx)
 
 `bits` is a target average bitrate, not a uniform integer field width.
 Quantization requires CUDA/HIP and the ExLlama V3 integration and its build

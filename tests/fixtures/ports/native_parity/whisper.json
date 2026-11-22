@@ -1,0 +1,85 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "activation_dropout": 0.0,
+  "activation_function": "gelu",
+  "apply_spec_augment": false,
+  "architectures": null,
+  "attention_dropout": 0.1,
+  "begin_suppress_tokens": [
+   220,
+   50256
+  ],
+  "bos_token_id": 50256,
+  "chunk_size_feed_forward": 0,
+  "classifier_proj_size": 4,
+  "d_model": 16,
+  "decoder_attention_heads": 4,
+  "decoder_ffn_dim": 16,
+  "decoder_layerdrop": 0.0,
+  "decoder_layers": 2,
+  "decoder_start_token_id": 50257,
+  "dropout": 0.1,
+  "dtype": null,
+  "encoder_attention_heads": 4,
+  "encoder_ffn_dim": 16,
+  "encoder_layerdrop": 0.0,
+  "encoder_layers": 2,
+  "eos_token_id": 50256,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "init_std": 0.02,
+  "input_channels": 1,
+  "is_decoder": false,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "mask_feature_length": 10,
+  "mask_feature_min_masks": 0,
+  "mask_feature_prob": 0.0,
+  "mask_time_length": 10,
+  "mask_time_min_masks": 2,
+  "mask_time_prob": 0.05,
+  "max_position_embeddings": 20,
+  "max_source_positions": 30,
+  "max_target_positions": 448,
+  "median_filter_width": 7,
+  "model_type": "whisper",
+  "num_mel_bins": 80,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 50256,
+  "problem_type": null,
+  "return_dict": true,
+  "scale_embedding": false,
+  "suppress_tokens": null,
+  "tie_word_embeddings": true,
+  "transformers_version": "5.23.0",
+  "use_cache": true,
+  "use_weighted_layer_sum": false,
+  "vocab_size": 51865
+ },
+ "config_class": "WhisperConfig",
+ "config_module": "configuration_whisper",
+ "extra_inputs": {},
+ "float_inputs": {
+  "input_features": {
+   "dtype": "float32",
+   "shape": [
+    3,
+    80,
+    60
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_whisper",
+   "WhisperForAudioClassification"
+  ]
+ ]
+}

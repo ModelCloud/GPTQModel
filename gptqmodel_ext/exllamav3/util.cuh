@@ -1,5 +1,24 @@
 #pragma once
 
+// gpu_assert reports through stderr; CUDA 13.1 no longer provides <cstdio> and
+// <cstdlib> transitively, so the device-side assertion path failed to compile.
+#include <cstdio>
+#include <cstdlib>
+
+// The half2/bfloat162 vectors below are built from the CUDA spellings
+// (__nv_bfloat162, __halves2bfloat162). Hipify rewrites those identifiers to
+// their HIP spellings in the generated util_hip.cuh, but hipify does not add
+// the header that declares them, and this file has no include of its own: on
+// CUDA the translation units that use it happen to pull in cuda_bf16.h
+// transitively, on ROCm nothing does, so exl3_comp_unit_frac failed with
+// "unknown type name '__hip_bfloat162'" (#5760). Include the bf16 header
+// explicitly for each platform.
+#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
+#include <hip/hip_bf16.h>
+#else
+#include <cuda_bf16.h>
+#endif
+
 typedef struct __align__(8) half4
 {
     half2 x;

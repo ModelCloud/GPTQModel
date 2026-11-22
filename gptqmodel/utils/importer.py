@@ -18,13 +18,13 @@ import torch
 from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
-from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear, new_validation_error
 from ..quantization import FORMAT, METHOD
 from ..quantization.config import _normalize_quant_bits, quant_bits_width
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from . import BACKEND
-from .backend import normalize_backend
+from .backend import NATIVE_TTNN_BACKENDS, normalize_backend
 from .rocm import IS_ROCM
 from .torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU, is_xla_available, xla_device_count
 
@@ -228,15 +228,6 @@ def _validation_method_identity(cls, name: str):
     return None
 
 
-def _new_validation_error(error_type, message):
-    if error_type is None:
-        return None
-    try:
-        return error_type(message)
-    except Exception:
-        return ValueError(message)
-
-
 def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
     """Validate one kernel contract with a bounded, device-aware cache.
 
@@ -272,7 +263,7 @@ def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
         if cached is not None:
             _VALIDATION_CACHE.move_to_end(key)
             ok, error_type, error_message = cached
-            return ok, _new_validation_error(error_type, error_message)
+            return ok, new_validation_error(error_type, error_message)
         generation = _VALIDATION_CACHE_GENERATION
 
     try:
@@ -293,12 +284,12 @@ def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
             class_cache_clear = getattr(cls.cached_validate_once, "cache_clear", None)
             if class_cache_clear is not None:
                 class_cache_clear()
-            return bool(ok), _new_validation_error(error_type, error_message)
+            return bool(ok), new_validation_error(error_type, error_message)
         _VALIDATION_CACHE[key] = cached
         _VALIDATION_CACHE.move_to_end(key)
         while len(_VALIDATION_CACHE) > _VALIDATION_CACHE_MAXSIZE:
             _VALIDATION_CACHE.popitem(last=False)
-    return bool(ok), _new_validation_error(error_type, error_message)
+    return bool(ok), new_validation_error(error_type, error_message)
 
 
 def clear_validation_cache() -> None:
@@ -318,8 +309,45 @@ def selector_device_family(device: Optional[SelectorDevices]) -> Optional[DEVICE
     return _device_family(targets[0])
 
 
-def expand_selector_device_family(device: SelectorDevices) -> SelectorDevice | tuple[SelectorDevice, ...]:
-    """Expand one abstract accelerator family to all visible physical devices."""
+def _compute_capability_group(
+    devices: tuple[SelectorDevice, ...],
+) -> tuple[SelectorDevice, ...]:
+    """Devices that share the first entry's compute capability.
+
+    Kernel selection needs one capability, so a default placement that expands
+    to every visible GPU refuses the whole load on a host that mixes
+    generations (a 4090 next to a 5090) even when the model fits on one card
+    (#4705). Entries whose capability cannot be queried are kept.
+    """
+
+    if len(devices) < 2:
+        return devices
+    first = devices[0]
+    if _device_family(first) not in (DEVICE.CUDA, DEVICE.ROCM):
+        return devices
+    capability = _device_capability(first)
+    if capability is None:
+        return devices
+    kept = tuple(
+        device
+        for device in devices
+        if _device_family(device) not in (DEVICE.CUDA, DEVICE.ROCM)
+        or _device_capability(device) in (None, capability)
+    )
+    return kept or devices
+
+
+def expand_selector_device_family(
+    device: SelectorDevices, *, single_capability_group: bool = False
+) -> SelectorDevice | tuple[SelectorDevice, ...]:
+    """Expand one abstract accelerator family to all visible physical devices.
+
+    ``single_capability_group`` keeps the expansion inside the first device's
+    compute-capability group. The default placement uses it: without a
+    placement argument a mixed-generation host must still load, and the caller
+    can always ask for the full span with ``device``/``device_map``/
+    ``max_memory`` (#4705).
+    """
     targets = _selector_devices(device)
     assert targets is not None
     if len(targets) != 1:
@@ -355,6 +383,8 @@ def expand_selector_device_family(device: SelectorDevices) -> SelectorDevice | t
         return family
 
     devices = tuple(torch.device(f"{runtime_type}:{index}") for index in range(count))
+    if single_capability_group:
+        devices = _compute_capability_group(devices)
     _validate_selector_device_families(devices)
     return devices[0] if len(devices) == 1 else devices
 
@@ -1014,7 +1044,9 @@ def _is_accelerate_offload_target(value: str) -> bool:
     return value.strip().lower() in ACCELERATE_OFFLOAD_TARGETS
 
 
-def _validate_selector_device_families(devices: Sequence[SelectorDevice]) -> None:
+def _validate_selector_device_families(
+    devices: Sequence[SelectorDevice], *, hint: Optional[str] = None
+) -> None:
     families = {_device_family(device) for device in devices if device != DEVICE.ALL}
     if len(families) > 1:
         raise ValueError(
@@ -1034,39 +1066,105 @@ def _validate_selector_device_families(devices: Sequence[SelectorDevice]) -> Non
             for device, capability in device_capabilities
             if capability is not None
         )
+        remedy = hint or (
+            "Place the model on one capability group with `device=\"cuda:N\"`, "
+            "a `max_memory` budget that names one card, or a "
+            "`CUDA_VISIBLE_DEVICES` list."
+        )
         raise ValueError(
             "Quantized kernel selection does not support a device map spanning "
-            f"different GPU compute capabilities: {rendered}."
+            f"different GPU compute capabilities: {rendered}. {remedy}"
         )
 
 
-def _accelerate_keyword_device(accelerator) -> SelectorDevice | tuple[SelectorDevice, ...]:
+def _accelerate_keyword_device(
+    accelerator, *, defer_placement: bool = False
+) -> SelectorDevice | tuple[SelectorDevice, ...]:
     if accelerator is None:
         return DEVICE.CPU
 
     family = _device_family(torch.device(accelerator.type))
-    return expand_selector_device_family(family)
+    if not defer_placement:
+        return expand_selector_device_family(family)
+
+    # A homogeneous host keeps the historical expansion, so the selected kernel
+    # stays identical to the one a resolved map would pick. Only a host whose
+    # visible GPUs span capability groups defers to the family: there the
+    # placement is still unknown, and a kernel valid on every visible device is
+    # the only choice that can serve any resolved budget (#5084).
+    if family not in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU):
+        return family
+    runtime_type = "cuda" if family == DEVICE.ROCM else family.type
+    runtime = getattr(torch, runtime_type, None)
+    count_getter = getattr(runtime, "device_count", None)
+    if count_getter is None:
+        return family
+    try:
+        count = count_getter()
+    except Exception:
+        return family
+    if count < 1:
+        return family
+    devices = tuple(torch.device(f"{runtime_type}:{index}") for index in range(count))
+    if len(_compute_capability_group(devices)) == len(devices):
+        return devices[0] if len(devices) == 1 else devices
+    return family
 
 
 def hf_normalize_device_device_map(
     device: Optional[Union[str, torch.device]],
     device_map: Optional[Union[str, Dict]],
 ) -> SelectorDevice | tuple[SelectorDevice, ...]:
-    return normalize_device_device_map(device=device, device_map=device_map, default=DEVICE.CPU)
+    """Normalize the placement a Transformers/Optimum quantizer hook receives.
+
+    Transformers calls ``preprocess_model`` before it resolves the map from
+    ``max_memory``, so an accelerate keyword map (``"auto"``, ``"balanced"``,
+    ``"sequential"``) is not a placement yet. Expanding it to every visible GPU
+    made kernel selection refuse budgets that never touch the other card
+    (#5084). Keep the accelerator *family* instead: a family selector makes
+    every kernel validate against all visible devices, rather than picking a
+    kernel for a card the budget may exclude.
+    """
+    return normalize_device_device_map(
+        device=device,
+        device_map=device_map,
+        default=DEVICE.CPU,
+        defer_keyword_placement=True,
+    )
 
 
 def normalize_device_device_map(
     device: Optional[Union[str, int, torch.device, DEVICE]],
     device_map: Optional[Union[str, Dict]],
     default: Optional[SelectorDevice] = None,
+    *,
+    validate_families: bool = True,
+    defer_keyword_placement: bool = False,
 ) -> SelectorDevice | tuple[SelectorDevice, ...]:
+    """Normalize a public ``device``/``device_map`` pair.
+
+    ``validate_families`` enforces the single compute-capability group that the
+    inference kernel selection requires (#4632/#4705/#4734). A quantization load
+    selects no inference kernel for its device pool, so its entry points pass
+    ``False`` and a pool may span generations (#4875).
+
+    ``defer_keyword_placement`` returns an accelerate keyword map
+    (``"auto"``/``"balanced"``/``"sequential"``) as the accelerator family
+    instead of expanding it to every visible GPU. Callers that receive the map
+    before ``max_memory`` is applied cannot know the placement, so they must
+    not reject it; the family keeps each kernel valid on every visible device
+    (#5084).
+    """
+
     normalized_device: Optional[SelectorDevice] = default
     accelerator = torch.accelerator.current_accelerator()
     if device is None:
         if device_map is not None:
             if isinstance(device_map, str):
                 if _is_accelerate_device_map_keyword(device_map):
-                    return _accelerate_keyword_device(accelerator)
+                    return _accelerate_keyword_device(
+                        accelerator, defer_placement=defer_keyword_placement
+                    )
                 devices = (device_map,)
             else:
                 # Preserve map order and concrete ordinals.  A set here would
@@ -1078,7 +1176,9 @@ def normalize_device_device_map(
                     continue
                 if isinstance(map_device, str):
                     if _is_accelerate_device_map_keyword(map_device) or map_device == "auto":
-                        return _accelerate_keyword_device(accelerator)
+                        return _accelerate_keyword_device(
+                            accelerator, defer_placement=defer_keyword_placement
+                        )
                     if _is_accelerate_offload_target(map_device):
                         continue
                 candidate = _as_selector_device(map_device)
@@ -1093,7 +1193,8 @@ def normalize_device_device_map(
             ]
             selected_devices = accelerator_devices or normalized_devices
             if selected_devices:
-                _validate_selector_device_families(selected_devices)
+                if validate_families:
+                    _validate_selector_device_families(selected_devices)
                 normalized_device = (
                     selected_devices[0]
                     if len(selected_devices) == 1
@@ -1107,7 +1208,8 @@ def normalize_device_device_map(
         else:
             normalized = _selector_devices(device)
             assert normalized is not None
-            _validate_selector_device_families(normalized)
+            if validate_families:
+                _validate_selector_device_families(normalized)
             normalized_device = normalized[0] if len(normalized) == 1 else normalized
 
     # map fake cuda to actual rocm
@@ -1127,8 +1229,8 @@ def auto_select_device(
         # Backend-specific kernels should default to a compatible device class.
         if backend in (BACKEND.GPTQ_TORCH_FUSED, BACKEND.AWQ_TORCH_FUSED, BACKEND.TORCH_FUSED, BACKEND.TORCH_FUSED_AWQ):
             return DEVICE.XPU if HAS_XPU else DEVICE.CPU
-        if backend == BACKEND.GPTQ_TTNN:
-            # The native TTNN backend opens its own mesh. Probing XLA
+        if backend in NATIVE_TTNN_BACKENDS:
+            # The native TTNN backends open their own mesh. Probing XLA
             # availability here would initialize the PJRT plugin and claim every
             # Tenstorrent chip before TT-Metal can take ownership, so select the
             # family without touching the runtime.
@@ -1150,6 +1252,82 @@ def auto_select_device(
         else:
             device = DEVICE.CPU
     return device
+
+
+def device_map_uses_cpu(device_map) -> bool:
+    """Whether a placement map contains a CPU-resident entry.
+
+    The HF bridge (`hf_select_quant_linear` / `hf_select_quant_linear_v2`) is
+    called by Transformers and Optimum *before* the weights are dispatched, so
+    it has to derive the CPU-offload contract from the map it is given. Without
+    it AUTO picked `MarlinLinear` / `AwqMarlinLinear` for a map that offloads
+    some layers to CPU, and those kernels need CUDA during `post_init` (#5022).
+
+    An integer is a device ordinal, not a CPU placement; `"disk"` and other
+    accelerate offload spellings are not CPU-resident either.
+    """
+
+    if not isinstance(device_map, dict):
+        return False
+    for value in device_map.values():
+        if value is None or isinstance(value, int):
+            continue
+        try:
+            if torch.device(value).type == "cpu":
+                return True
+        except (RuntimeError, ValueError):
+            continue
+    return False
+
+
+def is_offload_placement(value) -> bool:
+    """Whether one resolved device-map entry offloads its layer to CPU or disk.
+
+    An integer is a device ordinal, not an offload. `"disk"` is accelerate's
+    disk-offload spelling and is not CPU-resident, but it still leaves the layer
+    without tensors during `post_init` (#5194).
+    """
+
+    if value is None or isinstance(value, int):
+        return False
+    if isinstance(value, str) and value.strip().lower() == "disk":
+        return True
+    try:
+        return torch.device(value).type == "cpu"
+    except (RuntimeError, ValueError):
+        return False
+
+
+def device_map_offloads_layers(device_map) -> bool:
+    """Whether a placement map sends any layer to CPU *or* disk.
+
+    `device_map_uses_cpu` answers the narrower "is a layer CPU-resident"
+    question. Kernel selection needs the wider one: a disk-mapped layer has no
+    tensors at all during `post_init`, so a kernel that needs resident CUDA
+    tensors fails exactly like it does for a CPU-mapped layer (#5194).
+    """
+
+    if not isinstance(device_map, dict):
+        return False
+    return any(is_offload_placement(value) for value in device_map.values())
+
+
+def auto_cpu_offload(backend, device_map) -> bool:
+    """Whether AUTO must skip a kernel whose ``post_init`` needs resident CUDA.
+
+    Only AUTO selection consults the ``SUPPORTS_CPU_OFFLOAD`` declaration: an
+    explicit backend is the caller's choice, and
+    ``_post_init_cpu_offloaded_marlin`` repacks a CPU-offloaded layer from an
+    in-memory offload weights map (#5022).
+
+    A disk-mapped layer counts as offloaded even though it is not CPU-resident:
+    its tensors live in the offload map during `post_init`, so the same
+    declaration decides whether the kernel can initialize at all (#5194).
+    """
+
+    if backend not in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
+        return False
+    return device_map_offloads_layers(device_map)
 
 
 # public/stable api exposed to transformer/optimum
@@ -1186,6 +1364,7 @@ def hf_select_quant_linear(
         dynamic=None,
         pack_dtype=torch.int32,
         adapter=None,
+        cpu_offload=auto_cpu_offload(backend, device_map),
     )
 
 # public/stable api exposed to transformer/optimum
@@ -1244,7 +1423,7 @@ def hf_select_quant_linear_v2(
     else:
         device = DEVICE.CPU
 
-    if format == FORMAT.LLM_AWQ:
+    if fmt == FORMAT.LLM_AWQ:
         # llm-awq uses torch.int16 to pack qweight
         pack_dtype = torch.int16
 
@@ -1267,10 +1446,78 @@ def hf_select_quant_linear_v2(
         pack_dtype=pack_dtype,
         dtype=normalized_dtype,
         adapter=None,
+        cpu_offload=auto_cpu_offload(backend, device_map),
     )
 
 
 # auto select the correct/optimal QuantLinear class
+def _auto_select_priority(cls: Type[BaseQuantLinear], fmt: FORMAT, dtype) -> int:
+    """Effective AUTO rank for one candidate at the requested activation dtype.
+
+    ``SUPPORTS_FORMATS`` is a dtype-independent rank. A kernel may lower its
+    own rank for a dtype whose path is a slow fallback. Test doubles that only
+    declare ``SUPPORTS_FORMATS`` keep working through the fallback.
+    """
+
+    resolver = getattr(cls, "auto_select_priority", None)
+    if resolver is not None:
+        return resolver(fmt, dtype)
+    formats = getattr(cls, "SUPPORTS_FORMATS", None) or {}
+    return formats.get(fmt, 0)
+
+
+def _portable_fallback(quant_method: METHOD, fmt: FORMAT, families):
+    """Return the declared explicit-only reader for one layout and target, if any.
+
+    Some checkpoint layouts have no AUTO-eligible kernel for a device family:
+    the native kernel is CUDA-only and the portable reader is priority 0 so it
+    cannot change AUTO order. When AUTO resolves nothing for those target
+    families, the ``PORTABLE_FALLBACK`` kernel keeps loading and in-session
+    inference possible instead of raising ``No valid quant linear`` (issues
+    #4554 and #5109).
+
+    ``families`` is the set of device families the target resolves to; a
+    reader is eligible only when it declares every one of them, so a CPU-only
+    reader never serves a ROCm placement.
+    """
+
+    for cls in iter_quant_linear_kernels():
+        # ``PORTABLE_CPU_FALLBACK`` is the pre-#5109 spelling, kept because the
+        # GEMV reader still only serves CPU targets.
+        if not (getattr(cls, "PORTABLE_FALLBACK", False)
+                or getattr(cls, "PORTABLE_CPU_FALLBACK", False)):
+            continue
+        if quant_method not in (cls.SUPPORTS_METHODS or ()):
+            continue
+        if fmt not in (cls.SUPPORTS_FORMATS or {}):
+            continue
+        devices = set(cls.SUPPORTS_DEVICES or ())
+        if DEVICE.ALL not in devices and not families.issubset(devices):
+            continue
+        return cls
+    return None
+
+
+def _dynamic_bits_supported(kernel: Type[BaseQuantLinear], bits: int, dynamic) -> bool:
+    """Return whether ``kernel`` declares support for every dynamic width.
+
+    Mirrors ``BaseQuantLinear._validate_dynamic_bits`` so callers can tell
+    whether a per-module width is the only thing the kernel rejects.
+    """
+
+    if not dynamic:
+        return True
+    supported = getattr(kernel, "SUPPORTS_BITS", None) or []
+    for pattern_dict in dynamic.values():
+        width = (pattern_dict or {}).get("bits", bits)
+        if len(supported) == 1:
+            if width != bits:
+                return False
+        elif width not in supported:
+            return False
+    return True
+
+
 def select_quant_linear(
         bits,
         group_size: int,
@@ -1396,6 +1643,14 @@ def select_quant_linear(
         allow_quant_linears = list(get_auto_backend_kernel_mapping()[quant_method].get(format, {}).items())
         if not allow_quant_linears:
             raise ValueError(f"No auto-select kernels found for `{quant_method}` with format `{format}`.")
+        # Re-rank for the requested activation dtype: a kernel whose dtype path
+        # is a slow fallback (for example ExLlamaV2 reconstructs a dense weight
+        # for BF16) must not outrank a native kernel. The sort is stable, so
+        # equal ranks keep the declared order.
+        allow_quant_linears.sort(
+            key=lambda item: _auto_select_priority(item[1], format, dtype),
+            reverse=True,
+        )
 
         last_err = None
         global message_logged
@@ -1505,6 +1760,30 @@ def select_quant_linear(
                     "Reload with a trainable backend before fine-tuning."
                 )
                 return auto_inference_only_fallback
+            portable = (
+                _portable_fallback(quant_method, format, selector_families)
+                if selector_families
+                else None
+            )
+            if portable is not None:
+                portable_ok, portable_err = validate_candidate(portable,
+                    bits=bits,
+                    group_size=group_size,
+                    desc_act=desc_act,
+                    sym=sym,
+                    pack_dtype=pack_dtype,
+                    dtype=dtype,
+                    dynamic=dynamic,
+                    trainable=trainable,
+                    adapter=adapter,
+                )
+                if portable_ok:
+                    log.info(
+                        f"Kernel: AUTO has no kernel for `{format}` on `{sorted(f.value for f in selector_families)}`; "
+                        f"selected portable fallback `{portable.__name__}`."
+                    )
+                    return [portable] if multi_select else portable
+                last_err = portable_err or last_err
             if last_err:
                 raise last_err
             raise ValueError("No valid quant linear")
@@ -1522,6 +1801,22 @@ def select_quant_linear(
     if is_sharded and not supports_sharded_load:
         raise ValueError(f"Selected backend `{backend}` with kernel `{qlinear.__name__}` does not support sharded checkpoints.")
 
+    # AWQ resolves the pack kernel per module
+    # (`AWQProcessor._resolve_qlinear_kernel`): a module whose `dynamic` width
+    # the native CUDA GEMM kernel cannot unpack is packed with the portable
+    # `AwqTorchLinear` instead. The model-wide candidate is only the default for
+    # the modules that do match it, so it must be validated against the global
+    # width and not against a per-module width it will never pack (#5408).
+    # GEMV/GEMV_FAST have no such per-module width fallback and stay gated.
+    gate_dynamic = dynamic
+    if (
+        pack
+        and quant_method == METHOD.AWQ
+        and format == FORMAT.GEMM
+        and not _dynamic_bits_supported(qlinear, bits, dynamic)
+    ):
+        gate_dynamic = None
+
     validate, err = validate_candidate(qlinear,
         bits=bits,
         group_size=group_size,
@@ -1529,7 +1824,7 @@ def select_quant_linear(
         sym=sym,
         pack_dtype=pack_dtype,
         dtype=dtype,
-        dynamic=dynamic,
+        dynamic=gate_dynamic,
         trainable=trainable,
         adapter=adapter,
     )

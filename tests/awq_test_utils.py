@@ -19,7 +19,7 @@ from datasets import load_dataset  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear  # noqa: E402
@@ -94,14 +94,12 @@ def save_quantized_awq_artifact(
         PRETRAINED_MODEL_ID,
         quantize_config=quantize_config,
     )
-    model.quantize(get_awq_calibration_dataset(), batch_size=1, calibration_concat_size=0)
+    model.quantize(CalibrationConfig(dataset=get_awq_calibration_dataset(), batch_size=1))
     model.save(artifact_root)
 
     with open(Path(artifact_root) / QUANT_CONFIG_FILENAME, "r", encoding="utf-8") as config_file:
         file_dict = json.loads(config_file.read())
         assert model.quantize_config.to_dict() == file_dict
-        # Exclude `offload_to_disk_path`, which is a random value.
-        file_dict["meta"].pop("offload_to_disk_path")
         logging.info("Saved config file: %s", file_dict)
 
     del model
@@ -127,7 +125,6 @@ def assert_awq_linear_backend(model, backend: BACKEND) -> None:
 
 def assert_loaded_quantize_config_matches(model, expected_config: dict) -> None:
     actual_quantize_config = model.quantize_config.to_dict()
-    actual_quantize_config["meta"].pop("offload_to_disk_path")
     assert actual_quantize_config == expected_config
 
 

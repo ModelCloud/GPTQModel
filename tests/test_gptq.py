@@ -645,7 +645,15 @@ def test_neutralize_dead_columns_matches_boolean_mask_oracle(case, strided):
     expected_hessian = hessian.clone()
     expected_weight = weight.clone()
     expected_auxiliary = auxiliary.clone()
-    expected_hessian[mask, mask] = 1.0
+    # #5727: dead entries take the live diagonal mean so the shared damping
+    # mean is unchanged; an all-dead Hessian keeps the finite 1.0 fallback.
+    live = ~mask
+    placeholder = (
+        hessian.diagonal()[live].mean()
+        if bool(live.any())
+        else torch.ones((), dtype=hessian.dtype)
+    )
+    expected_hessian[mask, mask] = placeholder
     expected_weight[:, mask] = 0.0
     expected_auxiliary[:, mask] = 0.0
 
@@ -656,10 +664,94 @@ def test_neutralize_dead_columns_matches_boolean_mask_oracle(case, strided):
     with recorder:
         _neutralize_dead_columns(actual_hessian, actual_weight, actual_auxiliary)
 
-    assert torch.equal(actual_hessian, expected_hessian), case
+    # The placeholder is the live diagonal mean, so an independently computed
+    # mean may differ by one fp64 ulp; live entries and the zeroed columns are
+    # still bit-exact.
+    torch.testing.assert_close(actual_hessian, expected_hessian, rtol=1e-14, atol=0)
     assert torch.equal(actual_weight, expected_weight), case
     assert torch.equal(actual_auxiliary, expected_auxiliary), case
     _assert_sync_free(recorder.ops, (case, "neutralize_dead_columns"))
+
+
+def test_neutralize_dead_columns_uses_live_diagonal_mean():
+    """#5727: a dead column must not inflate the shared damping mean.
+
+    ``hessian_inverse`` damps every column by ``mean(diag(H))``.  A fixed
+    ``1.0`` placeholder turns that mean into a function of the dead-channel
+    count whenever the live diagonal is well below one, which is common for
+    small ``down_proj``/MLP activations.
+    """
+
+    size = 16
+    live_index = torch.tensor([0, 1, 3, 4, 6, 7, 8, 10, 11, 12, 13, 14, 15])
+    dead_index = torch.tensor([2, 5, 9])
+    live_values = torch.linspace(2.0e-3, 4.0e-3, live_index.numel(), dtype=torch.float64)
+    hessian = torch.zeros(size, size, dtype=torch.float64)
+    hessian[live_index, live_index] = live_values
+    weight = torch.ones(4, size, dtype=torch.float64)
+    live_mean = live_values.mean()
+
+    _neutralize_dead_columns(hessian, weight)
+
+    torch.testing.assert_close(
+        hessian.diagonal()[dead_index],
+        live_mean.expand(dead_index.shape),
+        rtol=1e-12,
+        atol=0,
+    )
+    # The damping mean ``hessian_inverse`` computes is now the live mean.
+    torch.testing.assert_close(hessian.diagonal().mean(), live_mean, rtol=1e-12, atol=0)
+    # Live diagonal entries and the live weight columns stay untouched.
+    torch.testing.assert_close(hessian.diagonal()[live_index], live_values, rtol=0, atol=0)
+    assert torch.count_nonzero(weight[:, dead_index]) == 0
+    assert torch.count_nonzero(weight[:, live_index] - 1.0) == 0
+
+
+def test_neutralize_dead_columns_keeps_finite_placeholder_when_all_dead():
+    """An all-dead Hessian still needs a finite, positive diagonal placeholder."""
+
+    hessian = torch.zeros(4, 4)
+    weight = torch.ones(2, 4)
+
+    dead = _neutralize_dead_columns(hessian, weight)
+
+    assert bool(dead.all())
+    assert torch.equal(hessian.diagonal(), torch.ones(4))
+    assert torch.count_nonzero(weight) == 0
+
+
+def test_hessian_inverse_damps_with_live_diagonal_mean():
+    """#5727: the damp added to live columns follows the live diagonal mean.
+
+    The fixture is diagonal, so the returned upper Cholesky factor of the
+    damped inverse is exactly ``diag(1 / sqrt(diag(H) + damp * mean))``.
+    """
+
+    linear = nn.Linear(8, 4, bias=False, dtype=torch.float32).eval()
+    task = GPTQ(
+        linear,
+        qcfg=QuantizeConfig(
+            bits=4,
+            group_size=4,
+            sym=True,
+            desc_act=False,
+            damp_percent=0.05,
+            damp_auto_increment=0.0,
+        ),
+    )
+    live_index = torch.tensor([0, 2, 3, 4, 5])
+    live_values = torch.tensor([2.0e-3, 3.0e-3, 2.5e-3, 3.5e-3, 2.8e-3])
+    hessian = torch.zeros(8, 8)
+    hessian[live_index, live_index] = live_values
+    weight = torch.ones(4, 8)
+    _neutralize_dead_columns(hessian, weight)
+
+    factor, damp = task.hessian_inverse(hessian)
+
+    assert damp == pytest.approx(0.05)
+    expected = 1.0 / torch.sqrt(live_values + damp * live_values.mean())
+    torch.testing.assert_close(factor.diagonal()[live_index], expected, rtol=1e-5, atol=0)
+    assert torch.isfinite(factor).all()
 
 
 def _dead_channel_task(kind):
@@ -733,7 +825,9 @@ def test_dead_channel_neutralization_stays_on_device(kind):
         task.quantize(blocksize=4 if kind != "qqq" else 8)
 
     assert recorder.bool_mask_index_puts == 0, (kind, recorder.ops)
-    assert "aten.masked_fill_.Scalar" in recorder.ops, kind
+    # The placeholder is now the live diagonal mean, a 0-dim tensor, so the
+    # Tensor overload carries the value instead of a Python scalar.
+    assert "aten.masked_fill_.Tensor" in recorder.ops, kind
 
 
 def test_qqq_quantize_has_no_redundant_device_sync(monkeypatch):
@@ -1083,13 +1177,13 @@ def test_gptaq_quantize_uses_token_normalized_loss(monkeypatch):
 class TestGPTQAddBatchCPU(ModelTest):
     ######### test_gptq_add_batch_cpu.py ###########
     pytestmark = pytest.mark.skipif(
-        (not torch.cuda.is_available()) or torch.cuda.device_count() <= 6,
-        reason="CUDA device 6 is required for this benchmark test",
+        not torch.cuda.is_available(),
+        reason="CUDA is required for this benchmark test",
         )
 
 
     def test_gptq_add_batch_cpu_vs_gpu_queue(self):
-        device = torch.device("cuda", 6)
+        device = torch.device("cuda", torch.cuda.current_device())
         torch.cuda.set_device(device)
 
         configs: List[Tuple[str, int]] = [
@@ -1142,8 +1236,8 @@ class TestGPTQAddBatchCPU(ModelTest):
 class TestGPTQHessianChunking(ModelTest):
     ######### test_gptq_hessian_chunking.py ###########
     pytestmark = pytest.mark.skipif(
-        (not torch.cuda.is_available()) or torch.cuda.device_count() <= 6,
-        reason="CUDA device 6 is required for this benchmark test",
+        not torch.cuda.is_available(),
+        reason="CUDA is required for this benchmark test",
         )
 
 
@@ -1203,7 +1297,7 @@ class TestGPTQHessianChunking(ModelTest):
 
 
     def test_hessian_chunking_vram_vs_latency(self):
-        device = torch.device("cuda", 6)
+        device = torch.device("cuda", torch.cuda.current_device())
         torch.cuda.set_device(device)
 
         configs: List[Tuple[str, int]] = [

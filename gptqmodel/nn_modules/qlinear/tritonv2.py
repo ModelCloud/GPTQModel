@@ -13,6 +13,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
+from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 from .torch import TorchLinear
 
@@ -50,6 +51,12 @@ class TritonV2Linear(TorchLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = True
+
+    # GB10 (sm_121), torch 2.11.0+cu130: eager=True, graph_breaks=2 (the tensor
+    # `_version` read in the weight-cache key), so dynamo/aot/inductor reject
+    # it; explicit CUDA-graph capture succeeds and matches eager.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "tritonv2"
@@ -167,6 +174,17 @@ class TritonV2Linear(TorchLinear):
                 self, x2, x.shape[:-1] + (self.out_features,)
             )
 
+        # ``QuantLinearFunction`` decodes the packed weight into the activation
+        # dtype before the matmul, so a decoded weight outside that dtype's
+        # finite range becomes ``inf`` and ``0 * inf`` becomes ``NaN`` (#5738).
+        # The fused gates above already reject that case; this covers the
+        # whole-weight decode. Keep the #5606 range-safe decode: the parent
+        # widens the decode and reduction when the reconstructed weight does
+        # not fit the activation dtype. Checking here keeps the hot fused path
+        # on its single existing range check.
+        if not self._decoded_weight_fits(x.dtype):
+            return super().forward(x)
+
         x = self._apply_rotation_to_input(x)
 
         # if in_features is padded, we need to pad the input as well
@@ -201,8 +219,10 @@ def triton_test_add(x: torch.Tensor, y: torch.Tensor):
     import triton  # noqa: F401  # ensure Triton language bindings load
     import triton.language as tl  # noqa: F401  # ensure Triton language bindings load
 
+    from gptqmodel.utils.triton_jit import jit as triton_jit
+
     # don't put it on top-level to avoid crash if triton was not installed
-    @triton.jit
+    @triton_jit
     def add_kernel(x_ptr,  # *Pointer* to first input vector.
                    y_ptr,  # *Pointer* to second input vector.
                    output_ptr,  # *Pointer* to output vector.

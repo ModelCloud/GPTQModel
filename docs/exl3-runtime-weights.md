@@ -11,7 +11,7 @@ contract for the generic `EXL3Processor`. The refresh was introduced with
 ## Why the layer inventory is refreshed, not only the subset
 
 One decoder layer is quantized in subsets. After subset `n` is packed,
-`EXL3Processor._stage_runtime_weight` (`gptqmodel/looper/exllamav3_processor.py:2388`)
+`EXL3Processor._stage_runtime_weight` (`gptqmodel/looper/exllamav3_processor.py:2432`)
 replaces that subset's dense weight with a META placeholder and stores a marker
 in `NamedModule.state`. The layer forward that follows still executes every
 module in the layer: earlier subsets are already packed, and later subsets are
@@ -137,6 +137,40 @@ flowchart TD
     G --> H["packed trellis stores padded outputs"]
 ```
 
+## Native mul1 half-bit rates
+
+Pass `EXL3Config(bits=2.5, codebook="mul1")` when loading a model for
+quantization. The same 1.5, 2.5 and 3.5 rates are accepted for `head_bits`
+and in per-module `dynamic` rules. Each half-bit tile uses alternating
+transition widths of `floor(bits)` and `floor(bits) + 1`, starting with the
+smaller transition. The 256-weight tiles occupy 24, 40 and 56 int16 words,
+respectively. The checkpoint identifies the codebook through the `mul1`
+marker and the decoder derives the exact rate from the tile width.
+
+| Operation | Prior runtime | Runtime with half-bit tiles |
+| --- | --- | --- |
+| Config validation | Accept integer EXL3 rates | Also accept 1.5, 2.5 and 3.5 with `mul1` |
+| Quantization | Fixed transition width and `pack_trellis` | Alternate widths with native Viterbi and `pack_trellis_frac` |
+| Save and reload | Integer rate and `16 * bits` words per tile | Half-bit rate preserved in JSON and in the packed tensor shape |
+| Inference | Derive integer depth from shape | Read the exact packed rate for CUDA or portable Torch |
+
+```mermaid
+flowchart LR
+    A["EXL3Config"] --> B{"Integer rate or supported mul1 half rate?"}
+    B -- "yes" --> C["EXL3Processor._build_quant_args"]
+    B -- "no" --> D["Reject before packing"]
+    style D fill:#ffd6d6,stroke:#b00020,stroke-width:2px
+    C --> E["quantize_exl3 and pack_trellis"]
+    E --> F["Packed safetensors and tensor_storage"]
+    F --> G["trellis_rate checks tile width and codebook marker"]
+    G --> H["CUDA and portable Torch forward"]
+```
+
+`3inst`, `mcg`, and `mul1` still support integer rates. Use
+`dynamic` to express a mix of per-projection rates. MLX inference and the
+RCO EXL3 allocator support integer rates. The transition layout is from
+[ExLlamaV3 1.6.7](https://github.com/turboderp-org/exllamav3/blob/8c593e4e5c88da76a4aaf8f1b1838bb7c1fce4e0/exllamav3/exllamav3_ext/quant/frac.cu).
+
 ## Failure and ambiguity contract
 
 | Situation | Before | After |
@@ -152,3 +186,36 @@ flowchart TD
 
 This page does not add activation padding for non-128-aligned input widths.
 That would require a runtime input boundary and a different stored geometry.
+
+## Process-global torch constants are built outside inference mode
+
+`ExllamaV3TorchLinear` derives its Hadamard matrices, tensor-core permutations
+and codebook LUTs from process-global `functools.lru_cache` factories in
+`gptqmodel/nn_modules/exllamav3_torch.py`. The cache is keyed by device, dtype
+and codebook, never by caller, so whichever forward fills an entry decides the
+tensor kind every later forward receives.
+
+Before #5213 those factories built the constants in the caller's context. The
+first EXL3 torch forward in a process running under `torch.inference_mode()`
+(`generate()`, an eval loop, a server warmup) cached an inference tensor. Every
+later grad-mode forward of **any** model then raised
+`RuntimeError: Inference tensors cannot be saved for backward` in
+`_apply_hadamard_right` until the process restarted. A `.clone()` taken inside
+inference mode is still an inference tensor, so cloning the cached value cannot
+repair the entry; the construction context itself has to be grad-safe.
+
+After #5213 each factory is decorated with `@torch.inference_mode(False)` and
+`@torch.no_grad()` under `@lru_cache`. The constants never need grad, so an
+ordinary tensor is valid in both modes, and the extra context runs only on a
+cache miss (once per device/dtype/codebook key), never per forward.
+
+| | Before | After |
+| --- | --- | --- |
+| Context that fills a cache entry | the caller's mode | `inference_mode(False)` + `no_grad()` |
+| Entry built by an inference-mode forward | inference tensor | ordinary tensor |
+| Grad-mode forward of a second model afterwards | `RuntimeError` in `_apply_hadamard_right` | works |
+| Cache hit | returns whichever kind was built first | always grad-safe |
+
+Regression: `tests/test_exl3_torch_constant_cache_5213.py` warms the cache with
+model A under `inference_mode()`, then forwards a fresh model B in grad mode and
+checks that every cached constant is an ordinary tensor.

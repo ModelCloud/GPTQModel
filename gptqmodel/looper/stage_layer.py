@@ -28,13 +28,14 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.awq_processor import AWQProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
-from ..looper.paroquant_processor import ParoQuantProcessor
+from ..looper.paro_processor import ParoProcessor
 from ..looper.qqq_processor import QQQProcessor
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from ..quantization.config import GcMode, QuantizeEmbed
 from ..utils.device import get_device, get_device_new
 from ..utils.device_telemetry import capture_device_telemetry
+from ..utils.host_memory import malloc_trim as trim_host_heap
 from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
 from ..utils.looper_helpers import (
     find_last_quantized_layer_index,
@@ -145,9 +146,9 @@ def _should_drain_finalize_futures_synchronously(
 ) -> bool:
     """Decide whether one layer must finish finalization before the next begins.
 
-    ParoQuant layer/group optimization holds substantially more live CUDA state
+    Paro layer/group optimization holds substantially more live CUDA state
     than the weight-only paths. Letting its finalizers overlap the next layer
-    can visibly ratchet active VRAM upward from layer N to N+1, so ParoQuant
+    can visibly ratchet active VRAM upward from layer N to N+1, so Paro
     always drains per-layer finalizers synchronously.
 
     Any multi-accelerator quantization flow can overlap layer N finalizers with
@@ -183,7 +184,7 @@ def _should_drain_finalize_futures_synchronously(
     }
     if len(active_accelerators) > 1:
         return True
-    return any(isinstance(process, ParoQuantProcessor) for process, *_ in finalize_tasks)
+    return any(isinstance(process, ParoProcessor) for process, *_ in finalize_tasks)
 
 
 def _should_empty_cache_after_sync_finalize(
@@ -210,7 +211,21 @@ def _should_empty_cache_after_sync_finalize(
         return True
     if not getattr(looper.gptq_model.quantize_config, "offload_to_disk", False):
         return False
-    return any(isinstance(process, ParoQuantProcessor) for process, *_ in finalize_tasks)
+    return any(isinstance(process, ParoProcessor) for process, *_ in finalize_tasks)
+
+
+def _trim_host_heap_after_layer() -> None:
+    """Return freed host pages to the OS at a layer boundary.
+
+    AWQ's token-row feature packing and CPU pack path allocate many short-lived
+    host buffers per layer. glibc keeps the freed pages in its arenas, so a
+    large MoE AWQ run retains several GiB even after the packed model is gone
+    (issue #4990). Trimming once per layer keeps the heap flat. The helper is a
+    silent no-op where glibc ``malloc_trim`` is unavailable, so it cannot break
+    quantization on musl/macOS/Windows.
+    """
+
+    trim_host_heap()
 
 
 def _processor_needs_pristine_group_clone(processor) -> bool:
@@ -318,8 +333,15 @@ def _replay_layer_outputs(
     region_timer,
     replay_plan: Optional[SubsetPlan] = None,
     force_serial: Optional[bool] = None,
+    consume_inputs: Optional[bool] = None,
 ) -> List[List[torch.Tensor]]:
     """Replay one layer forward to materialize outputs for the next layer.
+
+    ``consume_inputs`` releases each cached batch as soon as its output exists.
+    It defaults to the processor's ``forward.replay_after_process`` policy:
+    that replay feeds ``receive_layer_inputs``, so it is the last reader of the
+    activations. A replay into a separate pristine/clean cache must pass
+    ``False`` because its inputs may alias the live layer cache.
 
     ``force_serial`` overrides data-parallel forward dispatch. Resume replay
     passes this: running several batches through torch's dynamo-instrumented
@@ -329,6 +351,11 @@ def _replay_layer_outputs(
     concurrent entry entirely; the cost is bounded to the handful of already-
     quantized layers being fast-forwarded, not the run's main quant loop.
     """
+
+    if consume_inputs is None:
+        consume_inputs = bool(
+            getattr(getattr(processor, "forward", None), "replay_after_process", False)
+        )
 
     if replay_plan is None:
         replay_batch_count, replay_row_counts, replay_total_rows = _collect_layer_forward_progress(
@@ -413,6 +440,7 @@ def _replay_layer_outputs(
             # Replay should emit next-layer activations under the model's native router.
             # And reduce the execution time of `forward()`.
             apply_moe_config=False,
+            consume_inputs=consume_inputs,
         )
     finally:
         if (
@@ -493,6 +521,7 @@ def _capture_pristine_group_context(
         log=log,
         region_timer=region_timer,
         replay_plan=None,
+        consume_inputs=False,
     )
     receive_clean_layer_inputs = getattr(processor, "receive_clean_layer_inputs", None)
     if callable(receive_clean_layer_inputs):
@@ -713,7 +742,21 @@ def run_layer_stage(
             # Excluded layers have no bundles and remain skipped on resume.
             continue
 
-        module = looper.gptq_model.pre_quantize(module)
+        # Capture the layer's pre-stage home before any stage code can move
+        # it. If the run is cancelled or fails mid-layer, the looper restores
+        # this placement instead of leaving the layer pinned on the compute
+        # device (issue #4546).
+        inflight_home = get_device(module)
+        if getattr(inflight_home, "type", None) == "meta":
+            inflight_home = CPU
+        # ``pre_quantize`` moves a CPU layer to the quantize device itself, so
+        # track the current object before that call as well as after it.
+        looper._track_inflight_layer(module, inflight_home)
+
+        module = looper.gptq_model.pre_quantize(
+            module, module_path=layer_name or None
+        )
+        looper._track_inflight_layer(module, inflight_home)
 
         embedding_module_name = None
         if is_input_embeddings_module:
@@ -729,6 +772,7 @@ def run_layer_stage(
             if model_type in MODULE_CONVERTER_MAP:
                 converter = MODULE_CONVERTER_MAP[model_type]
                 module = converter(module, looper.gptq_model.model.config)
+                looper._track_inflight_layer(module, inflight_home)
 
             needs_group_pristine = any(
                 callable(getattr(processor, "uses_grouped_optimization", None)) and processor.uses_grouped_optimization()
@@ -769,6 +813,7 @@ def run_layer_stage(
                     )
                     if not relative_name and prepared_native is not module:
                         module = prepared_native
+                        looper._track_inflight_layer(module, inflight_home)
 
             replace_module_with_hooked_legacy(
                 module,
@@ -828,6 +873,7 @@ def run_layer_stage(
                 module,
                 cur_layer_device,
                 projection_modules=full,
+                module_path=layer_descriptor,
             )
             # Recovery must use the same forward topology as the original
             # capture.  In particular, DeepSeek's router can make different
@@ -930,6 +976,7 @@ def run_layer_stage(
                 layer_index=layer_index,
                 layer_name=layer_descriptor,
             )
+            looper._clear_inflight_layer()
             if durable_progress_logs:
                 log.info(
                     "StageLayer: packed catch-up boundary committed for layer=%s",
@@ -1055,6 +1102,7 @@ def run_layer_stage(
                 )
                 if live_endpoint is not None and live_endpoint is not module:
                     module = live_endpoint
+                    looper._track_inflight_layer(module, inflight_home)
                     if is_lm_head_module:
                         full = find_modules(module, name=looper.gptq_model.lm_head)
                     cur_layer_device = get_device(module)
@@ -1100,7 +1148,7 @@ def run_layer_stage(
                 # Process the layer in smaller subsets so attention groups or
                 # MoE experts can be quantized independently within a layer.
                 if DEBUG_ON and log.isEnabledFor(logging.DEBUG):
-                    if isinstance(processor, (AWQProcessor, ParoQuantProcessor)):
+                    if isinstance(processor, (AWQProcessor, ParoProcessor)):
                         log.debug(
                             "StageLayer[%s]: layer=%s subset=%s/%s size=%s names=%s",
                             processor.name(),
@@ -1185,6 +1233,7 @@ def run_layer_stage(
                 )
                 if live_endpoint is not None and live_endpoint is not module:
                     module = live_endpoint
+                    looper._track_inflight_layer(module, inflight_home)
                     cur_layer_device = get_device(module)
                     if getattr(cur_layer_device, "type", None) == "meta":
                         cur_layer_device = normalize_device_like(
@@ -1230,6 +1279,7 @@ def run_layer_stage(
                     module,
                     cur_layer_device,
                     projection_modules=full,
+                    module_path=layer_descriptor,
                 )
                 for relative_name, native_module in full.items():
                     if isinstance(native_module, NamedModule):
@@ -1340,6 +1390,9 @@ def run_layer_stage(
                     looper.gptq_model.post_quantize(module)
                 else:
                     layers[layer_index] = looper.gptq_model.post_quantize(module)
+                # The success path has returned the layer to CPU; a later
+                # unrelated failure must not try to restore it again.
+                looper._clear_inflight_layer()
 
                 for finalized in processed_subset.values():
                     # Reset finalized modules to CPU to guarantee deterministic
@@ -1409,7 +1462,7 @@ def run_layer_stage(
                             process.submodule_finalize(module, looper.gptq_model)
 
                         # Disk offload (lifecycle TODO note preserved)
-                        if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor, ParoQuantProcessor)):
+                        if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor, ParoProcessor)):
                             quant_config = getattr(looper.gptq_model, "quantize_config", None)
                             if quant_config and getattr(quant_config, "offload_to_disk", False):
                                 offload_path = getattr(quant_config, "offload_to_disk_path", None)
@@ -1430,6 +1483,7 @@ def run_layer_stage(
                                             offload_to_disk(
                                                 model=looper.gptq_model.model,
                                                 module=target_module,
+                                                module_name=module_full_name,
                                                 disk_path=offload_path,
                                                 # The on-disk bundle is the only record a
                                                 # resumed run can restore from, so never
@@ -1572,6 +1626,10 @@ def run_layer_stage(
                             submodule_finalized=True,
                             raise_in_place=False,
                         )
+                        # Finalization (packing + disk offload) has released the
+                        # layer's host temporaries; return them to the OS before
+                        # the next layer allocates its own (#4990).
+                        _trim_host_heap_after_layer()
                     return True
 
                 if finalize_futures_snapshot:
@@ -1628,6 +1686,9 @@ def run_layer_stage(
                         submodule_finalized=True,
                         raise_in_place=True,
                     )
+                    # No finalize tasks, but the layer's own capture/quantize
+                    # temporaries were freed; trim at the same boundary.
+                    _trim_host_heap_after_layer()
                     if durable_progress_logs:
                         log.info(
                             "StageLayer: layer=%s complete (no finalize tasks)",

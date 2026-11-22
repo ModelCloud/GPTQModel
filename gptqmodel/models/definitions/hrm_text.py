@@ -4,6 +4,7 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..looped_capture import LoopedLayerCaptureMixin
 
 
@@ -13,6 +14,11 @@ class Chunk:
 
 
 class HrmTextQModel(LoopedLayerCaptureMixin, BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     # z_L_init is a Parameter on model itself, so child-module traversal misses it.
     fusable = FusableConfig("hrm_text").merge(LlamaFusableConfig())
 

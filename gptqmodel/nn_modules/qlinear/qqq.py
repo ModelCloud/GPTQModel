@@ -9,19 +9,38 @@ from functools import lru_cache
 from typing import List, Optional, Tuple
 
 import torch
+import transformers
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import CPU, DEVICE, PLATFORM
 from ...nn_modules.qlinear import GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
+from ...quantization.qqq_activation import QQQ_ACTIVATION_DTYPES, qqq_activation_quantize
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
 from ...utils.rocm import IS_ROCM
+from ...utils.torch import dynamo_is_compiling
+from ._compile_support import COMPILE_LEVEL
+from ._numerics import scaled_accumulation
 from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
+
+
+# INT32 accumulation bound shared by every CPU INT8 GEMM path.  The most
+# negative INT8 product is (-128) * (-128) = 16384, so one INT32 accumulator may
+# sum at most floor((2**31 - 1) / 16384) = 131071 terms before it wraps.
+# ``torch._int_mm`` and the packed CPU kernel both accumulate in INT32, and
+# neither raises on overflow, so each path has to reject or split a longer
+# contraction explicitly instead of relying on an exception.
+INT8_INT32_MAX_REDUCTION = (2**31 - 1) // (128 * 128)
+
+# Long contractions are summed in INT64 over bounded INT8 GEMM chunks.  65536
+# is a power-of-two multiple of the 64-wide kernel alignment and keeps every
+# partial sum at or below 2**30.
+INT8_INT32_CHUNK_REDUCTION = 1 << 16
 
 
 @lru_cache(maxsize=1)
@@ -33,7 +52,40 @@ def _qqq_gpu_quantizer():
     return dynamic_quant
 
 
-_INT4_DIVISORS = (1, 16, 256, 4096, 65536, 1048576, 16777216, 268435456)
+# ``qqq_gemm`` uses its ``C`` argument only as the INT32 global-reduce scratch
+# of one call.  ``global_reduce`` writes each column slice before it reads that
+# slice, so ``C`` carries no state across calls: the kernel produces
+# bitwise-equal output from a zeroed buffer and from one filled with garbage
+# (#4621).
+#
+# ``C`` is therefore allocated per call and returned to the caching allocator
+# when the forward drops it.  Two earlier designs cached it, first per device
+# (#4387) and then per device *and* stream (#4488), and both outlived the
+# model: a thread pool that created its 32 pooled streams pinned 32 x 56 MiB on
+# an 8B QQQ model for the life of the process, and ``del model`` released none
+# of it (#4621).  A per-call allocation is stream-safe by construction: the
+# allocator only reuses a freed block on the stream that freed it, and work on
+# one stream is ordered by that stream.  On the 4096x14336 shapes it measured
+# 0.0-0.3 us slower per call, where one kernel call is 13.9 us.
+
+
+def _allocate_reduce_scratch(
+    device: torch.device,
+    out_features: int,
+    max_par: int = 16,
+) -> torch.Tensor:
+    """Allocate the INT32 global-reduce scratch for one ``qqq_gemm`` call.
+
+    The contiguous ``(max_par * 64, out_features)`` tensor is the kernel's ``C``
+    argument.  Nothing in it survives the call, so the caller may drop it as
+    soon as the kernel has been enqueued.
+    """
+
+    return torch.empty(
+        (max_par * 64, out_features),
+        dtype=torch.int32,
+        device=torch.device(device),
+    )
 
 # The Marlin-derived QQQ W4A8 kernel (``gptqmodel_ext/qqq/qqq_gemm.cu``) is
 # written against CUDA inline PTX: ``cp.async``, ``mma.sync``, ``ldmatrix``,
@@ -49,15 +101,24 @@ QQQ_ROCM_UNSUPPORTED = (
 )
 
 
+def _fake_qqq_int4(input, weight, scales, group_size):
+    """FakeTensor shape for the packed QQQ CPU kernel (see ``extension.register_fake``)."""
+
+    return input.new_empty((input.shape[0], weight.shape[0]), dtype=torch.float32)
+
+
 @lru_cache(maxsize=1)
 def _qqq_cpu_kernel():
     from ...extension import op as extension_op
+    from ...extension import register_fake
     from ...utils.cpu_features import has_avx512_bf16
 
     if not has_avx512_bf16():
         return None
     try:
-        return extension_op("int4_qzero_group_scaled_cpu", "qqq_int4")
+        kernel = extension_op("int4_qzero_group_scaled_cpu", "qqq_int4")
+        register_fake("int4_qzero_group_scaled_cpu", "qqq_int4", _fake_qqq_int4)
+        return kernel
     except (RuntimeError, ImportError, OSError) as exc:
         log.warning("QQQ packed CPU kernel unavailable: %s", exc)
         return None
@@ -87,16 +148,29 @@ def _invert_permutation(values) -> torch.Tensor:
 
 
 def _unpack_uint4(packed: torch.Tensor) -> torch.Tensor:
-    packed_i64 = packed.to(torch.int64)
-    packed_u32 = torch.where(packed_i64 < 0, packed_i64 + (1 << 32), packed_i64)
-    divisors = torch.tensor(_INT4_DIVISORS, dtype=torch.int64, device=packed.device)
-    quotients = torch.floor_divide(packed_u32.unsqueeze(-1), divisors)
-    lanes = quotients - torch.floor_divide(quotients, 16) * 16
-    return lanes.reshape(packed.shape[0], packed.shape[1] * 8)
+    """Unpack eight unsigned 4-bit lanes per INT32 with INT32/INT8 temporaries.
+
+    The previous implementation widened the packed tensor to INT64 and divided
+    by eight INT64 divisors, materialising several ``8 * in_features *
+    out_features`` byte temporaries per forward (issue #4387 item 4).  Shifting
+    and masking in INT32 needs one packed-sized INT32 temporary and a
+    ``packed.numel() * 8`` UINT8 result, and returns the same codes bit for bit.
+    """
+
+    rows, columns = packed.shape
+    lanes = torch.empty((rows, columns * 8), dtype=torch.uint8, device=packed.device)
+    shifted = torch.empty_like(packed)
+    for lane in range(8):
+        shifted.copy_(packed)
+        shifted.bitwise_right_shift_(4 * lane)
+        shifted.bitwise_and_(0xF)
+        lanes[:, lane::8] = shifted
+    return lanes
 
 
 def mul(
-    A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16
+    A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16,
+    bias=None,
 ):
     """INT8xINT4 multiply based on Marlin kernel; can be used within `torch.compile`.
     @A: `torch.int8` input matrix of shape `(m, k)` in standard row-major layout
@@ -111,13 +185,33 @@ def mul(
     @thread_n: `n` size of a thread_tile in `B` (can usually be left as auto -1)
     @sms: number of SMs to use for the kernel (can usually be left as auto -1)
     @max_par: maximum number of batch 64 problems to solve in parallel for large input sizes
+    @bias: optional `torch.float32` per-column bias of shape `(n,)`. The kernel adds it to the
+        complete FP32 reduction before the single FP16 output cast, so a pre-bias partial sum
+        above 65504 no longer becomes `inf` and the result is not rounded twice (#5725).
     """
     if not qqq_runtime_available():
         raise ModuleNotFoundError("QQQ torch.ops kernels are not properly installed. Error: " + qqq_runtime_error())
-    qqq_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par)
+    qqq_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par, bias)
 
 
 class QQQLinear(GroupedQuantLinear):
+    # The AVX512 CPU forward drops these after building its packed cache, so
+    # they have to be materialized before an export and required on load
+    # (#5010). `s_group` is legitimately empty when `group_size` spans the whole
+    # input, so only its presence is checked.
+    CHECKPOINT_REQUIRED_BUFFERS = ("B", "s_group", "s_channel")
+    # Per-channel layers (`group_size == in_features`) hold an empty
+    # `s_group`; the kernel builds its own empty operand. Older saves dropped
+    # every such key as shared storage (#5126), so accept a missing empty
+    # entry. A grouped layer's non-empty `s_group` remains required.
+    CHECKPOINT_OPTIONAL_EMPTY_BUFFERS = ("s_group",)
+
+    # The native Marlin W4A8 `qqq_gemm` custom op has no fake impl and the
+    # per-call reduce scratch/locks allocation is host-side; the JIT extension
+    # is also unbuildable here (no CUDA toolkit). Static: EAGER.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.QQQ]
     SUPPORTS_METHODS = [METHOD.QQQ]
     SUPPORTS_FORMATS = {FORMAT.QQQ: 100}
@@ -226,16 +320,13 @@ class QQQLinear(GroupedQuantLinear):
                 ),
                 persistent=False,
             )
-            self.register_buffer(
-                "reduce_buffer",
-                torch.zeros((self.max_par * 16 * 4, self.out_features), dtype=torch.int),
-                persistent=False,
-            )
         # Quantization builds this module with `register_buffers=False`, so the
         # bias attribute must be initialized outside the buffer preallocation
-        # block or `pack()` cannot tell whether a bias is expected.
+        # block or `pack()` cannot tell whether a bias is expected. A caller
+        # that already knows the checkpoint width (the kernel rebuild path)
+        # passes ``bias_dtype``; the packer adopts the source width otherwise.
         if bias:
-            self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
+            self.register_buffer("bias", torch.zeros((self.out_features), dtype=self.bias_dtype))
         else:
             self.bias = None
 
@@ -375,9 +466,21 @@ class QQQLinear(GroupedQuantLinear):
             buf.append(self.s_group)
         if hasattr(self, "workspace") and self.workspace is not None:
             buf.append(self.workspace)
-        if hasattr(self, "reduce_buffer") and self.reduce_buffer is not None:
-            buf.append(self.reduce_buffer)
         return buf
+
+    def _reduce_scratch(self, device: Optional[torch.device] = None) -> torch.Tensor:
+        """Allocate the INT32 reduce scratch for this kernel call.
+
+        The native kernel consumes ``C`` for the duration of one call and does
+        not read its initial contents, so every call allocates its own buffer
+        instead of sharing a process-wide cache that outlives the model
+        (#4621).  One allocation also serves both the eager and the compiled
+        path: nothing here can be captured as a graph constant.
+        """
+
+        if device is None:
+            device = self.B.device if hasattr(self, "B") else torch.device("cpu")
+        return _allocate_reduce_scratch(device, self.out_features, self.max_par)
 
     def pack(self, linear: torch.nn.Module, scales: torch.Tensor, s_extra=None):
         """Pack a fake-quantized linear layer into the Marlin representation."""
@@ -428,6 +531,10 @@ class QQQLinear(GroupedQuantLinear):
             device=CPU,
         )
         weight = linear.weight.data
+        if isinstance(linear, transformers.Conv1D):
+            # ``transformers.Conv1D`` stores ``[in_features, out_features]``;
+            # the tiling below addresses the logical ``[out, in]`` layout.
+            weight = weight.t()
         perm = self._perm.to(device=weight.device)
         for input_start in range(0, self.in_features, input_chunk_size):
             input_end = min(input_start + input_chunk_size, self.in_features)
@@ -517,34 +624,119 @@ class QQQLinear(GroupedQuantLinear):
                 ),
                 persistent=False,
             )
-        if not hasattr(self, "reduce_buffer"):
-            self.register_buffer(
-                "reduce_buffer",
-                torch.zeros((self.max_par * 16 * 4, self.out_features), dtype=torch.int, device=packed_weight.device),
-                persistent=False,
-            )
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device=packed_weight.device, dtype=torch.float16)
+            # A bias is model-dtype storage, not quantization state: narrowing
+            # a finite BF16 bias into the FP16 placeholder turns e.g. 65536
+            # into +inf before any kernel runs (#5603). Keep the source width
+            # and let each forward promote it at the accumulation epilogue.
+            bias = linear.bias.detach().to(device=packed_weight.device)
             if "bias" in self._buffers:
-                self.bias.copy_(bias)
+                if self.bias.dtype != bias.dtype:
+                    self.register_buffer("bias", bias)
+                else:
+                    self.bias.copy_(bias)
             else:
                 self.register_buffer("bias", bias)
+            self.bias_dtype = bias.dtype
         elif not hasattr(self, "bias"):
             self.bias = None
+        # A repack replaces ``B``/scales, so any derived CPU cache (and the
+        # runtime-only layout it may have installed) is stale.
+        clear = getattr(self, "clear_weight_cache", None)
+        if callable(clear):
+            clear()
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        """Adopt the checkpoint bias width before the generic buffer copy.
+
+        ``nn.Module.load_state_dict`` copies into the preallocated FP16
+        placeholder, so a BF16 checkpoint bias would be narrowed - and can
+        become +inf - before the kernel ever runs (#5603). Replacing the
+        buffer with the checkpoint width makes the generic ``copy_`` exact.
+        """
+        key = prefix + "bias"
+        incoming = state_dict.get(key)
+        current = getattr(self, "bias", None)
+        if (
+            isinstance(incoming, torch.Tensor)
+            and isinstance(current, torch.Tensor)
+            and current.device.type != "meta"
+            and incoming.dtype != current.dtype
+            and incoming.shape == current.shape
+        ):
+            self.bias = incoming.to(device=current.device)
+            self.bias_dtype = self.bias.dtype
+        return super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
         if (x.device.type == "cuda" and x.is_contiguous() and 0 < x.shape[-1] <= 32768
-                and x.dtype in (torch.float16, torch.bfloat16, torch.float32)
-                and not torch.compiler.is_compiling()):
+                and x.dtype in QQQ_ACTIVATION_DTYPES
+                and not dynamo_is_compiling()):
             quantizer = _qqq_gpu_quantizer()
             if quantizer is not None:
                 return quantizer(x)
-        x = x.float()
-        quant_scale = x.abs().amax(dim=-1, keepdim=True).div(127.0)
-        quant_scale = torch.where(quant_scale == 0, torch.ones_like(quant_scale), quant_scale)
-        x = (x / quant_scale).round().clamp(-128, 127).to(torch.int8)
-        return x, quant_scale
+        # The element-wise fallback preserves the input's memory format, so a
+        # column-strided activation (``x.t()`` of a ``[K, M]`` buffer) comes back
+        # column-major. ``qqq_gemm`` reads the operand row-major with no stride
+        # argument, so hand it a packed INT8 buffer (#4740). The copy is int8,
+        # i.e. a quarter of the fp16 operand it replaces.
+        #
+        # GSQ calibration calls the same helper, so the Hessian and cross moment
+        # describe the codes and FP32 scale this path produces rather than a
+        # separate FP16-narrowed grid.
+        return qqq_activation_quantize(x)
+
+    def _kernel_bias(self, device) -> Optional[torch.Tensor]:
+        """Return the FP32, output-column-ordered bias operand for this call.
+
+        The kernel adds the bias to the complete FP32 reduction, so the launch
+        operand must be FP32: narrowing a finite bias the activation dtype
+        cannot hold would change the result before the cancellation (#5725).
+        ``self.bias`` keeps the checkpoint width and order; the converted copy
+        lives only for this call.
+        """
+        bias = self.bias
+        if bias is None:
+            return None
+        if bias.device != device:
+            bias = bias.to(device=device)
+        if bias.dtype != torch.float32:
+            bias = bias.to(dtype=torch.float32)
+        if bias.dim() != 1:
+            bias = bias.reshape(-1)
+        return bias if bias.is_contiguous() else bias.contiguous()
+
+    def _split_k_locks(self, device) -> torch.Tensor:
+        """A fresh zeroed split-K lock array for one forward call.
+
+        ``qqq_gemm.cu`` spins on and resets these counters, so a single
+        per-module buffer lets two streams serving the same module corrupt each
+        other's counters and deadlock (#4665). EXL3 allocates its locks per
+        call for the same reason; this array is a few hundred int32 slots.
+        """
+        return torch.zeros(
+            _workspace_numel(self.out_features, self.max_par),
+            dtype=torch.int32,
+            device=device,
+        )
 
     def forward(self, A):
         # TODO FIXME: parent should never call us if there is no data to process
@@ -568,22 +760,18 @@ class QQQLinear(GroupedQuantLinear):
         mul(
             quant_A, # A
             self.B, # B
-            self.reduce_buffer, # C
+            self._reduce_scratch(A.device), # C
             D, # D
             s1, # s1
             self.s_channel, # s2
             self.s_group, # s3
-            self.workspace,
+            self._split_k_locks(A.device),
             max_par=self.max_par,
+            bias=self._kernel_bias(A.device),
         )
 
         # TODO: check if we should reshape at end
         D = D.reshape(out_shape)
-
-        if self.bias is not None:
-            # The kernel output is FP16; add the stored bias in FP32 so the
-            # visible cast is the only rounding after the reduction.
-            D = (D.float() + self.bias.float()).to(dtype=A_dtype)
 
         if self.adapter:
             D = self.adapter.apply(x=A, out=D)
@@ -592,6 +780,28 @@ class QQQLinear(GroupedQuantLinear):
 
 
 class QQQTorchLinear(QQQLinear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
+    # inductor and reduce-overhead all pass. Explicit torch.cuda.graph capture
+    # fails: forward copies the CPU `_scale_perm_single_i` table to the device.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all pass. The packed CPU kernel
+    # (`qqq_int4`) now has a FakeTensor impl, and the traced forward reads the
+    # kernel handle and packed cache the eager warmup published instead of
+    # calling `_qqq_cpu_kernel()` (importlib) and `_packed_weight_for_cpu()`
+    # (RLock + checkpoint rewrite). A compile before any eager call takes the
+    # traceable `torch._int_mm` path instead.
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_GRAPH_CAPTURE = False
+    # ... and a static-cache `generate()` is a win on this torch kernel:
+    # Qwen2.5-0.5B-Instruct QQQ, bf16, RTX 4090 (sm_89), torch 2.15.0+cu132,
+    # 4 left-padded prompts x 32 greedy tokens: 2.08 s eager -> 0.48 s compiled
+    # (4.3x), 1 dynamo graph, 0 graph breaks (#5102). The 172-graph /
+    # 24-115-break number this declaration used to cite came from the AUTO
+    # `QQQLinear` CUDA kernel, not from this torch kernel; #5075 made the packed
+    # QQQ op traceable, so the copied reason was stale.
+    SUPPORTS_COMPILE = True
+
     SUPPORTS_BACKENDS = [BACKEND.QQQ_TORCH]
     SUPPORTS_METHODS = [METHOD.QQQ]
     SUPPORTS_FORMATS = {FORMAT.QQQ: 90}
@@ -613,34 +823,88 @@ class QQQTorchLinear(QQQLinear):
     REQUIRES_FORMAT_V2 = False
     QUANT_TYPE = "qqq"
 
+    #: Runtime state that ``__init__`` normally creates. ``rehome_quantized_kernel``
+    #: reinterprets an already-built ``QQQLinear`` by assigning ``__class__``, which
+    #: never runs this ``__init__``, so every read has to find a class-level default
+    #: as well (#4940; the same class-swap path broke #4451 before it).
+    _torch_packed_cache = None
+    _torch_packed_cache_key = None
+    _torch_dropped_checkpoint = None
+    #: Resolved packed-CPU kernel handle, published by the eager warmup so a
+    #: traced forward never calls ``_qqq_cpu_kernel()`` (importlib is skipped by
+    #: dynamo). ``None`` means the AVX512 kernel is unavailable.
+    _torch_cpu_kernel = None
+    # ``None`` means "no failed shape recorded yet": a shared class-level ``set``
+    # would leak one module's failures into every other module.
+    _torch_int_mm_failed_shapes = None
+
     #: This kernel computes with a plain FP32 matmul, so it needs neither the
     #: Marlin compute-capability floor nor the CUDA-only requirement. Without
     #: this, a pre-Ampere NVIDIA card that could run the fallback is rejected at
     #: selection time.
     MARLIN_DEVICE_RESTRICTIONS = False
 
+    @classmethod
+    def _init_runtime_state(cls, module) -> None:
+        """Install per-instance runtime state on a class-swapped module.
+
+        ``_switch_quant_linear_class`` assigns ``__class__`` without running
+        ``__init__``, so the target kernel has to be able to initialise the
+        attributes it reads. Keeping this a hook means the next attribute added
+        here is picked up by the swap instead of raising ``AttributeError`` at
+        the end of ``quantize()`` (#4940).
+        """
+
+        module._torch_packed_cache = None
+        module._torch_packed_cache_key = None
+        module._torch_dropped_checkpoint = None
+        module._torch_cpu_kernel = None
+        module._torch_int_mm_failed_shapes = set()
+
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.QQQ_TORCH)
         super().__init__(*args, **kwargs)
-        self._torch_packed_cache = None
-        self._torch_packed_cache_key = None
-        self._torch_int_mm_failed_shapes = set()
+        # ``_torch_dropped_checkpoint`` is ``{name: (shape, dtype)}`` for the
+        # checkpoint tensors the packed CPU cache replaced; ``None`` means the
+        # checkpoint layout is still resident.
+        self._init_runtime_state(self)
 
     def post_init(self):
+        self._materialize_dropped_checkpoint()
         super().post_init()
         self.clear_weight_cache()
 
+    def _failed_int_mm_shapes(self) -> set:
+        """Per-instance ``torch._int_mm`` failure memo, created on demand."""
+
+        failed_shapes = getattr(self, "_torch_int_mm_failed_shapes", None)
+        if failed_shapes is None:
+            failed_shapes = set()
+            self._torch_int_mm_failed_shapes = failed_shapes
+        return failed_shapes
+
     def clear_weight_cache(self) -> None:
+        # The packed cache is the only remaining copy of ``B``/the scales once
+        # it has replaced them, so restore the checkpoint layout first.
+        self._materialize_dropped_checkpoint()
         self._torch_packed_cache = None
         self._torch_packed_cache_key = None
-        self._torch_int_mm_failed_shapes.clear()
+        self._failed_int_mm_shapes().clear()
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         return True, None
 
+    def _checkpoint_B(self) -> torch.Tensor:
+        """Checkpoint-packed INT4 words for the live weight layout."""
+        return self.B
+
+    def _checkpoint_scale(self, name: str) -> torch.Tensor:
+        """Checkpoint scale tensor for ``name`` for the live weight layout."""
+        return getattr(self, name)
+
     def _unpack_weight_codes(self) -> torch.Tensor:
-        unpacked = _unpack_uint4(self.B)
+        unpacked = _unpack_uint4(self._checkpoint_B())
         perm_i = self._perm_i.to(device=unpacked.device)
         unpacked = unpacked.reshape(-1, self._perm_i.numel())[:, perm_i].reshape(
             self.in_features // self.tile,
@@ -663,21 +927,70 @@ class QQQTorchLinear(QQQLinear):
 
     def _dequantize_weight_for_torch(self) -> tuple[torch.Tensor, torch.Tensor]:
         codes = self._unpack_weight_codes()
-        s_channel = self._unpermute_scales(self.s_channel, self._scale_perm_single_i).to(torch.float32)
+        s_channel = self._unpermute_scales(
+            self._checkpoint_scale("s_channel"), self._scale_perm_single_i
+        ).to(torch.float32)
 
         if self.group_size != self.in_features:
-            s_group = self._unpermute_scales(self.s_group, self._scale_perm_i).to(torch.float32)
+            s_group = self._unpermute_scales(
+                self._checkpoint_scale("s_group"), self._scale_perm_i
+            ).to(torch.float32)
+            weight = self._grouped_weight_fp32(codes, s_group)
+        else:
+            signed = codes.to(torch.int8)
+            signed.bitwise_xor_(8)
+            signed.sub_(8)
+            weight = signed.to(torch.float32)
+            weight.mul_(16.0)
+
+        return weight, s_channel
+
+    def _grouped_weight_fp32(self, codes: torch.Tensor, s_group: torch.Tensor) -> torch.Tensor:
+        """Expand grouped QQQ codes to the FP32 INT8-valued weight plane.
+
+        ``codes`` is the UINT8 nibble plane.  When the group size divides
+        ``in_features`` the scale broadcast is a view, so no ``in_features *
+        out_features`` gather temporary is created; the odd tail keeps the
+        index-select fallback.
+        """
+
+        weight = codes.to(torch.float32)
+        weight.sub_(8.0)
+        if self.group_size > 0 and self.in_features % self.group_size == 0:
+            groups = self.in_features // self.group_size
+            weight = weight.reshape(groups, self.group_size, self.out_features)
+            weight.mul_(s_group.reshape(groups, 1, self.out_features))
+            weight = weight.reshape(self.in_features, self.out_features)
+        else:
             group_idx = torch.floor_divide(
                 torch.arange(self.in_features, dtype=torch.int64, device=codes.device),
                 self.group_size,
             )
-            weight = (codes.to(torch.float32) - 8.0) * s_group[group_idx]
-            weight = weight.round().clamp(-128, 127)
-        else:
-            signed = torch.where(codes >= 8, codes - 16, codes)
-            weight = signed.to(torch.float32) * 16.0
+            weight.mul_(s_group[group_idx])
+        weight.round_()
+        weight.clamp_(-128.0, 127.0)
+        return weight
 
-        return weight, s_channel
+    def _int8_weight_for_forward(self) -> torch.Tensor:
+        """Build the transient INT8 weight plane for one forward.
+
+        This is deliberately not cached: an INT4-to-INT8 expansion is an
+        expanded weight cache under ``AGENTS.md``.  Channel-wise codes are
+        signed nibbles scaled by 16, so they convert directly to INT8 without
+        an FP32 plane; grouped codes need the rounded FP32 product.
+        """
+
+        codes = self._unpack_weight_codes()
+        if self.group_size != self.in_features:
+            s_group = self._unpermute_scales(
+                self._checkpoint_scale("s_group"), self._scale_perm_i
+            ).to(torch.float32)
+            return self._grouped_weight_fp32(codes, s_group).to(torch.int8)
+        signed = codes.to(torch.int8)
+        signed.bitwise_xor_(8)
+        signed.sub_(8)
+        signed.mul_(16)
+        return signed
 
     def _torch_weight_state_key(self):
         return (
@@ -689,35 +1002,293 @@ class QQQTorchLinear(QQQLinear):
             self.out_features,
         )
 
+    def _pack_weight_codes(self, codes: torch.Tensor) -> torch.Tensor:
+        """Repack UINT8 codes into the checkpoint ``B`` word layout.
+
+        Exact inverse of :meth:`QQQLinear._unpack_weight_codes`; the packing is
+        a pure nibble permutation, so no value is rounded.
+        """
+        tile = self.tile
+        in_features, out_features = self.in_features, self.out_features
+        perm = self._perm.to(device=codes.device)
+        transformed = (
+            codes.reshape(in_features // tile, tile, out_features // tile, tile)
+            .permute(0, 2, 1, 3)
+            .reshape(in_features // tile, out_features * tile)
+        )
+        transformed = transformed.reshape(-1, perm.numel()).index_select(1, perm).reshape(
+            in_features // tile, out_features * tile
+        )
+        packed = torch.zeros(
+            (in_features // tile, out_features * 2),
+            dtype=torch.int32,
+            device=codes.device,
+        )
+        for lane in range(8):
+            packed.bitwise_or_((transformed[:, lane::8].to(torch.int32) & 0xF) << (4 * lane))
+        return packed
+
+    def _rebuild_checkpoint_B(self) -> torch.Tensor:
+        """Rebuild the checkpoint ``B`` words from the packed CPU cache."""
+        cached = self._torch_packed_cache
+        if cached is None:
+            raise RuntimeError(
+                f"{type(self).__name__} has no packed CPU cache to rebuild its checkpoint weight from"
+            )
+        from .torch_cpu_avx512 import unpack_hf_int4
+
+        packed = cached[0]
+        codes = unpack_hf_int4(packed, self.out_features, self.in_features).t().contiguous()
+        if self.group_size == self.in_features:
+            # The kernel-facing cache stores channel-wise codes biased by 8.
+            codes = codes ^ 8
+        return self._pack_weight_codes(codes)
+
+    def _rebuild_checkpoint_scales(self, name: str, shape, dtype) -> torch.Tensor:
+        cached = self._torch_packed_cache
+        if cached is None:
+            raise RuntimeError(
+                f"{type(self).__name__} has no packed CPU cache to rebuild its checkpoint scales from"
+            )
+        if name == "s_group":
+            scales, perm = cached[1], self._scale_perm
+        else:
+            scales, perm = cached[2], self._scale_perm_single
+        if scales.numel() == 0:
+            return torch.empty(shape, dtype=dtype, device=scales.device)
+        return (
+            self._unpermute_scales(scales, torch.tensor(perm, dtype=torch.long))
+            .to(dtype=dtype)
+            .reshape(shape)
+            .contiguous()
+        )
+
+    def _rebuild_checkpoint_tensors(self, descriptors) -> dict[str, torch.Tensor]:
+        rebuilt = {"B": self._rebuild_checkpoint_B()}
+        for name in ("s_group", "s_channel"):
+            shape, dtype = descriptors[name]
+            rebuilt[name] = self._rebuild_checkpoint_scales(name, shape, dtype)
+        return rebuilt
+
+    def _checkpoint_B(self) -> torch.Tensor:
+        """Checkpoint ``B``, rebuilt transiently when the cache replaced it."""
+        if self._torch_dropped_checkpoint is None:
+            return self.B
+        return self._rebuild_checkpoint_B()
+
+    def _checkpoint_scale(self, name: str) -> torch.Tensor:
+        """Checkpoint scales, rebuilt transiently when the cache replaced them."""
+        tensor = getattr(self, name, None)
+        if tensor is not None:
+            return tensor
+        descriptors = self._torch_dropped_checkpoint
+        if descriptors is None:
+            raise RuntimeError(
+                f"{type(self).__name__} has no checkpoint {name} and no packed cache"
+            )
+        shape, dtype = descriptors[name]
+        return self._rebuild_checkpoint_scales(name, shape, dtype)
+
+    def _materialize_dropped_checkpoint(self) -> bool:
+        """Restore ``B``/scales from the cache and forget the runtime-only layout."""
+        with self._cpu_transform_lock:
+            descriptors = getattr(self, "_torch_dropped_checkpoint", None)
+            if descriptors is None:
+                return False
+            for name, tensor in self._rebuild_checkpoint_tensors(descriptors).items():
+                self._buffers[name] = tensor
+            self._torch_dropped_checkpoint = None
+            if getattr(self, "_torch_packed_cache", None) is not None:
+                self._torch_packed_cache_key = self._torch_weight_state_key()
+            return True
+
+    def iter_runtime_weight_tensors(self):
+        """Yield the packed CPU operands that replaced the checkpoint buffers.
+
+        ``_torch_packed_cache`` is a plain tuple, so a budget walk that only
+        reads ``parameters()`` and ``buffers()`` misses almost all of the
+        projection's weight bytes once the first forward has dropped
+        ``B``/``s_group``/``s_channel`` (#5810).
+        """
+
+        yield from self._torch_packed_cache or ()
+
+    def materialize_checkpoint_layout_for_export(self) -> bool:
+        """Publish the dropped checkpoint buffers so an export can see them.
+
+        The packed cache is released in the same critical section. The rebuilt
+        checkpoint buffers hold the exact same weight, so keeping both would
+        leave two full copies resident after a save; the refreshed cache key
+        would then make the next forward take the cache hit and never run the
+        rebuild-and-verify drop (#5804). The next native forward rebuilds the
+        packed terms and ``_maybe_drop_checkpoint_tensors()`` drops the
+        checkpoint buffers again only after proving the inverse exact.
+        """
+
+        with self._cpu_transform_lock:
+            materialized = self._materialize_dropped_checkpoint()
+            if materialized:
+                self._torch_packed_cache = None
+                self._torch_packed_cache_key = None
+            return materialized
+
+    def _maybe_drop_checkpoint_tensors(self) -> bool:
+        """Release the checkpoint copy once the cache proves it is rebuildable.
+
+        Fails closed: any shape/dtype/value mismatch keeps both layouts
+        resident, so an unverified inverse can never reach a saved checkpoint.
+        """
+        with self._cpu_transform_lock:
+            if getattr(self, "_torch_dropped_checkpoint", None) is not None:
+                return False
+            descriptors = {}
+            for name in ("B", "s_group", "s_channel"):
+                tensor = self._buffers.get(name)
+                if not isinstance(tensor, torch.Tensor):
+                    return False
+                descriptors[name] = (tuple(tensor.shape), tensor.dtype)
+            try:
+                rebuilt = self._rebuild_checkpoint_tensors(descriptors)
+            except Exception:
+                return False
+            for name, tensor in rebuilt.items():
+                current = self._buffers.get(name)
+                if (
+                    current is None
+                    or tuple(current.shape) != tuple(tensor.shape)
+                    or current.dtype != tensor.dtype
+                    or not torch.equal(current, tensor)
+                ):
+                    return False
+            # Publish the descriptor before dropping the buffers so a concurrent
+            # reader never sees a missing tensor without a rebuild recipe.
+            self._torch_dropped_checkpoint = descriptors
+            for name in rebuilt:
+                self._buffers[name] = None
+            return True
+
+    # ``inference_mode(False)`` first: the cached operands outlive this call, and
+    # a tensor created under ``inference_mode`` cannot be saved for backward.
+    # ``forward()`` runs the first forward of every ``generate()``/eval loop
+    # inside ``inference_mode``, so without this the lazily-built cache held
+    # inference tensors and the next grad-mode forward raised at
+    # ``accum * s_channel`` (#5197). The plain ``no_grad`` below is required
+    # too: on this torch, ``inference_mode(False)`` restores the enclosing grad
+    # mode, and a cache built while rebuilding the checkpoint must never record
+    # an autograd graph.
+    @torch.inference_mode(False)
+    @torch.no_grad()
     def _packed_weight_for_cpu(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Cache only INT4 codes and unpermuted scales for CPU inference."""
+        """Build the CPU kernel cache, then replace the checkpoint layout.
+
+        The AVX512 ``qqq_int4`` kernel consumes packed INT4 codes and
+        unpermuted scales, never the checkpoint ``B``/scales. Once the cache is
+        built, :meth:`_maybe_drop_checkpoint_tensors` proves it can rebuild the
+        checkpoint tensors bit for bit and drops them, so the packed weight is
+        not resident twice (#4805). Any verification mismatch keeps both.
+
+        The whole build runs under ``_cpu_transform_lock``, like the other CPU
+        int4 kernels' ``_ensure_cpu_layout``: a concurrent cold forward would
+        otherwise pass the cache check, then read ``B``/``s_channel`` after this
+        thread dropped them (#4942).
+        """
         from .torch_cpu_avx512 import pack_hf_int4
 
-        key = self._torch_weight_state_key()
-        cached = self._torch_packed_cache
-        if cached is not None and self._torch_packed_cache_key == key:
+        with self._cpu_transform_lock:
+            cached = getattr(self, "_torch_packed_cache", None)
+            if cached is not None and getattr(self, "_torch_dropped_checkpoint", None) is not None:
+                # The cache is the only resident weight; nothing can mutate it
+                # behind the key without materializing the checkpoint first.
+                return cached
+            key = self._torch_weight_state_key()
+            if cached is not None and getattr(self, "_torch_packed_cache_key", None) == key:
+                return cached
+
+            codes = self._unpack_weight_codes().t().to(torch.uint8)
+            # Keep the scales in the checkpoint dtype: the kernel call widens the
+            # group scales it needs, and an FP32 cache doubles their residency.
+            s_channel = (
+                self._unpermute_scales(self.s_channel, self._scale_perm_single_i)
+                .to(self.s_channel.dtype)
+                .contiguous()
+            )
+            if self.group_size == self.in_features:
+                codes = codes ^ 8
+                s_group = torch.empty(0, dtype=self.s_group.dtype, device=self.B.device)
+            else:
+                s_group = (
+                    self._unpermute_scales(self.s_group, self._scale_perm_i)
+                    .to(self.s_group.dtype)
+                    .contiguous()
+                )
+            cached = (pack_hf_int4(codes), s_group, s_channel)
+            self._torch_packed_cache = cached
+            self._torch_packed_cache_key = key
+            self._maybe_drop_checkpoint_tensors()
             return cached
 
-        codes = self._unpack_weight_codes().t().to(torch.uint8)
-        s_channel = self._unpermute_scales(self.s_channel, self._scale_perm_single_i).float().contiguous()
-        if self.group_size == self.in_features:
-            codes = codes ^ 8
-            s_group = torch.empty(0, dtype=torch.float32, device=self.B.device)
-        else:
-            s_group = self._unpermute_scales(self.s_group, self._scale_perm_i).float().contiguous()
-        cached = (pack_hf_int4(codes), s_group, s_channel)
-        self._torch_packed_cache = cached
-        self._torch_packed_cache_key = key
-        return cached
+    def _packed_cpu_weight_device(self):
+        weight = getattr(self, "B", None)
+        if weight is not None:
+            return weight.device
+        packed = getattr(self, "_torch_packed_cache", None)
+        if getattr(self, "_torch_dropped_checkpoint", None) is not None and packed is not None:
+            return packed[0].device
+        return None
 
     def _packed_cpu_matmul(self, quant_A: torch.Tensor):
-        if quant_A.device.type != "cpu" or self.B.device.type != "cpu" or self.in_features > 131071:
+        weight_device = self._packed_cpu_weight_device()
+        if (
+            quant_A.device.type != "cpu"
+            or weight_device is None
+            or weight_device.type != "cpu"
+            or self.in_features > INT8_INT32_MAX_REDUCTION
+        ):
             return None
+        if dynamo_is_compiling():
+            # ``_qqq_cpu_kernel()`` resolves the extension through
+            # ``importlib`` (a dynamo-skipped call) and
+            # ``_packed_weight_for_cpu()`` takes the transform lock and may drop
+            # the checkpoint tensors. The eager warmup publishes both, so a
+            # traced graph only reads them; without a warmup it falls through
+            # to the traceable ``_int8_matmul`` path.
+            kernel = getattr(self, "_torch_cpu_kernel", None)
+            cached = getattr(self, "_torch_packed_cache", None)
+            if kernel is None or cached is None:
+                return None
+            packed, s_group, s_channel = cached
+            if s_group.dtype != torch.float32:
+                s_group = s_group.to(torch.float32)
+            return kernel(quant_A.contiguous(), packed, s_group, self.group_size), s_channel
         kernel = _qqq_cpu_kernel()
+        self._torch_cpu_kernel = kernel
         if kernel is None:
             return None
         packed, s_group, s_channel = self._packed_weight_for_cpu()
+        if s_group.dtype != torch.float32:
+            s_group = s_group.to(torch.float32)
         return kernel(quant_A.contiguous(), packed, s_group, self.group_size), s_channel
+
+    def _apply(self, fn, recurse=True):
+        # A device move invalidates the cache's placement, so restore the
+        # checkpoint layout before it is moved. ``super()._apply`` then clears
+        # the derived cache. Post-forward dtype casts are rejected before this
+        # runs (contracts/kernel/forward-dtype.md).
+        self._materialize_dropped_checkpoint()
+        return super()._apply(fn, recurse=recurse)
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        with self._cpu_transform_lock:
+            super()._save_to_state_dict(destination, prefix, keep_vars)
+            descriptors = self._torch_dropped_checkpoint
+            if descriptors is None:
+                return
+            for name, tensor in self._rebuild_checkpoint_tensors(descriptors).items():
+                destination[prefix + name] = tensor if keep_vars else tensor.detach()
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        self._materialize_dropped_checkpoint()
+        return super()._load_from_state_dict(*args, **kwargs)
 
     def _int8_matmul(self, quant_A: torch.Tensor, weight: torch.Tensor) -> Optional[torch.Tensor]:
         shape_key = (
@@ -726,8 +1297,9 @@ class QQQTorchLinear(QQQLinear):
             int(quant_A.shape[1]),
             int(weight.shape[1]),
         )
+        failed_shapes = self._failed_int_mm_shapes()
         if (
-            shape_key in self._torch_int_mm_failed_shapes
+            shape_key in failed_shapes
             or quant_A.device.type != "cpu"
             or quant_A.device != weight.device
             or quant_A.dtype != torch.int8
@@ -740,13 +1312,31 @@ class QQQTorchLinear(QQQLinear):
         ):
             return None
         try:
-            return torch._int_mm(quant_A, weight).to(torch.float32)
+            reduction = int(quant_A.shape[1])
+            if reduction <= INT8_INT32_MAX_REDUCTION:
+                return torch._int_mm(quant_A, weight).to(torch.float32)
+            # A longer contraction would wrap silently inside ``_int_mm``, so
+            # the failure memo below would never see it.  Sum bounded chunks
+            # in INT64 instead; each chunk stays inside the INT32 range and the
+            # wider accumulator preserves the exact integer result.
+            accum = None
+            for start in range(0, reduction, INT8_INT32_CHUNK_REDUCTION):
+                end = min(start + INT8_INT32_CHUNK_REDUCTION, reduction)
+                partial = torch._int_mm(
+                    quant_A[:, start:end].contiguous(),
+                    weight[start:end].contiguous(),
+                )
+                if accum is None:
+                    accum = partial.to(torch.int64)
+                else:
+                    accum = accum + partial.to(torch.int64)
+            return accum.to(torch.float32)
         except (RuntimeError, NotImplementedError):
             # A build may not expose an integer GEMM kernel for this exact
             # shape. Remember only that shape so a later batch size/device can
             # still use the optimized path, and so a transient failure does not
             # permanently disable the module.
-            self._torch_int_mm_failed_shapes.add(shape_key)
+            failed_shapes.add(shape_key)
             return None
 
     def forward(self, A):
@@ -761,16 +1351,25 @@ class QQQTorchLinear(QQQLinear):
         if packed_result is not None:
             accum, s_channel = packed_result
         else:
-            weight, s_channel = self._dequantize_weight_for_torch()
-            weight = weight.to(torch.int8).contiguous()
+            weight = self._int8_weight_for_forward()
+            s_channel = self._unpermute_scales(
+                self._checkpoint_scale("s_channel"), self._scale_perm_single_i
+            ).to(torch.float32)
             accum = self._int8_matmul(quant_A, weight)
             if accum is None:
                 accum = torch.matmul(
                     quant_A.to(torch.float32),
                     weight.to(device=A_flat.device, dtype=torch.float32),
                 )
-        accum = accum * s1
-        accum = accum * s_channel.to(device=A_flat.device, dtype=torch.float32)
+        # Apply both scales through the overflow-safe product: the historical
+        # left-to-right order overflows an FP32 intermediate for a finite
+        # BF16 result (#5608), while the helper keeps that order's exact bits
+        # whenever it is representable.
+        accum = scaled_accumulation(
+            accum,
+            s1,
+            s_channel.to(device=A_flat.device, dtype=torch.float32),
+        )
         if self.bias is not None:
             # The INT8 reduction and scales are still FP32 here. Add bias
             # before the output cast so a finite sum cannot overflow in FP16.

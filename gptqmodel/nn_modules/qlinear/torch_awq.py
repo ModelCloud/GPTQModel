@@ -4,23 +4,27 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 # AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 
+from typing import Optional
+
 import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import dequantize_gemm, pack_awq
+from ...quantization.awq.utils.packing_utils import dequantize_gemm, pack_awq, source_weight_out_in
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
-from ._numerics import matmul_fp32_reduce
+from ._awq_decode import AwqDecodeRangeMixin
+from ._compile_support import COMPILE_LEVEL
+from ._numerics import autocast_active, linear_wide_bias, matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
 
 
-class AwqTorchLinear(AWQuantLinear):
+class AwqTorchLinear(AwqDecodeRangeMixin, AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 10}
@@ -30,6 +34,24 @@ class AwqTorchLinear(AWQuantLinear):
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
+    # Measured, not assumed: the reporter of #4669 saw a static-cache
+    # `generate()` improve from 1.36 s to 0.76 s on Llama-3.2-1B (4090), and
+    # this host's tiny Llama fixture measured parity (0.167 s dynamic vs
+    # 0.155 s static steady state). The eager dequantize path is slow enough
+    # that compiling it is not a pessimization, unlike the custom-op kernels.
+    SUPPORTS_COMPILE = True
+    # Measured on NVIDIA GB10 (sm_121), torch 2.11.0+cu130: dynamo, aot_eager,
+    # inductor and reduce-overhead all pass. Eager CUDA-graph capture used to
+    # fail because dequantize_gemm built its shift table with a host-to-device
+    # copy; #5094 keeps that table out of the global cache during capture, and
+    # the eager forward now captures and replays on RTX 4090 (sm_89), torch
+    # 2.15.0+cu132 (tests/test_awq_shift_capture_5094.py).
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all reach it. CUDA-graph capture is CUDA-only,
+    # so the CPU forward's ceiling is INDUCTOR.
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_GRAPH_CAPTURE = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]
@@ -44,6 +66,9 @@ class AwqTorchLinear(AWQuantLinear):
     REQUIRES_FORMAT_V2 = False
 
     QUANT_TYPE = "awq_torch"
+    # The bias is added after a wide reduction (`matmul_fp32_reduce`), so it
+    # keeps its checkpoint dtype like the scales.
+    MODEL_DTYPE_BUFFERS = ()
 
     def __init__(
         self,
@@ -85,6 +110,9 @@ class AwqTorchLinear(AWQuantLinear):
         self._cpu_packed_bias = None
         self._cpu_packed_key = None
         self._cpu_packed_warning_logged = False
+        self._decode_range_key = None
+        self._decode_range_fits = True
+        self._decode_range_fits_by_dtype = {}
 
     def post_init(self):
         # `scales` and `bias` keep the precision they were loaded with. The
@@ -104,6 +132,9 @@ class AwqTorchLinear(AWQuantLinear):
         self._cpu_packed_bias = None
         self._cpu_packed_key = None
         self._cpu_packed_warning_logged = False
+        self._decode_range_key = None
+        self._decode_range_fits = True
+        self._refresh_decode_range_fits()
 
     def extra_repr(self) -> str:
         return (
@@ -131,7 +162,7 @@ class AwqTorchLinear(AWQuantLinear):
 
         # Gather each input column's group scale/zero in a single pass instead
         # of launching one tiny kernel per input column.
-        weight = linear.weight.data
+        weight = source_weight_out_in(linear)
         group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
             (weight.t().float() + scale_zeros.index_select(0, group_index))
@@ -146,11 +177,9 @@ class AwqTorchLinear(AWQuantLinear):
     def _scales_for_compute(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         """Return the stored scales converted for this computation only.
 
-        ``self.scales`` keeps the checkpoint dtype. Rewriting it in place to
-        the activation dtype (the previous behavior) permanently rounded the
-        stored precision, so a later forward with another dtype, or a re-saved
-        checkpoint, could no longer recover the original scale. A BF16 scale
-        below the FP16 subnormal range became zero this way.
+        ``self.scales`` keeps the checkpoint dtype so a re-saved checkpoint
+        recovers the original scale bit-exactly. The activation dtype is locked
+        for the run (contracts/kernel/forward-dtype.md).
         """
         scales = self.scales
         if scales.device != device or scales.dtype != dtype or not scales.is_contiguous():
@@ -176,38 +205,48 @@ class AwqTorchLinear(AWQuantLinear):
         x_flat: torch.Tensor,
         *,
         dtype: torch.dtype,
+        qweight: Optional[torch.Tensor] = None,
+        qzeros: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # `dequantize_gemm` multiplies the integer codes by the scales, so the
         # weight follows the temporary scale dtype. The Torch AWQ forward uses
-        # a half compute dtype, while ParoQuant's dense fallback can use FP32.
+        # a half compute dtype, while Paro's dense fallback can use FP32.
         # Keep FP32 scales in FP32 there: a half intermediate could underflow
         # or overflow before the finished weight is widened again.
         weight = dequantize_gemm(
-            qweight=self.qweight,
-            qzeros=self.qzeros,
+            qweight=self.qweight if qweight is None else qweight,
+            qzeros=self.qzeros if qzeros is None else qzeros,
             scales=self._scales_for_compute(device=x_flat.device, dtype=dtype),
             bits=self.bits,
             group_size=self.group_size,
         )
-        if weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-            raise AssertionError(f"weight {weight.dtype} is not float16, bfloat16, or float32")
+        if weight.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+            raise AssertionError(
+                f"weight {weight.dtype} is not float16, bfloat16, float32, or float64"
+            )
         if weight.dtype != dtype or weight.device != x_flat.device or not weight.is_contiguous():
             weight = weight.to(device=x_flat.device, dtype=dtype).contiguous()
         return weight
+
+    def _cpu_avx512_shape_supported(self) -> bool:
+        """Whether the packed shape fits the AVX512 int4 GEMM."""
+        return (
+            self.bits == 4
+            and self.group_size > 0
+            and self.group_size <= 512
+            and self.in_features % 2 == 0
+            and self.in_features % self.group_size == 0
+            and self.out_features % 32 == 0
+        )
 
     def _cpu_avx512_eligible(self, x_flat: torch.Tensor) -> bool:
         return (
             x_flat.device.type == "cpu"
             and not self.training
             and not x_flat.requires_grad
-            and self.bits == 4
-            and self.group_size > 0
-            and self.group_size <= 512
-            and self.in_features % 2 == 0
-            and self.in_features % self.group_size == 0
-            and self.out_features % 32 == 0
             and x_flat.shape[-1] == self.in_features
             and x_flat.dtype == torch.bfloat16
+            and self._cpu_avx512_shape_supported()
         )
 
     def _ensure_cpu_packed(self) -> bool:
@@ -305,9 +344,31 @@ class AwqTorchLinear(AWQuantLinear):
         # This is the portable/reference AWQ implementation.  Its arithmetic
         # must remain the dense dequantize + matmul oracle; the BF16-only
         # AVX512 path is selected explicitly through TorchCpuAvx512AwqLinear.
-        # Subclasses such as ParoQuant use the shared dequantize helper.
-        weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
-        output = matmul_fp32_reduce(x_flat, weight, bias=self._bias_for_compute(device=device))
+        # Subclasses such as Paro use the shared dequantize helper.
+        # The decode dtype follows the stored checkpoint range, not only the
+        # activation dtype: narrowing an overflowing or underflowing weight
+        # first produces `inf`/`0`, which no later FP32 reduction recovers.
+        decode_dtype = self._decode_dtype_for_activation(compute_dtype)
+        weight = self._dequantize_weight_for_inference(x_flat, dtype=decode_dtype)
+        bias = self._bias_for_compute(device=device)
+        # An ambient autocast context disables the fused ``addmm`` epilogue
+        # inside ``matmul_fp32_reduce``, because autocast would narrow its
+        # operands. What remains is a plain matmul, which rounds the product
+        # before the stored bias cancels it: an exact 1 comes back as 0. The
+        # wide epilogue disables autocast for this call only and restores the
+        # caller's context (#5753).
+        wide_autocast_bias = (
+            bias is not None
+            and x_flat.dtype in (torch.float16, torch.bfloat16)
+            and autocast_active(x_flat.device.type)
+        )
+        if weight.dtype == x_flat.dtype and not wide_autocast_bias:
+            output = matmul_fp32_reduce(x_flat, weight, bias=bias)
+        else:
+            # Wide decode: promote the activation for this call, accumulate in
+            # FP32, add the stored bias there, and round once at the output.
+            # The reconstructed weight stays call-local.
+            output = linear_wide_bias(x_flat, weight.t(), bias)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)

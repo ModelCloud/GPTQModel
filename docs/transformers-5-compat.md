@@ -1,5 +1,10 @@
 # Transformers 5.22 model compatibility
 
+> **Historical (Transformers 5.22).** PR #4620 replaced the 5.22 compatibility
+> shims with the native/port path and pinned GPT-QModel to Transformers 5.23.
+> This document is retained for history; the code paths and present tense
+> below describe the 5.22 implementation, not the current package.
+
 Transformers 5.22 changed three things that GPT-QModel's model definitions and
 lazy checkpoint loader depended on:
 
@@ -218,7 +223,7 @@ default `{"rope_type": "default", "rope_theta": ...}` dict, and their legacy
 (`gptqmodel/utils/hf.py:1512`).
 
 The policy is now decided from the config class itself:
-`_declares_legacy_rope_field()` (`gptqmodel/utils/hf.py:1540`) returns True for
+`_declares_legacy_rope_field()` (`gptqmodel/utils/hf.py:1860`) returns True for
 a remote config whose `__init__` declares `rope_scaling` and not
 `rope_parameters`. For such a config, `_normalize_rope_parameters_config_compat`
 (`gptqmodel/utils/hf.py:1572`) clears both aliases when the effective RoPE is
@@ -228,7 +233,7 @@ the transformers-5 dict.
 
 ```mermaid
 flowchart TD
-    A["normalize_hf_config_compat"] --> B{"class __init__ declares rope_scaling<br/>and not rope_parameters?"}
+    A["remote-code config shim"] --> B{"class __init__ declares rope_scaling<br/>and not rope_parameters?"}
     B -- No --> C["fill default rope_parameters<br/>native and modern remote"]
     B -- Yes --> D{"per-layer dict or scaled rope?"}
     D -- Yes --> E["keep dict and add legacy type key"]
@@ -334,7 +339,7 @@ flowchart TD
 `modeling_klear.py` imports `check_model_inputs` and `OutputRecorder` from
 `transformers.utils.generic`. Transformers 5 moved `OutputRecorder` to
 `transformers.utils.output_capturing`, so the remote module raised
-`ImportError`. `_patch_transformers_remote_code_compat` now re-exports the real
+`ImportError`. The remote-code compatibility shim now re-exports the real
 recorder into `generic` next to the existing `check_model_inputs` shim
 (`gptqmodel/utils/hf.py:996`).
 
@@ -352,6 +357,43 @@ than a cache-backed loop. The native rotary restore rebuilds buffers from the
 module constructor; a remote rotary module whose constructor arguments are not
 stored as attributes is left untouched (LazyTurtle keeps its own
 materialization-time restore for the quantize path).
+
+### J.7 Legacy cache-length shim follows the layer API (transformers 5.22)
+
+Transformers 5 removed the deprecated cache-level `get_max_length()` and
+`get_usable_length()` helpers that older remote decoders call, so
+the remote-code compatibility shim reinstalls them. The reinstall was
+gated on the *replacement* name `Cache.get_max_cache_shape` existing. In
+transformers 5.22 that cache-level name is gone as well — the length query
+moved to `CacheLayerMixin.get_max_length()` — so the gate never fired and every
+remote decode that asks the cache for its limit still raised `AttributeError`.
+
+The shim now installs whenever `Cache.get_max_length` is missing, and resolves
+the value from the layer that owns it:
+
+```mermaid
+flowchart TD
+    A["remote-code compatibility shim"] --> B{"Cache.get_max_length exists?"}
+    B -- Yes --> Z["leave the installed API alone"]
+    B -- No --> C["install get_max_length(self, layer_idx=0)"]
+    C --> D{"self.layers[layer_idx] defines<br/>get_max_length?"}
+    D -- Yes --> E["layer.get_max_length()"]
+    D -- No --> F{"layer defines<br/>get_max_cache_shape?"}
+    F -- Yes --> G["layer.get_max_cache_shape()"]
+    F -- No --> H["cache-level get_max_cache_shape,<br/>only when callable"]
+    H -- absent --> I["return None (unbounded)"]
+    E --> J["None if value is None or negative"]
+    G --> J
+    I --> J
+    J --> K["get_usable_length(new_seq_length, layer_idx)"]
+```
+
+| Area | Before | After |
+| --- | --- | --- |
+| Install gate | `not hasattr(Cache, "get_max_length") and hasattr(Cache, "get_max_cache_shape")` (`utils/hf.py:1208`) | `not hasattr(Cache, "get_max_length")` (`utils/hf.py:1208`) |
+| Value source | `self.get_max_cache_shape(layer_idx)` unconditionally (`utils/hf.py:1231`) | layer API first, cache-level shape only when callable, else `None` (`utils/hf.py:1233`) |
+| Behaviour on 5.22 | shim not installed, `AttributeError` | shim installed, dynamic layers report `None` |
+
 
 ## K. Native loads run the pre-load hook; one legacy `generate()` adapter (issue #4121 items 2-3)
 
@@ -409,7 +451,7 @@ gone:
 
 The fix is one adapter installed from `BaseQModel.__init__`
 (`gptqmodel/models/base.py:774`) plus cache-side surface in
-`_patch_transformers_remote_code_compat`. No family names appear in it:
+the remote-code compatibility shim. No family names appear in it:
 
 ```mermaid
 flowchart TD
@@ -429,7 +471,7 @@ flowchart TD
 ```
 
 Cache-side surface, installed once per process by
-`_patch_transformers_remote_code_compat` (`gptqmodel/utils/hf.py:858`):
+the remote-code compatibility shim (`gptqmodel/utils/hf.py:1137`):
 
 | Symbol | Added by | Why |
 | --- | --- | --- |
@@ -447,6 +489,20 @@ Failure contract: a cache that has not been written yet is reported as "no
 past", never as an empty tuple that legacy code will index; a native
 transformers class is never wrapped; a definition's hook runs on every load
 path and must stay idempotent because quantize and reload can share a process.
+
+## M. Hymba `generate()` and the `flex` attention hint (issue #5090)
+
+Hymba's original remote code relied on three transformers-4 `generate()`
+inputs (an always-present all-ones `attention_mask`, model-built
+`position_ids`, and a cache whose length is read from its own storage) and on
+copying `attn_implementation_new` (`flex`) into `_attn_implementation` after
+transformers 5 had already validated it. GPT-QModel no longer runs that remote
+code or patches Transformers for it: Hymba is a package-owned port
+(`gptqmodel/models/ports/hymba`) whose `prepare_inputs_for_generation`, cache
+and config implement the transformers 5.23 contract directly, and whose
+`HymbaConfig` maps the serialized execution hint to portable SDPA.
+`tests/test_hymba_local_port.py` covers greedy and beam `generate()`;
+`tests/test_hymba_bf16_load_4888.py` covers the `flex` hint.
 
 ## Measured behaviour
 
@@ -477,14 +533,15 @@ quality claims for full checkpoints.
 | `tests/module_tree/test_nemotron_h_model_tree.py` | real-model `model` tree root and native mixer projection coverage |
 | `tests/test_falcon_h1_support.py` | `mup_vector` restoration and idempotence |
 | `tests/module_tree/test_registered_module_plans.py` | updated Nemotron-H registry plan |
+| `tests/test_hymba_bf16_load_4888.py` | #5090: the checkpoint's `flex` hint loads the package-owned Hymba with SDPA |
 | `tests/test_remote_code_rotary_restore.py` | fp64 oracle for legacy `inv_freq`/cos/sin, meta-shell skip, native-style skip, idempotence |
-| `tests/test_hf_config_compat.py` | legacy unscaled RoPE stays `None`, modern `rope_parameters` preserved, ChatGLM aliases, `OutputRecorder` shim |
+| `tests/test_hf_config_compat.py` | legacy unscaled RoPE stays `None`, modern `rope_parameters` preserved, ChatGLM aliases, `OutputRecorder` shim, cache-length helpers restored from the layer API |
 | `tests/test_lazy_turtle_conversion_mapping.py` | chained `.bin` conversion error, legacy tied-key normalization before save |
 | `tests/test_spark2_5_support.py` | AUTO_NF12 source-weight dtype/shape/device contract |
 | `tests/models/test_chatglm.py` | native and tiny from-config `generate()` |
-| `tests/test_legacy_generation_compat.py` | native load runs `before_model_load`; empty cache becomes `None`; `cache[0][0]`/`seen_tokens`/`get_usable_length`; `num_layers`/`n_layer` -> `num_hidden_layers` |
+| `tests/test_legacy_generation_compat.py` (removed by #4620) | Historical coverage: native load ran `before_model_load`; empty cache became `None`; `cache[0][0]`/`seen_tokens`/`get_usable_length`; `num_layers`/`n_layer` -> `num_hidden_layers` |
 | `tests/models/test_ouro.py`, `tests/models/test_spark2_5.py` | native `generate()` after the pre-load hook installs the mask-helper shim |
-| `tests/models/test_deci.py`, `test_exaone.py`, `test_nanbeige42.py`, `test_minicpm.py`, `test_baichuan.py`, `test_pangu_alpha.py` | quantize+ARC path also asserts real generated text (`ASSERT_INFERENCE`) |
+| `tests/models/test_deci.py`, `test_exaone.py`, `test_nanbeige42.py`, `test_minicpm.py`, `test_baichuan.py`, `test_pangu_alpha.py`, `test_hymba.py` | quantize+ARC path also asserts real generated text (`ASSERT_INFERENCE`) |
 
 ## E-I. Definition and calibration fixes (issue #4040)
 

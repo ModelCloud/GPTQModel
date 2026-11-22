@@ -14,7 +14,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import torch
 from safetensors import safe_open
-from safetensors.torch import save_file as save_safetensors_file
+
+from ..utils.safe import safetensors_save_file as save_safetensors_file
 
 
 @dataclass
@@ -336,6 +337,19 @@ class DiskBackedLayerOutputSequence(Sequence[List[torch.Tensor]]):
     @property
     def row_counts(self) -> list[int]:
         return list(self._row_counts)
+
+    def batch_placement(self, index: int) -> tuple[bool, torch.device]:
+        """Return one batch's presence and device without opening its shard.
+
+        ``open()`` validated the manifest, so every declared batch is present,
+        and ``__getitem__`` always returns CPU tensors. Multi-device scheduling
+        can therefore place a batch from this metadata instead of materializing
+        it; reading a batch opens its shard and hashes the whole file.
+        """
+
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        return True, torch.device("cpu")
 
     def __getitem__(self, index: int | slice):
         if isinstance(index, slice):

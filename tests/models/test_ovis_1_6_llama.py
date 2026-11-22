@@ -13,14 +13,13 @@ from PIL import Image
 class TestOvis1_6_Llama(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ovis1.6-Llama3.2-3B"
 
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 1
     USE_FLASH_ATTN = False
 
     def test_ovis_1_6(self):
         with self.model_compat_test_context():
-            # the evaluation harness does not support Ovis, and will throw an error during execution:
-            # TypeError: Ovis.forward() missing 3 required positional arguments: 'attention_mask', 'labels', and 'pixel_values'
+            # The evaluation harness does not provide Ovis image batches.
             model, tokenizer, _ = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
                                                   dtype=self.TORCH_DTYPE, multimodal_max_length=8192, batch_size=1,
                                                   call_perform_post_quant_validation=False)

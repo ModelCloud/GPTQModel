@@ -26,7 +26,7 @@ TUNED_PIPELINES = [
     ("gptq_gemv", "gptqmodel.nn_modules.triton_utils.gptq_gemv", "_GEMV_LAUNCH_CONFIGS"),
     ("gptq_gemm", "gptqmodel.nn_modules.triton_utils.gptq_gemm", "_LAUNCH_CONFIGS"),
     ("gptq_dequant", "gptqmodel.nn_modules.triton_utils.dequant", "_DEQUANT_LAUNCH_CONFIGS"),
-    ("paroquant_gemm", "gptqmodel.quantization.paroquant.modules.triton.gemm", "_PAROQUANT_GEMM_LAUNCH_CONFIGS"),
+    ("paro_gemm", "gptqmodel.quantization.paro.modules.triton.gemm", "_PARO_GEMM_LAUNCH_CONFIGS"),
     ("awq_gemv", "gptqmodel.quantization.awq.modules.triton.gemv", "_AWQ_GEMV_LAUNCH_CONFIGS"),
     ("bitsandbytes_4bit_gemm", "gptqmodel.nn_modules.qlinear.bitsandbytes_triton", "_BNB_GEMM_LAUNCH"),
 ]
@@ -75,31 +75,32 @@ def test_ada_is_not_promoted_to_hopper():
     assert arch.is_ada((10, 0)) is False
 
 
-def test_paroquant_launch_table_is_per_family_and_row_banded():
-    """ParoQuant keeps its historical tile off-table and measured Ada/RDNA4 tiles."""
+def test_paro_launch_table_is_per_family_and_row_banded():
+    """Paro keeps its historical tile off-table and measured Ada/RDNA4 tiles."""
 
-    from gptqmodel.quantization.paroquant.modules.triton import gemm as paro_gemm
+    # The launch table lives in the Triton kernel module, which imports Triton.
+    paro_gemm = pytest.importorskip("gptqmodel.quantization.paro.modules.triton.gemm")
 
-    table = paro_gemm._PAROQUANT_GEMM_LAUNCH_CONFIGS
-    assert "rdna4" in table, "ParoQuant: no measured RDNA4 launch entry"
-    assert "ada" in table, "ParoQuant: no measured Ada launch entry"
+    table = paro_gemm._PARO_GEMM_LAUNCH_CONFIGS
+    assert "rdna4" in table, "Paro: no measured RDNA4 launch entry"
+    assert "ada" in table, "Paro: no measured Ada launch entry"
 
     # Families with no measured entry keep the tile that shipped before the
     # table existed.  Ada and RDNA4 are measured now and are covered below.
     for family in ("other", "hopper", "blackwell", "cdna4"):
         assert (
-            paro_gemm.paroquant_gemm_launch_config("decode", "gfx942")
-            == paro_gemm._PAROQUANT_GEMM_DEFAULT_CONFIGS["decode"]
+            paro_gemm.paro_gemm_launch_config("decode", "gfx942")
+            == paro_gemm._PARO_GEMM_DEFAULT_CONFIGS["decode"]
         )
     assert (
-        paro_gemm.paroquant_gemm_launch_config("prefill", "gfx942")
-        == paro_gemm._PAROQUANT_GEMM_DEFAULT_CONFIGS["prefill"]
+        paro_gemm.paro_gemm_launch_config("prefill", "gfx942")
+        == paro_gemm._PARO_GEMM_DEFAULT_CONFIGS["prefill"]
     )
 
     # RDNA4 is row-banded: <=8 rows, 9..64 rows, >64 rows.
-    small = paro_gemm.paroquant_gemm_launch_config("decode", "gfx1201", rows=8)
-    medium = paro_gemm.paroquant_gemm_launch_config("prefill", "gfx1201", rows=9)
-    large = paro_gemm.paroquant_gemm_launch_config("prefill", "gfx1201", rows=65)
+    small = paro_gemm.paro_gemm_launch_config("decode", "gfx1201", rows=8)
+    medium = paro_gemm.paro_gemm_launch_config("prefill", "gfx1201", rows=9)
+    large = paro_gemm.paro_gemm_launch_config("prefill", "gfx1201", rows=65)
     assert small == table["rdna4"]["decode"]
     assert medium == table["rdna4"]["prefill"]
     assert large == table["rdna4"]["prefill_large"]
@@ -110,9 +111,9 @@ def test_paroquant_launch_table_is_per_family_and_row_banded():
     assert medium[3] == 4 and large[3] == 4
 
     # Ada (RTX 4090) is row-banded the same way with its own measured tiles.
-    ada_small = paro_gemm.paroquant_gemm_launch_config("decode", (8, 9), rows=8)
-    ada_medium = paro_gemm.paroquant_gemm_launch_config("prefill", "sm_89", rows=9)
-    ada_large = paro_gemm.paroquant_gemm_launch_config("prefill", (8, 9), rows=65)
+    ada_small = paro_gemm.paro_gemm_launch_config("decode", (8, 9), rows=8)
+    ada_medium = paro_gemm.paro_gemm_launch_config("prefill", "sm_89", rows=9)
+    ada_large = paro_gemm.paro_gemm_launch_config("prefill", (8, 9), rows=65)
     assert ada_small == table["ada"]["decode"]
     assert ada_medium == table["ada"]["prefill"]
     assert ada_large == table["ada"]["prefill_large"]
@@ -129,6 +130,9 @@ def test_gguf_qk_table_is_ada_only_and_rdna4_falls_through():
 
     from gptqmodel.nn_modules.qlinear import gguf_triton
 
+    if not gguf_triton._TRITON_AVAILABLE:
+        # The fixed-tile table is only defined alongside the Triton kernels.
+        pytest.skip("GGUF Triton launch tables require Triton")
     table = gguf_triton._GGUF_SM89_QK_SHAPES
     assert table, "GGUF SM89 table is empty"
     for qtype, bands in table.items():

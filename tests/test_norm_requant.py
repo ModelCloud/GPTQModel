@@ -13,7 +13,7 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from gptqmodel import NormConfig, NormType, QuantizeEmbed
+from gptqmodel import CalibrationConfig, NormConfig, NormType, QuantizeEmbed
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
@@ -142,7 +142,7 @@ def test_tune_norm_params_escapes_inference_scope_and_clears_stale_gradients():
 
 
 def test_requantize_dispatches_norm_without_embedding_target():
-    model = _bare(BaseQModel, nn.Module())
+    model = _bare(Qwen3QModel, _tiny_qwen3())
     captured = {}
 
     def requantize_norm(**kwargs):
@@ -151,20 +151,22 @@ def test_requantize_dispatches_norm_without_embedding_target():
 
     model._requantize_norm = requantize_norm
     model._requantize_embeddings = lambda **kwargs: pytest.fail("embedding requant must not run")
-    config = NormConfig(teacher="teacher-path", steps=3)
+    config = NormConfig(teacher=_tiny_qwen3(seed=1), steps=3)
 
-    result = model.requantize(calibration=["sample"], norm=config, batch_size=4)
+    result = model.requantize(CalibrationConfig(dataset=["sample"], batch_size=4), norm=config)
 
     assert result == {"norm": {"modules": ["model.norm"]}}
     assert captured["norm"] is config
-    assert captured["batch_size"] == 4
+    assert captured["calibration"].batch_size == 4
+    # The norm-only path runs the same pre-flight validation (#5118).
+    assert captured["names"] == model.norm_module_names()
 
 
 def test_requantize_rejects_removed_rmsnorm_argument():
     model = _bare(BaseQModel, nn.Module())
     config = NormConfig(teacher="teacher-path", steps=3)
     with pytest.raises(TypeError, match="unexpected keyword argument 'rmsnorm'"):
-        model.requantize(calibration=["sample"], rmsnorm=config)
+        model.requantize(CalibrationConfig(dataset=["sample"]), rmsnorm=config)
 
 
 def test_norm_validates_arguments():
@@ -173,7 +175,7 @@ def test_norm_validates_arguments():
     with pytest.raises(ValueError, match="steps"):
         NormConfig(teacher="t", steps=0)
     with pytest.raises(TypeError, match="NormConfig"):
-        _bare(BaseQModel).requantize(calibration=["sample"], norm={"teacher": "t"})
+        _bare(BaseQModel).requantize(CalibrationConfig(dataset=["sample"]), norm={"teacher": "t"})
     assert NormConfig(teacher="t", types="layernorm").types == (NormType.LAYERNORM,)
     assert NormConfig(teacher="t", types=(NormType.LAYERNORM, "rmsnorm", "rmsnorm")).types == (
         NormType.LAYERNORM,
@@ -217,8 +219,13 @@ def test_combined_v1_call_fails_before_embedding_or_teacher_work():
     model._requantize_embeddings = lambda **kwargs: pytest.fail("must reject before embedding packing")
     model._requantize_norm = lambda **kwargs: pytest.fail("must reject before teacher loading")
     with pytest.raises(ValueError, match="Requantize embeddings separately"):
-        model.requantize(calibration=["sample"], embed_quant_mode=QuantizeEmbed.OUTPUT,
-            norm=NormConfig(teacher="unused", steps=1))
+        model.requantize(
+            CalibrationConfig(
+                dataset=["sample"],
+            ),
+            embed_quant_mode=QuantizeEmbed.OUTPUT,
+            norm=NormConfig(teacher="unused", steps=1),
+        )
 
 
 def test_packed_rmsnorm_tuning_save_reload_preserves_quantized_tensors(tmp_path, monkeypatch):
@@ -331,3 +338,46 @@ def test_packed_rmsnorm_tuning_save_reload_preserves_quantized_tensors(tmp_path,
     reloaded.load_state_dict(saved_tensors)
     for name, value in saved_tensors.items():
         assert torch.equal(reloaded.state_dict()[name], value)
+
+
+@pytest.mark.parametrize(
+    "calibration_kwargs,norm_kwargs,tokenizer,error",
+    [
+        ({"exclude_attention_sinks": True}, {}, None, ValueError),
+        ({"adapter_dataset": ["x"]}, {}, None, ValueError),
+        ({}, {"types": ["layernorm"]}, None, ValueError),
+        ({}, {}, "not-a-tokenizer", ValueError),
+        ({}, {"teacher": "/nonexistent/teacher-model"}, None, OSError),
+    ],
+    ids=["attention-sinks", "adapter-dataset", "no-norm-modules", "bad-tokenizer", "bad-teacher"],
+)
+def test_invalid_norm_request_fails_before_embedding_packing(
+    calibration_kwargs, norm_kwargs, tokenizer, error
+):
+    """Every norm-side rejection lands before the embedding is replaced (#5118).
+
+    A rejected norm half used to leave ``TorchQuantEmbeddings`` installed, and
+    no later ``requantize()`` accepted it, so the user had to reload.
+    """
+
+    student = _tiny_qwen3()
+    model = _bare(Qwen3QModel, student)
+    model.quantize_config = QuantizeConfig(
+        bits=4, group_size=16, format=FORMAT.GPTQ_V2, offload_to_disk=False
+    )
+    model._requantize_embeddings = lambda **kwargs: pytest.fail(
+        "must reject before embedding packing"
+    )
+    model._requantize_norm = lambda **kwargs: pytest.fail(
+        "must reject before teacher loading"
+    )
+
+    calibration = CalibrationConfig(dataset=["sample"], **calibration_kwargs)
+    norm = NormConfig(**{"teacher": "unused", "steps": 1, **norm_kwargs})
+    with pytest.raises(error):
+        model.requantize(
+            calibration,
+            embed_quant_mode=QuantizeEmbed.INPUT,
+            norm=norm,
+            tokenizer=tokenizer,
+        )

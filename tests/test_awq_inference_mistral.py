@@ -4,17 +4,33 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import pytest
+import torch
 from awq_test_utils import run_inference_only_generation_test
 
 from gptqmodel import BACKEND
 
 
-pytestmark = [pytest.mark.model, pytest.mark.slow]
+MODEL_ID = "TheBloke/Mistral-7B-v0.1-AWQ"
+
+
+def _cached(model_id: str) -> bool:
+    from huggingface_hub import try_to_load_from_cache
+
+    return isinstance(try_to_load_from_cache(model_id, "config.json"), str)
+
+
+pytestmark = [
+    pytest.mark.model,
+    pytest.mark.slow,
+    # The shared helper loads onto `cuda` and fetches the Hub checkpoint.
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="AWQ inference test loads onto CUDA"),
+    pytest.mark.skipif(not _cached(MODEL_ID), reason=f"{MODEL_ID} is not in the local Hugging Face cache"),
+]
 
 
 def test_inference_mistral_awq():
     run_inference_only_generation_test(
-        "TheBloke/Mistral-7B-v0.1-AWQ",
+        MODEL_ID,
         backend=BACKEND.GEMM,
         max_new_tokens=64,
     )

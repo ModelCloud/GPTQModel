@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.nn_modules.qlinear.gemv_fast_awq import pack_intweight
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq_columns
 from gptqmodel.utils.awq import (
@@ -250,7 +251,6 @@ def test_real_qwen25_awq_gemv_greedy_decode_stays_finite(tmp_path):
         group_size=GROUP_SIZE,
         quant_method=METHOD.AWQ,
         format=FORMAT.GEMV,
-        dtype=torch.float16,
     )
     model = GPTQModel.load(
         str(QWEN25_DENSE_PATH),
@@ -267,7 +267,7 @@ def test_real_qwen25_awq_gemv_greedy_decode_stays_finite(tmp_path):
         }
         for _ in range(4)
     ]
-    model.quantize(calibration, batch_size=1, calibration_concat_size=0)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1))
     model.save(str(tmp_path))
     del model
 
@@ -288,4 +288,134 @@ def test_real_qwen25_awq_gemv_greedy_decode_stays_finite(tmp_path):
     assert generated.scores, "greedy decode returned no scores"
     assert all(bool(torch.isfinite(score).all()) for score in generated.scores), (
         "AWQ GEMV greedy decode produced non-finite logits"
+    )
+
+
+def _wide_output_sentinel_input(rows: int, in_features: int, tail: int = 8):
+    """Activations whose only nonzero rows are the final ``tail`` rows.
+
+    Every other row is exactly zero, so a missed store is the only way the tail
+    of the output can disagree with the oracle. K stays small so the 2^31
+    output-element shape fits in a single allocation without a wide input.
+    """
+    torch.manual_seed(0)
+    x = torch.zeros(rows, in_features, dtype=torch.float16, device="cuda")
+    x[-tail:] = torch.randn(tail, in_features, dtype=torch.float16, device="cuda")
+    return x
+
+
+def _wide_output_geometry(tail: int = 8):
+    """Return (rows, out_features, in_features, tail) just above 2^31 elements.
+
+    ``rows * out_features`` is 2^31 + 4096 with K = 256, so both the output
+    store and the A-side row offset cross the 32-bit boundary while the
+    activation itself stays 128 MiB.
+    """
+    in_features = 256
+    out_features = 8192
+    rows = 2**31 // out_features + (4096 + out_features - 1) // out_features
+    assert rows * out_features > 2**31
+    return rows, out_features, in_features, tail
+
+
+@CUDA_REQUIRED
+@pytest.mark.parametrize("split_k_iters", [1, 2])
+def test_gemmv2_stores_every_row_above_int32_element_count(split_k_iters):
+    """Issue #5091: GEMMV2 (M > 8) must store rows past 2^31 output elements.
+
+    ``row_offset * OC`` was a 32-bit product, so once ``rows * out_features``
+    passed 2^31 the store wrapped to a negative element offset: the sm_80+ path
+    silently dropped the tail rows and the older arch build faulted with
+    ``cudaErrorIllegalAddress``. Only the sampled tail rows need an oracle, so
+    the fixture stays inside one output allocation.
+    """
+    _require_runtime()
+    rows, out_features, in_features, tail = _wide_output_geometry()
+    codes, scales, zeros, qweight, scale_buf, zero_buf = _build_gemv_buffers(
+        in_features, out_features
+    )
+    qweight = qweight.cuda()
+    scale_buf = scale_buf.cuda()
+    zero_buf = zero_buf.cuda()
+
+    x = _wide_output_sentinel_input(rows, in_features, tail)
+    with torch.inference_mode():
+        out = awq_gemmv2_forward(x, qweight, scale_buf, zero_buf, GROUP_SIZE, split_k_iters)
+        torch.cuda.synchronize()
+
+    assert out.shape == (rows, out_features)
+    assert torch.isfinite(out[-tail:]).all()
+    error = _rel_error(out[-tail:], _gemv_oracle(x[-tail:], codes, scales, zeros))
+    assert error <= REL_TOL, (
+        f"GEMMV2 split_k={split_k_iters} relative error {error:.3e} above 2^31 output "
+        "elements; the tail rows were not stored"
+    )
+
+
+@CUDA_REQUIRED
+def test_gemv_fast_prefill_stores_every_row_above_int32_element_count():
+    """Issue #5091: GEMV_FAST prefill must store rows past 2^31 elements.
+
+    ``int index = write_row * N + ...`` wrapped in the T2 prefill kernel, so a
+    long-context prefill aborted the CUDA context with an illegal memory
+    access. The tail rows are the only nonzero inputs, so a dropped store is
+    visible without materializing a wide float32 oracle.
+    """
+    _require_runtime()
+    rows, out_features, in_features, tail = _wide_output_geometry()
+    codes, scales, offsets, qweight, scale_buf, zero_buf = _build_gemv_fast_buffers(
+        in_features, out_features
+    )
+    qweight = qweight.cuda()
+    scale_buf = scale_buf.cuda()
+    zero_buf = zero_buf.cuda()
+
+    x = _wide_output_sentinel_input(rows, in_features, tail)
+    with torch.inference_mode():
+        out = awq_fast_gemm_forward_prefill(x, qweight, scale_buf, zero_buf)
+        torch.cuda.synchronize()
+
+    assert out.shape == (rows, out_features)
+    assert torch.isfinite(out[-tail:]).all()
+    error = _rel_error(out[-tail:], _gemv_fast_oracle(x[-tail:], codes, scales, offsets))
+    assert error <= REL_TOL, (
+        f"GEMV_FAST prefill relative error {error:.3e} above 2^31 output elements; "
+        "the tail rows were not stored"
+    )
+
+
+@CUDA_REQUIRED
+def test_gemmv2_reads_activations_above_int32_row_stride_product():
+    """Issue #5091: GEMMV2 must index A rows once rows * in_features > 2^31.
+
+    ``A_ptr`` multiplied the row by ``IC`` in 32 bits, so a long prefill read
+    the wrong activation row for every tile whose ``row * IC`` crossed 2^31.
+    The output stays small here (N = 128) and only the final rows are nonzero,
+    so a wrapped A offset changes the sampled rows without a wide output.
+    """
+    _require_runtime()
+    in_features = 8192
+    out_features = 128
+    tail = 8
+    rows = 2**31 // in_features + (4096 + in_features - 1) // in_features + 1
+    assert rows * in_features > 2**31
+
+    codes, scales, zeros, qweight, scale_buf, zero_buf = _build_gemv_buffers(
+        in_features, out_features
+    )
+    qweight = qweight.cuda()
+    scale_buf = scale_buf.cuda()
+    zero_buf = zero_buf.cuda()
+
+    x = _wide_output_sentinel_input(rows, in_features, tail)
+    with torch.inference_mode():
+        out = awq_gemmv2_forward(x, qweight, scale_buf, zero_buf, GROUP_SIZE, 1)
+        torch.cuda.synchronize()
+
+    assert out.shape == (rows, out_features)
+    assert torch.isfinite(out[-tail:]).all()
+    error = _rel_error(out[-tail:], _gemv_oracle(x[-tail:], codes, scales, zeros))
+    assert error <= REL_TOL, (
+        f"GEMMV2 relative error {error:.3e} once rows * in_features passed 2^31; "
+        "the activation row offset wrapped"
     )

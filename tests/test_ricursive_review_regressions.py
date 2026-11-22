@@ -9,42 +9,16 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
 from pathlib import Path
 
 import pytest
 import torch
-import transformers
-from huggingface_hub import snapshot_download
-from ricursive_test_utils import compatibility_module, make_model
+from ricursive_test_utils import make_model
 
 
-@lru_cache(maxsize=1)
-def legacy_source():
-    """Use real historical source; changing a modern marker cannot test old forwards."""
-    configured = os.environ.get("GPTQMODEL_RIPPLE_LEGACY_REF")
-    if configured:
-        return Path(configured)
-    return Path(
-        snapshot_download(
-            "ricursiveAI/Ripple-65B-Preview",
-            revision="da94cc013a8fda04a502f0a185083c7099ea06c1",
-            allow_patterns=["configuration_ricursive.py", "modeling_ricursive.py"],
-        )
-    )
-
-
-def review_model(mode, **kwargs):
-    model = make_model(source_dir=legacy_source() if mode == "legacy" else None, **kwargs)
-    if mode != "native":
-        compatibility_module().apply_ricursive_generate_patch(model)
-    return model
-
-
-@pytest.mark.parametrize("mode", ["native", "patched", "legacy"])
 @pytest.mark.parametrize("return_dict", [True, False])
-def test_accumulated_loss_matches_whole_batch_gradients(mode, return_dict):
-    model = review_model(mode).train()
+def test_accumulated_loss_matches_whole_batch_gradients(return_dict):
+    model = make_model().train()
     ids = torch.tensor([[3, 5, 6, 8], [2, 3, 4, 5]])
     labels = ids.clone()
     labels[1, 2:] = -100
@@ -70,8 +44,8 @@ def test_accumulated_loss_matches_whole_batch_gradients(mode, return_dict):
         torch.testing.assert_close(parameter.grad, expected[name], atol=2e-6, rtol=2e-5, msg=name)
 
 
-def test_legacy_accumulation_with_empty_label_microbatch_matches_full_gradient():
-    model = review_model("legacy").train()
+def test_accumulation_with_empty_label_microbatch_matches_full_gradient():
+    model = make_model().train()
     ids = torch.tensor([[3, 4, 5, 6], [2, 3, 4, 5]])
     labels = ids.clone()
     labels[0] = -100
@@ -109,13 +83,12 @@ def test_legacy_accumulation_with_empty_label_microbatch_matches_full_gradient()
     torch.testing.assert_close(model.lm_head.weight.grad, expected_gradient, atol=2e-6, rtol=2e-5)
 
 
-@pytest.mark.parametrize("mode", ["native", "legacy"])
-def test_trainer_accumulation_preserves_optimizer_update(mode, tmp_path):
+def test_trainer_accumulation_preserves_optimizer_update(tmp_path):
     try:
         from transformers import Trainer, TrainingArguments
     except (ImportError, ModuleNotFoundError) as exc:
         pytest.skip(f"Trainer dependencies unavailable: {exc}")
-    initial = review_model(mode, use_cache=False)
+    initial = make_model(use_cache=False)
     ids = torch.tensor([[3, 5, 6, 8], [2, 3, 4, 5]])
     labels = ids.clone()
     labels[1, 2:] = -100
@@ -148,11 +121,10 @@ def test_trainer_accumulation_preserves_optimizer_update(mode, tmp_path):
         torch.testing.assert_close(weights[0][name], weights[1][name], atol=2e-6, rtol=2e-5, msg=name)
 
 
-@pytest.mark.parametrize("mode", ["native", "patched", "legacy"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @torch.no_grad()
-def test_additive_mask_preserves_empty_rows_and_forbidden_keys(mode, dtype):
-    model = review_model(mode).to(dtype=dtype)
+def test_additive_mask_preserves_empty_rows_and_forbidden_keys(dtype):
+    model = make_model().to(dtype=dtype)
     attn = model.model.layers[0].self_attn
     x = torch.randn(1, 6, model.config.hidden_size, dtype=dtype)
     positions = torch.arange(6)
@@ -160,19 +132,18 @@ def test_additive_mask_preserves_empty_rows_and_forbidden_keys(mode, dtype):
     allowed[..., 2, :] = False
     allowed[..., 4, :] = False
     additive = torch.zeros(allowed.shape, dtype=dtype).masked_fill(~allowed, float("-inf"))
-    options = {"position_ids": positions[None], "cache_position": positions, "output_attentions": True}
-    expected, expected_weights, _ = attn(x, attention_mask=allowed, **options)
-    actual, weights, _ = attn(x, attention_mask=additive, **options)
+    options = {"position_ids": positions[None], "output_attentions": True}
+    expected, expected_weights = attn(x, attention_mask=allowed, **options)
+    actual, weights = attn(x, attention_mask=additive, **options)
     torch.testing.assert_close(actual, expected, atol=2e-3, rtol=2e-3)
     torch.testing.assert_close(weights, expected_weights, atol=2e-3, rtol=2e-3)
     assert torch.count_nonzero(actual[:, [2, 4]]) == 0
     assert torch.count_nonzero(weights.masked_select(~allowed)) == 0
 
 
-@pytest.mark.parametrize("mode", ["native", "legacy"])
 @pytest.mark.parametrize("second_request", ["keep_three", "full", "labels"])
-def test_shared_model_concurrent_calls_keep_independent_logits(mode, second_request):
-    model = review_model(mode)
+def test_shared_model_concurrent_calls_keep_independent_logits(second_request):
+    model = make_model()
     ids = torch.tensor([[3, 5, 6, 8]])
     requests = [
         {"logits_to_keep": 1},
@@ -206,47 +177,16 @@ def test_shared_model_concurrent_calls_keep_independent_logits(mode, second_requ
             torch.testing.assert_close(out.loss, expected.loss)
 
 
-def test_legacy_concurrent_tuple_outputs_keep_independent_rows():
-    model = review_model("legacy").eval()
-    ids = torch.tensor([[3, 4, 5, 6]])
-    with torch.no_grad():
-        full_logits = model(ids, use_cache=False, return_dict=False)[0]
-
-    gate = threading.Barrier(2, timeout=10)
-    head = model.lm_head
-    original_head_forward = head.forward
-
-    def synchronized_head_forward(hidden_states):
-        gate.wait()
-        return original_head_forward(hidden_states)
-
-    def run(keep):
-        with torch.no_grad():
-            return model(ids, logits_to_keep=keep, return_dict=False, use_cache=False)[0]
-
-    head.forward = synchronized_head_forward
-    try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            actual = list(executor.map(run, [1, 2]))
-    finally:
-        del head.forward
-
-    for output, keep in zip(actual, [1, 2]):
-        assert output.shape[1] == keep
-        torch.testing.assert_close(output, full_logits[:, -keep:, :])
-    assert not head._forward_pre_hooks
-
-
-@pytest.mark.parametrize("mode", ["native", "patched", "legacy"])
+@pytest.mark.parametrize("via_config", [False, True])
 @torch.no_grad()
-def test_tied_embeddings_construct_resize_and_roundtrip(mode, tmp_path):
-    if mode == "legacy":
-        untied = review_model(mode)
+def test_tied_embeddings_construct_resize_and_roundtrip(tmp_path, via_config):
+    if via_config:
+        untied = make_model()
         config = copy.deepcopy(untied.config)
         config.tie_word_embeddings = True
         model = type(untied)(config).eval()
     else:
-        model = review_model(mode, tie_word_embeddings=True)
+        model = make_model(tie_word_embeddings=True)
     assert model.lm_head.weight is model.model.embed_tokens.weight
     model.resize_token_embeddings(70)
     assert model.lm_head.weight is model.model.embed_tokens.weight
@@ -258,17 +198,14 @@ def test_tied_embeddings_construct_resize_and_roundtrip(mode, tmp_path):
     torch.testing.assert_close(restored(ids, use_cache=False).logits, expected)
 
 
-@pytest.mark.parametrize("mode", ["native", "patched", "legacy"])
 @pytest.mark.parametrize(
     "runtime,dtype", [("cpu", "float32"), ("cuda", "float32"), ("cuda", "float16"), ("cuda", "bfloat16")]
 )
-def test_real_tensor_parallel_matches_unsharded_model(mode, runtime, dtype):
+def test_real_tensor_parallel_matches_unsharded_model(runtime, dtype):
     # Portable Torch ops: cuda is the execution namespace for CUDA and ROCm.
     if runtime == "cuda" and (not torch.cuda.is_available() or torch.cuda.device_count() < 2):
         pytest.skip("Two CUDA/ROCm runtime devices required")
-    if runtime == "cpu" and transformers.__version__.startswith("4.") and torch.version.cuda is not None:
-        pytest.skip("Transformers 4 TP loader chooses CUDA on a CUDA-enabled Torch build even for a CPU mesh")
-    env = dict(os.environ, OMP_NUM_THREADS="1")
+    env = dict(os.environ)
     if runtime == "cpu":
         # Transformers otherwise selects the available accelerator during loading.
         env["CUDA_VISIBLE_DEVICES"] = ""
@@ -280,7 +217,6 @@ def test_real_tensor_parallel_matches_unsharded_model(mode, runtime, dtype):
             "--standalone",
             "--nproc_per_node=2",
             str(Path(__file__).with_name("ricursive_tp_worker.py")),
-            mode,
             runtime,
             dtype,
         ],

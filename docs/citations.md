@@ -16,6 +16,9 @@
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * VPTQ: Microsoft, main-authors Yifei Liu et al., arXiv:2409.17066. [Official implementation](https://github.com/microsoft/VPTQ)
 * MACaQ: Huawei CSL, main-authors Lorenz K. Muller, Philippe Bich, Chiara Boretti, Hyun-Min Chang, Jiawei Zhuang, and Lukas Cavigelli. [Official implementation](https://github.com/huawei-csl/MACaQ), [Paper](https://arxiv.org/abs/2611.10649)
+* **QTIP** by Albert Tseng, Qingyao Sun, David Hou, and Christopher De Sa introduced the bitshift trellis that underlies EXL3. CPTC uses QTIP's tail-biting construction. [Paper](https://arxiv.org/abs/2406.11235) · [Reference implementation](https://github.com/Cornell-RelaxML/qtip) · [ExLlamaV3 quantization](https://github.com/turboderp-org/exllamav3#exl3-quantization)
+* **CPTC** by Muhammed Fatih Balın introduced the computed permutation decoder and small codebook used by GPT-QModel's CPTC implementation. [Paper](https://arxiv.org/abs/2611.22019) · [CPTC guide](cptc.md)
+* **YAQA** by Albert Tseng, Zhaofeng Sun, and Christopher De Sa introduced the Hessian sketches and two-sided adaptive rounding used in GPT-QModel's calibrated CPTC path. [Paper](https://arxiv.org/abs/2505.22988) · [Reference implementation](https://github.com/Cornell-RelaxML/yaqa-quantization) · [CPTC calibration](cptc.md#yaqa-calibration)
 * Norm Tweaking: Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu, [paper](https://arxiv.org/abs/2309.02784)
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
 * GSQ: [IST-DASLab's GSQ paper](https://arxiv.org/abs/2604.18556) and [reference implementation](https://github.com/IST-DASLab/GSQ), by Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, and Dan Alistarh. The optional local refinement and staged Llama training in GPT-QModel are adaptations of this work.
@@ -79,7 +82,7 @@
   year={2023}
 }
 
-# ParoQuant
+# Paro
 @inproceedings{liang2026paroquant,
   title     = {{ParoQuant: Pairwise Rotation Quantization for Efficient Reasoning LLM Inference}},
   author    = {Liang, Yesheng and Chen, Haisheng and Han, Song and Liu, Zhijian},
@@ -150,6 +153,36 @@
   archivePrefix={arXiv},
   primaryClass={cs.LG},
   url={https://arxiv.org/abs/2309.02784}
+}
+
+# QTIP
+@misc{tseng2024qtip,
+  title = {{QTIP}: Quantization with Trellises and Incoherence Processing},
+  author = {Tseng, Albert and Sun, Qingyao and Hou, David and De Sa, Christopher},
+  year = {2024},
+  eprint = {2406.11235},
+  archivePrefix = {arXiv},
+  url = {https://arxiv.org/abs/2406.11235}
+}
+
+# CPTC
+@misc{balin2026cptc,
+  title = {Computed Permutation Trellis Coding: Near-Optimal Quantization from Two Multiplications and a 64-Byte Table},
+  author = {Bal{\i}n, Muhammed Fatih},
+  year = {2026},
+  eprint = {2611.22019},
+  archivePrefix = {arXiv},
+  url = {https://arxiv.org/abs/2611.22019}
+}
+
+# YAQA
+@misc{tseng2025yaqa,
+  title = {Model-Preserving Adaptive Rounding},
+  author = {Tseng, Albert and Sun, Zhaofeng and De Sa, Christopher},
+  year = {2025},
+  eprint = {2505.22988},
+  archivePrefix = {arXiv},
+  url = {https://arxiv.org/abs/2505.22988}
 }
 
 # ExLlama V3 / EXL3

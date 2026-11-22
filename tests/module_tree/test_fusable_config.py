@@ -11,7 +11,7 @@ import pytest
 import torch
 from transformers import Qwen2Config, Qwen2ForCausalLM
 
-from gptqmodel import FusableConfig, FusableProfile, LlamaFusableConfig
+from gptqmodel import CalibrationConfig, FusableConfig, FusableProfile, LlamaFusableConfig
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.models.definitions.qwen2 import Qwen2QModel
 from gptqmodel.models.fusable import require_fusable_config
@@ -151,7 +151,7 @@ def test_explicit_load_and_quantization_opt_in_reject_before_work():
         _wrapper(definition=NonFusableLlamaQModel, automatic=True)
     model, _ = _wrapper(definition=NonFusableLlamaQModel, quantized=False)
     with pytest.raises(ValueError, match="not fusable"):
-        model.quantize([], fuse=True)
+        model.quantize(CalibrationConfig(dataset=[]), fuse=True)
     assert not model._auto_fusion and not model.quantized
 
 

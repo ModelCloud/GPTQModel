@@ -127,10 +127,20 @@ def test_load_dataset_falls_back_when_datasets_import_failed(monkeypatch):
 
     monkeypatch.setattr(model_test_module, "hf_load_dataset", None)
     monkeypatch.setattr(model_test_module, "DATASETS_IMPORT_ERROR", SyntaxError("source code string cannot contain null bytes"))
-    monkeypatch.setattr(ModelTest, "_load_calibration_parquet", staticmethod(lambda **_kwargs: fallback_dataset))
+    requested_rows = []
+
+    def _load_calibration_parquet(rows=0):
+        # Mirror the real loader's contract: it slices to ``rows`` itself. A
+        # host with the local parquet takes that early path for ``rows > 0``
+        # before consulting ``datasets`` at all.
+        requested_rows.append(rows)
+        return fallback_dataset.select(range(min(rows, len(fallback_dataset)))) if rows > 0 else fallback_dataset
+
+    monkeypatch.setattr(ModelTest, "_load_calibration_parquet", staticmethod(_load_calibration_parquet))
 
     dataset = ModelTest.load_dataset(rows=1)
 
+    assert requested_rows == [1]
     assert list(dataset) == [{"text": "a"}]
 
 
@@ -506,3 +516,18 @@ def test_perform_post_quant_validation_retries_without_forced_cuda_map_after_oom
     ]
     assert reuse_candidates == {}
     assert eval_records == {BACKEND.AUTO: {"ok": 1.0}}
+
+
+def test_resolve_attn_implementation_prefers_flash_attention_2_when_available(monkeypatch):
+    monkeypatch.setattr(model_test_module, "is_flash_attn_2_available", lambda: True)
+
+    assert model_test_module.resolve_attn_implementation() == "paged|flash_attention_2"
+    assert model_test_module.resolve_attn_implementation("flash_attention_2") == "flash_attention_2"
+
+
+def test_resolve_attn_implementation_falls_back_to_sdpa_when_flash_attn_missing(monkeypatch):
+    monkeypatch.setattr(model_test_module, "is_flash_attn_2_available", lambda: False)
+
+    assert model_test_module.resolve_attn_implementation() == "paged|sdpa"
+    assert model_test_module.resolve_attn_implementation("flash_attention_2") == "sdpa"
+    assert model_test_module.resolve_attn_implementation("eager") == "eager"
