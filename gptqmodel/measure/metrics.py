@@ -52,6 +52,20 @@ def _shifted(logits: torch.Tensor, input_ids: torch.Tensor) -> Tuple[torch.Tenso
     return logits[:, :-1, :], input_ids[:, 1:]
 
 
+# Two FP32 tensors exist per NLL tile: the cast logits and their log-softmax.
+# The full-vocabulary copies used to scale with batch size and sequence length,
+# including padded positions, so one long row could add hundreds of MiB of
+# scratch for a single scalar per target. Bound the pair by a byte budget and
+# accumulate the sums on the logits' device instead.
+_NLL_FP32_TILE_BYTES = 32 * 1024 * 1024
+
+
+def _nll_tile_rows(vocab: int) -> int:
+    """Rows per NLL tile, bounded by the two FP32 temporaries it creates."""
+
+    return max(1, _NLL_FP32_TILE_BYTES // (2 * vocab * 4))
+
+
 def mean_negative_log_likelihood(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
@@ -69,43 +83,76 @@ def mean_negative_log_likelihood(
     is the window's own coverage mask: position ``j`` is True when ``j`` is a
     target this window is responsible for. Overlapping windows pass their mask
     so a target shared as context by a later window is not counted twice.
+
+    The FP32 work runs in row tiles, so a long sequence or a large batch cannot
+    allocate a full-vocabulary copy of every logit at once. Per-tile sums and
+    valid-token counts accumulate on the logits' device and are copied back once.
     """
 
     shifted_logits, targets = _shifted(logits, input_ids)
-    log_probs = F.log_softmax(shifted_logits.float(), dim=-1)
-    gather_targets = targets
-    if ignore_index is not None:
-        # Gather on a clamped copy: `ignore_index` is usually -100, which is a
-        # valid-looking index to `gather` and would either wrap or raise.
-        gather_targets = targets.masked_fill(targets == ignore_index, 0)
-    picked = log_probs.gather(-1, gather_targets.unsqueeze(-1)).squeeze(-1)
+    if attention_mask is not None and attention_mask.shape != input_ids.shape:
+        raise ValueError(
+            f"attention_mask {tuple(attention_mask.shape)} does not match "
+            f"input_ids {tuple(input_ids.shape)}"
+        )
+    if score_mask is not None and score_mask.shape != input_ids.shape:
+        raise ValueError(
+            f"score_mask {tuple(score_mask.shape)} does not match "
+            f"input_ids {tuple(input_ids.shape)}"
+        )
 
-    keep = torch.ones_like(picked, dtype=torch.bool)
-    if ignore_index is not None:
-        keep &= targets != ignore_index
-    if attention_mask is not None:
-        # A padded position predicts nothing: its target is a pad id, and
-        # counting it would drag the perplexity toward whatever pad happens to
-        # look like.
-        if attention_mask.shape != input_ids.shape:
-            raise ValueError(
-                f"attention_mask {tuple(attention_mask.shape)} does not match "
-                f"input_ids {tuple(input_ids.shape)}"
-            )
-        keep &= attention_mask[:, 1:].bool()
-    if score_mask is not None:
-        # A target belongs to exactly one window. Windows overlap for context,
-        # not to score the same transition again.
-        if score_mask.shape != input_ids.shape:
-            raise ValueError(
-                f"score_mask {tuple(score_mask.shape)} does not match "
-                f"input_ids {tuple(input_ids.shape)}"
-            )
-        keep &= score_mask[:, 1:].bool()
-    picked = picked[keep]
-    if picked.numel() == 0:
+    batch, sequence, vocab = shifted_logits.shape
+    if batch == 0:
         return 0.0, 0
-    return float(-picked.sum()), int(picked.numel())
+    row_budget = _nll_tile_rows(vocab)
+    # Split the row budget across the batch so one tile never exceeds it.
+    batch_step = min(batch, row_budget)
+    sequence_step = max(1, row_budget // batch_step)
+
+    total = torch.zeros((), dtype=torch.float32, device=shifted_logits.device)
+    count = torch.zeros((), dtype=torch.long, device=shifted_logits.device)
+
+    for batch_start in range(0, batch, batch_step):
+        batch_end = min(batch_start + batch_step, batch)
+        for sequence_start in range(0, sequence, sequence_step):
+            sequence_end = min(sequence_start + sequence_step, sequence)
+            tile_logits = shifted_logits[
+                batch_start:batch_end, sequence_start:sequence_end, :
+            ].float()
+            tile_targets = targets[batch_start:batch_end, sequence_start:sequence_end]
+
+            keep = torch.ones_like(tile_targets, dtype=torch.bool)
+            if ignore_index is not None:
+                keep &= tile_targets != ignore_index
+            if attention_mask is not None:
+                # A padded position predicts nothing: its target is a pad id, and
+                # counting it would drag the perplexity toward whatever pad happens to
+                # look like.
+                keep &= attention_mask[
+                    batch_start:batch_end, 1 + sequence_start:1 + sequence_end
+                ].bool()
+            if score_mask is not None:
+                # A target belongs to exactly one window. Windows overlap for
+                # context, not to score the same transition again.
+                keep &= score_mask[
+                    batch_start:batch_end, 1 + sequence_start:1 + sequence_end
+                ].bool()
+
+            # `cross_entropy` takes classes from dim 1, so flatten the tile's
+            # batch and sequence rows. Ignored and padded positions share one
+            # sentinel and contribute neither a loss nor a count.
+            sentinel = ignore_index if ignore_index is not None else -1
+            total += F.cross_entropy(
+                tile_logits.reshape(-1, vocab),
+                tile_targets.masked_fill(~keep, sentinel).reshape(-1),
+                reduction="sum",
+                ignore_index=sentinel,
+            )
+            count += keep.sum()
+
+    if count == 0:
+        return 0.0, 0
+    return float(total), int(count)
 
 
 def kl_divergence(

@@ -18,6 +18,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import gptqmodel.measure.metrics as metrics_module
 from gptqmodel.measure import (
     GradedThresholdConfig,
     KLDConfig,
@@ -127,6 +128,69 @@ def test_score_mask_and_attention_mask_compose():
     # Row 0 scores positions 2 and 3; row 1 scores positions 1 and 2 (its pad
     # would have been position 3, so the attention mask removes nothing extra).
     assert count == 4
+
+
+def test_negative_log_likelihood_tiles_match_the_full_reference(monkeypatch):
+    vocab = 131072
+    logits = _logits(batch=1, sequence=65, vocab=vocab, seed=11)
+    ids = torch.randint(0, vocab, (1, 65), generator=torch.Generator().manual_seed(12))
+    ids[0, 5] = -100
+    attention = torch.ones_like(ids)
+    attention[0, 60:] = 0
+    score = torch.ones_like(ids, dtype=torch.bool)
+    score[0, 50:] = False
+
+    keep = torch.ones((1, 64), dtype=torch.bool)
+    keep &= ids[:, 1:] != -100
+    keep &= attention[:, 1:].bool()
+    keep &= score[:, 1:].bool()
+    shifted = logits[:, :-1, :].reshape(-1, vocab).double()
+    targets = ids[:, 1:].reshape(-1)
+    per_token = F.cross_entropy(
+        shifted, targets.masked_fill(~keep.reshape(-1), 0), reduction="none"
+    )
+    expected_total = float(per_token[keep.reshape(-1)].sum())
+
+    calls = []
+    real_cross_entropy = torch.nn.functional.cross_entropy
+
+    def spy(input, target, *args, **kwargs):
+        calls.append(tuple(input.shape))
+        return real_cross_entropy(input, target, *args, **kwargs)
+
+    monkeypatch.setattr(torch.nn.functional, "cross_entropy", spy)
+
+    total, count = mean_negative_log_likelihood(
+        logits,
+        ids,
+        ignore_index=-100,
+        attention_mask=attention,
+        score_mask=score,
+    )
+
+    assert count == int(keep.sum()) == 48
+    assert total == pytest.approx(expected_total, rel=1e-6)
+    # 64 next-token rows against the 32-row budget for this vocabulary.
+    assert [shape[0] for shape in calls] == [32, 32]
+
+
+def test_negative_log_likelihood_tile_budget_bounds_the_fp32_pair():
+    # 32 MiB shared by the FP32 cast and log-softmax of a 131,072-token
+    # vocabulary leaves 32 rows per tile.
+    assert metrics_module._nll_tile_rows(131072) == 32
+    assert metrics_module._nll_tile_rows(8) > 1
+
+
+def test_negative_log_likelihood_all_masked_tiles_return_zero():
+    # 513 next-token rows over a 512-row budget: two tiles, both fully padded.
+    logits = _logits(batch=1, sequence=514, vocab=8192, seed=13)
+    ids = torch.randint(0, 8192, (1, 514), generator=torch.Generator().manual_seed(14))
+
+    total, count = mean_negative_log_likelihood(
+        logits, ids, attention_mask=torch.zeros_like(ids)
+    )
+
+    assert (total, count) == (0.0, 0)
 
 
 def test_more_noise_moves_every_metric_the_same_way():
