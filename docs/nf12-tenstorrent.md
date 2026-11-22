@@ -380,6 +380,11 @@ before the existing RMS normalization. The released embedding and RMS
 benchmark improved from 789.2 to 460.3 µs for these requests. The stock BF16
 path took 332.3 µs in the same host-facing run.
 
+A separate host-adapter run included ID upload and RMS normalization.
+Uploading the one CPU ID directly after a signed scalar range check reduced
+one-ID latency from 306.60 to 242.40 µs. The BF16 median was 235.44 µs in that
+run. The resident-input measurements above exclude ID upload for both paths.
+
 ```bash
 PJRT_DEVICE=TT PYTHONPATH=. python scripts/bench_nf12_ttxla_gather.py --chip 0 \
   --checkpoint /path/to/Inkling-2-Mini --repeats 100 --exhaustive
