@@ -17,6 +17,15 @@ del model
 close_mesh(owner="inkling-nf12")
 ```
 
+On source-main TTNN, pass `native_lm_head="sfpu"` to select the fast bias-free
+LM head. The installer verifies the original BF16 hash while transcoding the
+canonical NF12 input in bounded host slabs. It uploads one copy of the versioned
+`nf12-tt-sfpu-planes-v1` layout with its sparse escape metadata. The token
+embedding and vision layers use the canonical representation. The head runs
+each activation block of up to 32 rows through the same resident weight and
+returns the original BF16 output shape for the existing vocabulary crop and
+FP32 softcap.
+
 For TT-XLA, start a separate process with `PJRT_DEVICE=TT`, use
 `torch_xla.device(0)`, and pass `backend="ttxla"`. The model adapters accept
 host activations in both backends. Native operations also expose
@@ -24,7 +33,7 @@ host activations in both backends. Native operations also expose
 TT-XLA linear accepts XLA tensors, and its gather accepts CPU signed IDs or
 device int32 IDs. The model's remaining operators run where the model is placed.
 
-| Site | Dense forward at `0071b1aa0` | With the opt-in installer |
+| Site | Dense forward in the Inkling port | With the opt-in installer |
 | --- | --- | --- |
 | Token embedding and RMS gain | `Inkling2LoopNormedEmbedding.forward` | `_NF12Embedding` runs gather and calls the existing `embed_norm` |
 | LM head, valid vocabulary crop, softcap | `Inkling2LoopForConditionalGeneration.forward` | `_NF12Linear` supplies BF16 logits to the existing crop and FP32 softcap |
