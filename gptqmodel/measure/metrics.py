@@ -12,6 +12,7 @@ model good". End-to-end quality is a benchmark's job (Evalution); these are the
 fast numbers that catch a kernel or packing change moving the math.
 """
 
+import math
 from typing import Optional, Tuple
 
 import torch
@@ -21,8 +22,11 @@ import torch.nn.functional as F
 __all__ = [
     "mean_negative_log_likelihood",
     "kl_divergence",
+    "kl_divergence_sum",
     "topk_overlap",
+    "topk_overlap_sum",
     "logit_rmse",
+    "logit_rmse_sums",
 ]
 
 
@@ -155,6 +159,27 @@ def mean_negative_log_likelihood(
     return float(total), int(count)
 
 
+def _kl_per_position(
+    reference_logits: torch.Tensor,
+    candidate_logits: torch.Tensor,
+    *,
+    temperature: float,
+) -> torch.Tensor:
+    _require_logits(reference_logits, "reference_logits")
+    _require_logits(candidate_logits, "candidate_logits")
+    if reference_logits.shape != candidate_logits.shape:
+        raise ValueError(
+            f"logit shapes differ: {tuple(reference_logits.shape)} vs "
+            f"{tuple(candidate_logits.shape)}"
+        )
+    if temperature <= 0:
+        raise ValueError(f"temperature must be positive, got {temperature}")
+
+    reference = F.log_softmax(reference_logits.float() / temperature, dim=-1)
+    candidate = F.log_softmax(candidate_logits.float() / temperature, dim=-1)
+    return (reference.exp() * (reference - candidate)).sum(dim=-1)
+
+
 def kl_divergence(
     reference_logits: torch.Tensor,
     candidate_logits: torch.Tensor,
@@ -168,20 +193,24 @@ def kl_divergence(
     a candidate probability underflows.
     """
 
-    _require_logits(reference_logits, "reference_logits")
-    _require_logits(candidate_logits, "candidate_logits")
-    if reference_logits.shape != candidate_logits.shape:
-        raise ValueError(
-            f"logit shapes differ: {tuple(reference_logits.shape)} vs "
-            f"{tuple(candidate_logits.shape)}"
-        )
-    if temperature <= 0:
-        raise ValueError(f"temperature must be positive, got {temperature}")
+    return float(_kl_per_position(reference_logits, candidate_logits, temperature=temperature).mean())
 
-    reference = F.log_softmax(reference_logits.float() / temperature, dim=-1)
-    candidate = F.log_softmax(candidate_logits.float() / temperature, dim=-1)
-    per_position = (reference.exp() * (reference - candidate)).sum(dim=-1)
-    return float(per_position.mean())
+
+def kl_divergence_sum(
+    reference_logits: torch.Tensor,
+    candidate_logits: torch.Tensor,
+    *,
+    temperature: float = 1.0,
+) -> Tuple[float, int]:
+    """``(sum of per-position KL, position count)`` for pooling batches.
+
+    Summing and counting lets the runner weight every sampled position once,
+    however the rows were split into batches, instead of averaging per-batch
+    means that each carried a different number of positions.
+    """
+
+    per_position = _kl_per_position(reference_logits, candidate_logits, temperature=temperature)
+    return float(per_position.sum()), int(per_position.numel())
 
 
 def topk_overlap(
@@ -210,10 +239,76 @@ def topk_overlap(
             f"{tuple(candidate_logits.shape)}"
         )
 
+    return float(_topk_overlap_per_position(reference_logits, candidate_logits, k=k).mean())
+
+
+def _topk_overlap_per_position(
+    reference_logits: torch.Tensor,
+    candidate_logits: torch.Tensor,
+    *,
+    k: int,
+) -> torch.Tensor:
     reference_top = reference_logits.topk(k, dim=-1).indices
     candidate_top = candidate_logits.topk(k, dim=-1).indices
     matches = (reference_top.unsqueeze(-1) == candidate_top.unsqueeze(-2)).any(-1)
-    return float(matches.float().sum(dim=-1).div(k).mean())
+    return matches.float().sum(dim=-1).div(k)
+
+
+def topk_overlap_sum(
+    reference_logits: torch.Tensor,
+    candidate_logits: torch.Tensor,
+    *,
+    k: int,
+) -> Tuple[float, int]:
+    """``(sum of per-position overlap, position count)`` for pooling batches."""
+
+    _require_logits(reference_logits, "reference_logits")
+    _require_logits(candidate_logits, "candidate_logits")
+    if k <= 0:
+        raise ValueError(f"k must be positive, got {k}")
+    vocab = reference_logits.shape[-1]
+    if k > vocab:
+        raise ValueError(f"k={k} exceeds the vocabulary size {vocab}")
+    if reference_logits.shape != candidate_logits.shape:
+        raise ValueError(
+            f"logit shapes differ: {tuple(reference_logits.shape)} vs "
+            f"{tuple(candidate_logits.shape)}"
+        )
+
+    per_position = _topk_overlap_per_position(reference_logits, candidate_logits, k=k)
+    return float(per_position.sum()), int(per_position.numel())
+
+
+def logit_rmse_sums(
+    reference_logits: torch.Tensor,
+    candidate_logits: torch.Tensor,
+    *,
+    normalize: bool = False,
+) -> Tuple[float, float, int]:
+    """``(squared error, squared reference, element count)`` for pooling batches.
+
+    Accumulating the squared errors and the element count lets the caller take
+    one square root over the whole sample. Averaging per-batch RMSE values would
+    weight a short final batch as heavily as a full one. ``squared reference``
+    is zero unless ``normalize`` is set, so the reference RMS is only
+    materialised when it is actually needed.
+    """
+
+    _require_logits(reference_logits, "reference_logits")
+    _require_logits(candidate_logits, "candidate_logits")
+    if reference_logits.shape != candidate_logits.shape:
+        raise ValueError(
+            f"logit shapes differ: {tuple(reference_logits.shape)} vs "
+            f"{tuple(candidate_logits.shape)}"
+        )
+
+    # `.float()` returns the input itself when it is already float32, so never
+    # subtract in place here: the caller still owns `reference_logits`.
+    reference = reference_logits.float()
+    squared_reference = float(reference.pow(2).sum()) if normalize else 0.0
+    difference = reference - candidate_logits.float()
+    squared_error = float(difference.pow(2).sum())
+    return squared_error, squared_reference, int(difference.numel())
 
 
 def logit_rmse(
@@ -224,18 +319,14 @@ def logit_rmse(
 ) -> float:
     """Root-mean-square logit difference, optionally normalised by the reference RMS."""
 
-    _require_logits(reference_logits, "reference_logits")
-    _require_logits(candidate_logits, "candidate_logits")
-    if reference_logits.shape != candidate_logits.shape:
-        raise ValueError(
-            f"logit shapes differ: {tuple(reference_logits.shape)} vs "
-            f"{tuple(candidate_logits.shape)}"
-        )
-    difference = (reference_logits.float() - candidate_logits.float()).pow(2).mean().sqrt()
+    squared_error, squared_reference, count = logit_rmse_sums(
+        reference_logits, candidate_logits, normalize=normalize
+    )
+    difference = math.sqrt(squared_error / count)
     if not normalize:
-        return float(difference)
+        return difference
 
-    reference_scale = reference_logits.float().pow(2).mean().sqrt()
+    reference_scale = math.sqrt(squared_reference / count)
     if reference_scale == 0:
         raise ValueError("cannot normalise by a reference logit RMS of zero")
-    return float(difference / reference_scale)
+    return difference / reference_scale

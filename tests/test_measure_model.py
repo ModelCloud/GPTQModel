@@ -10,6 +10,8 @@ comparing a model with itself must produce exact zeros, and a perturbed copy mus
 move them.
 """
 
+import math
+
 import pytest
 import torch
 from tokenizers import Tokenizer
@@ -235,3 +237,93 @@ def test_positions_reports_what_was_actually_sampled(tiny_model):
     # 2 usable positions in the first row and 3 in the second, not the 64 asked
     # for: the report must not claim a sample it did not read.
     assert report.positions == 5
+
+
+class _FixedLogits(torch.nn.Module):
+    """Token-independent logits; the candidate flips one known position.
+
+    Every row sees the same two-vocabulary distribution, so the expected
+    divergence is arithmetic rather than model-dependent. Exactly one of the
+    nine sampled next-token positions (the first token of the short row) is
+    flipped, which makes the expected KLD, RMSE and top-1 exact.
+    """
+
+    def __init__(self, candidate=False):
+        super().__init__()
+        self.candidate = candidate
+
+    def forward(self, input_ids, attention_mask):
+        logits = torch.tensor([2.0, 0.0]).expand(*input_ids.shape, 2)
+        if not self.candidate:
+            return logits
+        return torch.where((input_ids[:, :1] == 1).unsqueeze(-1), logits.flip(-1), logits)
+
+
+def test_batch_size_does_not_change_sampled_positions_or_metrics():
+    # Ragged rows: lengths 2, 5 and 5. Batch 1/2/3 all read the same nine
+    # transitions; batch=2 and batch=3 exercise a short final batch.
+    rows = [
+        torch.tensor([[1, 0]]),
+        torch.tensor([[0, 0, 0, 0, 0]]),
+        torch.tensor([[0, 0, 0, 0, 0]]),
+    ]
+    config = MeasureConfig(
+        metrics=(KLDConfig(positions=64), RMSEConfig(), TOPKConfig(k=(1,))),
+        batch=1,
+        max_batches=3,
+    )
+
+    reports = {}
+    for batch in (1, 2, 3):
+        reports[batch] = measure_models(
+            _FixedLogits(candidate=True),
+            _FixedLogits(),
+            rows,
+            MeasureConfig(
+                metrics=config.metrics,
+                batch=batch,
+                max_batches=config.max_batches,
+            ),
+        )
+
+    # 1 usable position in the length-2 row plus 4 in each length-5 row.
+    expected_kld = 2.0 * math.tanh(1.0) / 9.0
+    expected_rmse = math.sqrt(8.0 / 18.0)
+    expected_top1 = 8.0 / 9.0
+    for batch, report in reports.items():
+        assert report.positions == 9, batch
+        assert report.values["KLD"] == pytest.approx(expected_kld, rel=1e-5), batch
+        assert report.values["RMSE"] == pytest.approx(expected_rmse, rel=1e-5), batch
+        assert report.values["TOP_K"][1] == pytest.approx(expected_top1, rel=1e-5), batch
+
+    assert reports[1].values == reports[2].values == reports[3].values
+
+
+def test_batch_pools_positions_instead_of_averaging_batch_means():
+    # Four rows: a short row that batches with a long one must not have its
+    # positions dropped, and the short final batch must not get an equal vote
+    # with a full batch. Expected values come from the same exact arithmetic as
+    # above, now over 1 + 4 + 4 + 4 = 13 positions with one flipped.
+    rows = [
+        torch.tensor([[1, 0]]),
+        torch.tensor([[0, 0, 0, 0, 0]]),
+        torch.tensor([[0, 0, 0, 0, 0]]),
+        torch.tensor([[0, 0, 0, 0, 0]]),
+    ]
+
+    report = measure_models(
+        _FixedLogits(candidate=True),
+        _FixedLogits(),
+        rows,
+        MeasureConfig(
+            metrics=(KLDConfig(positions=64), RMSEConfig(), TOPKConfig(k=(1,))),
+            batch=3,
+            max_batches=4,
+        ),
+    )
+
+    assert report.batches == 2  # 3 rows, then a one-row final batch
+    assert report.positions == 13
+    assert report.values["KLD"] == pytest.approx(2.0 * math.tanh(1.0) / 13.0, rel=1e-5)
+    assert report.values["RMSE"] == pytest.approx(math.sqrt(8.0 / 26.0), rel=1e-5)
+    assert report.values["TOP_K"][1] == pytest.approx(12.0 / 13.0, rel=1e-5)
