@@ -74,7 +74,9 @@ Linear cores own disjoint output vocabulary tiles. The reader maps decoded
 ascending tile order with HiFi4, FP32 destination accumulation and approximate
 math disabled. Up to four activation tiles reuse each decoded weight tile.
 Bias is added to the FP32 result before BF16 conversion. The layers retain
-one packed copy and escape table. The exponent base is a kernel constant.
+one packed copy and escape table. Native TTNN specializes on the exponent
+base. TT-XLA reads the exponent base and row geometry from a 64-byte header in
+the escape stream so a cached executable can safely serve different weights.
 
 TT-XLA uses the version-2 tt-lang resolver artifact ABI to lower the shared
 Metal kernels into a PJRT executable. Its resolver delegates other operations
@@ -97,7 +99,9 @@ PYTHONPATH=. python scripts/bench_nf12_tenstorrent.py \
 PJRT_DEVICE=TT PYTHONPATH=. python scripts/bench_nf12_tenstorrent.py \
   --backend ttxla --chip 0 --checkpoint /path/to/Inkling-2-Mini --repeats 8 --exhaustive
 PYTHONPATH=. python scripts/validate_inkling2_nf12_tenstorrent.py \
-  --backend ttnn --chip 0 --checkpoint /path/to/Inkling-2-Mini
+  --backend ttnn --chip 0 --checkpoint /path/to/Inkling-2-Mini --verify-weights
+PJRT_DEVICE=TT PYTHONPATH=. python scripts/validate_inkling2_nf12_tenstorrent.py \
+  --backend ttxla --chip 0 --checkpoint /path/to/Inkling-2-Mini --verify-weights
 python -m pytest -q tests/test_nf12_tenstorrent.py tests/test_nf12_codec.py
 ```
 
@@ -106,7 +110,9 @@ linear against the matching device reduction, and reports maximum error,
 scaled RMSE and top-k overlap against FP32 Torch arithmetic rounded to BF16.
 The paired model harness reports logits, KLD, and PPL and can write per-matrix
 provenance to a user-specified local file. Use `--verify-weights` to compare
-every selected matrix's logical rows against its original BF16 bits.
+every selected matrix's logical rows against its original BF16 bits and each
+forward against the matching device BF16 reduction. Use `--vision-only` to
+run the vision cases without the CPU language model.
 
 ## Device and runtime manifest
 
@@ -125,15 +131,15 @@ every selected matrix's logical rows against its original BF16 bits.
 
 The checkpoint kernel timings used the original runtime above with GPT-QModel's
 documented Torch-version override. A separate source-main native environment
-ran the synthetic bit-pattern, rounding, bias and matched BF16 suites on chip 0
+ran the synthetic bit-pattern, rounding, bias and matched BF16 suites on all four chips
 using the following source revisions and SFPI 7.96.0.
 
 | Source development component | Revision or status |
 | --- | --- |
 | PyTorch main | `65e101a3cc8242711ae1cb467ed6cde097135821`, installed as 2.16.0a0 |
 | TT-Metal / TTNN main | `2a1236fa6e78c49d61986e403d1fe09dd1b981cb`, editable TTNN installed and tested |
-| TT-XLA main | `fdc3b7773674081b8f8c0698de3400d8d899dc8f`, source build underway |
-| Tenstorrent PyTorch/XLA default branch | `a3fb00817690c82bef596c74243a213986c358a4`, source build underway |
+| TT-XLA main | `fdc3b7773674081b8f8c0698de3400d8d899dc8f`, uses its own TT-MLIR and TT-Metal source pins |
+| Tenstorrent PyTorch/XLA default branch | `a3fb00817690c82bef596c74243a213986c358a4`, TorchGen fails against PyTorch main because the fork registers removed operators such as `qr` |
 
 Checkpoint data came from the public
 [Inkling-2-Mini revision](https://huggingface.co/thinkingmachines/Inkling-2-Mini/tree/b85c3cfa615fc413cc9af3379f491b963f3b586a).
@@ -144,6 +150,11 @@ NVFP4/MXFP8 text experts. Native TTNN measured 695,461,184 resident embedding
 bytes and 695,392,000 resident LM-head bytes, against 926,318,592 BF16 bytes
 each. The resident figures include page padding and exclude allocator pool
 reservations. TT-XLA rounds each packed stream to a 4,096-byte page.
+
+The model installer packed all 144 target matrices. The 142 vision matrices
+occupy 477,749,758 canonical bytes, from 635,797,504 logical BF16 bytes, with
+54,807 escape groups. The 144 target matrices together use 1,868,602,944
+canonical bytes. Rank-one vision parameters and normalization gains are BF16.
 
 ## Checkpoint kernel measurements
 
@@ -228,3 +239,30 @@ weight decoding at that shape and kept scratch bounded.
 TT-XLA resident bytes were 695,463,936 for the token table and 695,394,304
 for the head. Its 2,048-row head decode measured 9.50 ms median and
 9.89 ms p95, including the host read.
+
+## Mixed-runtime model validation
+
+Using Transformers 5.23.0, the NF12 matrices ran on P300c chip 0. The existing
+Torch model ran normalization, rotary embeddings, attention, routing, and
+expert operations on CPU. Each paired run kept the released NVFP4/MXFP8
+expert payloads fixed. The handoff variant with BF4_B/BF8_B experts needs
+its corresponding checkpoint to establish equivalent model-level results.
+
+| Native TTNN input | Patch blocks | Patch scaled RMSE | Block 0 scaled RMSE | 23-block scaled RMSE | Merged 2,304-wide token scaled RMSE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| square | 4 | 0.001068 | 0.001998 | 0.009038 | 0.009444 |
+| rectangle | 6 | 0.001079 | 0.001874 | 0.009472 | 0.008421 |
+| processor pair | 10 | 0.0002383 | 0.003551 | 0.01432 | 0.0245 |
+
+Position sums matched bitwise for all three inputs. The processor case sent
+two differently sized images through one vision forward. On each backend,
+all 142 vision matrices decoded bit-for-bit and all 431 checked vision calls
+matched the same-device BF16 path. Those comparisons used the same activations,
+HiFi4 arithmetic, K-reduction order, bias and output conversion for both paths.
+Against CPU BF16, the processor-pair difference starts in the patch projection
+and grows through the tower.
+
+| Native TTNN logits | Max abs | Scaled RMSE | Top-1 / 5 / 10 overlap | KLD | BF16 / NF12 PPL |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| text | 0.09505 | 0.0007206 | 100.00% / 100.00% / 100.00% | 1.9454e-05 | 182.2207 / 182.2977 |
+| image | 7.59959 | 0.0944021 | 100.00% / 92.00% / 92.00% | 0.0366887 | 6715.163 / 6506.864 |

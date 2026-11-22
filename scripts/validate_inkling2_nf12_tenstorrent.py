@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 
@@ -69,6 +70,13 @@ def _logits(model, ids, inputs):
     return model(input_ids=ids, use_cache=False, **inputs).logits
 
 
+def _logits_with_image_features(model, ids, features):
+    inputs_embeds = model.model.get_input_embeddings()(ids)
+    features = features.to(inputs_embeds)
+    mask = model.model.get_placeholder_mask(ids, inputs_embeds, features, model.config.image_token_id)
+    return model(inputs_embeds=inputs_embeds.masked_scatter(mask, features), use_cache=False).logits
+
+
 def _logit_errors(output, oracle, ids, image_token):
     expected = oracle.log_softmax(-1)
     actual = output.log_softmax(-1)
@@ -83,13 +91,41 @@ def _logit_errors(output, oracle, ids, image_token):
     }
 
 
+def _matched_hook(source, backend, copy, counts, name):
+    def compare(module, arguments, actual):
+        x = arguments[0]
+        if not hasattr(module, "in_features"):
+            expected = module.embed_norm(source[x])
+        else:
+            layer = module.layer
+            baseline = layer.upload_baseline(source)
+            bias = module.bias
+            if backend == "ttnn":
+                rows = x.reshape(-1, x.shape[-1])
+                expected = layer.linear_device(
+                    layer.upload_activation(rows),
+                    None if bias is None else layer.upload_bias(bias),
+                    baseline=baseline,
+                )
+                expected = copy(expected)[: len(rows), :module.out_features].reshape_as(actual)
+            else:
+                bias = None if bias is None else bias.to(layer.device)
+                expected = copy(layer.linear(x.to(layer.device), bias, baseline=baseline))
+        try:
+            _same(actual, expected)
+        except AssertionError as exc:
+            raise AssertionError(f"Matched device BF16 forward differs for {name}") from exc
+        counts[name] += 1
+    return compare
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--backend", choices=("ttnn", "ttxla"), required=True)
     p.add_argument("--chip", type=int, default=0)
     p.add_argument("--vision-only", action="store_true")
-    p.add_argument("--verify-weights", action="store_true", help="Decode every selected weight on the device")
+    p.add_argument("--verify-weights", action="store_true", help="Check every selected weight and forward against a BF16 device reference")
     p.add_argument("--descriptors", type=Path, help="Write weight provenance into a local JSON file")
     args = p.parse_args()
     torch.set_num_threads(8)
@@ -118,14 +154,21 @@ def main():
             for name in _targets(model, vision=True, text=not args.vision_only):
                 sources[name] = model.get_submodule(name).weight.detach()
 
-        with _runtime(args.backend, args.chip) as (_, device, _, sync):
+        with _runtime(args.backend, args.chip) as (_, device, copy, sync):
             descriptors = install_inkling2_nf12(
                 model, backend=args.backend, device=device, text=not args.vision_only,
             )
             sync()
             if args.descriptors:
-                args.descriptors.write_text(json.dumps({key: asdict(value) for key, value in descriptors.items()},
-                                                       indent=2) + "\n")
+                entries = {
+                    key: {
+                        **asdict(value),
+                        "packed_bytes": value.packed_bytes,
+                        "resident_bytes": model.get_submodule(key.removesuffix(".weight")).layer.resident_bytes,
+                    }
+                    for key, value in descriptors.items()
+                }
+                args.descriptors.write_text(json.dumps(entries, indent=2) + "\n")
             print(json.dumps({"backend": args.backend, "matrices": len(descriptors),
                               "canonical_bytes": sum(d.packed_bytes for d in descriptors.values())}), flush=True)
             for name, source in sources.items():
@@ -133,8 +176,16 @@ def main():
                 for start in range(0, len(source), 2048):
                     rows = torch.arange(start, min(start + 2048, len(source)))
                     _same(layer.embedding(rows).cpu(), source[rows])
+            counts = Counter()
+            hooks = []
             if sources:
                 print(json.dumps({"verified_logical_matrices": len(sources)}), flush=True)
+                hooks = [
+                    model.get_submodule(name).register_forward_hook(
+                        _matched_hook(source, args.backend, copy, counts, name)
+                    )
+                    for name, source in sources.items()
+                ]
                 sources.clear()
             for name, inputs in cases.items():
                 actual = _vision(tower, inputs)
@@ -147,6 +198,15 @@ def main():
             for name, (ids, inputs, expected) in paired.items():
                 actual = _logits(model, ids, inputs)
                 print(json.dumps({"logits": name, **_logit_errors(actual, expected, ids, model.config.image_token_id)}), flush=True)
+                if name == "image" and args.verify_weights:
+                    fixed_vision = _logits_with_image_features(model, ids, vision_reference["processor_pair"]["tokens"])
+                    print(json.dumps({
+                        "logits": "image_cpu_vision", **_logit_errors(fixed_vision, expected, ids, model.config.image_token_id),
+                    }), flush=True)
+            for hook in hooks:
+                hook.remove()
+            if counts:
+                print(json.dumps({"matched_forward_calls": counts.total(), "matched_modules": len(counts)}), flush=True)
 
 
 if __name__ == "__main__":
