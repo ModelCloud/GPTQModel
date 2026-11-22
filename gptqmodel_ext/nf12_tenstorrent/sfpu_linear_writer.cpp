@@ -12,39 +12,48 @@ void write_results(const Output& output, uint32_t start, uint32_t end, const App
     constexpr auto decoded_raw = tt::CBIndex::c_16;
     constexpr auto final_cb = tt::CBIndex::c_17;
     constexpr uint32_t k_tiles = NF12_CONFIG(0);
-
-    for (uint32_t n = start; n < end; ++n) {
-        if constexpr (!dense) {
-            // The raw UInt16 producer and the BF16 consumer alias one L1 slab.
-            cb_wait_front(decoded_raw, k_tiles);
-            apply(n, get_read_ptr(decoded_raw));
 #ifdef NF12_PJRT
-            cb_reserve_back(decoded, 1);
-            cb_push_back(decoded, 1);
+    constexpr uint32_t n_tiles = NF12_CONFIG(3);
+    constexpr uint32_t m_tiles = NF12_CONFIG(4);
 #else
-            cb_reserve_back(decoded, k_tiles);
-            cb_push_back(decoded, k_tiles);
+    constexpr uint32_t n_tiles = 0;
+    constexpr uint32_t m_tiles = 1;
 #endif
-        }
-        cb_wait_front(final_cb, 1);
-        const uint32_t tile_address = get_read_ptr(final_cb);
-        if constexpr (single_row) {
-            const uint32_t row_address = get_write_ptr(25);
-            auto* row = reinterpret_cast<volatile uint32_t*>(row_address);
-            const auto* tile = reinterpret_cast<volatile const uint32_t*>(tile_address);
-            // Copy the first row of each of the two upper BF16 faces as raw words.
-            for (uint32_t word = 0; word < 8; ++word) {
-                row[word] = tile[word];
-                row[8 + word] = tile[128 + word];
+
+    for (uint32_t m = 0; m < m_tiles; ++m) {
+        for (uint32_t n = start; n < end; ++n) {
+            if constexpr (!dense) {
+                // The raw UInt16 producer and the BF16 consumer share one L1 slab.
+                cb_wait_front(decoded_raw, k_tiles);
+                apply(n, get_read_ptr(decoded_raw));
+#ifdef NF12_PJRT
+                cb_reserve_back(decoded, 1);
+                cb_push_back(decoded, 1);
+#else
+                cb_reserve_back(decoded, k_tiles);
+                cb_push_back(decoded, k_tiles);
+#endif
             }
-            noc_async_write_page(n, output, row_address);
-        } else {
-            noc_async_write_page(n, output, tile_address);
-        }
-        noc_async_write_barrier();
-        cb_pop_front(final_cb, 1);
-        if constexpr (!dense) {
-            cb_pop_front(decoded_raw, k_tiles);
+            cb_wait_front(final_cb, 1);
+            const uint32_t tile_address = get_read_ptr(final_cb);
+            if constexpr (single_row) {
+                const uint32_t row_address = get_write_ptr(25);
+                auto* row = reinterpret_cast<volatile uint32_t*>(row_address);
+                const auto* tile = reinterpret_cast<volatile const uint32_t*>(tile_address);
+                // Copy the first row of each upper BF16 face as raw words.
+                for (uint32_t word = 0; word < 8; ++word) {
+                    row[word] = tile[word];
+                    row[8 + word] = tile[128 + word];
+                }
+                noc_async_write_page(n, output, row_address);
+            } else {
+                noc_async_write_page(m * n_tiles + n, output, tile_address);
+            }
+            noc_async_write_barrier();
+            cb_pop_front(final_cb, 1);
+            if constexpr (!dense) {
+                cb_pop_front(decoded_raw, k_tiles);
+            }
         }
     }
 }

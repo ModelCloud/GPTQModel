@@ -83,15 +83,16 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
         ]
     elif op == "sfpu_linear":
         nt, kt = n // 32, k // 32
+        mt = round_up(m, 32) // 32
         dense = bool(flag)
         metadata = tuple(shapes[2])
-        if (m != 1 or n <= 0 or n % 32 or k <= 0 or k % 128 or m_block < 1 or kt // 4 % m_block
+        if (m <= 0 or n <= 0 or n % 32 or k <= 0 or k % 128 or m_block < 1 or kt // 4 % m_block
                 or not 0 <= base <= 120 or flag not in (0, 1) or len(metadata) != 2
                 or metadata[1] != 32 or metadata[0] % 128 != base
                 or metadata[0] * 32 < round_up(nt * kt // 2, 16)):
             raise ValueError("Unexpected TT-XLA SFPU LM-head geometry or exponent base")
         w_shape = (nt * kt * 32, 32) if dense else (round_up(nt * (kt // 4) * 1536, 1024) // 32, 32)
-        expected = [(32, k), w_shape, metadata, (32, n)]
+        expected = [(mt * 32, k), w_shape, metadata, (mt * 32, n)]
         expected_dtypes = ("bf16", "bf16" if dense else "si32", "si32", "bf16")
         tasks = nt
         cbs = [
@@ -106,9 +107,9 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
                 _cb(24, "UInt32", 128),
             ]
         kernels = [
-            ("sfpu_linear_reader", "noc", [1, 0], [kt, int(dense), m_block, nt]),
-            ("sfpu_linear_writer", "noc", [3] if dense else [3, 2], [kt, int(dense), int(not dense), nt]),
-            ("sfpu_linear_compute", "compute", [], [kt, int(dense), base, nt]),
+            ("sfpu_linear_reader", "noc", [1, 0], [kt, int(dense), m_block, nt, mt]),
+            ("sfpu_linear_writer", "noc", [3] if dense else [3, 2], [kt, int(dense), int(not dense), nt, mt]),
+            ("sfpu_linear_compute", "compute", [], [kt, int(dense), base, nt, mt]),
         ]
     else:
         raise ValueError(f"Unknown TT-XLA NF12 operation {op}")
@@ -182,18 +183,23 @@ def _call(op, config, inputs, out):
     )[0]
 
 
+def _blackhole_device(device):
+    import torch_xla.runtime as xr
+
+    device = torch.device(device)
+    if device.type != "xla" or xr.device_type() != "TT":
+        raise ValueError("TT-XLA NF12 requires the Tenstorrent PJRT device")
+    arch = xr.runtime_device_attributes(str(device)).get("device_arch", "")
+    if str(arch).casefold() != "blackhole":
+        raise ValueError(f"TT-XLA NF12 requires a Blackhole chip, received {arch!r}")
+    return device
+
+
 class TTXLANF12:
     """Single-chip packed weights for the Tenstorrent PJRT backend."""
 
     def __init__(self, device, descriptor, weight):
-        import torch_xla.runtime as xr
-
-        device = torch.device(device)
-        if device.type != "xla" or xr.device_type() != "TT":
-            raise ValueError("TT-XLA NF12 requires the Tenstorrent PJRT device")
-        arch = xr.runtime_device_attributes(str(device)).get("device_arch", "")
-        if str(arch).casefold() != "blackhole":
-            raise ValueError(f"TT-XLA NF12 requires a Blackhole chip, received {arch!r}")
+        device = _blackhole_device(device)
         verify_nf12(descriptor, weight)
         _install_resolver()
         self.device = device

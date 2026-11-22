@@ -88,6 +88,7 @@ def install_inkling2_nf12(
     text: bool = True,
     checkpoint: Mapping[str, tuple[NF12Descriptor, Path]] | None = None,
     native_lm_head: str = "canonical",
+    ttxla_lm_head: str = "canonical",
 ) -> dict[str, NF12Descriptor]:
     """Replace the requested BF16 inference leaves after normal checkpoint load.
 
@@ -96,6 +97,8 @@ def install_inkling2_nf12(
     each canonical safetensors payload to a descriptor with a BF16 source hash.
     On native TTNN, ``native_lm_head="sfpu"`` selects the single-copy SFPU
     layout for the bias-free head and requires the source Blackhole runtime.
+    On TT-XLA, ``ttxla_lm_head="sfpu"`` selects its single-copy head layout
+    and requires the bundled Blackhole TT-XLA kernel interface.
     The caller owns device lifetime and should install after model placement.
     """
     if not isinstance(model, (Inkling2LoopForConditionalGeneration, Inkling2LoopForCausalLM, Inkling2LoopVisionModel)):
@@ -104,8 +107,12 @@ def install_inkling2_nf12(
         raise ValueError("Load Inkling 2 for inference with eval() before installing NF12")
     if native_lm_head not in {"canonical", "sfpu"}:
         raise ValueError(f"Unknown native Inkling NF12 LM-head layout {native_lm_head!r}")
+    if ttxla_lm_head not in {"canonical", "sfpu"}:
+        raise ValueError(f"Unknown TT-XLA Inkling NF12 LM-head layout {ttxla_lm_head!r}")
     if native_lm_head == "sfpu" and (backend != "ttnn" or not text or isinstance(model, Inkling2LoopVisionModel)):
         raise ValueError("The SFPU LM head requires native TTNN and text installation")
+    if ttxla_lm_head == "sfpu" and (backend != "ttxla" or not text or isinstance(model, Inkling2LoopVisionModel)):
+        raise ValueError("The TT-XLA SFPU LM head requires the TT-XLA backend and text installation")
     if backend == "ttnn":
         from ....utils.nf12_ttnn import TTNNNF12 as executor
     elif backend == "ttxla":
@@ -129,12 +136,17 @@ def install_inkling2_nf12(
                 raise ValueError(f"NF12 checkpoint source mismatch for {weight_name}")
             weight = read_nf12(path, descriptor)
 
-        if name == "lm_head" and native_lm_head == "sfpu":
-            from ....utils.nf12_ttnn_sfpu import TTNNSFPUNF12Head
-
+        if name == "lm_head" and "sfpu" in (native_lm_head, ttxla_lm_head):
             if not isinstance(source, nn.Linear) or source.bias is not None:
                 raise ValueError("The SFPU NF12 LM head must be a bias-free linear")
-            layer = TTNNSFPUNF12Head(device, descriptor, weight)
+            if backend == "ttxla":
+                from ....utils.nf12_ttxla_sfpu import TTXLASFPUNF12Head
+
+                layer = TTXLASFPUNF12Head(device, descriptor, weight)
+            else:
+                from ....utils.nf12_ttnn_sfpu import TTNNSFPUNF12Head
+
+                layer = TTNNSFPUNF12Head(device, descriptor, weight)
         else:
             layer = executor(device, descriptor, weight)
         if isinstance(source, nn.Linear):

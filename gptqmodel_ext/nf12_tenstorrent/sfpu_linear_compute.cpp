@@ -43,92 +43,96 @@ void kernel_main() {
 #ifdef NF12_PJRT
     NF12_RANGE(NF12_CONFIG(3), 0, 0);
     const uint32_t n_tiles = end - start;
+    constexpr uint32_t m_tiles = NF12_CONFIG(4);
 #else
     const uint32_t n_tiles = get_arg_val<uint32_t>(0);
+    constexpr uint32_t m_tiles = 1;
 #endif
 
     compute_kernel_hw_startup<SrcOrder::Reverse>(activation, decoded, output);
-    cb_wait_front(activation, k_tiles);
-    if constexpr (dense) {
-        matmul_init(activation, decoded);
-    }
-    for (uint32_t n = 0; n < n_tiles; ++n) {
-        if constexpr (!dense) {
-            disable_fp32_dest_acc();
-#ifdef NF12_PJRT
-            raw_decode_init(packed, decoded_raw);
-#else
-            reconfig_data_format<SrcOrder::Regular, false>(packed, packed);
-            pack_reconfig_data_format<false, false>(decoded_raw);
-            copy_init<false>(packed);
-#endif
-            for (uint32_t group = 0; group < k_tiles / 4; ++group) {
-                cb_wait_front(packed, 3);
-                tile_regs_acquire();
-                for (uint32_t i = 0; i < 3; ++i) {
-#ifdef NF12_PJRT
-                    raw_copy(packed, i);
-#else
-                    copy_tile<false>(packed, i, i);
-#endif
-                }
-                MATH(SFPU_UNARY_CALL_NO_TEMPLATE_ARGS(
-                    DST_SYNC_MODE, DST_ACCUM_MODE, decode_face, 0, VectorMode::RC, base));
-                tile_regs_commit();
-                tile_regs_wait();
-                cb_reserve_back(decoded_raw, 4);
-                for (uint32_t i = 0; i < 4; ++i) {
-#ifdef NF12_PJRT
-                    PACK((llk_pack<false, false, PackMode::Default>(i, decoded_raw, 0)));
-#else
-                    pack_tile<false, false>(i, decoded_raw);
-#endif
-                }
-                cb_push_back(decoded_raw, 4);
-                tile_regs_release();
-                cb_pop_front(packed, 3);
-            }
-            enable_fp32_dest_acc();
-#ifdef NF12_PJRT
-            reconfig_data_format<SrcOrder::Reverse>(activation, decoded);
-            pack_reconfig_data_format(output);
-#else
-            reconfig_data_format<SrcOrder::Reverse, true>(activation, decoded);
-            pack_reconfig_data_format<false, true>(output);
-#endif
+    for (uint32_t m = 0; m < m_tiles; ++m) {
+        cb_wait_front(activation, k_tiles);
+        if constexpr (dense) {
             matmul_init(activation, decoded);
         }
+        for (uint32_t n = 0; n < n_tiles; ++n) {
+            if constexpr (!dense) {
+                disable_fp32_dest_acc();
 #ifdef NF12_PJRT
-        // Artifact ABI v2 cannot alias two formats to one L1 allocation. Use
-        // the BF16 CB as a ready token, then bind its unpack address to the
-        // exact UInt16 slab only for the matmul. Both page sizes are 2 KiB.
-        cb_wait_front(decoded, dense ? k_tiles : 1);
-        UNPACK(uint32_t ready_ptr = 0;);
-        if constexpr (!dense) {
-            UNPACK(ready_ptr = get_local_cb_interface(decoded).fifo_rd_ptr;
-                   get_local_cb_interface(decoded).fifo_rd_ptr = get_local_cb_interface(decoded_raw).fifo_rd_ptr;);
-        }
+                raw_decode_init(packed, decoded_raw);
 #else
-        cb_wait_front(decoded, k_tiles);
+                reconfig_data_format<SrcOrder::Regular, false>(packed, packed);
+                pack_reconfig_data_format<false, false>(decoded_raw);
+                copy_init<false>(packed);
 #endif
-        tile_regs_acquire();
-        for (uint32_t k = 0; k < k_tiles; ++k) {
-            matmul_tiles(activation, decoded, k, k, 0);
-        }
-        tile_regs_commit();
-        tile_regs_wait();
-        cb_reserve_back(output, 1);
-        pack_tile(0, output);
-        cb_push_back(output, 1);
-        tile_regs_release();
+                for (uint32_t group = 0; group < k_tiles / 4; ++group) {
+                    cb_wait_front(packed, 3);
+                    tile_regs_acquire();
+                    for (uint32_t i = 0; i < 3; ++i) {
 #ifdef NF12_PJRT
-        if constexpr (!dense) {
-            UNPACK(get_local_cb_interface(decoded).fifo_rd_ptr = ready_ptr;);
-        }
-        cb_pop_front(decoded, dense ? k_tiles : 1);
+                        raw_copy(packed, i);
 #else
-        cb_pop_front(decoded, k_tiles);
+                        copy_tile<false>(packed, i, i);
 #endif
+                    }
+                    MATH(SFPU_UNARY_CALL_NO_TEMPLATE_ARGS(
+                        DST_SYNC_MODE, DST_ACCUM_MODE, decode_face, 0, VectorMode::RC, base));
+                    tile_regs_commit();
+                    tile_regs_wait();
+                    cb_reserve_back(decoded_raw, 4);
+                    for (uint32_t i = 0; i < 4; ++i) {
+#ifdef NF12_PJRT
+                        PACK((llk_pack<false, false, PackMode::Default>(i, decoded_raw, 0)));
+#else
+                        pack_tile<false, false>(i, decoded_raw);
+#endif
+                    }
+                    cb_push_back(decoded_raw, 4);
+                    tile_regs_release();
+                    cb_pop_front(packed, 3);
+                }
+                enable_fp32_dest_acc();
+#ifdef NF12_PJRT
+                reconfig_data_format<SrcOrder::Reverse>(activation, decoded);
+                pack_reconfig_data_format(output);
+#else
+                reconfig_data_format<SrcOrder::Reverse, true>(activation, decoded);
+                pack_reconfig_data_format<false, true>(output);
+#endif
+                matmul_init(activation, decoded);
+            }
+#ifdef NF12_PJRT
+            // Artifact ABI v2 cannot alias two formats to one L1 allocation. Use
+            // the BF16 CB as a ready token, then bind its unpack address to the
+            // exact UInt16 slab only for the matmul. Both page sizes are 2 KiB.
+            cb_wait_front(decoded, dense ? k_tiles : 1);
+            UNPACK(uint32_t ready_ptr = 0;);
+            if constexpr (!dense) {
+                UNPACK(ready_ptr = get_local_cb_interface(decoded).fifo_rd_ptr;
+                       get_local_cb_interface(decoded).fifo_rd_ptr = get_local_cb_interface(decoded_raw).fifo_rd_ptr;);
+            }
+#else
+            cb_wait_front(decoded, k_tiles);
+#endif
+            tile_regs_acquire();
+            for (uint32_t k = 0; k < k_tiles; ++k) {
+                matmul_tiles(activation, decoded, k, k, 0);
+            }
+            tile_regs_commit();
+            tile_regs_wait();
+            cb_reserve_back(output, 1);
+            pack_tile(0, output);
+            cb_push_back(output, 1);
+            tile_regs_release();
+#ifdef NF12_PJRT
+            if constexpr (!dense) {
+                UNPACK(get_local_cb_interface(decoded).fifo_rd_ptr = ready_ptr;);
+            }
+            cb_pop_front(decoded, dense ? k_tiles : 1);
+#else
+            cb_pop_front(decoded, k_tiles);
+#endif
+        }
+        cb_pop_front(activation, k_tiles);
     }
-    cb_pop_front(activation, k_tiles);
 }

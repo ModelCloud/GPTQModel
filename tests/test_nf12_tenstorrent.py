@@ -107,3 +107,7 @@ def test_ttxla_sfpu_artifact_requires_base_tag_and_one_weight_slab():
     assert buffers[16]["data_format"] == "UInt16"
     assert buffers[2]["total_size"] == 2048
     assert buffers[2]["data_format"] == "BFloat16"
+
+    multirow = [(96, 128), *shapes[1:3], (96, 128)]
+    multiple_tiles = json.loads(_artifact(_PREFIX + "sfpu_linear.128.128.65.56.1.0", args[0], multirow, *args[2:]))
+    assert multiple_tiles["cb_configs"] == resolved["cb_configs"]

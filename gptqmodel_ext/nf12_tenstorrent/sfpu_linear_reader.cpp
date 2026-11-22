@@ -22,38 +22,45 @@ void kernel_main() {
     );
     const auto input = TensorAccessor(input_args, NF12_ADDRESS(1), 2048);
     NF12_RANGE(NF12_CONFIG(3), 2, 3);
-
-    cb_reserve_back(activation_cb, k_tiles);
-    const uint32_t activation_address = get_write_ptr(activation_cb);
-    for (uint32_t k = 0; k < k_tiles; ++k) {
-        noc_async_read_page(k, input, activation_address + k * 2048);
-    }
-    noc_async_read_barrier();
-    cb_push_back(activation_cb, k_tiles);
+#ifdef NF12_PJRT
+    constexpr uint32_t m_tiles = NF12_CONFIG(4);
+#else
+    constexpr uint32_t m_tiles = 1;
+#endif
 
     constexpr uint32_t block_tiles = dense ? 4 : 3;
     constexpr uint32_t prefetch_tiles = block_tiles * prefetch_groups;
     constexpr auto weight_cb = dense ? decoded_cb : packed_cb;
-    for (uint32_t n = start; n < end; ++n) {
-        for (uint32_t group = 0; group < k_tiles / 4; group += prefetch_groups) {
-            cb_reserve_back(weight_cb, prefetch_tiles);
-            const uint32_t packed_address = get_write_ptr(weight_cb);
-            const uint32_t first_page = (n * (k_tiles / 4) + group) * block_tiles;
-            for (uint32_t i = 0; i < prefetch_tiles; ++i) {
-                const uint32_t page = first_page + i;
-                const uint32_t destination = packed_address + i * 2048;
+    for (uint32_t m = 0; m < m_tiles; ++m) {
+        cb_reserve_back(activation_cb, k_tiles);
+        const uint32_t activation_address = get_write_ptr(activation_cb);
+        for (uint32_t k = 0; k < k_tiles; ++k) {
+            noc_async_read_page(m * k_tiles + k, input, activation_address + k * 2048);
+        }
+        noc_async_read_barrier();
+        cb_push_back(activation_cb, k_tiles);
+
+        for (uint32_t n = start; n < end; ++n) {
+            for (uint32_t group = 0; group < k_tiles / 4; group += prefetch_groups) {
+                cb_reserve_back(weight_cb, prefetch_tiles);
+                const uint32_t packed_address = get_write_ptr(weight_cb);
+                const uint32_t first_page = (n * (k_tiles / 4) + group) * block_tiles;
+                for (uint32_t i = 0; i < prefetch_tiles; ++i) {
+                    const uint32_t page = first_page + i;
+                    const uint32_t destination = packed_address + i * 2048;
 #ifdef NF12_PJRT
-                if constexpr (!dense) {
-                    // PJRT carries two raw UInt16 planes per physical INT32 tile.
-                    noc_async_read(weights.get_noc_addr(page / 2, page % 2 * 2048), destination, 2048);
-                } else
+                    if constexpr (!dense) {
+                        // PJRT carries two raw UInt16 planes per physical INT32 tile.
+                        noc_async_read(weights.get_noc_addr(page / 2, page % 2 * 2048), destination, 2048);
+                    } else
 #endif
-                {
-                    noc_async_read_page(page, weights, destination);
+                    {
+                        noc_async_read_page(page, weights, destination);
+                    }
                 }
+                noc_async_read_barrier();
+                cb_push_back(weight_cb, prefetch_tiles);
             }
-            noc_async_read_barrier();
-            cb_push_back(weight_cb, prefetch_tiles);
         }
     }
 }
