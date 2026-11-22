@@ -217,23 +217,36 @@ class TTXLANF12:
     def resident_bytes(self):
         return (self.packed.numel() + self.escapes.numel()) * 4
 
-    def embedding(self, ids, padding_idx=None):
-        n, k = self.descriptor.logical_shape
-        padded_n, padded_k = self.descriptor.padded_shape
+    def upload_ids(self, ids, padding_idx=None):
         if ids.device.type != "cpu" and ids.device != self.device:
             raise ValueError("TT-XLA NF12 IDs must be CPU tensors or on the packed table's device")
         if ids.dtype == torch.int64 and ids.device.type == "xla":
             raise ValueError("TT-XLA NF12 expects int32 device IDs or int64 CPU IDs")
-        flat = normalize_ids(ids, n, padding_idx).reshape(-1)
+        flat = normalize_ids(ids, self.descriptor.logical_shape[0], padding_idx).reshape(-1)
         if not flat.numel():
-            return torch.empty((*ids.shape, k), dtype=torch.bfloat16, device=self.device)
-        count = len(flat)
+            return flat[None, :]
+        return torch.nn.functional.pad(flat, (0, round_up(flat.numel(), 32) - flat.numel()), value=-1)[None, :].to(self.device)
+
+    def gather_device(self, ids, count):
+        """Gather from a padded int32 ID tensor already resident on the device."""
+        if count <= 0:
+            raise ValueError("NF12 expects at least one ID")
+        n, k = self.descriptor.logical_shape
+        padded_n, padded_k = self.descriptor.padded_shape
         rows = round_up(count, 32)
-        flat = torch.nn.functional.pad(flat, (0, rows - count), value=-1)[None, :].to(self.device)
+        if ids.device != self.device or ids.dtype != torch.int32 or tuple(ids.shape) != (1, rows):
+            raise ValueError("TT-XLA NF12 expects padded int32 IDs on the packed table's device")
         out = torch.empty((rows, padded_k), dtype=torch.bfloat16, device=self.device)
         result = _call("gather", (n, padded_k, count, 0, 0, padded_n),
-                       (self.packed, self.escapes, flat), out)
-        return result[:count, :k].reshape(*ids.shape, k)
+                       (self.packed, self.escapes, ids), out)
+        return result[:count, :k]
+
+    def embedding(self, ids, padding_idx=None):
+        k = self.descriptor.logical_shape[1]
+        resident = self.upload_ids(ids, padding_idx)
+        if not ids.numel():
+            return torch.empty((*ids.shape, k), dtype=torch.bfloat16, device=self.device)
+        return self.gather_device(resident, ids.numel()).reshape(*ids.shape, k)
 
     def upload_baseline(self, w):
         n, k = self.descriptor.logical_shape

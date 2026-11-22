@@ -113,7 +113,8 @@ def _embedding(w, name, runtime, backend, repeats, *, exhaustive=False):
     if backend == "ttnn":
         import ttnn
 
-        dense = ttnn.from_torch(w, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
+        dense = ttnn.from_torch(w, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+        dense = ttnn.to_layout(dense, ttnn.ROW_MAJOR_LAYOUT)
         def bf16(index):
             valid = index.clamp(0, rows - 1).flatten()[None, :].to(torch.int32)
             device_ids = ttnn.from_torch(valid, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
@@ -128,20 +129,21 @@ def _embedding(w, name, runtime, backend, repeats, *, exhaustive=False):
         "one": torch.tensor([min(201023, rows - 1)]),
         "repeat": torch.full((1, 32), min(16, rows - 1), dtype=torch.long),
         "contiguous": torch.arange(32).reshape(2, 16),
-        "scattered": torch.tensor([[15, 16, 31, 32, rows - 1, 0, -1, rows, 2**32 + 16, 16]]),
+        "scattered": torch.tensor([[15, 16, 31, 32, rows - 1, 0, 16]]),
     }
+    invalid = torch.tensor([[-1, rows, 2**32 + 16, rows - 1]])
+    _same(layer.embedding(invalid).cpu(), _gather_oracle(w, invalid))
     for label, index in ids.items():
-        if backend == "ttnn":
-            resident = layer.upload_ids(index)
-            operation = lambda: layer.gather_device(resident, index.numel())  # noqa: E731
-        else:
-            resident = index  # signed normalization is part of the mixed-runtime XLA invocation
-            operation = lambda: layer.embedding(resident)  # noqa: E731
+        resident = layer.upload_ids(index)
+        operation = lambda: layer.gather_device(resident, index.numel())  # noqa: E731
         _, padded_k = descriptor.padded_shape
         result, measured = _measure(operation, sync, repeats, index.numel() * w.shape[1] * 2)
         out = copy(result).reshape(index.numel(), -1)[:, :w.shape[1]].reshape(*index.shape, w.shape[1])
         _same(out, _gather_oracle(w, index))
-        _, baseline = _measure(bf16(index), sync, repeats, index.numel() * w.shape[1] * 2)
+        dense_result, baseline = _measure(bf16(index), sync, repeats, index.numel() * w.shape[1] * 2)
+        # The dense PJRT gather can canonicalize signed zeros. The packed
+        # result above is still checked against the literal CPU BF16 bits.
+        torch.testing.assert_close(copy(dense_result).reshape_as(out), out, atol=0, rtol=0, equal_nan=True)
         atom_read = {}
         if backend == "ttnn":
             full, atom_read = _measure(lambda: layer.gather_device(resident, index.numel(), full_atoms=True),
@@ -150,6 +152,7 @@ def _embedding(w, name, runtime, backend, repeats, *, exhaustive=False):
         print(json.dumps({
             "op": "embedding", "tensor": name, "case": label, "ids": index.numel(), "shape": list(w.shape),
             "packed_bytes": descriptor.packed_bytes, "resident_bytes": layer.resident_bytes,
+            "resident_ids_on_both_paths": True,
             "canonical_bytes_per_uncached_row": (192 if backend == "ttnn" else 2 * 1536) * padded_k // 64,
             "bf16_gather": baseline, "full_atoms": atom_read, **measured,
         }), flush=True)
@@ -259,11 +262,12 @@ def _smoke(runtime, backend, repeats):
     print(json.dumps({"op": "cache_reuse", "distinct_exponent_bases": True}), flush=True)
 
 
-def _checkpoint(path, runtime, backend, repeats, exhaustive, *, lm_head_only=False):
+def _checkpoint(path, runtime, backend, repeats, exhaustive, *, lm_head_only=False, embedding_only=False):
     weight_map = json.loads((path / "model.safetensors.index.json").read_text())["weight_map"]
+    embedding = "model.llm.embed.weight"
     lm_head = "model.llm.unembed.weight"
     matrices = [
-        ("model.llm.embed.weight", ()),
+        (embedding, ()),
         (lm_head, (1, 4, 8, 16, 32, 128, 256)),
         ("model.visual.backbone.embeddings.patch_embedding.weight", (16, 64, 256)),
         ("model.visual.backbone.embeddings.position_embedding", ()),
@@ -274,7 +278,7 @@ def _checkpoint(path, runtime, backend, repeats, exhaustive, *, lm_head_only=Fal
         ("model.visual.proj_out.weight", (4, 16, 64)),
     ]
     for name, sizes in matrices:
-        if lm_head_only and name != lm_head:
+        if (lm_head_only and name != lm_head) or (embedding_only and name != embedding):
             continue
         with safe_open(path / weight_map[name], framework="pt", device="cpu") as shard:
             w = shard.get_tensor(name)
@@ -302,12 +306,14 @@ def main():
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--exhaustive", action="store_true", help="Check every logical embedding row on the device")
-    parser.add_argument("--lm-head-only", action="store_true", help="Benchmark only the Inkling LM head")
+    selected = parser.add_mutually_exclusive_group()
+    selected.add_argument("--lm-head-only", action="store_true", help="Benchmark only the Inkling LM head")
+    selected.add_argument("--embedding-only", action="store_true", help="Benchmark only the Inkling token embedding")
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be positive")
-    if args.lm_head_only and args.checkpoint is None:
-        parser.error("--lm-head-only requires --checkpoint")
+    if (args.lm_head_only or args.embedding_only) and args.checkpoint is None:
+        parser.error("--lm-head-only and --embedding-only require --checkpoint")
     torch.set_num_threads(6)
     torch.manual_seed(12)
     print(json.dumps({"backend": args.backend, "chip": args.chip, "repeats": args.repeats, "torch": torch.__version__,
@@ -317,7 +323,7 @@ def main():
             _smoke(runtime, args.backend, args.repeats)
         else:
             _checkpoint(args.checkpoint, runtime, args.backend, args.repeats, args.exhaustive,
-                        lm_head_only=args.lm_head_only)
+                        lm_head_only=args.lm_head_only, embedding_only=args.embedding_only)
 
 
 if __name__ == "__main__":
