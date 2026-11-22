@@ -52,12 +52,13 @@ class Inkling2LoopVisionRotary(nn.Module):
 
     def __init__(self, config: Inkling2LoopVisionConfig):
         super().__init__()
-        # Keep the config so the loader can rebuild this module's non-persistent
-        # ``inv_freq`` buffer (the checkpoint does not store it).
         self.config = config
-        spatial_dim = config.head_dim // 2
-        inv_freq = 1.0 / (config.rope_theta ** (torch.arange(0, spatial_dim, 2).float() / spatial_dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("inv_freq", self._compute_inv_freq(), persistent=False)
+
+    def _compute_inv_freq(self, device=None):
+        spatial_dim = self.config.head_dim // 2
+        exponents = torch.arange(0, spatial_dim, 2, dtype=torch.float32, device=device) / spatial_dim
+        return 1.0 / (self.config.rope_theta ** exponents)
 
     def forward(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # position_ids: (tokens, 2) holding the (row, column) of every token
@@ -266,6 +267,12 @@ class Inkling2LoopVisionModel(PreTrainedModel):
     base_model_prefix = "vision_tower"
     main_input_name = "pixel_values"
     _no_split_modules = ["Inkling2LoopVisionLayer"]
+
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        if isinstance(module, Inkling2LoopVisionRotary):
+            # Checkpoint loading materializes non-persistent meta buffers as empty tensors.
+            module.inv_freq.copy_(module._compute_inv_freq(module.inv_freq.device))
 
     def __init__(self, config: Inkling2LoopVisionConfig):
         super().__init__(config)
