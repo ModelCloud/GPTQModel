@@ -171,7 +171,7 @@ def _measure_linear_pair(calls, sync, repeats):
     return tuple((statistics.median(times), sorted(times)[math.ceil(0.95 * repeats) - 1]) for times in elapsed)
 
 
-def _exercise_linear(ttnn, device, sync, size, repeats, checkpoint, prefetch_groups):
+def _exercise_linear(ttnn, device, sync, size, repeats, checkpoint, prefetch_groups, m_sizes):
     base, weight = _weight(size, checkpoint, False)
     n, k = weight.shape
     if (k // 128) % prefetch_groups:
@@ -179,12 +179,7 @@ def _exercise_linear(ttnn, device, sync, size, repeats, checkpoint, prefetch_gro
     bits = weight.view(torch.int16).int() & 0xffff
     tiles = _to_tiles(bits).transpose(-2, -1).contiguous()
     packed, patches = _pack_four(tiles, base)
-    generator = torch.Generator().manual_seed(54)
-    x = torch.randn((1, k), generator=generator).bfloat16()
-    activation = ttnn.from_torch(torch.nn.functional.pad(x, (0, 0, 0, 31)), dtype=ttnn.bfloat16,
-                                 layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-    calls = []
-    resident_bytes = []
+    residents = []
     for dense, data, dtype in ((True, tiles.to(torch.int16).view(torch.bfloat16), ttnn.bfloat16),
                                (False, packed, ttnn.uint16)):
         words = ttnn.from_torch(data, dtype=dtype, layout=ttnn.TILE_LAYOUT,
@@ -192,22 +187,34 @@ def _exercise_linear(ttnn, device, sync, size, repeats, checkpoint, prefetch_gro
         metadata = tuple(ttnn.from_torch(patch, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT,
                                          device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
                          for patch in patches if not dense)
-        calls.append(_linear_operation(ttnn, device, words, activation, n, k, base, dense=dense, metadata=metadata,
-                                       prefetch_groups=1 if dense else prefetch_groups))
-        resident_bytes.append(data.numel() * 2 + sum(m.volume() * 4 for m in metadata))
+        residents.append((dense, words, metadata, data.numel() * 2 + sum(m.volume() * 4 for m in metadata)))
 
-    timings = _measure_linear_pair(calls, sync, repeats)
-    results = [ttnn.to_torch(call()) for call in calls]
-    _same(*results)
-    golden = torch.nn.functional.linear(x.float(), weight.float()).bfloat16()
-    oracle = _errors(results[1][:1], golden)
-    assert oracle["scaled_rmse"] <= 0.002, oracle
-    for label, weight_bytes, (median, p95) in zip(("matched_bf16_linear", "sfpu_linear"), resident_bytes, timings):
-        print(json.dumps({"kind": label, "shape": [n, k], "m": 1, "weight_bytes": weight_bytes,
-                          "median_us": median, "p95_us": p95, "effective_GBps": weight_bytes / median / 1000}),
-              flush=True)
-    print(json.dumps({"matched_linear_exact": True, "shape": [n, k], "packed_prefetch_groups": prefetch_groups,
-                      "torch_fp32_oracle": oracle}), flush=True)
+    for m in m_sizes:
+        x = torch.randn((m, k), generator=torch.Generator().manual_seed(54)).bfloat16()
+        activations = [
+            ttnn.from_torch(torch.nn.functional.pad(rows, (0, 0, 0, 32 - len(rows))), dtype=ttnn.bfloat16,
+                            layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            for rows in x.split(32)
+        ]
+        calls = []
+        for dense, words, metadata, _ in residents:
+            slabs = [_linear_operation(ttnn, device, words, activation, n, k, base, dense=dense, metadata=metadata,
+                                       prefetch_groups=1 if dense else prefetch_groups) for activation in activations]
+            calls.append(lambda slabs=slabs: tuple(slab() for slab in slabs))
+
+        timings = _measure_linear_pair(calls, sync, repeats)
+        results = [torch.cat([ttnn.to_torch(output) for output in call()]) for call in calls]
+        _same(*results)
+        golden = torch.nn.functional.linear(x.float(), weight.float()).bfloat16()
+        oracle = _errors(results[1][:m], golden)
+        assert oracle["scaled_rmse"] <= 0.002, oracle
+        for (dense, _, _, weight_bytes), (median, p95) in zip(residents, timings):
+            print(json.dumps({"kind": "matched_bf16_linear" if dense else "sfpu_linear", "shape": [n, k], "m": m,
+                              "weight_bytes": weight_bytes, "weight_passes": len(activations), "median_us": median,
+                              "p95_us": p95, "effective_GBps": weight_bytes * len(activations) / median / 1000}),
+                  flush=True)
+        print(json.dumps({"matched_linear_exact": True, "shape": [n, k], "m": m,
+                          "packed_prefetch_groups": prefetch_groups, "torch_fp32_oracle": oracle}), flush=True)
 
 
 def main():
@@ -217,8 +224,9 @@ def main():
     parser.add_argument("--repeats", type=int, default=8)
     parser.add_argument("--checkpoint", type=Path, help="Use the first --size rows of the public Inkling 2 Mini head")
     parser.add_argument("--special", action="store_true", help="Add special BF16 values to synthetic input")
-    parser.add_argument("--linear", action="store_true", help="Run the M=1 whole-slab SFPU and matmul experiment")
+    parser.add_argument("--linear", action="store_true", help="Run the bias-free SFPU and matmul experiment")
     parser.add_argument("--prefetch-groups", type=int, default=1, help="Read this many compressed groups per NoC batch")
+    parser.add_argument("--m", nargs="+", type=int, default=[1], help="Logical M sizes to validate in linear mode")
     args = parser.parse_args()
     if args.size < 64 or args.size % 64 or args.repeats < 1:
         parser.error("Use a size that is a positive multiple of 64 and at least one repeat")
@@ -226,6 +234,8 @@ def main():
         parser.error("For linear without a checkpoint, use a synthetic size divisible by 128 and finite weights")
     if args.prefetch_groups < 1:
         parser.error("The number of prefetch groups must be positive")
+    if min(args.m) < 1:
+        parser.error("M sizes must be positive")
     torch.set_num_threads(3)
     ttnn = import_ttnn()
     device = ttnn.open_device(device_id=args.chip)
@@ -235,7 +245,8 @@ def main():
                 ttnn.synchronize_device(device)
 
             if args.linear:
-                _exercise_linear(ttnn, device, sync, args.size, args.repeats, args.checkpoint, args.prefetch_groups)
+                _exercise_linear(ttnn, device, sync, args.size, args.repeats, args.checkpoint,
+                                 args.prefetch_groups, args.m)
             else:
                 _exercise(ttnn, device, ttnn.to_torch, sync, args.size, args.repeats, args.checkpoint, args.special)
     finally:
