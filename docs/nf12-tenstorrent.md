@@ -129,6 +129,42 @@ run the vision cases without the CPU language model.
 | Transformers source | `2f1bc5e321b9a736200a590d6e7743ccdeb60772` |
 | Canonical codec | GPT-QModel Torch reference and vendored NF12 ABI |
 
+### Local P300c topology
+
+UMD discovered two cards with PCIe-visible ASICs `{0, 1}` and `{2, 3}`.
+The active chip-to-chip Ethernet links form a path with two reported channels
+per edge. PCIe carries host traffic. The Ethernet path carries inter-chip
+fabric traffic. All measurements in this document use one ASIC's local DRAM.
+
+```text
+chip 0 -- 2 channels -- chip 3 -- 2 channels -- chip 2 -- 2 channels -- chip 1
+card A                   card B                 card B                 card A
+```
+
+Each local device exposes an 11×10 logical worker grid and eight DRAM banks.
+Blackhole's physical SoC grid is 17×12. The TT-Metal SoC descriptor maps the
+worker, Ethernet and DRAM endpoints onto the two independent NoC planes. In
+its physical coordinate convention, DRAM channel endpoints are grouped in
+columns 0 and 9, and Ethernet cores occupy row 1. ASIC and runtime grid
+dimensions differ because of harvesting and dispatch reservations.
+[Blackhole SoC descriptor](https://github.com/tenstorrent/tt-metal/blob/2a1236fa6e78c49d61986e403d1fe09dd1b981cb/tt_metal/soc_descriptors/blackhole_140_arch.yaml)
+
+A Tensix worker has about 1.5 MB of L1 and five control RISC-V processors.
+BRISC and NCRISC issue data movement on the NoCs. TRISC0/1/2 drive unpack,
+math and pack. The matrix engine consumes BF16 tiles from L1, while the SFPU
+can execute 32-wide integer operations. The original NF12 reader reconstructs
+each BF16 value on a data-movement RISC-V while the matrix engine waits.
+The p300c rating is 32 GB and 512 GB/s of GDDR6 per ASIC.
+[P300c specifications](https://docs.tenstorrent.com/systems/quietbox/quietbox-bh-2/specifications.html) ·
+[Tensix dataflow](https://docs.tenstorrent.com/tt-metal/latest/tt-metalium/tt_metal/advanced_topics/compute_engines_and_dataflow_within_tensix.html) ·
+[Blackhole bring-up guide](https://github.com/tenstorrent/tt-metal/blob/2a1236fa6e78c49d61986e403d1fe09dd1b981cb/tech_reports/Blackhole/BlackholeBringUpProgrammingGuide.md)
+
+For independent tests, current source TTNN accepts `TT_VISIBLE_DEVICES=N`
+with the stock 1×1 `p150_mesh_graph_descriptor.textproto` as
+`TT_MESH_GRAPH_DESC_PATH`. The masked ASIC appears as logical device 0. Four
+simultaneous TTNN tile tests verified `/proc/self/fd` contained only the
+assigned `/dev/tenstorrent/N` for each process.
+
 The checkpoint kernel timings used the original runtime above with GPT-QModel's
 documented Torch-version override. A separate source-main native environment
 ran the synthetic bit-pattern, rounding, bias and matched BF16 suites on all four chips
@@ -180,7 +216,7 @@ runtime and allocator overhead.
 | Q projection temporary FP32 DRAM at M=65 | 393,216 B | 393,216 B | 393,216 B |
 | MLP expansion temporary FP32 DRAM at M=65 | 1,572,864 B | 1,572,864 B | 1,572,864 B |
 
-## Checkpoint kernel measurements
+## Initial checkpoint kernel measurements
 
 Latency is synchronized wall time, median and p95 of eight samples after one
 warmup. Timed native calls take resident activations and weights. TT-XLA pays
@@ -272,6 +308,52 @@ At M=256 the one-activation-tile schedule took 1,657.75 ms on TTNN and
 2,883.01 ms on TT-XLA. Reusing each decoded tile for up to four activation
 tiles reduced the medians to 407.05 ms and 799.95 ms, respectively.
 
+### LM-head performance target
+
+The initial reader fetches two 1,536-byte super-atoms per K=32 tile. Each
+super-atom covers K=64, so that schedule requests about 1.39 GB of packed
+weight data for one LM-head contraction before escapes and activation reads.
+The resident packed weight is about 695 MB. Reusing each atom across both
+K tiles realizes the resident-byte reduction in the weight read path.
+
+At the 5.64 ms native matched BF16 median, the 695 MB packed weight alone
+requires 123 GB/s of effective bandwidth to break even. At 1.1× and 1.3×
+speedup the end-to-end targets are 5.13 ms and 4.34 ms, equivalent to
+136 GB/s and 160 GB/s of packed weight per second. Activation, escape,
+decode, output and dispatch costs fit inside those same time budgets.
+
+On source-main TTNN, the grouped canonical reader builds paired BF16 stores
+and defers only escape groups. A 1 KiB per-worker L1 table caches exponent
+expansions and an unrolled loop writes four row pairs. Timed source-main runs
+kept the canonical packed data in DRAM and matched BF16 bit-for-bit.
+
+| Chip 0 LM-head variant | M=1 median | M=128 median |
+| --- | ---: | ---: |
+| Initial canonical reader | 203.29 ms | 204.03 ms |
+| Grouped 32-bit stores | 41.28 ms | 41.66 ms |
+| Grouped stores, exponent lookup and unrolled writes | 37.33 ms | 37.53 ms |
+| Matched BF16, same run as the unrolled variant | 5.44 ms | 14.22 ms |
+
+The L1 reservations for the new reader are 18,944 bytes per worker at M=1 and
+31,232 bytes per worker at M=128 or 256. The exponent table does not change
+resident DRAM. Each variant was compared to its same-process control across
+eight synchronized samples per configuration. The two comparison sessions used
+the same chip. They were initialized independently.
+
+The same optimized decoder passed the exhaustive TT-XLA checkpoint kernel
+run. The bundled PJRT benchmark used chip 0 and a synchronized host output
+read. Each entry is median / p95 in milliseconds.
+
+| TT-XLA LM-head M | Optimized NF12 ms | Matched BF16 ms |
+| ---: | ---: | ---: |
+| 1 | 124.86 / 137.12 | 13.63 / 129.34 |
+| 4 | 127.45 / 132.05 | 14.20 / 133.04 |
+| 8 | 128.59 / 133.17 | 18.28 / 137.45 |
+| 16 | 141.90 / 144.05 | 25.62 / 145.99 |
+| 32 | 123.92 / 125.41 | 14.43 / 130.45 |
+| 128 | 184.82 / 190.53 | 75.41 / 191.73 |
+| 256 | 247.95 / 527.07 | 159.98 / 277.20 |
+
 ## Mixed-runtime model validation
 
 Using Transformers 5.23.0, the NF12 matrices ran on P300c chip 0. The existing
@@ -301,3 +383,14 @@ rebuilds the buffer from the vision config in `_init_weights`. A checkpoint
 save-and-load regression checks the expected column and row phases. The table
 above was measured after that fix. The earlier image logit measurements varied
 with the uninitialized buffer and have been withdrawn.
+
+| Native TTNN logits after the loader fix | Max abs | Scaled RMSE | Top-1 / 5 / 10 overlap | KLD | BF16 / NF12 PPL |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| text | 0.09505 | 0.0007206 | 100.00% / 100.00% / 100.00% | 1.9454e-05 | 182.2207 / 182.2977 |
+| image | 16.67358 | 0.2488112 | 93.33% / 93.33% / 89.33% | 0.2059546 | 39270.61 / 36971.74 |
+| image with CPU BF16 vision tokens | 0.09505 | 0.0008239 | 100.00% / 100.00% / 100.00% | 2.2561e-06 | 39270.61 / 39273.31 |
+
+The native run verified all 144 logical matrices and 580 matched device BF16
+calls. Swapping only the merged vision tokens reduced scaled image logit RMSE
+from 24.88% to 0.0824% on the frozen pair. The device BF16 control reproduces
+the NF12 vision arithmetic bit-for-bit on the same activations.
