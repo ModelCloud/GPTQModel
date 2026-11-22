@@ -152,7 +152,7 @@ _KERNELS = Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "nf12_tenstor
 @lru_cache(maxsize=None)
 def kernel_source(name):
     source = (_KERNELS / f"{name}.cpp").read_text()
-    if name in {"gather", "gather_xla", "linear_reader"}:
+    if name in {"gather", "gather_xla", "linear_pair_reader"}:
         source = (_KERNELS / "decode.h").read_text() + "\n" + source
     for header in ("program.h", "sfpu_decode_math.h", "sfpu_escape_patch.h"):
         include = f'#include "{header}"'

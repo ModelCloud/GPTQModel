@@ -75,8 +75,9 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
         ]
         if not dense:
             cbs.append(_cb(24, "UInt32", LINEAR_PACKED_SCRATCH_BYTES))
+        reader_name = "linear_reader" if dense else "linear_pair_reader"
         kernels = [
-            ("linear_reader", "noc", [0, 1, 2], [n // 16, kt, mt, m_block, base, int(dense), nt]),
+            (reader_name, "noc", [0, 1, 2], [n // 16, kt, mt, m_block, base, int(dense), nt]),
             ("linear_writer", "noc", [3], [nt, mt, out_page]),
             ("linear_compute", "compute", [], [kt, mt, m_block, nt]),
         ]
@@ -115,7 +116,7 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
 def _version_tag():
     digest = hashlib.sha256()
     digest.update(Path(__file__).read_bytes())
-    for name in ("gather_xla", "linear_reader", "linear_compute", "linear_writer"):
+    for name in ("gather_xla", "linear_reader", "linear_pair_reader", "linear_compute", "linear_writer"):
         digest.update(kernel_source(name).encode())
     return digest.hexdigest()[:24]
 

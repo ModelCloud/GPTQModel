@@ -187,8 +187,9 @@ class TTNNNF12:
         output = self._allocate((m_tiles * 32, n_tiles * 32), output_dtype, ttnn.TILE_LAYOUT)
         readers = [x, w, self.escapes]
         addresses = [tensor.buffer_address() for tensor in readers]
+        reader_name = "linear_reader" if dense else "linear_pair_reader"
         reader = _kernel(
-            ttnn, "linear_reader", ttnn.ReaderConfigDescriptor(), cores, assignments,
+            ttnn, reader_name, ttnn.ReaderConfigDescriptor(), cores, assignments,
             (n // 16, k_tiles, m_tiles, m_block, self.exp_base, int(dense)),
             readers, lambda start, end: [*addresses, start, end],
         )
