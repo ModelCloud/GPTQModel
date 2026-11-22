@@ -84,6 +84,20 @@ def test_packing_inside_ambient_inference_mode_stays_mutable(pack_impl):
         assert not getattr(module, name).is_inference(), name
 
 
+@pytest.mark.parametrize("pack_impl", ["block", "original"])
+def test_state_dict_copy_after_packing_inside_inference_mode(pack_impl):
+    # Packing inside ``torch.inference_mode()`` must leave the checkpoint
+    # buffers mutable: copying a second state dict in with ``assign=False``
+    # has to succeed (#5983).
+    target = _pack(_quant(), 1.0, pack_impl, inference=True)
+    source = _pack(_quant(), 2.0, pack_impl)
+    target.load_state_dict(source.state_dict(), assign=False)
+    for name in BUFFERS:
+        torch.testing.assert_close(
+            getattr(target, name), getattr(source, name), rtol=0, atol=0
+        )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="pack_gpu needs a CUDA device")
 def test_pack_gpu_leaves_mutable_checkpoint_buffers():
     module = TorchLinear(
