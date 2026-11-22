@@ -1,5 +1,10 @@
 # Transformers 5.22 model compatibility
 
+> **Historical (Transformers 5.22).** PR #4620 replaced the 5.22 compatibility
+> shims with the native/port path and pinned GPT-QModel to Transformers 5.23.
+> This document is retained for history; the code paths and present tense
+> below describe the 5.22 implementation, not the current package.
+
 Transformers 5.22 changed three things that GPT-QModel's model definitions and
 lazy checkpoint loader depended on:
 
@@ -228,7 +233,7 @@ the transformers-5 dict.
 
 ```mermaid
 flowchart TD
-    A["normalize_hf_config_compat"] --> B{"class __init__ declares rope_scaling<br/>and not rope_parameters?"}
+    A["remote-code config shim"] --> B{"class __init__ declares rope_scaling<br/>and not rope_parameters?"}
     B -- No --> C["fill default rope_parameters<br/>native and modern remote"]
     B -- Yes --> D{"per-layer dict or scaled rope?"}
     D -- Yes --> E["keep dict and add legacy type key"]
@@ -334,7 +339,7 @@ flowchart TD
 `modeling_klear.py` imports `check_model_inputs` and `OutputRecorder` from
 `transformers.utils.generic`. Transformers 5 moved `OutputRecorder` to
 `transformers.utils.output_capturing`, so the remote module raised
-`ImportError`. `_patch_transformers_remote_code_compat` now re-exports the real
+`ImportError`. The remote-code compatibility shim now re-exports the real
 recorder into `generic` next to the existing `check_model_inputs` shim
 (`gptqmodel/utils/hf.py:996`).
 
@@ -357,7 +362,7 @@ materialization-time restore for the quantize path).
 
 Transformers 5 removed the deprecated cache-level `get_max_length()` and
 `get_usable_length()` helpers that older remote decoders call, so
-`_patch_transformers_remote_code_compat` reinstalls them. The reinstall was
+the remote-code compatibility shim reinstalls them. The reinstall was
 gated on the *replacement* name `Cache.get_max_cache_shape` existing. In
 transformers 5.22 that cache-level name is gone as well — the length query
 moved to `CacheLayerMixin.get_max_length()` — so the gate never fired and every
@@ -368,7 +373,7 @@ the value from the layer that owns it:
 
 ```mermaid
 flowchart TD
-    A["_patch_transformers_remote_code_compat"] --> B{"Cache.get_max_length exists?"}
+    A["remote-code compatibility shim"] --> B{"Cache.get_max_length exists?"}
     B -- Yes --> Z["leave the installed API alone"]
     B -- No --> C["install get_max_length(self, layer_idx=0)"]
     C --> D{"self.layers[layer_idx] defines<br/>get_max_length?"}
@@ -446,7 +451,7 @@ gone:
 
 The fix is one adapter installed from `BaseQModel.__init__`
 (`gptqmodel/models/base.py:774`) plus cache-side surface in
-`_patch_transformers_remote_code_compat`. No family names appear in it:
+the remote-code compatibility shim. No family names appear in it:
 
 ```mermaid
 flowchart TD
@@ -466,7 +471,7 @@ flowchart TD
 ```
 
 Cache-side surface, installed once per process by
-`_patch_transformers_remote_code_compat` (`gptqmodel/utils/hf.py:1137`):
+the remote-code compatibility shim (`gptqmodel/utils/hf.py:1137`):
 
 | Symbol | Added by | Why |
 | --- | --- | --- |
@@ -534,7 +539,7 @@ quality claims for full checkpoints.
 | `tests/test_lazy_turtle_conversion_mapping.py` | chained `.bin` conversion error, legacy tied-key normalization before save |
 | `tests/test_spark2_5_support.py` | AUTO_NF12 source-weight dtype/shape/device contract |
 | `tests/models/test_chatglm.py` | native and tiny from-config `generate()` |
-| `tests/test_legacy_generation_compat.py` | native load runs `before_model_load`; empty cache becomes `None`; `cache[0][0]`/`seen_tokens`/`get_usable_length`; `num_layers`/`n_layer` -> `num_hidden_layers` |
+| `tests/test_legacy_generation_compat.py` (removed by #4620) | Historical coverage: native load ran `before_model_load`; empty cache became `None`; `cache[0][0]`/`seen_tokens`/`get_usable_length`; `num_layers`/`n_layer` -> `num_hidden_layers` |
 | `tests/models/test_ouro.py`, `tests/models/test_spark2_5.py` | native `generate()` after the pre-load hook installs the mask-helper shim |
 | `tests/models/test_deci.py`, `test_exaone.py`, `test_nanbeige42.py`, `test_minicpm.py`, `test_baichuan.py`, `test_pangu_alpha.py`, `test_hymba.py` | quantize+ARC path also asserts real generated text (`ASSERT_INFERENCE`) |
 

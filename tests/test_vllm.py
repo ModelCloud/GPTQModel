@@ -37,7 +37,7 @@ class TestLoadVLLM(ModelTest):
         if ((importlib.util.find_spec("flashinfer") is None and importlib.util.find_spec("flashinfer-python") is None) or
                 importlib.util.find_spec("vllm") is None):
             raise unittest.SkipTest(
-                "flashinfer and vllm are required by this test. install via `pip install gptqmodel['vllm']`"
+                "flashinfer and vllm are required by this test. install via `pip install gptqmodel vllm flashinfer`"
             )
 
         try:

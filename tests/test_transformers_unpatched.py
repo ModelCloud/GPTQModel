@@ -10,9 +10,12 @@ registry, GGUF integration and ``PreTrainedModel`` APIs, ``torch.nn`` /
 and its hook classes), Defuser, ``safetensors``, ``huggingface_hub`` and Triton
 (when importable) exactly as they ship. Every model class a load instantiated
 (vendored, port or Transformers framework class) must keep its class
-``__dict__``: GPT-QModel never assigns onto classes it does not own. There is
-no allow-list. The check runs in a fresh interpreter so no other test can have
-imported ``gptqmodel`` first.
+``__dict__``: GPT-QModel never assigns onto classes it does not own. The only
+allowed entries are the five wrappers of the model-global-state construction
+guard (#5304, #5421), which keeps concurrent constructions from observing
+another thread's process-global dtype/tie/``apply_patches`` window. The check
+runs in a fresh interpreter so no other test can have imported ``gptqmodel``
+first.
 """
 
 from __future__ import annotations
@@ -27,9 +30,18 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Every entry here would be a patch GPT-QModel applies to a third-party API.
-# The policy forbids them all, so the set stays empty.
-_ALLOWED_INTEGRATION_PATCHES: set[tuple[str, str]] = set()
+# The model-global-state construction guard is the one documented exception:
+# it wraps Transformers' construction entry points so a concurrent
+# ``from_pretrained``/``from_config`` cannot observe another thread's
+# process-global dtype/tie/``apply_patches`` window (#5304, #5421). Every other
+# patch remains forbidden.
+_ALLOWED_INTEGRATION_PATCHES: set[tuple[str, str]] = {
+    ("PreTrainedModel", "get_init_context"),
+    ("PreTrainedModel", "_from_config"),
+    ("modeling_utils", "local_torch_dtype"),
+    ("modeling_utils", "apply_patches"),
+    ("initialization", "no_tie_weights"),
+}
 
 _SCRIPT = textwrap.dedent(
     r"""
@@ -51,7 +63,7 @@ _SCRIPT = textwrap.dedent(
     import transformers.utils as hf_utils
     import transformers.utils.generic as generic
     import transformers.utils.import_utils as import_utils
-    from transformers import PreTrainedModel, PreTrainedConfig
+    from transformers import PreTrainedModel, PreTrainedConfig, initialization, modeling_utils
     from transformers.generation import GenerationMixin
     from transformers.integrations import hub_kernels
     from transformers.quantizers.quantizer_awq import AwqQuantizer
@@ -69,6 +81,8 @@ _SCRIPT = textwrap.dedent(
         "import_utils": import_utils,
         "PreTrainedModel": PreTrainedModel,
         "PreTrainedConfig": PreTrainedConfig,
+        "modeling_utils": modeling_utils,
+        "initialization": initialization,
         "hub_kernels": hub_kernels,
         "quant_auto": quant_auto,
         "quant_auto.AUTO_QUANTIZER_MAPPING": quant_auto.AUTO_QUANTIZER_MAPPING,
