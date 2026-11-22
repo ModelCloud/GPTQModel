@@ -50,3 +50,30 @@ def test_packed_inkling2_vision_attention_preserves_token_and_head_axes():
     individual = [tower(patch, grid[None]).pooler_output for patch, grid in zip(pixels.split((2, 1)), grids)]
     assert packed.shape == (3, config.text_hidden_size)
     torch.testing.assert_close(packed, torch.cat(individual), atol=1e-6, rtol=1e-5)
+
+
+@torch.no_grad()
+def test_inkling2_vision_position_embeddings_follow_patch_merge_order():
+    config = Inkling2LoopVisionConfig(
+        hidden_size=16, num_attention_heads=2, num_hidden_layers=1, patch_size=2,
+        posemb_grid_size=4, projection_hidden_dim=24, text_hidden_size=32,
+    )
+    tower = Inkling2LoopVisionModel(config).eval()
+    tower.embeddings.patch_embedding.weight.zero_()
+    table = tower.embeddings.position_embedding.weight
+    table.copy_(torch.arange(16).float()[:, None].expand_as(table))
+
+    # vLLM resamples its learned positions on the row-major image grid.
+    # GPT-QModel's patch stream stores each 2x2 block together.
+    positions = F.interpolate(table.T.reshape(1, 16, 4, 4), size=(2, 4), mode="bilinear")
+    expected = positions.flatten(2)[0].T[[0, 1, 4, 5, 2, 3, 6, 7]]
+
+    def check_embeddings(module, args, result):
+        torch.testing.assert_close(result[1:], expected, atol=0, rtol=0)
+
+    handle = tower.embeddings.register_forward_hook(check_embeddings)
+    try:
+        output = tower(torch.zeros(2, 4, 4, 3), torch.tensor([[1, 1, 2]]))
+    finally:
+        handle.remove()
+    assert output.pooler_output.shape == (2, config.text_hidden_size)
