@@ -79,6 +79,20 @@ def test_ttxla_artifact_rejects_wrong_number_of_fields(suffix):
         _artifact(_PREFIX + suffix, "", [], [], [], (1, 1), "")
 
 
+def test_ttxla_compact_gather_requires_distinct_id_rank():
+    from gptqmodel.utils.nf12_ttxla import _PREFIX, _artifact, _version_tag
+
+    layouts = ["<interleaved><dram>!ttcore.tile<32x32"] * 4
+    dtypes = ["si32", "si32", "si32", "bf16"]
+    op = _PREFIX + "gather_compact.47.256.1.0.0.64"
+    with pytest.raises(ValueError, match="operand"):
+        _artifact(op, _version_tag(), [(192, 32), (32, 32), (1, 32), (8, 32)], dtypes, layouts, (1, 1), "in,in,in,out")
+    resolved = json.loads(_artifact(
+        op, _version_tag(), [(192, 32), (32, 32), (1, 1, 32), (8, 32)], dtypes, layouts, (1, 1), "in,in,in,out",
+    ))
+    assert resolved["cb_configs"][0]["total_size"] == 2624
+
+
 def test_ttxla_packed_linear_buffers_two_k_pairs():
     from gptqmodel.utils.nf12_ttxla import _PREFIX, _artifact, _version_tag
 

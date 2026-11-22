@@ -12,6 +12,7 @@ from functools import lru_cache, wraps
 from pathlib import Path
 
 import torch
+from torch._subclasses.fake_tensor import FakeTensor
 
 from .nf12_tenstorrent import (
     LINEAR_PACKED_BUFFER_DEPTH,
@@ -70,6 +71,15 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
         row_read_bytes = 128 if row_block_group == 1 else 192
         cbs = [_cb(24, "UInt32", 32 * row_read_bytes + 128 + row_block_group * (2 * 2048 + 16 * 64))]
         kernels = [("gather_xla", "noc", [0, 1, 2, 3], [k, tasks])]
+    elif op == "gather_compact":
+        if m != 1 or k <= 0 or k % 128 or n <= 0 or flag < n or flag % 16:
+            raise ValueError("Compact TT-XLA gather requires one row and a K=128-aligned table")
+        expected = [(round_up(flag * k * 3 // 8, 1024) // 32, 32),
+                    tuple(shapes[1]), (1, 1, 32), (k // 32, 32)]
+        expected_dtypes = ("si32", "si32", "si32", "bf16")
+        tasks = k // 128
+        cbs = [_cb(24, "UInt32", 128 + 192 + 256 + 32 * 64)]
+        kernels = [("gather_compact_xla", "noc", [0, 1, 2, 3], [k])]
     elif op == "linear":
         nt, kt, mt = round_up(n, 32) // 32, k // 32, round_up(m, 32) // 32
         dense, wide = bool(flag & 1), bool(flag & 2)
@@ -132,8 +142,10 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
             or arg_roles != "in,in,in,out" or version_tag != _version_tag()):
         raise ValueError(f"Unexpected TT-XLA NF12 operand or kernel version for {operation_id}")
 
-    grid_x = min(tasks, 11 if op == "sfpu_linear" else _GRID_X)
-    grid_y = min(max(1, tasks // grid_x), 10 if op == "sfpu_linear" else _GRID_Y)
+    large_grid = op == "sfpu_linear"
+    grid_x = min(tasks, 11 if large_grid else _GRID_X)
+    n_rows = (tasks + grid_x - 1) // grid_x if op == "gather_compact" else tasks // grid_x
+    grid_y = min(max(1, n_rows), 10 if large_grid else _GRID_Y)
     sources = []
     for name, thread, indices, config in kernels:
         if thread == "compute":
@@ -161,7 +173,7 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
 def _version_tag():
     digest = hashlib.sha256()
     digest.update(Path(__file__).read_bytes())
-    for name in ("gather_xla", "linear_reader", "linear_pair_reader", "linear_compute", "linear_writer",
+    for name in ("gather_xla", "gather_compact_xla", "linear_reader", "linear_pair_reader", "linear_compute", "linear_writer",
                  "sfpu_linear_reader", "sfpu_linear_writer", "sfpu_linear_compute"):
         digest.update(kernel_source(name).encode())
     return digest.hexdigest()[:24]
@@ -196,6 +208,24 @@ def _call(op, config, inputs, out):
         [*inputs, out], kernel_id=op_id, arg_roles="in,in,in,out", version_tag=_version_tag(),
         shard_spec="", out_indices=[3],
     )[0]
+
+
+@lru_cache(maxsize=64)
+def _gather_attrs(op, config):
+    return {"kernel_id": _PREFIX + op + "." + ".".join(map(str, config)),
+            "arg_roles": "in,in,in,out", "version_tag": _version_tag()}
+
+
+def _gather_call(op, config, inputs, shape, *, direct):
+    if not direct or torch.compiler.is_compiling() or any(isinstance(tensor, FakeTensor) for tensor in inputs):
+        out = torch.empty(shape, dtype=torch.bfloat16, device=inputs[0].device)
+        return _call(op, config, inputs, out)
+    from torch_xla.experimental.stablehlo_custom_call import stablehlo_custom_call
+
+    # The tt-lang XLA wrapper strips its empty output operand and supplies
+    # only the shape to StableHLO. The eager gather can supply it directly.
+    return stablehlo_custom_call(inputs, "tt.tt_lang_op", [list(shape)], [torch.bfloat16],
+                                 frontend_attributes=_gather_attrs(op, config))
 
 
 def _blackhole_device(device):
@@ -255,7 +285,7 @@ class TTXLANF12:
             return flat[None, :]
         return torch.nn.functional.pad(flat, (0, round_up(flat.numel(), 32) - flat.numel()), value=-1)[None, :].to(self.device)
 
-    def gather_device(self, ids, count):
+    def gather_device(self, ids, count, *, direct=True):
         """Gather from a padded int32 ID tensor already resident on the device."""
         if count <= 0:
             raise ValueError("NF12 expects at least one ID")
@@ -264,10 +294,24 @@ class TTXLANF12:
         rows = round_up(count, 32)
         if ids.device != self.device or ids.dtype != torch.int32 or tuple(ids.shape) != (1, rows):
             raise ValueError("TT-XLA NF12 expects padded int32 IDs on the packed table's device")
-        out = torch.empty((rows, padded_k), dtype=torch.bfloat16, device=self.device)
-        result = _call("gather", (n, padded_k, count, 0, 0, padded_n),
-                       (self.packed, self.escapes, ids), out)
-        return result[:count, :k]
+        result = _gather_call("gather", (n, padded_k, count, 0, 0, padded_n),
+                              (self.packed, self.escapes, ids), (rows, padded_k), direct=direct)
+        if k != padded_k:
+            result = result[:, :k]
+        return result[:count] if count != rows else result
+
+    def gather_compact_device(self, ids, *, direct=True):
+        """Produce one row as a tile-dense carrier for a host consumer."""
+        n, k = self.descriptor.logical_shape
+        padded_n, padded_k = self.descriptor.padded_shape
+        if not self.row_major or k != padded_k or k % 128:
+            raise ValueError("Compact TT-XLA gather needs the row-major layout and unpadded K divisible by 128")
+        if ids.device != self.device or ids.dtype != torch.int32 or tuple(ids.shape) != (1, 32):
+            raise ValueError("Compact TT-XLA gather needs one padded resident int32 ID tensor")
+        # The compact and ordinary gathers have the same resident inputs and
+        # different results. Distinguish them explicitly in the executable cache.
+        return _gather_call("gather_compact", (n, k, 1, 0, 0, padded_n),
+                            (self.packed, self.escapes, ids.reshape(1, 1, 32)), (k // 32, 32), direct=direct)
 
     def embedding(self, ids, padding_idx=None):
         k = self.descriptor.logical_shape[1]
@@ -275,6 +319,14 @@ class TTXLANF12:
         if not ids.numel():
             return torch.empty((*ids.shape, k), dtype=torch.bfloat16, device=self.device)
         return self.gather_device(resident, ids.numel()).reshape(*ids.shape, k)
+
+    def embedding_to_host(self, ids, padding_idx=None):
+        """Gather for host consumers, with a compact one-row device transfer."""
+        _, k = self.descriptor.logical_shape
+        if self.row_major and ids.numel() == 1 and k == self.descriptor.padded_shape[1] and k % 128 == 0:
+            resident = self.upload_ids(ids, padding_idx)
+            return self.gather_compact_device(resident).cpu().reshape(*ids.shape, k)
+        return self.embedding(ids, padding_idx).cpu()
 
     def upload_baseline(self, w):
         n, k = self.descriptor.logical_shape

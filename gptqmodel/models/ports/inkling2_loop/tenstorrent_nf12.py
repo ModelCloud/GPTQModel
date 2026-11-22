@@ -40,9 +40,10 @@ class _NF12Linear(ForwardDtypeLockMixin, nn.Module):
 
 
 class _NF12Embedding(nn.Module):
-    def __init__(self, source, layer):
+    def __init__(self, source, layer, *, xla):
         super().__init__()
         self.layer = layer
+        self.xla = xla
         self.num_embeddings = source.num_embeddings
         self.embedding_dim = source.embedding_dim
         self.padding_idx = source.padding_idx
@@ -53,6 +54,8 @@ class _NF12Embedding(nn.Module):
     def forward(self, ids):
         # As with nn.Embedding, the model reads the stored padding row. The
         # low-level raw gather also supports an explicitly zeroed padding ID.
+        if self.xla and ids.device.type == "cpu":
+            return self.embed_norm(self.layer.embedding_to_host(ids))
         return self.embed_norm(self.layer.embedding(ids).to(ids.device))
 
 
@@ -164,7 +167,7 @@ def install_inkling2_nf12(
         if isinstance(source, nn.Linear):
             replacements[name] = _NF12Linear(source, layer, backend == "ttxla")
         else:
-            replacements[name] = _NF12Embedding(source, layer)
+            replacements[name] = _NF12Embedding(source, layer, xla=backend == "ttxla")
         descriptors[weight_name] = descriptor
     for name, module in replacements.items():
         model.set_submodule(name, module)
