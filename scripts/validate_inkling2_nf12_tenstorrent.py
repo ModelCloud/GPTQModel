@@ -18,6 +18,7 @@ from PIL import Image
 from transformers import AutoTokenizer, Inkling2ImageProcessor
 
 from gptqmodel.models.inkling2_loop import Inkling2LoopForConditionalGeneration, install_inkling2_nf12
+from gptqmodel.models.inkling2_loop.tenstorrent_nf12 import _targets
 from gptqmodel.models.inkling2_loop.vision import _bilinear_taps
 
 
@@ -88,6 +89,7 @@ def main():
     p.add_argument("--backend", choices=("ttnn", "ttxla"), required=True)
     p.add_argument("--chip", type=int, default=0)
     p.add_argument("--vision-only", action="store_true")
+    p.add_argument("--verify-weights", action="store_true", help="Decode every selected weight on the device")
     p.add_argument("--descriptors", type=Path, help="Write weight provenance into a local JSON file")
     args = p.parse_args()
     torch.set_num_threads(8)
@@ -99,6 +101,7 @@ def main():
         tower = model.model.vision_tower
         cases = _vision_inputs(args.checkpoint)
         vision_reference = {name: _vision(tower, inputs) for name, inputs in cases.items()}
+        print(json.dumps({"phase": "baseline_vision", "cases": list(cases)}), flush=True)
         paired = {}
         if not args.vision_only:
             tokenizer = AutoTokenizer.from_pretrained(args.checkpoint, local_files_only=True)
@@ -106,10 +109,14 @@ def main():
             image_inputs = cases["processor_pair"]
             image_tokens = int(image_inputs["image_grid_thw"].prod(-1).sum())
             image_ids = torch.cat((torch.full((1, image_tokens), model.config.image_token_id), text_ids), dim=1)
-            paired = {
-                "text": (text_ids, {}, _logits(model, text_ids, {})),
-                "image": (image_ids, image_inputs, _logits(model, image_ids, image_inputs)),
-            }
+            for case, ids, inputs in (("text", text_ids, {}), ("image", image_ids, image_inputs)):
+                paired[case] = (ids, inputs, _logits(model, ids, inputs))
+                print(json.dumps({"phase": "baseline_logits", "case": case, "tokens": ids.numel()}), flush=True)
+
+        sources = {}
+        if args.verify_weights:
+            for name in _targets(model, vision=True, text=not args.vision_only):
+                sources[name] = model.get_submodule(name).weight.detach()
 
         with _runtime(args.backend, args.chip) as (_, device, _, sync):
             descriptors = install_inkling2_nf12(
@@ -121,6 +128,14 @@ def main():
                                                        indent=2) + "\n")
             print(json.dumps({"backend": args.backend, "matrices": len(descriptors),
                               "canonical_bytes": sum(d.packed_bytes for d in descriptors.values())}), flush=True)
+            for name, source in sources.items():
+                layer = model.get_submodule(name).layer
+                for start in range(0, len(source), 2048):
+                    rows = torch.arange(start, min(start + 2048, len(source)))
+                    _same(layer.embedding(rows).cpu(), source[rows])
+            if sources:
+                print(json.dumps({"verified_logical_matrices": len(sources)}), flush=True)
+                sources.clear()
             for name, inputs in cases.items():
                 actual = _vision(tower, inputs)
                 expected = vision_reference[name]

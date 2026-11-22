@@ -215,6 +215,24 @@ def _smoke(runtime, backend, repeats):
     _linear(w, "synthetic.linear", runtime, backend, repeats, [1, 67, 160])
     _linear(w, "synthetic.bias", runtime, backend, repeats, [4, 128], bias=torch.randn(len(w)).bfloat16() * 0.03125)
 
+    make, device, copy, _ = runtime
+    w = torch.zeros((16, 64), dtype=torch.bfloat16)
+    w[:, 0] = 1.5
+    w[1, 0] = -1.5
+    x = torch.zeros((1, 64), dtype=torch.bfloat16)
+    x[0, 0] = 1.0078125
+    bias = torch.full((16,), -1.5078125, dtype=torch.bfloat16)
+    bias[1] = 1.5078125
+    layer = make(device, *prepare_nf12(w, "synthetic.rounding"))
+    if backend == "ttxla":
+        x, bias = x.to(device), bias.to(device)
+    unbiased = copy(layer.linear(x)) if backend == "ttxla" else layer.linear(x)
+    biased = copy(layer.linear(x, bias)) if backend == "ttxla" else layer.linear(x, bias)
+    expected = torch.tensor([1.515625, -1.515625], dtype=torch.bfloat16)
+    _same(unbiased[0, :2], expected)
+    _same(biased[0, :2], torch.tensor([0.00390625, -0.00390625], dtype=torch.bfloat16))
+    print(json.dumps({"op": "rounding", "tie_to_even": True, "bias_before_rounding": True}), flush=True)
+
 
 def _checkpoint(path, runtime, backend, repeats, exhaustive):
     weight_map = json.loads((path / "model.safetensors.index.json").read_text())["weight_map"]

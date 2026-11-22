@@ -3,7 +3,8 @@
 GPT-QModel can install single-chip NF12 embedding and linear inference layers
 in Inkling 2 Mini. The standard model loader first resolves checkpoint names
 and loads the source tensors. Call `install_inkling2_nf12` after loading and
-placing the model for inference.
+placing the model for inference. The implementation is introduced in
+[PR #5977](https://github.com/ModelCloud/GPTQModel/pull/5977).
 
 ```python
 from gptqmodel.models.inkling2_loop import install_inkling2_nf12
@@ -104,7 +105,8 @@ The benchmark compares raw BF16 bits before arithmetic, checks every sampled
 linear against the matching device reduction, and reports maximum error,
 scaled RMSE and top-k overlap against FP32 Torch arithmetic rounded to BF16.
 The paired model harness reports logits, KLD, and PPL and can write per-matrix
-provenance to a user-specified local file.
+provenance to a user-specified local file. Use `--verify-weights` to compare
+every selected matrix's logical rows against its original BF16 bits.
 
 ## Device and runtime manifest
 
@@ -121,10 +123,17 @@ provenance to a user-specified local file.
 | Transformers source | `2f1bc5e321b9a736200a590d6e7743ccdeb60772` |
 | Canonical codec | GPT-QModel Torch reference and vendored NF12 ABI |
 
-The initial hardware stack used GPT-QModel's documented Torch-version override
-for local validation. A separate source development environment uses the
-default branches of PyTorch, Tenstorrent's PyTorch/XLA fork, TT-XLA, and
-TT-Metal. Hardware measurements below identify the runtime used for each run.
+The checkpoint kernel timings used the original runtime above with GPT-QModel's
+documented Torch-version override. A separate source-main native environment
+ran the synthetic bit-pattern, rounding, bias and matched BF16 suites on chip 0
+using the following source revisions and SFPI 7.96.0.
+
+| Source development component | Revision or status |
+| --- | --- |
+| PyTorch main | `65e101a3cc8242711ae1cb467ed6cde097135821`, installed as 2.16.0a0 |
+| TT-Metal / TTNN main | `2a1236fa6e78c49d61986e403d1fe09dd1b981cb`, editable TTNN installed and tested |
+| TT-XLA main | `fdc3b7773674081b8f8c0698de3400d8d899dc8f`, source build underway |
+| Tenstorrent PyTorch/XLA default branch | `a3fb00817690c82bef596c74243a213986c358a4`, source build underway |
 
 Checkpoint data came from the public
 [Inkling-2-Mini revision](https://huggingface.co/thinkingmachines/Inkling-2-Mini/tree/b85c3cfa615fc413cc9af3379f491b963f3b586a).
