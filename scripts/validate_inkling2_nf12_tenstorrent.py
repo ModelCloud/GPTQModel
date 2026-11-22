@@ -126,6 +126,7 @@ def main():
     p.add_argument("--backend", choices=("ttnn", "ttxla"), required=True)
     p.add_argument("--chip", type=int, default=0)
     p.add_argument("--vision-only", action="store_true")
+    p.add_argument("--embedding-layout", choices=("canonical", "row_major"), default="canonical")
     p.add_argument("--verify-weights", action="store_true", help="Check every selected weight and forward against a BF16 device reference")
     p.add_argument("--descriptors", type=Path, help="Write weight provenance into a local JSON file")
     args = p.parse_args()
@@ -158,17 +159,20 @@ def main():
         with _runtime(args.backend, args.chip) as (_, device, copy, sync):
             descriptors = install_inkling2_nf12(
                 model, backend=args.backend, device=device, text=not args.vision_only,
+                embedding_layout=args.embedding_layout,
             )
             sync()
             if args.descriptors:
-                entries = {
-                    key: {
+                entries = {}
+                for key, value in descriptors.items():
+                    layer = model.get_submodule(key.removesuffix(".weight")).layer
+                    entry = entries[key] = {
                         **asdict(value),
                         "packed_bytes": value.packed_bytes,
-                        "resident_bytes": model.get_submodule(key.removesuffix(".weight")).layer.resident_bytes,
+                        "resident_bytes": layer.resident_bytes,
                     }
-                    for key, value in descriptors.items()
-                }
+                    if hasattr(layer, "storage_descriptor"):
+                        entry["device_storage"] = asdict(layer.storage_descriptor)
                 args.descriptors.write_text(json.dumps(entries, indent=2) + "\n")
             print(json.dumps({"backend": args.backend, "matrices": len(descriptors),
                               "canonical_bytes": sum(d.packed_bytes for d in descriptors.values())}), flush=True)

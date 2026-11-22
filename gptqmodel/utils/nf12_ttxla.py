@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from functools import lru_cache, wraps
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from .nf12_tenstorrent import (
     kernel_source,
     normalize_ids,
     round_up,
+    tensor_sha256,
     verify_nf12,
 )
 
@@ -25,6 +27,13 @@ from .nf12_tenstorrent import (
 _PREFIX = "gptqmodel.nf12.v1."
 _ARTIFACT_VERSION = 2
 _GRID_X, _GRID_Y = 8, 8
+
+
+@dataclass(frozen=True)
+class _TTXLARowStorageDescriptor:
+    layout: str
+    packed_sha256: str
+    escapes_sha256: str
 
 
 def _tiled_words(words):
@@ -217,15 +226,20 @@ class TTXLANF12:
             packed, escapes = rowmajor_pack_cpu(weight.packed, weight.escapes, weight.exp_base)
         else:
             packed, escapes = weight.packed, weight.escapes
-        self.packed = _tiled_words(packed.view(torch.int32)).to(device)
+        packed_words = _tiled_words(packed.view(torch.int32))
         # The Torch/XLA lazy cache can reuse an executable for equal operand
         # shapes even when frontend attributes differ. Read per-weight values
         # from memory so two matrices can safely use the same executable.
         header = torch.zeros(16, dtype=torch.int32)
         header[:3] = torch.tensor([weight.exp_base, descriptor.logical_shape[0], weight.shape[0] // 16])
         header[3] = int(row_major)
-        escape_stream = torch.cat((header, escapes.view(torch.int32).flatten()))
-        self.escapes = _tiled_words(escape_stream).to(device)
+        escape_words = _tiled_words(torch.cat((header, escapes.view(torch.int32).flatten())))
+        if row_major:
+            self.storage_descriptor = _TTXLARowStorageDescriptor(
+                "nf12-row-major-pjrt-int32-v1", tensor_sha256(packed_words), tensor_sha256(escape_words),
+            )
+        self.packed = packed_words.to(device)
+        self.escapes = escape_words.to(device)
 
     @property
     def resident_bytes(self):

@@ -89,6 +89,7 @@ def install_inkling2_nf12(
     checkpoint: Mapping[str, tuple[NF12Descriptor, Path]] | None = None,
     native_lm_head: str = "canonical",
     ttxla_lm_head: str = "canonical",
+    embedding_layout: str = "canonical",
 ) -> dict[str, NF12Descriptor]:
     """Replace the requested BF16 inference leaves after normal checkpoint load.
 
@@ -99,6 +100,8 @@ def install_inkling2_nf12(
     layout for the bias-free head and requires the source Blackhole runtime.
     On TT-XLA, ``ttxla_lm_head="sfpu"`` selects its single-copy head layout
     and requires the bundled Blackhole TT-XLA kernel interface.
+    ``embedding_layout="row_major"`` derives the CUDA/HIP row format for token
+    and position tables from the same verified canonical checkpoint.
     The caller owns device lifetime and should install after model placement.
     """
     if not isinstance(model, (Inkling2LoopForConditionalGeneration, Inkling2LoopForCausalLM, Inkling2LoopVisionModel)):
@@ -109,6 +112,8 @@ def install_inkling2_nf12(
         raise ValueError(f"Unknown native Inkling NF12 LM-head layout {native_lm_head!r}")
     if ttxla_lm_head not in {"canonical", "sfpu"}:
         raise ValueError(f"Unknown TT-XLA Inkling NF12 LM-head layout {ttxla_lm_head!r}")
+    if embedding_layout not in {"canonical", "row_major"}:
+        raise ValueError(f"Unknown Inkling NF12 embedding layout {embedding_layout!r}")
     if native_lm_head == "sfpu" and (backend != "ttnn" or not text or isinstance(model, Inkling2LoopVisionModel)):
         raise ValueError("The SFPU LM head requires native TTNN and text installation")
     if ttxla_lm_head == "sfpu" and (backend != "ttxla" or not text or isinstance(model, Inkling2LoopVisionModel)):
@@ -147,6 +152,13 @@ def install_inkling2_nf12(
                 from ....utils.nf12_ttnn_sfpu import TTNNSFPUNF12Head
 
                 layer = TTNNSFPUNF12Head(device, descriptor, weight)
+        elif isinstance(source, nn.Embedding) and embedding_layout == "row_major":
+            if backend == "ttnn":
+                from ....utils.nf12_ttnn_rows import TTNNNF12RowEmbedding
+
+                layer = TTNNNF12RowEmbedding(device, descriptor, weight)
+            else:
+                layer = executor(device, descriptor, weight, row_major=True)
         else:
             layer = executor(device, descriptor, weight)
         if isinstance(source, nn.Linear):

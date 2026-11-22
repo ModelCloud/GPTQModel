@@ -108,7 +108,14 @@ def _runtime(backend, chip):
 def _embedding(w, name, runtime, backend, repeats, *, exhaustive=False, row_major=False):
     make, device, copy, sync = runtime
     descriptor, packed = prepare_nf12(w, name)
-    layer = make(device, descriptor, packed, row_major=True) if row_major else make(device, descriptor, packed)
+    if row_major and backend == "ttnn":
+        from gptqmodel.utils.nf12_ttnn_rows import TTNNNF12RowEmbedding
+
+        layer = TTNNNF12RowEmbedding(device, descriptor, packed)
+    elif row_major:
+        layer = make(device, descriptor, packed, row_major=True)
+    else:
+        layer = make(device, descriptor, packed)
     rows = len(w)
     if backend == "ttnn":
         import ttnn
@@ -125,11 +132,14 @@ def _embedding(w, name, runtime, backend, repeats, *, exhaustive=False, row_majo
             device_ids = index.clamp(0, rows - 1).flatten().to(torch.int32).to(device)
             return lambda: dense.index_select(0, device_ids)
 
+    generator = torch.Generator().manual_seed(9)
+    scattered = torch.cat((torch.tensor([15, 16, 31, 32, rows - 1, 0, 16]),
+                           torch.randperm(rows, generator=generator)[:25]))
     ids = {
         "one": torch.tensor([min(201023, rows - 1)]),
         "repeat": torch.full((1, 32), min(16, rows - 1), dtype=torch.long),
         "contiguous": torch.arange(32).reshape(2, 16),
-        "scattered": torch.tensor([[15, 16, 31, 32, rows - 1, 0, 16]]),
+        "scattered": scattered.reshape(4, 8),
     }
     invalid = torch.tensor([[-1, rows, 2**32 + 16, rows - 1]])
     _same(layer.embedding(invalid).cpu(), _gather_oracle(w, invalid))
@@ -145,17 +155,21 @@ def _embedding(w, name, runtime, backend, repeats, *, exhaustive=False, row_majo
         # result above is still checked against the literal CPU BF16 bits.
         torch.testing.assert_close(copy(dense_result).reshape_as(out), out, atol=0, rtol=0, equal_nan=True)
         atom_read = {}
-        if backend == "ttnn":
+        if backend == "ttnn" and not row_major:
             full, atom_read = _measure(lambda: layer.gather_device(resident, index.numel(), full_atoms=True),
                                        sync, repeats, index.numel() * w.shape[1] * 2)
             _same(copy(full)[:, :w.shape[1]].reshape_as(out), out)
-        column_block_bytes = (128 if padded_k % 128 else 96) if row_major else 192 if backend == "ttnn" else 2 * 1536
+        if row_major:
+            packed_read_bytes = ((round_up(padded_k, 128) * 3 // 2) if backend == "ttnn"
+                                 else (128 if padded_k % 128 else 96) * padded_k // 64)
+        else:
+            packed_read_bytes = (192 if backend == "ttnn" else 2 * 1536) * padded_k // 64
         print(json.dumps({
             "op": "embedding", "tensor": name, "case": label, "ids": index.numel(), "shape": list(w.shape),
             "packed_bytes": descriptor.packed_bytes, "resident_bytes": layer.resident_bytes,
             "resident_ids_on_both_paths": True,
             "layout": "row_major" if row_major else "canonical",
-            "packed_read_bytes_per_uncached_row": column_block_bytes * padded_k // 64,
+            "packed_read_bytes_per_uncached_row": packed_read_bytes,
             "bf16_gather": baseline, "full_atoms": atom_read, **measured,
         }), flush=True)
     if exhaustive:
@@ -323,8 +337,6 @@ def main():
         parser.error("--repeats must be positive")
     if (args.lm_head_only or args.embedding_only) and args.checkpoint is None:
         parser.error("--lm-head-only and --embedding-only require --checkpoint")
-    if args.row_major_embedding and args.backend != "ttxla":
-        parser.error("--row-major-embedding currently requires --backend ttxla")
     torch.set_num_threads(6)
     torch.manual_seed(12)
     print(json.dumps({"backend": args.backend, "chip": args.chip, "repeats": args.repeats, "torch": torch.__version__,
