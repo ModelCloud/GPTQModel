@@ -70,15 +70,10 @@ class BailingMoeQModel(BaseQModel):
                     layer_input[0] = norm(hidden)
             return result
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        from ..ports.bailing_moe.configuration_bailing import BailingConfig
-
-        # MLA, recurrent state and routing need separate full-output qualification.
-        # Empty groups deliberately select AWQ's existing plain-quantization path.
-        if isinstance(self.model.config, BailingConfig):
-            return []
-        return super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
-
+    # AWQ uses the generic planner. Every fold it emits on the four layouts
+    # (`dense`, `mla`, `hybrid`, `legacy_gqa`) is output-neutral, including the
+    # MLA low-rank q/kv inputs and the compensated unquantized MoE router
+    # consumer. See `tests/module_tree/test_awq_fold_safety_4175.py`.
     # allow dynamic expert index for layer_modules so we don't need to write out 64 layers here
     # config.num_experts contains the actual expert count used for index
     dynamic_expert_index = "num_experts"

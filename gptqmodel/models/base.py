@@ -3518,6 +3518,15 @@ class BaseQModel(nn.Module):
         if self._auto_fusion:
             self.fuse()
 
+        # The quantize loop installs fresh kernel modules, which start in
+        # training mode even though the shell model was loaded for inference.
+        # Their ``train`` transition also restores the checkpoint zero-point
+        # layout, so leave the finished model in the eval state the loader
+        # produces; otherwise an in-session forward decodes through the
+        # training path and no longer matches the saved checkpoint's logits.
+        if isinstance(self.model, nn.Module):
+            self.model.eval()
+
         _log_quantize_summary(
             result,
             run_started=run_started,

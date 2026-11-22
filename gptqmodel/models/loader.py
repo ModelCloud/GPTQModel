@@ -2791,7 +2791,15 @@ def ModelLoader(cls):
             dtype = cls.require_dtype
         elif dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
             dtype_device = selector_device_family(resolved_device)
-            if mimo_source and isinstance(quantize_config, BaseQuantizeConfig) and quantize_config.device is not None:
+            if isinstance(quantize_config, BaseQuantizeConfig) and quantize_config.device is not None:
+                # The dense source is materialized on CPU and each layer is
+                # moved to the quantization device for calibration, so an
+                # auto-selected dtype must follow that device rather than the
+                # accelerator this host happens to expose. Otherwise a CPU
+                # quantization on an MPS/CUDA host loads and re-saves the
+                # non-quantized weights in the host's dtype (fp16 on MPS) and
+                # a CPU reload resolves a different one (bf16), breaking an
+                # exact dtype-preserving round trip.
                 dtype_device = selector_device_family(normalize_device(quantize_config.device))
             dtype = auto_dtype(
                 config=config,

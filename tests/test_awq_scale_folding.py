@@ -398,7 +398,12 @@ class _Lfm3DecoderLayer(nn.Module):
     `post_operator_norm` / `post_ffn_norm` run on the block output after the
     residual add, so their output never feeds `conv.in_proj` or
     `feed_forward.w1` even though the module tree lists them first.
+
+    This is the conv (legacy) layer shape: it owns a `conv` mixer and no
+    `self_attn`, and the shipped contract folds both input norms there.
     """
+
+    is_attention_layer = False
 
     def __init__(self, hidden: int = 32, intermediate: int = 64):
         super().__init__()
@@ -484,7 +489,12 @@ def test_lfm3_native_sandwich_norm_fold_is_output_neutral(layer_type):
         features = {name: torch.randn(4, submodule.in_features)
                     for name, submodule in layer.named_modules() if isinstance(submodule, nn.Linear)}
         nodes = qmodel.awq_get_modules_for_scaling(layer, features, {})
-        expected_sources = {layer.ffn_norm, layer.operator_norm}
+        # Conv layers have no gate, so both input norms fold. Attention layers
+        # feed the non-quantized sigmoid gate from `operator_norm`; the shipped
+        # contract leaves that norm to plain quantization and folds only `ffn_norm`.
+        expected_sources = {layer.ffn_norm}
+        if layer_type == "conv":
+            expected_sources.add(layer.operator_norm)
         assert {node["prev_op"] for node in nodes} == expected_sources
         scales = [
             (get_op_name(layer, node["prev_op"]), [get_op_name(layer, target) for target in node["layers"]],
@@ -557,11 +567,16 @@ def _tiny_lfm3_attention_model():
     return model, layer, input_ids, features
 
 
-def test_lfm3_attention_fold_targets_qkv_and_compensates_sigmoid_gate():
-    """`operator_norm` feeds Q/K/V and the sigmoid gate, never `o_proj`.
+def test_lfm3_attention_operator_norm_fold_is_suppressed():
+    """An attention layer emits only `ffn_norm`; `operator_norm` is not a source.
 
-    The legacy tree named `gate_proj`, so `o_proj` was folded into the attention
-    input norm while the live `g_proj` gate was left uncompensated.
+    `operator_norm` feeds Q/K/V and the non-quantized sigmoid gate. The AWQ
+    search scores a group with the consumers still reading the rescaled norm
+    output, so a Q/K/V fold is not neutral: it changes the logits by ~5e-2
+    on this fixture.
+    Compensating `g_proj` would restore neutrality, but that rewrites a
+    non-quantized weight, which the shipped contract avoids by suppressing the
+    group instead. Conv layers have no gate, so they still fold both norms.
     """
 
     model, layer, input_ids, features = _tiny_lfm3_attention_model()
@@ -571,49 +586,53 @@ def test_lfm3_attention_fold_targets_qkv_and_compensates_sigmoid_gate():
     qmodel.__dict__["module_tree"] = LFM3QModel.module_tree
 
     nodes = qmodel.awq_get_modules_for_scaling(layer, features, {})
-    node = next(node for node in nodes if node["prev_op"] is layer.operator_norm)
-    names = [get_op_name(layer, module) for module in node["layers"]]
-
-    assert names == [
-        "self_attn.q_proj",
-        "self_attn.k_proj",
-        "self_attn.v_proj",
+    assert all(node["prev_op"] is not layer.operator_norm for node in nodes)
+    ffn_node = next(node for node in nodes if node["prev_op"] is layer.ffn_norm)
+    assert [get_op_name(layer, module) for module in ffn_node["layers"]] == [
+        "feed_forward.w1",
+        "feed_forward.w3",
     ]
-    assert node["_scale_consumers"] == ["self_attn.g_proj"]
-    for candidate in nodes:
-        assert "self_attn.o_proj" not in [
-            get_op_name(layer, module) for module in candidate["layers"]
-        ]
-
     AWQProcessor._validate_scale_group(
         layer,
-        node["prev_op"],
-        node["layers"],
-        node["inp"],
-        node["module2inspect"],
-        node["_scale_consumers"],
+        ffn_node["prev_op"],
+        ffn_node["layers"],
+        ffn_node["inp"],
+        ffn_node["module2inspect"],
+        ffn_node.get("_scale_consumers", []),
     )
 
+    qkv = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
     scales = torch.linspace(0.3, 2.0, 32)
-    with torch.no_grad():
-        before = model(input_ids).logits.clone()
-    o_proj_before = layer.self_attn.o_proj.weight.detach().clone()
-    gate_before = layer.self_attn.g_proj.weight.detach().clone()
+    snapshot = {name: value.clone() for name, value in layer.state_dict().items()}
+    try:
+        with torch.no_grad():
+            before = model(input_ids).logits.clone()
+        gate_before = layer.self_attn.g_proj.weight.detach().clone()
 
-    apply_scale(
-        layer,
-        [("operator_norm", names, scales, None)],
-        consumer_map={"operator_norm": node["_scale_consumers"]},
-    )
+        # The fold the contract suppresses: Q/K/V are scaled while the gate
+        # consumer keeps reading the divided norm, matching the search replay.
+        apply_scale(layer, [("operator_norm", qkv, scales, None)])
+        with torch.no_grad():
+            after = model(input_ids).logits
+        assert torch.equal(layer.self_attn.g_proj.weight, gate_before)
+        uncompensated = _relative_error(after, before)
+        assert uncompensated > 1e-3, uncompensated
 
-    with torch.no_grad():
-        after = model(input_ids).logits
-
-    assert _relative_error(after, before) < 1e-5
-    # `o_proj` is quantized plainly, so its weights stay untouched; the gate is
-    # a declared consumer and must absorb the inverse scale.
-    assert torch.equal(layer.self_attn.o_proj.weight, o_proj_before)
-    assert not torch.equal(layer.self_attn.g_proj.weight, gate_before)
+        # The neutral alternative rewrites the non-quantized gate, which is why
+        # the contract drops the group rather than folding it.
+        layer.load_state_dict(snapshot)
+        gate_before = layer.self_attn.g_proj.weight.detach().clone()
+        apply_scale(
+            layer,
+            [("operator_norm", qkv, scales, None)],
+            consumer_map={"operator_norm": ["self_attn.g_proj"]},
+        )
+        with torch.no_grad():
+            compensated = model(input_ids).logits
+        assert not torch.equal(layer.self_attn.g_proj.weight, gate_before)
+        assert _relative_error(compensated, before) < 1e-5
+    finally:
+        layer.load_state_dict(snapshot)
 
 
 def _scaled_before_norm_class():

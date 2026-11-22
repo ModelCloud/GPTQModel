@@ -25,11 +25,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn.functional as F
+from awq_neutrality import assert_awq_folds_neutral
 from transformers.cache_utils import Cache, LinearAttentionLayer
 
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
 from gptqmodel.models.auto import MODEL_MAP
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
@@ -150,7 +152,7 @@ def test_inkling2_loop_public_loader_uses_local_code_and_checkpoint_keys(tmp_pat
     assert get_checkpoint_conversion_mapping("inkling2_loop") is None
     for name in ("model.language_model.embed_tokens.weight", "model.language_model.layers.1.attention_input.query"):
         torch.testing.assert_close(wrapper.model.state_dict()[name], source.state_dict()[name], rtol=0, atol=0)
-    assert wrapper.awq_get_modules_for_scaling(None, {}, {}) == []
+    assert type(wrapper).awq_get_modules_for_scaling is not BaseQModel.awq_get_modules_for_scaling
     image_inputs = wrapper.processor.image_processor(Image.new("RGB", (7, 3)), return_tensors="pt")
     assert image_inputs["image_grid_thw"].tolist() == [[1, 1, 2]]
     assert wrapper.processor.replace_image_token(image_inputs, 0) == "<|unused_200054|>" * 2
@@ -708,3 +710,112 @@ def test_inkling2_loop_replay_rebuilds_block_states_and_masks():
         with torch.no_grad():
             output = layer(record["args"][0], block_states=block_states, **additional_inputs)
         assert torch.allclose(output, record["output"], atol=1e-6, rtol=0), position
+
+
+@pytest.fixture(scope="module")
+def inkling2_awq_case():
+    """A float32 tiny model plus each layer's replay inputs from one forward."""
+
+    configuration, modeling = _inkling2_modules()
+    definition = MODEL_MAP["inkling2_loop"]
+    torch.manual_seed(0)
+    model = modeling.Inkling2LoopForConditionalGeneration(_tiny_config(configuration)).float().eval()
+    assert _convert_model_with_defuser(definition, model, cleanup_original=False)
+    layers, _ = get_layers_with_prefixes(model, definition.extract_layers_node())
+
+    captured = {}
+
+    def capture(module, args, kwargs):
+        captured[module] = (args, dict(kwargs))
+
+    handles = [layer.register_forward_pre_hook(capture, with_kwargs=True) for layer in layers]
+    input_ids = torch.randint(0, 64, (1, 24))
+    try:
+        with torch.no_grad():
+            model(
+                input_ids=input_ids,
+                attention_mask=torch.ones_like(input_ids),
+                use_cache=False,
+            )
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert set(captured) == set(layers)
+    return SimpleNamespace(
+        definition=definition,
+        model=model,
+        layers=layers,
+        captured=captured,
+    )
+
+
+EXPERT_UP_DOWN_FOLDS = [
+    ("mlp.experts.0.up_proj", ["mlp.experts.0.down_proj"], []),
+    ("mlp.experts.1.up_proj", ["mlp.experts.1.down_proj"], []),
+]
+
+
+@pytest.mark.parametrize(
+    "layer_index",
+    [0, 2, 7, 8],
+    ids=["sliding", "full", "sliding-loop", "full-loop"],
+)
+def test_inkling2_loop_awq_folds_only_per_expert_up_down(inkling2_awq_case, layer_index):
+    """Tree order is not data flow: only the routed activation fold survives.
+
+    The generic planner folds ``post_attention_layernorm`` into q/k/v (which
+    read the *input* norm) and ``o_proj.linear`` into the attention-input
+    ``o_proj.gate_proj``. Both change the layer output. The per-expert
+    ``up_proj -> down_proj`` fold multiplies ``up_proj``'s output straight
+    into ``down_proj`` (apart from the bounded ``up`` softcap), so it is
+    output-preserving at this scale.
+    """
+
+    layer = inkling2_awq_case.layers[layer_index]
+    args, kwargs = inkling2_awq_case.captured[layer]
+    checked = assert_awq_folds_neutral(
+        inkling2_awq_case.definition,
+        inkling2_awq_case.model,
+        layer,
+        lambda: layer(*args, **kwargs),
+    )
+    assert checked == EXPERT_UP_DOWN_FOLDS
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        (
+            "post_attention_layernorm",
+            r"post_attention_layernorm -> \[.*\] changed the layer output by",
+        ),
+        (
+            "o_proj",
+            r"self_attn\.o_proj\.linear -> \['self_attn\.o_proj\.gate_proj'\] changed the layer output by",
+        ),
+    ],
+    ids=["attention-input-norm", "attention-output"],
+)
+def test_inkling2_loop_awq_dropped_attention_folds_are_not_neutral(
+    inkling2_awq_case, source, expected
+):
+    """Pin why the definition drops the two generic attention groups."""
+
+    layer = inkling2_awq_case.layers[0]
+    args, kwargs = inkling2_awq_case.captured[layer]
+
+    def generic(wrapper, module, input_feat, module_kwargs):
+        nodes = BaseQModel.awq_get_modules_for_scaling(wrapper, module, input_feat, module_kwargs)
+        if source == "post_attention_layernorm":
+            return [node for node in nodes if node["prev_op"] is module.post_attention_layernorm]
+        return [node for node in nodes if node["prev_op"] is module.self_attn.o_proj.linear]
+
+    with pytest.raises(AssertionError, match=expected):
+        assert_awq_folds_neutral(
+            inkling2_awq_case.definition,
+            inkling2_awq_case.model,
+            layer,
+            lambda: layer(*args, **kwargs),
+            scaling_provider=generic,
+        )

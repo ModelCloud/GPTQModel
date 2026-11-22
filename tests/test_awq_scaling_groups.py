@@ -461,7 +461,7 @@ def _worst_relative_change(hf_model, ids, layer, groups):
 
 # Families whose decoder layer has no foldable AWQ group and is quantized plainly.
 PLAIN_QUANTIZATION_FAMILIES = {
-    "gpt_pangu", "codegen", "gpt2", "nemotron_h",
+    "codegen", "gpt2",
 }
 
 # Hybrid SSM families whose decoder forward resolves Mamba-2 scan kernels through
@@ -611,7 +611,10 @@ def test_routed_and_shared_experts_share_one_group(family):
         ("gemma4_text", ["self_attn.v_proj"]),
         # Issue #4121 items 7-10: the composite/unified Gemma 4 trees did not
         # copy the text tree's declarations, and PanGu/NemotronH folded across a
-        # nonlinearity. `olmo_hybrid` is absent on purpose: its
+        # nonlinearity. Both families now use the generic planner for their
+        # remaining neutral folds; the `:nosrc` flags keep the non-homogeneous
+        # activation projections out of the source set. `olmo_hybrid` is absent
+        # on purpose: its
         # `post_attention_layernorm` is a valid source on linear-attention
         # layers, so only the per-layer fold invariant can pin it.
         # Issue #4355: the routed and shared expert MLPs are the same `relu2`

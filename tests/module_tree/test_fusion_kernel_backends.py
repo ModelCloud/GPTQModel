@@ -49,6 +49,11 @@ EXCLUDED = {
     "AwqSwordfishLinear": "Swordfish requires Blackwell",
     "W4ANVFP4Linear": "NVFP4 requires SM121+",
     "TorchInt8AwqLinear": "Retired INT4-to-INT8 expanded-weight backend",
+    # Humming's post_init() replaces the checkpoint tensors with its own
+    # shape-padded JIT operands and a per-layer LayerConfig, so there is no
+    # concatenable native layout for the executor to bind.
+    "HummingLinear": "Humming repacks each layer into shape-padded JIT operands; no fusion adapter",
+    "AwqHummingLinear": "Humming repacks each layer into shape-padded JIT operands; no fusion adapter",
     # Portable CPU readers for layouts whose native kernel is CUDA-only
     # (#4554, #4736). They dequantize to a dense tile per forward, so no
     # fused executor group can consume their packed storage.

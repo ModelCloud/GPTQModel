@@ -34,15 +34,50 @@ class PanguAlphaQModel(BaseQModel):
             "attn": ("attn:!", "q_proj:0", "k_proj:0", "v_proj:0", "c_proj:1"),
             "ln_2": ("ln_2:!",),
             # `GPTPanguMLP.forward` is `c_proj(act(c_fc(x)))` with GELU, which is
-            # not positively homogeneous: folding a scale into `c_fc` changes the
-            # MLP output (4.5e-2 on a tiny model).
+            # not positively homogeneous. Using `c_fc` as a fold *source*
+            # (`c_fc -> c_proj`) changes the MLP output (1.2e-2 on a tiny
+            # model), so it is `nosrc`. Folding `ln_2`'s output *into* `c_fc`
+            # is neutral and stays in the generic planner.
             "mlp": ("c_fc:0:nosrc", "c_proj:1"),
         },
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        """Plain AWQ only: top-query replay/fold search has not been qualified."""
-        return []
+        """Drop the top-query layer's `q_proj` from the `ln_1` scaling group.
+
+        ``GPTPanguModel.forward`` applies ``ln_f`` before the last block and
+        passes it ``custom_query = wqe(position_ids)``, so that block's
+        ``q_proj`` reads query embeddings rather than ``ln_1``'s output.
+        Scaling it with the ``ln_1`` group changes the attention output
+        (q is multiplied by the scale while its input is not divided), so it
+        is removed from the node; the remaining k/v consumers keep the group.
+
+        Every group the generic planner emits for PanGu is neutral on a real
+        forward (``ln_1 -> q/k/v``, ``attn.v_proj -> attn.c_proj`` and
+        ``ln_2 -> mlp.c_fc``); the non-neutral ``c_fc -> c_proj`` fold is
+        already suppressed by the tree's ``nosrc`` flag. This is validated by
+        ``tests/test_pangu_alpha_local_port.py`` for the first and last block.
+        """
+
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        transformer = getattr(self.model, "transformer", None)
+        blocks = getattr(transformer, "h", None)
+        if not blocks or blocks[-1] is not module:
+            return nodes
+        q_proj = getattr(getattr(module, "attn", None), "q_proj", None)
+        if q_proj is None:
+            return nodes
+
+        filtered = []
+        for node in nodes:
+            layers = node.get("layers") or []
+            if q_proj not in layers:
+                filtered.append(node)
+                continue
+            remaining = [consumer for consumer in layers if consumer is not q_proj]
+            if remaining:
+                filtered.append({**node, "layers": remaining})
+        return filtered
 
     def prepare_layer_replay_kwargs(
         self,
