@@ -184,19 +184,25 @@ def _attend(
     dropout: float = 0.0,
 ) -> torch.Tensor:
     key = _repeat_key_value(key, num_key_value_groups)
-    value = _repeat_key_value(value, num_key_value_groups)
-    weights = torch.matmul(query, key.transpose(2, 3)) * scaling
+    weights = torch.matmul(query, key.transpose(2, 3))
+    del key
+    weights = weights * scaling
     if position_bias is not None:
         weights = weights + position_bias
     if mask is not None:
         weights = weights + mask
     if sinks is not None:
         # one extra logit per query with a zero value: it only absorbs probability mass
-        combined = torch.cat([weights, sinks], dim=-1).float()
-        weights = F.softmax(combined, dim=-1)[..., :-1].to(query.dtype)
-    else:
-        weights = F.softmax(weights.float(), dim=-1).to(query.dtype)
+        weights = torch.cat([weights, sinks], dim=-1)
+    # Release each score buffer at its last use. Prefill score buffers can
+    # be several GiB before the FP32 softmax and narrowing cast.
+    weights = weights.float()
+    weights = F.softmax(weights, dim=-1)
+    if sinks is not None:
+        weights = weights[..., :-1]
+    weights = weights.to(query.dtype)
     weights = F.dropout(weights, p=dropout, training=dropout > 0.0)
+    value = _repeat_key_value(value, num_key_value_groups)
     return torch.matmul(weights, value).transpose(1, 2).contiguous()
 
 
@@ -259,13 +265,16 @@ class Inkling2LoopShortConvolution(nn.Module):
         )
 
     def _conv(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return F.conv1d(
+        padded = F.conv1d(
             hidden_states,
             weight=self.conv1d.weight,
             bias=self.conv1d.bias,
             padding=self.conv_kernel_size - 1,
             groups=hidden_states.shape[1],
         )
+        # Keep the causal prefix before the caller selects the current chunk.
+        # The right padding otherwise shifts the chunk outputs into the future.
+        return padded[..., : hidden_states.shape[-1]]
 
     def _update(self, hidden_states: torch.Tensor, conv_state: torch.Tensor) -> torch.Tensor:
         state_len = conv_state.shape[-1]

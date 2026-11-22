@@ -243,7 +243,8 @@ class Inkling2LoopConfig(PreTrainedConfig):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
-        config = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
+        loaded = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
+        config = loaded[0] if isinstance(loaded, tuple) else loaded
         formats = read_expert_formats(
             pretrained_model_name_or_path,
             subfolder=kwargs.get("subfolder"),
@@ -251,7 +252,7 @@ class Inkling2LoopConfig(PreTrainedConfig):
         )
         if formats is not None and config.text_config.experts_formats is None:
             config.text_config.experts_formats = formats
-        return config
+        return loaded
 
 
 def _manifest_path(model_path: str, subfolder: Optional[str] = None) -> Optional[str]:

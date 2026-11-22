@@ -17,11 +17,15 @@ Transformers release shipping an ``inkling2_loop`` implementation.
 from __future__ import annotations
 
 import copy
+import json
+import math
 import re
 from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn.functional as F
+from transformers.cache_utils import Cache, LinearAttentionLayer
 
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
@@ -97,8 +101,6 @@ def _tiny_config(configuration):
 
 
 def test_inkling2_loop_public_loader_uses_local_code_and_checkpoint_keys(tmp_path, monkeypatch):
-    import json
-
     pytest.importorskip("torchvision")
     from PIL import Image
     from safetensors.torch import save_file
@@ -152,6 +154,80 @@ def test_inkling2_loop_public_loader_uses_local_code_and_checkpoint_keys(tmp_pat
     image_inputs = wrapper.processor.image_processor(Image.new("RGB", (7, 3)), return_tensors="pt")
     assert image_inputs["image_grid_thw"].tolist() == [[1, 1, 2]]
     assert wrapper.processor.replace_image_token(image_inputs, 0) == "<|unused_200054|>" * 2
+    with torch.no_grad():
+        output = wrapper.model(
+            input_ids=torch.tensor([[2, 4, 4, 7]]), use_cache=False, **image_inputs,
+        )
+    assert output.logits.shape == (1, 4, config.text_config.unpadded_vocab_size)
+    assert torch.isfinite(output.logits).all()
+
+
+def test_inkling2_config_preserves_unused_kwargs_with_expert_manifest(tmp_path):
+    configuration, _ = _inkling2_modules()
+    config_dir = tmp_path / "submodel"
+    _tiny_config(configuration).save_pretrained(config_dir)
+    manifest = {
+        "model": {
+            "parameter_groups": [
+                {
+                    "output_dtype": "uint8",
+                    "tensors": ["model.llm.layers.0.mlp.experts.w13_weight"],
+                }
+            ]
+        },
+    }
+    (config_dir / configuration.QUANT_MANIFEST).write_text(json.dumps(manifest), encoding="utf-8")
+
+    config_class = configuration.Inkling2LoopConfig
+    loaded, unused = config_class.from_pretrained(
+        tmp_path,
+        subfolder="submodel",
+        return_unused_kwargs=True,
+        test_argument="retained",
+    )
+    plain = config_class.from_pretrained(tmp_path, subfolder="submodel")
+    assert unused["test_argument"] == "retained"
+    assert isinstance(loaded, config_class)
+    assert loaded.text_config.experts_formats == ["nvfp4"] + [None] * 11
+    assert plain.text_config.experts_formats == loaded.text_config.experts_formats
+
+
+def test_inkling2_concrete_model_loads_without_explicit_config(tmp_path):
+    configuration, modeling = _inkling2_modules()
+    model_class = modeling.Inkling2LoopForConditionalGeneration
+    model = model_class(_tiny_config(configuration))
+    model.save_pretrained(tmp_path)
+
+    loaded = model_class.from_pretrained(tmp_path)
+    assert loaded.config.text_config.hidden_size == model.config.text_config.hidden_size
+    torch.testing.assert_close(loaded.state_dict(), model.state_dict(), rtol=0, atol=0)
+
+
+@torch.no_grad()
+def test_inkling2_defused_dense_experts_keep_bf16_routing_order():
+    configuration, modeling = _inkling2_modules()
+    model = modeling.Inkling2LoopForConditionalGeneration(_tiny_config(configuration))
+    experts = model.model.language_model.layers[0].mlp.experts.to(torch.bfloat16)
+    half = experts.gate_up_proj.shape[1] // 2
+    experts.gate_up_proj.zero_()
+    experts.gate_up_proj[0, [0, 1, half, half + 1], 0] = torch.tensor([1, -1, 2, 4], dtype=torch.bfloat16)
+    experts.down_proj.zero_()
+    experts.down_proj[0, 0, :2] = torch.tensor([1, 0.5], dtype=torch.bfloat16)
+
+    x = torch.zeros((1, model.config.text_config.hidden_size), dtype=torch.bfloat16)
+    x[0, 0] = 1.25
+    indices = torch.tensor([[0]])
+    routing = torch.tensor([[0.4731]])
+    gate = torch.tensor([1.25, -1.25])
+    up = torch.tensor([2.5, 5.0])
+    activation = (4 * (gate / 4).tanh() * gate.sigmoid() * (25 * (up / 25).tanh()) * routing).bfloat16()
+    expected = torch.zeros_like(x)
+    expected[0, 0] = activation[0, 0].float() + 0.5 * activation[0, 1].float()
+
+    torch.testing.assert_close(experts(x, indices, routing), expected, rtol=0, atol=0)
+    assert _convert_model_with_defuser(MODEL_MAP["inkling2_loop"], model, cleanup_original=True)
+    assert isinstance(experts.get_submodule("0.down_proj"), torch.nn.Linear)
+    torch.testing.assert_close(experts(x, indices, routing), expected, rtol=0, atol=0)
 
 
 @pytest.fixture(scope="module")
@@ -478,6 +554,56 @@ def test_inkling2_loop_wrapper_compiles_the_same_plan(inkling2_case):
     for module in ("embed_tokens", "final_input", "message_input"):
         assert getattr(language_model, module, None) is not None
     assert getattr(inkling2_case.model.model, "vision_tower", None) is not None
+
+
+@pytest.mark.parametrize("dynamic", [False, True], ids=["static", "dynamic"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_inkling2_short_convolution_is_causal_and_chunk_independent(dynamic, dtype):
+    _, modeling = _inkling2_modules()
+    x = torch.arange(1, 17, dtype=dtype).view(1, 8, 2) / 16
+    weights = torch.tensor([[[1.0, 0.5, -0.25, 2.0]], [[-0.5, 1.0, 3.0, -2.0]]])
+    if dynamic:
+        conv = modeling.Inkling2LoopDynamicShortConvolution(2, 2, 1, 4, 0, 0)
+        conv.static_weight.data.copy_(weights.flip(-1).squeeze(1).T)
+        conv.weight_proj.to(dtype=dtype)
+        conv.weight_proj.weight.data.copy_(torch.tensor([[.125, 0], [0, .25], [0, -.125], [.25, 0]]))
+    else:
+        conv = modeling.Inkling2LoopShortConvolution(2, 4, 0, 0)
+        conv.conv1d.weight.data.copy_(weights)
+
+    with torch.no_grad():
+        full = conv(x, dynamic_input=x)
+        prefix = conv(x[:, :3], dynamic_input=x[:, :3])
+        assert full.dtype == x.dtype
+        torch.testing.assert_close(prefix, full[:, :3], atol=1e-6, rtol=1e-6)
+
+        if not dynamic:
+            # Unpadded depthwise correlation on explicitly left-padded history.
+            oracle = F.conv1d(F.pad(x.float().transpose(1, 2), (3, 0)), weights, groups=2)
+            expected = ((oracle.transpose(1, 2) + x.float()) / math.sqrt(5)).to(dtype)
+            torch.testing.assert_close(full, expected, atol=1e-6, rtol=1e-6)
+
+        for record_past in (False, True):
+            cache = Cache(layers=[LinearAttentionLayer()])
+            if record_past:
+                cache.activate_past_recording()
+            chunks = [
+                conv(x[:, start:end], dynamic_input=x[:, start:end], cache=cache)
+                for start, end in ((0, 3), (3, 5), (5, 6), (6, 8))
+            ]
+            torch.testing.assert_close(torch.cat(chunks, dim=1), full, atol=1e-6, rtol=1e-6)
+
+
+def test_inkling2_loop_logits_are_prefix_invariant():
+    configuration, modeling = _inkling2_modules()
+    with torch.random.fork_rng(devices=[]), torch.no_grad():
+        torch.manual_seed(7)
+        model = modeling.Inkling2LoopForConditionalGeneration(_tiny_config(configuration)).eval()
+        input_ids = torch.tensor([[7, 11, 13, 17, 19, 23, 29]])
+        full = model(input_ids=input_ids, use_cache=False).logits
+        prefix = model(input_ids=input_ids[:, :3], use_cache=False).logits
+    assert torch.isfinite(full).all()
+    torch.testing.assert_close(full[:, :3], prefix, atol=1e-5, rtol=2e-5)
 
 
 def test_inkling2_loop_replay_rebuilds_block_states_and_masks():

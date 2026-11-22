@@ -63,10 +63,15 @@ class Inkling2LoopSoftcappedSwiGLU(nn.Module):
         self.gate_softcap = Inkling2LoopSoftcap(gate_softcap)
         self.up_softcap = Inkling2LoopSoftcap(up_softcap)
 
-    def forward(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, gate: torch.Tensor, up: torch.Tensor, routing_weight: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         dtype = gate.dtype
         gate, up = gate.float(), up.float()
-        return (self.gate_softcap(gate) * torch.sigmoid(gate) * self.up_softcap(up)).to(dtype)
+        activated = self.gate_softcap(gate) * torch.sigmoid(gate) * self.up_softcap(up)
+        if routing_weight is not None:
+            activated = activated * routing_weight.float()
+        return activated.to(dtype)
 
 
 def _expert_activation(config) -> Inkling2LoopSoftcappedSwiGLU:
@@ -108,21 +113,36 @@ class Inkling2LoopExperts(nn.Module):
         top_k_index: torch.Tensor,
         top_k_weights: torch.Tensor,
     ) -> torch.Tensor:
+        return self._forward_routed(hidden_states, top_k_index, top_k_weights)
+
+    def _forward_routed(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> torch.Tensor:
         final_hidden_states = torch.zeros_like(hidden_states, dtype=torch.float32)
         for expert_idx, tokens, slots in _route(
             hidden_states, top_k_index, top_k_weights, self.num_experts
         ):
             current = hidden_states[tokens]
-            current = F.linear(current, self.gate_up_proj[expert_idx])
-            current = self._apply_gate(current)
-            current = F.linear(current, self.down_proj[expert_idx])
-            current = current * top_k_weights[tokens, slots, None]
+            routing_weight = top_k_weights[tokens, slots, None]
+            expert = self._modules.get(str(expert_idx))
+            if expert is None:
+                current = F.linear(current, self.gate_up_proj[expert_idx])
+                current = self._apply_gate(current, routing_weight)
+                current = F.linear(current, self.down_proj[expert_idx])
+            else:
+                current = self.act_fn(expert.gate_proj(current), expert.up_proj(current), routing_weight)
+                current = expert.down_proj(current)
             final_hidden_states.index_add_(0, tokens, current.to(final_hidden_states.dtype))
         return final_hidden_states.to(hidden_states.dtype)
 
-    def _apply_gate(self, gate_up: torch.Tensor) -> torch.Tensor:
+    def _apply_gate(
+        self, gate_up: torch.Tensor, routing_weight: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         gate, up = gate_up.chunk(2, dim=-1)
-        return self.act_fn(gate, up)
+        return self.act_fn(gate, up, routing_weight)
 
 
 class Inkling2LoopPackedExpertLinear(nn.Linear):
@@ -352,7 +372,8 @@ class Inkling2LoopPackedExperts(nn.Module):
     def defuse(self) -> "Inkling2LoopPackedExperts":
         """Split the fused 3-D payload into per-expert projections, in place.
 
-        Every leaf keeps a view of the checkpoint storage (no copy, no decode),
+        The checkpoint alternates gate and up rows for each intermediate
+        channel. Every leaf keeps a view of that storage (no copy, no decode),
         so the calibration forward still runs the packed W4A16/W8A16 kernels.
         The fused parameters are dropped afterwards; the views keep their
         storage alive.
@@ -383,8 +404,8 @@ class Inkling2LoopPackedExperts(nn.Module):
                 in_features=self.hidden_dim,
                 out_features=self.intermediate_dim,
                 fmt=self.fmt,
-                weight=gate_up_weight[: self.intermediate_dim],
-                scales=gate_up_scales[: self.intermediate_dim],
+                weight=gate_up_weight[0::2],
+                scales=gate_up_scales[0::2],
                 global_scale=None
                 if gate_amax is None
                 else gate_amax[expert_idx] / gate_outer.reshape(()),
@@ -393,8 +414,8 @@ class Inkling2LoopPackedExperts(nn.Module):
                 in_features=self.hidden_dim,
                 out_features=self.intermediate_dim,
                 fmt=self.fmt,
-                weight=gate_up_weight[self.intermediate_dim :],
-                scales=gate_up_scales[self.intermediate_dim :],
+                weight=gate_up_weight[1::2],
+                scales=gate_up_scales[1::2],
                 global_scale=None
                 if gate_amax is None
                 else gate_amax[expert_idx] / gate_outer.reshape(()),
@@ -469,7 +490,7 @@ class Inkling2LoopPackedExperts(nn.Module):
         self.gate_up_weight = nn.Parameter(
             torch.stack(
                 [
-                    torch.cat([gate.packed_weight, up.packed_weight], dim=0)
+                    torch.stack([gate.packed_weight, up.packed_weight], dim=1).flatten(0, 1)
                     for gate, up, _ in leaves
                 ]
             ),
@@ -478,7 +499,7 @@ class Inkling2LoopPackedExperts(nn.Module):
         self.gate_up_scales = nn.Parameter(
             torch.stack(
                 [
-                    torch.cat([gate.packed_scales, up.packed_scales], dim=0)
+                    torch.stack([gate.packed_scales, up.packed_scales], dim=1).flatten(0, 1)
                     for gate, up, _ in leaves
                 ]
             ),
@@ -512,11 +533,11 @@ class Inkling2LoopPackedExperts(nn.Module):
             hidden_states, top_k_index, top_k_weights, self.num_experts
         ):
             current = hidden_states[tokens]
+            routing_weight = top_k_weights[tokens, slots, None]
             if self._defused:
                 expert = getattr(self, str(expert_idx))
-                current = self.act_fn(expert.gate_proj(current), expert.up_proj(current))
+                current = self.act_fn(expert.gate_proj(current), expert.up_proj(current), routing_weight)
                 current = expert.down_proj(current)
-                current = current * top_k_weights[tokens, slots, None]
                 final_hidden_states.index_add_(
                     0, tokens, current.to(final_hidden_states.dtype)
                 )
@@ -532,8 +553,8 @@ class Inkling2LoopPackedExperts(nn.Module):
                 gate_up = self._matmul(
                     current, self.gate_up_weight[expert_idx], self.gate_up_scales[expert_idx]
                 )
-            gate, up = gate_up.chunk(2, dim=-1)
-            current = self.act_fn(gate, up)
+            gate, up = gate_up[..., 0::2], gate_up[..., 1::2]
+            current = self.act_fn(gate, up, routing_weight)
             if self.fmt == "nvfp4":
                 current = self._matmul(
                     current,
@@ -545,7 +566,6 @@ class Inkling2LoopPackedExperts(nn.Module):
                 current = self._matmul(
                     current, self.down_weight[expert_idx], self.down_scales[expert_idx]
                 )
-            current = current * top_k_weights[tokens, slots, None]
             final_hidden_states.index_add_(0, tokens, current.to(final_hidden_states.dtype))
         return final_hidden_states.to(hidden_states.dtype)
 
@@ -557,22 +577,20 @@ class Inkling2LoopPackedExperts(nn.Module):
         for expert_idx in range(self.num_experts):
             if self.fmt == "nvfp4":
                 gs = self._global_scale(self.gate_up_amax, self.gate_up_outer_scale, expert_idx)
-                gate_up.append(
-                    dequant_nvfp4(
-                        self.gate_up_weight[expert_idx], self.gate_up_scales[expert_idx], gs
-                    )
+                interleaved = dequant_nvfp4(
+                    self.gate_up_weight[expert_idx], self.gate_up_scales[expert_idx], gs
                 )
                 gs = self._global_scale(self.down_amax, self.down_outer_scale, expert_idx)
                 down.append(
                     dequant_nvfp4(self.down_weight[expert_idx], self.down_scales[expert_idx], gs)
                 )
             else:
-                gate_up.append(
-                    dequant_mxfp8(self.gate_up_weight[expert_idx], self.gate_up_scales[expert_idx])
-                )
+                interleaved = dequant_mxfp8(self.gate_up_weight[expert_idx], self.gate_up_scales[expert_idx])
                 down.append(
                     dequant_mxfp8(self.down_weight[expert_idx], self.down_scales[expert_idx])
                 )
+            # Dense experts use separate contiguous halves for Defuser.
+            gate_up.append(torch.cat((interleaved[0::2], interleaved[1::2]), dim=0))
         dense = Inkling2LoopExperts(self.config)
         dense.gate_up_proj = nn.Parameter(torch.stack(gate_up).to(torch.bfloat16))
         dense.down_proj = nn.Parameter(torch.stack(down).to(torch.bfloat16))

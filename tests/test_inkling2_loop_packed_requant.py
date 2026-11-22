@@ -71,6 +71,52 @@ def _route_inputs(config, dtype=torch.float32):
     return hidden, top_k_index, top_k_weights
 
 
+@pytest.mark.parametrize("fmt", ("nvfp4", "mxfp8"))
+def test_released_expert_gate_up_rows_follow_checkpoint_pair_order(fmt):
+    config = _text_config(n_routed_experts=1, experts_formats=[fmt], intermediate_size=32, moe_intermediate_size=32)
+    container = E.build_experts(config, 0)
+    # Physical rows encode g0=1, u0=2, g1=-1, u1=4 in one input channel.
+    # The down projection uses two intermediate channels to expose either
+    # a wrong row order or a premature BF16 cast of the routing multiplier.
+    with torch.no_grad():
+        container.gate_up_weight.zero_()
+        container.down_weight.zero_()
+        if fmt == "nvfp4":
+            container.gate_up_weight[0, :4, 0] = torch.tensor([2, 4, 10, 6], dtype=torch.uint8)
+            container.down_weight[0, 0, 0] = 0x12
+            for name in ("gate_up_scales", "down_scales", "gate_up_amax", "down_amax",
+                         "gate_up_outer_scale", "down_outer_scale"):
+                getattr(container, name).fill_(1.0)
+        else:
+            container.gate_up_weight[0, :4, 0].copy_(torch.tensor([1, 2, -1, 4], dtype=torch.float8_e4m3fn))
+            container.down_weight[0, 0, :2].copy_(torch.tensor([1.0, 0.5], dtype=torch.float8_e4m3fn))
+            container.gate_up_scales.fill_(127)
+            container.down_scales.fill_(127)
+
+    x = torch.zeros((1, config.hidden_size), dtype=torch.bfloat16)
+    x[0, 0] = 1.25
+    expert = torch.zeros((1, 1), dtype=torch.long)
+    gamma = torch.tensor([[0.4731]], dtype=torch.float32)
+    gate, up = torch.tensor([1.25, -1.25]), torch.tensor([2.5, 5.0])
+    activated = (4 * (gate / 4).tanh() * gate.sigmoid() * (25 * (up / 25).tanh()) * gamma).bfloat16()
+    expected = torch.zeros_like(x)
+    expected[0, 0] = activated[0, 0].float() + 0.5 * activated[0, 1].float()
+
+    raw = {name: tensor.detach().view(torch.uint8).clone() for name, tensor in container.named_parameters()}
+    torch.testing.assert_close(container(x, expert, gamma), expected, rtol=0, atol=0)
+    exported = container.dequantize()
+    assert exported.gate_up_proj[0, [0, 1, 32, 33], 0].tolist() == [1.0, -1.0, 2.0, 4.0]
+    container.defuse()
+    leaf = getattr(container, "0")
+    assert leaf.gate_proj.dequantize_weight()[:2, 0].tolist() == [1.0, -1.0]
+    assert leaf.up_proj.dequantize_weight()[:2, 0].tolist() == [2.0, 4.0]
+    torch.testing.assert_close(container(x, expert, gamma), expected, rtol=0, atol=0)
+    container.refuse()
+    for name, tensor in container.named_parameters():
+        assert torch.equal(tensor.detach().view(torch.uint8), raw[name]), name
+    torch.testing.assert_close(container(x, expert, gamma), expected, rtol=0, atol=0)
+
+
 def test_packed_experts_defuse_into_linear_leaves_without_decoding():
     config = _text_config(experts_formats=["nvfp4"])
     container = E.build_experts(config, 0)

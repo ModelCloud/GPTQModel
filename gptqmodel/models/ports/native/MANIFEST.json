@@ -1948,8 +1948,8 @@
   "status": "verbatim"
  },
  "qwen3_omni_moe/configuration_qwen3_omni_moe.py": {
-  "sha256": "5cf83bc6fa2be06c19e51d44d0527be74d87af93f4351b268527eeb4bc6be102",
-  "status": "verbatim"
+  "sha256": "f07db039c5b22f2f746fce7fcb98316e564dd68c9d435eb01c96604159361618",
+  "status": "patched"
  },
  "qwen3_omni_moe/modeling_qwen3_omni_moe.py": {
   "sha256": "66f9e6bf72b293b6bfb98c89975289be50a95c1d0a88fc30cc7cf288a6781a97",

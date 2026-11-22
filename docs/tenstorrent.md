@@ -253,6 +253,17 @@ the lm-head are `save_blockfloat_model()`'s job, not this writer's.
 
 ## Block-float kernel dispatch
 
+Out-axis checkpoints store `W.T` with one exponent per 16 output features.
+On NVIDIA sm_80 or newer with Triton, `TTBlockfloatLinear` and the tied output
+head read those bytes directly for FP16, BF16, and FP32 activations. Decode and
+short prefill can split the reduction across CUDA thread blocks. Only partial
+outputs go to scratch. The kernel decodes weights in FP32 and adds the stored
+bias to the FP32 reduction before rounding to the activation dtype.
+
+CPU, ROCm, installations without Triton, and calls that need autograd use the
+Torch out-axis path. In-axis checkpoints retain the CUDA/HIP extension path.
+Out-axis embedding lookup continues to use the Torch path.
+
 `TTBlockfloatEmbedding` accepts a wider `block` than the hardware format so a
 converted table can still be exercised on CPU. The native block-float kernels,
 however, bind exactly one exponent per 16 values: `check_exponents()` requires
@@ -262,7 +273,11 @@ native geometry and must stay on the Torch reference path on every device.
 ```mermaid
 flowchart TD
     A["TTBlockfloatEmbedding._kernel_embedding"] --> B{"hip_dispatch(ids)"}
-    C["TTBlockfloatTiedHead.forward<br/>embedding._kernel_linear(hidden)"] --> D{"hip_dispatch(hidden)"}
+    C["TTBlockfloatLinear or TTBlockfloatTiedHead<br/>_BlockfloatStorage._kernel_linear"] --> M{"GPU out axis with block size 16?"}
+    M -- yes --> P{"linear_out_axis accepts operands?"}
+    M -- no --> D{"hip_dispatch(hidden)"}
+    P -- yes --> Q["Triton packed GEMV or GEMM"]
+    P -- no --> L
     B -- "yes: block == 16 and HIP ready" --> E["tt_blockfloat_hip.embedding"]
     D -- "yes: block == 16 and HIP ready" --> F["tt_blockfloat_hip.linear"]
     B -- no --> G{"cuda_dispatch(ids)"}
@@ -284,6 +299,7 @@ wider block never builds or enters the extension.
 
 | Old mechanism | New mechanism | Evidence |
 | --- | --- | --- |
+| Out-axis projection calls decoded the entire stored matrix for `F.linear` | `_kernel_linear()` tries `linear_out_axis()` and decodes one tile at a time on supported NVIDIA devices | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py`, `gptqmodel/utils/tt_blockfloat_triton.py` |
 | `_kernel_embedding()` checked device, bits, dtype and `ready()`, but not `block` | `cuda_dispatch()` rejects `block != 16` before `ready()` and the native call | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py:120-138`, `:454` |
 | `_kernel_linear()` had the same missing gate for the tied head | the same predicate covers the linear path | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py:247` |
 | HIP already required `block == 16` | unchanged | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py:102-118` |
