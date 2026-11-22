@@ -39,7 +39,14 @@ in `requirements.txt`.
   `huggingface_hub`) or other libraries (Accelerate, Defuser, torch, Triton),
   not even temporarily or scoped; this includes `AutoConfig`/`AutoModel`,
   quantizer registries and assigning onto (vendored) model classes at load
-  time. Accelerate offload uses GPT-QModel's own `GPTQModelAlignDevicesHook`,
+  time. The sole exception is the model-global-state construction guard
+  (#5304, #5421): it wraps Transformers' `PreTrainedModel.get_init_context` /
+  `_from_config` and the `modeling_utils.local_torch_dtype` /
+  `modeling_utils.apply_patches` / `initialization.no_tie_weights` contexts so
+  concurrent constructions cannot observe another thread's process-global
+  window. The wrappers are pass-through and installed once at import; they are
+  the only entries allowed by `tests/test_transformers_unpatched.py`.
+  Accelerate offload uses GPT-QModel's own `GPTQModelAlignDevicesHook`,
   and per-model fixes go on the loaded instance. GPT-QModel checkpoints load
   with `GPTQModel.load`; loading GPT-QModel-only features through plain
   Transformers is unsupported. `tests/test_transformers_unpatched.py` enforces
@@ -145,7 +152,7 @@ Published checkpoints continue to use safetensors.
 | `DeepSeekV2QModel` / `deepseek_v2` | Native-derived compatibility and pinned legacy source | No GPU/trained-checkpoint quality, FlashAttention, distributed experts or full packed-checkpoint round trip; expert parallelism rejected |
 | `DeepSeekV3QModel` / `deepseek_v3`, `kimi_k2` | Native bridge, checkpoint conversion and pinned Kimi/DeepSeek provenance | Kimi partial-group routing rejected; no GPU, trained-checkpoint accuracy or production FP8 qualification |
 | `DeepSeekV4QModel` / `deepseek_v4` | Native Transformers 5.23 and pinned BF16 checkpoint schema | BF16 checkpoint metadata gated (HTTP 401); no trained weights, GPU, FP8/FP4, MTP accuracy or packed export qualification |
-| `DeepSeekV41QModel` / `deepseek_v41` (not in `MODEL_MAP`) | Package-owned text decoder, Engram hashing and dSpark stages from the pinned DeepSeek-V4.1-Flash reference (MIT); reference-oracle and key-inventory tests | Explicit calibration API only; vision tower not ported; FP8/FP4 kernels and activation fake-quantization not simulated; padded batches rejected; no trained weights or GPU qualification |
+| `DeepSeekV41FlashQModel` / `deepseek_v41` | Package-owned text decoder, Engram hashing and dSpark stages from the pinned DeepSeek-V4.1-Flash reference (MIT); reference-oracle and key-inventory tests | Explicit calibration API only; vision tower not ported; FP8/FP4 kernels and activation fake-quantization not simulated; padded batches rejected; no trained weights or GPU qualification |
 | `DeepSeekVLV2QModel` / `deepseek_vl_v2` | Local vision, language and processor port; pinned source, licenses and notices | Eager text attention only; no trained-weight accuracy, GPU/FlashAttention, tensor/expert parallel or fusion qualification |
 | `DeciLMQModel` / `deci`, `nemotron-nas` | Heterogeneous GQA, sink cache, pinned source and Apache license | No GPU/trained evaluation or native AWQ folding; shifted-sink continuation chunks must be shorter than window minus sinks; eager/SDPA only |
 | `DreamQModel` / `dream` | Pinned Dream source and Apache license, diffusion flow | No trained 7B evaluation, GPU, FlashAttention or sliding-window qualification; uncached Hub/tokenizer loading unverified |

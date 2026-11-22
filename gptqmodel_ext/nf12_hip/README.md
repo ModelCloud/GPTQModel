@@ -229,10 +229,8 @@ Two consequences:
   decode cost, so it cannot win in that regime.
 * `torch.cuda.get_device_properties().L2_cache_size` returns 8 MiB. That is the
   real L2 and is **not** a bug, but it is not the outermost cache either. HIP
-  exposes no LLC field; `gptqmodel.rocm_llc` back-ports
-  [pytorch#203965](https://github.com/pytorch/pytorch/pull/203965) so
-  `last_level_cache_size` reports 64 MiB and Inductor stops sizing its flush
-  buffer from 8 MiB.
+  exposes no LLC field, and GPT-QModel no longer patches torch to add one; use
+  the upstream PyTorch fix for Inductor.
 
 So the same kernel wins or loses depending on whether the weight fits in the
 LLC. Both regimes are reported below.
@@ -370,7 +368,6 @@ Environment knobs:
 | `GPTQMODEL_NF12_HIP_FORCE_REBUILD` | Rebuild even when the cache matches. |
 | `GPTQMODEL_NF12_HIP_FORCE_DOT_FALLBACK` | Force the gfx1250 portable-dot path on gfx1200/gfx1201 for oracle validation. |
 | `GPTQMODEL_EXT_VERBOSE` | Show the full hipcc command line. |
-| `KernelConfig(rocm_llc=False)` | Skip the `gptqmodel.rocm_llc` back-port (a config field, not an environment variable). |
 
 ## Files
 

@@ -7,6 +7,9 @@ import json
 from types import SimpleNamespace
 
 import pytest
+
+
+pytest.importorskip("torchvision")
 import torch
 from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
@@ -87,7 +90,11 @@ def test_real_decoder_weight_owners_quantization_and_plan_tags(kv_heads, bias, s
 
 @pytest.mark.parametrize("kv_heads,bias,sandwich", [(4, False, True), (2, True, False)])
 def test_inherited_lfm3_awq_folds_preserve_every_layer_type(kv_heads, bias, sandwich):
-    # Omni folds both input norms and compensates its source-dtype gate.
+    # Omni inherits the LFM3 norm search: ``ffn_norm`` is neutral on every
+    # layer and a conv layer also folds ``operator_norm``. An attention
+    # layer's ``operator_norm`` feeds the gated q/k/v block, whose
+    # compensation would rewrite the non-quantized ``gate_proj``, so it is
+    # left to plain quantization there.
     model = tiny_model(kv_heads=kv_heads, bias=bias, sandwich=sandwich)
     _convert_model_with_defuser(LFM3OmniQModel, model, cleanup_original=False)
     language = model.model.language_model
@@ -98,13 +105,12 @@ def test_inherited_lfm3_awq_folds_preserve_every_layer_type(kv_heads, bias, sand
 
     for layer, layer_type in zip(language.layers, language.config.layer_types):
         checked = assert_awq_folds_neutral(LFM3OmniQModel, model, layer, forward)
+        ffn_fold = ("ffn_norm", ["feed_forward.w1", "feed_forward.w3"], [])
         if layer_type == "conv":
             operator_fold = ("operator_norm", ["conv.in_proj"], [])
+            assert checked == [operator_fold, ffn_fold]
         else:
-            operator_fold = (
-                "operator_norm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"], ["self_attn.gate_proj"],
-            )
-        assert checked == [operator_fold, ("ffn_norm", ["feed_forward.w1", "feed_forward.w3"], [])]
+            assert checked == [ffn_fold]
 
 
 def _layout_sha256(model):

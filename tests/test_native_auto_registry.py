@@ -23,6 +23,16 @@ def _is_vendored(cls):
     return cls.__module__.startswith("gptqmodel.models.ports.native.")
 
 
+def test_lazy_mapping_enumerates_the_registry_table():
+    mapping = auto.CONFIG_MAPPING
+    table = auto._registry.CONFIG
+    assert len(mapping) == len(table)
+    assert list(mapping) == list(table)
+    assert list(mapping.keys()) == list(table.keys())
+    assert list(mapping.items()) == list(table.items())
+    assert list(mapping.values()) == list(table.values())
+
+
 @pytest.mark.parametrize("declared", ["Qwen2Tokenizer", "Qwen2TokenizerFast"])
 def test_declared_tokenizer_class_resolves_to_vendored_class(tmp_path, declared):
     cls = auto.NativeTokenizer.tokenizer_class(str(_checkpoint(tmp_path, "qwen3", tokenizer_class=declared)))

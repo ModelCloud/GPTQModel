@@ -11,7 +11,10 @@ consistent.
 GPT-QModel never patches, monkeypatches or registers into Transformers, the
 HF ecosystem (Optimum, OpenVINO, safetensors, `huggingface_hub`) or other
 libraries (Accelerate, Defuser, torch, Triton), not even temporarily or
-scoped. `tests/test_transformers_unpatched.py` snapshots the
+scoped. The sole exception is the pass-through model-global-state construction
+guard (#5304, #5421), which wraps Transformers' construction entry points so
+concurrent builds cannot observe another thread's process-global
+dtype/tie/`apply_patches` window. `tests/test_transformers_unpatched.py` snapshots the
 quantizer registries, the GPTQ/AWQ quantizers, Transformers' GGUF modules,
 `PreTrainedModel`, `torch.nn.init` and `safetensors.torch` (plus Optimum and
 OpenVINO when installed) before and after import, native load, port build and

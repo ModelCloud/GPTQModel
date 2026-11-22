@@ -6,7 +6,6 @@ from transformers import PreTrainedConfig
 from transformers import TokenizersBackend as UnlimitedOcrTokenizer
 
 from ..native.unlimited_ocr.configuration_unlimited_ocr import UnlimitedOcrConfig
-from ..native.unlimited_ocr.image_processing_unlimited_ocr import UnlimitedOcrImageProcessor
 from ..native.unlimited_ocr.modeling_unlimited_ocr import (
     UnlimitedOcrForConditionalGeneration as NativeUnlimitedOcrForConditionalGeneration,
 )
@@ -30,6 +29,10 @@ class UnlimitedOcrProcessor:
 
     @classmethod
     def from_pretrained(cls, path, *, config, tokenizer, **kwargs):
+        # The image processor imports torchvision. Import it only when a
+        # processor is requested, keeping config/model imports dependency-light.
+        from ..native.unlimited_ocr.image_processing_unlimited_ocr import UnlimitedOcrImageProcessor
+
         return NativeUnlimitedOcrProcessor(
             image_processor=UnlimitedOcrImageProcessor.from_pretrained(path, **kwargs),
             tokenizer=tokenizer, patch_size=config.vision_config.sam_config.patch_size,

@@ -119,7 +119,9 @@ fix snippets where applicable. See the audit and review skill for the procedure.
   never patches, monkeypatches or registers into Transformers, the HF
   ecosystem (optimum, OpenVINO, safetensors, huggingface_hub) or any other
   library (Accelerate, Defuser, torch, Triton), and never assigns onto a model
-  class at load time, not even temporarily or scoped. Behavior GPT-QModel needs
+  class at load time, not even temporarily or scoped. The sole exception is
+  the pass-through model-global-state construction guard (#5304, #5421) around
+  Transformers' construction entry points. Behavior GPT-QModel needs
   lives on package-owned subclasses (`GPTQModelAlignDevicesHook`,
   `gptqmodel.utils.triton_jit.jit`) or on its own model instances; GPT-QModel
   checkpoints load through `GPTQModel.load`.

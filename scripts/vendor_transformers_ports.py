@@ -284,7 +284,56 @@ TASK_TABLES = {
 def _table(module, name):
     from importlib import import_module
 
+    if module == "video_processing_auto" and name == "VIDEO_PROCESSOR_MAPPING_NAMES":
+        return _video_processor_mapping_names()
     return getattr(import_module(f"transformers.models.auto.{module}"), name)
+
+
+def _video_processor_mapping_names():
+    """The video-processor table before Transformers nulls torchvision names.
+
+    Transformers 5.23 replaces every ``torchvision`` entry with ``None`` when
+    torchvision is not importable. The committed registry records the backend
+    names, so regenerate from the pristine generated table plus the same
+    non-standard overrides Transformers merges at import time.
+    """
+
+    from importlib import import_module
+    from importlib.util import module_from_spec, spec_from_file_location
+    from pathlib import Path
+
+    import transformers
+
+    auto = import_module("transformers.models.auto.video_processing_auto")
+    mapping = auto.VIDEO_PROCESSOR_MAPPING_NAMES
+    if not any(isinstance(value, dict) and value.get("torchvision") is None for value in mapping.values()):
+        return mapping
+
+    source = Path(transformers.__file__).parent / "models" / "auto" / "auto_mappings.py"
+    spec = spec_from_file_location("_gptqmodel_auto_mappings", source)
+    pristine = module_from_spec(spec)
+    spec.loader.exec_module(pristine)
+    canonical = dict(pristine.VIDEO_PROCESSOR_MAPPING_NAMES)
+    canonical.update(_missing_video_processor_mapping_names(auto))
+    return canonical
+
+
+def _missing_video_processor_mapping_names(auto):
+    """Read the non-standard overrides before Transformers nulls their torchvision names."""
+
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(auto.__file__).read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(getattr(target, "id", None) == "MISSING_VIDEO_PROCESSOR_MAPPING_NAMES" for target in node.targets):
+            continue
+        value = node.value
+        if isinstance(value, ast.Call) and value.args:
+            return dict(ast.literal_eval(value.args[0]))
+    return {}
 
 
 def _class_name(value):
@@ -304,8 +353,15 @@ def _class_home(cls_name):
 
     import transformers
 
-    value = getattr(transformers, cls_name, None)
-    module = getattr(value, "__module__", None)
+    # Use the lazy-export table instead of importing the class: Transformers
+    # substitutes the PIL class when torchvision is missing, which would make
+    # the generated registry depend on the installed optional backends.
+    submodule = getattr(transformers, "_class_to_module", {}).get(cls_name)
+    if isinstance(submodule, str) and submodule:
+        module = f"transformers.{submodule}"
+    else:
+        value = getattr(transformers, cls_name, None)
+        module = getattr(value, "__module__", None)
     if module is None:
         return None
     if module.startswith("transformers.models."):

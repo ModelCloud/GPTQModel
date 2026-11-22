@@ -4,6 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+pytest.importorskip("einops")
+pytest.importorskip("torchvision")
+pytest.importorskip("timm")
 import torch
 from torch import nn
 

@@ -10,6 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+pytest.importorskip("torchvision")
 import torch
 from safetensors.torch import load_file, save_file
 

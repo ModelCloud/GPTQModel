@@ -1302,7 +1302,6 @@ class GPTQModel:
         # normalize adapter to instance
         adapter = normalize_adapter(adapter)
 
-        print(f"from_quantized: adapter: {adapter}")
         model_definition = check_and_get_model_definition(
             model_id_or_path,
             trust_remote_code,

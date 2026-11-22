@@ -563,18 +563,28 @@ def _resolve_qualified_name(
     missing names.
     """
 
-    if module_path:
-        try:
-            resolved = root.get_submodule(module_path)
-        except (AttributeError, IndexError, KeyError):
-            resolved = None
-        if resolved is obj:
-            return module_path
-        log.warning(
-            "Provided module path `%s` does not resolve to the target module; "
-            "falling back to a full named_modules() lookup.",
-            module_path,
-        )
+    if module_path is not None:
+        if not module_path:
+            # An explicit empty path names the root itself. The quantizer
+            # materializes the root when a checkpoint has no layer-wise shards.
+            if obj is root:
+                return ""
+            log.warning(
+                "Provided empty module path does not name the target module; "
+                "falling back to a full named_modules() lookup."
+            )
+        else:
+            try:
+                resolved = root.get_submodule(module_path)
+            except (AttributeError, IndexError, KeyError):
+                resolved = None
+            if resolved is obj:
+                return module_path
+            log.warning(
+                "Provided module path `%s` does not resolve to the target module; "
+                "falling back to a full named_modules() lookup.",
+                module_path,
+            )
     return _get_qualified_name(root, obj)
 
 
@@ -1672,7 +1682,7 @@ class LazyTurtle:
             modules_by_name[module_path] = target_submodule
             if recurse:
                 for subname, submod in target_submodule.named_modules():
-                    full_name = f"{module_path}.{subname}" if subname else module_path
+                    full_name = ".".join(part for part in (module_path, subname) if part)
                     modules_by_name[full_name] = submod
         elif recurse:
             modules_by_name = dict(target_model.named_modules())
