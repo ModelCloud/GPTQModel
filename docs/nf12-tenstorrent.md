@@ -457,6 +457,74 @@ TT_VISIBLE_DEVICES=2 TT_MESH_GRAPH_DESC_PATH=/path/to/p150_mesh_graph_descriptor
   --linear --checkpoint /path/to/Inkling-2-Mini --repeats 40
 ```
 
+#### Native SFPU activation groups
+
+The native reader stages up to eight 32-row activation tiles in worker L1.
+For each output column tile, `sfpu_linear_compute` decodes the weight slab
+once and accumulates up to four FP32 destinations at a time. Every destination
+visits the original ascending K sequence. `sfpu_linear_writer` applies the
+same escape patches to the shared slab and writes each completed output tile
+in its original row order.
+
+| Stage | One activation tile | Grouped activation tiles |
+| --- | --- | --- |
+| Activation staging | One 32-row tile across all K | Up to eight 32-row tiles across all K |
+| Packed weight reads and escape patching | One pass for each activation tile | One pass for the group |
+| FP32 reduction | One output tile in ascending K | Up to four independent output tiles in ascending K |
+
+```mermaid
+flowchart LR
+  A["sfpu_linear_reader stages the activation group"] --> B["sfpu_linear_compute decodes one weight slab"]
+  B --> C["sfpu_linear_writer patches the slab and signals availability"]
+  C --> D["sfpu_linear_compute reuses the slab across the group"]
+  D --> E["sfpu_linear_writer publishes all output rows"]
+```
+
+The following P300c chip-3 resident timings are median / p95 in milliseconds
+over 12 synchronized samples. The grouped BF16 reference uses the same
+matrix schedule and staging. The best tested TTNN library BF16 schedule used
+the full worker grid with HiFi4 and FP32 destination accumulation. Library
+results were compared with the separate Torch FP32 oracle.
+
+| Released LM head M | Repeated NF12 | Grouped NF12 | Grouped BF16 | TTNN library BF16 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 2.081 / 2.101 | 2.081 / 2.101 | 2.378 / 2.490 | 2.374 / 2.495 |
+| 128 | 8.315 / 8.397 | 3.008 / 3.111 | 2.683 / 2.864 | 2.768 / 2.905 |
+| 256 | 16.280 / 16.342 | 4.163 / 4.259 | 3.101 / 3.192 | 5.449 / 5.570 |
+
+Native grouped outputs matched the repeated NF12 and grouped BF16 outputs
+bit-for-bit. The resident packed and BF16 weight allocations were 695,807,872
+and 926,318,592 bytes. The packed worker circular buffers occupied 311,424 bytes
+at M=1, 753,792 at M=128 and 1,343,616 at M=256. The grouped BF16 buffers used
+299,008, 741,376 and 1,331,200 bytes, respectively. Decoded weights stayed in L1.
+
+For Torch callers, `TTNNSFPUNF12Head.linear` selects one group when all active
+rows fit the available worker L1 and the last tile contains more than one
+live row or is full. It untilizes the output on device before transferring it
+to Torch and returns that host tensor directly. Multiple groups retain the
+existing repeated-slab transfers, including compact singleton tails. The
+temporary row-major result uses 51,462,144 DRAM payload bytes at M=128 and
+102,924,288 at M=256. Reconstruction still uses worker L1.
+
+| Torch LM-head M | Repeated host median / p95 ms | Selected host median / p95 ms |
+| ---: | ---: | ---: |
+| 1 | 2.824 / 3.111 | 2.743 / 2.948 |
+| 128 | 31.568 / 32.812 | 27.945 / 28.651 |
+| 256 | 60.632 / 62.475 | 52.625 / 53.348 |
+| 257 | 61.666 / 61.776 | 61.554 / 61.788 |
+
+The host timings include input upload and output transfer. The 1-, 128-,
+and 256-row cases use eight interleaved samples. The 257-row tail case uses
+two. The selected host path matched repeated results including padded final
+groups, singleton tails and batched activation shapes.
+
+```bash
+TT_VISIBLE_DEVICES=3 TT_MESH_GRAPH_DESC_PATH=/path/to/p150_mesh_graph_descriptor.textproto \
+  PYTHONPATH=. python scripts/bench_nf12_sfpu_decode.py --chip 0 --size 201024 \
+  --linear --checkpoint /path/to/Inkling-2-Mini --m 1 128 256 \
+  --repeats 12 --activation-tiles 1 2 4 8
+```
+
 ### SFPU full-head prototype on bundled TT-XLA
 
 The TT-XLA version uses the same three-plane representation. It carries the
