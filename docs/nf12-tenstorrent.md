@@ -326,7 +326,7 @@ and 24,832 bytes for the general 32-ID schedule. Its repeated-ID schedule
 reads one packed row for all 32 outputs. The [native benchmark](nf12-tenstorrent-row-embedding.md)
 records the synchronized latency and the exact row checks.
 
-TT-XLA used 60 synchronized launches on chip 0 with both inputs resident.
+The initial TT-XLA comparison used 60 synchronized launches on chip 0 with both inputs resident.
 Latency includes the host read that forces completion. Every released row
 passed the raw BF16 check.
 
@@ -341,6 +341,48 @@ passed the raw BF16 check.
 PJRT_DEVICE=TT PYTHONPATH=. python scripts/bench_nf12_tenstorrent.py --backend ttxla \
   --chip 0 --row-major-embedding --embedding-only --checkpoint /path/to/Inkling-2-Mini \
   --exhaustive --repeats 60
+```
+
+#### Compact TT-XLA host output
+
+An eager one-ID lookup for the 2,304-column table now writes 4,608 live BF16
+bytes into three carrier tiles. The ordinary row gather writes a padded
+32 × 2,304 result across 72 tiles. Each compact worker decodes one 128-value
+stripe using 2,624 bytes of L1 scratch and writes disjoint faces of the carrier.
+The host adapter reshapes the returned values and the existing embedding RMS
+normalization consumes them. Both paths use the same 695,463,936-byte
+resident weight and escape allocation. A singleton ID rank distinguishes
+the output layout in the lazy executable cache.
+
+The eager gather supplies its result shape and BF16 dtype directly to the
+StableHLO custom call. The registered wrapper remains available to compiler
+and fake-tensor callers. The raw embedding interface returns an XLA tensor.
+Inkling's mixed-runtime embedding uses the compact path for eligible
+single-ID CPU calls.
+
+| Resident single ID, chip 0, 100 interleaved samples | Median / p95 including host completion |
+| --- | ---: |
+| NF12, ordinary output through the registered wrapper | 230.96 / 386.66 µs |
+| NF12, ordinary output through direct StableHLO | 161.55 / 289.17 µs |
+| NF12, compact output through direct StableHLO | 143.39 / 271.52 µs |
+| Dense BF16 | 162.84 / 255.53 µs |
+
+The compact path is 1.14× faster at the median in this run. An independent
+100-sample run on chip 3 measured 160.24 / 278.26 µs compact NF12 and
+167.43 / 252.58 µs BF16. BF16 is faster at p95 in both runs. At 32 IDs the
+direct ordinary gather measured 141.98, 158.98, and
+154.61 µs for repeated, contiguous, and scattered IDs. BF16 measured 144.11,
+129.20, and 127.99 µs. Every released token row passed the exact check.
+
+The host adapter also detects requests containing 32 copies of the same
+CPU ID. It reads one compact row and copies it into independent output rows
+before the existing RMS normalization. The released embedding and RMS
+benchmark improved from 789.2 to 460.3 µs for these requests. The stock BF16
+path took 332.3 µs in the same host-facing run.
+
+```bash
+PJRT_DEVICE=TT PYTHONPATH=. python scripts/bench_nf12_ttxla_gather.py --chip 0 \
+  --checkpoint /path/to/Inkling-2-Mini --repeats 100 --exhaustive
 ```
 
 ### TT-XLA LM head
