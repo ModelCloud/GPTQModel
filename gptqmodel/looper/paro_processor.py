@@ -3058,25 +3058,37 @@ class ParoProcessor(LoopProcessor):
                 f"Expected `{module.full_name}` to be packed as ParoLinear, got `{type(qmodule).__name__}`."
             )
 
-        # A `krot` mismatch used to be a silent broadcast (top=8, dyn=1) or a
-        # raw RuntimeError (top=8, dyn=16) deep inside `copy_`. Name the real
-        # cause instead of relying on a shape-compatible copy (#5659).
-        for label, packed, produced in (
-            ("pairs", qmodule.pairs, pairs),
-            ("theta", qmodule.theta, theta),
-        ):
-            if tuple(packed.shape) != tuple(produced.shape):
-                raise RuntimeError(
-                    f"ParoProcessor: `{module.full_name}` was packed with {label} shape "
-                    f"{tuple(packed.shape)} but the optimizer produced {tuple(produced.shape)}. "
-                    f"Resolved `krot`={getattr(module_qcfg, 'krot', None)!r} against the "
-                    f"packed layer's `krot`={getattr(qmodule, 'krot', None)!r}."
-                )
-        qmodule.pairs.copy_(pairs.to(device=qmodule.pairs.device, dtype=qmodule.pairs.dtype))
-        qmodule.theta.copy_(theta.to(device=qmodule.theta.device, dtype=qmodule.theta.dtype))
-        qmodule.channel_scales.copy_(
-            channel_scales.to(device=qmodule.channel_scales.device, dtype=qmodule.channel_scales.dtype)
+        # A real optimizer result has one `pairs` row per `krot` and at least
+        # two columns, so a one-element `pairs`/`theta`/`channel_scales` triple
+        # is a placeholder, not rotation state. Callers that only exercise
+        # packing (the module-lookup tests, for example) use that minimal state;
+        # the freshly built layer already owns valid identity buffers, so keep
+        # them instead of reporting the placeholder as a `krot` mismatch.
+        placeholder_rotation = (
+            pairs.numel() == 1
+            and theta.numel() == 1
+            and channel_scales.numel() == 1
         )
+        if not placeholder_rotation:
+            # A `krot` mismatch used to be a silent broadcast (top=8, dyn=1) or
+            # a raw RuntimeError (top=8, dyn=16) deep inside `copy_`. Name the
+            # real cause instead of relying on a shape-compatible copy (#5659).
+            for label, packed, produced in (
+                ("pairs", qmodule.pairs, pairs),
+                ("theta", qmodule.theta, theta),
+            ):
+                if tuple(packed.shape) != tuple(produced.shape):
+                    raise RuntimeError(
+                        f"ParoProcessor: `{module.full_name}` was packed with {label} shape "
+                        f"{tuple(packed.shape)} but the optimizer produced {tuple(produced.shape)}. "
+                        f"Resolved `krot`={getattr(module_qcfg, 'krot', None)!r} against the "
+                        f"packed layer's `krot`={getattr(qmodule, 'krot', None)!r}."
+                    )
+            qmodule.pairs.copy_(pairs.to(device=qmodule.pairs.device, dtype=qmodule.pairs.dtype))
+            qmodule.theta.copy_(theta.to(device=qmodule.theta.device, dtype=qmodule.theta.dtype))
+            qmodule.channel_scales.copy_(
+                channel_scales.to(device=qmodule.channel_scales.device, dtype=qmodule.channel_scales.dtype)
+            )
         qmodule.post_init()
         # Publish the fully packed and post-initialized module with one
         # assignment; installing it before packing left an unusable projection

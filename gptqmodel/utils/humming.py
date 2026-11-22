@@ -74,6 +74,15 @@ except Exception as exc:  # pragma: no cover - depends on the installed wheels
     _BaseWeightSchema = None
     _HummingInputSchema = None
     _prepare_and_transform_humming_tensors = None
+    # This import is often first attempted lazily from inside ``quantize()``
+    # (kernel selection imports every qlinear module). Keeping the exception's
+    # traceback would pin that whole caller stack -- including the model and
+    # its run-exit state -- for the life of the process, so a later
+    # ``del model`` could never run the offload finalizer (the #4595 run-dir
+    # leak). The type and message are all callers use; drop the stack.
+    exc.__traceback__ = None
+    exc.__context__ = None
+    exc.__cause__ = None
     _HUMMING_IMPORT_ERROR = exc
 
 #: ``None`` when ``humming`` imported, otherwise the import failure. Kept under
