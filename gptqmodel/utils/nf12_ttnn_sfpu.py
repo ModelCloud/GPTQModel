@@ -104,6 +104,14 @@ def _linear_l1_bytes(k_tiles, activation_tiles, *, dense, metadata, prefetch_gro
     return pages * 2048 + 128 * int(bool(metadata)) + 64 * int(single_row)
 
 
+def _activation_group_tiles(k_tiles, available_l1, *, metadata):
+    fixed_bytes = _linear_l1_bytes(k_tiles, 0, dense=False, metadata=metadata, prefetch_groups=1)
+    capacity = (available_l1 - fixed_bytes) // (k_tiles * 2048)
+    if capacity < 1:
+        raise ValueError("SFPU NF12 needs enough worker L1 for one activation tile row and one decoded slab")
+    return min(capacity, _MAX_ACTIVATION_TILES)
+
+
 def _linear_operation(ttnn, device, words, activation, n, k, base, *, dense, metadata, prefetch_groups, single_row=False):
     m, activation_k = activation.shape
     activation_tiles = m // 32
@@ -177,14 +185,36 @@ class TTNNSFPUNF12Head:
             raise ValueError("SFPU NF12 expects CPU BF16 activations with the logical K")
         ttnn = import_ttnn()
         rows = x.reshape(-1, k)
-        result = x.new_empty((len(rows), n))
-        for start in range(0, len(rows), 32):
-            slab = rows[start : start + 32]
-            activation = ttnn.from_torch(pad(slab, (0, 0, 0, 32 - len(slab))),
-                                         dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
-                                         device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        output_shape = (*x.shape[:-1], n)
+        if not len(rows):
+            return x.new_empty(output_shape)
+        result = None
+        group_rows = 32
+        activation_tiles = round_up(len(rows), 32) // 32
+        if 1 < activation_tiles <= _MAX_ACTIVATION_TILES and len(rows) % 32 != 1:
+            l1 = ttnn.get_memory_view(self.device, ttnn.BufferType.L1).largest_contiguous_bytes_free_per_bank
+            if activation_tiles <= _activation_group_tiles(k // 32, l1, metadata=self.metadata):
+                # One group avoids stitching a large host result between launches.
+                group_rows = activation_tiles * 32
+
+        for start in range(0, len(rows), group_rows):
+            end = min(start + group_rows, len(rows))
+            slab = rows[start:end]
+            padded = pad(slab, (0, 0, 0, round_up(len(slab), 32) - len(slab)))
+            activation = ttnn.from_torch(
+                padded, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
             call = _linear_operation(ttnn, self.device, self.planes, activation, n, k, self.exp_base,
-                                     dense=False, metadata=self.metadata, prefetch_groups=1, single_row=len(slab) == 1)
-            host_output = ttnn.to_torch(call()).reshape(-1, n)
-            result[start : start + len(slab)].copy_(host_output[: len(slab)])
-        return result.reshape(*x.shape[:-1], n)
+                                     dense=False, metadata=self.metadata, prefetch_groups=1,
+                                     single_row=len(slab) == 1)
+            device_output = call()
+            if group_rows > 32:
+                device_output = ttnn.untilize(device_output, use_multicore=True, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            host_output = ttnn.to_torch(device_output).reshape(-1, n)[:len(slab)]
+            if len(slab) == len(rows):
+                return host_output.reshape(output_shape)
+            if result is None:
+                result = x.new_empty((len(rows), n))
+            result[start:end].copy_(host_output)
+        return result.reshape(output_shape)

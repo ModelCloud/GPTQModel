@@ -136,6 +136,7 @@ def _exercise_linear(ttnn, device, sync, size, repeats, checkpoint, prefetch_gro
                          for patch in patches if not dense)
         residents.append((dense, words, metadata, data.numel() * 2 + sum(m.volume() * 4 for m in metadata)))
 
+    available_l1 = ttnn.get_memory_view(device, ttnn.BufferType.L1).largest_contiguous_bytes_free_per_bank
     for m in m_sizes:
         x = torch.randn((m, k), generator=torch.Generator().manual_seed(54)).bfloat16()
         golden = torch.nn.functional.linear(x.float(), weight.float()).bfloat16()
@@ -151,9 +152,12 @@ def _exercise_linear(ttnn, device, sync, size, repeats, checkpoint, prefetch_gro
             calls, l1_bytes = [], []
             for dense, words, metadata, _ in residents:
                 groups = 1 if dense else prefetch_groups
-                l1_bytes.append(_linear_l1_bytes(
+                scratch = _linear_l1_bytes(
                     k // 32, activation_tiles, dense=dense, metadata=metadata, prefetch_groups=groups,
-                ))
+                )
+                if scratch > available_l1:
+                    raise ValueError(f"The {activation_tiles}-tile group needs {scratch} B of usable worker L1, got {available_l1} B")
+                l1_bytes.append(scratch)
                 slabs = [
                     _linear_operation(ttnn, device, words, activation, n, k, base, dense=dense, metadata=metadata,
                                       prefetch_groups=groups) for activation in activations

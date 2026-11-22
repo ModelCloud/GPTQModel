@@ -38,6 +38,17 @@ def test_signed_ids_before_narrowing():
     assert actual.tolist() == [-1, 0, 16, -1, -1, -1, -1]
 
 
+def test_sfpu_activation_group_respects_worker_l1_budget():
+    from gptqmodel.utils.nf12_ttnn_sfpu import _activation_group_tiles
+
+    assert _activation_group_tiles(72, 1_460_288, metadata=True) == 8
+    assert _activation_group_tiles(72, 1_343_616, metadata=True) == 8
+    assert _activation_group_tiles(72, 1_343_615, metadata=True) == 7
+    assert _activation_group_tiles(72, 311_424, metadata=True) == 1
+    with pytest.raises(ValueError, match="enough worker L1"):
+        _activation_group_tiles(72, 311_423, metadata=True)
+
+
 def test_sfpu_transcode_offsets_and_verifies_source_bits():
     from gptqmodel.utils.nf12_ttnn_sfpu import _pack_four, _to_tiles, _transcode
 
