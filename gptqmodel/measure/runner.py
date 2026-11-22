@@ -11,7 +11,7 @@ adding a weight-space metric later does not require rewriting the loop.
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import torch
 
@@ -36,7 +36,7 @@ from .metrics import (
 from .report import MeasurementReport
 
 
-__all__ = ["MeasurementError", "build_token_rows", "measure_models"]
+__all__ = ["MeasurementError", "TokenWindow", "build_token_rows", "measure_models"]
 
 log = setup_logger()
 
@@ -69,6 +69,79 @@ class _Captures:
         return None if self.tokens == 0 else math.exp(self.nll_sum / self.tokens)
 
 
+@dataclass(frozen=True, eq=False)
+class TokenWindow:
+    """One model input plus which of its tokens are newly scored targets.
+
+    ``score_mask`` is aligned with ``input_ids``: position ``j`` is True when the
+    token at ``j`` is a next-token target this window is responsible for. The
+    mask is what lets overlapping windows share context without scoring the
+    shared targets twice, and what keeps the seam between adjacent windows from
+    being dropped.
+    """
+
+    input_ids: torch.Tensor
+    score_mask: torch.Tensor
+
+    def __post_init__(self):
+        if self.input_ids.dim() != 2 or self.input_ids.shape[0] != 1:
+            raise ValueError(
+                f"TokenWindow.input_ids must be [1, tokens], got {tuple(self.input_ids.shape)}"
+            )
+        if self.score_mask.shape != self.input_ids.shape:
+            raise ValueError(
+                f"TokenWindow.score_mask {tuple(self.score_mask.shape)} does not match "
+                f"input_ids {tuple(self.input_ids.shape)}"
+            )
+
+    @classmethod
+    def covering(cls, input_ids: torch.Tensor) -> "TokenWindow":
+        """A window that scores every transition inside it (its first token is context)."""
+
+        mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        mask[:, 1:] = True
+        return cls(input_ids=input_ids, score_mask=mask)
+
+
+def _windows_of_row(encoded: torch.Tensor, window: int, stride: int) -> List[TokenWindow]:
+    """Slice one row into windows whose scoring masks partition its transitions.
+
+    A window feeds ``window`` tokens to the model so the logits see as much
+    context as the configured window allows. Only targets not already scored by
+    an earlier window are marked in ``score_mask``, so every transition in the
+    row is scored exactly once however the windows overlap.
+
+    The step is capped at ``window - 1``: a window with ``w`` tokens can score at
+    most ``w - 1`` transitions, and stepping further would leave the transition
+    at each seam unscored. Capping it also retains one token of context at every
+    seam instead of introducing a gap.
+    """
+
+    length = int(encoded.shape[1])
+    if length < 2:
+        return []
+    if length <= window:
+        return [TokenWindow.covering(encoded)]
+
+    step = window - 1 if stride <= 0 else min(int(stride), window - 1)
+    windows: List[TokenWindow] = []
+    # Global index of the first target token (index ``t`` means the transition
+    # from token ``t - 1`` to token ``t``) this row has not scored yet.
+    next_target = 1
+    for start in range(0, length - 1, step):
+        if next_target > length - 1:
+            break
+        piece = encoded[:, start:start + window]
+        positions = torch.arange(piece.shape[1])
+        target_index = start + positions
+        score_mask = ((positions >= 1) & (target_index >= next_target)).reshape(1, -1)
+        if not bool(score_mask.any()):
+            continue
+        windows.append(TokenWindow(input_ids=piece, score_mask=score_mask))
+        next_target = start + int(piece.shape[1])
+    return windows
+
+
 def build_token_rows(
     tokenizer: Any,
     dataset: Sequence[Any],
@@ -76,12 +149,19 @@ def build_token_rows(
     window: int = _DEFAULT_WINDOW,
     stride: int = 0,
     max_rows: int = 4,
-) -> List[torch.Tensor]:
-    """Turn texts (or token-id rows) into ``[1, tokens]`` windows."""
+) -> List[TokenWindow]:
+    """Turn texts (or token-id rows) into windows with target-scoring masks.
+
+    Windows overlap when ``stride < window`` and always retain one token of
+    context at a seam, so the masks partition every transition in a row exactly
+    once. Pass the result straight to :func:`measure_models`.
+    """
 
     if dataset is None:
         raise ValueError("measurement needs `dataset` (texts or token-id rows)")
-    rows: List[torch.Tensor] = []
+    if window < 2:
+        raise ValueError(f"measurement window must be >= 2, got {window}")
+    rows: List[TokenWindow] = []
     for sample in dataset:
         if isinstance(sample, str):
             if tokenizer is None:
@@ -96,15 +176,7 @@ def build_token_rows(
         if encoded.shape[1] < 2:
             continue
 
-        if encoded.shape[1] <= window:
-            rows.append(encoded)
-        else:
-            step = window if stride <= 0 else stride
-            for start in range(0, encoded.shape[1] - 1, step):
-                piece = encoded[:, start:start + window]
-                if piece.shape[1] < 2:
-                    break
-                rows.append(piece)
+        rows.extend(_windows_of_row(encoded, window, stride))
         if len(rows) >= max_rows:
             break
     if not rows:
@@ -116,10 +188,20 @@ def build_token_rows(
 class _Batch:
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
+    score_mask: torch.Tensor
+
+
+def _as_window(row: Any) -> TokenWindow:
+    """Accept a plain ``[1, tokens]`` row as "score every transition in it"."""
+
+    if isinstance(row, TokenWindow):
+        return row
+    input_ids = row if torch.is_tensor(row) else torch.as_tensor(row)
+    return TokenWindow.covering(input_ids.reshape(1, -1))
 
 
 def _batch_rows(
-    rows: Sequence[torch.Tensor], batch: int, pad_token_id: int = 0
+    rows: Sequence[Union[TokenWindow, torch.Tensor]], batch: int, pad_token_id: int = 0
 ) -> List[_Batch]:
     """Pad rows into batches of ``batch``.
 
@@ -130,19 +212,23 @@ def _batch_rows(
     counted, which is the difference between batching and corrupting the metric.
     """
 
-    rows = list(rows)
+    windows = [_as_window(row) for row in rows]
     batches: List[_Batch] = []
-    for start in range(0, len(rows), max(1, batch)):
-        chunk = rows[start:start + batch]
-        widths = [int(row.shape[1]) for row in chunk]
+    for start in range(0, len(windows), max(1, batch)):
+        chunk = windows[start:start + batch]
+        widths = [int(window.input_ids.shape[1]) for window in chunk]
         width = max(widths)
         input_ids = torch.full((len(chunk), width), int(pad_token_id), dtype=torch.long)
         attention_mask = torch.zeros((len(chunk), width), dtype=torch.long)
-        for index, row in enumerate(chunk):
-            length = int(row.shape[1])
-            input_ids[index, :length] = row[0, :length]
+        score_mask = torch.zeros((len(chunk), width), dtype=torch.bool)
+        for index, window in enumerate(chunk):
+            length = int(window.input_ids.shape[1])
+            input_ids[index, :length] = window.input_ids[0, :length]
             attention_mask[index, :length] = 1
-        batches.append(_Batch(input_ids=input_ids, attention_mask=attention_mask))
+            score_mask[index, :length] = window.score_mask[0, :length].bool()
+        batches.append(
+            _Batch(input_ids=input_ids, attention_mask=attention_mask, score_mask=score_mask)
+        )
     return batches
 
 
@@ -188,7 +274,10 @@ def _capture(
             logits = _logits_of(model(input_ids=input_ids, attention_mask=attention_mask))
         if needs_nll:
             total, count = mean_negative_log_likelihood(
-                logits, input_ids, attention_mask=attention_mask
+                logits,
+                input_ids,
+                attention_mask=attention_mask,
+                score_mask=batch.score_mask.to(device),
             )
             captures.nll_sum += total
             captures.tokens += count
@@ -214,12 +303,18 @@ def _capture(
 def measure_models(
     candidate: torch.nn.Module,
     reference: torch.nn.Module,
-    token_rows: Sequence[torch.Tensor],
+    token_rows: Sequence[Union[TokenWindow, torch.Tensor]],
     config: MeasureConfig,
     *,
     pad_token_id: Optional[int] = None,
 ) -> MeasurementReport:
-    """Run every configured metric over the same token rows for both models."""
+    """Run every configured metric over the same token rows for both models.
+
+    ``token_rows`` accepts :class:`TokenWindow` objects from
+    :func:`build_token_rows` (which carry a scoring mask) or plain ``[1, tokens]``
+    tensors (every transition in the row is scored). The mask is what makes PPL
+    weight each transition in the stream exactly once across overlapping windows.
+    """
 
     if reference is None:
         raise ValueError("measure() needs a reference model or checkpoint path")

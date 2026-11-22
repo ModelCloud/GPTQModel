@@ -97,6 +97,38 @@ def test_attention_mask_removes_padded_targets():
     assert masked_total == pytest.approx(row0_total + trimmed_total, rel=1e-6)
 
 
+def test_score_mask_limits_nll_to_its_targets():
+    logits = _logits(sequence=5, vocab=8, seed=11)
+    ids = torch.randint(0, 8, (2, 5), generator=torch.Generator().manual_seed(12))
+    # Score only the last two targets of each row; earlier positions are context.
+    score_mask = torch.zeros(2, 5, dtype=torch.bool)
+    score_mask[:, 3:] = True
+
+    total, count = mean_negative_log_likelihood(logits, ids, score_mask=score_mask)
+
+    picked = torch.stack([
+        F.cross_entropy(logits[row, 2:4].float(), ids[row, 3:5], reduction="sum")
+        for row in range(2)
+    ]).sum()
+    assert count == 4
+    assert total == pytest.approx(float(picked), rel=1e-6)
+
+
+def test_score_mask_and_attention_mask_compose():
+    logits = _logits(sequence=4, vocab=8, seed=13)
+    ids = torch.randint(0, 8, (2, 4), generator=torch.Generator().manual_seed(14))
+    attention = torch.tensor([[1, 1, 1, 1], [1, 1, 1, 0]])
+    score = torch.tensor([[0, 0, 1, 1], [0, 1, 1, 1]], dtype=torch.bool)
+
+    _total, count = mean_negative_log_likelihood(
+        logits, ids, attention_mask=attention, score_mask=score
+    )
+
+    # Row 0 scores positions 2 and 3; row 1 scores positions 1 and 2 (its pad
+    # would have been position 3, so the attention mask removes nothing extra).
+    assert count == 4
+
+
 def test_more_noise_moves_every_metric_the_same_way():
     reference = _logits(seed=3)
     small = reference + 0.05 * _logits(seed=4)
