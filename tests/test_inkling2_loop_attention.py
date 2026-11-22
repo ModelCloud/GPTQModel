@@ -8,6 +8,8 @@ import torch
 from torch.nn import functional as F
 
 from gptqmodel.models.inkling2_loop import modeling
+from gptqmodel.models.inkling2_loop.configuration import Inkling2LoopVisionConfig
+from gptqmodel.models.inkling2_loop.vision import Inkling2LoopVisionAttention, Inkling2LoopVisionRotary
 
 
 def _inputs(dtype, repeats):
@@ -84,3 +86,55 @@ def test_eager_attention_releases_scores_and_repeated_keys_before_softmax(monkey
         output = modeling._attend(query, key, value, None, 8**-0.5, bias, sinks, num_key_value_groups=3)
     assert output.shape == (2, 7, 6, 8)
     assert len(repeated) == 2
+
+
+def _vision_reference(attention, hidden, boundaries, cos, sin):
+    images = []
+    for start, end in zip(boundaries, boundaries[1:]):
+        project = (attention.q_proj, attention.k_proj, attention.v_proj)
+        q, k, v = (
+            F.linear(hidden[start:end], layer.weight, layer.bias)
+            .unflatten(-1, (attention.num_heads, attention.head_dim))
+            .unbind(dim=1)
+            for layer in project
+        )
+        c, s = cos[start:end, ::2], sin[start:end, ::2]
+
+        def rotate(head):
+            real, imag = head[:, ::2].float(), head[:, 1::2].float()
+            return torch.stack((real * c - imag * s, real * s + imag * c), dim=-1).flatten(1).to(head.dtype)
+
+        heads = []
+        for query, key, value in zip(q, k, v, strict=True):
+            scores = (rotate(query) @ rotate(key).T) / attention.head_dim**0.5
+            probabilities = scores.float().softmax(dim=-1).to(query.dtype)
+            heads.append(probabilities @ value)
+        images.append(torch.cat(heads, dim=1))
+    return F.linear(torch.cat(images), attention.out_proj.weight, attention.out_proj.bias)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "boundaries",
+    [(0, 2, 5), (0, 3, 16)],
+    ids=["rotary-across-tokens", "output-head-order"],
+)
+def test_vision_attention_matches_per_image_and_head_reference(dtype, boundaries):
+    config = Inkling2LoopVisionConfig(hidden_size=128, num_attention_heads=16)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(711)
+        attention = Inkling2LoopVisionAttention(config).to(dtype=dtype).eval()
+        hidden = torch.randn(boundaries[-1], config.hidden_size, dtype=dtype)
+    positions = torch.arange(boundaries[-1])
+    if len(positions) == config.num_attention_heads:
+        # Isolate output head ordering with identity rotations and equal axis lengths.
+        positions = torch.zeros_like(positions)
+    position_ids = torch.stack((positions // 3, positions % 3), dim=-1)
+    cos, sin = Inkling2LoopVisionRotary(config)(position_ids)
+    with torch.inference_mode():
+        expected = _vision_reference(attention, hidden, boundaries, cos, sin)
+        actual = attention(hidden, torch.tensor(boundaries, dtype=torch.int32), (cos, sin))
+    assert actual.shape == hidden.shape
+    assert actual.dtype == dtype
+    rtol, atol = (1e-5, 1e-6) if dtype == torch.float32 else (2e-3, 2e-3)
+    torch.testing.assert_close(actual, expected, rtol=rtol, atol=atol)

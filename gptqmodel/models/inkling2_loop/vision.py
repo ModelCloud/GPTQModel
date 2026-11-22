@@ -40,7 +40,7 @@ def _apply_axial_rotary(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     q_dtype, k_dtype = query.dtype, key.dtype
     query, key = query.float(), key.float()
-    cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
+    cos, sin = cos.unsqueeze(0).float(), sin.unsqueeze(0).float()
     query = query * cos + _rotate_pairs(query) * sin
     key = key * cos + _rotate_pairs(key) * sin
     return query.to(q_dtype), key.to(k_dtype)
@@ -102,7 +102,7 @@ class Inkling2LoopVisionAttention(nn.Module):
             weights = F.dropout(weights, p=self.attention_dropout, training=self.training)
             pieces.append(torch.matmul(weights, v))
         attended = torch.cat(pieces, dim=2)
-        return self.out_proj(attended.reshape(tokens, -1).contiguous())
+        return self.out_proj(attended.transpose(1, 2).reshape(tokens, -1).contiguous())
 
 
 class Inkling2LoopVisionMLP(nn.Module):
