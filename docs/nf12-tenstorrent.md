@@ -490,6 +490,62 @@ PJRT_DEVICE=TT PYTHONPATH=. python scripts/bench_nf12_sfpu_xla.py --chip 0 \
   --size 201024 --checkpoint /path/to/Inkling-2-Mini --repeats 40
 ```
 
+## Inkling expert routing
+
+The mixed-runtime model computes the router on CPU. The released checkpoint
+stores a BF16 `[128, 2304]` gate matrix and a FP32 `[128]` correction bias.
+`Inkling2LoopTopKRouter` widens the matrix and input to FP32, computes sigmoid
+scores, adds the correction for top-8 selection, gathers the original scores,
+and normalizes their sum before multiplying by the checkpoint scale of eight.
+The selected expert IDs, token indices and slots drive the NVFP4/MXFP8 experts.
+
+```mermaid
+flowchart LR
+  A["Inkling2LoopTopKRouter supplies scores and expert IDs"] --> B{"_route on eager CPU"}
+  B -->|Yes| C["Stable sort of slot-major IDs and group by expert"]
+  B -->|Other runtime| D["One-hot expert mask and where per expert"]
+  C --> E["Experts consume the same expert, token and slot order"]
+  D --> E
+```
+
+For layer 0, 64 synchronized CPU samples with four threads gave the following
+dispatch timings. The grouped path matched the dense expert mask for every
+selected slot on layers 0, 12 and 23. The synthetic input used the checkpoint's
+hidden size and BF16 dtype.
+
+| Tokens | Dense mask median / p95 µs | Grouped CPU median / p95 µs | Median speedup |
+| ---: | ---: | ---: | ---: |
+| 1 | 215.3 / 229.8 | 16.6 / 18.1 | 13.0× |
+| 4 | 228.0 / 234.7 | 38.0 / 39.5 | 6.0× |
+| 32 | 312.1 / 326.3 | 114.2 / 116.1 | 2.7× |
+| 128 | 768.1 / 1,008.0 | 140.8 / 147.3 | 5.5× |
+| 256 | 2,174.5 / 2,241.4 | 144.2 / 153.2 | 15.1× |
+
+The FP32 TTNN probe on P300c chip 2 uses resident gate weights and correction
+bias. The following layer-0 medians include synchronized launch time, from
+eight samples. The mixed-runtime column also uploads inputs and reads the
+logits, selected IDs and weights back to CPU.
+
+| Tokens | CPU gate µs | TTNN gate µs | CPU top-k µs | TTNN top-k µs | CPU through weights µs | Resident TTNN through weights µs | Mixed TTNN through weights µs |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 73.9 | 48.1 | 1.5 | 42.3 | 86.2 | 224.7 | 324.1 |
+| 32 | 2,282.2 | 47.2 | 5.2 | 40.1 | 2,302.7 | 210.9 | 328.3 |
+
+On ordinary inputs, TTNN top-k selected the same ID sets and returned a
+different order from Torch, including when both received identical CPU scores.
+At an all-equal cutoff it returned different expert IDs for both test rows.
+The full TTNN pipeline also produced nonzero score differences. The eager
+CPU grouping optimization keeps the original gate and score calculation.
+
+The source-main CPU build in this probe uses Eigen for BLAS. The available
+MKL-enabled CPU build ran the same layer-0 FP32 gate in 15.2 µs at M=1 and
+67.8 µs at M=32.
+
+```bash
+PYTHONPATH=. python scripts/bench_inkling2_router_ttnn.py --chip 0 \
+  --checkpoint /path/to/Inkling-2-Mini --layers 0 12 23 --m 1 4 32 128 256 --repeats 64
+```
+
 ## Mixed-runtime model validation
 
 Using Transformers 5.23.0, the NF12 matrices ran on P300c chip 0. The existing
