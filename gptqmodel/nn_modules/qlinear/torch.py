@@ -267,7 +267,19 @@ def _decode_248_weight(
 
     wide = decode_dtype != scales.dtype
     if wide:
-        zeros = zeros.to(decode_dtype)
+        # Round the product once. Casting the scale to a half-precision
+        # activation dtype (BF16 decoding FP16 scales) rounds the scale before
+        # the multiply; a fused/compiled decode keeps that multiply in FP32 and
+        # rounds only the result. Compute wide decodes in at least FP32 so the
+        # eager and compiled implementations agree bitwise (#5740).
+        work_dtype = (
+            decode_dtype
+            if decode_dtype in (torch.float32, torch.float64)
+            else torch.float32
+        )
+        zeros = zeros.to(work_dtype)
+    else:
+        work_dtype = decode_dtype
 
     weight = torch.bitwise_and(
         _right_shift_unpack(
@@ -281,14 +293,15 @@ def _decode_248_weight(
 
     if num_itr == 1:
         if wide:
-            return scales.to(decode_dtype)[g_idx_long] * (
-                weight[:in_features].to(decode_dtype) - zeros[g_idx_long]
-            )
+            return (
+                scales.to(work_dtype)[g_idx_long]
+                * (weight[:in_features].to(work_dtype) - zeros[g_idx_long])
+            ).to(decode_dtype)
         return scales[g_idx_long] * (weight[:in_features] - zeros[g_idx_long])
 
     num_dim = g_idx_long.shape[0] // num_itr
     out_dim = weight.shape[1] // num_itr
-    wide_scales = scales.to(decode_dtype) if wide else scales
+    wide_scales = scales.to(work_dtype) if wide else scales
     weights = []
     for i in range(num_itr):
         row_start = i * num_dim
@@ -301,8 +314,12 @@ def _decode_248_weight(
         zeros_i = zeros[:, col_start:col_end]
         g_idx_i = g_idx_long[row_start:row_end]
         if wide:
-            weight_i = weight_i.to(decode_dtype)
-        weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
+            weight_i = weight_i.to(work_dtype)
+            weights.append(
+                (scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i])).to(decode_dtype)
+            )
+        else:
+            weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
 
     return torch.cat(weights, dim=1)
 
