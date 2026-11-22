@@ -30,6 +30,15 @@ def _verify_compact(layer, weight):
         # Same padded input shape, with distinct executable output layouts.
         _same(layer.gather_device(resident, 1, direct=True).cpu(), expected)
 
+    repeat = torch.full((4, 8), 16, dtype=torch.long)
+    expected = _gather_oracle(weight, repeat)
+    rows = layer.embedding_to_host(repeat)
+    _same(rows, expected)
+    rows[0, 0, 0] = rows[0, 0, 0] + 1
+    _same(rows[0, 1:], expected[0, 1:])
+    repeat[0, 0] = 15
+    _same(layer.embedding_to_host(repeat), _gather_oracle(weight, repeat))
+
 
 def _measure(calls, repeats):
     for _, call in calls:

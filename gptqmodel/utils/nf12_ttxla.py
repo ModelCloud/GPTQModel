@@ -323,9 +323,19 @@ class TTXLANF12:
     def embedding_to_host(self, ids, padding_idx=None):
         """Gather for host consumers, with a compact one-row device transfer."""
         _, k = self.descriptor.logical_shape
-        if self.row_major and ids.numel() == 1 and k == self.descriptor.padded_shape[1] and k % 128 == 0:
-            resident = self.upload_ids(ids, padding_idx)
-            return self.gather_compact_device(resident).cpu().reshape(*ids.shape, k)
+        if self.row_major and k == self.descriptor.padded_shape[1] and k % 128 == 0:
+            count = ids.numel()
+            if count == 1:
+                resident = self.upload_ids(ids, padding_idx)
+                return self.gather_compact_device(resident).cpu().reshape(*ids.shape, k)
+            if (count == 32 and ids.device.type == "cpu" and not torch.compiler.is_compiling()
+                    and not isinstance(ids, FakeTensor)):
+                flat = ids.reshape(-1)
+                first = flat[:1]
+                if torch.equal(flat, first.expand_as(flat)):
+                    resident = self.upload_ids(first, padding_idx)
+                    row = self.gather_compact_device(resident).cpu().reshape(1, k)
+                    return row.expand(count, k).clone().reshape(*ids.shape, k)
         return self.embedding(ids, padding_idx).cpu()
 
     def upload_baseline(self, w):
