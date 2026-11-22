@@ -92,15 +92,39 @@ class NemotronHQModel(BaseQModel):
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
         tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
         if cls is NemotronHQModel and getattr(getattr(model, "config", None), "model_type", None) == "nemotron_h":
-            tree[-1]["mixer"] = tuple(dict.fromkeys((*tree[-1]["mixer"], "A_log:!", "D:!", "dt_bias:!")))
+            # The SSM state parameters are not modules, so they must not close the
+            # attention q/k/v subset. Appended to `mixer` they became its last
+            # entry; `_try_update_last_module` cannot resolve a Parameter, so
+            # the next projection (`o_proj`) fell back to the block norm and
+            # `_merge_shared_source_nodes` folded q/k/v and `o_proj` into one
+            # group. `o_proj` reads the attention output, not the norm, and that
+            # group changed the layer output by 8.1e-02. Declared as their own
+            # trailing subsets they keep their `:!` ownership without taking
+            # part in the projection ordering.
+            tree[-1]["mixer"] = tuple(
+                name for name in tree[-1]["mixer"]
+                if name not in {"A_log:!", "D:!", "dt_bias:!"}
+            )
+            for name in ("A_log", "D", "dt_bias"):
+                tree[-1][f"mixer.{name}"] = (f"{name}:!",)
             tree[-1]["mixer.norm"] = ("norm:!",)
         return tree
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
         if type(self) is NemotronHQModel:
-            # SSM recurrence/gating and routed/shared latent MoE need a joint
-            # replay objective before any affine fold can be qualified.
-            return []
+            # Only the MoE mixer is fold-free. Its norm feeds the shared expert
+            # and every routed expert, while the latent projections interpose a
+            # second input width; a single affine fold cannot compensate both
+            # branches. Measured on the native tiny layout: a shared-expert-only
+            # fold changed the layer output by 2.445e-02, and with
+            # `moe_latent_size` the emitted groups mix 32-wide and 16-wide
+            # consumers (and fold a down_proj into an unrelated latent
+            # projection). Mamba, full-attention and dense-MLP layers use the
+            # generic planner unchanged.
+            from ..ports.native.nemotron_h.modeling_nemotron_h import NemotronHMoE
+
+            if isinstance(getattr(module, "mixer", None), NemotronHMoE):
+                return []
         return super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
 
     def monkey_patch(self):

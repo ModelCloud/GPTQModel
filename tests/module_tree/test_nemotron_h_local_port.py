@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import _capture, _quantized_features, assert_awq_folds_neutral
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.nemotron_h import NemotronHQModel
@@ -93,11 +94,66 @@ def test_every_live_checkpoint_tensor_has_a_declared_exact_owner_and_policy(devi
             else:
                 assert "!" in spec.flags
         assert quantized == expected_by_type[layer.block_type]
-        assert actual.awq_get_modules_for_scaling(layer, {}, {}) == []
+        # Only the MoE mixer stays fold-free. The dense mixers keep their AWQ
+        # groups, which the live-activation regression below qualifies.
+        if layer.block_type == "moe":
+            assert actual.awq_get_modules_for_scaling(layer, {}, {}) == []
     assert not plan.find("mixer.experts.0.down_proj.undeclared")
     assert "nosrc" in plan.find("mixer.up_proj").flags
     assert "nosrc" in plan.find("mixer.experts.0.up_proj").flags
     assert NemotronHQModel.fusable is None
+
+
+@pytest.mark.parametrize("heads", [1, 4])
+@pytest.mark.parametrize("latent", [None, 16])
+def test_awq_folds_are_neutral_on_every_dense_mixer(heads, latent):
+    """Restore AWQ folds for mamba/attention/MLP, but never for the MoE mixer.
+
+    The blanket empty-group override also disabled the neutral dense folds.
+    The SSM state parameters are Parameters, not modules, so appending them to
+    the `mixer` declaration closed the q/k/v subset: the planner could not
+    resolve them as the next source, fell back to the block norm for `o_proj`
+    and merged it into the q/k/v group. That fold changed the layer output by
+    8.1e-02 because `o_proj` reads the attention output, not the norm. They
+    are declared as their own trailing subsets instead.
+
+    The MoE mixer stays plain: its shared-expert fold changed the layer output
+    by 2.445e-02, and with `moe_latent_size` the planner emits groups that mix
+    32-wide and 16-wide consumers and fold a `down_proj` into an unrelated
+    latent projection.
+    """
+
+    torch.manual_seed(2301)
+    model = NemotronHForCausalLM(
+        config(num_key_value_heads=heads, moe_latent_size=latent)
+    ).eval()
+    _convert_model_with_defuser(NemotronHQModel, model, cleanup_original=False)
+    actual = wrapper(model)
+    ids = torch.tensor([[1, 5, 8, 9, 12]])
+
+    def forward():
+        return model(input_ids=ids).logits
+
+    emitted = {}
+    for layer in model.model.layers:
+        if layer.block_type == "moe":
+            _, features = _capture(layer, forward)
+            features = _quantized_features(layer, features, actual.effective_module_tree)
+            assert actual.awq_get_modules_for_scaling(layer, features, {}) == []
+            emitted[layer.block_type] = []
+            continue
+        emitted[layer.block_type] = assert_awq_folds_neutral(
+            NemotronHQModel,
+            model,
+            layer,
+            forward,
+            tree=actual.effective_module_tree,
+        )
+
+    assert set(emitted) == {"linear_attention", "full_attention", "mlp", "moe"}
+    assert emitted["linear_attention"]
+    assert emitted["full_attention"]
+    assert emitted["mlp"]
 
 
 def test_effective_native_exclusions_do_not_mutate_independently_owned_sibling_trees():

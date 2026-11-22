@@ -14,16 +14,23 @@ Each test builds a real tiny CPU layer, asks the definition for its scaling
 groups, applies one non-unit non-uniform fold **without quantization**, and
 compares the full output with a fresh native baseline. A correct fold is
 neutral to about 1e-7; the parent commit changes these outputs by 1e-3..2e-1.
-Definitions explicitly using plain AWQ emit no fold groups; those cases check
-unchanged layer state and output here, with actual public packing/reload
-coverage in the owned port suites.
+The `bailing_moe` case builds the real port config: #4620 added an
+empty-group override keyed on `isinstance(config, BailingConfig)`, so a
+duck-typed fixture passed while every production model emitted no folds.
 """
 
 from types import SimpleNamespace
 
 import pytest
 import torch
-from awq_neutrality import TOLERANCE, _assert_neutral, _capture, _quantized_features, _wrapper  # noqa: F401
+from awq_neutrality import (  # noqa: F401
+    TOLERANCE,
+    _assert_neutral,
+    _capture,
+    _quantized_features,
+    _wrapper,
+    assert_awq_folds_neutral,
+)
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -425,75 +432,81 @@ def test_generic_planner_keeps_nemotron_h_mixer_norm_folds():
     assert ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj"] in norm_groups
 
 
-class _LingAttention(nn.Module):
-    """Ling 2.0 remote attention: `query_key_value` + `dense`, no MLA pair."""
-
-    def __init__(self, width):
-        super().__init__()
-        self.query_key_value = nn.Linear(width, 3 * width, bias=False)
-        self.dense = nn.Linear(width, width, bias=False)
-
-    def forward(self, hidden_states):
-        qkv = self.query_key_value(hidden_states)
-        # `dense` reads the attention output, not the normed hidden state.
-        return self.dense(qkv[..., : qkv.shape[-1] // 3] * qkv[..., qkv.shape[-1] // 3 : 2 * qkv.shape[-1] // 3])
+# ---------------------------------------------------------------------------
+# Ling 2.0/2.5 (`bailing_moe`): the fold plan must be built from the real
+# `BailingConfig`. #4620 keyed an empty-group override on
+# `isinstance(model.config, BailingConfig)`; the previous fixture used
+# `SimpleNamespace(model_type="bailing_moe")`, bypassed that guard and passed
+# while every production checkpoint silently fell back to plain quantization.
+# ---------------------------------------------------------------------------
 
 
-class _LingMLP(nn.Module):
-    def __init__(self, width):
-        super().__init__()
-        self.gate_proj = nn.Linear(width, 2 * width, bias=False)
-        self.up_proj = nn.Linear(width, 2 * width, bias=False)
-        self.down_proj = nn.Linear(2 * width, width, bias=False)
-
-    def forward(self, hidden_states):
-        return self.down_proj(self.up_proj(hidden_states) * self.gate_proj(hidden_states))
-
-
-class _LingLayer(nn.Module):
-    def __init__(self, width):
-        super().__init__()
-        self.input_layernorm = nn.LayerNorm(width)
-        self.attention = _LingAttention(width)
-        self.post_attention_layernorm = nn.LayerNorm(width)
-        self.mlp = _LingMLP(width)
-
-    def forward(self, hidden_states):
-        hidden_states = hidden_states + self.attention(self.input_layernorm(hidden_states))
-        return hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
+def _bailing_attention_inputs(layout):
+    """Exact `input_layernorm` fold targets for the two-layer tiny stack."""
+    if layout == "hybrid":
+        # Ling 2.5 alternates lightning attention (layer 0, qkv + sigmoid
+        # gate) with MLA (layer 1, low-rank q/kv inputs).
+        return [
+            ["attention.query_key_value", "attention.g_proj"],
+            ["attention.q_a_proj", "attention.kv_a_proj_with_mqa"],
+        ]
+    if layout == "mla":
+        return [["attention.q_a_proj", "attention.kv_a_proj_with_mqa"]] * 2
+    # `dense` and `legacy_gqa` both use `DenseAttention`.
+    return [["attention.query_key_value"]] * 2
 
 
-class _LingModel(nn.Module):
-    """Ling 2.0 (`bailing_moe`) layer built against the definition's real tree."""
+@pytest.mark.parametrize("layout", ["dense", "mla", "hybrid", "legacy_gqa"])
+def test_bailing_moe_awq_folds_are_neutral_on_production_config(layout):
+    from gptqmodel.models.definitions.bailing_moe import BailingMoeQModel
+    from gptqmodel.models.ports.bailing_moe.configuration_bailing import BailingConfig
+    from tests.test_bailing_moe_local_port import tiny_config
 
-    def __init__(self, width):
-        super().__init__()
-        self.config = SimpleNamespace(model_type="bailing_moe", num_experts=0)
-        self.model = nn.Module()
-        self.model.layers = nn.ModuleList([_LingLayer(width)])
-        self.model.norm = nn.LayerNorm(width)
-        self.lm_head = nn.Linear(width, width, bias=False)
+    torch.manual_seed(7)
+    model = BailingMoeQModel.loader.from_config(tiny_config(layout)).eval()
+    # The removed override was keyed on this exact type, so a duck-typed
+    # `SimpleNamespace(model_type="bailing_moe")` cannot reproduce the
+    # regression this test guards.
+    assert isinstance(model.config, BailingConfig)
 
-    def forward(self, hidden_states):
-        return self.lm_head(self.model.norm(self.model.layers[0](hidden_states)))
-
-
-def test_bailing_moe_input_norm_still_folds():
-    width = 8
-    model = _LingModel(width).eval()
-    definition = MODEL_MAP["bailing_moe"]
-    layer = model.model.layers[0]
-    hidden = torch.randn(2, 3, width)
+    ids = torch.randint(2, model.config.vocab_size, (1, 8))
 
     def forward():
-        return model(hidden)
+        return model(input_ids=ids, use_cache=False).logits
 
-    checked = _assert_neutral(definition, model, layer, forward)
+    emitted = []
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(BailingMoeQModel, model, layer, forward)
+        emitted.append({
+            (source, tuple(targets), tuple(consumers))
+            for source, targets, consumers in checked
+        })
+    assert len(emitted) == 2
 
-    norm_groups = [
-        targets for source, targets, _consumers in checked if source == "input_layernorm"
-    ]
-    assert norm_groups == [["attention.query_key_value"]], (
-        "the Ling 2.0 input norm must fold `attention.query_key_value` and only it; "
-        f"got {norm_groups}"
+    for layer_index, targets in enumerate(_bailing_attention_inputs(layout)):
+        assert ("input_layernorm", tuple(targets), ()) in emitted[layer_index], (
+            f"{layout}: input_layernorm did not fold {targets}; got {sorted(emitted[layer_index])}"
+        )
+
+    # `first_k_dense_replace=1`: layer 0 is the dense prefix, layer 1 is MoE.
+    assert ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj"), ()) in emitted[0]
+    assert ("mlp.up_proj", ("mlp.down_proj",), ()) in emitted[0]
+
+    # The MoE block folds the norm into the shared expert and every routed
+    # expert, and compensates the unquantized router that reads the same norm.
+    moe_targets = ("mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj") + tuple(
+        f"mlp.experts.{expert}.{suffix}"
+        for expert in range(4)
+        for suffix in ("gate_proj", "up_proj")
     )
+    assert ("post_attention_layernorm", moe_targets, ("mlp.gate",)) in emitted[1], (
+        f"{layout}: MoE norm group did not cover shared and routed experts; "
+        f"got {sorted(emitted[1])}"
+    )
+    assert ("mlp.shared_experts.up_proj", ("mlp.shared_experts.down_proj",), ()) in emitted[1]
+    for expert in range(4):
+        assert (
+            f"mlp.experts.{expert}.up_proj",
+            (f"mlp.experts.{expert}.down_proj",),
+            (),
+        ) in emitted[1]

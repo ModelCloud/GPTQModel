@@ -8,12 +8,15 @@ from pathlib import Path
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch.nn import functional as F
 from transformers.cache_utils import DynamicCache
 
 from gptqmodel.models.definitions.pangu_alpha import PanguAlphaQModel
+from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.pangu_alpha import GPTPanguConfig, GPTPanguForCausalLM
 from gptqmodel.models.ports.pangu_alpha.tokenization_pangu import GPTPanguTokenizer
+from gptqmodel.quantization.awq.quantize.scale import apply_scale
 from tests.port_assets import read_port_asset
 
 
@@ -454,3 +457,70 @@ def test_public_plain_awq_pack_infer_and_two_reloads(tmp_path, offload, dtype, l
         with torch.no_grad():
             torch.testing.assert_close(wrapper.model(ids).logits, logits, rtol=0, atol=0)
             assert wrapper.generate(ids, max_new_tokens=2, min_new_tokens=2).shape == (1, 6)
+
+
+def _pangu_awq_model():
+    """Real port model plus the effective tree production plans against."""
+
+    model = PanguAlphaQModel.loader.from_config(tiny_config()).eval()
+    _convert_model_with_defuser(PanguAlphaQModel, model, cleanup_original=False)
+    tree = PanguAlphaQModel._resolve_effective_module_tree(model, None)
+    ids = torch.tensor([[1, 3, 8, 5, 2, 7]])
+
+    def forward():
+        return model(input_ids=ids).logits
+
+    return model, tree, forward
+
+
+def test_awq_scale_groups_are_neutral_for_first_and_last_block():
+    """Every emitted PanGu fold preserves the model output; top-query q_proj is dropped.
+
+    ``GPTPanguModel.forward`` applies ``ln_f`` before the last block and feeds
+    its attention ``custom_query = wqe(position_ids)``, so the last block's
+    ``q_proj`` does not read ``ln_1``. The production definition removes it from
+    the ``ln_1`` group; folding it would scale the query while its input is
+    unchanged. ``ln_2 -> mlp.c_fc`` is a fold into the consumer's input and is
+    neutral; ``c_fc -> c_proj`` is suppressed by the tree's ``nosrc`` flag
+    (GELU is not positively homogeneous; see the negative test below).
+    """
+
+    model, tree, forward = _pangu_awq_model()
+    layers = model.transformer.h
+
+    checked = assert_awq_folds_neutral(PanguAlphaQModel, model, layers[0], forward, tree=tree)
+    assert checked == [
+        ("ln_1", ["attn.q_proj", "attn.k_proj", "attn.v_proj"], []),
+        ("attn.v_proj", ["attn.c_proj"], []),
+        ("ln_2", ["mlp.c_fc"], []),
+    ]
+
+    checked = assert_awq_folds_neutral(PanguAlphaQModel, model, layers[-1], forward, tree=tree)
+    assert checked == [
+        ("ln_1", ["attn.k_proj", "attn.v_proj"], []),
+        ("attn.v_proj", ["attn.c_proj"], []),
+        ("ln_2", ["mlp.c_fc"], []),
+    ]
+    assert all("attn.q_proj" not in targets for _, targets, _ in checked)
+    assert all(source != "mlp.c_fc" for source, _, _ in checked)
+
+
+def test_awq_c_fc_is_not_a_neutral_fold_source():
+    """Document the `nosrc` flag: folding `c_fc`'s output into `c_proj` is not neutral."""
+
+    model, _tree, forward = _pangu_awq_model()
+    layer = model.transformer.h[0]
+    snapshot = {name: value.clone() for name, value in layer.state_dict().items()}
+    try:
+        with torch.no_grad():
+            before = forward().clone()
+            width = layer.mlp.c_fc.weight.shape[0]
+            apply_scale(
+                layer,
+                [("mlp.c_fc", ["mlp.c_proj"], torch.linspace(0.55, 1.45, width), None)],
+            )
+            after = forward()
+    finally:
+        layer.load_state_dict(snapshot)
+    relative = float((after - before).norm() / before.norm())
+    assert relative > 1e-3, f"c_fc -> c_proj unexpectedly neutral: {relative:.3e}"

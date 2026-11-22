@@ -9,6 +9,7 @@ import torch
 from transformers import ProcessorMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
+from ...quantization.awq.utils.module import get_op_name
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
@@ -128,8 +129,43 @@ class Inkling2LoopQModel(BaseQModel):
     pre_lm_head_norm_module = "model.language_model.norm"
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        """Use plain quantization until looped attention and expert folds are qualified."""
-        return []
+        """Keep only the per-expert ``up_proj -> down_proj`` fold.
+
+        The generic planner follows module-tree order, which is not this layer's
+        data flow: ``q_proj``/``k_proj``/``v_proj`` read ``input_layernorm``
+        (through ``attention_input``) rather than the
+        ``post_attention_layernorm`` the tree places before them, and
+        ``o_proj.gate_proj`` reads the attention input rather than
+        ``o_proj.linear``'s output. Folding either generic group changes the
+        layer output (measured 8e-2..4e-1 relative), so both are dropped.
+
+        The routed activation multiplies ``up_proj``'s output into
+        ``down_proj``; the only intervening step is the bounded ``up``
+        softcap, whose saturation is negligible at the calibrated scale
+        (measured <4e-6 relative layer drift). Keep exactly one expert's
+        ``up_proj -> down_proj`` pair per group; every other projection falls
+        back to plain quantization.
+        """
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        prefix, suffix = "mlp.experts.", ".up_proj"
+        kept = []
+        for node in nodes:
+            prev_op = node.get("prev_op")
+            layers = node.get("layers") or []
+            if not isinstance(prev_op, torch.nn.Linear) or len(layers) != 1:
+                continue
+            target = layers[0]
+            if not isinstance(target, torch.nn.Linear):
+                continue
+            source_name = get_op_name(module, prev_op)
+            if not (source_name.startswith(prefix) and source_name.endswith(suffix)):
+                continue
+            expert_index = source_name[len(prefix):-len(suffix)]
+            if expert_index.isdigit() and get_op_name(module, target) == (
+                f"{prefix}{expert_index}.down_proj"
+            ):
+                kept.append(node)
+        return kept
 
     def pre_quantize(self, module, module_path=None):
         """Materialize a layer, then split its packed experts into quantizable leaves.

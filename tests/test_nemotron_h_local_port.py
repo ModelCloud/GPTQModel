@@ -344,7 +344,7 @@ def test_real_mamba_padding_and_future_tokens_cannot_affect_valid_prefix():
 
 @pytest.mark.parametrize("offload", [False, True])
 @pytest.mark.parametrize("layout", ["hybrid", "dense", "moe", "latent"])
-def test_public_plain_awq_packs_every_decoder_linear_and_reload_is_exact(tmp_path, offload, layout):
+def test_public_awq_packs_every_decoder_linear_and_reload_is_exact(tmp_path, offload, layout):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization import AWQConfig
@@ -357,8 +357,20 @@ def test_public_plain_awq_packs_every_decoder_linear_and_reload_is_exact(tmp_pat
     expected_linears = {name for name, module in source.named_modules()
                         if isinstance(module, torch.nn.Linear) and name.startswith("model.layers.")
                         and not name.endswith(".gate")}
+    # AWQ folds a dense mixer's block norm into its consumers, so those norms
+    # are intentionally no longer bit-identical to the source checkpoint.
+    # Every other non-quantized tensor must still be copied verbatim.
+    dense_layers = {
+        f"model.layers.{index}" for index, layer in enumerate(source.model.layers)
+        if layer.block_type != "moe"
+    }
+    fold_sources = {
+        name for name in source.state_dict()
+        if name.endswith(".norm.weight") and name.rsplit(".", 2)[0] in dense_layers
+    }
     dense = {name: value.clone() if "e_score_correction_bias" in name else value.half() for name, value in source.state_dict().items()
-             if not any(name.startswith(root + ".") for root in expected_linears)}
+             if not any(name.startswith(root + ".") for root in expected_linears)
+             and name not in fold_sources}
     qcfg = AWQConfig(bits=4, group_size=16, device="cpu", fallback=None, offload_to_disk=offload,
                      offload_to_disk_path=str(tmp_path / "offload"))
     loaded = GPTQModel.load(str(tmp_path / "source"), quantize_config=qcfg, backend=BACKEND.AWQ_TORCH,
@@ -377,12 +389,21 @@ def test_public_plain_awq_packs_every_decoder_linear_and_reload_is_exact(tmp_pat
         CalibrationConfig(dataset=samples, batch_size=1, min_length=1),
         backend=BACKEND.AWQ_TORCH,
     )
-    assert groups and all(group == [] for group in groups)
+    assert groups
+    # Dense mixers (mamba/attention/mlp) now search AWQ scales; only the MoE
+    # mixer is fold-free because a single affine fold cannot compensate both
+    # the shared and routed expert branches.
+    assert any(group for group in groups)
+    if "moe" in patterns[layout]:
+        assert any(group == [] for group in groups)
     packed = {name for name, module in loaded.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert packed == expected_linears
     state = {name: value.clone() for name, value in loaded.model.state_dict().items()}
     for name, value in dense.items():
         torch.testing.assert_close(state[name], value, atol=0, rtol=0)
+    for name in fold_sources:
+        assert state[name].dtype == torch.float16, name
+        assert torch.isfinite(state[name]).all(), name
     ids = torch.tensor([[1, 3, 8, 11, 9]])
     with torch.inference_mode():
         expected = loaded.model(ids).logits
