@@ -3,23 +3,24 @@
 # NF12 reference: AlpinDale and the nf12 contributors, Apache-2.0, https://github.com/dphnAI/nf12
 """Packed NF12 linear and embedding inference on MLX Metal."""
 
+import ctypes
+import sys
 from functools import lru_cache
+from platform import mac_ver
 
 import mlx.core as mx
 import mlx.nn as nn
 
 
 _THREADS = 256
-_SUPER_ATOM_BYTES = 1536
 _DECODE_SLICE_BYTES = 64 << 20
 
 # Adapted from the Apache-2.0 NF12 Metal linear and codec kernels at
-# https://github.com/dphnAI/nf12/tree/97c4101541a8d92d2b3d89c910c452cfa8efc9c9/csrc/metal
+# https://github.com/dphnAI/nf12/tree/58e151f536f35649098027376e3b159acb78a8fb/csrc/metal
 # GPT-QModel binds the packed checkpoint tensors directly, supports FP16 and
 # FP32 activations and bias, and compiles these shaders through MLX at runtime.
-_LINEAR_HEADER = """
-#include <metal_simdgroup_matrix>
-
+_DECODE_HEADER = """
+constant constexpr uint kSuperAtomRows = 16;
 constant constexpr uint kSuperAtomCols = 64;
 constant constexpr uint kSuperAtomBytes = 1536;
 constant constexpr uint kPlaneBytes = 512;
@@ -62,6 +63,20 @@ inline void decode_group(Group g, uint base_x4, device const uint4* escapes, thr
   }
 }
 
+// Stage a decoded 16 x 64 tile in BF16 pairs, with a stride of Ld elements.
+template <uint Ld>
+inline void stage_bf16_tile(threadgroup uint* tile, uint lane, const thread uint (&r)[4][4]) {
+  threadgroup uint* w0 = tile + (lane >> 2) * (Ld / 2) + (lane & 3u);
+  threadgroup uint* w1 = w0 + 8 * (Ld / 2);
+  #pragma unroll
+  for (uint j = 0; j < 4; ++j) {
+    w0[8 * j] = r[j][0];
+    w0[8 * j + 4] = r[j][2];
+    w1[8 * j] = r[j][1];
+    w1[8 * j + 4] = r[j][3];
+  }
+}
+
 struct NF12Source {
   device const uint4* packed;   // super-atoms, 96 uint4 each
   device const uint4* escapes;  // may be unused when the weight has none
@@ -79,6 +94,11 @@ struct NF12Source {
     decode_group(Group{m.w, l23.z, l23.w}, base_x4, escapes, r[3]);
   }
 };
+
+"""
+
+_LINEAR_HEADER = _DECODE_HEADER + """
+#include <metal_simdgroup_matrix>
 
 // Small M (GEMV-like). One simdgroup streams the super-atoms (nb, kb0..kb1) of
 // a 16-row block. Lane (g, t) accumulates rows g and g + 8 over its 16 columns
@@ -277,6 +297,90 @@ _MMA_SOURCE = _LINEAR_SETUP + """
 """
 
 
+_TENSOR_HEADER = _DECODE_HEADER + """
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+
+constant constexpr uint kTensorSimdgroups = 4;
+constant constexpr uint kTensorN = kSuperAtomRows;
+constant constexpr uint kTensorK = kSuperAtomCols;
+using Extents = metal::dextents<int, 2>;
+using Strides = metal::array<int, 2>;
+using WeightTile = metal::tensor<threadgroup bfloat, Extents, metal::tensor_inline>;
+
+template <uint BM, uint KS>
+constant constexpr uint kScratchWords = kTensorN * (KS > 1 && BM > kTensorK / 2 ? BM : kTensorK / 2);
+"""
+
+_TENSOR_SOURCE = """
+  const uint sg = simdgroup_index_in_threadgroup, lane = thread_index_in_simdgroup;
+  const NF12Source src{
+      reinterpret_cast<device const uint4*>(packed),
+      reinterpret_cast<device const uint4*>(escapes),
+      exp_base_x4(exp_base[0]),
+  };
+  threadgroup uint scratch[kTensorSimdgroups][kScratchWords<BM, KS>];
+  const uint n0 = (threadgroup_position_in_grid.x * (kTensorSimdgroups / KS) + sg / KS) * kTensorN;
+  // Move the last partial tile inside the bounds so its tensor loads stay
+  // full sized. This threadgroup only stores the rows assigned to it.
+  const uint first_row = threadgroup_position_in_grid.y * BM;
+  const uint m0 = min(first_row, uint(M) - BM);
+  const bool valid = n0 < N;
+  if constexpr (KS == 1) {
+    if (!valid) return;
+  }
+  const uint k = uint(K_BLOCKS) * kTensorK;
+  using Activation = metal::tensor<device T, Extents, metal::tensor_inline>;
+  Activation a(const_cast<device T*>(x) + ulong(m0) * K, Extents(k, BM),
+               Strides{1, int(K)});
+  WeightTile w(reinterpret_cast<threadgroup bfloat*>(scratch[sg]), Extents(kTensorK, kTensorN),
+               Strides{1, kTensorK});
+  auto w_tile = w.template slice<kTensorK, kTensorN>(0, 0);
+  using ActivationTile = decltype(a.template slice<kTensorK, BM>(0, 0));
+  constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
+      BM, kTensorN, kTensorK, false, true, true,
+      mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
+  auto acc = op.template get_destination_cooperative_tensor<ActivationTile, decltype(w_tile), float>();
+  #pragma unroll
+  for (ushort i = 0; i < acc.get_capacity(); ++i) acc[i] = 0.0f;
+
+  constexpr uint kb_per_split = (K_BLOCKS + KS - 1) / KS;
+  const uint kb0 = (sg % KS) * kb_per_split;
+  const uint kb1 = min(kb0 + kb_per_split, uint(K_BLOCKS));
+  if (valid) {
+    const ulong first_atom = ulong(n0 / kTensorN) * uint(K_BLOCKS);
+    for (uint kb = kb0; kb < kb1; ++kb) {
+      uint regs[4][4];
+      src.load(first_atom + kb, lane, regs);
+      stage_bf16_tile<kTensorK>(scratch[sg], lane, regs);
+      simdgroup_barrier(mem_flags::mem_threadgroup);
+      auto a_tile = a.template slice<kTensorK, BM>(kb * kTensorK, 0);
+      op.run(a_tile, w_tile, acc);
+      simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+  }
+
+  // Reuse the decoded tile for split-K partials and add them in split order.
+  if constexpr (KS > 1) {
+    #pragma unroll
+    for (ushort i = 0; i < acc.get_capacity(); ++i)
+      scratch[sg][lane * acc.get_capacity() + i] = as_type<uint>(acc[i]);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (!valid || sg % KS != 0) return;
+  }
+  #pragma unroll
+  for (ushort i = 0; i < acc.get_capacity(); ++i) {
+    const auto coord = acc.get_multidimensional_index(i);
+    const uint m = m0 + coord[1], n = n0 + coord[0];
+    if (m < first_row) continue;
+    float sum = acc[i];
+    #pragma unroll
+    for (uint split = 1; split < KS; ++split)
+      sum += as_type<float>(scratch[sg + split][lane * acc.get_capacity() + i]);
+    output[ulong(m) * N + n] = T(sum + float(bias[n]));
+  }
+"""
+
 @lru_cache(maxsize=2)
 def _linear_kernel(use_mma):
     return mx.fast.metal_kernel(
@@ -294,7 +398,7 @@ def _decode_kernel():
         name="gptqmodel_nf12_linear_decode",
         input_names=["packed", "escapes", "exp_base"],
         output_names=["weight"],
-        header=_LINEAR_HEADER,
+        header=_DECODE_HEADER,
         source="""
             const uint gid = thread_position_in_grid.x;
             const uint lane = gid % 32;
@@ -324,9 +428,68 @@ def _decode_kernel():
     )
 
 
+@lru_cache(maxsize=1)
+def _tensor_kernel():
+    return mx.fast.metal_kernel(
+        name="gptqmodel_nf12_tensor",
+        input_names=["x", "packed", "escapes", "exp_base", "bias"],
+        output_names=["output"],
+        header=_TENSOR_HEADER,
+        source=_TENSOR_SOURCE,
+        compile_options={"math_mode": "safe"},
+    )
+
+
+@lru_cache(maxsize=1)
+def _has_accelerated_tensorops():
+    if sys.platform != "darwin" or not mx.metal.is_available():
+        return False
+    if int(mac_ver()[0].split(".")[0]) < 27:
+        return False
+    metal = ctypes.CDLL("/System/Library/Frameworks/Metal.framework/Metal")
+    objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+    metal.MTLCreateSystemDefaultDevice.argtypes = ()
+    metal.MTLCreateSystemDefaultDevice.restype = ctypes.c_void_p
+    objc.sel_registerName.argtypes = (ctypes.c_char_p,)
+    objc.sel_registerName.restype = ctypes.c_void_p
+    objc.objc_msgSend.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long)
+    objc.objc_msgSend.restype = ctypes.c_bool
+    objc.objc_release.argtypes = (ctypes.c_void_p,)
+    objc.objc_release.restype = None
+    device = metal.MTLCreateSystemDefaultDevice()
+    if not device:
+        return False
+    try:
+        return objc.objc_msgSend(device, objc.sel_registerName(b"supportsFamily:"), 1010)  # Apple10
+    finally:
+        objc.objc_release(device)
+
+
+def _tensor_prefill(rows, n, k):
+    if not (16 <= rows <= 128 and 2048 <= k <= 16384):
+        return False
+    if n < 4096:
+        return n >= 512 and k <= 4096 and (rows in (16, 32, 64) or (n <= 1024 and rows > 64))
+    if n > 32768:
+        return rows == 16 or 32 <= rows <= 64
+    return True
+
+
+def _linear_route(rows, n, k, dtype):
+    narrow_router = n < 512 and 17 <= rows <= 128 and 2048 <= k <= 8192
+    # Metal and MLX can narrow FP32 matmul operands on Apple10. Router
+    # logits need the full mantissa, so use the register MMA tile here.
+    if dtype == mx.float32 and narrow_router:
+        return "simd"
+    if (dtype in (mx.bfloat16, mx.float16) and (narrow_router or _tensor_prefill(rows, n, k))
+            and _has_accelerated_tensorops()):
+        return "tensor"
+    return "simd" if rows <= 16 else "decode"
+
+
 def _linear_launch(rows, out_features, in_features):
     use_mma = rows > 4
-    tile_rows = 1 << (rows - 1).bit_length()
+    tile_rows = min(16, 1 << (rows - 1).bit_length())
     n_blocks = out_features // 16
     k_blocks = in_features // 64
 
@@ -341,38 +504,27 @@ def _linear_launch(rows, out_features, in_features):
     return use_mma, tile_rows, splits, blocks, grid_n, grid_m
 
 
-class MlxNF12Linear(nn.Module):
-    """Multiply activations by a packed NF12 weight on Metal."""
-
-    def __init__(
-        self,
-        *,
-        in_features,
-        out_features,
-        num_escapes=0,
-        threads=_THREADS,
-    ):
-        super().__init__()
-        in_features = int(in_features)
-        out_features = int(out_features)
-        if in_features % 64 or out_features % 16:
-            raise ValueError("NF12 MLX inference needs in_features % 64 and out_features % 16")
-        self.in_features = in_features
-        self.out_features = out_features
-        self.threads = int(threads)
-        self.packed = mx.zeros((out_features, in_features * 3 // 2), dtype=mx.uint8)
+class _NF12Projection(nn.Module):
+    def _init_packed_weight(self, in_features, out_features, num_escapes):
+        self.in_features = int(in_features)
+        self.out_features = int(out_features)
+        if self.in_features % 64 or self.out_features % 16:
+            raise ValueError("NF12 MLX needs in_features % 64 and out_features % 16")
+        self.packed = mx.zeros((self.out_features, self.in_features * 3 // 2), dtype=mx.uint8)
         self.escapes = mx.zeros((max(int(num_escapes), 1), 8), dtype=mx.int16)
         self.exp_base = mx.zeros((1,), dtype=mx.uint8)
-        # A zero bias keeps one fused kernel for biased and unbiased layers.
-        self.bias = mx.zeros((out_features,), dtype=mx.float32)
-        self.freeze()
+
+    def _weight_inputs(self, packed):
+        # Empty MLX arrays bind as constants, so use a device buffer in the
+        # unreachable escape branch of weights that have no escapes.
+        return packed, self.escapes if self.escapes.size else packed, self.exp_base
 
     def _decode(self, start=0, end=None, *, dtype=mx.bfloat16):
         """Decode a 16-row-aligned slice for the current matmul."""
         end = self.out_features if end is None else end
         rows = end - start
         return _decode_kernel()(
-            inputs=[self.packed[start:end], self.escapes, self.exp_base],
+            inputs=self._weight_inputs(self.packed[start:end]),
             template=[
                 ("T", dtype), ("K", self.in_features), ("K_BLOCKS", self.in_features // 64),
                 ("WIDE", dtype == mx.float32),
@@ -383,14 +535,14 @@ class MlxNF12Linear(nn.Module):
             output_dtypes=[dtype],
         )[0]
 
-    def _fused_linear(self, x, rows):
+    def _fused_linear(self, x, rows, bias):
         use_mma, tile_rows, splits, blocks, grid_n, grid_m = _linear_launch(
             rows, self.out_features, self.in_features,
         )
         k_blocks = self.in_features // 64
         threads = 32 * splits * blocks
         return _linear_kernel(use_mma)(
-            inputs=[x, self.packed, self.escapes, self.exp_base, self.bias],
+            inputs=[x, *self._weight_inputs(self.packed), bias],
             template=[
                 ("T", x.dtype), ("K", self.in_features), ("N", self.out_features), ("M", rows),
                 ("K_BLOCKS", k_blocks), ("KB_PER_SPLIT", (k_blocks + splits - 1) // splits),
@@ -402,10 +554,27 @@ class MlxNF12Linear(nn.Module):
             output_dtypes=[x.dtype],
         )[0]
 
-    def _decode_matmul(self, x):
+    def _tensor_prefill(self, x, rows, bias):
+        n, k = self.out_features, self.in_features
+        tile_m = 16 if rows < 32 else 32 if rows < 64 else 64
+        splits = 4 if k > 4096 else 1
+        tile_n = 64 // splits
+        return _tensor_kernel()(
+            inputs=[x, *self._weight_inputs(self.packed), bias],
+            template=[
+                ("M", rows), ("N", n), ("K", k), ("K_BLOCKS", k // 64),
+                ("BM", tile_m), ("KS", splits), ("T", x.dtype),
+            ],
+            grid=(128 * ((n + tile_n - 1) // tile_n), (rows + tile_m - 1) // tile_m, 1),
+            threadgroup=(128, 1, 1),
+            output_shapes=[(rows, n)],
+            output_dtypes=[x.dtype],
+        )[0]
+
+    def _decode_matmul(self, x, bias):
         # BF16 addmm reduces and adds a BF16 bias in FP32 before rounding.
         # Use FP32 operands when either input or bias needs wider precision.
-        compute = mx.bfloat16 if x.dtype == self.bias.dtype == mx.bfloat16 else mx.float32
+        compute = mx.bfloat16 if x.dtype == bias.dtype == mx.bfloat16 else mx.float32
         element_bytes = 2 if compute == mx.bfloat16 else 4
         slice_rows = max(16, _DECODE_SLICE_BYTES // (self.in_features * element_bytes * 16) * 16)
         activations = x.astype(compute)
@@ -413,10 +582,10 @@ class MlxNF12Linear(nn.Module):
         for start in range(0, self.out_features, slice_rows):
             end = min(start + slice_rows, self.out_features)
             weight = self._decode(start, end, dtype=compute)
-            parts.append(mx.addmm(self.bias[start:end], activations, weight.T).astype(x.dtype))
+            parts.append(mx.addmm(bias[start:end], activations, weight.T).astype(x.dtype))
         return parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=-1)
 
-    def __call__(self, x):
+    def _project(self, x, bias):
         if x.shape[-1] != self.in_features:
             raise ValueError(f"expected input width {self.in_features}, got {x.shape[-1]}")
         output_shape = (*x.shape[:-1], self.out_features)
@@ -426,91 +595,73 @@ class MlxNF12Linear(nn.Module):
             raise ValueError(f"Unsupported NF12 activation dtype: {x.dtype}")
         rows = x.size // self.in_features
         x = x.reshape(rows, self.in_features)
-        out = self._fused_linear(x, rows) if rows <= 16 else self._decode_matmul(x)
+        route = _linear_route(rows, self.out_features, self.in_features, x.dtype)
+        if route == "tensor":
+            out = self._tensor_prefill(x, rows, bias)
+        elif route == "simd":
+            out = self._fused_linear(x, rows, bias)
+        else:
+            out = self._decode_matmul(x, bias)
         return out.reshape(output_shape)
 
 
-_EMBED_SOURCE = """            uint physical = thread_position_in_threadgroup.x;
-            uint id_chunk = threadgroup_position_in_grid.y;
-            uint slot = physical >> 4;
-            uint lane = physical >> 2;
-            uint j = physical & 3u;
-            uint t = lane & 3u;
-            uint id_pos = id_chunk * 8u + slot;
-            if (id_pos >= NUM_IDS) {{
-                return;
-            }}
-            uint k_j = 16u * j + 2u * t;
-            uint out_base = id_pos * K + k_j;
-            int row = ids[id_pos];
-            if (row < 0 || uint(row) >= N) {{
-                // Vocab-parallel shards hand out-of-range IDs and expect +0.0.
-                for (uint step = 0; step < SA_ROW; ++step) {{
-                    uint base = out_base + step * 64u;
-                    *(device uint *)(output + base) = 0u;
-                    *(device uint *)(output + base + 8u) = 0u;
-                }}
-                return;
-            }}
-            uint block = uint(row) >> 4;
-            uint upper = (uint(row) >> 3) & 1u;
-            uint wlane = 4u * (uint(row) & 7u) + t;
-            uint meta_word = block * SA_BYTES + wlane * 4u + j;
-            uint low_word = block * SA_BYTES + 128u + (j >> 1) * 128u + wlane * 4u + (j & 1u) * 2u;
-            // The selected row takes the lower or upper half of the paired
-            // group, so both the meta byte and the low byte move by 8 bits.
-            uint meta_shift = upper * 8u;
-            uint byte_shift = upper * 16u;
-            uint escape_base = upper * 2u;
-            uint exp_base_value = uint(exp_base[0]);
-            const device uint *base = (const device uint *)packed;
-            for (uint step = 0; step < SA_ROW; ++step) {{
-                const device uint *sa = base + step * 384u;
-                uint meta = sa[meta_word];
-                uint low0 = sa[low_word];
-                uint low1 = sa[low_word + 1u];
-                uint m_lo = (meta >> meta_shift) & 0xFFu;
-                uint m_hi = (meta >> (16u + meta_shift)) & 0xFFu;
-                uint l0 = (low0 >> byte_shift) & 0xFFu;
-                uint l1 = (low0 >> (byte_shift + 8u)) & 0xFFu;
-                uint l2 = (low1 >> byte_shift) & 0xFFu;
-                uint l3 = (low1 >> (byte_shift + 8u)) & 0xFFu;
-                uint v0, v1, v2, v3;
-                if (meta == 0u) {{
-                    v0 = uint(uint16_t(escapes[low0 * 8u + escape_base])) << 16u;
-                    v1 = uint(uint16_t(escapes[low0 * 8u + escape_base + 1u])) << 16u;
-                    v2 = uint(uint16_t(escapes[low0 * 8u + escape_base + 4u])) << 16u;
-                    v3 = uint(uint16_t(escapes[low0 * 8u + escape_base + 5u])) << 16u;
-                }} else {{
-                    uint hi_lo = m_lo & 0x87u;
-                    uint hi_lo1 = ((m_lo << 1u) & 0x80u) | ((m_lo >> 3u) & 0x07u);
-                    uint hi_hi = m_hi & 0x87u;
-                    uint hi_hi1 = ((m_hi << 1u) & 0x80u) | ((m_hi >> 3u) & 0x07u);
-                    v0 = (((hi_lo + exp_base_value) << 24u) | (l0 << 16u));
-                    v1 = (((hi_lo1 + exp_base_value) << 24u) | (l1 << 16u));
-                    v2 = (((hi_hi + exp_base_value) << 24u) | (l2 << 16u));
-                    v3 = (((hi_hi1 + exp_base_value) << 24u) | (l3 << 16u));
-                }}
-                // The BF16 word is the top half of the assembled float bits.
-                uint out = out_base + step * 64u;
-                *(device uint *)(output + out) = (v0 >> 16u) | ((v1 >> 16u) << 16u);
-                *(device uint *)(output + out + 8u) = (v2 >> 16u) | ((v3 >> 16u) << 16u);
-            }}
+class MlxNF12Linear(_NF12Projection):
+    """Multiply activations by a packed NF12 weight on Metal."""
+
+    def __init__(self, *, in_features, out_features, num_escapes=0, threads=_THREADS):
+        super().__init__()
+        self._init_packed_weight(in_features, out_features, num_escapes)
+        self.threads = int(threads)
+        self.bias = mx.zeros((self.out_features,), dtype=mx.float32)
+        self.freeze()
+
+    def __call__(self, x):
+        return self._project(x, self.bias)
+
+
+_EMBED_SOURCE = """
+    const uint gx = thread_position_in_grid.x, gy = thread_position_in_grid.y;
+    const uint kb0 = PARALLEL ? gx >> 4 : 0;
+    const uint id_pos = PARALLEL ? gy : 8 * gy + (gx >> 4);
+    if (id_pos >= COUNT || kb0 >= K / 64) return;
+    const uint j = (gx >> 2) & 3u, t = gx & 3u;
+    const long id = long(ids[id_pos]);
+    const bool valid = id >= 0 && ulong(id) < N;
+    const uint row = uint(id & 15), lane = 4 * (row & 7u) + t;
+    const ulong row_base = (ulong(id) >> 4) * (K / 64) * (kSuperAtomBytes / 4) + 4 * lane;
+    const uint lo = (1 + (j >> 1)) * (kPlaneBytes / 4) + 2 * (j & 1u);
+    const uint h = row >> 3;
+    const uint base_x4 = exp_base_x4(exp_base[0]);
+    const device uint* words = reinterpret_cast<device const uint*>(packed);
+    const device uint4* table = reinterpret_cast<device const uint4*>(escapes);
+    device uint* dst = reinterpret_cast<device uint*>(output) +
+        (ulong(id_pos) * K + 16 * j + 2 * t) / 2;
+    const uint kb1 = PARALLEL ? kb0 + 1u : K / 64;
+    for (uint kb = kb0; kb < kb1; ++kb) {
+        uint r[4] = {};
+        if (valid) {
+            const ulong base = row_base + ulong(kb) * (kSuperAtomBytes / 4);
+            decode_group(Group{words[base + j], words[base + lo], words[base + lo + 1]}, base_x4, table, r);
+        }
+        dst[32 * kb] = r[h];
+        dst[32 * kb + 4] = r[2 + h];
+    }
 """
 
 
 @lru_cache(maxsize=1)
 def _embed_kernel():
-    """Packed NF12 embedding lookup: 8 IDs per threadgroup, 4 values per thread."""
+    """Packed NF12 lookup with independent tiles along the row and ID axes."""
     return mx.fast.metal_kernel(
         name="gptqmodel_nf12_embedding",
         input_names=["ids", "packed", "escapes", "exp_base"],
         output_names=["output"],
+        header=_DECODE_HEADER,
         source=_EMBED_SOURCE,
     )
 
 
-class MlxNF12Embedding(nn.Module):
+class MlxNF12Embedding(_NF12Projection):
     """Gather BF16 rows from an NF12 table without materializing it dense.
 
     ``ids`` of any shape select rows of a ``[num_embeddings, embedding_dim]``
@@ -519,32 +670,33 @@ class MlxNF12Embedding(nn.Module):
 
     def __init__(self, *, num_embeddings, embedding_dim, num_escapes=0):
         super().__init__()
-        num_embeddings = int(num_embeddings)
-        embedding_dim = int(embedding_dim)
-        if embedding_dim % 64 or num_embeddings % 16:
-            raise ValueError("NF12 MLX embedding needs dim % 64 and num_embeddings % 16")
-        self.num_embeddings = num_embeddings
-        self.embedding_dim = embedding_dim
-        self.packed = mx.zeros((num_embeddings, embedding_dim * 3 // 2), dtype=mx.uint8)
-        self.escapes = mx.zeros((max(int(num_escapes), 1), 8), dtype=mx.int16)
-        self.exp_base = mx.zeros((1,), dtype=mx.uint8)
+        self._init_packed_weight(embedding_dim, num_embeddings, num_escapes)
+        self.num_embeddings = self.out_features
+        self.embedding_dim = self.in_features
         self.freeze()
+
+    def as_linear(self, x):
+        """Project through the packed table for a tied output head."""
+        return self._project(x, mx.zeros((self.num_embeddings,), dtype=mx.bfloat16))
 
     def __call__(self, ids):
         flat = ids.reshape(-1)
         count = flat.size
         if count == 0:
             return mx.zeros((*ids.shape, self.embedding_dim), dtype=mx.bfloat16)
+        columns = self.embedding_dim // 4
+        # Width tiles distribute long rows across the GPU for large prefills.
+        parallel = count >= 1024 and self.embedding_dim >= 4096
+        threads = 128
+        grid = ((columns + threads - 1) // threads * threads, count, 1) if parallel else (
+            threads, (count + 7) // 8, 1,
+        )
+        index_type = mx.int64 if flat.dtype in (mx.int64, mx.uint32, mx.uint64) else mx.int32
         output = _embed_kernel()(
-            inputs=[flat.astype(mx.int32), self.packed, self.escapes, self.exp_base],
-            template=[
-                ("K", self.embedding_dim), ("N", self.num_embeddings),
-                ("SA_ROW", self.embedding_dim // 64),
-                ("SA_BYTES", self.embedding_dim * 6),
-                ("NUM_IDS", count),
-            ],
-            grid=(128, (count + 7) // 8, 1),
-            threadgroup=(128, 1, 1),
+            inputs=[flat.astype(index_type), *self._weight_inputs(self.packed)],
+            template=[("K", self.embedding_dim), ("N", self.num_embeddings), ("COUNT", count), ("PARALLEL", parallel)],
+            grid=grid,
+            threadgroup=(threads, 1, 1),
             output_shapes=[(count, self.embedding_dim)],
             output_dtypes=[mx.bfloat16],
         )[0]

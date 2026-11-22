@@ -204,41 +204,48 @@ activation rounding, so W4A4 output tracks the Torch MACaQ kernel within the
 
 ### NF12 linear dispatch
 
-`MlxNF12Linear` runs the NF12 Metal linear kernels through
-`mx.fast.metal_kernel`. MLX compiles the shaders at runtime using the macOS Metal
-framework. Building the GPT-QModel wheel and running NF12 linear require no
-Xcode installation or offline Metal compiler. The port uses the packed
-checkpoint, escape table, and exponent base directly. Its starting point is
-[the NF12 Metal linear implementation](https://github.com/dphnAI/nf12/tree/97c4101541a8d92d2b3d89c910c452cfa8efc9c9/csrc/metal).
+`MlxNF12Linear` runs packed inference through `mx.fast.metal_kernel`, with
+runtime Metal compilation and no Xcode dependency. It uses the packed
+checkpoint, escapes and exponent base directly. The TensorOps kernel and
+shape thresholds come from [NF12 PR #13](https://github.com/dphnAI/nf12/pull/13).
 
-| Rows | Previous dispatch | Current dispatch |
+| Workload | Previous route | Current route |
 | --- | --- | --- |
-| 1–4 | Fused row-specialized dot product | Vectorized super-atom loads and SIMD dot products |
-| 5–16 | Dot product by default, with a separate threadgroup-memory tile at 16 rows for wide outputs | Register-resident SIMD matrix multiply |
-| 17 or more | Full BF16 decode followed by matmul and bias | Vectorized decode in output slices with the bias fused into MLX `addmm` |
+| 1–4 tokens | SIMD dot products | SIMD dot products |
+| 5–16 tokens | Register MMA | TensorOps for eligible 16-token calls, otherwise register MMA |
+| 17 or more tokens | Sliced decode and MLX matmul | TensorOps for eligible FP16 and BF16 prefill, register MMA for narrow FP32 routers, otherwise sliced decode and MLX matmul |
+| Embedding lookup | One group processes up to eight IDs with serial row traversal | Shared packed decode, with width tiles for at least 1024 IDs and 4096 columns |
+| Tied output head | No packed projection on the embedding module | `MlxNF12Embedding.as_linear` uses the same packed table and dispatch as linear |
 
 ```mermaid
 flowchart TD
-    A["MlxNF12Linear.__call__"] --> B{"Input shape and dtype"}
+    A["MlxNF12Linear.__call__ or MlxNF12Embedding.as_linear"] --> B{"_project validates input"}
     B -->|Invalid| E[Raise ValueError]
     B -->|Empty| Z[Return empty output]
-    B -->|Valid| M{"Flattened token rows"}
-    M -->|1–4| G["_fused_linear · SIMD dot products"]
-    M -->|5–16| T["_fused_linear · register MMA"]
-    M -->|17 or more| D["_decode_matmul · sliced decode and addmm"]
-    G --> O[Return activation dtype and leading dimensions]
-    T --> O
+    B -->|Valid| C{"_linear_route · shape, dtype and Metal capability"}
+    C -->|Eligible prefill| T["_tensor_prefill"]
+    C -->|Short calls or narrow FP32 routers| G["_fused_linear"]
+    C -->|Other larger calls| D["_decode_matmul"]
+    T --> O[Restore activation dtype and leading dimensions]
+    G --> O
     D --> O
 ```
 
-A SIMD group reads all four atoms of a 16-by-64 weight tile from three
-coalesced packed planes. Small batches split K inside a threadgroup when
-there are too few output blocks to fill the GPU. The kernel sums those
-partials in FP32 and applies bias before the output cast. Larger batches use
-temporary decoded slices, targeting at most 64 MiB per slice. Matching BF16
-activations and bias use BF16 `addmm` with FP32 accumulation. FP16 or FP32
-activations and wider bias use FP32 operands. The packed weight is the only
-weight representation retained by the layer.
+TensorOps requires macOS 27 or later and Metal's Apple10 GPU family. Each
+SIMD group decodes a BF16 tile and feeds it directly to the matrix units.
+The kernel preserves FP16 or BF16 activation storage, reduces split-K in FP32
+in a fixed order and applies bias before rounding. Narrow router projections
+with fewer than 512 outputs are eligible at 17–128 tokens and 2048–8192 inputs.
+FP32 router prefill uses register MMA to preserve the activation mantissa.
+The decode fallback uses temporary
+slices of up to 64 MiB per slice, using BF16 math for matching BF16 activations
+and bias and FP32 operands otherwise.
+
+Embedding lookup uses the same bit-exact NF12 decoder, reading only the groups
+for each indexed row and returning +0 for out-of-range IDs. The inline Metal
+TensorOps library provides matrix multiply and convolution. Indexed lookup
+uses one custom compute kernel, including escape handling. Both paths retain
+only the packed table and its metadata.
 
 MACaQ folds its diagonal pre-scale and 32-wide block Hadamard into one Metal
 dispatch instead of a multiply plus a batched matmul, which removes an
