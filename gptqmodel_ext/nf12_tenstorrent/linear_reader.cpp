@@ -70,6 +70,7 @@ inline void decode_tile(
             // Two adjacent output features are four canonical lanes apart.
             // Write both in one word, in the [K, N] BF16 face order.
             for (uint32_t col_pair = 0; col_pair < 4; ++col_pair) {
+#pragma GCC unroll 4
                 for (uint32_t row_pair = 0; row_pair < 4; ++row_pair) {
                     const uint32_t lane = col_pair * 8 + row_pair;
                     const auto a = load_group(atom, first_face + f, lane);
