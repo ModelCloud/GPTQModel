@@ -7,6 +7,9 @@ import json
 from types import SimpleNamespace
 
 import pytest
+
+
+pytest.importorskip("torchvision")
 import torch
 from test_lfm3_vl_local_port import FIXTURES, media_inputs, native_model, tiny_processor
 from transformers import AutoModelForImageTextToText, Lfm3VlConfig

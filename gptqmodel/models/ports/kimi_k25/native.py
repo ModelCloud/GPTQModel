@@ -23,7 +23,17 @@ from ..native.kimi_k25.modeling_kimi_k25 import (
     Kimi_K25PreTrainedModel,
 )
 from ..native.kimi_k25.modeling_kimi_k25 import Kimi_K25VisionModel as NativeKimiVisionModel
-from .processing_kimi_k25 import Kimi_K25Processor
+
+
+def __getattr__(name):
+    # The processor imports the torchvision image processor. Keep config/model
+    # importable in a base install by resolving the processor only on access.
+    if name == "Kimi_K25Processor":
+        from .processing_kimi_k25 import Kimi_K25Processor
+
+        globals()[name] = Kimi_K25Processor
+        return Kimi_K25Processor
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class Kimi_K25VisionModel(NativeKimiVisionModel):

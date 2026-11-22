@@ -140,3 +140,46 @@ def test_every_vendored_definition_resolves_its_package_model_class():
         if resolved is None or not resolved.__module__.startswith("gptqmodel."):
             unresolved[model_type] = resolved
     assert not unresolved, unresolved
+
+
+_VISION_FREE_IMPORT_SCRIPT = r"""
+import sys
+
+for name in ("torchvision", "timm", "einops"):
+    sys.modules[name] = None
+import transformers.utils.import_utils as import_utils
+
+_is_package_available = import_utils._is_package_available
+import_utils._is_package_available = (
+    lambda name, *args, **kwargs: (False, None)
+    if str(name).split(".")[0] in {"torchvision", "timm", "einops"}
+    else _is_package_available(name, *args, **kwargs)
+)
+
+from importlib import import_module
+
+from gptqmodel.models.auto import MODEL_MAP
+
+for model_type in ("kimi_k25", "lfm3_vl", "unlimited_ocr", "nemotronh_nano_omni_reasoning_v3"):
+    loader = MODEL_MAP[model_type].loader
+    for path in (loader.config_class, loader.model_class, loader.tokenizer_class):
+        if path is None:
+            continue
+        module, _, name = path.rpartition(".")
+        getattr(import_module(module), name)
+print("RESULT ok")
+"""
+
+
+def test_config_model_and_tokenizer_import_without_vision_extras():
+    """A sibling processor import must not make config/model/tokenizer imports fail."""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _VISION_FREE_IMPORT_SCRIPT],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stdout[-2000:] + completed.stderr[-4000:]
+    assert "RESULT ok" in completed.stdout

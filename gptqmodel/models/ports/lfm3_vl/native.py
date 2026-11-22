@@ -10,8 +10,6 @@ vendored Qwen media processors.
 from ..native.lfm3_vl.configuration_lfm3_vl import Lfm3VlConfig
 from ..native.lfm3_vl.modeling_lfm3_vl import Lfm3VlForConditionalGeneration
 from ..native.lfm3_vl.processing_lfm3_vl import Lfm3VlProcessor
-from ..native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
-from ..native.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
 
 
 class Lfm3VlNativeProcessor(Lfm3VlProcessor):
@@ -25,6 +23,11 @@ class Lfm3VlNativeProcessor(Lfm3VlProcessor):
 
     @classmethod
     def from_pretrained(cls, model_id_or_path, *, tokenizer=None, config=None, **kwargs):
+        # These media processors import torchvision. Resolve them only when the
+        # processor is actually built so config/model loading stays dependency-light.
+        from ..native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
+        from ..native.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
+
         del config
         kwargs.pop("trust_remote_code", None)
         kwargs.pop("code_revision", None)

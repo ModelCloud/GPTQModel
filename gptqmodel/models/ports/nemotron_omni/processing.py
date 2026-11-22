@@ -4,16 +4,9 @@
 
 from transformers import TokenizersBackend
 
-from ..native.nemotron_h_omni.image_processing_nemotron_h_omni import (
-    NemotronH_Omni_Reasoning_V3ImageProcessor,
-)
 from ..native.nemotron_h_omni.processing_nemotron_h_omni import (
     NemotronH_Omni_Reasoning_V3Processor as NativeProcessor,
 )
-from ..native.nemotron_h_omni.video_processing_nemotron_h_omni import (
-    NemotronH_Omni_Reasoning_V3VideoProcessor,
-)
-from ..native.parakeet.feature_extraction_parakeet import ParakeetFeatureExtractor
 from .configuration import NemotronOmniConfig
 
 
@@ -23,6 +16,16 @@ NemotronOmniTokenizer = TokenizersBackend
 class NemotronOmniProcessor(NativeProcessor):
     @classmethod
     def from_pretrained(cls, path, *, config=None, tokenizer=None, **kwargs):
+        # The media components import torchvision. Keep the tokenizer/config
+        # importable in a base install by resolving them only for processor loads.
+        from ..native.nemotron_h_omni.image_processing_nemotron_h_omni import (
+            NemotronH_Omni_Reasoning_V3ImageProcessor,
+        )
+        from ..native.nemotron_h_omni.video_processing_nemotron_h_omni import (
+            NemotronH_Omni_Reasoning_V3VideoProcessor,
+        )
+        from ..native.parakeet.feature_extraction_parakeet import ParakeetFeatureExtractor
+
         for name in ("trust_remote_code", "code_revision", "_from_auto"):
             kwargs.pop(name, None)
         config = config or NemotronOmniConfig.from_pretrained(path, **kwargs)

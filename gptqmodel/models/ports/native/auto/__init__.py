@@ -54,6 +54,12 @@ class _LazyMapping(dict):
     def __contains__(self, model_type):
         return model_type in self._table
 
+    def __len__(self):
+        return len(self._table)
+
+    def __iter__(self):
+        return iter(self._table)
+
     def __getitem__(self, model_type):
         return _resolve(self._table, model_type, self._kind)
 
@@ -62,6 +68,12 @@ class _LazyMapping(dict):
 
     def keys(self):
         return self._table.keys()
+
+    def items(self):
+        return self._table.items()
+
+    def values(self):
+        return self._table.values()
 
 
 CONFIG_MAPPING = _LazyMapping(_registry.CONFIG, "config")
@@ -118,15 +130,50 @@ for _name, _module in _registry.TOKENIZER_CLASSES.items():
     _CLASS_INDEX.setdefault(_name, (_module, _name))
 
 
+def _vendored_pil_entry(name):
+    """Return the on-disk PIL sibling entry for a vendored image-processor name.
+
+    ``IMAGE_PROCESSOR`` only indexes the torchvision entry; the PIL module lives
+    next to it (``image_processing_<family>`` -> ``image_processing_pil_<family>``).
+    Deriving the entry here keeps ``XImageProcessorPil`` resolvable on demand
+    instead of requiring every PIL class name in ``_CLASS_INDEX`` up front.
+    """
+
+    if not name.endswith("Pil"):
+        return None
+    entry = _CLASS_INDEX.get(name.removesuffix("Pil"))
+    if entry is None:
+        return None
+    module, _ = entry
+    package, _, leaf = module.rpartition(".")
+    if "image_processing_" not in leaf or "image_processing_pil_" in leaf:
+        return None
+    sibling = f"{package}.{leaf.replace('image_processing_', 'image_processing_pil_', 1)}"
+    return sibling, name
+
+
 def _by_name(name):
     """Resolve a class name to a vendored class or a Transformers framework class.
 
     Model-family classes from ``transformers.models`` are never returned.
     """
 
-    entry = _CLASS_INDEX.get(name)
+    entry = _CLASS_INDEX.get(name) or _vendored_pil_entry(name)
     if entry is not None:
-        return getattr(import_module(entry[0]), entry[1])
+        try:
+            return getattr(import_module(entry[0]), entry[1])
+        except ImportError:
+            # The module may be vendored while an optional backend (for example
+            # torchvision) is not installed. Leave it unresolved so the caller
+            # can fall back to the sibling backend instead of failing the load.
+            return None
+        except NameError:
+            # Optional-backend modules can also fail while evaluating backend
+            # annotations (for example ``tvF.InterpolationMode`` without
+            # torchvision). Treat the class as unavailable for the same reason.
+            if "processing" not in entry[0]:
+                raise
+            return None
     import transformers
 
     # Consult the lazy export table first: ``getattr`` on a model-family name
@@ -135,7 +182,10 @@ def _by_name(name):
     submodule = getattr(transformers, "_class_to_module", {}).get(name)
     if not isinstance(submodule, str) or submodule == "models" or submodule.startswith("models."):
         return None
-    value = getattr(transformers, name, None)
+    try:
+        value = getattr(transformers, name, None)
+    except ImportError:
+        return None
     module = getattr(value, "__module__", "")
     if isinstance(value, type) and module.startswith("transformers.") and not module.startswith("transformers.models."):
         return value
@@ -424,7 +474,7 @@ def _image_processor_by_name(name, backend):
         for candidate in (module, f"{package}.{leaf.replace('image_processing_', 'image_processing_pil_', 1)}"):
             try:
                 pil_class = getattr(import_module(candidate), base + "Pil", None)
-            except ModuleNotFoundError:
+            except ImportError:
                 pil_class = None
             if pil_class is not None:
                 break
@@ -478,6 +528,15 @@ def _resolve_backend(backend, use_fast):
     return backend
 
 
+def _image_processor_from_table(table, model_type, backend):
+    """Resolve a vendored image processor for the requested backend."""
+
+    entry = table.get(model_type)
+    if entry is None:
+        return None
+    return _image_processor_by_name(entry[1], _resolve_backend(backend, None))
+
+
 class NativeProcessor:
     """Assemble the vendored processor from vendored sub-processors."""
 
@@ -495,11 +554,19 @@ class NativeProcessor:
             return sub_class
         table, kind = _SUB_PROCESSOR_TABLES[attribute]
         if model_type in table:
+            if attribute == "image_processor":
+                found = _image_processor_from_table(table, model_type, backend)
+                if isinstance(found, type):
+                    return found
             return _resolve(table, model_type, kind)
         declared = getattr(processor_class, f"{attribute}_class", None)
         sub_class = _by_name(declared) if isinstance(declared, str) else None
         if sub_class is not None:
             return sub_class
+        if attribute == "image_processor":
+            found = _image_processor_from_table(table, model_type, backend)
+            if isinstance(found, type):
+                return found
         return _resolve(table, model_type, kind)
 
     @classmethod
