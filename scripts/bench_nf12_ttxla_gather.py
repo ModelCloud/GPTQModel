@@ -29,6 +29,8 @@ def _verify_compact(layer, weight):
         _same(layer.gather_compact_device(resident, direct=True).cpu().reshape(1, k), expected)
         # Same padded input shape, with distinct executable output layouts.
         _same(layer.gather_device(resident, 1, direct=True).cpu(), expected)
+        _same(layer.embedding_to_host(ids), expected)
+    _same(layer.embedding_to_host(torch.tensor([n - 1]), padding_idx=-1), torch.zeros((1, k), dtype=weight.dtype))
 
     repeat = torch.full((4, 8), 16, dtype=torch.long)
     expected = _gather_oracle(weight, repeat)

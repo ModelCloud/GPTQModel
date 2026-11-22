@@ -320,20 +320,35 @@ class TTXLANF12:
             return torch.empty((*ids.shape, k), dtype=torch.bfloat16, device=self.device)
         return self.gather_device(resident, ids.numel()).reshape(*ids.shape, k)
 
+    def _upload_compact_id(self, ids, padding_idx):
+        if ids.device.type != "cpu" or type(ids) is not torch.Tensor or torch.compiler.is_compiling():
+            return self.upload_ids(ids, padding_idx)
+        if ids.dtype not in (torch.int32, torch.int64):
+            raise TypeError("NF12 embedding expects signed int32 or int64 IDs")
+        n = self.descriptor.logical_shape[0]
+        value = ids.item()
+        valid = 0 <= value < n
+        if padding_idx is not None:
+            if not -n <= padding_idx < n:
+                raise ValueError("padding_idx is outside the NF12 embedding table")
+            valid = valid and value != padding_idx % n
+        padded_id = torch.tensor([[value if valid else -1] + [-1] * 31], dtype=torch.int32, device="cpu")
+        return padded_id.to(self.device)
+
     def embedding_to_host(self, ids, padding_idx=None):
         """Gather for host consumers, with a compact one-row device transfer."""
         _, k = self.descriptor.logical_shape
         if self.row_major and k == self.descriptor.padded_shape[1] and k % 128 == 0:
             count = ids.numel()
             if count == 1:
-                resident = self.upload_ids(ids, padding_idx)
+                resident = self._upload_compact_id(ids, padding_idx)
                 return self.gather_compact_device(resident).cpu().reshape(*ids.shape, k)
             if (count == 32 and ids.device.type == "cpu" and not torch.compiler.is_compiling()
                     and not isinstance(ids, FakeTensor)):
                 flat = ids.reshape(-1)
                 first = flat[:1]
                 if torch.equal(flat, first.expand_as(flat)):
-                    resident = self.upload_ids(first, padding_idx)
+                    resident = self._upload_compact_id(first, padding_idx)
                     row = self.gather_compact_device(resident).cpu().reshape(1, k)
                     return row.expand(count, k).clone().reshape(*ids.shape, k)
         return self.embedding(ids, padding_idx).cpu()
