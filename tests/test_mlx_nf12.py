@@ -305,8 +305,10 @@ def test_nf12_fp32_router_preserves_mantissa_bits():
     from gptqmodel.utils import nf12_codec
 
     weight = torch.ones((128, 2048), dtype=torch.bfloat16)
+    weight[-1, -1] = 2**20
     packed, escapes, exp_base = nf12_codec.encode(weight)
-    layer = MlxNF12Linear(in_features=2048, out_features=128)
+    assert len(escapes) > 0
+    layer = MlxNF12Linear(in_features=2048, out_features=128, num_escapes=len(escapes))
     layer.packed, layer.escapes = mx.array(packed.numpy()), mx.array(escapes.numpy())
     layer.exp_base = mx.array([exp_base], dtype=mx.uint8)
     x = torch.zeros((32, 2048), dtype=torch.float32)
