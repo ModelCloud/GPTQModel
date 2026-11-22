@@ -196,6 +196,9 @@ class Inkling2LoopQModel(BaseQModel):
                     raise RuntimeError(
                         f"Inkling2Loop expert {index} has no gate/up/down projections after defusion."
                     )
+            # Defuser's generic forward applies routing after the down projection.
+            # Bind the model's routed forward on this instance to preserve FP32 routing.
+            experts.forward = experts._forward_routed
 
     module_tree = [
         "model",
