@@ -29,7 +29,7 @@ def _tiled_words(words):
 
 
 def _cb(index, data_format, page_size, count=1):
-    return dict(buffer_index=index, data_format=data_format, page_size=page_size, total_size=count * page_size)
+    return {"buffer_index": index, "data_format": data_format, "page_size": page_size, "total_size": count * page_size}
 
 
 def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, arg_roles, **_unused):
@@ -88,13 +88,13 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
             f"constexpr unsigned int nf12_core_count = {grid_x * grid_y};\n"
             f"constexpr unsigned int nf12_config[] = {{{', '.join(map(str, config))}}};\n"
         )
-        sources.append(dict(thread_type=thread, cpp_source=prelude + kernel_source(name),
-                            tensor_indices=indices, kernel_config=kernel_config))
-    return json.dumps(dict(
-        format_version=_ARTIFACT_VERSION, kernels=sources, cb_configs=cbs, num_tensors=4,
-        core_range={"start": [0, 0], "end": [grid_x - 1, grid_y - 1]},
-        num_pipe_sync_semaphores=0, num_pipe_global_semaphores=0, pipe_sram_scratch_bytes=0,
-    )).encode()
+        sources.append({"thread_type": thread, "cpp_source": prelude + kernel_source(name),
+                            "tensor_indices": indices, "kernel_config": kernel_config})
+    return json.dumps({
+        "format_version": _ARTIFACT_VERSION, "kernels": sources, "cb_configs": cbs, "num_tensors": 4,
+        "core_range": {"start": [0, 0], "end": [grid_x - 1, grid_y - 1]},
+        "num_pipe_sync_semaphores": 0, "num_pipe_global_semaphores": 0, "pipe_sram_scratch_bytes": 0,
+    }).encode()
 
 
 @lru_cache(maxsize=1)

@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import torch
 
-from .nf12_tenstorrent import kernel_source, normalize_ids, verify_nf12, round_up
+from .nf12_tenstorrent import kernel_source, normalize_ids, round_up, verify_nf12
 from .ttnn_runtime import import_ttnn
+
 
 _GATHER_SCRATCH = 1536 + 64 + 128 + 16 * 64
 _LINEAR_SCRATCH = 1536 + 64 * 64

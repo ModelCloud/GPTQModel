@@ -12,7 +12,7 @@ from pathlib import Path
 
 import torch
 
-from gptqmodel_nf12.api import NF12Weight, validate_escape_indices
+from gptqmodel_nf12.api import ESCAPES_KEY, EXP_BASE_KEY, PACKED_KEY, NF12Weight, validate_escape_indices
 
 from .nf12_codec import MAX_EXP_BASE, encode, escape_counts_all_bases
 
@@ -67,6 +67,22 @@ def verify_nf12(descriptor: NF12Descriptor, weight: NF12Weight) -> None:
         raise ValueError(f"NF12 descriptor mismatch for {descriptor.tensor_name}")
     for rows in weight.packed.split(512):
         validate_escape_indices(rows, weight.escapes)
+
+
+def read_nf12(path, descriptor: NF12Descriptor) -> NF12Weight:
+    """Read the canonical safetensors triplet bound to this descriptor."""
+    from safetensors import safe_open
+
+    prefix = descriptor.tensor_name + "."
+    with safe_open(path, framework="pt", device="cpu") as tensors:
+        packed = tensors.get_tensor(prefix + PACKED_KEY)
+        escapes = tensors.get_tensor(prefix + ESCAPES_KEY)
+        base = tensors.get_tensor(prefix + EXP_BASE_KEY)
+    if base.dtype != torch.uint8 or tuple(base.shape) != (1,):
+        raise ValueError("NF12 exponent base must be uint8 [1]")
+    weight = NF12Weight(packed, escapes, int(base.item()))
+    verify_nf12(descriptor, weight)
+    return weight
 
 
 def prepare_nf12(source: torch.Tensor, tensor_name: str, *, exp_base: int | None = None):

@@ -225,13 +225,12 @@ class Inkling2LoopVisionEmbeddings(nn.Module):
             blocks.reshape(-1, self.patch_embedding.in_features)
         )
 
-        table = self.position_embedding.weight
         position_embeddings = []
         for grid_h, grid_w in grids:
             indices, weights = _bilinear_taps(grid_h, grid_w, self.grid_size)
             indices = indices.to(pixel_values.device)
             weights = weights.to(pixel_values.device)
-            position_embeddings.append((table[indices] * weights[:, :, None]).sum(1))
+            position_embeddings.append((self.position_embedding(indices) * weights[:, :, None]).sum(1))
         patch_embeddings = patch_embeddings + torch.cat(position_embeddings).to(
             patch_embeddings.dtype
         )
@@ -307,7 +306,11 @@ class Inkling2LoopVisionModel(PreTrainedModel):
             image_ids, patches_per_image
         )
 
-        pixel_values = pixel_values.to(self.embeddings.patch_embedding.weight.dtype)
+        patch_projection = self.embeddings.patch_embedding
+        patch_dtype = getattr(patch_projection, "weight_dtype", None)
+        if patch_dtype is None:
+            patch_dtype = patch_projection.weight.dtype
+        pixel_values = pixel_values.to(patch_dtype)
         hidden_states = self.embeddings(pixel_values, grids, patch_index, total_tokens)
         hidden_states = self.pre_layernorm(hidden_states)
 
