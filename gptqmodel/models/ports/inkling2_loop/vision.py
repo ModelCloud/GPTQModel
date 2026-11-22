@@ -17,6 +17,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import initialization as init
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
@@ -52,12 +53,13 @@ class Inkling2LoopVisionRotary(nn.Module):
 
     def __init__(self, config: Inkling2LoopVisionConfig):
         super().__init__()
-        # Keep the config so the loader can rebuild this module's non-persistent
-        # ``inv_freq`` buffer (the checkpoint does not store it).
         self.config = config
-        spatial_dim = config.head_dim // 2
-        inv_freq = 1.0 / (config.rope_theta ** (torch.arange(0, spatial_dim, 2).float() / spatial_dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("inv_freq", self._compute_inv_freq(), persistent=False)
+
+    def _compute_inv_freq(self, device=None):
+        spatial_dim = self.config.head_dim // 2
+        exponents = torch.arange(0, spatial_dim, 2, dtype=torch.float32, device=device) / spatial_dim
+        return 1.0 / (self.config.rope_theta ** exponents)
 
     def forward(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # position_ids: (tokens, 2) holding the (row, column) of every token
@@ -223,13 +225,12 @@ class Inkling2LoopVisionEmbeddings(nn.Module):
             blocks.reshape(-1, self.patch_embedding.in_features)
         )
 
-        table = self.position_embedding.weight
         position_embeddings = []
         for grid_h, grid_w in grids:
             indices, weights = _bilinear_taps(grid_h, grid_w, self.grid_size, merge)
             indices = indices.to(pixel_values.device)
             weights = weights.to(pixel_values.device)
-            position_embeddings.append((table[indices] * weights[:, :, None]).sum(1))
+            position_embeddings.append((self.position_embedding(indices) * weights[:, :, None]).sum(1))
         patch_embeddings = patch_embeddings + torch.cat(position_embeddings).to(
             patch_embeddings.dtype
         )
@@ -268,6 +269,12 @@ class Inkling2LoopVisionModel(PreTrainedModel):
     main_input_name = "pixel_values"
     _no_split_modules = ["Inkling2LoopVisionLayer"]
 
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        if isinstance(module, Inkling2LoopVisionRotary):
+            # Checkpoint loading materializes non-persistent meta buffers as empty tensors.
+            init.copy_(module.inv_freq, module._compute_inv_freq(module.inv_freq.device))
+
     def __init__(self, config: Inkling2LoopVisionConfig):
         super().__init__(config)
         self.embeddings = Inkling2LoopVisionEmbeddings(config)
@@ -305,7 +312,11 @@ class Inkling2LoopVisionModel(PreTrainedModel):
             image_ids, patches_per_image
         )
 
-        pixel_values = pixel_values.to(self.embeddings.patch_embedding.weight.dtype)
+        patch_projection = self.embeddings.patch_embedding
+        patch_dtype = getattr(patch_projection, "weight_dtype", None)
+        if patch_dtype is None:
+            patch_dtype = patch_projection.weight.dtype
+        pixel_values = pixel_values.to(patch_dtype)
         hidden_states = self.embeddings(pixel_values, grids, patch_index, total_tokens)
         hidden_states = self.pre_layernorm(hidden_states)
 

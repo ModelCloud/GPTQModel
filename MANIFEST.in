@@ -19,6 +19,7 @@ include gptqmodel_ext/nf12/docs/SPEC.md
 include gptqmodel_nf12/README.md
 # NF12 HIP port (RDNA4). Sources only; the extension is always JIT-built.
 recursive-include gptqmodel_ext/nf12_hip *.cuh *.hip *.cpp README.md
+recursive-include gptqmodel_ext/nf12_tenstorrent *.h *.cpp
 recursive-include gptqmodel_ext/tt_blockfloat_hip *.h *.hip *.cpp *.py README.md
 exclude gptqmodel_ext/tt_blockfloat_hip/tt_blockfloat_hip_selftest.cpp
 # ttbfp CPU kernels: standalone ctypes library built by its own Makefile.

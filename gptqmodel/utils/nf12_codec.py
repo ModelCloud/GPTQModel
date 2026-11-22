@@ -235,6 +235,64 @@ def decode(
     return from_groups(values, n, k).contiguous().view(torch.bfloat16)
 
 
+def rowmajor_pack_cpu(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert CPU canonical NF12 to the CUDA/HIP embedding-only row-major ABI.
+
+    Each 64-column block has 32 meta bytes followed by 64 low bytes. Split
+    canonical escapes retain indexes ``2*i + row_half``. Collision records
+    follow in canonical tile, lane, atom, and row-half order, as in
+    ``gptqmodel_ext/nf12/csrc/common/rowmajor_pack.cuh``.
+    """
+    if packed.dtype != torch.uint8 or packed.ndim != 2 or packed.device.type != "cpu":
+        raise TypeError("CPU row-major NF12 expects canonical uint8 [N, 3K/2]")
+    if escapes.dtype != torch.int16 or escapes.ndim != 2 or escapes.shape[1] != 8 or escapes.device.type != "cpu":
+        raise TypeError("CPU row-major NF12 expects canonical int16 [E, 8] escapes")
+    if not 0 <= exp_base <= MAX_EXP_BASE:
+        raise ValueError(f"exp_base must be in [0, {MAX_EXP_BASE}], got {exp_base}")
+    n, width = packed.shape
+    k = width * 2 // 3
+    check_shape(n, k)
+    if width != k * 3 // 2:
+        raise ValueError("Canonical NF12 row width does not match K")
+
+    k_blocks = k // 64
+    result = torch.empty_like(packed, memory_format=torch.contiguous_format)
+    split = escapes.reshape(-1, 2, 2, 2).transpose(1, 2).reshape(-1, 4)
+    parts = [split]
+    offset = len(split)
+    for start in range(0, n, 512):
+        slab = packed[start : start + 512]
+        blocks = slab.reshape(-1, k_blocks, 3, 512)
+        meta = blocks[:, :, 0].reshape(-1, k_blocks, 32, 4, 4)
+        low = blocks[:, :, 1:].reshape(-1, k_blocks, 2, 32, 2, 8).permute(0, 1, 3, 2, 4, 5)
+        low = low.reshape(-1, k_blocks, 32, 4, 8)
+        selected = meta.unflatten(-1, (2, 2)).transpose(-2, -1)
+        row_lows = low.unflatten(-1, (2, 2, 2)).transpose(-3, -2).flatten(-2).contiguous()
+        row_words = row_lows.view(torch.int32).squeeze(-1)
+
+        escaped = (meta == 0).all(-1)
+        collision = (selected == 0).all(-1) & ~escaped.unsqueeze(-1)
+        collision_values = row_lows[collision].to(torch.int16) | (exp_base << 8)
+        end = offset + len(collision_values)
+        if end > 2**32:
+            raise ValueError("Row-major NF12 escape index exceeds uint32 capacity")
+        old_ids = low[..., :4].contiguous().view(torch.int32).squeeze(-1)[escaped].to(torch.int64) & 0xffffffff
+        if len(old_ids) and int(old_ids.max()) >= len(escapes):
+            raise ValueError("Canonical NF12 escape index out of range")
+        row_words[escaped] = (old_ids[:, None] * 2 + torch.arange(2)).to(torch.int32)
+        row_words[collision] = torch.arange(offset, end, dtype=torch.int64).to(torch.int32)
+        parts.append(collision_values)
+        offset = end
+
+        # [super-row, K block, lane=4*row+group, atom, row-half, metadata/low bytes]
+        # -> [logical row, K block, group=4*atom+group, metadata/low bytes]
+        order = (0, 5, 2, 1, 4, 3, 6)
+        metas = selected.unflatten(2, (8, 4)).permute(order).reshape(len(slab), k_blocks, 32)
+        lows = row_lows.unflatten(2, (8, 4)).permute(order).reshape(len(slab), k_blocks, 64)
+        result[start : start + len(slab)].copy_(torch.cat((metas, lows), -1).reshape(len(slab), width))
+    return result, torch.cat(parts)
+
+
 def pack_bf16t(w: torch.Tensor) -> torch.Tensor:
     """Return the uncompressed BF16-tiled twin layout as uint8 ``[N, 2K]``."""
 
@@ -300,6 +358,7 @@ __all__ = [
     "group_bytes",
     "encode",
     "decode",
+    "rowmajor_pack_cpu",
     "pack_bf16t",
     "unpack_bf16t",
     "linear",

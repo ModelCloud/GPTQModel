@@ -8,6 +8,21 @@ from gptqmodel.models.ports.inkling2_loop.configuration import Inkling2LoopVisio
 from gptqmodel.models.ports.inkling2_loop.vision import Inkling2LoopVisionModel
 
 
+def test_inkling2_vision_rotary_survives_checkpoint_load(tmp_path):
+    config = Inkling2LoopVisionConfig(
+        hidden_size=16, num_attention_heads=2, num_hidden_layers=1, patch_size=2,
+        posemb_grid_size=4, projection_hidden_dim=24, text_hidden_size=32, rope_theta=100.0,
+    )
+    tower = Inkling2LoopVisionModel(config)
+    tower.save_pretrained(tmp_path)
+    loaded = Inkling2LoopVisionModel.from_pretrained(tmp_path, dtype=torch.bfloat16)
+
+    angles = torch.tensor([[0.0] * 8, [5, 5, 0.5, 0.5, 2, 2, 0.2, 0.2]])
+    cos, sin = loaded.rotary(torch.tensor([[0, 0], [2, 5]]))
+    torch.testing.assert_close(cos, angles.cos(), atol=0, rtol=0)
+    torch.testing.assert_close(sin, angles.sin(), atol=0, rtol=0)
+
+
 @torch.no_grad()
 def test_packed_inkling2_vision_attention_preserves_token_and_head_axes():
     config = Inkling2LoopVisionConfig(

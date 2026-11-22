@@ -71,6 +71,31 @@ def _route_inputs(config, dtype=torch.float32):
     return hidden, top_k_index, top_k_weights
 
 
+@pytest.mark.parametrize("m,k,num_experts", [(0, 8, 128), (3, 0, 128), (4, 8, 3), (97, 8, 128)])
+def test_cpu_expert_routes_match_dense_mask_order(m, k, num_experts):
+    generator = torch.Generator().manual_seed(92)
+    selected = torch.randint(num_experts, (m, k), generator=generator)
+    if m and k:
+        selected[0, 1] = selected[0, 0]
+    weights = torch.randn(m, k, generator=generator)
+    hidden = torch.randn(m, 32, generator=generator)
+    mask = nn.functional.one_hot(selected, num_classes=num_experts).permute(2, 1, 0)
+    groups = tuple(E._route(hidden, selected, weights, num_experts))
+    active = mask.flatten(1).any(1).nonzero().flatten().tolist()
+    assert [expert for expert, _, _ in groups] == active
+    for expert, tokens, slots in groups:
+        expected_slots, expected_tokens = torch.where(mask[expert])
+        assert torch.equal(tokens, expected_tokens)
+        assert torch.equal(slots, expected_slots)
+        assert torch.equal(weights[tokens, slots], weights[expected_tokens, expected_slots])
+
+
+@pytest.mark.parametrize("invalid,message", [(-1, "non-negative"), (128, "smaller")])
+def test_cpu_expert_routes_reject_invalid_ids(invalid, message):
+    with pytest.raises(RuntimeError, match=message):
+        tuple(E._route(torch.zeros(1, 32), torch.tensor([[invalid]]), torch.ones(1, 1), 128))
+
+
 @pytest.mark.parametrize("fmt", ("nvfp4", "mxfp8"))
 def test_released_expert_gate_up_rows_follow_checkpoint_pair_order(fmt):
     config = _text_config(n_routed_experts=1, experts_formats=[fmt], intermediate_size=32, moe_intermediate_size=32)
