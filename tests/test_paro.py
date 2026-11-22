@@ -3535,6 +3535,7 @@ def test_paro_processor_group_capture_uses_pristine_module_and_clean_inputs_for_
             force_serial,
             preserve_module_devices,
             apply_moe_config,
+            consume_inputs,
         ):
             del (
                 processor,
@@ -3554,6 +3555,7 @@ def test_paro_processor_group_capture_uses_pristine_module_and_clean_inputs_for_
                 force_serial,
                 preserve_module_devices,
                 apply_moe_config,
+                consume_inputs,
             )
             outputs = []
             for batch_inputs, batch_kwargs in zip(layer_inputs, layer_input_kwargs):
