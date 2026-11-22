@@ -294,7 +294,13 @@ def _capture(
             if picked_rows:
                 picked = torch.cat(picked_rows, dim=0).unsqueeze(0)
                 captures.positions += int(picked.shape[1])
-                captures.logits.append(picked.detach().cpu().to(torch.float16))
+                # Keep the dtype the model returned. Narrowing to FP16 here
+                # rounded distinct FP32 logits together - hiding a top-token
+                # flip - and turned finite BF16 logits above 65504 into
+                # infinities, so a model compared with itself reported NaN.
+                # The metrics promote to FP32 when they compute, which keeps
+                # the capture lossless without widening the stored sample.
+                captures.logits.append(picked.detach().cpu())
     return captures
 
 

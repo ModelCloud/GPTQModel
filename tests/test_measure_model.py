@@ -32,6 +32,7 @@ from gptqmodel.measure import (
     TOPKConfig,
 )
 from gptqmodel.measure.runner import measure_models
+from gptqmodel.models.base import BaseQModel
 
 
 VOCAB = 128
@@ -104,6 +105,74 @@ def test_identity_is_exact_through_the_model_api(tiny_model):
     assert report.values["PPL"] == pytest.approx(report.reference["PPL"], rel=1e-6)
     assert report.overall is None  # no grades configured
     assert report.passed is None
+
+
+class _ConstantLogits(torch.nn.Module):
+    """Constant logits, independent of the tokens: a hand-written oracle."""
+
+    def __init__(self, logits, dtype=torch.float32):
+        super().__init__()
+        values = logits if torch.is_tensor(logits) else torch.tensor(logits)
+        self.register_buffer("values", values.to(dtype))
+
+    def forward(self, input_ids, attention_mask):
+        return self.values.expand(*input_ids.shape, self.values.numel())
+
+
+class _MeasureHost:
+    """Borrow BaseQModel.measure() without loading a checkpoint."""
+
+    measure = BaseQModel.measure
+    _measurement_reference = BaseQModel._measurement_reference
+
+
+def _measure_fixed_logits(candidate, reference):
+    host = _MeasureHost()
+    host.model = candidate
+    return host.measure(MeasureConfig(
+        metrics=(KLDConfig(), RMSEConfig(), TOPKConfig(k=(1,))),
+        dataset=[[0, 0]],
+        reference=reference,
+    )).values
+
+
+def _fp64_kl(reference_logits, candidate_logits):
+    """Independent KL oracle: FP64 log-softmax of the supplied logits."""
+
+    reference = torch.log_softmax(torch.tensor(reference_logits, dtype=torch.float64), dim=-1)
+    candidate = torch.log_softmax(torch.tensor(candidate_logits, dtype=torch.float64), dim=-1)
+    return float((reference.exp() * (reference - candidate)).sum())
+
+
+def test_fp32_top_token_flip_is_visible_through_the_model_api():
+    reference_logits = [16.0, 16.0 + 1 / 256]
+    candidate_logits = [16.0 + 1 / 256, 16.0]
+
+    values = _measure_fixed_logits(
+        _ConstantLogits(candidate_logits), _ConstantLogits(reference_logits)
+    )
+
+    # Both logits narrow to 16 in FP16, which hid the flip entirely.
+    assert values["TOP_K"][1] == 0.0
+    assert values["RMSE"] == pytest.approx(1 / 256, rel=1e-6)
+    assert values["KLD"] == pytest.approx(
+        _fp64_kl(reference_logits, candidate_logits), rel=1e-5
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_finite_identity_above_the_fp16_range_is_exact_through_the_model_api(dtype):
+    logits = torch.tensor([65536.0, 0.0], dtype=dtype)
+    assert torch.isfinite(logits).all()  # finite input, not an overflow fixture
+
+    values = _measure_fixed_logits(
+        _ConstantLogits(logits, dtype=dtype), _ConstantLogits(logits, dtype=dtype)
+    )
+
+    # FP16 capture made 65536 infinite, so identity reported NaN.
+    assert values["KLD"] == 0.0
+    assert values["RMSE"] == 0.0
+    assert values["TOP_K"][1] == 1.0
 
 
 def test_all_four_metrics_share_one_forward_per_batch(tiny_model):
