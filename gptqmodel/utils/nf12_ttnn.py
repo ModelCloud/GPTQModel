@@ -7,12 +7,18 @@ from __future__ import annotations
 
 import torch
 
-from .nf12_tenstorrent import kernel_source, normalize_ids, round_up, verify_nf12
+from .nf12_tenstorrent import (
+    LINEAR_PACKED_BUFFER_DEPTH,
+    LINEAR_PACKED_SCRATCH_BYTES,
+    kernel_source,
+    normalize_ids,
+    round_up,
+    verify_nf12,
+)
 from .ttnn_runtime import import_ttnn
 
 
 _GATHER_SCRATCH = 1536 + 64 + 128 + 16 * 64
-_LINEAR_SCRATCH = 1536 + 64 * 64 + 256 * 4
 
 
 def _cores(ttnn, device, tasks):
@@ -194,14 +200,15 @@ class TTNNNF12:
             ttnn, "linear_writer", ttnn.WriterConfigDescriptor(), cores, assignments,
             (n_tiles, m_tiles, page), (output,), lambda start, end: [output.buffer_address(), start, end],
         )
-        program = ttnn.ProgramDescriptor(
-            kernels=[reader, compute, writer], semaphores=[], cbs=[
-                _cb(ttnn, cores, 0, ttnn.bfloat16, 2048, 2),
-                _cb(ttnn, cores, 1, ttnn.bfloat16, 2048, 2 * m_block),
-                _cb(ttnn, cores, 16, output_dtype, page, 2),
-                _cb(ttnn, cores, 24, ttnn.uint32, _LINEAR_SCRATCH),
-            ],
-        )
+        depth = 2 if dense else LINEAR_PACKED_BUFFER_DEPTH
+        cbs = [
+            _cb(ttnn, cores, 0, ttnn.bfloat16, 2048, depth),
+            _cb(ttnn, cores, 1, ttnn.bfloat16, 2048, depth * m_block),
+            _cb(ttnn, cores, 16, output_dtype, page, 2),
+        ]
+        if not dense:
+            cbs.append(_cb(ttnn, cores, 24, ttnn.uint32, LINEAR_PACKED_SCRATCH_BYTES))
+        program = ttnn.ProgramDescriptor(kernels=[reader, compute, writer], semaphores=[], cbs=cbs)
         result = ttnn.generic_op([*readers, output], program)
         if bias is not None:
             result = ttnn.add(result, bias, dtype=ttnn.bfloat16)

@@ -42,66 +42,80 @@ inline void store_group_pairs(volatile uint32_t* output, const GroupPairs& a, co
     store_rows(output + 68, a.pair3, b.pair3);
 }
 
-template <typename Packed, typename Escapes>
-inline void decode_tile(
-    uint32_t nt, uint32_t kt, uint32_t dst, uint32_t scratch,
-    uint32_t n_atoms, const uint32_t* exponent, const Packed& packed, const Escapes& escapes) {
-    constexpr uint32_t k_tiles = NF12_CONFIG(1);
-    auto* tile = reinterpret_cast<volatile uint32_t*>(dst);
-    const auto* atom = reinterpret_cast<volatile const uint32_t*>(scratch);
-    const uint32_t first_face = 2 * (kt % 2);
-    const uint32_t escape_addr = scratch + 1536;
-    for (uint32_t nh = 0; nh < 2; ++nh) {
-        const uint32_t nb = nt * 2 + nh;
-        if (nb >= n_atoms) {
-            for (uint32_t i = 0; i < 128; ++i) {
-                tile[nh * 128 + i] = 0;
-                tile[(2 + nh) * 128 + i] = 0;
+constexpr uint32_t atom_bytes = 1536;
+constexpr uint32_t atoms_per_pair = 2;
+constexpr uint32_t escape_bytes_per_atom = 4 * 32 * 64;
+constexpr uint32_t tile_bytes = 2048;
+
+template <typename Packed>
+inline void read_pair(const Packed& packed, uint32_t n_atoms, uint32_t n_tile, uint32_t k_atom, uint32_t scratch) {
+    constexpr uint32_t k_atoms = NF12_CONFIG(1) / 2;
+    for (uint32_t n_half = 0; n_half < atoms_per_pair; ++n_half) {
+        const uint32_t n_atom = n_tile * atoms_per_pair + n_half;
+        if (n_atom < n_atoms) {
+            read_atom(n_atom * k_atoms + k_atom, packed, scratch + n_half * atom_bytes);
+        }
+    }
+}
+
+inline volatile uint32_t* tile_face(uint32_t dst, uint32_t n_half, uint32_t atom_face) {
+    const uint32_t tile = dst + (atom_face / 2) * tile_bytes;
+    return reinterpret_cast<volatile uint32_t*>(tile) + (2 * (atom_face % 2) + n_half) * 128;
+}
+
+template <typename Escapes>
+inline void decode_pair(
+    uint32_t n_atoms, uint32_t n_tile, uint32_t dst, uint32_t scratch, uint32_t escape_scratch,
+    const Escapes& escapes, const uint32_t* exponent) {
+    uint8_t deferred[atoms_per_pair * 4 * 16];
+    uint32_t pending = 0;
+    for (uint32_t n_half = 0; n_half < atoms_per_pair; ++n_half) {
+        if (n_tile * atoms_per_pair + n_half >= n_atoms) {
+            for (uint32_t f = 0; f < 4; ++f) {
+                auto* output = tile_face(dst, n_half, f);
+                for (uint32_t i = 0; i < 128; ++i) {
+                    output[i] = 0;
+                }
             }
             continue;
         }
-        read_atom(nb * (k_tiles / 2) + kt / 2, packed, scratch);
-        noc_async_read_barrier();
-        uint8_t deferred[32];
-        uint32_t pending = 0;
-        for (uint32_t f = 0; f < 2; ++f) {
-            auto* face = tile + (2 * f + nh) * 128;
-            const uint32_t face_escapes = escape_addr + 32 * f * 64;
-            // Two adjacent output features are four canonical lanes apart.
-            // Write both in one word, in the [K, N] BF16 face order.
+        const auto* atom = reinterpret_cast<volatile const uint32_t*>(scratch + n_half * atom_bytes);
+        for (uint32_t f = 0; f < 4; ++f) {
+            auto* output = tile_face(dst, n_half, f);
+            const uint32_t face_escapes = escape_scratch + n_half * escape_bytes_per_atom + 32 * f * 64;
             for (uint32_t col_pair = 0; col_pair < 4; ++col_pair) {
 #pragma GCC unroll 4
                 for (uint32_t row_pair = 0; row_pair < 4; ++row_pair) {
                     const uint32_t lane = col_pair * 8 + row_pair;
-                    const auto a = load_group(atom, first_face + f, lane);
-                    const auto b = load_group(atom, first_face + f, lane + 4);
+                    const auto a = load_group(atom, f, lane);
+                    const auto b = load_group(atom, f, lane + 4);
                     if (a.meta != 0 && b.meta != 0) {
-                        store_group_pairs(face + row_pair * 16 + col_pair,
+                        store_group_pairs(output + row_pair * 16 + col_pair,
                                           decode_regular_pairs(a, exponent), decode_regular_pairs(b, exponent));
                     } else {
                         fetch_escape(a, escapes, face_escapes + lane * 64);
                         fetch_escape(b, escapes, face_escapes + (lane + 4) * 64);
-                        deferred[pending++] = f * 16 + col_pair * 4 + row_pair;
+                        deferred[pending++] = (n_half * 4 + f) * 16 + col_pair * 4 + row_pair;
                     }
                 }
             }
         }
-        if (pending == 0) {
-            continue;
-        }
-        noc_async_read_barrier();
-        for (uint32_t i = 0; i < pending; ++i) {
-            const uint32_t f = deferred[i] / 16;
-            const uint32_t col_pair = deferred[i] / 4 % 4;
-            const uint32_t row_pair = deferred[i] % 4;
-            const uint32_t lane = col_pair * 8 + row_pair;
-            const uint32_t escape_page = escape_addr + (32 * f + lane) * 64;
-            const auto a = load_group(atom, first_face + f, lane);
-            const auto b = load_group(atom, first_face + f, lane + 4);
-            store_group_pairs(tile + (2 * f + nh) * 128 + row_pair * 16 + col_pair,
-                              decode_pairs(a, exponent, escape_page),
-                              decode_pairs(b, exponent, escape_page + 4 * 64));
-        }
+    }
+    if (pending == 0) {
+        return;
+    }
+    noc_async_read_barrier();
+    for (uint32_t i = 0; i < pending; ++i) {
+        const uint32_t n_half = deferred[i] / 64;
+        const uint32_t face = deferred[i] / 16 % 4;
+        const uint32_t col_pair = deferred[i] / 4 % 4;
+        const uint32_t row_pair = deferred[i] % 4;
+        const uint32_t lane = col_pair * 8 + row_pair;
+        const auto* atom = reinterpret_cast<volatile const uint32_t*>(scratch + n_half * atom_bytes);
+        const uint32_t entry = escape_scratch + n_half * escape_bytes_per_atom + (32 * face + lane) * 64;
+        auto* output = tile_face(dst, n_half, face) + row_pair * 16 + col_pair;
+        store_group_pairs(output, decode_pairs(load_group(atom, face, lane), exponent, entry),
+                          decode_pairs(load_group(atom, face, lane + 4), exponent, entry + 4 * 64));
     }
 }
 
@@ -112,12 +126,41 @@ void kernel_main() {
     constexpr bool dense = NF12_CONFIG(5) != 0;
     constexpr auto x_args = TensorAccessorArgs<NF12_ACCESSORS(6)>();
     constexpr auto w_args = TensorAccessorArgs<x_args.next_compile_time_args_offset()>();
-    constexpr auto escape_args = TensorAccessorArgs<w_args.next_compile_time_args_offset()>();
-    const auto x = TensorAccessor(x_args, NF12_ADDRESS(0), 2048);
-    const auto w = TensorAccessor(w_args, NF12_ADDRESS(1), dense ? 2048 : NF12_PACKED_PAGE);
-    const auto escapes = TensorAccessor(escape_args, NF12_ADDRESS(2), NF12_ESCAPE_PAGE);
+    const auto x = TensorAccessor(x_args, NF12_ADDRESS(0), tile_bytes);
+    const auto w = TensorAccessor(w_args, NF12_ADDRESS(1), dense ? tile_bytes : NF12_PACKED_PAGE);
     NF12_RANGE(NF12_CONFIG(6), 3, 4);
+
+    if constexpr (dense) {
+        for (uint32_t nt = start; nt < end; ++nt) {
+            for (uint32_t mt = 0; mt < m_tiles; mt += m_block) {
+                const uint32_t count = m_block < m_tiles - mt ? m_block : m_tiles - mt;
+                for (uint32_t kt = 0; kt < k_tiles; ++kt) {
+                    cb_reserve_back(0, 1);
+                    cb_reserve_back(1, m_block);
+                    const uint32_t x_dst = get_write_ptr(1);
+                    for (uint32_t i = 0; i < count; ++i) {
+                        noc_async_read_page((mt + i) * k_tiles + kt, x, x_dst + i * tile_bytes);
+                    }
+                    noc_async_read_barrier();
+                    cb_push_back(1, m_block);
+                    noc_async_read_page(nt * k_tiles + kt, w, get_write_ptr(0));
+                    noc_async_read_barrier();
+                    cb_push_back(0, 1);
+                }
+            }
+        }
+        return;
+    }
+
+    static_assert(k_tiles % 2 == 0, "Canonical NF12 pads K to full 64-column atoms");
+    constexpr uint32_t k_atoms = k_tiles / 2;
+    constexpr auto escape_args = TensorAccessorArgs<w_args.next_compile_time_args_offset()>();
+    const auto escapes = TensorAccessor(escape_args, NF12_ADDRESS(2), NF12_ESCAPE_PAGE);
+    constexpr uint32_t pair_bytes = atoms_per_pair * atom_bytes;
     const uint32_t scratch = get_write_ptr(24);
+    // A pair of input buffers alternates while the previous pair is decoded.
+    const uint32_t escape_scratch = scratch + 2 * pair_bytes;
+    auto* exponent = reinterpret_cast<uint32_t*>(escape_scratch + atoms_per_pair * escape_bytes_per_atom);
 #ifdef NF12_PJRT
     noc_async_read(escapes.get_noc_addr(0), scratch, 64);
     noc_async_read_barrier();
@@ -128,35 +171,33 @@ void kernel_main() {
     constexpr uint32_t base = NF12_CONFIG(4);
     constexpr uint32_t n_atoms = NF12_CONFIG(0);
 #endif
-
-    auto* exponent = reinterpret_cast<uint32_t*>(scratch + 1536 + 64 * 64);
-    if constexpr (!dense) {
-        for (uint32_t meta = 0; meta < 256; ++meta) {
-            const uint32_t even = (meta & 0x87) + base;
-            const uint32_t odd = (((meta << 1) & 0x80) | ((meta >> 3) & 7)) + base;
-            exponent[meta] = (even << 8) | (odd << 24);
-        }
+    for (uint32_t meta = 0; meta < 256; ++meta) {
+        const uint32_t even = (meta & 0x87) + base;
+        const uint32_t odd = (((meta << 1) & 0x80) | ((meta >> 3) & 7)) + base;
+        exponent[meta] = (even << 8) | (odd << 24);
     }
 
     for (uint32_t nt = start; nt < end; ++nt) {
         for (uint32_t mt = 0; mt < m_tiles; mt += m_block) {
             const uint32_t count = m_block < m_tiles - mt ? m_block : m_tiles - mt;
-            for (uint32_t kt = 0; kt < k_tiles; ++kt) {
-                cb_reserve_back(0, 1);
-                cb_reserve_back(1, m_block);
-                uint32_t x_dst = get_write_ptr(1);
+            read_pair(w, n_atoms, nt, 0, scratch);
+            for (uint32_t ka = 0; ka < k_atoms; ++ka) {
+                cb_reserve_back(0, 2);
+                cb_reserve_back(1, 2 * m_block);
+                const uint32_t x_dst = get_write_ptr(1);
+                const uint32_t pair_scratch = scratch + (ka % 2) * pair_bytes;
                 for (uint32_t i = 0; i < count; ++i) {
-                    noc_async_read_page((mt + i) * k_tiles + kt, x, x_dst + i * 2048);
+                    const uint32_t x_tile = (mt + i) * k_tiles + 2 * ka;
+                    noc_async_read_page(x_tile, x, x_dst + i * tile_bytes);
+                    noc_async_read_page(x_tile + 1, x, x_dst + (m_block + i) * tile_bytes);
                 }
                 noc_async_read_barrier();
-                cb_push_back(1, m_block);
-                if constexpr (dense) {
-                    noc_async_read_page(nt * k_tiles + kt, w, get_write_ptr(0));
-                    noc_async_read_barrier();
-                } else {
-                    decode_tile(nt, kt, get_write_ptr(0), scratch, n_atoms, exponent, w, escapes);
+                cb_push_back(1, 2 * m_block);
+                if (ka + 1 < k_atoms) {
+                    read_pair(w, n_atoms, nt, ka + 1, scratch + ((ka + 1) % 2) * pair_bytes);
                 }
-                cb_push_back(0, 1);
+                decode_pair(n_atoms, nt, get_write_ptr(0), pair_scratch, escape_scratch, escapes, exponent);
+                cb_push_back(0, 2);
             }
         }
     }

@@ -12,7 +12,14 @@ from pathlib import Path
 
 import torch
 
-from .nf12_tenstorrent import kernel_source, normalize_ids, round_up, verify_nf12
+from .nf12_tenstorrent import (
+    LINEAR_PACKED_BUFFER_DEPTH,
+    LINEAR_PACKED_SCRATCH_BYTES,
+    kernel_source,
+    normalize_ids,
+    round_up,
+    verify_nf12,
+)
 
 
 _PREFIX = "gptqmodel.nf12.v1."
@@ -60,12 +67,14 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
         expected_dtypes = ("bf16", "bf16" if dense else "si32", "si32", "f32" if wide else "bf16")
         tasks = nt
         out_page = 4096 if wide else 2048
+        depth = 2 if dense else LINEAR_PACKED_BUFFER_DEPTH
         cbs = [
-            _cb(0, "BFloat16", 2048, 2),
-            _cb(1, "BFloat16", 2048, 2 * m_block),
+            _cb(0, "BFloat16", 2048, depth),
+            _cb(1, "BFloat16", 2048, depth * m_block),
             _cb(16, "Float32" if wide else "BFloat16", out_page, 2),
-            _cb(24, "UInt32", 1536 + 64 * 64 + 256 * 4),
         ]
+        if not dense:
+            cbs.append(_cb(24, "UInt32", LINEAR_PACKED_SCRATCH_BYTES))
         kernels = [
             ("linear_reader", "noc", [0, 1, 2], [n // 16, kt, mt, m_block, base, int(dense), nt]),
             ("linear_writer", "noc", [3], [nt, mt, out_page]),

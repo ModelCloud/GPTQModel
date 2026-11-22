@@ -17,6 +17,12 @@ from gptqmodel_nf12.api import ESCAPES_KEY, EXP_BASE_KEY, PACKED_KEY, NF12Weight
 from .nf12_codec import MAX_EXP_BASE, encode, escape_counts_all_bases
 
 
+# Keep two pairs of BF16 K tiles queued. Reader scratch holds two raw atom
+# pairs, one aligned escape page per group, and the exponent lookup table.
+LINEAR_PACKED_BUFFER_DEPTH = 4
+LINEAR_PACKED_SCRATCH_BYTES = 4 * 1536 + 2 * 4 * 32 * 64 + 256 * 4
+
+
 def tensor_sha256(value: torch.Tensor) -> str:
     """SHA-256 of the contiguous tensor bytes, including raw BF16 payloads."""
     return hashlib.sha256(value.contiguous().view(torch.uint8).numpy()).hexdigest()
