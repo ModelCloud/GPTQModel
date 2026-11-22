@@ -300,15 +300,13 @@ _MMA_SOURCE = _LINEAR_SETUP + """
 _TENSOR_HEADER = _DECODE_HEADER + """
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 
-constant constexpr uint kTensorSimdgroups = 4;
-constant constexpr uint kTensorN = kSuperAtomRows;
 constant constexpr uint kTensorK = kSuperAtomCols;
 using Extents = metal::dextents<int, 2>;
 using Strides = metal::array<int, 2>;
 using WeightTile = metal::tensor<threadgroup bfloat, Extents, metal::tensor_inline>;
 
-template <uint BM, uint KS>
-constant constexpr uint kScratchWords = kTensorN * (KS > 1 && BM > kTensorK / 2 ? BM : kTensorK / 2);
+template <uint BM, uint BN, uint KS>
+constant constexpr uint kScratchWords = BN * (KS > 1 && BM > kTensorK / 2 ? BM : kTensorK / 2);
 """
 
 _TENSOR_SOURCE = """
@@ -318,8 +316,8 @@ _TENSOR_SOURCE = """
       reinterpret_cast<device const uint4*>(escapes),
       exp_base_x4(exp_base[0]),
   };
-  threadgroup uint scratch[kTensorSimdgroups][kScratchWords<BM, KS>];
-  const uint n0 = (threadgroup_position_in_grid.x * (kTensorSimdgroups / KS) + sg / KS) * kTensorN;
+  threadgroup uint scratch[SG][kScratchWords<BM, BN, KS>];
+  const uint n0 = (threadgroup_position_in_grid.x * (SG / KS) + sg / KS) * BN;
   // Move the last partial tile inside the bounds so its tensor loads stay
   // full sized. This threadgroup only stores the rows assigned to it.
   const uint first_row = threadgroup_position_in_grid.y * BM;
@@ -332,12 +330,12 @@ _TENSOR_SOURCE = """
   using Activation = metal::tensor<device T, Extents, metal::tensor_inline>;
   Activation a(const_cast<device T*>(x) + ulong(m0) * K, Extents(k, BM),
                Strides{1, int(K)});
-  WeightTile w(reinterpret_cast<threadgroup bfloat*>(scratch[sg]), Extents(kTensorK, kTensorN),
+  WeightTile w(reinterpret_cast<threadgroup bfloat*>(scratch[sg]), Extents(kTensorK, BN),
                Strides{1, kTensorK});
-  auto w_tile = w.template slice<kTensorK, kTensorN>(0, 0);
+  auto w_tile = w.template slice<kTensorK, BN>(0, 0);
   using ActivationTile = decltype(a.template slice<kTensorK, BM>(0, 0));
   constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
-      BM, kTensorN, kTensorK, false, true, true,
+      BM, BN, kTensorK, false, true, true,
       mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
   mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
   auto acc = op.template get_destination_cooperative_tensor<ActivationTile, decltype(w_tile), float>();
@@ -348,11 +346,15 @@ _TENSOR_SOURCE = """
   const uint kb0 = (sg % KS) * kb_per_split;
   const uint kb1 = min(kb0 + kb_per_split, uint(K_BLOCKS));
   if (valid) {
-    const ulong first_atom = ulong(n0 / kTensorN) * uint(K_BLOCKS);
+    const ulong first_atom = ulong(n0 / kSuperAtomRows) * uint(K_BLOCKS);
     for (uint kb = kb0; kb < kb1; ++kb) {
-      uint regs[4][4];
-      src.load(first_atom + kb, lane, regs);
-      stage_bf16_tile<kTensorK>(scratch[sg], lane, regs);
+      #pragma unroll
+      for (uint block = 0; block < BN / kSuperAtomRows; ++block) {
+        uint regs[4][4] = {};
+        if (BN == kSuperAtomRows || n0 + block * kSuperAtomRows < N)
+          src.load(first_atom + ulong(block) * K_BLOCKS + kb, lane, regs);
+        stage_bf16_tile<kTensorK>(scratch[sg] + block * kSuperAtomRows * (kTensorK / 2), lane, regs);
+      }
       simdgroup_barrier(mem_flags::mem_threadgroup);
       auto a_tile = a.template slice<kTensorK, BM>(kb * kTensorK, 0);
       op.run(a_tile, w_tile, acc);
@@ -372,7 +374,7 @@ _TENSOR_SOURCE = """
   for (ushort i = 0; i < acc.get_capacity(); ++i) {
     const auto coord = acc.get_multidimensional_index(i);
     const uint m = m0 + coord[1], n = n0 + coord[0];
-    if (m < first_row) continue;
+    if (m < first_row || (BN > kSuperAtomRows && n >= N)) continue;
     float sum = acc[i];
     #pragma unroll
     for (uint split = 1; split < KS; ++split)
@@ -487,6 +489,28 @@ def _linear_route(rows, n, k, dtype):
     return "simd" if rows <= 16 else "decode"
 
 
+@lru_cache(maxsize=1)
+def _is_m5_ultra():
+    return mx.metal.is_available() and mx.device_info(mx.gpu).get("device_name") == "Apple M5 Ultra"
+
+
+def _tensor_tile(rows, n, k):
+    bm = 16 if rows < 32 else 32 if rows < 64 else 64
+    if _is_m5_ultra():
+        if 1024 <= n <= 3072 and 3072 <= k <= 4096:
+            if bm == 16 and n <= 1536:
+                return bm, 32, 4, 1
+            # Reuse each activation tile across more output rows. At BM=64,
+            # BN=32 keeps the ordered split-K partials within 32 KiB.
+            return bm, 64 if bm < 64 else 32, 4, 2
+        if n >= 65536 and k == 2048:
+            return (bm, 64, 1, 1) if bm < 64 else (bm, 32, 2, 1)
+        if n == 4096 and rows >= 96 and k >= 8192:
+            # Larger token tiles can trade some split-K parallelism for reuse.
+            return (bm, 32, 4, 2) if k == 8192 else (bm, 16, 2, 2)
+    return bm, 16, 4, 4 if k > 4096 else 1
+
+
 def _linear_launch(rows, out_features, in_features):
     use_mma = rows > 4
     tile_rows = min(16, 1 << (rows - 1).bit_length())
@@ -556,17 +580,17 @@ class _NF12Projection(nn.Module):
 
     def _tensor_prefill(self, x, rows, bias):
         n, k = self.out_features, self.in_features
-        tile_m = 16 if rows < 32 else 32 if rows < 64 else 64
-        splits = 4 if k > 4096 else 1
-        tile_n = 64 // splits
+        bm, bn, simdgroups, splits = _tensor_tile(rows, n, k)
+        tile_n = bn * (simdgroups // splits)
+        threads = 32 * simdgroups
         return _tensor_kernel()(
             inputs=[x, *self._weight_inputs(self.packed), bias],
             template=[
                 ("M", rows), ("N", n), ("K", k), ("K_BLOCKS", k // 64),
-                ("BM", tile_m), ("KS", splits), ("T", x.dtype),
+                ("BM", bm), ("BN", bn), ("SG", simdgroups), ("KS", splits), ("T", x.dtype),
             ],
-            grid=(128 * ((n + tile_n - 1) // tile_n), (rows + tile_m - 1) // tile_m, 1),
-            threadgroup=(128, 1, 1),
+            grid=(threads * ((n + tile_n - 1) // tile_n), (rows + bm - 1) // bm, 1),
+            threadgroup=(threads, 1, 1),
             output_shapes=[(rows, n)],
             output_dtypes=[x.dtype],
         )[0]
@@ -620,6 +644,7 @@ class MlxNF12Linear(_NF12Projection):
 
 
 _EMBED_SOURCE = """
+    constexpr uint kRowBlockMetaBytes = 32, kRowBlockBytes = 96;
     const uint gx = thread_position_in_grid.x, gy = thread_position_in_grid.y;
     const uint kb0 = PARALLEL ? gx >> 4 : 0;
     const uint id_pos = PARALLEL ? gy : 8 * gy + (gx >> 4);
@@ -638,13 +663,34 @@ _EMBED_SOURCE = """
         (ulong(id_pos) * K + 16 * j + 2 * t) / 2;
     const uint kb1 = PARALLEL ? kb0 + 1u : K / 64;
     for (uint kb = kb0; kb < kb1; ++kb) {
-        uint r[4] = {};
+        uint left = 0, right = 0;
         if (valid) {
-            const ulong base = row_base + ulong(kb) * (kSuperAtomBytes / 4);
-            decode_group(Group{words[base + j], words[base + lo], words[base + lo + 1]}, base_x4, table, r);
+            uint r[4];
+            if constexpr (ROW_MAJOR) {
+                // One row block contains 16 metadata halves and 16 low words.
+                const device uchar* tile = packed + (ulong(id) * (K / 64) + kb) * kRowBlockBytes;
+                const uint group = 4 * j + t;
+                const uint meta = reinterpret_cast<device const ushort*>(tile)[group];
+                const uint lows = reinterpret_cast<device const uint*>(tile + kRowBlockMetaBytes)[group];
+                if (meta == 0) {
+                    const uint2 e = reinterpret_cast<device const uint2*>(escapes)[lows];
+                    left = e.x;
+                    right = e.y;
+                } else {
+                    decode_bulk(Group{(meta & 255u) | ((meta & 0xff00u) << 8), lows & 65535u, lows >> 16},
+                                base_x4, r);
+                    left = r[0];
+                    right = r[2];
+                }
+            } else {
+                const ulong base = row_base + ulong(kb) * (kSuperAtomBytes / 4);
+                decode_group(Group{words[base + j], words[base + lo], words[base + lo + 1]}, base_x4, table, r);
+                left = r[h];
+                right = r[2 + h];
+            }
         }
-        dst[32 * kb] = r[h];
-        dst[32 * kb + 4] = r[2 + h];
+        dst[32 * kb] = left;
+        dst[32 * kb + 4] = right;
     }
 """
 
@@ -673,10 +719,39 @@ class MlxNF12Embedding(_NF12Projection):
         self._init_packed_weight(embedding_dim, num_embeddings, num_escapes)
         self.num_embeddings = self.out_features
         self.embedding_dim = self.in_features
+        self._row_major = False
         self.freeze()
+
+    @property
+    def row_major(self) -> bool:
+        return self._row_major
+
+    @classmethod
+    def from_weight(cls, weight, *, tied: bool):
+        """Load a canonical ``gptqmodel_nf12.NF12Weight`` for MLX inference.
+
+        Pass ``tied=True`` when this table also serves the output projection.
+        Untied tables use the row-major gather layout on M5 Ultra.
+        """
+        packed = weight.packed.detach().cpu().contiguous()
+        escapes = weight.escapes.detach().cpu().contiguous()
+        row_major = not tied and _is_m5_ultra()
+        if row_major:
+            from ...utils.nf12_codec import rowmajor_pack_cpu
+
+            packed, escapes = rowmajor_pack_cpu(packed, escapes, weight.exp_base)
+        n, k = weight.shape
+        module = cls(num_embeddings=n, embedding_dim=k, num_escapes=len(escapes))
+        module.packed = mx.array(packed.numpy())
+        module.escapes = mx.array(escapes.numpy())
+        module.exp_base = mx.array([weight.exp_base], dtype=mx.uint8)
+        module._row_major = row_major
+        return module
 
     def as_linear(self, x):
         """Project through the packed table for a tied output head."""
+        if self.row_major:
+            raise ValueError("NF12 output projection requires canonical storage. Load the embedding with tied=True.")
         return self._project(x, mx.zeros((self.num_embeddings,), dtype=mx.bfloat16))
 
     def __call__(self, ids):
@@ -686,15 +761,19 @@ class MlxNF12Embedding(_NF12Projection):
             return mx.zeros((*ids.shape, self.embedding_dim), dtype=mx.bfloat16)
         columns = self.embedding_dim // 4
         # Width tiles distribute long rows across the GPU for large prefills.
-        parallel = count >= 1024 and self.embedding_dim >= 4096
-        threads = 128
+        if self.row_major:
+            parallel = count >= (512 if self.embedding_dim > 2048 else 2048)
+        else:
+            parallel = count >= 1024 and self.embedding_dim >= 4096
+        threads = 256 if parallel and self.row_major else 128
         grid = ((columns + threads - 1) // threads * threads, count, 1) if parallel else (
             threads, (count + 7) // 8, 1,
         )
         index_type = mx.int64 if flat.dtype in (mx.int64, mx.uint32, mx.uint64) else mx.int32
         output = _embed_kernel()(
             inputs=[flat.astype(index_type), *self._weight_inputs(self.packed)],
-            template=[("K", self.embedding_dim), ("N", self.num_embeddings), ("COUNT", count), ("PARALLEL", parallel)],
+            template=[("K", self.embedding_dim), ("N", self.num_embeddings), ("COUNT", count),
+                      ("PARALLEL", parallel), ("ROW_MAJOR", self.row_major)],
             grid=grid,
             threadgroup=(threads, 1, 1),
             output_shapes=[(count, self.embedding_dim)],
