@@ -87,6 +87,19 @@ one packed copy and escape table. Native TTNN specializes on the exponent
 base. TT-XLA reads the exponent base and row geometry from a 64-byte header in
 the escape stream so a cached executable can safely serve different weights.
 
+The canonical packed reader fetches both 16 × 64 atoms for one output tile and
+reuses their bytes across two adjacent K tiles. It prefetches the next pair
+into separate L1 scratch, resolves escapes, and publishes each two-tile block.
+The compute kernel consumes one K=32 tile at a time in ascending order.
+
+```mermaid
+flowchart LR
+  A["linear_pair_reader.cpp reads two canonical atoms"] --> B["Decode regular groups using the exponent table"]
+  A --> C["Prefetch the next pair into separate L1 scratch"]
+  B --> D["Resolve escapes and publish two BF16 tiles"]
+  D --> E["linear_compute.cpp consumes one tile per K32 step"]
+```
+
 TT-XLA uses the version-2 tt-lang resolver artifact ABI to lower the shared
 Metal kernels into a PJRT executable. Its resolver delegates other operations
 to TT-XLA and rejects a mismatched artifact ABI or unsupported layout at
@@ -219,11 +232,27 @@ runtime and allocator overhead.
 | Operator scratch | TTNN NF12 | TT-XLA NF12 | Matched BF16 |
 | --- | ---: | ---: | ---: |
 | Gather circular buffer per worker | 2,752 B | 4,224 B | — |
-| LM head circular buffers per worker at M=1 | 17,920 B | 17,920 B | 17,920 B |
-| LM head circular buffers per worker at M=128 or 256 | 30,208 B | 30,208 B | 30,208 B |
+| Canonical LM head circular buffers per worker at M=1 | 44,032 B | 44,032 B | 12,288 B |
+| Canonical LM head circular buffers per worker at M=128 or 256 | 68,608 B | 68,608 B | 24,576 B |
 | LM head temporary DRAM beyond activations and results | 0 B | 0 B | 0 B |
 | Q projection temporary FP32 DRAM at M=65 | 393,216 B | 393,216 B | 393,216 B |
 | MLP expansion temporary FP32 DRAM at M=65 | 1,572,864 B | 1,572,864 B | 1,572,864 B |
+
+## Scalar K64 reader measurements
+
+On P300c chip 3 the native K32 and K64 packed kernels used the same resident
+weights, activation tensors, and BF16 reduction. Each group contains eight
+synchronized samples. Values below are median / p95 in milliseconds. TT-XLA
+timings include a synchronized host output read.
+
+| LM-head M | Native K32 NF12 ms | Native K64 NF12 ms | Native BF16 ms | TT-XLA K64 NF12 ms | TT-XLA BF16 ms |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 36.75 / 36.80 | 32.88 / 32.95 | 5.00 / 5.24 | 83.82 / 92.60 | 13.91 / 85.49 |
+| 128 | 37.31 / 37.35 | 32.65 / 32.90 | 13.73 / 13.85 | 114.13 / 132.18 | 81.90 / 146.10 |
+| 256 | 81.27 / 82.01 | 70.61 / 70.86 | 27.25 / 27.43 | 231.05 / 471.65 | 128.15 / 257.31 |
+
+Native results matched BF16 bit-for-bit at every reported M. TT-XLA matched
+at M=1, 4, 8, 16, 32, 128 and 256 and also verified every logical weight row.
 
 ## Initial checkpoint kernel measurements
 
@@ -404,6 +433,12 @@ blocks. This comparison uses the same row blocking for BF16 and NF12.
 | 32 | 2.093 / 2.125 ms | 2.492 / 2.520 ms |
 | 33 | 4.120 / 4.198 ms | 4.919 / 4.993 ms |
 | 128 | 8.248 / 8.312 ms | 9.871 / 9.888 ms |
+
+On chip 1, 20 matched M=256 launches measured 16.473 / 16.907 ms NF12 and
+19.678 / 20.034 ms BF16. All eight 32-row blocks matched bit-for-bit. The
+installed Torch adapter was also tested with fresh activation upload and
+host result reads, taking 6.00 ms packed versus 6.28 ms matched BF16 at M=1,
+and 14.15 ms versus 14.81 ms at M=33 in the mixed-runtime setup on chip 2.
 
 ```bash
 TT_VISIBLE_DEVICES=2 TT_MESH_GRAPH_DESC_PATH=/path/to/p150_mesh_graph_descriptor.textproto \
