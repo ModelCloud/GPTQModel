@@ -90,7 +90,9 @@ def test_phi4_ci_deps_cover_required_packages():
         assert requirement in pkgs
 
 
-@pytest.mark.parametrize("package", ["defuser", "transformers", "tokenicer"])
+@pytest.mark.parametrize(
+    "package", ["defuser", "transformers", "tokenicer", "tiktoken", "logbar", "pypcre"]
+)
 def test_tenstorrent_manifest_satisfies_project_runtime_requirements(package):
     """TT's model and tokenizer dependencies must satisfy requirements.txt.
 

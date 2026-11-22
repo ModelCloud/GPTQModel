@@ -4,6 +4,9 @@
 """Kimi-K2.5 AWQ scale folds must leave the full multimodal model output unchanged."""
 
 import pytest
+
+
+pytest.importorskip("torchvision")
 import torch
 from awq_neutrality import assert_awq_folds_neutral
 

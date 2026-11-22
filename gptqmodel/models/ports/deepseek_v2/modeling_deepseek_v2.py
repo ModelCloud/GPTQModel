@@ -54,9 +54,10 @@ class DeepseekV2TopkRouter(NativeDeepseekV2TopkRouter):
         if not (self.top_k > 1 and self.norm_topk_prob):
             return super().forward(hidden_states)
 
-        # Pinned legacy MoEGate.forward normalizes BEFORE (and instead of)
-        # scaling. Native scale-then-divide loses finite FP32 values at extreme
-        # Python-finite factors. Keep native topk/group-mask/tie semantics.
+        # Normalize before applying routed_scaling_factor so the normalization
+        # sum is computed on probabilities, not already-scaled weights. This
+        # mirrors the legacy MoEGate.forward order: divide by the sum, then
+        # scale. Keep native topk/group-mask/tie semantics.
         logits = nn.functional.linear(hidden_states.reshape(-1, self.hidden_dim).float(), self.weight.float())
         scores = logits.softmax(dim=-1, dtype=torch.float32)
         if self.topk_method == "group_limited_greedy":
@@ -66,7 +67,8 @@ class DeepseekV2TopkRouter(NativeDeepseekV2TopkRouter):
             mask = group_mask.unsqueeze(-1).expand(-1, self.num_group, self.num_experts // self.num_group)
             scores = scores.masked_fill(~mask.reshape(-1, self.num_experts).bool(), 0.0)
         weights, indices = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)
-        return logits, weights / (weights.sum(dim=-1, keepdim=True) + 1e-20), indices
+        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-20)
+        return logits, weights * self.routed_scaling_factor, indices
 
 
 class DeepseekV2RotaryEmbedding(NativeDeepseekV2RotaryEmbedding):

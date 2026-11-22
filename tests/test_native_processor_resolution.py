@@ -10,7 +10,11 @@ fallback, and nothing may come from ``transformers.models``.
 """
 
 import json
+import os
+import subprocess
+import sys
 from importlib import import_module
+from pathlib import Path
 
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
@@ -21,6 +25,7 @@ from gptqmodel.models.ports.native.auto import NativeProcessor, _registry
 
 
 NATIVE = "gptqmodel.models.ports.native."
+REPO = Path(__file__).resolve().parents[1]
 SPECIAL = [
     "<pad>", "<s>", "</s>", "<|image_pad|>", "<|video_pad|>", "<|vision_start|>", "<|vision_end|>",
     "<|image|>", "<|boi|>", "<|eoi|>", "<|audio|>", "<|boa|>", "<|eoa|>", "<|video|>",
@@ -55,6 +60,7 @@ def _load_through_definition(model_type, path):
 
 
 def test_qwen3_vl_moe_processor_uses_declared_image_processor(tmp_path):
+    pytest.importorskip("torchvision")
     from gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
     from gptqmodel.models.ports.native.qwen3_vl.processing_qwen3_vl import Qwen3VLProcessor
     from gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
@@ -77,6 +83,7 @@ def test_qwen3_vl_moe_processor_uses_declared_image_processor(tmp_path):
 
 
 def test_qwen3_vl_moe_legacy_fast_declaration(tmp_path):
+    pytest.importorskip("torchvision")
     from gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
     from gptqmodel.models.ports.native.qwen3_vl.processing_qwen3_vl import Qwen3VLProcessor
     from gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
@@ -101,6 +108,7 @@ def test_qwen3_vl_moe_legacy_fast_declaration(tmp_path):
 
 
 def test_diffusion_gemma_processor_uses_declared_feature_extractor(tmp_path):
+    pytest.importorskip("torchvision")
     from gptqmodel.models.ports.native.gemma4.feature_extraction_gemma4 import Gemma4AudioFeatureExtractor
     from gptqmodel.models.ports.native.gemma4.image_processing_gemma4 import Gemma4ImageProcessor
     from gptqmodel.models.ports.native.gemma4.processing_gemma4 import Gemma4Processor
@@ -140,6 +148,49 @@ def test_declared_model_family_class_is_never_selected(tmp_path):
         assert found is None or _vendored(found.__module__), (attribute, found)
 
 
+_PIL_FALLBACK_SCRIPT = r"""
+import sys
+
+sys.modules["torchvision"] = None
+import transformers.utils.import_utils as import_utils
+
+_is_package_available = import_utils._is_package_available
+import_utils._is_package_available = (
+    lambda name, *args, **kwargs: (False, None)
+    if str(name).split(".")[0] == "torchvision"
+    else _is_package_available(name, *args, **kwargs)
+)
+
+from gptqmodel.models.ports.native.auto import _by_name, _image_processor_by_name
+
+pil = _by_name("Qwen2VLImageProcessorPil")
+assert pil is not None, "PIL sibling was not indexed"
+assert pil.__name__ == "Qwen2VLImageProcessorPil", pil
+assert pil.__module__.startswith("gptqmodel.models.ports.native."), pil
+assert _image_processor_by_name("Qwen2VLImageProcessor", "pil") is pil
+assert _image_processor_by_name("Qwen2VLImageProcessor", "torchvision") is pil
+assert _by_name("Qwen2VLImageProcessor") is None
+print("RESULT ok")
+"""
+
+
+def test_pil_fallback_resolves_without_torchvision():
+    """A missing torchvision backend must not abort the vendored PIL fallback."""
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(REPO), env.get("PYTHONPATH"))))
+    completed = subprocess.run(
+        [sys.executable, "-c", _PIL_FALLBACK_SCRIPT],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stdout[-2000:] + completed.stderr[-4000:]
+    assert "RESULT ok" in completed.stdout
+
+
 def _native_processor_definitions():
     return sorted(
         model_type
@@ -157,7 +208,12 @@ def test_sub_processor_classes_resolve_package_locally(model_type, tmp_path):
     entry = _registry.PROCESSOR.get(model_type)
     if entry is None:
         pytest.skip(f"{model_type}: processor is declared by the checkpoint (no model_type entry)")
-    processor_class = getattr(import_module(entry[0]), entry[1])
+    try:
+        processor_class = getattr(import_module(entry[0]), entry[1])
+    except ModuleNotFoundError as exc:
+        if str(exc.name).split(".")[0] == "torchvision":
+            pytest.skip(f"{model_type}: processor module requires torchvision")
+        raise
     _write_config(tmp_path, model_type)
     for attribute in processor_class.get_attributes():
         if "tokenizer" in attribute:
@@ -180,7 +236,20 @@ def test_sub_processor_classes_resolve_package_locally(model_type, tmp_path):
             key = {"image_processor": "image_processor_type", "video_processor": "video_processor_type",
                    "feature_extractor": "feature_extractor_type"}[attribute]
             (tmp_path / "processor_config.json").write_text(json.dumps({attribute: {key: sibling}}))
-        resolved = NativeProcessor.sub_processor_class(processor_class, attribute, str(tmp_path), model_type=model_type)
+        try:
+            resolved = NativeProcessor.sub_processor_class(
+                processor_class, attribute, str(tmp_path), model_type=model_type
+            )
+        except ModuleNotFoundError as exc:
+            if str(exc.name).split(".")[0] == "torchvision":
+                pytest.skip(f"{model_type}.{attribute}: requires torchvision")
+            raise
+        except ValueError as exc:
+            from transformers.utils import is_torchvision_available
+
+            if not is_torchvision_available() and "has no vendored" in str(exc):
+                pytest.skip(f"{model_type}.{attribute}: requires torchvision")
+            raise
         assert not resolved.__module__.startswith("transformers.models."), (model_type, attribute, resolved)
         assert resolved.__module__.startswith((NATIVE, "transformers.")), (model_type, attribute, resolved)
         (tmp_path / "processor_config.json").unlink(missing_ok=True)

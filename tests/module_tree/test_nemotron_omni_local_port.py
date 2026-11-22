@@ -5,6 +5,9 @@
 import re
 
 import pytest
+
+
+pytest.importorskip("torchvision")
 import torch
 from awq_neutrality import _wrapper, assert_awq_folds_neutral
 from torch import nn
