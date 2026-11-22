@@ -251,11 +251,12 @@ def _smoke(runtime, backend, repeats):
     print(json.dumps({"op": "cache_reuse", "distinct_exponent_bases": True}), flush=True)
 
 
-def _checkpoint(path, runtime, backend, repeats, exhaustive):
+def _checkpoint(path, runtime, backend, repeats, exhaustive, *, lm_head_only=False):
     weight_map = json.loads((path / "model.safetensors.index.json").read_text())["weight_map"]
+    lm_head = "model.llm.unembed.weight"
     matrices = [
         ("model.llm.embed.weight", ()),
-        ("model.llm.unembed.weight", (1, 4, 8, 16, 32, 128, 256)),
+        (lm_head, (1, 4, 8, 16, 32, 128, 256)),
         ("model.visual.backbone.embeddings.patch_embedding.weight", (16, 64, 256)),
         ("model.visual.backbone.embeddings.position_embedding", ()),
         ("model.visual.backbone.layers.0.self_attn.q_proj.weight", (18, 65, 257)),
@@ -265,6 +266,8 @@ def _checkpoint(path, runtime, backend, repeats, exhaustive):
         ("model.visual.proj_out.weight", (4, 16, 64)),
     ]
     for name, sizes in matrices:
+        if lm_head_only and name != lm_head:
+            continue
         with safe_open(path / weight_map[name], framework="pt", device="cpu") as shard:
             w = shard.get_tensor(name)
             if w.ndim == 4:
@@ -291,9 +294,12 @@ def main():
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--exhaustive", action="store_true", help="Check every logical embedding row on the device")
+    parser.add_argument("--lm-head-only", action="store_true", help="Benchmark only the Inkling LM head")
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be positive")
+    if args.lm_head_only and args.checkpoint is None:
+        parser.error("--lm-head-only requires --checkpoint")
     torch.set_num_threads(6)
     torch.manual_seed(12)
     print(json.dumps({"backend": args.backend, "chip": args.chip, "repeats": args.repeats, "torch": torch.__version__,
@@ -302,7 +308,8 @@ def main():
         if args.checkpoint is None:
             _smoke(runtime, args.backend, args.repeats)
         else:
-            _checkpoint(args.checkpoint, runtime, args.backend, args.repeats, args.exhaustive)
+            _checkpoint(args.checkpoint, runtime, args.backend, args.repeats, args.exhaustive,
+                        lm_head_only=args.lm_head_only)
 
 
 if __name__ == "__main__":
