@@ -4,10 +4,9 @@
 
 template <typename Packed, typename Escapes>
 inline void decode_tile(
-    uint32_t nt, uint32_t kt, uint32_t dst, uint32_t scratch, const Packed& packed, const Escapes& escapes) {
-    constexpr uint32_t n_atoms = NF12_CONFIG(0);
+    uint32_t nt, uint32_t kt, uint32_t dst, uint32_t scratch,
+    uint32_t n_atoms, uint32_t base, const Packed& packed, const Escapes& escapes) {
     constexpr uint32_t k_tiles = NF12_CONFIG(1);
-    constexpr uint32_t base = NF12_CONFIG(4);
     auto* tile = reinterpret_cast<volatile uint16_t*>(dst);
     const auto* atom = reinterpret_cast<volatile const uint32_t*>(scratch);
     const uint32_t first_face = 2 * (kt % 2);
@@ -57,6 +56,16 @@ void kernel_main() {
     const auto escapes = TensorAccessor(escape_args, NF12_ADDRESS(2), NF12_ESCAPE_PAGE);
     NF12_RANGE(NF12_CONFIG(6), 3, 4);
     const uint32_t scratch = get_write_ptr(24);
+#ifdef NF12_PJRT
+    noc_async_read(escapes.get_noc_addr(0), scratch, 64);
+    noc_async_read_barrier();
+    const auto* metadata = reinterpret_cast<volatile const uint32_t*>(scratch);
+    const uint32_t base = metadata[0];
+    const uint32_t n_atoms = metadata[2];
+#else
+    constexpr uint32_t base = NF12_CONFIG(4);
+    constexpr uint32_t n_atoms = NF12_CONFIG(0);
+#endif
 
     for (uint32_t nt = start; nt < end; ++nt) {
         for (uint32_t mt = 0; mt < m_tiles; mt += m_block) {
@@ -74,7 +83,7 @@ void kernel_main() {
                     noc_async_read_page(nt * k_tiles + kt, w, get_write_ptr(0));
                     noc_async_read_barrier();
                 } else {
-                    decode_tile(nt, kt, get_write_ptr(0), scratch, w, escapes);
+                    decode_tile(nt, kt, get_write_ptr(0), scratch, n_atoms, base, w, escapes);
                 }
                 cb_push_back(0, 1);
             }

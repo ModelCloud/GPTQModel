@@ -3,10 +3,7 @@
 // decode.h is prepended by the host.
 
 void kernel_main() {
-    constexpr uint32_t n = NF12_CONFIG(0);
-    constexpr uint32_t k = NF12_CONFIG(1);
-    constexpr uint32_t count = NF12_CONFIG(2);
-    constexpr uint32_t base = NF12_CONFIG(3);
+    constexpr uint32_t cols = NF12_CONFIG(0) / 32;
     constexpr auto packed_args = TensorAccessorArgs<NF12_ACCESSORS(0)>();
     constexpr auto escape_args = TensorAccessorArgs<packed_args.next_compile_time_args_offset()>();
     constexpr auto ids_args = TensorAccessorArgs<escape_args.next_compile_time_args_offset()>();
@@ -15,13 +12,17 @@ void kernel_main() {
     const auto escapes = TensorAccessor(escape_args, NF12_ADDRESS(1), NF12_ESCAPE_PAGE);
     const auto ids = TensorAccessor(ids_args, NF12_ADDRESS(2), 4096);
     const auto out = TensorAccessor(out_args, NF12_ADDRESS(3), 2048);
-    constexpr uint32_t cols = k / 32;
-    NF12_RANGE(((count + 31) / 32 * cols), 0, 0);
+    NF12_RANGE(NF12_CONFIG(1), 0, 0);
 
     const uint32_t atom_addr = get_write_ptr(24);
     const uint32_t id_addr = atom_addr + 1536;
     const uint32_t tile_addr = id_addr + 128;
     const uint32_t escape_addr = tile_addr + 2048;
+    noc_async_read(escapes.get_noc_addr(0), atom_addr, 64);
+    noc_async_read_barrier();
+    const auto* metadata = reinterpret_cast<volatile const uint32_t*>(atom_addr);
+    const uint32_t base = metadata[0];
+    const uint32_t n = metadata[1];
     auto* tile = reinterpret_cast<volatile uint16_t*>(tile_addr);
     const auto* atom = reinterpret_cast<volatile const uint32_t*>(atom_addr);
     const auto* id_words = reinterpret_cast<volatile const uint32_t*>(id_addr);
@@ -39,7 +40,7 @@ void kernel_main() {
         }
         for (uint32_t r = 0; r < 32; ++r) {
             const uint32_t id = id_words[r];
-            if (row_tile * 32 + r >= count || id >= n) {
+            if (id >= n) {
                 for (uint32_t c = 0; c < 32; ++c) {
                     tile[tile_slot(r, c)] = 0;
                 }

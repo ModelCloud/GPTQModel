@@ -38,7 +38,7 @@ inline void fetch_escape(const Group& group, const Accessor& escapes, uint32_t d
         // Escape pages contain four canonical 16-byte entries. A full page
         // keeps the DRAM/L1 transfer aligned on Blackhole.
 #ifdef NF12_PJRT
-        const uint32_t offset = (group.low0 / 4) * 64;
+        const uint32_t offset = 64 + (group.low0 / 4) * 64;
         noc_async_read(escapes.get_noc_addr(offset / 4096, offset % 4096), dst, 64);
 #else
         noc_async_read_page(group.low0 / 4, escapes, dst);

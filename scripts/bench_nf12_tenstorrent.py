@@ -233,6 +233,23 @@ def _smoke(runtime, backend, repeats):
     _same(biased[0, :2], torch.tensor([0.00390625, -0.00390625], dtype=torch.bfloat16))
     print(json.dumps({"op": "rounding", "tie_to_even": True, "bias_before_rounding": True}), flush=True)
 
+    # Equal shapes, identical escape counts, and different exponent bases
+    # exercise executable reuse in the Torch/XLA lazy cache.
+    variants = [
+        (torch.full((32, 64), value, dtype=torch.bfloat16), base)
+        for value, base in ((0.03125, 57), (0.015625, 55))
+    ]
+    x = torch.ones((1, 64), dtype=torch.bfloat16)
+    if backend == "ttxla":
+        x = x.to(device)
+    layers = [make(device, *prepare_nf12(w, "synthetic.exponents", exp_base=base)) for w, base in variants]
+    for index in (0, 1, 0):
+        w, _ = variants[index]
+        layer = layers[index]
+        _same(layer.embedding(torch.arange(len(w))).cpu(), w)
+        _same(layer.linear(x).cpu(), w.sum(1)[None, :])
+    print(json.dumps({"op": "cache_reuse", "distinct_exponent_bases": True}), flush=True)
+
 
 def _checkpoint(path, runtime, backend, repeats, exhaustive):
     weight_map = json.loads((path / "model.safetensors.index.json").read_text())["weight_map"]

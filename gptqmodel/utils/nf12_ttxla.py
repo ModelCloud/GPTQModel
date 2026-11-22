@@ -51,7 +51,7 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
         expected_dtypes = ("si32", "si32", "si32", "bf16")
         tasks = round_up(m, 32) // 32 * (k // 32)
         cbs = [_cb(24, "UInt32", 1536 + 128 + 2048 + 8 * 64)]
-        kernels = [("gather_xla", "noc", [0, 1, 2, 3], [n, k, m, base])]
+        kernels = [("gather_xla", "noc", [0, 1, 2, 3], [k, tasks])]
     elif op == "linear":
         nt, kt, mt = round_up(n, 32) // 32, k // 32, round_up(m, 32) // 32
         dense, wide = bool(flag & 1), bool(flag & 2)
@@ -151,13 +151,21 @@ class TTXLANF12:
         device = torch.device(device)
         if device.type != "xla" or xr.device_type() != "TT":
             raise ValueError("TT-XLA NF12 requires the Tenstorrent PJRT device")
+        arch = xr.runtime_device_attributes(str(device)).get("device_arch", "")
+        if str(arch).casefold() != "blackhole":
+            raise ValueError(f"TT-XLA NF12 requires a Blackhole chip, received {arch!r}")
         verify_nf12(descriptor, weight)
         _install_resolver()
         self.device = device
         self.descriptor = descriptor
-        self.exp_base = weight.exp_base
         self.packed = _tiled_words(weight.packed.view(torch.int32)).to(device)
-        self.escapes = _tiled_words(weight.escapes.view(torch.int32)).to(device)
+        # The Torch/XLA lazy cache can reuse an executable for equal operand
+        # shapes even when frontend attributes differ. Read per-weight values
+        # from memory so two matrices can safely use the same executable.
+        header = torch.zeros(16, dtype=torch.int32)
+        header[:3] = torch.tensor([weight.exp_base, descriptor.logical_shape[0], weight.shape[0] // 16])
+        escape_stream = torch.cat((header, weight.escapes.view(torch.int32).flatten()))
+        self.escapes = _tiled_words(escape_stream).to(device)
 
     @property
     def resident_bytes(self):
@@ -177,7 +185,7 @@ class TTXLANF12:
         rows = round_up(count, 32)
         flat = torch.nn.functional.pad(flat, (0, rows - count), value=-1)[None, :].to(self.device)
         out = torch.empty((rows, padded_k), dtype=torch.bfloat16, device=self.device)
-        result = _call("gather", (n, padded_k, count, self.exp_base, 0, padded_n),
+        result = _call("gather", (n, padded_k, count, 0, 0, padded_n),
                        (self.packed, self.escapes, flat), out)
         return result[:count, :k].reshape(*ids.shape, k)
 
@@ -213,8 +221,12 @@ class TTXLANF12:
         out = torch.empty((mt, nt), dtype=dtype, device=self.device)
         flags = int(baseline is not None) | (2 * int(bias is not None))
         weight = self.packed if baseline is None else baseline
-        y = _call("linear", (padded_n, padded_k, m, self.exp_base, min(m_block, mt // 32), flags),
-                  (activation, weight, self.escapes), out)[:m, :n]
+        block = min(m_block, mt // 32)
+        # A leading size-one dimension distinguishes M-reuse schedules in
+        # Torch/XLA's cache without adding a resident operand or changing pages.
+        escapes = self.escapes.reshape((1,) * (block - 1) + tuple(self.escapes.shape))
+        y = _call("linear", (padded_n, padded_k, m, 0, block, flags),
+                  (activation, weight, escapes), out)[:m, :n]
         if bias is not None:
             y = (y + bias.float()).to(torch.bfloat16)
         return y.reshape(*x.shape[:-1], n)
