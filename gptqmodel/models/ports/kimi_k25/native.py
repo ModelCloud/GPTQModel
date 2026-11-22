@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Native computation with temporal-pooling ownership and native-format saving."""
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -23,6 +23,10 @@ from ..native.kimi_k25.modeling_kimi_k25 import (
     Kimi_K25PreTrainedModel,
 )
 from ..native.kimi_k25.modeling_kimi_k25 import Kimi_K25VisionModel as NativeKimiVisionModel
+
+
+if TYPE_CHECKING:
+    from .processing_kimi_k25 import Kimi_K25Processor
 
 
 def __getattr__(name):
