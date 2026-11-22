@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
+import json
 
 import pytest
 import torch
@@ -65,3 +66,27 @@ def test_ttxla_artifact_rejects_wrong_number_of_fields(suffix):
 
     with pytest.raises(ValueError, match="expected seven fields"):
         _artifact(_PREFIX + suffix, "", [], [], [], (1, 1), "")
+
+
+def test_ttxla_packed_linear_buffers_two_k_pairs():
+    from gptqmodel.utils.nf12_ttxla import _PREFIX, _artifact, _version_tag
+
+    def artifact(dense):
+        weight = (256, 32) if dense else (96, 32)
+        shapes = [(160, 128), weight, (32, 32), (160, 64)]
+        dtypes = ["bf16", "bf16" if dense else "si32", "si32", "bf16"]
+        layouts = ["<interleaved><dram>!ttcore.tile<32x32"] * 4
+        return json.loads(_artifact(
+            _PREFIX + f"linear.48.128.129.0.4.{int(dense)}", _version_tag(),
+            shapes, dtypes, layouts, (1, 1), "in,in,in,out",
+        ))
+
+    packed = artifact(False)
+    dense = artifact(True)
+    assert {cb["buffer_index"]: cb["total_size"] for cb in packed["cb_configs"]} == {
+        0: 8192, 1: 32768, 16: 4096, 24: 23552,
+    }
+    assert {cb["buffer_index"]: cb["total_size"] for cb in dense["cb_configs"]} == {
+        0: 4096, 1: 16384, 16: 4096,
+    }
+    assert packed["kernels"][2]["kernel_config"] == dense["kernels"][2]["kernel_config"]
