@@ -173,3 +173,49 @@ buffers reserve 17,920 bytes per worker at M=1 and 30,208 bytes at M≥128 for
 bias-free outputs. The bias path adds 4,096 bytes of circular buffering and a
 transient FP32 output matrix. The bias-free path uses L1 for decoded tiles
 throughout the contraction.
+
+### TT-XLA LM head
+
+| M | NF12 ms median / p95 | BF16 ms median / p95 | NF12 GB/s | Scaled RMSE |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 348.17 / 349.74 | 12.22 / 351.84 | 2.00 | 0.001072 |
+| 4 | 352.62 / 370.00 | 14.76 / 357.97 | 1.97 | 0.001073 |
+| 8 | 358.57 / 361.00 | 23.64 / 362.89 | 1.94 | 0.001067 |
+| 16 | 370.18 / 370.89 | 27.22 / 374.43 | 1.88 | 0.001058 |
+| 32 | 349.58 / 352.06 | 15.82 / 354.80 | 1.99 | 0.001063 |
+| 128 | 401.26 / 404.67 | 78.76 / 409.31 | 1.73 | 0.001067 |
+| 256 | 807.24 / 1143.87 | 140.73 / 835.06 | 0.86 | 0.001068 |
+
+### TT-XLA token embedding
+
+| IDs | NF12 µs median / p95 | BF16 µs median / p95 |
+| --- | ---: | ---: |
+| one | 991 / 1598 | 517 / 1083 |
+| repeat | 9353 / 11764 | 3606 / 8672 |
+| contiguous | 9404 / 15835 | 4816 / 7875 |
+| scattered | 1335 / 1970 | 802 / 2941 |
+
+### Representative vision linears
+
+| Checkpoint projection | M | Native TTNN NF12 / BF16 ms | TT-XLA NF12 / BF16 ms |
+| --- | ---: | ---: | ---: |
+| Patch projection | 64 | 2.54 / 0.24 | 2.34 / 0.43 |
+| Q projection with bias | 65 | 2.09 / 0.27 | 2.13 / 0.93 |
+| MLP expansion with bias | 65 | 5.00 / 1.45 | 4.59 / 1.76 |
+| MLP contraction with bias | 65 | 6.95 / 0.45 | 7.00 / 0.94 |
+| Merger input | 16 | 14.74 / 1.36 | 12.99 / 0.85 |
+| Merger output | 16 | 7.08 / 0.53 | 12.80 / 0.73 |
+
+Both runtimes verified every logical row of the token table and LM head,
+and every row of the seven representative vision matrices. All 21 linear
+cases per runtime were bit-identical to their matching device BF16 schedule.
+The bias-free head had maximum absolute error at most 0.00098 and scaled
+RMSE at most 0.00108 against FP32 Torch arithmetic rounded to BF16.
+Across the head samples, top-1, top-5 and top-10 overlap were at least
+99.2%, 99.9% and 98.8%, respectively. The M=256 runs retained the same
+K-reduction order. Native reuse of up to four activation tiles reduced
+weight decoding at that shape and kept scratch bounded.
+
+TT-XLA resident bytes were 695,463,936 for the token table and 695,394,304
+for the head. Its 2,048-row head decode measured 9.50 ms median and
+9.89 ms p95, including the host read.
