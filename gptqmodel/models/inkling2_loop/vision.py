@@ -158,9 +158,9 @@ def _patch_positions(
 
 
 def _bilinear_taps(
-    grid_h: int, grid_w: int, side: int
+    grid_h: int, grid_w: int, side: int, merge: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Gather indices/weights that resample a ``side x side`` table to ``(grid_h, grid_w)``."""
+    """Resample the learned position table in the patch stream's merge order."""
 
     def taps(target: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # align_corners=False mapping from a destination cell to the source grid
@@ -172,12 +172,9 @@ def _bilinear_taps(
 
     row_low, row_high, row_frac = taps(grid_h)
     col_low, col_high, col_frac = taps(grid_w)
-    row_low = row_low.repeat_interleave(grid_w)
-    row_high = row_high.repeat_interleave(grid_w)
-    col_low = col_low.repeat(grid_h)
-    col_high = col_high.repeat(grid_h)
-    row_frac = row_frac.repeat_interleave(grid_w)
-    col_frac = col_frac.repeat(grid_h)
+    rows, cols = _patch_positions(grid_h, grid_w, merge)
+    row_low, row_high, row_frac = row_low[rows], row_high[rows], row_frac[rows]
+    col_low, col_high, col_frac = col_low[cols], col_high[cols], col_frac[cols]
     indices = torch.stack(
         [
             row_low * side + col_low,
@@ -229,7 +226,7 @@ class Inkling2LoopVisionEmbeddings(nn.Module):
         table = self.position_embedding.weight
         position_embeddings = []
         for grid_h, grid_w in grids:
-            indices, weights = _bilinear_taps(grid_h, grid_w, self.grid_size)
+            indices, weights = _bilinear_taps(grid_h, grid_w, self.grid_size, merge)
             indices = indices.to(pixel_values.device)
             weights = weights.to(pixel_values.device)
             position_embeddings.append((table[indices] * weights[:, :, None]).sum(1))
