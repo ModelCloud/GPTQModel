@@ -12,6 +12,7 @@ then the behaviours each metric exists for:
 - grades are evaluated in order, so a value can satisfy only one.
 """
 
+import math
 import re
 
 import pytest
@@ -34,6 +35,11 @@ from gptqmodel.measure import (
     logit_rmse,
     mean_negative_log_likelihood,
     topk_overlap,
+)
+from gptqmodel.measure.metrics import (
+    kl_divergence_sum,
+    logit_rmse_sums,
+    topk_overlap_sum,
 )
 
 
@@ -201,6 +207,52 @@ def test_more_noise_moves_every_metric_the_same_way():
     assert kl_divergence(reference, small) < kl_divergence(reference, large)
     assert topk_overlap(reference, small, k=1) > topk_overlap(reference, large, k=1)
     assert logit_rmse(reference, small) < logit_rmse(reference, large)
+
+
+def test_pooled_sums_match_the_concatenated_sample():
+    reference = _logits(seed=15)
+    candidate = reference + 0.3 * _logits(seed=16)
+    chunks = [slice(0, 1), slice(1, 2)]
+
+    for k in (1, 3):
+        total = sum(topk_overlap_sum(reference[c], candidate[c], k=k)[0] for c in chunks)
+        count = sum(topk_overlap_sum(reference[c], candidate[c], k=k)[1] for c in chunks)
+        assert total / count == pytest.approx(topk_overlap(reference, candidate, k=k))
+
+    total = 0.0
+    count = 0
+    for chunk in chunks:
+        chunk_total, chunk_count = kl_divergence_sum(reference[chunk], candidate[chunk])
+        total += chunk_total
+        count += chunk_count
+    assert total / count == pytest.approx(kl_divergence(reference, candidate))
+
+    for normalize in (False, True):
+        error = 0.0
+        squared_reference = 0.0
+        elements = 0
+        for chunk in chunks:
+            chunk_error, chunk_reference, chunk_elements = logit_rmse_sums(
+                reference[chunk], candidate[chunk], normalize=normalize
+            )
+            error += chunk_error
+            squared_reference += chunk_reference
+            elements += chunk_elements
+        difference = math.sqrt(error / elements)
+        expected = difference
+        if normalize:
+            expected = difference / math.sqrt(squared_reference / elements)
+        assert expected == pytest.approx(logit_rmse(reference, candidate, normalize=normalize))
+
+
+def test_pooled_rmse_sums_leave_the_inputs_untouched():
+    reference = _logits(seed=17)
+    candidate = reference + 0.1 * _logits(seed=18)
+    before = reference.clone()
+
+    logit_rmse_sums(reference, candidate, normalize=True)
+
+    assert torch.equal(reference, before)
 
 
 def test_a_constant_shift_is_invisible_to_topk_but_not_to_rmse():

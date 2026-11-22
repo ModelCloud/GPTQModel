@@ -28,10 +28,10 @@ from .config import (
     metric_of,
 )
 from .metrics import (
-    kl_divergence,
-    logit_rmse,
+    kl_divergence_sum,
+    logit_rmse_sums,
     mean_negative_log_likelihood,
-    topk_overlap,
+    topk_overlap_sum,
 )
 from .report import MeasurementReport
 
@@ -282,21 +282,19 @@ def _capture(
             captures.nll_sum += total
             captures.tokens += count
         if positions:
-            lengths = attention_mask.sum(dim=1)
-            usable = int(lengths.min()) - 1
-            if usable < 1:
-                continue
-            # Per-row positions keep the sample independent of how rows were
-            # batched: every row contributes the same number of predictions at
-            # evenly spaced offsets inside its own length.
-            count = min(positions, usable)
-            index = torch.stack([
-                torch.linspace(0, int(length) - 2, count).round().long()
-                for length in lengths
-            ]).to(device)
-            picked = logits.gather(1, index.unsqueeze(-1).expand(-1, -1, logits.shape[-1]))
-            captures.positions += int(index.numel())
-            captures.logits.append(picked.detach().cpu().to(torch.float16))
+            # Sample each row independently. Using the batch's shortest row as
+            # the cap silently dropped positions from longer peers, so the
+            # sample (and every metric weighting it) changed with `batch`.
+            picked_rows = []
+            for row, length in enumerate(attention_mask.sum(dim=1).tolist()):
+                index = _sample_positions(int(length), positions).to(device)
+                if index.numel() == 0:
+                    continue
+                picked_rows.append(logits[row].index_select(0, index))
+            if picked_rows:
+                picked = torch.cat(picked_rows, dim=0).unsqueeze(0)
+                captures.positions += int(picked.shape[1])
+                captures.logits.append(picked.detach().cpu().to(torch.float16))
     return captures
 
 
@@ -397,26 +395,57 @@ def _evaluate(
     if not pairs:
         raise ValueError(f"{name.value} needs sampled logits but none were captured")
 
+    # Pool positions and elements across batches, then divide once. Averaging
+    # per-batch means would give a short final batch the same vote as a full
+    # one, so `batch` would still move the number even with a correct sample.
     if name is Metric.KLD:
-        return _mean(
-            kl_divergence(reference.float(), candidate.float(), temperature=member.temperature)
-            for reference, candidate in pairs
-        )
+        total = 0.0
+        count = 0
+        for reference, candidate in pairs:
+            batch_total, batch_count = kl_divergence_sum(
+                reference, candidate, temperature=member.temperature
+            )
+            total += batch_total
+            count += batch_count
+        return _pooled_mean(total, count, name)
+
     if name is Metric.RMSE:
-        return _mean(
-            logit_rmse(reference.float(), candidate.float(), normalize=member.normalize)
-            for reference, candidate in pairs
-        )
+        squared_error = 0.0
+        squared_reference = 0.0
+        count = 0
+        for reference, candidate in pairs:
+            batch_error, batch_reference, batch_count = logit_rmse_sums(
+                reference, candidate, normalize=member.normalize
+            )
+            squared_error += batch_error
+            squared_reference += batch_reference
+            count += batch_count
+        if count == 0:
+            raise ValueError(f"{name.value} needs sampled logits but none were captured")
+        difference = math.sqrt(squared_error / count)
+        if not member.normalize:
+            return difference
+        reference_scale = math.sqrt(squared_reference / count)
+        if reference_scale == 0:
+            raise ValueError("cannot normalise by a reference logit RMS of zero")
+        return difference / reference_scale
+
     if name is Metric.TOP_K:
-        return {
-            k: _mean(topk_overlap(reference.float(), candidate.float(), k=k) for reference, candidate in pairs)
-            for k in member.k
-        }
+        overlaps = {}
+        for k in member.k:
+            total = 0.0
+            count = 0
+            for reference, candidate in pairs:
+                batch_total, batch_count = topk_overlap_sum(reference, candidate, k=k)
+                total += batch_total
+                count += batch_count
+            overlaps[k] = _pooled_mean(total, count, name)
+        return overlaps
+
     raise TypeError(f"unknown metric config {type(member).__name__}")
 
 
-def _mean(values) -> float:
-    collected = list(values)
-    if not collected:
-        raise ValueError("no measurements were collected")
-    return sum(collected) / len(collected)
+def _pooled_mean(total: float, count: int, name: Metric) -> float:
+    if count == 0:
+        raise ValueError(f"{name.value} needs sampled logits but none were captured")
+    return total / count

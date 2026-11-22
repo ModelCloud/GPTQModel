@@ -140,22 +140,18 @@ the window, so changing `window` or `stride` must not change PPL.
 
 ## Batching and reproducibility
 
-Default `batch=1`, and that default is the reproducible one. In bfloat16 the
-forward is sensitive to the batch shape: the same row alone and inside a batch
-of equally long rows differs by up to 0.84 in logits, which moves KLD by about
-1% and top-k by a few points. That is kernel accumulation, not padding - the
-padded and unpadded float32 runs agree to 1.5e-4.
+`batch` changes how the same rows are fed, never which transitions are sampled
+or how they are weighted. Each row samples its own positions up to its real
+length - a short peer no longer caps a longer row - and KLD, TOP_K and RMSE pool
+per-position sums and element counts across batches before dividing once. A
+ragged batch and a short final batch therefore report the same `positions` and
+the same metric definition as `batch=1`.
 
-`batch` changes how the same rows are fed, never how many rows are read:
-`batch > 1` gives the speed (4x fewer forwards below), `batch=1` gives the
-reproducible numbers.
-
-Measured on the 0.5B pair, 4 rows of 402-512 tokens:
-
-| batch | forwards | KLD | TOP_K@1 |
-| --- | --- | --- | --- |
-| 1 | 4 | 0.2204 | 0.7734 |
-| 4 | 1 | 0.2184 | 0.8047 |
+In bfloat16 the forward itself is still sensitive to batch shape: the same row
+alone and inside a batch of equally long rows differs by up to 0.84 in logits.
+That residual is kernel accumulation, not sampling or padding - the padded and
+unpadded float32 runs agree to 1.5e-4. `batch > 1` gives the speed (fewer
+forwards), while `batch=1` gives the most reproducible forward numerics.
 
 ## What "good" looks like
 
@@ -189,6 +185,10 @@ kernel.
   sampling stays inside each row's real length. In float32 the padded and
   unpadded runs agree to 1.5e-4, and adding `attention_mask` alone changes
   nothing.
+- **`batch` does not change the sample.** Every row samples its own positions,
+  and KLD/TOP_K/RMSE pool per-position sums and counts across batches instead
+  of averaging already-reduced batch means. Batch 1, a ragged batch and a short
+  final batch produce the same `report.positions` and the same values.
 - **`report.positions` is what was actually sampled**, not what was requested:
   a short row contributes its own two or three positions, not the configured 64.
 - **Report-only by default**: no grades, no verdict.
