@@ -379,6 +379,23 @@ special BF16 values, including signed zeros, subnormals, infinities and NaN
 payloads, was also tested before arithmetic. This result is for the source-main
 TTNN prototype at M=1.
 
+An independent 40-sample run on chip 0 measured 2.082 / 2.093 ms packed and
+2.375 / 2.403 ms matched BF16. The outputs matched bit-for-bit on both chips.
+
+The following chip 2 runs use one 32-row block at a time for both operands.
+For M above 32, they reuse the same resident weight across successive row
+blocks. This comparison uses the same row blocking for BF16 and NF12.
+
+| M | SFPU NF12 median / p95 | Matched BF16 median / p95 |
+| ---: | ---: | ---: |
+| 1 | 2.088 / 2.100 ms | 2.491 / 2.551 ms |
+| 4 | 2.090 / 2.184 ms | 2.504 / 2.545 ms |
+| 8 | 2.114 / 2.242 ms | 2.503 / 2.567 ms |
+| 16 | 2.117 / 2.195 ms | 2.497 / 2.616 ms |
+| 32 | 2.093 / 2.125 ms | 2.492 / 2.520 ms |
+| 33 | 4.120 / 4.198 ms | 4.919 / 4.993 ms |
+| 128 | 8.248 / 8.312 ms | 9.871 / 9.888 ms |
+
 ```bash
 TT_VISIBLE_DEVICES=2 TT_MESH_GRAPH_DESC_PATH=/path/to/p150_mesh_graph_descriptor.textproto \
   PYTHONPATH=. python scripts/bench_nf12_sfpu_decode.py --chip 0 --size 201024 \
