@@ -12,10 +12,15 @@ generic Llama tree cannot resolve them through ``ModulePlan.find()``.
 """
 
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from . import LlamaQModel
 
 
 class Olmo2QModel(LlamaQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     fusable = FusableConfig("olmo2").merge(LlamaFusableConfig())
 
     shared_input_verified_model_types = frozenset({"olmo2"})

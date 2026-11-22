@@ -5,9 +5,15 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class PhiQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     shared_input_verified_model_types = frozenset({"phi"})
 
     fusable = FusableConfig("phi").merge(LlamaFusableConfig(), profiles=("qkv",))

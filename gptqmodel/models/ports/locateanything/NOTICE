@@ -1,0 +1,15 @@
+LocateAnything port for GPT-QModel
+==================================
+
+The Python modules in this directory are an independent implementation written by
+ModelCloud.ai under the Apache License 2.0. They were written in a clean-room process
+from a behavioral specification (configuration fields, tensor names and shapes, and the
+observable numerical behavior of the model), not from the original source code.
+
+The implementation is compatible with the format of the published NVIDIA
+LocateAnything checkpoints (for example nvidia/LocateAnything-3B): it reads the same
+config.json fields and state-dict keys. Model weights are not part of this repository and
+remain under the terms their publisher distributes them with.
+
+The Qwen2/Qwen3 decoder building blocks are imported from GPT-QModel's vendored
+Apache-2.0 Transformers 5.23 families in ../native/qwen2 and ../native/qwen3.

@@ -248,12 +248,14 @@ def test_a_winning_capture_still_merges(monkeypatch):
     monkeypatch.setattr(torch, "topk", lambda *a, **k: calls.append(a) or real_topk(*a, **k))
 
     winner = torch.zeros(1, 4)
+    displaced = int(torch.argmax(entry["reservoir_priorities"][: entry["reservoir_used"]]))
     processor._merge_reservoir_rows(
         entry, winner, torch.zeros(1, dtype=torch.float64), source_index=7, budget_cap=CAP
     )
 
     assert calls
     # The survivor lands in the slot of the row it displaced, not slot 0.
+    assert int(entry["reservoir_sources"][displaced]) == 7
     survivors = (entry["reservoir_sources"] == 7).nonzero(as_tuple=False).flatten()
     assert survivors.numel() == 1
     assert torch.equal(entry["reservoir_buffer"][int(survivors[0])], winner[0])

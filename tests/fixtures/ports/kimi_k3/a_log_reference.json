@@ -1,0 +1,22 @@
+{
+  "repo": "moonshotai/Kimi-K3",
+  "revision": "f831ab66814297da540d832a5235f8e904f29d06",
+  "shard": "model-00013-of-000096.safetensors",
+  "key": "language_model.model.layers.12.self_attn.A_log",
+  "dtype": "F32",
+  "shape": [
+    128
+  ],
+  "active_heads": 96,
+  "header_length": 824104,
+  "data_offsets": [
+    3584,
+    4096
+  ],
+  "file_byte_range": [
+    827696,
+    828207
+  ],
+  "sha256": "13f756b245c0f444a480166b5398f1ba788de4e4926f04b351edc0f4378643dd",
+  "base64": "i0waP8K3FD9cmco9TXHsPrDxST9/VLm83iBTPh9rdz325pM+rmjzPoYslr7AX0o/8jJVvXT5rD049vk+MwvNPTvtrT0wYxQ95ek6PyRWLb7c/Hm+plmgPuixRT9X8B4/wrrCPdCQYD3kkIM9GUisPoX0Jz6wdhQ/azalvesPbz6DKNM+smRqP0hDMz4pf/g9IbaoPV4WIL5ZHQI/MLk6P4T3lD67sCk/9MbHPmxwaj4Ficc89xsuPyWrrT54bkA/mVZAP7Wrmz6Y7I09CV6AP0E8MD8QDc29TgEtvEYvxj0RORA8FnsGPrNEzD4T8Bw/caukviR8UD+j1+++jXS+vLF0dr0md1m+DhMxPzYYVD5gagU/aX1wvQm4uTw7ijE+UM8oP6lOTT9df7w+YMkmPmmNUrzfiOI+srFTP6529j6QTlQ+19eAP8S6dj6GlZA+DR4AP9133D5oDho/R0oRPzfQN72ADDU+Y6LePjlBLTxsS8Q9gjTVPeS2t7wcGSy8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+}

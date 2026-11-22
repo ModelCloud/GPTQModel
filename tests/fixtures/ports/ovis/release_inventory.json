@@ -1,0 +1,393 @@
+{
+ "Ovis-Clip-Llama3-8B": {
+  "config": {
+   "conversation_formatter_class": "Llama3ConversationFormatter",
+   "hidden_size": 4096,
+   "llm_config": {
+    "bos_token_id": 128000,
+    "eos_token_id": 128009,
+    "intermediate_size": 14336,
+    "max_position_embeddings": 8192,
+    "model_type": "llama",
+    "num_key_value_heads": 8,
+    "rms_norm_eps": 1e-05,
+    "rope_scaling": null,
+    "rope_theta": 500000.0,
+    "vocab_size": 128256
+   },
+   "model_type": "ovis",
+   "multimodal_max_length": 2048,
+   "visual_tokenizer_config": {
+    "backbone_config": {
+     "bos_token_id": null,
+     "dropout": 0.0,
+     "eos_token_id": null,
+     "hidden_size": 1024,
+     "image_size": 336,
+     "intermediate_size": 4096,
+     "model_type": "clip_vision_model",
+     "num_attention_heads": 16,
+     "num_hidden_layers": 24,
+     "pad_token_id": null,
+     "patch_size": 14,
+     "projection_dim": 768,
+     "tie_word_embeddings": true
+    },
+    "bos_token_id": null,
+    "drop_cls_token": true,
+    "eos_token_id": null,
+    "model_type": "clip_visual_tokenizer",
+    "pad_token_id": null,
+    "tie_word_embeddings": true,
+    "use_indicators": true,
+    "vocab_size": 131072
+   }
+  },
+  "keys_sha256": "0e18d67fa0400a413d425177b888772a36477c8d10cf8cd7601b1270c49716c5",
+  "shapes_sha256": null,
+  "tensors": 686
+ },
+ "Ovis-Clip-Qwen1_5-14B": {
+  "config": {
+   "conversation_formatter_class": "QwenConversationFormatter",
+   "hidden_size": 5120,
+   "llm_config": {
+    "bos_token_id": 151643,
+    "eos_token_id": 151645,
+    "hidden_size": 5120,
+    "intermediate_size": 13696,
+    "max_window_layers": 35,
+    "model_type": "qwen2",
+    "num_attention_heads": 40,
+    "num_hidden_layers": 40,
+    "num_key_value_heads": 40,
+    "rope_theta": 1000000.0,
+    "sliding_window": 32768,
+    "vocab_size": 152064
+   },
+   "model_type": "ovis",
+   "multimodal_max_length": 2048,
+   "visual_tokenizer_config": {
+    "backbone_config": {
+     "bos_token_id": null,
+     "dropout": 0.0,
+     "eos_token_id": null,
+     "hidden_size": 1024,
+     "image_size": 336,
+     "intermediate_size": 4096,
+     "model_type": "clip_vision_model",
+     "num_attention_heads": 16,
+     "num_hidden_layers": 24,
+     "pad_token_id": null,
+     "patch_size": 14,
+     "projection_dim": 768,
+     "tie_word_embeddings": true
+    },
+    "bos_token_id": null,
+    "drop_cls_token": true,
+    "eos_token_id": null,
+    "model_type": "clip_visual_tokenizer",
+    "pad_token_id": null,
+    "tie_word_embeddings": true,
+    "use_indicators": true,
+    "vocab_size": 131072
+   }
+  },
+  "keys_sha256": "f5cd841fcb8722e6401f55c37c5b4140d9c76815a28347f5d3611d22916f5c50",
+  "shapes_sha256": null,
+  "tensors": 878
+ },
+ "Ovis-Clip-Qwen1_5-7B": {
+  "config": {
+   "conversation_formatter_class": "QwenConversationFormatter",
+   "hidden_size": 4096,
+   "llm_config": {
+    "bos_token_id": 151643,
+    "eos_token_id": 151645,
+    "intermediate_size": 11008,
+    "model_type": "qwen2",
+    "rope_theta": 1000000.0,
+    "sliding_window": 32768
+   },
+   "model_type": "ovis",
+   "multimodal_max_length": 2048,
+   "visual_tokenizer_config": {
+    "backbone_config": {
+     "bos_token_id": null,
+     "dropout": 0.0,
+     "eos_token_id": null,
+     "hidden_size": 1024,
+     "image_size": 336,
+     "intermediate_size": 4096,
+     "model_type": "clip_vision_model",
+     "num_attention_heads": 16,
+     "num_hidden_layers": 24,
+     "pad_token_id": null,
+     "patch_size": 14,
+     "projection_dim": 768,
+     "tie_word_embeddings": true
+    },
+    "bos_token_id": null,
+    "drop_cls_token": true,
+    "eos_token_id": null,
+    "model_type": "clip_visual_tokenizer",
+    "pad_token_id": null,
+    "tie_word_embeddings": true,
+    "use_indicators": true,
+    "vocab_size": 131072
+   }
+  },
+  "keys_sha256": "77dac80f076168f36563034f546c7f5fbd27c8984f42beeed1d77563e884a85a",
+  "shapes_sha256": null,
+  "tensors": 782
+ },
+ "Ovis1.5-Gemma2-9B": {
+  "config": {
+   "conversation_formatter_class": "GemmaConversationFormatter",
+   "hidden_size": 3584,
+   "llm_config": {
+    "cache_implementation": "hybrid",
+    "hidden_act": "gelu_pytorch_tanh",
+    "hidden_size": 3584,
+    "intermediate_size": 14336,
+    "model_type": "gemma2",
+    "num_attention_heads": 16,
+    "num_hidden_layers": 42,
+    "num_key_value_heads": 8,
+    "rope_theta": 10000.0,
+    "sliding_window_size": 4096
+   },
+   "model_type": "ovis",
+   "multimodal_max_length": 8192,
+   "visual_tokenizer_config": {
+    "backbone_config": {
+     "bos_token_id": null,
+     "eos_token_id": null,
+     "hidden_size": 1152,
+     "image_size": 384,
+     "intermediate_size": 4304,
+     "model_type": "siglip_vision_model",
+     "num_attention_heads": 16,
+     "num_hidden_layers": 27,
+     "pad_token_id": null,
+     "patch_size": 14,
+     "tie_word_embeddings": true
+    },
+    "bos_token_id": null,
+    "eos_token_id": null,
+    "hd_booster": "s2wrapper",
+    "model_type": "siglip_visual_tokenizer",
+    "pad_token_id": null,
+    "tie_word_embeddings": true,
+    "use_indicators": true,
+    "vocab_size": 131072
+   }
+  },
+  "keys_sha256": "17eaeec7ba63c1b8a4522ba4ad56eff01c6b3ba120e5ce0b9476c07eb6407b2b",
+  "shapes_sha256": "f0028d3f0e65ccdd7d4fe80ad809099c535e620b058551076c8250a0e1ada8f8",
+  "tensors": 917
+ },
+ "Ovis1.5-Llama3-8B": {
+  "config": {
+   "conversation_formatter_class": "Llama3ConversationFormatter",
+   "hidden_size": 4096,
+   "llm_config": {
+    "bos_token_id": 128000,
+    "eos_token_id": 128001,
+    "intermediate_size": 14336,
+    "max_position_embeddings": 8192,
+    "model_type": "llama",
+    "num_key_value_heads": 8,
+    "rms_norm_eps": 1e-05,
+    "rope_scaling": null,
+    "rope_theta": 500000.0,
+    "vocab_size": 128256
+   },
+   "model_type": "ovis",
+   "multimodal_max_length": 8192,
+   "visual_tokenizer_config": {
+    "backbone_config": {
+     "bos_token_id": null,
+     "eos_token_id": null,
+     "hidden_size": 1152,
+     "image_size": 384,
+     "intermediate_size": 4304,
+     "model_type": "siglip_vision_model",
+     "num_attention_heads": 16,
+     "num_hidden_layers": 27,
+     "pad_token_id": null,
+     "patch_size": 14,
+     "tie_word_embeddings": true
+    },
+    "bos_token_id": null,
+    "eos_token_id": null,
+    "hd_booster": "s2wrapper",
+    "model_type": "siglip_visual_tokenizer",
+    "pad_token_id": null,
+    "tie_word_embeddings": true,
+    "use_indicators": true,
+    "vocab_size": 131072
+   }
+  },
+  "keys_sha256": "4571dd28e111e8d0a8531e3101bb884fd0e4c087ec8a9fd50c75fd3ab5d47b80",
+  "shapes_sha256": null,
+  "tensors": 743
+ },
+ "Ovis1.6-Gemma2-27B": {
+  "config": {
+   "conversation_formatter_class": "GemmaConversationFormatter",
+   "disable_tie_weight": false,
+   "hidden_size": 4608,
+   "llm_config": {
+    "_attn_implementation_autoset": false,
+    "cache_implementation": "hybrid",
+    "head_dim": 128,
+    "hidden_act": "gelu_pytorch_tanh",
+    "hidden_size": 4608,
+    "intermediate_size": 36864,
+    "model_type": "gemma2",
+    "num_attention_heads": 32,
+    "num_hidden_layers": 46,
+    "num_key_value_heads": 16,
+    "query_pre_attn_scalar": 144,
+    "rope_theta": 10000.0,
+    "sliding_window_size": 4096
+   },
+   "model_type": "ovis",
+   "multimodal_max_length": 8192,
+   "visual_tokenizer_config": {
+    "_attn_implementation_autoset": false,
+    "backbone_config": {
+     "_attn_implementation_autoset": false,
+     "bos_token_id": null,
+     "eos_token_id": null,
+     "hidden_size": 1152,
+     "image_size": 384,
+     "intermediate_size": 4304,
+     "model_type": "siglip_vision_model",
+     "num_attention_heads": 16,
+     "num_hidden_layers": 27,
+     "pad_token_id": null,
+     "patch_size": 14,
+     "tie_word_embeddings": true
+    },
+    "bos_token_id": null,
+    "eos_token_id": null,
+    "hidden_stride": 2,
+    "model_type": "siglip_visual_tokenizer",
+    "pad_token_id": null,
+    "tie_word_embeddings": true,
+    "vocab_size": 131072
+   }
+  },
+  "keys_sha256": "050f6dc12efa231be18fa429facad5f48ec2add7c70fe094521ee1be1baaa084",
+  "shapes_sha256": "254aa1002815570101700e0bd7e4f13d18074427c66ed2558191de01af0dfc6e",
+  "tensors": 960
+ },
+ "Ovis1.6-Gemma2-9B": {
+  "config": {
+   "conversation_formatter_class": "GemmaConversationFormatter",
+   "disable_tie_weight": false,
+   "hidden_size": 3584,
+   "llm_config": {
+    "cache_implementation": "hybrid",
+    "hidden_act": "gelu_pytorch_tanh",
+    "hidden_size": 3584,
+    "intermediate_size": 14336,
+    "model_type": "gemma2",
+    "num_attention_heads": 16,
+    "num_hidden_layers": 42,
+    "num_key_value_heads": 8,
+    "rope_theta": 10000.0,
+    "sliding_window_size": 4096
+   },
+   "model_type": "ovis",
+   "multimodal_max_length": 8192,
+   "visual_tokenizer_config": {
+    "backbone_config": {
+     "bos_token_id": null,
+     "eos_token_id": null,
+     "hidden_size": 1152,
+     "image_size": 384,
+     "intermediate_size": 4304,
+     "model_type": "siglip_vision_model",
+     "num_attention_heads": 16,
+     "num_hidden_layers": 27,
+     "pad_token_id": null,
+     "patch_size": 14,
+     "tie_word_embeddings": true
+    },
+    "bos_token_id": null,
+    "eos_token_id": null,
+    "hidden_stride": 2,
+    "model_type": "siglip_visual_tokenizer",
+    "pad_token_id": null,
+    "tie_word_embeddings": true,
+    "vocab_size": 65536
+   }
+  },
+  "keys_sha256": "bcc969609ec4f3b09b3d3e4d16e59507335b5acd5172b714187fce33942a40bf",
+  "shapes_sha256": "91eeb63f210e2176cb09a393d43c3937234962475cc9eb8c4730ed24a592e8de",
+  "tensors": 916
+ },
+ "Ovis1.6-Llama3.2-3B": {
+  "config": {
+   "conversation_formatter_class": "Llama3ConversationFormatter",
+   "disable_tie_weight": false,
+   "hidden_size": 3072,
+   "llm_config": {
+    "bos_token_id": 128000,
+    "eos_token_id": [
+     128001,
+     128008,
+     128009
+    ],
+    "hidden_size": 3072,
+    "intermediate_size": 8192,
+    "max_position_embeddings": 131072,
+    "model_type": "llama",
+    "num_attention_heads": 24,
+    "num_hidden_layers": 28,
+    "num_key_value_heads": 8,
+    "rms_norm_eps": 1e-05,
+    "rope_scaling": {
+     "factor": 32.0,
+     "high_freq_factor": 4.0,
+     "low_freq_factor": 1.0,
+     "original_max_position_embeddings": 8192,
+     "rope_type": "llama3"
+    },
+    "rope_theta": 500000.0,
+    "tie_word_embeddings": true,
+    "vocab_size": 128256
+   },
+   "model_type": "ovis",
+   "multimodal_max_length": 2624,
+   "visual_tokenizer_config": {
+    "backbone_config": {
+     "bos_token_id": null,
+     "eos_token_id": null,
+     "hidden_size": 1152,
+     "image_size": 384,
+     "intermediate_size": 4304,
+     "model_type": "siglip_vision_model",
+     "num_attention_heads": 16,
+     "num_hidden_layers": 27,
+     "pad_token_id": null,
+     "patch_size": 14,
+     "tie_word_embeddings": true
+    },
+    "bos_token_id": null,
+    "eos_token_id": null,
+    "hidden_stride": 2,
+    "model_type": "siglip_visual_tokenizer",
+    "pad_token_id": null,
+    "tie_word_embeddings": true,
+    "vocab_size": 65536
+   }
+  },
+  "keys_sha256": "d2805d6c0e6cf1fc925499fd56f02c33f211e1919aff0853758cb3017901d3e1",
+  "shapes_sha256": "4beae588d54e57d3039202725be2890ea2da5f3cec9bafaee6386151ed8f16fd",
+  "tensors": 706
+ }
+}

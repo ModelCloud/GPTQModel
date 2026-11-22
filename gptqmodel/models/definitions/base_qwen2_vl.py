@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 import torch
 from PIL import Image
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
@@ -15,6 +15,7 @@ from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
@@ -23,7 +24,12 @@ from ._vlm_calibration import (
 
 
 class BaseQwen2VLGPTQ(BaseQModel):
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     pre_lm_head_norm_module = ["model.language_model.norm", "language_model.norm"]
 
@@ -340,7 +346,14 @@ class BaseQwen2VLGPTQ(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path)
+        processor = self.__dict__.get("processor")
+        if processor is not None:
+            return processor
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         label = type(self).__name__

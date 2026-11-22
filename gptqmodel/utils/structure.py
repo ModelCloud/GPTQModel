@@ -1312,6 +1312,7 @@ class LazyTurtle:
         self._no_placement_params = tuple(
             pattern for pattern in (no_placement_params or ()) if isinstance(pattern, str) and pattern
         )
+        self._native_fp32_names = weakref.WeakKeyDictionary()
 
     def close(self) -> None:
         """Release the converted checkpoint directory held by this turtle.
@@ -1589,6 +1590,55 @@ class LazyTurtle:
     def eval(self) -> "LazyTurtle":
         return self
 
+    def _prepare_native_fp32_slots(self, target_model, target_submodule, module_path, *, recurse=True):
+        from ..nn_modules.qlinear import BaseQuantLinear
+        from .model import _native_fp32_checkpoint_names
+
+        names = self._native_fp32_names.get(target_model)
+        if names is None:
+            if not (getattr(target_model, "_keep_in_fp32_modules", None)
+                    or getattr(target_model, "_keep_in_fp32_modules_strict", None)):
+                self._native_fp32_names[target_model] = frozenset()
+                return
+            dtype = self._model_init_kwargs.get("dtype", self._model_init_kwargs.get("torch_dtype"))
+            if dtype in (None, "auto"):
+                dtype = getattr(target_model, "dtype", None)
+                if dtype is None:
+                    dtype = next((value.dtype for value in target_model.parameters() if value.is_floating_point()), None)
+            names = frozenset(_native_fp32_checkpoint_names(target_model, dtype))
+            self._native_fp32_names[target_model] = names
+        if not names:
+            return
+
+        # Resolve the root's policy once, but check current owners after packed
+        # modules replace dense linears. Packed payloads retain their own ABI.
+        modules = target_submodule.named_modules() if recurse else [("", target_submodule)]
+        for relative, module in modules:
+            prefix = ".".join(part for part in (module_path, relative) if part)
+            slots = {**module._parameters, **module._buffers}
+            selected = [(name, value) for name, value in slots.items()
+                        if (f"{prefix}.{name}" if prefix else name) in names
+                        and isinstance(value, torch.Tensor) and value.is_floating_point()]
+            if not selected:
+                continue
+            ancestors = [target_model]
+            if prefix:
+                ancestors.extend(target_model.get_submodule(".".join(prefix.split(".")[:end]))
+                                 for end in range(1, len(prefix.split(".")) + 1))
+            if any(isinstance(owner, BaseQuantLinear) or getattr(owner, "MODEL_DTYPE_BUFFERS", None) is not None
+                   for owner in ancestors):
+                continue
+            for name, value in selected:
+                if value.dtype != torch.float32:
+                    converted = value.to(dtype=torch.float32)
+                    if name in module._parameters:
+                        converted = nn.Parameter(converted, requires_grad=value.requires_grad)
+                        converted.__dict__.update(value.__dict__)
+                        module.register_parameter(name, converted)
+                    else:
+                        persistent = name not in module._non_persistent_buffers_set
+                        module.register_buffer(name, converted, persistent=persistent)
+
     def materialize_submodule(
         self,
         *,
@@ -1727,14 +1777,6 @@ class LazyTurtle:
                     f"LazyTurtle: `{model_cls.__name__}` does not provide save_pretrained(), "
                     "cannot convert checkpoint via transformers full-model load."
                 )
-            # Older trust_remote_code classes still declare
-            # `_tied_weights_keys = ["lm_head.weight"]`. transformers 5 expects
-            # the `{target: source}` mapping and otherwise raises
-            # `AttributeError: 'list' object has no attribute 'keys'` while
-            # saving. Normalize exactly as the quantized writer does.
-            from .hf import _normalize_legacy_tied_weights_keys
-
-            _normalize_legacy_tied_weights_keys(loaded_model)
             loaded_model.save_pretrained(output_dir, safe_serialization=True)
         finally:
             if loaded_model is not None:
@@ -2026,6 +2068,7 @@ class LazyTurtle:
 
         try:
             with self._lock, torch.inference_mode():
+                self._prepare_native_fp32_slots(shell_model, shell_model, "")
                 for idx, (qname, shell_sub) in enumerate(modules):
                     if isinstance(shell_sub, skip_module_types):
                         continue
@@ -2088,6 +2131,7 @@ class LazyTurtle:
             target_model, target_submodule, module_path
         )
         with self._lock, torch.inference_mode():
+            self._prepare_native_fp32_slots(target_model, target_submodule, path, recurse=False)
             self._materialize_direct_meta_tensors(
                 shell_sub=target_submodule,
                 module_path=path,
@@ -2379,30 +2423,73 @@ class LazyTurtle:
         model_type: Optional[str] = None,
     ) -> Optional[Any]:
         lookup_keys = cls._hf_conversion_lookup_keys(target_model=target_model, model_type=model_type)
-        if lookup_keys:
-            # Prefer the public transformers conversion registry and fall back to
-            # older per-model mappings when needed.
-            try:
-                conversion_mapping_module = import_module("transformers.conversion_mapping")
-            except Exception:
-                conversion_mapping_module = None
-            if conversion_mapping_module is not None:
-                get_checkpoint_conversion_mapping = getattr(
-                    conversion_mapping_module,
-                    "get_checkpoint_conversion_mapping",
-                    None,
-                )
-                if callable(get_checkpoint_conversion_mapping):
-                    for lookup_key in lookup_keys:
-                        reversed_map = cls.reverse_hf_conversion_map(
-                            get_checkpoint_conversion_mapping(lookup_key)
-                        )
-                        if reversed_map is not None:
-                            return reversed_map
+        get_checkpoint_conversion_mapping = None
+        try:
+            conversion_mapping_module = import_module("transformers.conversion_mapping")
+        except Exception:
+            conversion_mapping_module = None
+        if conversion_mapping_module is not None:
+            get_checkpoint_conversion_mapping = getattr(
+                conversion_mapping_module,
+                "get_checkpoint_conversion_mapping",
+                None,
+            )
+        if not callable(get_checkpoint_conversion_mapping):
+            get_checkpoint_conversion_mapping = None
+
+        reversed_map = cls.reverse_hf_conversion_map(getattr(target_model, "_checkpoint_conversion_mapping", None))
+        if reversed_map is None and lookup_keys and get_checkpoint_conversion_mapping is not None:
+            for lookup_key in lookup_keys:
+                reversed_map = cls.reverse_hf_conversion_map(get_checkpoint_conversion_mapping(lookup_key))
+                if reversed_map is not None:
+                    break
 
         if target_model is None:
-            return None
-        return cls.reverse_hf_conversion_map(getattr(target_model, "_checkpoint_conversion_mapping", None))
+            return reversed_map
+        scoped = cls._scoped_submodule_renamings(target_model, get_checkpoint_conversion_mapping)
+        if scoped:
+            # Submodule-scoped rules rewrite runtime names first; the top-level
+            # rules then map the result to the checkpoint namespace.
+            reversed_map = scoped + list(reversed_map or ())
+        return reversed_map
+
+    @classmethod
+    def _scoped_submodule_renamings(cls, target_model: nn.Module, get_checkpoint_conversion_mapping) -> list[_LazyWeightRenaming]:
+        """Reverse the class-keyed renames Transformers applies inside nested submodules.
+
+        Transformers' ``get_model_conversion_mapping`` also applies the map
+        registered for each nested submodule's class, scoped to that submodule
+        (for example ``Qwen2AudioModel`` maps ``language_model.model`` to
+        ``language_model`` under ``model.``). Only anchored 1:1 renames are
+        scoped (the checkpoint side anchored with ``^``); LazyTurtle cannot
+        replay tensor operations per key.
+        """
+
+        if get_checkpoint_conversion_mapping is None or not isinstance(target_model, nn.Module):
+            return []
+        root_class = type(target_model).__name__
+        seen_classes: dict[str, list[tuple[str, str]]] = {}
+        renamings: list[_LazyWeightRenaming] = []
+        for module_name, submodule in target_model.named_modules():
+            class_name = type(submodule).__name__
+            if not module_name or class_name == root_class:
+                continue
+            if class_name not in seen_classes:
+                pairs = []
+                for entry in get_checkpoint_conversion_mapping(class_name) or ():
+                    patterns = cls._extract_weight_renaming_patterns(entry)
+                    if patterns is not None and patterns[0].startswith("^"):
+                        pairs.append(patterns)
+                seen_classes[class_name] = pairs
+            prefix = re.escape(module_name)
+            for checkpoint_pattern, runtime_pattern in seen_classes[class_name]:
+                renamings.append(
+                    _LazyWeightRenaming(
+                        f"^{prefix}\\.{runtime_pattern.removeprefix('^')}",
+                        f"^{module_name}.{checkpoint_pattern[1:]}",
+                    )
+                )
+        return renamings
 
     @staticmethod
     def _parse_module_spec(module_spec: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -3001,7 +3088,12 @@ class LazyTurtle:
                 return []
 
             fused_parts = parts[: expert_pos + 1] + [fused_leaf]
-            return [(".".join(fused_parts), expert_index, split_index, split_dim)]
+            candidates = [(".".join(fused_parts), expert_index, split_index, split_dim)]
+            if proj_name in {"gate_proj", "up_proj"}:
+                separate_leaf = proj_name if tensor_name == "weight" else f"{proj_name}_bias"
+                separate_parts = parts[: expert_pos + 1] + [separate_leaf]
+                candidates.append((".".join(separate_parts), expert_index, None, None))
+            return candidates
 
         if len(parts) < 2:
             return []
@@ -3852,6 +3944,7 @@ class LazyTurtle:
     ) -> int:
         """Materialize checkpoint tensors into a shell submodule and rebuild missing init-only buffers."""
 
+        self._prepare_native_fp32_slots(target_model, target_submodule, module_path, recurse=recurse)
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
         # `skip_module_types` names module classes that own a packed

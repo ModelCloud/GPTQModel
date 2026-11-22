@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+"""Checkpoint inventories and real MiMo-V2 owners, independent of tree generation."""
+
+import hashlib
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+from torch import nn
+
+from gptqmodel.models.auto import MODEL_MAP
+from gptqmodel.models.definitions.mimo_v2 import MimoV2QModel
+from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.mimo_v2.configuration_mimo_v2 import MiMoV2Config
+from gptqmodel.models.ports.mimo_v2.modeling_mimo_v2 import MiMoV2ForCausalLM
+from tests.port_assets import read_port_json
+from tests.test_mimo_v2_local_port import make_model, tiny_config
+
+
+PORT = Path(__file__).parents[2] / "gptqmodel/models/ports/mimo_v2"
+EXPECTED_PLAN = {
+    "layers": ["model.layers"],
+    "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.qkv_proj", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.attention_sink_bias:!"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate_proj", "mlp.up_proj"], ["mlp.down_proj"], ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+    ],
+}
+
+
+def test_exact_local_registry_plan_and_native_distinction():
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
+    from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+
+    assert "mimo_v2" not in CONFIG_MAPPING_NAMES
+    assert "mimo_v2" not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+    assert "mimo_v2_flash" in CONFIG_MAPPING_NAMES
+    assert MODEL_MAP["mimo_v2"] is MimoV2QModel
+    tree = MimoV2QModel._resolve_effective_module_tree(SimpleNamespace(), SimpleNamespace(method="gptq"))
+    assert MimoV2QModel.build_layer_modules(tree, include_capture_only=True) == EXPECTED_PLAN["blocks"]
+    assert MimoV2QModel.extract_layers_node() == EXPECTED_PLAN["layers"]
+    assert not MimoV2QModel.require_trust_remote_code
+
+
+@pytest.mark.parametrize("layout", ["split", "fused_qkv"])
+@pytest.mark.parametrize("kv", [1, 2])
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("moe", [[0, 0], [0, 1]])
+def test_actual_decoder_tensor_ownership_layout_and_consumer_tags(layout, kv, bias, moe):
+    config = MiMoV2Config(**tiny_config(attention_projection_layout=layout, num_key_value_heads=kv,
+                                      swa_num_key_value_heads=kv, attention_bias=bias, moe_layer_freq=moe))
+    with torch.device("meta"):
+        model = MiMoV2ForCausalLM(config).eval()
+    plan = ModulePlan.from_tree(MimoV2QModel.module_tree)
+    quantized = 0
+    for layer in model.model.layers:
+        for name, tensor in layer.state_dict().items():
+            owner = name.rsplit(".", 1)[0]
+            if name.endswith("attention_sink_bias"):
+                owner = name
+            spec = plan.find(owner)
+            assert spec is not None, name
+            if spec.quantize:
+                assert isinstance(layer.get_submodule(owner), nn.Linear)
+                quantized += name.endswith("weight")
+            else:
+                assert "!" in spec.flags
+            assert tensor.device.type == "meta"
+        a = layer.self_attn
+        qdim = config.num_attention_heads * config.head_dim
+        if layout == "fused_qkv":
+            assert a.qkv_proj.weight.shape == (qdim + kv * (config.head_dim + config.v_head_dim), config.hidden_size)
+        else:
+            assert a.q_proj.weight.shape == (qdim, config.hidden_size)
+        assert a.o_proj.weight.shape == (config.hidden_size, config.num_attention_heads * config.v_head_dim)
+    assert quantized == 2 * (2 if layout == "fused_qkv" else 4) + sum(12 if is_moe else 3 for is_moe in moe)
+    assert "model.rotary_emb.inv_freq" not in model.state_dict()
+    assert not any(k.startswith("model.mtp.") for k in model.state_dict())
+
+
+@pytest.mark.parametrize("layout", ["split", "fused_qkv"])
+@pytest.mark.parametrize("kv", [1, 2])
+def test_awq_scale_folds_preserve_real_dense_moe_and_swa_layers(layout, kv):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    # Layer 0: full attention + dense MLP. Layer 1: SWA with sink bias + routed MoE.
+    model = make_model(attention_projection_layout=layout, moe_layer_freq=[0, 1], num_key_value_heads=kv,
+                       swa_num_key_value_heads=kv, num_experts_per_tok=4, topk_group=2)
+    ids = torch.randint(3, 60, (1, 8))
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    split = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")
+    qkv = ("self_attn.qkv_proj",) if layout == "fused_qkv" else split
+    for index, layer in enumerate(model.model.layers):
+        # AWQProcessor captures the MoE root input for the routed gate/up group.
+        root = {}
+        handle = layer.mlp.register_forward_pre_hook(lambda module, args: root.update(mlp=args[0].detach().clone()))
+        with torch.inference_mode():
+            forward()
+        handle.remove()
+
+        def provider(wrapper, module, features, kwargs, root=root):
+            return MimoV2QModel.awq_get_modules_for_scaling(wrapper, module, {**features, **root}, kwargs)
+
+        checked = assert_awq_folds_neutral(MimoV2QModel, model, layer, forward, scaling_provider=provider)
+        groups = {(source, tuple(targets), tuple(consumers)) for source, targets, consumers in checked}
+        expected = {("input_layernorm", qkv, ())}
+        if index == 0:
+            expected |= {
+                ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj"), ()),
+                ("mlp.up_proj", ("mlp.down_proj",), ()),
+            }
+        else:
+            experts = range(model.config.n_routed_experts)
+            # The router reads the same norm output and is compensated, not folded.
+            expected.add((
+                "post_attention_layernorm",
+                tuple(f"mlp.experts.{e}.{proj}_proj" for e in experts for proj in ("gate", "up")),
+                ("mlp.gate",),
+            ))
+            expected |= {(f"mlp.experts.{e}.up_proj", (f"mlp.experts.{e}.down_proj",), ()) for e in experts}
+        # o_proj reads v_head_dim-wide heads, so v_proj -> o_proj never applies.
+        assert groups == expected
+
+
+@pytest.mark.parametrize("variant", ["MiMo-V2.5-Base", "MiMo-V2.5-Pro-Base", "MiMo-V2.6-Pro-RL", "MiMo-V2.6-Flash-RL"])
+def test_pinned_complete_checkpoint_key_inventory(tmp_path, variant):
+    """Live owners equal the pinned index minus MTP/source-scale keys (stored as a SHA-256 digest)."""
+    fixture = read_port_json(PORT / "checkpoints.json")[variant]
+    with torch.device("meta"):
+        model = MiMoV2ForCausalLM(MiMoV2Config(**fixture["config"]))
+    state = model.state_dict()
+    omitted = set(fixture["model_only_keys"])
+    checkpoint = sorted(set(state) - omitted)
+    assert len(checkpoint) == fixture["live_key_count"]
+    assert hashlib.sha256("\n".join(checkpoint).encode()).hexdigest() == fixture["live_keys_sha256"]
+    # Run the actual omission policy against an index without the omitted owners.
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": dict.fromkeys(checkpoint, "x")}))
+    MimoV2QModel._drop_visual_merger_biases_if_checkpoint_omits_them(model, str(tmp_path))
+    MimoV2QModel._drop_checkpoint_omitted_audio_tensors(model, str(tmp_path))
+    state = model.state_dict()
+    assert sorted(state) == checkpoint
+    for name, shape in fixture.get("header_shapes", {}).items():
+        if not name.startswith("model.mtp.") and not name.endswith(("weight_scale_inv", "weight_scale")):
+            assert list(state[name].shape) == shape, name

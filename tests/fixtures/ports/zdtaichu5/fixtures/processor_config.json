@@ -1,0 +1,31 @@
+{
+  "auto_map": {
+    "AutoProcessor": "processing.ZDTaichu5_0_Processor"
+  },
+  "image_processor": {
+    "auto_map": {
+      "AutoImageProcessor": "image_processing.ZDTaichu5_0_ImageProcessor",
+      "AutoProcessor": "processing.ZDTaichu5_0_Processor"
+    },
+    "data_format": "channels_first",
+    "do_rescale": true,
+    "image_processor_type": "ZDTaichu5_0_ImageProcessor",
+    "image_size": 512,
+    "max_num_tiles": 12,
+    "merge_size": 1,
+    "norm_mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "norm_std": [
+      0.229,
+      0.224,
+      0.225
+    ],
+    "num_image_token": 256,
+    "rescale_factor": 0.00392156862745098,
+    "use_thumbnail": true
+  },
+  "processor_class": "ZDTaichu5_0_Processor"
+}

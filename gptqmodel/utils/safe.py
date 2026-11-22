@@ -199,9 +199,29 @@ THREADPOOLCTL = ThreadSafe(_threadpoolctl)
 # of the generic per-call lock wrapper.
 THREADPOOLCTL.threadpool_limits = threadpool_limits
 GC = ThreadSafe(gc)
+
+_SAFETENSORS_SAVE_LOCK = threading.Lock()
+
+
+def safetensors_save_file(*args, **kwargs):
+    """``safetensors.torch.save_file`` serialized behind one process-wide lock.
+
+    GPT-QModel writes shards and offload bundles from worker threads, and
+    ``save_file`` is not safe to run concurrently on free-threaded Python.
+    GPT-QModel's own writers call this function; ``safetensors`` itself is never
+    replaced, so other libraries in the process keep the original callable.
+    """
+
+    from safetensors.torch import save_file
+
+    with _SAFETENSORS_SAVE_LOCK:
+        return save_file(*args, **kwargs)
+
+
 __all__ = [
     "ThreadSafe",
     "THREADPOOLCTL",
     "threadpool_limits",
     "GC",
+    "safetensors_save_file",
 ]

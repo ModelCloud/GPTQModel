@@ -129,7 +129,7 @@ def test_real_model_weight_owners_are_declared(case):
 
 
 @pytest.mark.parametrize("family,paths", [
-    ("moss", ["ln_1", "attn.out_proj", "mlp.fc_in"]),
+    ("moss", ["attn.out_proj", "mlp.fc_in"]),
     ("gemma3n", ["input_layernorm", "self_attn.v_proj", "post_feedforward_layernorm", "per_layer_input_gate"]),
     ("gemma3n_text", ["input_layernorm", "self_attn.v_proj", "post_feedforward_layernorm", "per_layer_input_gate"]),
     ("axk2", ["self_attn.indexer.weights_proj", "self_attn.q_a_proj", "self_attn.kv_b_proj"]),
@@ -195,6 +195,45 @@ def _assert_fold_preservation(layer, nodes, reference, forward):
         finally:
             layer.load_state_dict(snapshot)
     return checked
+
+
+@pytest.mark.parametrize("latent", [None, 8])
+def test_nemotron_h_puzzle_expert_folds_preserve_decoder_output(latent):
+    from tests.test_nemotron_h_puzzle_local_port import TOKENS, tiny_config, varied_model
+
+    definition = MODEL_MAP["nemotron_h_puzzle"]
+    model = varied_model(tiny_config(
+        moe_latent_size=latent,
+        block_configs=[{"block_type": "moe", "moe_intermediate_size": 12, "num_experts_per_tok": 2}],
+    ))
+    layer = model.model.layers[0]
+    wrapper = definition.__new__(definition)
+    nn.Module.__init__(wrapper)
+    wrapper.model = model
+    tree = definition._resolve_effective_module_tree(model, None)
+    wrapper.effective_module_tree = wrapper.module_tree = tree
+    plan = ModulePlan.from_tree(tree)
+
+    routed = {f"mixer.experts.{i}.up_proj" for i in range(len(layer.mixer.experts))}
+    shared = "mixer.shared_experts.up_proj"
+    for path in routed | {shared}:
+        spec = plan.find(path)
+        assert spec.quantize and "nosrc" in spec.flags, path
+
+    reference, features = _capture(model, layer, TOKENS)
+    # AWQ does not capture projection inputs for absent latent projections.
+    for name, module in layer.named_modules():
+        if isinstance(module, nn.Identity):
+            features.pop(name, None)
+    nodes = wrapper.awq_get_modules_for_scaling(layer, features, {})
+    AWQProcessor._validate_scale_group_conflicts(layer, nodes)
+    groups = _foldable_groups(layer, nodes)
+    expected_targets = (routed if latent is None else {"mixer.fc1_latent_proj"}) | {shared}
+    assert [
+        (get_op_name(layer, node["prev_op"]), {get_op_name(layer, target) for target in node["layers"]})
+        for node in groups
+    ] == [("norm", expected_targets)]
+    assert _assert_fold_preservation(layer, nodes, reference, lambda: _text_output(model, TOKENS)) == 1
 
 
 @pytest.mark.parametrize("family,kv_heads", [("cohere_compass", 4), ("cohere_compass", 2), ("gemma3n_text", 2)])

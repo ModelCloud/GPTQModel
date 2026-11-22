@@ -12,6 +12,10 @@ intermediates.
 import pytest
 import torch
 
+
+# Every case here exercises a Triton kernel module that imports Triton.
+pytest.importorskip("triton")
+
 from gptqmodel.quantization.awq.modules.triton import gemv as gemv_mod
 from gptqmodel.utils import arch
 

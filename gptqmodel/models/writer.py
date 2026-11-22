@@ -18,10 +18,8 @@ from typing import Any, Dict, List, Optional, Union
 import pcre
 import torch
 from safetensors import safe_open
-from safetensors.torch import save_file
-from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
+from transformers import PreTrainedTokenizerFast, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
-from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
 from .._quant_methods import (
     REFUSED_HF_QUANT_METHODS,
@@ -61,12 +59,10 @@ from ..utils.checkpoint_state import checkpoint_serialization
 from ..utils.exl3_error_ledger import write_exl3_error_ledger
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
-    _normalize_legacy_tied_weights_keys,
-    ensure_qwen_drive_registered,
     get_hf_config_dtype,
-    normalize_hf_config_compat,
+    load_model_config,
+    resolve_trust_remote_code,
     sanitize_generation_config_file,
-    sanitize_model_config,
     suspend_hf_weight_init,
 )
 from ..utils.logger import setup_logger
@@ -75,6 +71,7 @@ from ..utils.model import (
     TensorSource,
     _atomic_shard_path,
     _checkpoint_tensor_keys,
+    _converted_safetensors_names,
     _validate_offload_sources_outside_save_dir,
     convert_loaded_qzeros_for_format_change,
     copy_py_files,
@@ -89,6 +86,7 @@ from ..utils.model import (
     resolve_resave_format_conversion,
     streaming_state_dict_to_shards,
 )
+from ..utils.safe import safetensors_save_file as save_file
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
 from ..utils.tied_weights import (
     lm_head_is_tied,
@@ -98,6 +96,7 @@ from ..utils.tied_weights import (
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER
+from .ports.native.auto import get_tokenizer_config
 
 
 log = setup_logger()
@@ -172,7 +171,7 @@ def _validate_export_shell_quantized_slots(model, checkpoint, key_converter=None
     if checkpoint_keys is None:
         return
     if callable(key_converter):
-        checkpoint_keys = {key_converter(key) for key in checkpoint_keys}
+        checkpoint_keys = {name for key in checkpoint_keys for name in _converted_safetensors_names(key, key_converter)}
 
     shell_keys = set(model.state_dict().keys())
     dropped = sorted(
@@ -349,16 +348,11 @@ def hf_compat_warnings(
     ):
         warnings.append(
             "This AWQ checkpoint carries `dynamic` per-module overrides "
-            "(`bits`/`group_size`). A loader that does not install GPT-QModel's "
-            "native AWQ bridge builds every module from the global `bits` and "
-            "`group_size`, so the overrides are ignored: on CPU the checkpoint "
-            "loads with silently wrong logits and on CUDA the Marlin pack raises "
-            "a qzeros shape error. Transformers' own AWQ quantizer only reaches "
-            "the bridge after it has already replaced the layers, so an older "
-            "Transformers or a third-party loader still needs `import gptqmodel` "
-            "before loading. Load this checkpoint with `GPTQModel.load` (or a "
-            "Transformers version with the native AWQ bridge) to honor the "
-            "overrides."
+            "(`bits`/`group_size`). Transformers' AWQ loader builds every module "
+            "from the global `bits` and `group_size`, so the overrides are "
+            "ignored: on CPU the checkpoint loads with silently wrong logits and "
+            "on CUDA the Marlin pack raises a qzeros shape error. Load this "
+            "checkpoint with `GPTQModel.load` to honor the overrides."
         )
     if (
         getattr(quantize_config, "method", None) == METHOD.AWQ
@@ -376,9 +370,8 @@ def hf_compat_warnings(
             "Packed GGUF checkpoints are not readable by `transformers`' "
             "`GgufHfQuantizer`, which owns `quant_method: \"gguf\"` and expects a "
             "`.gguf` file. This checkpoint publishes "
-            f"`quant_method: \"{GGUF_EXPORT_QUANT_METHOD}\"` so an HF loader "
-            "refuses it instead of random-initializing every linear layer. Load "
-            "it with `GPTQModel.load`."
+            f"`quant_method: \"{GGUF_EXPORT_QUANT_METHOD}\"` so it never "
+            "collides with that name. Load it with `GPTQModel.load`."
         )
     method = getattr(quantize_config, "method", None)
     method_name = getattr(method, "value", method)
@@ -387,8 +380,8 @@ def hf_compat_warnings(
             f"`quant_method: \"{method_name}\"` is a GPT-QModel-only layout that "
             "`transformers` cannot read: `AutoModelForCausalLM.from_pretrained` "
             "only warns `Unknown quantization type` and then random-initializes "
-            "every linear layer. Importing `gptqmodel` installs a refusing "
-            "quantizer, so plain HF raises instead. Load this checkpoint with "
+            "every linear layer. GPT-QModel never patches `transformers`, so "
+            "load this checkpoint with "
             f"{refused_hf_load_remedy(method_name)}."
         )
     if _has_per_expert_quantized_modules(model):
@@ -396,11 +389,10 @@ def hf_compat_warnings(
             "This checkpoint stores per-expert quantized weights "
             "(`experts.<n>.*.qweight`). Transformers 5 builds fused 3-D expert "
             "tensors and its built-in GPTQ/AWQ loaders only replace `nn.Linear`, "
-            "so a loader without the native bridge reports every expert tensor "
+            "so those loaders report every expert tensor "
             "as MISSING/UNEXPECTED and silently random-initializes the experts "
-            "(garbage output, no error). Import `gptqmodel` before Transformers "
-            "to install the native loading bridge for both methods, or load this "
-            "checkpoint with `GPTQModel.load`."
+            "(garbage output, no error). Load this checkpoint with "
+            "`GPTQModel.load`."
         )
     return warnings
 
@@ -2426,7 +2418,6 @@ def ModelWriter(cls):
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.
-        sanitize_model_config(self.model.config)
         config = copy.deepcopy(self.model.config)
 
         quantize_config = copy.deepcopy(self.quantize_config)
@@ -2477,7 +2468,7 @@ def ModelWriter(cls):
         if self.load_quantized_model and runtime_format != FORMAT.EXL3:
             model_for_save = self.get_model_with_quantize(
                 qcfg=quantize_config,
-                model_id_or_path=self.model_local_path,
+                model_id_or_path=self._checkpoint_repo_path,
             )
             live_generation_config = getattr(self.model, "generation_config", None)
             if live_generation_config is not None:
@@ -2527,7 +2518,6 @@ def ModelWriter(cls):
             removed_config_attention_attrs = strip_attention_impl_fields(model_for_save.config)
             if generation_config is not None:
                 removed_generation_attention_attrs = strip_attention_impl_fields(generation_config)
-            _normalize_legacy_tied_weights_keys(model_for_save)
 
             # Save model metadata directly. Calling model.save_pretrained with
             # an empty state_dict deletes resumable shards in recent
@@ -2804,12 +2794,15 @@ def ModelWriter(cls):
         # save-side build races concurrent loads (issue #4204, regression of #4129).
         from .loader import model_load_lock
 
-        ensure_qwen_drive_registered(model_id_or_path)
-        config = AutoConfig.from_pretrained(
-            model_id_or_path,
-            trust_remote_code=self.trust_remote_code,
+        config_load_kwargs = dict(getattr(self, "_config_load_kwargs", {}) or {})
+        trust_remote_code = resolve_trust_remote_code(
+            model_id_or_path, trust_remote_code=self.trust_remote_code, **config_load_kwargs
         )
-        normalize_hf_config_compat(config, trust_remote_code=self.trust_remote_code)
+        config = load_model_config(
+            model_id_or_path,
+            trust_remote_code=trust_remote_code,
+            **config_load_kwargs,
+        )
         model_dtype = get_hf_config_dtype(config)
 
         with model_load_lock(), suspend_hf_weight_init():
@@ -2818,7 +2811,7 @@ def ModelWriter(cls):
             # itself (#5304); compiled forwards may overlap the rest of the
             # shell rebuild (#5268).
             model = self.loader.from_config(
-                config, dtype=model_dtype
+                config, dtype=model_dtype, trust_remote_code=trust_remote_code
             )
 
             # Re-saving a loaded quantized MoE must rebuild the same per-expert

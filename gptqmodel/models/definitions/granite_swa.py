@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ..local import LocalModelLoader
 from .llama import LlamaQModel
 
 
@@ -14,6 +15,10 @@ class GraniteSWAQModel(LlamaQModel):
     in their source dtype; the attention projections and MLP leaves are
     quantized normally.
     """
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
 
     # Per-layer sliding-window dispatch and post-attention sink scaling are not
     # modeled by the current fused qkv/gate_up executor.

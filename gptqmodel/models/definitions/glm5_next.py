@@ -21,11 +21,11 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import AutoModelForImageTextToText
 
 from ...utils.exl3_router_candidates import bind_sigmoid_grouped_router_recovery
 from ...utils.model import move_to
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -53,7 +53,7 @@ def _expert_layer_count(config) -> int:
 class _Glm5NextSharedHead(nn.Module):
     def __init__(self, config):
         super().__init__()
-        from transformers.models.glm5_next.modeling_glm5_next import (
+        from ..ports.native.glm5_next.modeling_glm5_next import (
             Glm5NextTextRMSNorm,
         )
 
@@ -75,7 +75,7 @@ class Glm5NextMTPDecoderLayer(nn.Module):
 
     def __init__(self, config, *, language_model: nn.Module):
         super().__init__()
-        from transformers.models.glm5_next.modeling_glm5_next import (
+        from ..ports.native.glm5_next.modeling_glm5_next import (
             Glm5NextTextAttention,
             Glm5NextTextMoE,
             Glm5NextTextRMSNorm,
@@ -234,25 +234,23 @@ def _prune_glm5_next_replay_frontier(
         shutil.rmtree(candidate)
 
 
-class Glm5NextQuantizationLoader:
-    """Auto loader that exposes checkpoint-only MTP layer 45 to LazyTurtle."""
+class Glm5NextQuantizationLoader(LocalModelLoader):
+    """Vendored-class loader that exposes checkpoint-only MTP layer 45 to LazyTurtle."""
 
-    @classmethod
-    def from_config(cls, config, **kwargs):
-        model = AutoModelForImageTextToText.from_config(config, **kwargs)
-        return _attach_glm5_next_mtp(model)
+    def from_config(self, config, **kwargs):
+        return _attach_glm5_next_mtp(super().from_config(config, **kwargs))
 
-    @classmethod
-    def from_pretrained(cls, model_local_path, **kwargs):
-        model = AutoModelForImageTextToText.from_pretrained(
-            model_local_path,
-            **kwargs,
-        )
-        return _attach_glm5_next_mtp(model)
+    def from_pretrained(self, model_local_path, **kwargs):
+        return _attach_glm5_next_mtp(super().from_pretrained(model_local_path, **kwargs))
 
 
 class Glm5NextQModel(BaseQModel):
-    loader = Glm5NextQuantizationLoader
+    loader = Glm5NextQuantizationLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
     require_pkgs = ["transformers>=5.16.0"]
     require_load_processor = True
     layer_modules_strict = False

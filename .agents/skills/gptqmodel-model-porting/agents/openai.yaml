@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Model Porting"
+  short_description: "Port a model onto the Transformers 5.23 ABI"
+  default_prompt: "Use $gptqmodel-model-porting to port this model's config and modeling into gptqmodel/models/ports with no transformers.models imports and no backward-compatibility code."

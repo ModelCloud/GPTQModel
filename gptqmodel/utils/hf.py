@@ -3,77 +3,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import inspect
 import json
 import ntpath
 import os
 import re
-import shutil
-import sys
 import threading
 import warnings
 from collections import Counter
 from contextlib import contextmanager
-from functools import lru_cache, wraps
+from functools import lru_cache
 from typing import Any, Optional
 
 import torch
-import transformers
 from accelerate import init_empty_weights
-from transformers import (
+from transformers import (  # Auto*: unsupported-model config/support probes only
     AutoConfig,
-    AutoModel,
     AutoModelForCausalLM,
     GenerationConfig,
+    PreTrainedConfig,
     PreTrainedModel,
 )
+from transformers.initialization import no_init_weights
 from transformers.utils import cached_file
 
-from ..utils import _MONKEY_PATCH_LOCK
-
-
-_GGUF_LAZY_ATTRS = frozenset({
-    "PRISM_Q1_0_G128_BLOCK_SIZE",
-    "PRISM_Q1_0_G128_NAME",
-    "PRISM_Q1_0_G128_TYPE_SIZE",
-    "PRISM_Q1_0_G128_VALUE",
-    "_dequantize_prism_q1_0_g128",
-    "_is_prism_q1_0_g128",
-})
-
-
-def __getattr__(name: str):
-    """Resolve GGUF/PRISM names lazily so this module never imports NumPy."""
-    if name in _GGUF_LAZY_ATTRS:
-        from ..nn_modules.qlinear import gguf as gguf_module
-
-        value = getattr(gguf_module, name)
-    elif name == "internal_gguf":
-        from ..utils import internal_gguf as value
-    else:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    globals()[name] = value
-    return value
-
-
-# Compatibility wrapper for no_init_weights across different transformers versions
-# transformers >= 5.0.0: from transformers.initialization import no_init_weights
-# transformers < 5.0.0: from transformers.modeling_utils import no_init_weights
-try:
-    from transformers.initialization import no_init_weights
-except ImportError:
-    from transformers.modeling_utils import (
-        no_init_weights,  # Compatibility wrapper for no_init_weights across different transformers versions
-    )
-
-# transformers >= 5.0.0: from transformers import PreTrainedConfig
-# transformers < 5.0.0: from transformers import PretrainedConfig
-try:
-    from transformers import PreTrainedConfig
-except ImportError:
-    from transformers import PretrainedConfig as PreTrainedConfig
-
 from ..utils.logger import setup_logger
+from ..utils.security import RemoteCodeSecurityError, require_remote_code_permission, safety_checks_bypassed
 
 
 __all__ = [
@@ -82,9 +36,6 @@ __all__ = [
     "assert_loaded_model_state",
     "get_hf_config_dtype",
     "normalize_torch_dtype_kwarg",
-    "normalize_hf_config_compat",
-    "prepare_remote_code_compat",
-    "prepare_remote_model_init_compat",
     "has_native_transformers_causallm_support",
     "get_config_selection_kwargs",
     "get_hf_gguf_load_kwargs",
@@ -94,12 +45,12 @@ __all__ = [
     "resolve_trust_remote_code",
     "set_hf_config_dtype",
     "load_hf_tokenizer",
+    "load_model_config",
     "load_tokenizer",
 ]
 
 log = setup_logger()
 _TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
-_TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED: set[tuple[str, str, str]] = set()
 _MISSING = object()
 INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
@@ -134,15 +85,20 @@ def _local_config_model_type(model_id_or_path: Optional[str]) -> Optional[str]:
 
 
 def ensure_qwen_drive_registered(model_id_or_path: Optional[str] = None) -> bool:
-    """Register the official Qwen-Drive config before any ``AutoConfig`` call.
+    """Register legacy Qwen-Drive only when no package-owned loader exists.
 
-    Qwen-Drive is intentionally not bundled with GPT-QModel.  Importing its
-    package performs the official ``AutoConfig``/``AutoModel`` registrations.
-    A missing package is made actionable for a local Qwen-Drive directory
-    instead of surfacing Transformers' generic unknown ``model_type`` error.
-    Other model types are left untouched so importing GPT-QModel does not load
-    an unrelated optional planning stack.
+    Package ownership must bypass the optional official package in every
+    caller, including native probes and writer shell reconstruction. The
+    fallback retains actionable errors for legacy externally registered
+    definitions without importing an unrelated planning stack.
     """
+
+    from ..models.local import local_model_loader
+
+    # Package ownership precedes the legacy optional registration hook in
+    # config loading, native probing and writer reconstruction alike.
+    if local_model_loader(_QWEN_DRIVE_MODEL_TYPE) is not None:
+        return False
 
     local_model_type = _local_config_model_type(model_id_or_path)
     if local_model_type != _QWEN_DRIVE_MODEL_TYPE:
@@ -154,60 +110,6 @@ def ensure_qwen_drive_registered(model_id_or_path: Optional[str] = None) -> bool
         raise ImportError(_QWEN_DRIVE_INSTALL_HINT) from exc
 
     return True
-
-
-def _sync_local_remote_code_cache(model_id_or_path: Optional[str]) -> None:
-    if not model_id_or_path or not os.path.isdir(model_id_or_path):
-        return
-
-    try:
-        from transformers.dynamic_module_utils import HF_MODULES_CACHE, _sanitize_module_name
-    except Exception:
-        log.debug("remote-code cache probe skipped: transformers.dynamic_module_utils unavailable", exc_info=True)
-        return
-
-    repo_name = os.path.basename(os.path.normpath(model_id_or_path))
-    cache_root = os.path.join(
-        HF_MODULES_CACHE,
-        "transformers_modules",
-        _sanitize_module_name(repo_name),
-    )
-    # `trust_remote_code=True` on a local model path still goes through the
-    # transformers dynamic-module cache. On newer transformers releases we
-    # occasionally observe split/incomplete cache revisions for the same local
-    # repo: one revision contains `configuration_*.py`, another contains
-    # `modeling_*.py`, and recursive relative-import discovery then crashes
-    # with FileNotFoundError before the model class can be imported.
-    #
-    # The model directory already contains the authoritative source files, so
-    # for local paths we can safely backfill any missing top-level Python files
-    # into each cached revision directory. This keeps the fix narrowly scoped:
-    # it only affects local trust-remote-code models, only fills missing files,
-    # and never overwrites files that transformers has already materialized.
-    if not os.path.isdir(cache_root):
-        return
-
-    source_files = [
-        file_name
-        for file_name in os.listdir(model_id_or_path)
-        if file_name.endswith(".py") and os.path.isfile(os.path.join(model_id_or_path, file_name))
-    ]
-    if not source_files:
-        return
-
-    target_dirs = [cache_root]
-    for entry in os.listdir(cache_root):
-        target_dir = os.path.join(cache_root, entry)
-        if os.path.isdir(target_dir):
-            target_dirs.append(target_dir)
-
-    for target_dir in target_dirs:
-        for file_name in source_files:
-            source_path = os.path.join(model_id_or_path, file_name)
-            target_path = os.path.join(target_dir, file_name)
-            if not os.path.exists(target_path):
-                os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                shutil.copy2(source_path, target_path)
 
 
 def get_hf_config_dtype(config: Any) -> Optional[torch.dtype]:
@@ -310,61 +212,36 @@ _HF_INIT_SUSPENSION = None
 
 
 def _install_init_suspension():
-    """Patch the process-wide init entry points and return the originals."""
+    """Enter transformers' public ``no_init_weights`` guard for the outer scope.
 
-    def _skip_init(*args, **kwargs):
-        return None
+    GPT-QModel never replaces torch or transformers callables itself.
+    ``no_init_weights`` is transformers' own framework context: it silences the
+    ``torch.nn.init`` initializers and ``PreTrainedModel.init_weights`` and
+    restores them on exit. It is not re-entrant across threads, so it is kept
+    entered for the whole outermost scope: re-entering it per caller is what
+    makes overlapping entries lose the originals.
+    """
 
-    modeling_utils = transformers.modeling_utils
-    originals = {
-        "kaiming_uniform": torch.nn.init.kaiming_uniform_,
-        "uniform": torch.nn.init.uniform_,
-        "normal": torch.nn.init.normal_,
-        "had_init_flag": hasattr(modeling_utils, "_init_weights"),
-        "init_flag": getattr(modeling_utils, "_init_weights", None),
-    }
-
-    torch.nn.init.kaiming_uniform_ = _skip_init
-    torch.nn.init.uniform_ = _skip_init
-    torch.nn.init.normal_ = _skip_init
-    modeling_utils._init_weights = False
-
-    # transformers' own guard patches many more torch initializers and
-    # ``PreTrainedModel.init_weights``. Keep it entered for the whole outermost
-    # scope: re-entering it per caller is what makes overlapping entries lose
-    # the originals.
     no_init = no_init_weights()
     no_init.__enter__()
-    originals["no_init"] = no_init
-    return originals
+    return no_init
 
 
-def _restore_init_suspension(originals):
-    modeling_utils = transformers.modeling_utils
-    try:
-        originals["no_init"].__exit__(None, None, None)
-    finally:
-        torch.nn.init.kaiming_uniform_ = originals["kaiming_uniform"]
-        torch.nn.init.uniform_ = originals["uniform"]
-        torch.nn.init.normal_ = originals["normal"]
-        if originals["had_init_flag"]:
-            modeling_utils._init_weights = originals["init_flag"]
-        elif hasattr(modeling_utils, "_init_weights"):
-            delattr(modeling_utils, "_init_weights")
+def _restore_init_suspension(no_init):
+    no_init.__exit__(None, None, None)
 
 
 @contextmanager
 def suspend_hf_weight_init():
     """Disable HF/torch parameter init until the last overlapping entry exits.
 
-    ``transformers``' ``no_init_weights`` patches process-wide initializers and
-    ``PreTrainedModel.init_weights``, and this module also silences three torch
-    initializers. Both are process-global, so overlapping entries are reference
-    counted: the first entry installs the patches, later entries only increment
-    the depth, and the last exit restores the originals. Without the count the
-    first caller to leave restored the real initializers while another thread
-    was still building its model, and the second exit then restored the
-    ``_skip_init`` stubs, disabling weight init for the rest of the process
+    ``transformers``' ``no_init_weights`` swaps process-wide initializers and
+    ``PreTrainedModel.init_weights`` for the duration of its scope, so
+    overlapping entries are reference counted: the first entry enters it, later
+    entries only increment the depth, and the last exit leaves it. Without the
+    count the first caller to leave restored the real initializers while
+    another thread was still building its model, and the second exit then
+    restored the no-op stubs, disabling weight init for the rest of the process
     (issue #4129).
     """
 
@@ -437,54 +314,8 @@ def _compile_keep_in_fp32_matcher(model, attrs=_KEEP_IN_FP32_ATTRS):
     return matches
 
 
-CONSTRUCTION_DTYPES_ATTR = "_gptqmodel_construction_parameter_dtypes"
-
-
-def _record_construction_dtypes(model) -> None:
-    """Remember the dtype each parameter had when the model was constructed.
-
-    ``PreTrainedModel.post_init`` runs after the constructor and before
-    ``from_pretrained`` loads the checkpoint. Recording the dtypes there lets
-    ``assert_loaded_model_state`` distinguish a parameter the model's own code
-    allocated in fp32 (Hymba's ``mamba.A_log``) from one a broken load left in
-    the wrong dtype (issue #4888). Only dtypes are retained, never tensors.
-
-    Parameters matched by ``_keep_in_fp32_modules`` at construction are
-    excluded: the current declaration already governs them, so clearing the
-    declaration must make them reportable again (#4170).
-    """
-
-    named_parameters = getattr(model, "named_parameters", None)
-    if not callable(named_parameters):
-        return
-    try:
-        keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
-        dtypes = {
-            name: parameter.dtype
-            for name, parameter in named_parameters()
-            if parameter.is_floating_point()
-            and not (keep_in_fp32 is not None and keep_in_fp32(name))
-        }
-    except Exception:  # pragma: no cover - defensive: exotic parameter proxies
-        return
-    if not dtypes or all(dtype is torch.float32 for dtype in dtypes.values()):
-        # Constructed entirely in fp32: transformers' dtype context was not
-        # active, so the record says nothing about intent and must not be used
-        # to exempt anything. Keeping the strict check here is what stops a
-        # broken cast from being masked.
-        return
-    object.__setattr__(model, CONSTRUCTION_DTYPES_ATTR, dtypes)
-
-
 def _checkpoint_exact_dtype_parameter_names(model) -> set[str]:
-    """Fully-qualified names of parameters a module declares as kernel storage.
-
-    ``CHECKPOINT_EXACT_DTYPE_PARAMETERS`` marks tensors whose dtype is part of
-    the kernel contract (packed payloads, block scales, global scales). They
-    keep the checkpoint dtype instead of the model dtype, so the uniform-dtype
-    guard below must not hold them to it -- the same way transformers' fp32
-    keep-list is exempted.
-    """
+    """Return the fully qualified names of checkpoint-owned kernel storage."""
 
     names: set[str] = set()
     named_modules = getattr(model, "named_modules", None)
@@ -492,8 +323,6 @@ def _checkpoint_exact_dtype_parameter_names(model) -> set[str]:
         return names
     for module_name, module in named_modules():
         declared = getattr(module, "CHECKPOINT_EXACT_DTYPE_PARAMETERS", ())
-        if not declared:
-            continue
         prefix = f"{module_name}." if module_name else ""
         names.update(f"{prefix}{name}" for name in declared)
     return names
@@ -532,17 +361,13 @@ def assert_loaded_model_state(
     in any other dtype is still reported. Pinned parameters are still checked
     for materialization, and undeclared mixed dtypes still fail (issue #4170).
 
-    A model's own constructor may also allocate a parameter in fp32 from an
-    explicit fp32 tensor (Hymba's ``mamba.A_log``), and transformers loads the
-    half-precision checkpoint value into it without changing its dtype. The
-    dtype each parameter had at construction is recorded by the patched
-    ``post_init``; a parameter that is *still* fp32 after the load is treated
-    as intentional. A parameter the load changed away from its construction
-    dtype is still reported, so a broken cast is never masked (issue #4888).
+    A model whose constructor allocates a parameter in fp32 on purpose (the
+    Hymba port's ``mamba.A_log``) declares it in ``_keep_in_fp32_modules_strict``
+    so transformers keeps it fp32 and this guard exempts it through the same
+    declaration (issue #4888).
 
-    Parameters a module declares in ``CHECKPOINT_EXACT_DTYPE_PARAMETERS`` are
-    kernel storage, not activation operands, and are excluded from the dtype
-    checks (they are still checked for materialization).
+    Parameters declared in ``CHECKPOINT_EXACT_DTYPE_PARAMETERS`` keep their
+    checkpoint dtype and must still be materialized.
     """
 
     problems = []
@@ -567,17 +392,17 @@ def assert_loaded_model_state(
         require_materialized or require_uniform_dtype or expected_dtype is not None
     ):
         keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
-        construction_dtypes = getattr(model, CONSTRUCTION_DTYPES_ATTR, None)
         storage_parameters = _checkpoint_exact_dtype_parameter_names(model)
         dtypes = Counter()
         meta = []
         for name, parameter in named_parameters():
-            if not parameter.is_floating_point():
+            is_storage = name in storage_parameters
+            if not parameter.is_floating_point() and not is_storage:
                 continue
             if parameter.is_meta:
                 meta.append(name)
                 continue
-            if name in storage_parameters:
+            if is_storage:
                 continue
             if (
                 parameter.dtype is torch.float32
@@ -585,21 +410,11 @@ def assert_loaded_model_state(
                 and keep_in_fp32(name)
             ):
                 continue
-            if (
-                parameter.dtype is torch.float32
-                and construction_dtypes is not None
-                and construction_dtypes.get(name) is torch.float32
-            ):
-                # The constructor allocated this parameter in fp32 and the load
-                # did not change it (Hymba's `mamba.A_log`, #4888). A parameter
-                # constructed in a half dtype and then left/cast to fp32 is
-                # still reported below.
-                continue
             dtypes[parameter.dtype] += 1
 
         if require_materialized and meta:
             problems.append(
-                f"{len(meta)} floating parameter(s) stayed on the meta device, "
+                f"{len(meta)} parameter(s) stayed on the meta device, "
                 f"e.g. {meta[:3]}"
             )
         if expected_dtype is not None:
@@ -788,200 +603,6 @@ def _resolve_hf_gguf_artifact(model_id_or_path: str) -> Optional[tuple[str, str]
     return model_id_or_path, inferred_gguf_file
 
 
-def _transformers_has_native_prism_gguf_support() -> bool:
-    try:
-        import transformers.modeling_gguf_pytorch_utils as gguf_utils
-    except Exception:
-        return False
-
-    return hasattr(gguf_utils, "_dequantize_prism_q1_0_g128")
-
-
-def _internal_gguf_torch_loader_enabled(policy=None) -> bool:
-    """Read the load policy, never the process environment.
-
-    ``None`` resolves the policy this load installed; a direct caller may pass
-    the explicit ``KernelConfig`` it wants the dense import to honour.
-    """
-    from . import internal_gguf
-
-    return internal_gguf.torch_dequant_loader_enabled(policy)
-
-
-def _load_gguf_checkpoint_torch_direct(
-    *,
-    gguf_utils,
-    original_load_gguf_checkpoint,
-    gguf_checkpoint_path,
-    return_tensors: bool = False,
-    model_to_load=None,
-    torch_dtype=None,
-    policy=None,
-):
-    from ..utils import internal_gguf
-
-    if not return_tensors or model_to_load is None or not _internal_gguf_torch_loader_enabled(policy):
-        return original_load_gguf_checkpoint(
-            gguf_checkpoint_path,
-            return_tensors=return_tensors,
-            model_to_load=model_to_load,
-            torch_dtype=torch_dtype,
-        )
-
-    parsed_parameters = original_load_gguf_checkpoint(
-        gguf_checkpoint_path,
-        return_tensors=False,
-        model_to_load=model_to_load,
-        torch_dtype=torch_dtype,
-    )
-    config = parsed_parameters.get("config", {})
-    model_type = config.get("model_type")
-    if model_type != internal_gguf.MODEL_ARCH_QWEN3:
-        return original_load_gguf_checkpoint(
-            gguf_checkpoint_path,
-            return_tensors=True,
-            model_to_load=model_to_load,
-            torch_dtype=torch_dtype,
-        )
-
-    processor_cls = gguf_utils.TENSOR_PROCESSORS.get(model_type, gguf_utils.TensorProcessor)
-    if processor_cls is not gguf_utils.TensorProcessor:
-        return original_load_gguf_checkpoint(
-            gguf_checkpoint_path,
-            return_tensors=True,
-            model_to_load=model_to_load,
-            torch_dtype=torch_dtype,
-        )
-
-    processor = processor_cls(config=config)
-    tensor_key_mapping = gguf_utils.get_gguf_hf_weights_map(model_to_load, processor)
-    target_device = internal_gguf._resolve_torch_dequant_device(policy)
-    dequantize_kwargs = {"device": target_device}
-    if torch_dtype is not None:
-        dequantize_kwargs["dtype"] = torch_dtype
-    reader = internal_gguf.GGUFReader(gguf_checkpoint_path)
-    parsed_parameters["tensors"] = {}
-
-    for tensor in gguf_utils.tqdm(reader.tensors, desc="Converting GGUF tensors directly to torch..."):
-        name = tensor.name
-        weights = internal_gguf.dequantize_to_torch(
-            tensor.data,
-            tensor.tensor_type,
-            **dequantize_kwargs,
-        )
-
-        result = processor.process(
-            weights=weights,
-            name=name,
-            tensor_key_mapping=tensor_key_mapping,
-            parsed_parameters=parsed_parameters,
-        )
-
-        weights = result.weights
-        name = result.name
-        if name not in tensor_key_mapping:
-            continue
-
-        if not torch.is_tensor(weights):
-            # GGUF processors return nested sequences or array-likes. Normalize
-            # through the array's own API so big-endian dtypes and negative
-            # strides become a native C-contiguous buffer, then let Torch own
-            # the copy. No NumPy import is required.
-            dtype = getattr(weights, "dtype", None)
-            newbyteorder = getattr(dtype, "newbyteorder", None)
-            if newbyteorder is not None:
-                weights = weights.astype(newbyteorder("="), order="C", copy=True)
-            weights = torch.as_tensor(weights).clone().contiguous()
-            if target_device is not None:
-                weights = weights.to(device=target_device)
-
-        parsed_parameters["tensors"][tensor_key_mapping[name]] = weights.contiguous()
-
-    return parsed_parameters
-
-
-def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
-    with _MONKEY_PATCH_LOCK:
-        if getattr(gguf_utils, "_GPTQMODEL_GGUF_TORCH_LOADER_PATCHED", False):
-            return
-
-        original_load_gguf_checkpoint = gguf_utils.load_gguf_checkpoint
-
-        def _wrapped_load_gguf_checkpoint(gguf_checkpoint_path, return_tensors=False, model_to_load=None, torch_dtype=None):
-            try:
-                return _load_gguf_checkpoint_torch_direct(
-                    gguf_utils=gguf_utils,
-                    original_load_gguf_checkpoint=original_load_gguf_checkpoint,
-                    gguf_checkpoint_path=gguf_checkpoint_path,
-                    return_tensors=return_tensors,
-                    model_to_load=model_to_load,
-                    torch_dtype=torch_dtype,
-                )
-            except Exception as exc:
-                log.debug(
-                    "HF: internal torch GGUF loader fell back to the stock loader for `%s`: %s",
-                    gguf_checkpoint_path,
-                    exc,
-                )
-                return original_load_gguf_checkpoint(
-                    gguf_checkpoint_path,
-                    return_tensors=return_tensors,
-                    model_to_load=model_to_load,
-                    torch_dtype=torch_dtype,
-                )
-
-        gguf_utils._gptqmodel_original_load_gguf_checkpoint = original_load_gguf_checkpoint
-        gguf_utils.load_gguf_checkpoint = _wrapped_load_gguf_checkpoint
-        gguf_utils._GPTQMODEL_GGUF_TORCH_LOADER_PATCHED = True
-
-
-def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
-    from ..nn_modules.qlinear.gguf import (
-        PRISM_Q1_0_G128_BLOCK_SIZE,
-        PRISM_Q1_0_G128_NAME,
-        PRISM_Q1_0_G128_TYPE_SIZE,
-        PRISM_Q1_0_G128_VALUE,
-        _dequantize_prism_q1_0_g128,
-        _is_prism_q1_0_g128,
-    )
-    from ..utils import internal_gguf
-
-    try:
-        import transformers.modeling_gguf_pytorch_utils as gguf_utils
-        from transformers.utils import import_utils as hf_import_utils
-    except Exception:
-        log.debug("prism GGUF compat skipped: transformers GGUF internals unavailable", exc_info=True)
-        return
-
-    with _MONKEY_PATCH_LOCK:
-        internal_gguf.install_runtime()
-        _patch_transformers_internal_gguf_torch_loader(gguf_utils)
-
-        def _is_gguf_available(*_args, **_kwargs) -> bool:
-            return True
-
-        if not gguf_utils.is_gguf_available():
-            gguf_utils.is_gguf_available = _is_gguf_available
-            if hasattr(hf_import_utils, "is_gguf_available"):
-                hf_import_utils.is_gguf_available = _is_gguf_available
-
-        if _transformers_has_native_prism_gguf_support():
-            return
-
-        gguf_utils.PRISM_Q1_0_G128_NAME = PRISM_Q1_0_G128_NAME
-        gguf_utils.PRISM_Q1_0_G128_VALUE = PRISM_Q1_0_G128_VALUE
-        gguf_utils.PRISM_Q1_0_G128_BLOCK_SIZE = PRISM_Q1_0_G128_BLOCK_SIZE
-        gguf_utils.PRISM_Q1_0_G128_TYPE_SIZE = PRISM_Q1_0_G128_TYPE_SIZE
-        gguf_utils._is_prism_q1_0_g128 = _is_prism_q1_0_g128
-        gguf_utils._dequantize_prism_q1_0_g128 = _dequantize_prism_q1_0_g128
-
-        log.warning(
-            "HF: installed transformers lacks native Prism GGUF support; GPT-QModel registered its internal "
-            "GGUF runtime and local Q1_0_g128 compatibility patch for `%s`.",
-            api_name,
-        )
-
-
 def normalize_model_id_or_path_for_hf_gguf(
     model_id_or_path: Optional[str],
     kwargs: dict[str, Any],
@@ -1002,17 +623,18 @@ def normalize_model_id_or_path_for_hf_gguf(
         return model_id_or_path
 
     normalized_model_id_or_path, gguf_file = resolved
-    _patch_transformers_prism_gguf_compat(api_name=api_name)
     kwargs[INTERNAL_HF_GGUF_FILE_KWARG] = gguf_file
     return normalized_model_id_or_path
 
 
-@lru_cache(maxsize=None)
-def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple[bool, Optional[str], Optional[str]]:
+def _detect_native_transformers_causallm_support(model_id_or_path: str, **config_selection_kwargs) -> tuple[bool, Optional[str], Optional[str]]:
     # Qwen-Drive's top-level config is registered by the optional official
     # package, so it must be imported before Transformers first sees config.json.
     ensure_qwen_drive_registered(model_id_or_path)
-    config_load_kwargs: dict[str, Any] = {}
+    config_load_kwargs: dict[str, Any] = dict(config_selection_kwargs)
+    gguf_file = config_load_kwargs.pop("gguf_file", None)
+    if gguf_file is not None:
+        config_load_kwargs[INTERNAL_HF_GGUF_FILE_KWARG] = gguf_file
     normalized_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
         model_id_or_path,
         config_load_kwargs,
@@ -1022,6 +644,7 @@ def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple
         config = AutoConfig.from_pretrained(
             normalized_model_id_or_path,
             trust_remote_code=False,
+            **get_config_selection_kwargs(config_selection_kwargs),
             **get_hf_gguf_load_kwargs(config_load_kwargs),
         )
     except Exception as exc:
@@ -1043,102 +666,56 @@ def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple
     return True, model_type, getattr(model_cls, "__name__", str(model_cls))
 
 
-@lru_cache(maxsize=None)
-def _checkpoint_config_payload(model_id_or_path: str) -> Optional[dict]:
-    """Read the checkpoint's raw ``config.json`` without executing its code.
+def load_model_config(model_id_or_path, *, trust_remote_code: bool = False, **kwargs):
+    """Read config data first, then select package-owned or native config code.
 
-    ``resolve_trust_remote_code`` already loaded this file through
-    ``AutoConfig``, so the read is served from the same cache. Reading the raw
-    payload keeps the layout probe independent of the installed native config
-    class and never imports a snapshot module.
+    Preserve revision/subfolder/auth kwargs for both the data probe and final
+    load. A model port opts in through its definition's LocalModelLoader.
     """
+    from ..models.local import local_model_loader_for_config
 
-    try:
-        config_path = cached_file(model_id_or_path, "config.json")
-    except Exception:
-        return None
-
-    try:
-        with open(config_path, encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, TypeError, ValueError):
-        return None
-
-    return payload if isinstance(payload, dict) else None
-
-
-# Config fields that select a model layout the installed native Transformers
-# class cannot represent, keyed by checkpoint ``model_type``. A remote
-# ``auto_map`` class name is not a layout signal: remote and native classes for
-# the same architecture are routinely spelled differently (``PhiMoEForCausalLM``
-# vs ``PhimoeForCausalLM``, ``MPTForCausalLM`` vs ``MptForCausalLM``,
-# ``MiniMaxM2ForCausalLM`` vs ``MiniMaxForCausalLM``) and native conversion
-# mappings rename checkpoint keys such as ``attention.*`` -> ``self_attn.*``.
-_REMOTE_ONLY_LAYOUT_CONFIG_MARKERS: dict[str, tuple[str, ...]] = {
-    # Ling-2.6-flash (#4373): the remote MLA branch owns `q_a_proj` /
-    # `q_a_layernorm` / `q_b_proj`. Native `BailingHybridAttention` only has a
-    # dense `q_proj`, and `BailingHybridConfig` deletes `q_lora_rank`.
-    "bailing_hybrid": ("q_lora_rank",),
-}
-
-
-@lru_cache(maxsize=None)
-def _checkpoint_remote_layout_marker(model_id_or_path: str) -> tuple[Optional[str], Optional[str]]:
-    """Return ``(marker, remote_class_name)`` for a checkpoint's remote model code.
-
-    ``marker`` is the ``config.json`` field from
-    ``_REMOTE_ONLY_LAYOUT_CONFIG_MARKERS`` that the checkpoint sets, or ``None``
-    when the installed native class can load the checkpoint. A marker counts
-    only when the checkpoint also ships ``auto_map.AutoModelForCausalLM``;
-    without remote model code there is nothing to keep trust for.
-    """
-
-    payload = _checkpoint_config_payload(model_id_or_path)
-    if payload is None:
-        return None, None
-
-    auto_map = payload.get("auto_map")
-    if not isinstance(auto_map, dict):
-        return None, None
-
-    remote_class_ref = auto_map.get("AutoModelForCausalLM")
-    if not isinstance(remote_class_ref, str) or not remote_class_ref:
-        return None, None
-
-    remote_class_name = remote_class_ref.rsplit(".", 1)[-1]
-    model_type = str(payload.get("model_type") or "").lower()
-    for marker in _REMOTE_ONLY_LAYOUT_CONFIG_MARKERS.get(model_type, ()):
-        if payload.get(marker):
-            return marker, remote_class_name
-
-    return None, remote_class_name
-
-
-def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_code: bool) -> bool:
-    # Keep registration ahead of the trust-remote-code probe as well as the
-    # main loader's AutoConfig call.  The probe runs very early in every public
-    # GPTQModel entry point when callers explicitly pass trust_remote_code.
+    payload, _ = PreTrainedConfig.get_config_dict(model_id_or_path, **kwargs)
+    loader = local_model_loader_for_config(payload)
+    if loader is not None:
+        return loader.load_config(model_id_or_path, **kwargs)
     ensure_qwen_drive_registered(model_id_or_path)
-    if not trust_remote_code or not model_id_or_path:
-        return trust_remote_code
+    config_selection_kwargs = get_config_selection_kwargs(kwargs)
+    # GGUF metadata is the selected config. The trust preflight must inspect
+    # the same file, including when an unrelated config.json is also present.
+    if kwargs.get("gguf_file") is not None:
+        config_selection_kwargs["gguf_file"] = kwargs["gguf_file"]
+    trust_remote_code = resolve_trust_remote_code(
+        model_id_or_path, trust_remote_code=trust_remote_code, **config_selection_kwargs
+    )
+    return AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code, **kwargs)
 
-    native_supported, model_type, model_cls_name = _detect_native_transformers_causallm_support(str(model_id_or_path))
+
+def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_code: bool, **config_load_kwargs) -> bool:
+    # Disabling Python requires no metadata, network access or registration.
+    # The config loader owns malformed/missing asset diagnostics and retries.
+    if not trust_remote_code:
+        return False
+
+    from ..models.local import local_model_loader_for_config
+
+    if model_id_or_path:
+        payload, _ = PreTrainedConfig.get_config_dict(model_id_or_path, **config_load_kwargs)
+        if local_model_loader_for_config(payload) is not None:
+            return False
+    if not model_id_or_path:
+        return require_remote_code_permission(trust_remote_code)
+
+    ensure_qwen_drive_registered(model_id_or_path)
+    native_supported, model_type, model_cls_name = _detect_native_transformers_causallm_support(str(model_id_or_path), **config_load_kwargs)
     if not native_supported:
-        return True
+        # Multimodal definitions use auto classes other than causal LM. Inspect
+        # their declared loader before considering any checkpoint Python.
+        from ..models.auto import MODEL_MAP_CASEFOLD
 
-    remote_layout_marker, remote_model_cls_name = _checkpoint_remote_layout_marker(str(model_id_or_path))
-    if remote_layout_marker is not None:
-        log_key = (str(model_id_or_path), remote_model_cls_name or "unknown", model_cls_name or "unknown")
-        if log_key not in _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED:
-            log.info(
-                "HF: keeping trust_remote_code=True for `%s` because config field `%s` selects a layout of remote model code `%s` that native `%s` cannot load.",
-                model_id_or_path,
-                remote_layout_marker,
-                remote_model_cls_name or "unknown",
-                model_cls_name or "unknown",
-            )
-            _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED.add(log_key)
-        return True
+        definition = MODEL_MAP_CASEFOLD.get(str(payload.get("model_type", "")).lower())
+        if has_native_transformers_model_support(model_id_or_path, getattr(definition, "loader", None), **config_load_kwargs):
+            return False
+        return require_remote_code_permission(trust_remote_code)
 
     warning_key = (str(model_id_or_path), model_type or "unknown", model_cls_name or "unknown")
     if warning_key not in _TRUST_REMOTE_CODE_OVERRIDE_WARNED:
@@ -1153,2076 +730,25 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
     return False
 
 
+def has_native_transformers_model_support(model_id_or_path, loader, **config_load_kwargs) -> bool:
+    """Probe the definition's declared native auto class, including multimodal models."""
+    from ..models.local import LocalModelLoader
+
+    if isinstance(loader, LocalModelLoader):
+        return True
+    try:
+        config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=False, **config_load_kwargs)
+        return type(config) in loader._model_mapping
+    except (AttributeError, KeyError, TypeError, ValueError, OSError):
+        return False
+
+
 def has_native_transformers_causallm_support(model_id_or_path: Optional[str]) -> bool:
     if not model_id_or_path:
         return False
 
     native_supported, _, _ = _detect_native_transformers_causallm_support(str(model_id_or_path))
     return native_supported
-
-def _resolve_input_embedding_weight_name(model: PreTrainedModel) -> Optional[str]:
-    get_input_embeddings = getattr(model, "get_input_embeddings", None)
-    if not callable(get_input_embeddings):
-        return None
-
-    try:
-        input_embeddings = get_input_embeddings()
-    except Exception:
-        return None
-
-    if input_embeddings is None:
-        return None
-
-    weight = getattr(input_embeddings, "weight", None)
-    if weight is None:
-        return None
-
-    for name, param in model.named_parameters(remove_duplicate=False):
-        if param is weight:
-            return name
-
-    for name, module in model.named_modules(remove_duplicate=False):
-        if module is input_embeddings:
-            return f"{name}.weight" if name else "weight"
-
-    return None
-
-
-# Older remote model files sometimes store `_tied_weights_keys` as a plain list
-# like `["lm_head.weight"]`. transformers 5.x now expects `{target: source}`,
-# and otherwise later save/load helpers fail with `'list' object has no attribute 'keys'`.
-def _resolve_legacy_tied_weights_mapping(model: PreTrainedModel, tied_mapping) -> dict[str, str]:
-    if not isinstance(tied_mapping, (list, tuple, set)):
-        return {}
-
-    if not getattr(getattr(model, "config", None), "tie_word_embeddings", False):
-        return {}
-
-    source_name = _resolve_input_embedding_weight_name(model)
-    if source_name is None:
-        return {}
-
-    return {
-        # Legacy list entries only name the tied target, so resolve them back
-        # to the input embedding weight name expected by transformers 5.x.
-        target_name: source_name
-        for target_name in tied_mapping
-        if isinstance(target_name, str) and target_name != source_name
-    }
-
-
-# Rewrite legacy list-based `_tied_weights_keys` in-place so transformers 5.x
-# save/load code stops crashing on older trust_remote_code models that still use
-# the pre-5.x list format.
-def _normalize_legacy_tied_weights_keys(model: PreTrainedModel) -> None:
-    named_modules = getattr(model, "named_modules", None)
-    if not callable(named_modules):
-        return
-
-    try:
-        modules_iter = named_modules(remove_duplicate=False)
-    except TypeError:
-        modules_iter = named_modules()
-
-    for _name, submodule in modules_iter:
-        tied_mapping = getattr(submodule, "_tied_weights_keys", None)
-        if not isinstance(tied_mapping, (list, tuple, set)):
-            continue
-
-        if isinstance(submodule, PreTrainedModel):
-            submodule._tied_weights_keys = _resolve_legacy_tied_weights_mapping(submodule, tied_mapping)
-        else:
-            submodule._tied_weights_keys = {}
-
-
-def _is_rope_init_bridge(init_fn: Any) -> bool:
-    """Return whether ``init_fn`` delegates back to ``ROPE_INIT_FUNCTIONS``.
-
-    GPT-QModel installs such bridges on legacy ``trust_remote_code`` rotary
-    classes (e.g. Ouro) so transformers 5.x can find an initializer for them.
-    The bridge resolves the global ``"default"`` entry when it is called, so
-    the precedence wrapper must not hide that entry from it (#5259).
-    """
-
-    if getattr(init_fn, "_gptqmodel_rope_bridge", False):
-        return True
-
-    code = getattr(init_fn, "__code__", None)
-    if code is None:
-        return False
-
-    referenced = set(code.co_names) | set(code.co_freevars)
-    if "ROPE_INIT_FUNCTIONS" not in referenced:
-        return False
-    return "default" in {const for const in code.co_consts if isinstance(const, str)}
-
-
-def _rope_init_lookup_globals(init_fn: Any) -> Optional[dict[str, Any]]:
-    """Return the namespace ``init_fn`` resolves its module globals from."""
-
-    try:
-        unwrapped = inspect.unwrap(init_fn)
-    except Exception:
-        unwrapped = init_fn
-    namespace = getattr(unwrapped, "__globals__", None)
-    return namespace if isinstance(namespace, dict) else None
-
-
-def _install_rope_init_precedence_compat(rope_utils: Any) -> None:
-    """Keep a model's own default RoPE initializer ahead of the remote shim.
-
-    Legacy ``trust_remote_code`` modules index
-    ``ROPE_INIT_FUNCTIONS["default"]`` directly, so the compat entry installed
-    above has to stay in the global table. transformers 5.x builds its
-    ``_init_weights`` lookup as
-    ``{"default": module.compute_default_rope_parameters, **ROPE_INIT_FUNCTIONS}``,
-    so that global entry used to replace every native family's own
-    initializer: ``import gptqmodel`` changed ERNIE-4.5-VL's pre-rotated h/w
-    RoPE layout and its logits (#5226). Wrap ``_init_weights`` so a
-    module-owned initializer wins for that module, while modules that rely on
-    the shim still get it.
-
-    The table itself is never mutated: hiding ``"default"`` from the lookup
-    would break GPT-QModel's own bridges (Ouro's bridge delegates straight to
-    ``ROPE_INIT_FUNCTIONS["default"]``, #5259) and any other thread that
-    constructs a legacy remote rotary module during initialization. Instead
-    the wrapper shadows the table in ``_init_weights``' own namespace for the
-    duration of the call, leaving the process-global table intact.
-    """
-
-    try:
-        from transformers.modeling_utils import PreTrainedModel
-    except Exception:
-        log.debug("RoPE init precedence compat skipped: PreTrainedModel unavailable", exc_info=True)
-        return
-
-    original = PreTrainedModel._init_weights
-    if getattr(original, "_gptqmodel_rope_precedence", False):
-        return
-
-    def _init_weights_with_rope_precedence(self, module):
-        if (
-            getattr(module, "rope_type", None) == "default"
-            and hasattr(module, "original_inv_freq")
-            and "RotaryEmbedding" in module.__class__.__name__
-        ):
-            own = getattr(module, "compute_default_rope_parameters", None)
-            table = getattr(rope_utils, "ROPE_INIT_FUNCTIONS", None)
-            if own is not None and isinstance(table, dict) and "default" in table:
-                if getattr(own, "_gptqmodel_rope_bridge", False):
-                    # The marked bridge returns exactly the shim's result, so
-                    # letting the shim win is equivalent and leaves the table
-                    # untouched (#5259).
-                    return original(self, module)
-                namespace = _rope_init_lookup_globals(original)
-                shadow = None
-                if namespace is not None and namespace.get("ROPE_INIT_FUNCTIONS") is table:
-                    shadow = {key: value for key, value in table.items() if key != "default"}
-                if shadow is not None:
-                    with _MONKEY_PATCH_LOCK:
-                        namespace["ROPE_INIT_FUNCTIONS"] = shadow
-                        try:
-                            return original(self, module)
-                        finally:
-                            namespace["ROPE_INIT_FUNCTIONS"] = table
-                # Fallback for transformers builds that do not expose the
-                # lookup table as a module global: drop the entry for the
-                # duration. A detected bridge keeps resolving the shim instead
-                # of raising the KeyError this wrapper exists to avoid.
-                if not _is_rope_init_bridge(own):
-                    with _MONKEY_PATCH_LOCK:
-                        installed = table.pop("default")
-                        try:
-                            return original(self, module)
-                        finally:
-                            table["default"] = installed
-        return original(self, module)
-
-    _init_weights_with_rope_precedence._gptqmodel_rope_precedence = True
-    with _MONKEY_PATCH_LOCK:
-        PreTrainedModel._init_weights = _init_weights_with_rope_precedence
-
-
-# Bridge a few transformers 5.x API changes so older trust_remote_code model
-# files still import and initialize without editing the cached remote source.
-def _patch_transformers_remote_code_compat() -> None:
-    try:
-        from transformers.utils import import_utils
-    except Exception:
-        log.debug("remote-code compat skipped: transformers.utils.import_utils unavailable", exc_info=True)
-        return
-
-    try:
-        from transformers import cache_utils
-    except Exception:
-        cache_utils = None
-
-    try:
-        from transformers.generation import utils as generation_utils
-    except Exception:
-        generation_utils = None
-
-    try:
-        from transformers import utils
-    except Exception:
-        utils = None
-
-    try:
-        import transformers.modeling_rope_utils as rope_utils
-    except Exception:
-        rope_utils = None
-
-    try:
-        import transformers.tokenization_utils as tokenization_utils
-        from transformers.tokenization_utils_base import (
-            PaddingStrategy,
-            PreTokenizedInput,
-            TextInput,
-            TruncationStrategy,
-        )
-    except Exception:
-        tokenization_utils = None
-
-    import transformers.utils.generic as generic
-    with _MONKEY_PATCH_LOCK:
-        if not hasattr(import_utils, "is_torch_fx_available"):
-            # transformers 5.x removed `import_utils.is_torch_fx_available`, but
-            # older remote model files still import it during module import.
-            def is_torch_fx_available() -> bool:
-                return hasattr(torch, "fx")
-
-            import_utils.is_torch_fx_available = is_torch_fx_available
-
-        if tokenization_utils is not None:
-            # transformers 5.x moved these typing/enum helpers to
-            # `tokenization_utils_base`, but older remote processors still import
-            # them from `tokenization_utils`.
-            for name, value in (
-                ("PaddingStrategy", PaddingStrategy),
-                ("PreTokenizedInput", PreTokenizedInput),
-                ("TextInput", TextInput),
-                ("TruncationStrategy", TruncationStrategy),
-            ):
-                if not hasattr(tokenization_utils, name):
-                    setattr(tokenization_utils, name, value)
-
-        if utils is not None and not hasattr(utils, "is_flash_attn_greater_or_equal_2_10"):
-            legacy_flash_attn_probe = getattr(utils, "is_flash_attn_greater_or_equal", None)
-
-            if legacy_flash_attn_probe:
-                # Older trust_remote_code model files import the removed
-                # `is_flash_attn_greater_or_equal_2_10` helper from
-                # `transformers.utils`; newer transformers only expose the generic
-                # comparator.
-                def is_flash_attn_greater_or_equal_2_10() -> bool:
-                    return bool(legacy_flash_attn_probe("2.1.0"))
-
-                utils.is_flash_attn_greater_or_equal_2_10 = is_flash_attn_greater_or_equal_2_10
-
-        if rope_utils is not None and "default" not in getattr(rope_utils, "ROPE_INIT_FUNCTIONS", {}):
-            # transformers 5.x removed the legacy `"default"` RoPE entrypoint,
-            # but older trust_remote_code model files still resolve it directly.
-            # Recreate the unscaled/base initializer instead of aliasing to
-            # `"linear"` so configs do not need an artificial `factor=1.0`.
-            def _compute_default_rope_parameters_compat(
-                config: Optional["PreTrainedConfig"] = None,
-                device: Optional["torch.device"] = None,
-                seq_len: int | None = None,
-                layer_type: str | None = None,
-            ) -> tuple["torch.Tensor", float]:
-                del seq_len
-                if config is None:
-                    raise ValueError("`config` is required to compute default RoPE parameters.")
-
-                standardize_rope_params = getattr(config, "standardize_rope_params", None)
-                if callable(standardize_rope_params):
-                    standardize_rope_params()
-
-                rope_parameters = getattr(config, "rope_parameters", None)
-                if layer_type is not None and isinstance(rope_parameters, dict):
-                    rope_parameters = rope_parameters.get(layer_type, rope_parameters)
-
-                rope_theta = None
-                partial_rotary_factor = 1.0
-                if isinstance(rope_parameters, dict):
-                    rope_theta = rope_parameters.get("rope_theta")
-                    partial_rotary_factor = rope_parameters.get("partial_rotary_factor", partial_rotary_factor)
-
-                if rope_theta is None:
-                    rope_theta = getattr(config, "rope_theta", None)
-                    if rope_theta is None:
-                        rope_theta = getattr(config, "default_theta", 10_000.0)
-
-                head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
-                dim = int(head_dim * partial_rotary_factor)
-                attention_factor = 1.0
-                inv_freq = 1.0 / (
-                    rope_theta
-                    ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim)
-                )
-                return inv_freq, attention_factor
-
-            rope_utils.ROPE_INIT_FUNCTIONS["default"] = _compute_default_rope_parameters_compat
-
-        if rope_utils is not None:
-            # Keep the shim available for legacy remote code without letting it
-            # replace a native family's own initializer (#5226).
-            _install_rope_init_precedence_compat(rope_utils)
-
-        if cache_utils is not None and not hasattr(cache_utils, "SlidingWindowCache") and hasattr(cache_utils, "StaticCache"):
-            # transformers 5.x folds sliding-window behavior into StaticCache
-            # layers, but older remote code still imports the legacy symbol.
-            cache_utils.SlidingWindowCache = cache_utils.StaticCache
-
-        if not hasattr(generic, "check_model_inputs"):
-            # transformers 5.x removed `transformers.utils.generic.check_model_inputs`, but
-            # older remote model files still import it during module import.
-            def check_model_inputs(func=None, **kwargs):
-                def wrapper(fn):
-                    def inner(self, *args, **kwargs):
-                        return fn(self, *args, **kwargs)
-
-                    return inner
-
-                return wrapper(func) if func else wrapper
-
-            generic.check_model_inputs = check_model_inputs
-
-        if not hasattr(generic, "OutputRecorder"):
-            # transformers 5.x moved `OutputRecorder` to
-            # `transformers.utils.output_capturing`, but older remote model files
-            # still import it from `transformers.utils.generic` (for example
-            # `modeling_klear.py`). Re-export the real recorder so the remote
-            # `can_record_outputs` mapping keeps working.
-            try:
-                from transformers.utils.output_capturing import OutputRecorder
-            except Exception:
-                log.debug(
-                    "remote-code compat skipped: transformers.utils.output_capturing unavailable",
-                    exc_info=True,
-                )
-            else:
-                generic.OutputRecorder = OutputRecorder
-
-        if cache_utils is not None and not hasattr(cache_utils, "HybridCache") and hasattr(cache_utils, "StaticCache"):
-            # transformers 5.x also collapsed the legacy HybridCache entrypoint
-            # into StaticCache, which already instantiates hybrid/sliding layers
-            # based on the model config.
-            cache_utils.HybridCache = cache_utils.StaticCache
-
-        cache_base_cls = getattr(cache_utils, "Cache", None) if cache_utils is not None else None
-        # transformers 5.22 moved the length query down to the cache *layers*
-        # and no longer exposes a cache-level `get_max_cache_shape`, so the
-        # shim must not require that method to exist. It reads the layer API
-        # first and only falls back to a cache-level shape query when present.
-        if cache_base_cls is not None and not hasattr(cache_base_cls, "get_max_length"):
-            # Older remote decoders expect `get_max_length()`, while newer
-            # transformers renamed that API to `get_max_cache_shape()`. In
-            # transformers 5.14, the deprecated cache-level method delegates
-            # back to `get_max_length()`, so prefer the layer API to avoid a
-            # compatibility-alias recursion.
-            def get_max_length(self, layer_idx: int = 0) -> Optional[int]:
-                missing = object()
-                max_length = missing
-                layers = getattr(self, "layers", None)
-                if layers is not None:
-                    if 0 <= layer_idx < len(layers):
-                        layer = layers[layer_idx]
-                        layer_get_max_length = getattr(layer, "get_max_length", None)
-                        layer_get_max_cache_shape = getattr(layer, "get_max_cache_shape", None)
-                        if callable(layer_get_max_length):
-                            max_length = layer_get_max_length()
-                        elif callable(layer_get_max_cache_shape):
-                            max_length = layer_get_max_cache_shape()
-                    else:
-                        max_length = -1
-
-                if max_length is missing:
-                    shape_getter = getattr(self, "get_max_cache_shape", None)
-                    if callable(shape_getter):
-                        max_length = shape_getter(layer_idx)
-                if max_length is missing:
-                    return None
-                return None if max_length is None or max_length < 0 else max_length
-
-            cache_base_cls.get_max_length = get_max_length
-
-        if cache_base_cls is not None and not hasattr(cache_base_cls, "get_usable_length") and hasattr(cache_base_cls, "get_seq_length"):
-            # Recreate the pre-5.x cache eviction helper so remote attention code
-            # can compute usable KV length against the newer cache interface.
-            def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
-                max_length = self.get_max_length(layer_idx=layer_idx)
-                if max_length is not None and max_length < 0:
-                    # transformers 5 reports `-1` for a dynamic (unbounded)
-                    # layer; transformers 4 reported no limit as `None`.
-                    max_length = None
-                previous_seq_length = self.get_seq_length(layer_idx)
-                if max_length is not None and previous_seq_length + new_seq_length > max_length:
-                    return max_length - new_seq_length
-                return previous_seq_length
-
-            cache_base_cls.get_usable_length = get_usable_length
-
-        if cache_base_cls is not None and not getattr(
-            cache_base_cls.__dict__.get("__len__"), "_gptqmodel_legacy_layer_storage", False
-        ):
-            # transformers 5 moved cache length bookkeeping onto a `layers`
-            # list. Some remote caches subclass `Cache` while keeping the
-            # transformers-4 `key_cache`/`value_cache` lists (Hymba's
-            # `HybridMambaAttentionDynamicCache`), so `len(cache)` (through
-            # `bool(cache)`) and `get_max_length()` raised
-            # `AttributeError: ... has no attribute 'layers'`.
-            original_cache_len = cache_base_cls.__len__
-            original_cache_max_length = getattr(cache_base_cls, "get_max_length", None)
-
-            def __len__(self) -> int:
-                if getattr(self, "layers", None) is None:
-                    key_cache = getattr(self, "key_cache", None)
-                    if isinstance(key_cache, (list, tuple)):
-                        return len(key_cache)
-                    return 0
-                return original_cache_len(self)
-
-            __len__._gptqmodel_legacy_layer_storage = True
-            cache_base_cls.__len__ = __len__
-
-            if callable(original_cache_max_length) and not getattr(
-                original_cache_max_length, "_gptqmodel_legacy_layer_storage", False
-            ):
-                def get_max_length(self, layer_idx: Optional[int] = None):
-                    if getattr(self, "layers", None) is None:
-                        # A pre-5.x cache grows without a declared limit;
-                        # transformers 4 reported that as `None`.
-                        return None
-                    return original_cache_max_length(self, layer_idx)
-
-                get_max_length._gptqmodel_legacy_layer_storage = True
-                cache_base_cls.get_max_length = get_max_length
-
-        dynamic_cache_cls = getattr(cache_utils, "DynamicCache", None) if cache_utils is not None else None
-        if dynamic_cache_cls is not None and not hasattr(dynamic_cache_cls, "to_legacy_cache"):
-            # Older remote generation code still serializes cache state as
-            # `Tuple[(key, value), ...]`; rebuild that view from layer storage.
-            def to_legacy_cache(self) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
-                legacy_cache = ()
-                for layer in self.layers:
-                    if not getattr(layer, "is_initialized", False):
-                        continue
-                    legacy_cache += ((layer.keys, layer.values),)
-                return legacy_cache
-
-            dynamic_cache_cls.to_legacy_cache = to_legacy_cache
-
-        if dynamic_cache_cls is not None and not hasattr(dynamic_cache_cls, "from_legacy_cache"):
-            # Accept legacy tuple caches by replaying them into the current
-            # layer-based DynamicCache implementation.
-            @classmethod
-            def from_legacy_cache(cls, past_key_values: Optional[tuple[tuple[torch.Tensor, torch.Tensor], ...]] = None):
-                cache = cls()
-                if past_key_values is not None:
-                    for layer_idx, (key_states, value_states) in enumerate(past_key_values):
-                        cache.update(key_states, value_states, layer_idx)
-                return cache
-
-            dynamic_cache_cls.from_legacy_cache = from_legacy_cache
-
-        if cache_base_cls is not None and not hasattr(cache_base_cls, "seen_tokens"):
-            # transformers 4 exposed the number of cached tokens as
-            # `cache.seen_tokens`; transformers 5 replaced it with
-            # `get_seq_length()`. Legacy remote `prepare_inputs_for_generation`
-            # implementations still read the attribute (MiniCPM-2B-dpo).
-            def seen_tokens(self) -> int:
-                return self.get_seq_length()
-
-            cache_base_cls.seen_tokens = property(seen_tokens)
-
-        if dynamic_cache_cls is not None and not hasattr(dynamic_cache_cls, "__getitem__"):
-            # Legacy remote decoders index the KV cache as the transformers-4
-            # tuple of `(key, value)` pairs, e.g.
-            # `past_key_values[0][0].shape[2]` (DeciLM/Baichuan2 remote
-            # `prepare_inputs_for_generation`).
-            def __getitem__(self, layer_idx):
-                layers = self.layers
-                if isinstance(layer_idx, slice):
-                    return tuple((layer.keys, layer.values) for layer in layers[layer_idx])
-                if layer_idx < 0:
-                    layer_idx += len(layers)
-                if layer_idx < 0 or layer_idx >= len(layers):
-                    raise IndexError(f"cache layer {layer_idx} is out of range")
-                layer = layers[layer_idx]
-                if not getattr(layer, "is_initialized", False):
-                    raise IndexError(f"cache layer {layer_idx} has not been written yet")
-                return layer.keys, layer.values
-
-            dynamic_cache_cls.__getitem__ = __getitem__
-
-        if generation_utils is not None and not hasattr(generation_utils, "NEED_SETUP_CACHE_CLASSES_MAPPING"):
-            # Older remote generation code registers custom cache builders through
-            # this module-global dict during import.
-            generation_utils.NEED_SETUP_CACHE_CLASSES_MAPPING = {}
-
-        generation_mixin_cls = getattr(generation_utils, "GenerationMixin", None) if generation_utils is not None else None
-        if generation_mixin_cls is not None and not getattr(generation_mixin_cls, "_gptqmodel_custom_cache_impl_patch", False):
-            original_prepare_cache_for_generation = generation_mixin_cls._prepare_cache_for_generation
-
-            # transformers 5.x removed the custom cache registry path used by some
-            # trust_remote_code models, so recreate just enough of that setup here.
-            def _prepare_cache_for_generation_compat(
-                self,
-                generation_config: GenerationConfig,
-                model_kwargs: dict,
-                generation_mode,
-                batch_size: int,
-                max_cache_length: int,
-            ) -> None:
-                cache_mapping = getattr(generation_utils, "NEED_SETUP_CACHE_CLASSES_MAPPING", None)
-                cache_implementation = getattr(generation_config, "cache_implementation", None)
-                if not isinstance(cache_mapping, dict) or not isinstance(cache_implementation, str):
-                    original_prepare_cache_for_generation(
-                        self,
-                        generation_config,
-                        model_kwargs,
-                        generation_mode,
-                        batch_size,
-                        max_cache_length,
-                    )
-                    return None
-
-                custom_cache_cls = cache_mapping.get(cache_implementation)
-                if custom_cache_cls is None:
-                    original_prepare_cache_for_generation(
-                        self,
-                        generation_config,
-                        model_kwargs,
-                        generation_mode,
-                        batch_size,
-                        max_cache_length,
-                    )
-                    return None
-
-                is_linear_attn_cache = "mamba" in self.__class__.__name__.lower()
-                cache_name = "past_key_values" if not is_linear_attn_cache else "cache_params"
-
-                user_defined_cache = model_kwargs.get(cache_name)
-                if user_defined_cache is not None:
-                    if generation_config.cache_implementation is not None:
-                        raise ValueError(
-                            f"Passing both `cache_implementation` (used to initialize certain caches) and `{cache_name}` "
-                            "(`Cache` object) is unsupported. Please use only one of the two."
-                        )
-                    if isinstance(user_defined_cache, tuple):
-                        raise ValueError(
-                            "Passing a tuple of `past_key_values` is not supported anymore. Please use a `Cache` instance."
-                        )
-                    return
-
-                if generation_config.use_cache is False:
-                    return
-
-                cache_config = generation_config.cache_config
-                if cache_config is None:
-                    cache_kwargs = {}
-                elif isinstance(cache_config, dict):
-                    cache_kwargs = dict(cache_config)
-                elif hasattr(cache_config, "to_dict"):
-                    cache_kwargs = dict(cache_config.to_dict())
-                else:
-                    cache_kwargs = dict(cache_config)
-
-                text_config = self.config.get_text_config(decoder=True) if hasattr(self.config, "get_text_config") else self.config
-                full_batch_size = max(generation_config.num_beams, generation_config.num_return_sequences) * batch_size
-                cache_kwargs.setdefault("config", text_config)
-                cache_kwargs.setdefault("batch_size", full_batch_size)
-                cache_kwargs.setdefault("max_batch_size", full_batch_size)
-                cache_kwargs.setdefault("max_cache_len", max_cache_length)
-
-                model_dtype = getattr(self, "dtype", None) or get_hf_config_dtype(self.config)
-                if model_dtype is not None:
-                    cache_kwargs.setdefault("dtype", model_dtype)
-
-                model_device = getattr(self, "device", None)
-                if model_device is not None:
-                    cache_kwargs.setdefault("device", model_device)
-
-                model_kwargs["past_key_values"] = custom_cache_cls(**cache_kwargs)
-
-                encoder_decoder_cache_cls = getattr(cache_utils, "EncoderDecoderCache", None) if cache_utils is not None else None
-                if (
-                    getattr(self.config, "is_encoder_decoder", False)
-                    and "past_key_values" in model_kwargs
-                    and encoder_decoder_cache_cls is not None
-                    and not isinstance(model_kwargs["past_key_values"], encoder_decoder_cache_cls)
-                    and dynamic_cache_cls is not None
-                ):
-                    model_kwargs["past_key_values"] = encoder_decoder_cache_cls(
-                        model_kwargs["past_key_values"],
-                        dynamic_cache_cls(config=text_config),
-                    )
-
-                return None
-
-            generation_mixin_cls._prepare_cache_for_generation = _prepare_cache_for_generation_compat
-            generation_mixin_cls._gptqmodel_custom_cache_impl_patch = True
-
-        if not getattr(PreTrainedModel, "_gptqmodel_legacy_tied_weights_patch", False) and hasattr(PreTrainedModel, "get_expanded_tied_weights_keys"):
-            original_get_expanded_tied_weights_keys = PreTrainedModel.get_expanded_tied_weights_keys
-
-            def get_expanded_tied_weights_keys(self, all_submodels: bool = False) -> dict:
-                # transformers 5.x expects `_tied_weights_keys` to be a dict, while
-                # older trust_remote_code models still declare `["lm_head.weight"]`.
-                # Handle the legacy form here so HF tied-weight expansion still works.
-                tied_mapping = getattr(self, "_tied_weights_keys", None)
-                if not isinstance(tied_mapping, (list, tuple, set)):
-                    return original_get_expanded_tied_weights_keys(self, all_submodels=all_submodels)
-
-                if all_submodels:
-                    expanded_tied_weights = {}
-                    for prefix, submodule in self.named_modules(remove_duplicate=False):
-                        if isinstance(submodule, PreTrainedModel):
-                            submodel_tied_weights = submodule.get_expanded_tied_weights_keys(all_submodels=False)
-                            if prefix != "":
-                                submodel_tied_weights = {
-                                    f"{prefix}.{k}": f"{prefix}.{v}" for k, v in submodel_tied_weights.items()
-                                }
-                            expanded_tied_weights.update(submodel_tied_weights)
-                    return expanded_tied_weights
-
-                if not getattr(getattr(self, "config", None), "tie_word_embeddings", False):
-                    return {}
-
-                resolved_mapping = _resolve_legacy_tied_weights_mapping(self, tied_mapping)
-                self._tied_weights_keys = resolved_mapping
-                return resolved_mapping
-
-            PreTrainedModel.get_expanded_tied_weights_keys = get_expanded_tied_weights_keys
-            PreTrainedModel._gptqmodel_legacy_tied_weights_patch = True
-
-        if not hasattr(PreTrainedModel, "is_parallelizable"):
-            # Older remote-code model wrappers read this legacy base-class flag
-            # during init, but newer transformers dropped the default attribute.
-            PreTrainedModel.is_parallelizable = False
-
-        if not hasattr(PreTrainedModel, "get_head_mask"):
-            def get_head_mask(self, head_mask, num_hidden_layers, is_attention_chunked: bool = False):
-                # transformers 5.x removed this helper from PreTrainedModel,
-                # but many older trust_remote_code decoder implementations
-                # still call `self.get_head_mask(...)` from `forward()`.
-                #
-                # Legacy behavior:
-                # - `None` means no masking and expands to `[None] * n_layers`
-                # - 1D masks are `[num_heads]` and must be broadcast to every
-                #   layer
-                # - 2D masks are `[num_hidden_layers, num_heads]` and must be
-                #   expanded to the 5D attention-mask shape expected by old
-                #   attention blocks
-                #
-                # Keeping this compat shim at the base-class level is safer
-                # than patching each remote model individually because many
-                # pre-transformers-5 architectures shared the same contract.
-                if head_mask is None:
-                    return [None] * num_hidden_layers
-
-                if head_mask.dim() == 1:
-                    # [num_heads] -> [num_hidden_layers, batch, num_heads, seq, seq]
-                    head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-                    head_mask = head_mask.expand(num_hidden_layers, -1, -1, -1, -1)
-                elif head_mask.dim() == 2:
-                    # [num_hidden_layers, num_heads] -> [num_hidden_layers, batch, num_heads, seq, seq]
-                    head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
-                else:
-                    raise ValueError(
-                        f"head_mask must have dim 1 or 2, but got shape {tuple(head_mask.shape)}."
-                    )
-
-                target_dtype = getattr(self, "dtype", None)
-                if isinstance(target_dtype, torch.dtype):
-                    # Match the model compute dtype to avoid dtype promotion or
-                    # precision mismatches inside legacy attention kernels.
-                    head_mask = head_mask.to(dtype=target_dtype)
-
-                if is_attention_chunked:
-                    # Older chunked-attention implementations expect one extra
-                    # axis for chunk broadcasting.
-                    head_mask = head_mask.unsqueeze(-1)
-
-                return head_mask
-
-            PreTrainedModel.get_head_mask = get_head_mask
-
-        if not getattr(PreTrainedModel, "_gptqmodel_missing_all_tied_weights_patch", False):
-            original_getattr = PreTrainedModel.__getattr__
-
-            def __getattr__(self, name: str):
-                if name == "all_tied_weights_keys":
-                    # Older remote-code models may skip `post_init()`, so lazily
-                    # synthesize the tied-weight map the first time HF asks for it.
-                    tied_keys = self.get_expanded_tied_weights_keys(all_submodels=True)
-                    object.__setattr__(self, name, tied_keys)
-                    return tied_keys
-
-                return original_getattr(self, name)
-
-            PreTrainedModel.__getattr__ = __getattr__
-            PreTrainedModel._gptqmodel_missing_all_tied_weights_patch = True
-
-        if not getattr(PreTrainedModel, "_gptqmodel_construction_dtype_patch", False):
-            original_post_init = PreTrainedModel.post_init
-
-            def post_init(self):
-                original_post_init(self)
-                _record_construction_dtypes(self)
-
-            PreTrainedModel.post_init = post_init
-            PreTrainedModel._gptqmodel_construction_dtype_patch = True
-
-
-def _is_deepseek_vl_v2_model_path(model_id_or_path: Optional[str]) -> bool:
-    if not isinstance(model_id_or_path, str) or not os.path.isdir(model_id_or_path):
-        return False
-
-    config_path = os.path.join(model_id_or_path, "config.json")
-    if not os.path.exists(config_path):
-        return False
-
-    try:
-        with open(config_path, encoding="utf-8") as f:
-            config = json.load(f)
-    except Exception:
-        # A broken local config.json is not "this is some other model"; record it
-        # so a failed DeepSeek-VL2 pre-config patch is diagnosable.
-        log.debug("DeepSeek-VL2 probe could not read %s", config_path, exc_info=True)
-        return False
-
-    return str(config.get("model_type", "")).lower() == "deepseek_vl_v2"
-
-
-def patch_remote_code_before_config_load(model_id_or_path: Optional[str]) -> None:
-    # Must run before AutoConfig.from_pretrained(..., trust_remote_code=True):
-    # DeepSeek-VL2 imports the remote modeling modules while loading config, so
-    # applying this patch after config load is already too late.
-    if not _is_deepseek_vl_v2_model_path(model_id_or_path):
-        return
-
-    try:
-        import transformers.modeling_utils as modeling_utils
-        from transformers.utils import is_flash_attn_2_available
-    except Exception:
-        log.debug("DeepSeek-VL2 pre-config patch skipped: transformers modeling utils unavailable", exc_info=True)
-        return
-
-    try:
-        import transformers.models.llama.modeling_llama as modeling_llama
-    except Exception:
-        modeling_llama = None
-
-    with _MONKEY_PATCH_LOCK:
-        if not hasattr(modeling_utils, "is_flash_attn_2_available"):
-            # DeepSeek-VL2's SigLIP remote code imports this helper from the
-            # transformers 4.x location.
-            modeling_utils.is_flash_attn_2_available = is_flash_attn_2_available
-
-        if modeling_llama is None or not hasattr(modeling_llama, "LlamaAttention"):
-            return
-
-        original_llama_attention = modeling_llama.LlamaAttention
-
-        if getattr(original_llama_attention, "_gptqmodel_deepseek_vl2_compat", False):
-            modeling_llama.LlamaFlashAttention2 = original_llama_attention
-            return
-
-        class DeepSeekVLV2CompatLlamaAttention(original_llama_attention):
-            _gptqmodel_deepseek_vl2_compat = True
-
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.rotary_emb = modeling_llama.LlamaRotaryEmbedding(self.config)
-
-            def forward(
-                self,
-                hidden_states,
-                position_embeddings=None,
-                attention_mask=None,
-                past_key_values=None,
-                **kwargs,
-            ):
-                old_style = any(
-                    key in kwargs
-                    for key in ("position_ids", "past_key_value", "output_attentions", "use_cache")
-                )
-                if not old_style:
-                    return super().forward(
-                        hidden_states,
-                        position_embeddings=position_embeddings,
-                        attention_mask=attention_mask,
-                        past_key_values=past_key_values,
-                        **kwargs,
-                    )
-
-                position_ids = kwargs.pop("position_ids", None)
-                past_key_value = kwargs.pop("past_key_value", None)
-                output_attentions = kwargs.pop("output_attentions", False)
-                use_cache = kwargs.pop("use_cache", False)
-                if past_key_values is None:
-                    past_key_values = past_key_value
-
-                input_shape = hidden_states.shape[:-1]
-                hidden_shape = (*input_shape, -1, self.head_dim)
-                query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-                key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-                value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-                if position_embeddings is None:
-                    if position_ids is None:
-                        position_ids = torch.arange(
-                            hidden_states.shape[1],
-                            device=hidden_states.device,
-                        ).unsqueeze(0)
-                    position_embeddings = self.rotary_emb(value_states, position_ids)
-                cos, sin = position_embeddings
-                query_states, key_states = modeling_llama.apply_rotary_pos_emb(
-                    query_states,
-                    key_states,
-                    cos,
-                    sin,
-                )
-
-                if past_key_values is not None:
-                    if hasattr(past_key_values, "update"):
-                        key_states, value_states = past_key_values.update(
-                            key_states,
-                            value_states,
-                            self.layer_idx,
-                        )
-                        present_key_value = past_key_values
-                    else:
-                        key_states = torch.cat([past_key_values[0], key_states], dim=2)
-                        value_states = torch.cat([past_key_values[1], value_states], dim=2)
-                        present_key_value = (key_states, value_states)
-                else:
-                    present_key_value = (key_states, value_states) if use_cache else None
-
-                key_states = modeling_llama.repeat_kv(key_states, self.num_key_value_groups)
-                value_states = modeling_llama.repeat_kv(value_states, self.num_key_value_groups)
-
-                if output_attentions:
-                    attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scaling
-                    if attention_mask is not None:
-                        attn_weights = attn_weights + attention_mask
-                    attn_weights = torch.nn.functional.softmax(
-                        attn_weights,
-                        dim=-1,
-                        dtype=torch.float32,
-                    ).to(query_states.dtype)
-                    attn_output = torch.matmul(attn_weights, value_states)
-                else:
-                    attn_weights = None
-                    attn_output = torch.nn.functional.scaled_dot_product_attention(
-                        query_states,
-                        key_states,
-                        value_states,
-                        attn_mask=attention_mask,
-                        dropout_p=0.0 if not self.training else self.attention_dropout,
-                        is_causal=attention_mask is None and query_states.shape[2] > 1,
-                    )
-
-                attn_output = attn_output.transpose(1, 2).reshape(*input_shape, -1).contiguous()
-                attn_output = self.o_proj(attn_output)
-                return attn_output, attn_weights, present_key_value
-
-        modeling_llama.LlamaAttention = DeepSeekVLV2CompatLlamaAttention
-        modeling_llama.LlamaFlashAttention2 = DeepSeekVLV2CompatLlamaAttention
-
-
-def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:
-    if getattr(config, "model_type", None) != "chatglm":
-        return
-
-    if not hasattr(config, "seq_length") or hasattr(config, "max_length"):
-        return
-
-    # Older ChatGLM remote model code still reads `config.max_length`, while
-    # newer transformers only preserves the serialized `seq_length` field.
-    config.attribute_map = dict(getattr(config, "attribute_map", {}) or {})
-    config.attribute_map["max_length"] = "seq_length"
-    # transformers 5's DynamicCache sizes itself from `num_hidden_layers`;
-    # ChatGLM serializes the same value as `num_layers`. The shared alias below
-    # covers this and the other legacy layer-count field names.
-    _restore_legacy_layer_count_alias(config)
-
-    # `attribute_map` resolves `config.max_length` for the remote model's
-    # `__init__`, but transformers 5's `_prepare_generation_config` walks the
-    # same attribute and treats it as a user-modified generation parameter:
-    # `_get_generation_parameters()` raises for every `generate()` call because
-    # `max_length` is not a declared config field. The alias is a compatibility
-    # view, not generation state, so hide it from that probe on this config
-    # class. The attribute itself stays available to the remote code.
-    config_cls = type(config)
-    if not getattr(config_cls, "_gptqmodel_max_length_alias", False):
-        original_get_generation_parameters = config_cls._get_generation_parameters
-
-        def _get_generation_parameters(self):
-            parameters = original_get_generation_parameters(self)
-            parameters.pop("max_length", None)
-            return parameters
-
-        config_cls._get_generation_parameters = _get_generation_parameters
-        config_cls._gptqmodel_max_length_alias = True
-
-    if not hasattr(config, "use_cache"):
-        # transformers v5 removed `use_cache` from PretrainedConfig,
-        # but ChatGLM remote code still expects it. Add it back for compatibility.
-        config.use_cache = True
-
-
-def _is_glm5_next_nope_config(config: Any) -> bool:
-    model_type = getattr(config, "model_type", None)
-    if model_type == "glm5_next":
-        config = getattr(config, "text_config", None)
-    elif model_type != "glm5_next_text":
-        return False
-    # Native Glm5NextTextConfig omits mla_use_nope; zero rotary dim signals NoPE.
-    return (
-        getattr(config, "qk_rope_head_dim", None) == 0
-        and getattr(config, "mla_use_nope", True) is True
-    )
-
-
-def _rope_parameter_type_labels(config: Any) -> tuple:
-    """Layer/rope-type labels this config declares, in transformers' order."""
-    return (
-        getattr(config, "_rope_type_labels", None)
-        or getattr(config, "layer_types", None)
-        or ()
-    )
-
-
-def _rope_parameters_are_per_layer(config: Any, rope_parameters: Any) -> bool:
-    """True when ``rope_parameters`` is already nested per layer/rope type.
-
-    Must agree with Transformers' own resolution: ``RotaryEmbeddingConfigMixin``
-    reads ``_rope_type_labels`` before ``layer_types``
-    (``nested_rope_parameter_keys``). Keying only on ``layer_types`` misses
-    configs such as DeepSeek V4, whose ``rope_parameters`` are keyed by
-    ``("main", "compress")`` while ``layer_types`` names something else entirely,
-    and would then append flat ``rope_type``/``rope_theta`` scalars next to the
-    nested dictionaries.
-    """
-    if not isinstance(rope_parameters, dict) or not rope_parameters:
-        return False
-    labels = _rope_parameter_type_labels(config)
-    nested_keys = [key for key in rope_parameters if key in labels]
-    if not nested_keys:
-        return False
-    return all(
-        rope_parameters[key] is None or isinstance(rope_parameters[key], dict)
-        for key in nested_keys
-    )
-
-
-def _declares_legacy_rope_field(config: Any) -> bool:
-    """Whether the config class exposes the pre-5.x `rope_scaling` constructor field.
-
-    Legacy remote configs declare `rope_scaling` in `__init__` and read
-    `config.rope_scaling` from their modeling code, treating `None` as the
-    unscaled RoPE path. Transformers 5 configs (native and modern remote code)
-    declare `rope_parameters` instead and require it to stay populated.
-    """
-
-    try:
-        parameters = inspect.signature(type(config).__init__).parameters
-    except (TypeError, ValueError):
-        return False
-    return "rope_scaling" in parameters and "rope_parameters" not in parameters
-
-
-def _rope_config_is_scaled(config: Any) -> bool:
-    """Whether either RoPE alias declares a non-default scaling configuration."""
-
-    for candidate in (
-        getattr(config, "rope_scaling", None),
-        getattr(config, "rope_parameters", None),
-    ):
-        if not isinstance(candidate, dict):
-            continue
-        if candidate.get("type", candidate.get("rope_type")) not in (None, "default"):
-            return True
-        if candidate.get("factor") not in (None, 1, 1.0):
-            return True
-    return False
-
-
-def _normalize_rope_parameters_config_compat(
-    config: Any, *, clear_unscaled_legacy_rope: bool = False
-) -> None:
-    # HunYuanVL is a composite config: RoPE belongs exclusively to its text
-    # sub-config. Adding a synthetic top-level rope_parameters value is not
-    # harmless here because HunYuanVLConfig treats flat text fields as legacy
-    # overrides when the config is serialized and loaded again. That would
-    # replace the nested multimodal mrope_section with a default RoPE config.
-    if getattr(config, "model_type", None) == "hunyuan_vl":
-        text_config = getattr(config, "text_config", None)
-        if text_config is not None:
-            _normalize_rope_parameters_config_compat(
-                text_config, clear_unscaled_legacy_rope=clear_unscaled_legacy_rope
-            )
-        return
-
-    if (
-        clear_unscaled_legacy_rope
-        and not _rope_parameters_are_per_layer(config, getattr(config, "rope_parameters", None))
-        and not _rope_config_is_scaled(config)
-    ):
-        # Legacy remote modeling code (MiniCPM, MobileLLM, Nanbeige, ...) owns
-        # RoPE construction and treats `rope_scaling is None` as the unscaled
-        # path; any dict is indexed at `["type"]` and fails when transformers 5
-        # synthesized a default `{"rope_type": "default"}` dict. Clear both
-        # aliases (they are the same property in transformers 5) so the remote
-        # code sees the unscaled contract it was written for. Genuinely scaled
-        # configs keep their dict, which the remote-code pass below augments
-        # with the legacy `type` key.
-        config.rope_scaling = None
-        config.rope_parameters = None
-        return
-
-    rope_parameters = getattr(config, "rope_parameters", None)
-    if _rope_parameters_are_per_layer(config, rope_parameters):
-        # Hybrid attention configs (including Dots3) already hold one RoPE
-        # dictionary per layer type. Flat legacy defaults would introduce
-        # scalar entries that Transformers' per-type validator cannot read.
-        return
-    if (
-        isinstance(rope_parameters, dict)
-        and rope_parameters.get("rope_type") is not None
-        and rope_parameters.get("rope_theta") is not None
-    ):
-        return
-
-    convert_rope_params = getattr(config, "convert_rope_params_to_dict", None)
-    if callable(convert_rope_params):
-        try:
-            convert_rope_params()
-        except Exception as exc:
-            log.debug("Config: RoPE conversion fallback for %s failed: %s", type(config).__name__, exc)
-        else:
-            rope_parameters = getattr(config, "rope_parameters", None)
-            if (
-                isinstance(rope_parameters, dict)
-                and rope_parameters.get("rope_type") is not None
-                and rope_parameters.get("rope_theta") is not None
-            ):
-                return
-
-    legacy_rope_scaling = getattr(config, "rope_scaling", None)
-    if (
-        not rope_parameters
-        and not isinstance(legacy_rope_scaling, dict)
-        and getattr(config, "rope_theta", None) is None
-        and _is_glm5_next_nope_config(config)
-    ):
-        return
-
-    rope_parameters = dict(legacy_rope_scaling) if isinstance(legacy_rope_scaling, dict) else dict(rope_parameters or {})
-
-    rope_parameters.setdefault("rope_type", rope_parameters.get("type", "default"))
-    if rope_parameters.get("rope_theta") is None:
-        rope_theta = getattr(config, "rope_theta", None)
-        if rope_theta is None:
-            rope_theta = getattr(config, "default_theta", 10_000.0)
-        rope_parameters["rope_theta"] = rope_theta
-
-    partial_rotary_factor = getattr(config, "partial_rotary_factor", None)
-    if partial_rotary_factor is not None:
-        rope_parameters.setdefault("partial_rotary_factor", partial_rotary_factor)
-
-    if rope_parameters["rope_type"] in {"llama3", "yarn", "longrope"}:
-        original_max_position_embeddings = getattr(config, "original_max_position_embeddings", None)
-        if original_max_position_embeddings is None:
-            original_max_position_embeddings = getattr(config, "max_position_embeddings", None)
-        if original_max_position_embeddings is not None:
-            rope_parameters.setdefault("original_max_position_embeddings", original_max_position_embeddings)
-
-    config.rope_parameters = rope_parameters
-
-
-# Restore config fields renamed by transformers 5.x before older trust_remote_code
-# model files instantiate their architectures from the config object.
-_LEGACY_LAYER_COUNT_FIELDS = ("num_layers", "n_layer", "n_layers")
-
-
-def _restore_legacy_layer_count_alias(config: Any) -> bool:
-    """Alias a legacy layer-count field to `num_hidden_layers`.
-
-    transformers 5 sizes `DynamicCache` (and the heterogeneity helpers it
-    delegates to) from `config.num_hidden_layers`. Remote configs such as
-    `GPTPanguConfig` only declare `num_layers`/`n_layer`, so `generate()` fails
-    while building the cache. The alias lives in `attribute_map`, so the
-    serialized config keeps the checkpoint's own field name.
-    """
-
-    if hasattr(config, "num_hidden_layers"):
-        return False
-    for field in _LEGACY_LAYER_COUNT_FIELDS:
-        value = getattr(config, field, None)
-        if isinstance(value, int) and value > 0:
-            attribute_map = dict(getattr(config, "attribute_map", {}) or {})
-            attribute_map["num_hidden_layers"] = field
-            config.attribute_map = attribute_map
-            return True
-    return False
-
-
-def _normalize_remote_code_config_compat(config: Any) -> None:
-    _normalize_chatglm_remote_code_config_compat(config)
-    _restore_legacy_layer_count_alias(config)
-    model_type = getattr(config, "model_type", None)
-    model_type_lower = model_type.lower() if isinstance(model_type, str) else None
-
-    if model_type_lower in {"unlimited_ocr", "unlimited-ocr"}:
-        # transformers 5 synthesizes an initializer for the remote empty
-        # UnlimitedOCRConfig subclass and omits defaults declared by its
-        # DeepseekV2Config parent. Restore only missing fields so serialized
-        # checkpoint values remain authoritative.
-        defaults = {
-            "attention_bias": False,
-            "attention_dropout": 0.0,
-            "aux_loss_alpha": 0.001,
-            "ep_size": 1,
-            "hidden_act": "silu",
-            "initializer_range": 0.02,
-            "moe_layer_freq": 1,
-            "norm_topk_prob": False,
-            "pad_token_id": None,
-            "pretraining_tp": 1,
-            "rms_norm_eps": 1e-6,
-            "rope_scaling": None,
-            "rope_theta": 10000.0,
-            "routed_scaling_factor": 1.0,
-            "scoring_func": "softmax",
-            "seq_aux": True,
-            "tie_word_embeddings": False,
-            "use_cache": True,
-        }
-        for name, value in defaults.items():
-            if not hasattr(config, name):
-                setattr(config, name, value)
-
-        if not hasattr(config, "sliding_window") and hasattr(config, "sliding_window_size"):
-            config.sliding_window = config.sliding_window_size
-
-    if model_type_lower == "locateanything":
-        # Transformers 5 migrates Qwen2's legacy rope_theta field into
-        # rope_parameters, while LocateAnything's bundled Qwen2 implementation
-        # still reads config.rope_theta directly.
-        text_config = getattr(config, "text_config", None)
-        if text_config is not None and not hasattr(text_config, "rope_theta"):
-            rope_parameters = getattr(text_config, "rope_parameters", None)
-            if isinstance(rope_parameters, dict):
-                rope_theta = rope_parameters.get("rope_theta")
-                if rope_theta is not None:
-                    text_config.rope_theta = rope_theta
-
-    if model_type_lower == "ouro" and not hasattr(config, "pad_token_id"):
-        # Ouro's custom config does not pass pad_token_id to PretrainedConfig,
-        # while its model implementation accesses config.pad_token_id during
-        # construction. Use the model's EOS token as the conventional causal-LM
-        # padding fallback; this is a config compatibility fix, not a tokenizer
-        # model-name workaround.
-        config.pad_token_id = getattr(config, "eos_token_id", None)
-
-    if model_type_lower == "hymba":
-        # hymba uses Flex by default;
-        # however, `modeling_hymba` has not yet been adapted to support the latest version of PyTorch Flex.
-        # Therefore, we are applying a patch here to switch to flash_attention_2 or sdpa.
-        if getattr(config, 'attn_implementation_new', None) == "flex":
-            from transformers.utils import is_flash_attn_2_available
-            config.attn_implementation_new = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
-        if getattr(config, "attn_implementation_new", None) in (
-            "sdpa",
-            "flash_attention_2",
-        ) and getattr(config, "_attn_implementation", None) == "flex":
-            # `HymbaConfig` declares the mixer selection under its own
-            # `attn_implementation_new` field and `HymbaModel.__init__` copies
-            # it to `_attn_implementation`; transformers 5 validates
-            # `_attn_implementation` in `PreTrainedModel.__init__` *before*
-            # that copy runs and rejects the legacy `flex` value outright.
-            config._attn_implementation = config.attn_implementation_new
-
-    if model_type_lower == "dream" or model_type == "brumby":
-        import transformers.modeling_rope_utils as rope_utils
-        # dream remote models expect "default"
-        if "default" not in rope_utils.ROPE_INIT_FUNCTIONS:
-            rope_utils.ROPE_INIT_FUNCTIONS["default"] = rope_utils.ROPE_INIT_FUNCTIONS["linear"]
-
-        # transformers 5.x expects rope_parameters["factor"] for linear RoPE
-        if getattr(config, "rope_parameters", None):
-            config.rope_parameters.setdefault("factor", 1.0)
-
-    # BrumbyConfig remote config may not define pad_token_id.
-    # Ensure the attribute exists to avoid AttributeError in transformers 5.x.
-    if model_type == "brumby":
-        rope_scaling = getattr(config, "rope_scaling", None)
-
-        config.pad_token_id = getattr(config, "pad_token_id", None)
-
-    # transformers 5.x normalizes RoPE config to `rope_type`, but older
-    # MiniCPM remote code still reads `rope_scaling["type"]` or expects `None`.
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if not isinstance(rope_scaling, dict):
-        return
-    if not rope_scaling:
-        # Some remote config classes materialize an empty dict here, while
-        # legacy model code treats any dict as "scaled RoPE enabled" and then
-        # directly indexes mandatory fields like `factor`.
-        config.rope_scaling = None
-        return
-
-    if model_type != "instella" and rope_scaling.get("rope_type") == "default" and set(rope_scaling).issubset({"rope_type", "rope_theta"}):
-        # transformers 5.x materializes default RoPE metadata into
-        # `rope_scaling`, but older remote MiniCPM code treats any dict here
-        # as a scaled-RoPE config and expects an explicit `factor`.
-        config.rope_scaling = None
-        return
-
-    if "factor" not in rope_scaling:
-        rope_scaling = dict(rope_scaling)
-        rope_scaling["factor"] = 1.0
-
-    if "type" in rope_scaling:
-        config.rope_scaling = rope_scaling
-        return
-
-    rope_type = rope_scaling.get("rope_type")
-    if rope_type is None:
-        if "factor" not in rope_scaling:
-            config.rope_scaling = None
-            return
-        # Some remote-code repos (e.g. MiniCPM variants) now surface
-        # `rope_scaling={"factor": ...}` after transformers normalization.
-        # Legacy model code expects `rope_scaling["type"]` to exist whenever
-        # `rope_scaling` is a dict.
-        rope_scaling = dict(rope_scaling)
-        rope_scaling["type"] = "linear"
-        config.rope_scaling = rope_scaling
-        return
-
-    rope_scaling = dict(rope_scaling)
-    if model_type == "instella":
-        if rope_type == "default":
-            rope_type = "linear"
-        rope_scaling["factor"] = 1.0
-    rope_scaling["type"] = rope_type
-    config.rope_scaling = rope_scaling
-
-
-def deci_init_compat(config):
-    if config.model_type == "deci":
-        from transformers.models.auto import modeling_auto
-        with _MONKEY_PATCH_LOCK:
-            orig_register = modeling_auto.AutoModelForCausalLM.register
-
-            def patched_register(cls, config_class, model_class, exist_ok=False):
-                # DeciLMForCausalLM inherits from LlamaForCausalLM, but does not override
-                # `config_class` (thus still pointing to LlamaConfig). However, the model's
-                # config.json declares its AutoConfig as DeciLMConfig. This leads to a mismatch
-                # during AutoModel registration (model_class.config_class != config_class),
-                # causing a ValueError. We patch this inconsistency at runtime.
-                if hasattr(model_class, "config_class"):
-                    model_class.config_class = config_class
-                return orig_register(config_class, model_class, exist_ok=exist_ok)
-
-            modeling_auto.AutoModelForCausalLM.register = classmethod(patched_register)
-
-
-def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) -> None:
-    # Some transformers 5.x model classes now read `config.rope_parameters`
-    # directly during `from_config()`, but older local configs may only carry
-    # legacy RoPE fields or nothing but a default `rope_theta`.
-    clear_unscaled_legacy_rope = trust_remote_code and _declares_legacy_rope_field(config)
-    _normalize_rope_parameters_config_compat(
-        config, clear_unscaled_legacy_rope=clear_unscaled_legacy_rope
-    )
-
-    # `auto_map` is checkpoint data, not an opt-in. A config can carry a native
-    # `model_type` (so it loads as a built-in class) and still list remote
-    # classes; applying remote-code shims from that data would execute the
-    # snapshot without the caller's consent.
-    if not trust_remote_code:
-        return
-
-    _patch_transformers_remote_code_compat()
-    _normalize_remote_code_config_compat(config)
-    # Some config classes synchronize `rope_scaling` and `rope_parameters`, so
-    # remote-code normalization that clears legacy default `rope_scaling` can
-    # also reset `rope_parameters` back to None. Re-apply the RoPE backfill
-    # after remote-code field cleanup so from_config() sees stable metadata.
-    _normalize_rope_parameters_config_compat(
-        config, clear_unscaled_legacy_rope=clear_unscaled_legacy_rope
-    )
-    # Re-apply remote-code field aliases after RoPE parameter backfill, since
-    # some config classes synchronize `rope_scaling` from `rope_parameters` and
-    # can drop legacy keys like `rope_scaling["type"]`.
-    _normalize_remote_code_config_compat(config)
-    # Some config classes can still nullify rope_parameters during the second
-    # remote-code field normalization pass. Re-apply the same policy: a modern
-    # config keeps a valid `rope_parameters` dict, while a legacy unscaled
-    # remote config stays on its `None` contract.
-    _normalize_rope_parameters_config_compat(
-        config, clear_unscaled_legacy_rope=clear_unscaled_legacy_rope
-    )
-
-
-def prepare_remote_code_compat(config: Any) -> None:
-    # Remote-code loads need both the transformers API shims and any config
-    # field migrations applied before instantiation happens.
-    normalize_hf_config_compat(config, trust_remote_code=True)
-
-
-_REMOTE_CODE_MODULE_PREFIX = "transformers_modules."
-
-
-def _cache_sequence_length(cache: Any) -> int:
-    get_seq_length = getattr(cache, "get_seq_length", None)
-    if not callable(get_seq_length):
-        return 0
-    try:
-        return int(get_seq_length())
-    except Exception:
-        return 0
-
-
-def apply_legacy_remote_code_fixups(model: Any) -> tuple[int, bool]:
-    """Run the post-load repairs legacy remote-code families need.
-
-    transformers 5 materializes checkpoint-absent non-persistent buffers with
-    ``torch.empty_like`` and re-derives a native rotary module's ``inv_freq``
-    only in the default ``_init_weights``; a remote-code class that overrides
-    ``_init_weights`` (EXAONE-3.0, DeciLM, ...) keeps uninitialized memory
-    (#4093 item 10). transformers 5 also changed the ``generate()`` cache
-    contract those classes implement (#5154).
-
-    Both repairs are no-ops when a model does not need them. They live in one
-    helper because the native loader and the Transformers bridge have to apply
-    the same set: the bridge skipped them and produced garbage RoPE
-    frequencies on a checkpoint that ``GPTQModel.load`` read correctly (#5311).
-
-    Returns ``(restored_rotary_buffers, installed_generation_adapter)``.
-    """
-
-    # Imported lazily: ``structure`` imports model helpers that pull this module.
-    from .structure import restore_init_owned_rotary_buffers
-
-    restored = restore_init_owned_rotary_buffers(model)
-    installed = install_legacy_generation_compat(model)
-    return restored, installed
-
-
-def install_legacy_generation_compat(model: Any) -> bool:
-    """Restore the transformers-4 KV-cache contract for remote-code decoders.
-
-    transformers 5 hands `generate()`'s cache to `prepare_inputs_for_generation`
-    on the very first step, while transformers 4 passed `None` until the first
-    forward had written it. Legacy remote implementations guard on
-    `past_key_values is not None` and then index the cache as a tuple of
-    `(key, value)` pairs (DeciLM, Baichuan2) or read `seen_tokens`
-    (MiniCPM-2B-dpo). They also expect `cache_position` to be a tensor
-    (EXAONE-3). Nanbeige4.2 calls `get_max_length()` before the cache holds any
-    layer, which raises `max() iterable argument is empty`; passing `None`
-    while the cache is empty keeps that call out of the prefill path.
-
-    This installs one adapter on the remote model class; the cache-side
-    contract itself lives on `transformers.Cache`/`DynamicCache` in
-    `_patch_transformers_remote_code_compat`. Returns True when a wrapper was
-    installed.
-    """
-
-    model_cls = type(model)
-    if not model_cls.__module__.startswith(_REMOTE_CODE_MODULE_PREFIX):
-        return False
-    if getattr(model_cls, "_gptqmodel_legacy_generation_compat", False):
-        return False
-
-    original = getattr(model_cls, "prepare_inputs_for_generation", None)
-    if not callable(original):
-        return False
-    if not getattr(original, "__module__", "").startswith(_REMOTE_CODE_MODULE_PREFIX):
-        # The class inherits transformers' own implementation, which already
-        # speaks the transformers-5 cache contract.
-        return False
-
-    try:
-        parameters = inspect.signature(original).parameters
-    except (TypeError, ValueError):
-        return False
-
-    # Legacy remote implementations put `past_key_values` right after
-    # `input_ids`; anything else is not the contract this adapter restores.
-    positional = [
-        parameter
-        for parameter in parameters.values()
-        if parameter.kind
-        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]
-    if len(positional) < 3 or positional[2].name != "past_key_values":
-        return False
-
-    accepts_cache_position = "cache_position" in parameters or any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    accepts_attention_mask = any(
-        parameter.name == "attention_mask"
-        and parameter.kind
-        in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        )
-        for parameter in parameters.values()
-    )
-    # transformers 4 never synthesized `position_ids` inside `generate()`; a
-    # remote implementation that does not declare the argument builds its own
-    # from `attention_mask` or the cache length. transformers 5 injects ids
-    # sized to the text sequence, which such code rejects (Hymba expects the id
-    # span to include its memory tokens on prefill).
-    accepts_position_ids = "position_ids" in parameters
-
-    @wraps(original)
-    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, *args, **kwargs):
-        if past_key_values is not None and _cache_sequence_length(past_key_values) == 0:
-            # No state has been written yet: hand the remote code the
-            # transformers-4 "no past" value instead of an empty Cache.
-            past_key_values = None
-
-        # transformers 5 tells the callee how many tokens this step adds and
-        # passes the full sequence as `input_ids`; the transformers-4 contract
-        # that the remote code implements slices `input_ids` itself and expects
-        # `cache_position` to cover only the new tokens.
-        modern_sequence_length = "next_sequence_length" in parameters
-        num_new_tokens = None if modern_sequence_length else kwargs.pop(
-            "next_sequence_length", None
-        )
-
-        if not modern_sequence_length and accepts_attention_mask and kwargs.get("attention_mask") is None:
-            # transformers 5 drops an all-ones mask before calling the callee
-            # (no padding); transformers 4 always supplied it, and legacy
-            # remote implementations read it unconditionally (Hymba
-            # concatenates its memory-token mask onto `attention_mask.device`).
-            # An all-ones mask is exactly the transformers-4 value for an
-            # unpadded prompt, and it spans the sequence this step processes.
-            kwargs["attention_mask"] = torch.ones(
-                (int(input_ids.shape[0]), int(input_ids.shape[-1])),
-                dtype=torch.long,
-                device=input_ids.device,
-            )
-
-        if not modern_sequence_length and not accepts_position_ids:
-            # transformers 4 never synthesized ids; a legacy implementation
-            # that does not declare the argument builds its own from the mask
-            # or the cache length. transformers 5 injects ids sized to the text
-            # sequence, which that code rejects on prefill (Hymba's id span
-            # must include its memory tokens).
-            kwargs.pop("position_ids", None)
-
-        if (
-            accepts_cache_position
-            and not modern_sequence_length
-            and kwargs.get("cache_position") is None
-        ):
-            past_length = (
-                0 if past_key_values is None else _cache_sequence_length(past_key_values)
-            )
-            if not isinstance(num_new_tokens, int) or num_new_tokens <= 0:
-                num_new_tokens = int(input_ids.shape[-1]) - past_length
-                if num_new_tokens <= 0:
-                    num_new_tokens = 1
-            kwargs["cache_position"] = torch.arange(
-                past_length,
-                past_length + num_new_tokens,
-                device=input_ids.device,
-            )
-
-        return original(self, input_ids, past_key_values, *args, **kwargs)
-
-    prepare_inputs_for_generation._gptqmodel_legacy_generation_compat = True
-    model_cls.prepare_inputs_for_generation = prepare_inputs_for_generation
-    model_cls._gptqmodel_legacy_generation_compat = True
-    return True
-
-
-def register_runtime_automodel_config(config, remote_module, config_attr: str, remote_model_name: str) -> None:
-    # Obtain the correct config class path to register the config and model.
-    # Fix ValueError: Unrecognized configuration class
-    # <class 'transformers_modules.Ovis1_dot_6_hyphen_Llama3_dot_2_hyphen_3B.e514127b17008465.configuration_ovis.
-    # SiglipVisualTokenizerConfig'> for this kind of AutoModel: AutoModel.
-    runtime_config = getattr(config, config_attr, None)
-    runtime_model_cls = getattr(remote_module, remote_model_name, None) if remote_module is not None else None
-    if runtime_config is None or runtime_model_cls is None:
-        return
-
-    runtime_config_cls = type(runtime_config)
-
-    try:
-        if getattr(runtime_model_cls, "config_class", None) is not runtime_config_cls:
-            runtime_model_cls.config_class = runtime_config_cls
-        AutoModel.register(runtime_config_cls, runtime_model_cls, exist_ok=True)
-    except Exception as exc:
-        log.debug(
-            "HF: failed to bridge AutoModel registration for `%s` using `%s.%s`: %s",
-            config_attr,
-            getattr(remote_module, "__name__", "unknown"),
-            remote_model_name,
-            exc,
-        )
-
-
-class _TimmVersionCompatProxy:
-    """Report a timm 0.9.x version while forwarding to the installed timm module.
-
-    Prismatic-based remote code (OpenVLA) hard-fails on `timm >= 1.0` even
-    though the `timm.create_model` / `get_intermediate_layers` APIs it relies
-    on still exist. The proxy only replaces the remote module's own `timm`
-    reference, so global timm metadata stays untouched.
-    """
-
-    __version__ = "0.9.16"
-
-    def __init__(self, module: Any) -> None:
-        object.__setattr__(self, "_module", module)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(object.__getattribute__(self, "_module"), name)
-
-
-def _patch_prismatic_remote_code(remote_module: Any) -> None:
-    """Patch Prismatic/OpenVLA remote code for the installed timm version."""
-    timm = getattr(remote_module, "timm", None)
-    prismatic_cls = getattr(remote_module, "PrismaticForConditionalGeneration", None)
-
-    if (
-        timm is not None
-        and prismatic_cls is not None
-        and not isinstance(timm, _TimmVersionCompatProxy)
-        and not getattr(prismatic_cls, "_gptqmodel_timm_version_compat", False)
-    ):
-        remote_module.timm = _TimmVersionCompatProxy(timm)
-        prismatic_cls._gptqmodel_timm_version_compat = True
-
-    vision_backbone_cls = getattr(remote_module, "PrismaticVisionBackbone", None)
-    if vision_backbone_cls is not None and not getattr(
-        vision_backbone_cls, "_gptqmodel_timm_intermediate_layers_compat", False
-    ):
-        original_init = vision_backbone_cls.__init__
-
-        def vision_backbone_init_compat(self, *args, _original_init=original_init, **kwargs):
-            _original_init(self, *args, **kwargs)
-            for name in ("featurizer", "fused_featurizer"):
-                featurizer = getattr(self, name, None)
-                if featurizer is None:
-                    continue
-                original_forward = featurizer.forward
-
-                def forward(*fargs, _original_forward=original_forward, **fkwargs):
-                    # timm >= 1.0 returns a list even for a single requested layer,
-                    # while the remote `unpack_tuple()` helper only unwraps tuples.
-                    result = _original_forward(*fargs, **fkwargs)
-                    if isinstance(result, list) and len(result) == 1:
-                        return result[0]
-                    return result
-
-                featurizer.forward = forward
-
-        vision_backbone_cls.__init__ = vision_backbone_init_compat
-        vision_backbone_cls._gptqmodel_timm_intermediate_layers_compat = True
-
-
-def _bridge_legacy_vision2seq_remote_code(model_cls: Any, config: Any) -> Optional[type]:
-    """Bridge legacy `AutoModelForVision2Seq` remote classes onto transformers 5.x.
-
-    OpenVLA/Prismatic checkpoints declare their model under the
-    `AutoModelForVision2Seq` auto-map key, which transformers removed in 5.x.
-    Register the remote class with `AutoModelForImageTextToText` and restore the
-    generation API plus constructor assumptions that the legacy code expects.
-    """
-    if not isinstance(model_cls, type):
-        return None
-
-    with _MONKEY_PATCH_LOCK:
-        if not getattr(model_cls, "_gptqmodel_sdpa_flag_patch", False):
-            # The legacy `_supports_sdpa` property dereferences
-            # `self.language_model`, but transformers 5.x reads the flag inside
-            # `PreTrainedModel.__init__` before that attribute exists.
-            model_cls._supports_sdpa = property(
-                lambda self: getattr(getattr(self, "language_model", None), "_supports_sdpa", True)
-            )
-            model_cls._gptqmodel_sdpa_flag_patch = True
-
-        remote_module = sys.modules.get(model_cls.__module__)
-        if remote_module is not None:
-            _patch_prismatic_remote_code(remote_module)
-
-        bridged_cls = getattr(model_cls, "_gptqmodel_bridged_vision2seq_cls", None)
-        if bridged_cls is None:
-            from transformers.generation.utils import GenerationMixin
-
-            if not issubclass(model_cls, GenerationMixin):
-                # transformers 5.x dropped the implicit `GenerationMixin` base from
-                # `PreTrainedModel`, but `OpenVLAForActionPrediction.predict_action()`
-                # still calls `.generate()`.
-                bridged_cls = type(
-                    model_cls.__name__,
-                    (model_cls, GenerationMixin),
-                    {"__module__": model_cls.__module__, "__qualname__": model_cls.__qualname__},
-                )
-            else:
-                bridged_cls = model_cls
-            model_cls._gptqmodel_bridged_vision2seq_cls = bridged_cls
-        model_cls = bridged_cls
-
-        from transformers import AutoModelForImageTextToText
-
-        try:
-            AutoModelForImageTextToText.register(type(config), model_cls, exist_ok=True)
-        except Exception as exc:
-            log.debug(
-                "HF: failed to register legacy vision2seq remote class `%s`: %s",
-                getattr(model_cls, "__name__", "unknown"),
-                exc,
-            )
-
-        return model_cls
-
-
-def prepare_remote_model_init_compat(
-    model_id_or_path: Optional[str],
-    config: Any,
-    *,
-    trust_remote_code: bool = False,
-) -> None:
-    # Importing `auto_map` classes is remote-code execution. It is gated by the
-    # caller's explicit `trust_remote_code`; `auto_map` alone is checkpoint data
-    # and must never enable it. This also covers transformers' cross-repo
-    # `repo--module.Class` form, which resolves to another repository's code.
-    if not trust_remote_code or not model_id_or_path:
-        return
-
-    deci_init_compat(config)
-    _sync_local_remote_code_cache(model_id_or_path)
-
-    auto_map = getattr(config, "auto_map", None) or {}
-    class_ref = auto_map.get("AutoModelForCausalLM")
-    if not isinstance(class_ref, str) and getattr(config, "model_type", None) == "locateanything":
-        class_ref = auto_map.get("AutoModel")
-    legacy_vision2seq = False
-    if not isinstance(class_ref, str):
-        # OpenVLA/Prismatic checkpoints predate the transformers 5.x rename of
-        # `AutoModelForVision2Seq` to `AutoModelForImageTextToText`.
-        class_ref = auto_map.get("AutoModelForVision2Seq")
-        legacy_vision2seq = isinstance(class_ref, str)
-    if not isinstance(class_ref, str):
-        return
-
-    try:
-        from transformers.dynamic_module_utils import get_class_from_dynamic_module
-
-        model_cls = get_class_from_dynamic_module(class_ref, str(model_id_or_path))
-    except Exception as exc:
-        log.debug("HF: remote model init compat pre-import failed for `%s`: %s", model_id_or_path, exc)
-        return
-
-    if legacy_vision2seq:
-        model_cls = _bridge_legacy_vision2seq_remote_code(model_cls, config)
-        if model_cls is None:
-            return
-
-    module_root = model_cls.__module__.rsplit(".", maxsplit=1)[0]
-    speech_module = sys.modules.get(f"{module_root}.speech_conformer_encoder")
-    remote_module = sys.modules.get(model_cls.__module__)
-    ovis_config_module = sys.modules.get(f"{module_root}.configuration_ovis")
-    intern_vit_module = sys.modules.get(f"{module_root}.modeling_intern_vit")
-    outer_model_cls = model_cls if isinstance(model_cls, type) else None
-    input_mode_enum = getattr(remote_module, "InputMode", None) if remote_module is not None else None
-
-    with _MONKEY_PATCH_LOCK:
-        if outer_model_cls is not None:
-            try_patch_legacy_flash_attn_flag(outer_model_cls)
-
-        if getattr(config, "model_type", None) == "locateanything":
-            # LocateAnything bundles a second remote Qwen model class. Patch
-            # both the outer wrapper and nested decoder bases before either is
-            # instantiated by AutoModel.from_config/from_pretrained.
-            try_patch_legacy_attn_adjust_kwargs(outer_model_cls)
-            for module_name, module in list(sys.modules.items()):
-                if not (
-                    module_name == module_root
-                    or module_name.startswith(f"{module_root}.")
-                ):
-                    continue
-                for candidate in vars(module).values():
-                    if (
-                        isinstance(candidate, type)
-                        and candidate.__module__.startswith(module_root)
-                    ):
-                        try_patch_legacy_flash_attn_flag(candidate)
-                        try_patch_legacy_attn_adjust_kwargs(candidate)
-
-        if getattr(config, "model_type", None) == "internvl_chat" and intern_vit_module is not None:
-            encoder_cls = getattr(intern_vit_module, "InternVisionEncoder", None)
-            layer_cls = getattr(intern_vit_module, "InternVisionEncoderLayer", None)
-            module_nn = getattr(intern_vit_module, "nn", None)
-            if (
-                encoder_cls is not None
-                and layer_cls is not None
-                and module_nn is not None
-                and not getattr(encoder_cls, "_gptqmodel_meta_dpr_patch", False)
-            ):
-                def encoder_init_compat(self, encoder_config):
-                    module_nn.Module.__init__(self)
-                    self.config = encoder_config
-
-                    num_hidden_layers = int(getattr(encoder_config, "num_hidden_layers", 0) or 0)
-                    drop_path_rate = float(getattr(encoder_config, "drop_path_rate", 0.0) or 0.0)
-                    dpr = (
-                        torch.linspace(
-                            0,
-                            drop_path_rate,
-                            num_hidden_layers,
-                            device="cpu",
-                            dtype=torch.float32,
-                        ).tolist()
-                        if num_hidden_layers > 0
-                        else []
-                    )
-
-                    self.layers = module_nn.ModuleList(
-                        [layer_cls(encoder_config, dpr[idx]) for idx in range(num_hidden_layers)]
-                    )
-                    self.gradient_checkpointing = True
-
-                encoder_cls.__init__ = encoder_init_compat
-                encoder_cls._gptqmodel_meta_dpr_patch = True
-
-        if config.model_type in {"minicpmv", "minicpmv4_6", "minicpmo"}:
-            vision_model_cls = getattr(
-                remote_module,
-                "SiglipVisionTransformer",
-                None,
-            )
-            if vision_model_cls:
-                try_patch_legacy_flash_attn_flag(vision_model_cls)
-
-        if config.model_type == "ovis":
-            from transformers import LlamaForCausalLM
-            try_patch_legacy_flash_attn_flag(LlamaForCausalLM)
-
-            vision_model_cls = getattr(
-                remote_module,
-                "SiglipVisualTokenizer",
-                None,
-            )
-            if vision_model_cls:
-                try_patch_legacy_flash_attn_flag(vision_model_cls)
-
-        if config.model_type == "ovis2_6_moe":
-            vision_model_cls = getattr(
-                remote_module,
-                "Siglip2NavitModel",
-                None,
-            )
-            if vision_model_cls:
-                try_patch_legacy_flash_attn_flag(vision_model_cls)
-
-        if (
-            outer_model_cls is not None
-            and hasattr(outer_model_cls, "tie_weights")
-            and not getattr(outer_model_cls, "_gptqmodel_tie_weights_kwargs_patch", False)
-        ):
-            try:
-                tie_weights_sig = inspect.signature(outer_model_cls.tie_weights)
-            except (TypeError, ValueError):
-                tie_weights_sig = None
-
-            if tie_weights_sig is not None:
-                tie_weight_params = tie_weights_sig.parameters.values()
-                accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in tie_weight_params)
-                supports_missing_keys = "missing_keys" in tie_weights_sig.parameters
-                supports_recompute_mapping = "recompute_mapping" in tie_weights_sig.parameters
-
-                if not accepts_kwargs and (not supports_missing_keys or not supports_recompute_mapping):
-                    original_tie_weights = outer_model_cls.tie_weights
-
-                    # transformers 5.x passes `missing_keys=` and `recompute_mapping=`
-                    # into tie_weights(); older remote-code models still declare
-                    # `tie_weights(self)` and only need the original no-arg behavior.
-                    def tie_weights_compat(self, *args, **kwargs):
-                        return original_tie_weights(self)
-
-                    outer_model_cls.tie_weights = tie_weights_compat
-                    outer_model_cls._gptqmodel_tie_weights_kwargs_patch = True
-
-        if getattr(config, "model_type", None) == "ovis" and ovis_config_module is not None:
-            register_runtime_automodel_config(config, remote_module, "visual_tokenizer_config", "SiglipVisualTokenizer")
-
-            formatter_cls = getattr(ovis_config_module, "Llama3ConversationFormatter", None)
-            if formatter_cls is not None and not getattr(formatter_cls, "_gptqmodel_tokenizer_backend_patch", False):
-                support_tokenizer_types = list(getattr(formatter_cls, "support_tokenizer_types", None) or [])
-                if "TokenizersBackend" not in support_tokenizer_types:
-                    # Current transformers/tokenicer fast-tokenizer backend exposes
-                    # `TokenizersBackend` instead of the older
-                    # `PreTrainedTokenizerFast` class name expected by Ovis remote code.
-                    support_tokenizer_types.append("TokenizersBackend")
-                    formatter_cls.support_tokenizer_types = support_tokenizer_types
-                formatter_cls._gptqmodel_tokenizer_backend_patch = True
-
-        if getattr(config, "model_type", None) in {"ovis2_5", "ovis2_6", "ovis2_6_moe", "ovis2_6_next"}:
-            register_runtime_automodel_config(config, remote_module, "vit_config", "Siglip2NavitModel")
-
-        if getattr(config, "model_type", None) == "ovis2_6_next":
-            # Compatible with ExpertsRoutingOverride,
-            # as Ovis2_6_Next_Config lacks the `num_experts` and `num_experts_per_tok` attributes.
-            config.num_experts = config.llm_config.num_experts
-            config.num_experts_per_tok = config.llm_config.num_experts_per_tok
-
-        if getattr(config, "model_type", None) == "hymba" and remote_module is not None:
-            rotary_cls = getattr(remote_module, "LlamaRotaryEmbedding", None)
-            attention_cls = getattr(remote_module, "HymbaAttention", None)
-            if (
-                rotary_cls is not None
-                and attention_cls is not None
-                and not getattr(attention_cls, "_gptqmodel_init_rope_meta_patch", False)
-            ):
-                def hymba_init_rope_compat(self):
-                    # Hymba remote code hard-codes CUDA here, which forces a
-                    # meta->real-device materialization during __init__ under
-                    # transformers 5.x. Keep the device is None until HF
-                    # finishes model loading and device placement.
-                    device = None
-
-                    self.rotary_emb = rotary_cls(
-                        config=self.config,
-                        dim=self.kq_head_dim,
-                        base=self.rope_theta,
-                        device=device,
-                    )
-
-                attention_cls._init_rope = hymba_init_rope_compat
-                attention_cls._gptqmodel_init_rope_meta_patch = True
-
-        if getattr(config, "model_type", None) != "phi4mm":
-            return
-
-        if speech_module is not None and not getattr(speech_module, "_gptqmodel_scalar_tensor_meta_patch", False):
-            speech_torch = getattr(speech_module, "torch", None)
-            original_tensor = getattr(speech_torch, "tensor", None)
-            if speech_torch is not None and original_tensor is not None:
-                def _is_phi4mm_subsampling_scalar_init() -> bool:
-                    for frame_info in inspect.stack(context=0):
-                        if frame_info.filename.endswith("speech_conformer_encoder.py") and frame_info.lineno == 1426:
-                            return True
-                    return False
-
-                # Phi-4 MM remote audio init creates scalar tensors only to derive Python
-                # output sizes in NemoConvSubsampling; forcing just that scalar tensor onto
-                # CPU keeps meta init safe without perturbing other meta-only buffers.
-                def tensor_compat(data, *args, **kwargs):
-                    current_device = getattr(torch.utils._device, "CURRENT_DEVICE", None)
-                    if (
-                        kwargs.get("device") is None
-                        and current_device == torch.device("meta")
-                        and isinstance(data, (int, float, bool))
-                        and _is_phi4mm_subsampling_scalar_init()
-                    ):
-                        kwargs = dict(kwargs)
-                        kwargs["device"] = "cpu"
-                    return original_tensor(data, *args, **kwargs)
-
-                speech_torch.tensor = tensor_compat
-
-            positional_encoding_cls = getattr(speech_module, "AbsolutePositionalEncoding", None)
-            if positional_encoding_cls is not None and not getattr(positional_encoding_cls, "_gptqmodel_meta_extend_patch", False):
-                original_extend_pe = positional_encoding_cls.extend_pe
-
-                def _is_phi4mm_positional_seed_call() -> bool:
-                    for frame_info in inspect.stack(context=0):
-                        if frame_info.filename.endswith("speech_conformer_encoder.py") and frame_info.lineno == 895:
-                            return True
-                    return False
-
-                # The remote implementation seeds extend_pe() with a CPU scalar tensor.
-                # Under meta init, promote that seed tensor back to meta before the
-                # original method allocates its positional buffer.
-                def extend_pe_compat(self, x):
-                    if isinstance(x, torch.Tensor) and x.device.type != "meta" and _is_phi4mm_positional_seed_call():
-                        x = x.to(device="meta")
-                    return original_extend_pe(self, x)
-
-                positional_encoding_cls.extend_pe = extend_pe_compat
-                positional_encoding_cls._gptqmodel_meta_extend_patch = True
-
-            speech_module._gptqmodel_scalar_tensor_meta_patch = True
-
-        if (
-            outer_model_cls is not None
-            and hasattr(outer_model_cls, "forward")
-            and not getattr(outer_model_cls, "_gptqmodel_input_mode_patch", False)
-        ):
-            original_forward = outer_model_cls.forward
-
-            # Text-only callers like lm_eval do not pass `input_mode`; infer the
-            # correct Phi-4 MM mode from the provided modality tensors instead.
-            def forward_compat(self, *args, **kwargs):
-                if kwargs.get("input_mode") is None:
-                    kwargs = dict(kwargs)
-                    has_vision = any(
-                        kwargs.get(name) is not None
-                        for name in ("input_image_embeds", "image_sizes", "image_attention_mask")
-                    )
-                    has_audio = any(
-                        kwargs.get(name) is not None
-                        for name in ("input_audio_embeds", "audio_embed_sizes", "audio_attention_mask")
-                    )
-
-                    if has_vision and has_audio:
-                        kwargs["input_mode"] = input_mode_enum.VISION_SPEECH if input_mode_enum is not None else 3
-                    elif has_vision:
-                        kwargs["input_mode"] = input_mode_enum.VISION if input_mode_enum is not None else 1
-                    elif has_audio:
-                        kwargs["input_mode"] = input_mode_enum.SPEECH if input_mode_enum is not None else 2
-                    else:
-                        kwargs["input_mode"] = input_mode_enum.LANGUAGE if input_mode_enum is not None else 0
-                return original_forward(self, *args, **kwargs)
-
-            outer_model_cls.forward = forward_compat
-            outer_model_cls._gptqmodel_input_mode_patch = True
-
-        inner_model_cls = getattr(remote_module, "Phi4MMModel", None) if remote_module is not None else None
-        if inner_model_cls is not None and not hasattr(inner_model_cls, "prepare_inputs_for_generation"):
-            # PEFT expects the inner model it wraps to expose this hook, even
-            # though Phi-4 MM only defines the full implementation on the outer
-            # CausalLM class.
-            def prepare_inputs_for_generation(self, input_ids=None, past_key_values=None, inputs_embeds=None, **kwargs):
-                model_inputs = dict(kwargs)
-                if inputs_embeds is not None and past_key_values is None:
-                    model_inputs["inputs_embeds"] = inputs_embeds
-                else:
-                    model_inputs["input_ids"] = input_ids
-                model_inputs["past_key_values"] = past_key_values
-                return model_inputs
-
-            inner_model_cls.prepare_inputs_for_generation = prepare_inputs_for_generation
-
-        try:
-            import importlib.util
-
-            import peft.import_utils as peft_import_utils
-            import peft.tuners.lora.awq as peft_awq
-        except Exception:
-            log.debug("PEFT AWQ probe patch skipped: peft AWQ internals unavailable", exc_info=True)
-        else:
-            if not getattr(peft_awq, "_gptqmodel_awq_probe_patch", False):
-                # PEFT later imports `awq.modules.linear`, so the availability
-                # probe must require that concrete submodule instead of top-level
-                # namespace packages that are missing the actual runtime.
-                @lru_cache(maxsize=None)
-                def is_auto_awq_available() -> bool:
-                    try:
-                        return importlib.util.find_spec("awq.modules.linear") is not None
-                    except ModuleNotFoundError:
-                        return False
-
-                peft_import_utils.is_auto_awq_available = is_auto_awq_available
-                peft_awq.is_auto_awq_available = is_auto_awq_available
-                peft_awq._gptqmodel_awq_probe_patch = True
-
-
-def try_patch_legacy_flash_attn_flag(model_cls):
-    with _MONKEY_PATCH_LOCK:
-        if model_cls is None or not isinstance(model_cls, type):
-            return
-
-        # The remote modeling code for some models(For example, ovis.) still relies on `_supports_flash_attn_2`
-        if hasattr(model_cls, "_supports_flash_attn") and not hasattr(model_cls, "_supports_flash_attn_2"):
-            setattr(model_cls, "_supports_flash_attn_2", bool(model_cls._supports_flash_attn))
-            return
-
-        # Find the most specific class that explicitly declares the newer
-        # `_supports_flash_attn_2` flag used by newer transformers releases.
-        base_with_flag = None
-        for cls in model_cls.__mro__:
-            if "_supports_flash_attn_2" in cls.__dict__:
-                base_with_flag = cls
-                break
-
-        if base_with_flag is None:
-            return
-
-        # Respect remote models that already define the legacy flag themselves.
-        for cls in model_cls.__mro__:
-            if cls is base_with_flag:
-                break
-            if "_supports_flash_attn" in cls.__dict__:
-                return
-
-        flash_attn_2_val = base_with_flag.__dict__["_supports_flash_attn_2"]
-        setattr(base_with_flag, "_supports_flash_attn", bool(flash_attn_2_val))
-
-def try_patch_legacy_attn_adjust_kwargs(model_cls):
-    with _MONKEY_PATCH_LOCK:
-        if model_cls is None or not isinstance(model_cls, type):
-            return
-        if model_cls.__dict__.get("_gptqmodel_attn_adjust_kwargs_patch", False):
-            return
-
-        attn_adjust = getattr(model_cls, "_check_and_adjust_attn_implementation", None)
-        if not callable(attn_adjust):
-            return
-
-        try:
-            attn_adjust_sig = inspect.signature(attn_adjust)
-        except (TypeError, ValueError):
-            return
-
-        params = attn_adjust_sig.parameters.values()
-        accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params)
-        if accepts_kwargs or "allow_all_kernels" in attn_adjust_sig.parameters:
-            return
-
-        original_attn_adjust = attn_adjust
-
-        def attn_adjust_compat(self, *args, **kwargs):
-            kwargs.pop("allow_all_kernels", None)
-            from transformers import utils as transformers_utils
-
-            config = getattr(self, "config", None)
-            is_locateanything = getattr(config, "model_type", None) == "locateanything"
-            flash_available = transformers_utils.is_flash_attn_2_available()
-            if is_locateanything:
-                if args and args[0] not in ("magi", "sdpa"):
-                    args = ("sdpa", *args[1:])
-                elif kwargs.get("attn_implementation") not in (None, "magi", "sdpa"):
-                    kwargs["attn_implementation"] = "sdpa"
-            elif not flash_available:
-                if args and args[0] == "flash_attention_2":
-                    args = ("sdpa", *args[1:])
-                elif kwargs.get("attn_implementation") == "flash_attention_2":
-                    kwargs["attn_implementation"] = "sdpa"
-
-            if is_locateanything:
-                # Transformers recursively propagates the top-level Flash
-                # override to composite sub-configs. MoonViT does not support
-                # it, and LocateAnything's bundled Qwen forward only implements
-                # its mask path for `magi` and `sdpa` despite registering Flash
-                # attention layers. Keep the complete checkpoint on SDPA.
-                for sub_config_name in ("vision_config", "text_config"):
-                    sub_config = getattr(config, sub_config_name, None)
-                    if sub_config is not None:
-                        sub_config._attn_implementation = "sdpa"
-
-            adjusted = original_attn_adjust(self, *args, **kwargs)
-
-            return adjusted
-
-        model_cls._check_and_adjust_attn_implementation = attn_adjust_compat
-        model_cls._gptqmodel_attn_adjust_kwargs_patch = True
-
 
 def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
     from tokenicer import Tokenicer
@@ -3235,30 +761,166 @@ def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
     return Tokenicer.load(tokenizer_or_path, model_config=model_config, **kwargs)
 
 
+_REMOTE_ONLY_TOKENIZER_WARNED: set[tuple[str, str]] = set()
+
+
+def _remote_only_tokenizer_message(model_type: str) -> str:
+    return (
+        f"`{model_type}` checkpoints ship a customized tokenizer that exists only as checkpoint Python "
+        "(tokenizer_config.json auto_map). Loading it is unsafe and requires both trust_remote_code=True "
+        "and GPTQ_BYPASS_SAFETY_CHECKS=1. The model itself always uses GPT-QModel's package-owned implementation."
+    )
+
+
+def _warn_remote_only_tokenizer(model_type: str, tokenizer_path) -> None:
+    key = (model_type, os.fspath(tokenizer_path))
+    if key not in _REMOTE_ONLY_TOKENIZER_WARNED:
+        _REMOTE_ONLY_TOKENIZER_WARNED.add(key)
+        log.warning(_remote_only_tokenizer_message(model_type))
+
+
+_VENDORED_TOKENIZER_PREFIX = "gptqmodel.models.ports.native."
+
+
+def _register_vendored_tokenizer(tokenizer) -> None:
+    """Tell Tokenicer a vendored 5.23 tokenizer class is Transformers' own class.
+
+    Tokenicer gates normalization (SentencePiece handling for
+    ``LlamaTokenizer``, serialized ``tokenizer.json`` preference) on the
+    Transformers class. A class in ``gptqmodel.models.ports.native`` is an exact
+    copy of ``transformers.<same name>``, so declare that equivalence explicitly
+    instead of handing Tokenicer a ``transformers.models`` class.
+    """
+
+    from tokenicer import register_transformers_equivalent
+
+    tokenizer_class = type(tokenizer)
+    if (getattr(tokenizer_class, "__module__", "") or "").startswith(_VENDORED_TOKENIZER_PREFIX):
+        register_transformers_equivalent(tokenizer_class)
+
+
+def _load_package_tokenizer(path, model_config, *, prefer_serialized_tokenizer=True, **kwargs):
+    """Construct a definition's tokenizer with a package-selected class.
+
+    Used for definitions whose loader names no tokenizer class. The class comes
+    from ``NativeTokenizer`` (Transformers 5.23 AutoTokenizer selection, but a
+    checkpoint-declared name resolves only to vendored/framework classes), so
+    ``tokenizer_class="BertTokenizer"`` cannot reach ``transformers.models``.
+    The load-time steps Tokenicer applies on its own path-loading branch
+    (prepared kwargs, native ERNIE-VL loading, ``fix_mistral_regex`` default,
+    serialized ``tokenizer.json`` preference) are applied here identically so
+    token ids do not change; Tokenicer then normalizes the instance.
+    """
+
+    from tokenicer import Tokenicer
+    from tokenicer.ernie_vl import load_ernie_vl
+
+    from ..models.ports.native.auto import NativeTokenizer
+
+    kwargs.pop("trust_remote_code", None)
+    kwargs.pop("code_revision", None)
+    load_kwargs = Tokenicer.prepare_load_kwargs(path, **kwargs)
+    config = model_config if isinstance(model_config, PreTrainedConfig) else None
+    native_ernie = load_ernie_vl(path, config=config, **load_kwargs)
+    if native_ernie is not None:
+        return native_ernie
+    text_config = Tokenicer._resolve_text_model_config(config)
+    text_model_type = getattr(text_config, "model_type", None)
+    if isinstance(text_model_type, str) and text_model_type:
+        regex_fix = text_model_type == "laguna" or text_model_type.startswith(
+            ("mistral", "ministral", "mixtral", "voxtral", "pixtral")
+        )
+    else:
+        regex_fix = True
+    load_kwargs.setdefault("fix_mistral_regex", regex_fix)
+    tokenizer = NativeTokenizer.from_pretrained(
+        path, model_type=getattr(config, "model_type", None), config=config, **load_kwargs
+    )
+    _register_vendored_tokenizer(tokenizer)
+    return Tokenicer._resolve_serialized_tokenizer(
+        path, tokenizer, load_kwargs, prefer_serialized_tokenizer=prefer_serialized_tokenizer
+    )
+
+
 def load_hf_tokenizer(
         tokenizer_or_path,
         *,
         model_config: Any = None,
         trust_remote_code: bool = False,
+        return_tokenicer: bool = False,
         **kwargs,
 ):
     from tokenicer import Tokenicer
 
-    tokenicer = Tokenicer.load(
-        tokenizer_or_path,
-        model_config=model_config,
-        trust_remote_code=trust_remote_code,
-        **kwargs,
+    from ..models.local import local_model_loader
+
+    model_type = str(getattr(model_config, "model_type", None) or "").lower()
+    loader = local_model_loader(model_type)
+    checkpoint_path = isinstance(tokenizer_or_path, (str, os.PathLike))
+    # Some package-owned models were released with a tokenizer that exists only
+    # as checkpoint Python. The model stays package-owned; the tokenizer alone
+    # may use checkpoint code under the same two-flag consent as any other.
+    remote_tokenizer = bool(
+        loader is not None and checkpoint_path and model_type in loader.remote_tokenizer_model_types
     )
-    # BaseQModel applies GPTQModel's runtime Tokenicer wrapper once the model is
-    # constructed. Keep this loader's native-tokenizer return contract while
-    # delegating tokenizer construction and compatibility normalization to
-    # Tokenicer.
-    return tokenicer.tokenizer
+    if remote_tokenizer:
+        _warn_remote_only_tokenizer(model_type, tokenizer_or_path)
+    # Native tokenizers can load even if a caller supplied the trust flag.
+    # Keep the request separate from permission so a remote-only tokenizer
+    # can report the missing consent without enabling Python to detect it.
+    requested_remote_code = bool(trust_remote_code and checkpoint_path and (loader is None or remote_tokenizer))
+    trust_remote_code = requested_remote_code and safety_checks_bypassed()
+    tokenicer_option_names = {"normalize_sentencepiece"}
+    if loader is not None:
+        for key, value in loader.tokenicer_options:
+            kwargs.setdefault(key, value)
+            tokenicer_option_names.add(key)
+    if checkpoint_path:
+        tokenizer_or_path = os.fspath(tokenizer_or_path)
+        # Class selection belongs to the package for every definition, including
+        # when two checkpoints declare the same tokenizer class name. Tokenicer
+        # receives the owned instance and remains the normalization owner.
+        tokenizer_kwargs = {
+            key: value for key, value in kwargs.items()
+            if key not in {"config", "strict", "pad_tokens", "prefer_serialized_tokenizer"}
+            and key not in tokenicer_option_names
+        }
+        if loader is not None and loader.tokenizer_class is not None:
+            tokenizer_or_path = loader.load_tokenizer(tokenizer_or_path, **tokenizer_kwargs)
+        elif loader is not None and not remote_tokenizer:
+            tokenizer_or_path = _load_package_tokenizer(
+                tokenizer_or_path,
+                model_config,
+                prefer_serialized_tokenizer=kwargs.get("prefer_serialized_tokenizer", True),
+                **tokenizer_kwargs,
+            )
+    _register_vendored_tokenizer(tokenizer_or_path)
+    if isinstance(model_config, PreTrainedConfig):
+        # Tokenicer's model_config controls normalization; AutoTokenizer uses
+        # the separate `config` argument for class selection. Reuse the config
+        # already selected by our policy so tokenizer initialization cannot
+        # import checkpoint AutoConfig code behind a definition-owned port.
+        kwargs["config"] = model_config
+    try:
+        tokenicer = Tokenicer.load(
+            tokenizer_or_path,
+            model_config=model_config,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
+    except ValueError as exc:
+        # Tokenicer and Transformers both include this option in their
+        # remote-code-required errors and expose no dedicated exception type.
+        if requested_remote_code and not trust_remote_code and "`trust_remote_code=True`" in str(exc):
+            require_remote_code_permission(requested_remote_code)
+        if remote_tokenizer and not trust_remote_code and "trust_remote_code" in str(exc):
+            raise RemoteCodeSecurityError(_remote_only_tokenizer_message(model_type)) from exc
+        raise
+    # Internal model loads retain the normalized wrapper through construction.
+    # Direct callers keep the native-tokenizer return contract by default.
+    return tokenicer if return_tokenicer else tokenicer.tokenizer
 
 
-
-_patch_transformers_remote_code_compat()
 
 def _sampling_fields_request_sampling(cfg: GenerationConfig) -> bool:
     """Whether sampling-only fields contradict an explicitly greedy config.
@@ -3391,13 +1053,6 @@ def autofix_hf_generation_config(cfg: GenerationConfig):
     _sanitize_generation_config(cfg, drop_sampling_fields=False)
 
 
-def sanitize_model_config(config):
-    if getattr(config, "model_type", None) == "chatglm" and hasattr(config, "max_length"):
-        # max_length can only be stored in generation_config.
-        # see _normalize_chatglm_remote_code_config_compat()
-        del config.attribute_map["max_length"]
-
-
 def _generation_config_payload_contradicts_greedy(data: dict) -> bool:
     """JSON-payload counterpart of ``_sampling_fields_request_sampling``."""
     if data.get("do_sample") is not False:
@@ -3521,7 +1176,7 @@ def pin_keep_in_fp32_shell_tensors(model, *, dtype: Optional[torch.dtype]) -> in
 def build_shell_model(
     loader,
     config: Any,
-    trust_remote_code: bool = True,
+    trust_remote_code: bool = False,
     **model_init_kwargs,
 ):
     """
@@ -3533,66 +1188,25 @@ def build_shell_model(
         trust_remote_code: Allow loading custom model classes.
     """
     init_kwargs = model_init_kwargs.copy()
+    from ..models.local import LocalModelLoader
+
+    if isinstance(loader, LocalModelLoader):
+        trust_remote_code = False
+    else:
+        require_remote_code_permission(trust_remote_code)
 
     del init_kwargs["device_map"]
     del init_kwargs["_fast_init"]
-    # All nn.Parameters and buffers are created
-
-    normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
     # All nn.Parameters and buffers are created on 'meta' and initializers are skipped.
     pb = log.spinner(title="Model loading...", interval=0.1)
     try:
         with init_empty_weights(include_buffers=True):
-            try:
-                # ``from_config`` opens transformers' ``local_torch_dtype``
-                # window, which holds the model-global-state writer itself
-                # (#5304). Compiled forwards never trace through it (#5209,
-                # #5268).
-                shell = loader.from_config(
-                    config,
-                    trust_remote_code=trust_remote_code,
-                    **init_kwargs
-                )
-            except FileNotFoundError as exc:
-                # Some trust_remote_code caches can become stale (missing
-                # generated files like transformers_v*__configuration_*.py).
-                # Try to recreate known compatibility shims, then refresh once.
-                missing_path = str(exc)
-                if (
-                    trust_remote_code
-                    and "transformers_modules" in missing_path
-                    and "No such file or directory" in missing_path
-                ):
-                    missing_file = None
-                    # Parse "...: '/path/to/file.py'" from OSError message.
-                    if "'" in missing_path:
-                        parts = missing_path.split("'")
-                        if len(parts) >= 2:
-                            missing_file = parts[1]
-
-                    if (
-                        missing_file
-                        and missing_file.endswith("__configuration_llama.py")
-                        and not os.path.exists(missing_file)
-                    ):
-                        os.makedirs(os.path.dirname(missing_file), exist_ok=True)
-                        with open(missing_file, "w", encoding="utf-8") as fp:
-                            fp.write("from transformers.models.llama.configuration_llama import *\n")
-
-                    auto_map = getattr(config, "auto_map", None) or {}
-                    class_ref = auto_map.get("AutoModelForCausalLM")
-                    if isinstance(class_ref, str):
-                        from transformers.dynamic_module_utils import get_class_from_dynamic_module
-                        get_class_from_dynamic_module(class_ref, str(getattr(config, "_name_or_path", "")), force_download=True)
-
-                    shell = loader.from_config(
-                        config,
-                        trust_remote_code=trust_remote_code,
-                        **init_kwargs,
-                    )
-                else:
-                    raise
+            shell = loader.from_config(
+                config,
+                trust_remote_code=trust_remote_code,
+                **init_kwargs,
+            )
     finally:
         pb.close()
 
@@ -3612,8 +1226,5 @@ def build_shell_model(
             pinned,
             shell_dtype,
         )
-
-    if trust_remote_code and isinstance(shell, PreTrainedModel):
-        _normalize_legacy_tied_weights_keys(shell)
 
     return shell

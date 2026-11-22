@@ -10,9 +10,9 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Mapping, Optional
 
 import torch
-from transformers import AutoConfig
 
 from .generation_result import GenerationResult
+from .security import require_remote_code_permission
 
 
 SGLANG_VERSION: Optional[str] = None
@@ -153,16 +153,16 @@ def load_model_by_sglang(
     config=None,
     **kwargs,
 ):
+    require_remote_code_permission(trust_remote_code)
     _require_sglang()
 
     # from_quantized already loaded the config with its cache/revision and
     # offline options. Direct callers still get the historical convenience.
     hf_config = config
     if hf_config is None:
-        hf_config = AutoConfig.from_pretrained(
-            model,
-            trust_remote_code=trust_remote_code,
-        )
+        from .hf import load_model_config
+
+        hf_config = load_model_config(model, trust_remote_code=trust_remote_code)
     runtime_kwargs = _normalize_sglang_engine_kwargs(kwargs, trust_remote_code)
     engine_factory = getattr(sgl, "Engine", _MISSING)
     if engine_factory is not _MISSING:

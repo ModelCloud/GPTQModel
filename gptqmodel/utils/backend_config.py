@@ -219,13 +219,11 @@ class RuntimeConfig(_KernelSettings):
     # GGUF checkpoint load strategy, shared by every backend that can read a
     # GGUF checkpoint (see KernelConfig for the semantics).
     gguf_native_quantized_loader: bool = True
-    gguf_torch_dequant_loader: Optional[bool] = None
     gguf_dequant_device: Optional[str] = None
     gguf_dequant_chunk_bytes: int = 256 * 1024 * 1024
     gsq_disable_cuda_relaxation: bool = False
     gsq_disable_hip_relaxation: bool = False
     rocm_quant_blas: Optional[str] = None
-    rocm_llc: bool = True
     paro_sym_ste_triton: bool = True
     paro_affine_ste_triton: bool = True
     paro_affine_ste_triton_backward: bool = False

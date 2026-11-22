@@ -55,6 +55,8 @@ try:  # pragma: no cover - exercised implicitly by the availability probe
     import triton
     import triton.language as tl
 
+    from gptqmodel.utils.triton_jit import jit as triton_jit
+
     if torch.version.hip is not None:
         from triton.language.extra.hip import libdevice as _libdevice
     else:
@@ -69,7 +71,7 @@ _SYM_STE_BLOCK = 1024
 
 if _SYM_STE_TRITON_AVAILABLE:
 
-    @triton.jit
+    @triton_jit
     def _sym_qdq_forward_kernel(
         weight_ptr,
         scale_ptr,

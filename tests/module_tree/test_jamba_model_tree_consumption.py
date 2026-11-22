@@ -18,7 +18,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import transformers
 from module_tree.looper_doubles import no_auto_dtype_cast_forward
 
 from gptqmodel.looper.module_looper import ModuleLooper
@@ -26,6 +25,7 @@ from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native.auto import AutoConfig as NativeAutoConfig
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
 
 
@@ -35,7 +35,7 @@ ROLES = {"gate_proj": "gate", "up_proj": "up", "down_proj": "down"}
 
 
 def _mixed_jamba_config():
-    config = transformers.AutoConfig.for_model("jamba")
+    config = NativeAutoConfig.for_model("jamba")
     # Shrink the default 32-layer stack and interleave every branch so one
     # config exercises Mamba, attention, dense MLP and routed-MoE layers.
     config.num_hidden_layers = 4

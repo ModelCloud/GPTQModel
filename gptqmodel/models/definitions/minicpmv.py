@@ -7,7 +7,7 @@ from copy import deepcopy
 from typing import Dict
 
 from PIL import Image
-from transformers import AutoModel, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import fetch_image
@@ -15,6 +15,7 @@ from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
@@ -22,18 +23,13 @@ from ._vlm_calibration import (
 )
 
 
-def _allow_minicpmv_remote_tokenizer() -> None:
-    try:
-        from transformers.models.auto import tokenization_auto
-    except Exception:
-        return
-
-    incompatible = getattr(tokenization_auto, "MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS", None)
-    if isinstance(incompatible, set):
-        incompatible.discard("minicpmv")
-
 class MiniCPMVQModel(BaseQModel):
-    loader = AutoModel
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.minicpmv.configuration_minicpm.MiniCPMVConfig",
+        model_class="gptqmodel.models.ports.minicpmv.modeling_minicpmv.MiniCPMV",
+        processor_class="gptqmodel.models.ports.minicpmv.processing_minicpmv.MiniCPMVProcessor",
+        tokenizer_class="gptqmodel.models.ports.minicpmv.tokenization_minicpmv.MiniCPMVTokenizer",
+    )
 
     pre_lm_head_norm_module = "llm.model.norm"
 
@@ -49,6 +45,12 @@ class MiniCPMVQModel(BaseQModel):
             # fold into q only and then q into k. The MLP stages were also
             # merged, so `down_proj` shared the gate/up GPTQ subset.
             "self_attn": (
+                # Qwen3's per-head Q/K norms read q/k outputs. Declared ahead of
+                # the projections (as Qwen3QModel does) they never sit between
+                # v_proj and o_proj, which hid the v -> o fold and, on layouts
+                # without them, folded o_proj into `input_layernorm`.
+                "q_norm:!",
+                "k_norm:!",
                 "q_proj:0:in=x",
                 "k_proj:0:in=x",
                 "v_proj:0:in=x",
@@ -61,10 +63,7 @@ class MiniCPMVQModel(BaseQModel):
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
     require_load_processor = True
-    require_trust_remote_code = True
-
-    def before_model_load(self, model_local_path: str, load_quantized_model: bool):
-        _allow_minicpmv_remote_tokenizer()
+    require_trust_remote_code = False
 
     def pre_quantize_generate_hook_start(self):
         self.shell_module_materialize(self.model.llm.model.embed_tokens, self.quantize_config.device)
@@ -105,7 +104,10 @@ class MiniCPMVQModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
+        return type(self).loader.load_processor(
+            self.model_local_path, config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
 
     @staticmethod
     def _normalize_conversation(
@@ -213,3 +215,12 @@ class MiniCPMVQModel(BaseQModel):
             tokenizer=self.model.tokenizer,
             **generation_config,
         )
+
+    def capture_first_layer_input_kwargs(self, args, kwargs, batch_device, layer_input_kwargs):
+        # Capture runs through generate(), which threads a live DynamicCache into
+        # the decoder even with `use_cache=False`. Replaying the captured kwargs
+        # would append to it on every AWQ scale-search forward of `self_attn`.
+        layer_input_kwargs = super().capture_first_layer_input_kwargs(args, kwargs, batch_device, layer_input_kwargs)
+        if layer_input_kwargs.get("past_key_values") is not None:
+            layer_input_kwargs["past_key_values"] = None
+        return layer_input_kwargs

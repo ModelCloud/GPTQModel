@@ -8,7 +8,7 @@ from model_test import ModelTest
 
 class TestZDTaichu5(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/ZDTaichu5.0-9B" # TaichuAI/ZDTaichu5.0-9B
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "acc": {"value": {"A100": 0.5427}, "floor_pct": 0.04},

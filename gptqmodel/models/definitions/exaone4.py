@@ -1,11 +1,16 @@
-from transformers import AutoModelForImageTextToText
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from .base_qwen3_vl import BaseQwen3VLGPTQ
 
 
 class Exaone4QModel(BaseQModel):
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.exaone4.Exaone4TextConfig",
+        model_class="gptqmodel.models.ports.exaone4.Exaone4ForCausalLM",
+    )
 
     fusable = FusableConfig("exaone4").merge(LlamaFusableConfig())
 
@@ -50,7 +55,12 @@ class Exaone4_5QModel(BaseQwen3VLGPTQ):
     fusable = FusableConfig("exaone4_5").merge(Exaone4QModel.fusable)
 
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
     require_load_processor = True
     layer_modules_strict = False
 
@@ -84,6 +94,10 @@ class Exaone4_5QModel(BaseQwen3VLGPTQ):
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
         },
     ]
+
+    def load_processor(self):
+        # BaseQModel already built the vendored processor; reuse that instance.
+        return self.__dict__.get("processor") or type(self).loader.load_processor(self.model_local_path)
 
 
 __all__ = ["Exaone4QModel", "Exaone4_5QModel"]

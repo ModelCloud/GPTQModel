@@ -18,7 +18,7 @@ from safetensors.torch import save_file
 
 from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear
 from gptqmodel.quantization.macaq import macaq_quantize_weight
-from gptqmodel.utils.macaq_triton import mxfp4_w4a16_linear
+from gptqmodel.utils import macaq_triton
 from gptqmodel.utils.model import load_checkpoint_in_model_then_tie_weights
 
 
@@ -116,13 +116,12 @@ def test_checkpoint_round_trip_restores_the_wide_bias(tmp_path):
 
 def test_triton_w4a16_tail_adds_a_wide_bias_in_fp32(monkeypatch):
     weight = torch.ones(OUT_FEATURES, IN_FEATURES, dtype=torch.bfloat16)
-    monkeypatch.setattr(
-        "gptqmodel.utils.macaq_triton.dequant_w4_to_bf16",
-        lambda packed, scales: weight,
-    )
+    # Exercise the Torch epilogue on CPU with the Triton decode result supplied.
+    monkeypatch.setattr(macaq_triton, "TRITON_AVAILABLE", True)
+    monkeypatch.setattr(macaq_triton, "dequant_w4_to_bf16", lambda packed, scales: weight)
     bias = torch.tensor([WIDE_BIAS], dtype=torch.float32)
 
-    out = mxfp4_w4a16_linear(
+    out = macaq_triton.mxfp4_w4a16_linear(
         _cancelling_input(),
         torch.zeros((OUT_FEATURES, IN_FEATURES // 2), dtype=torch.uint8),
         torch.zeros((OUT_FEATURES, IN_FEATURES // 32), dtype=torch.uint8),

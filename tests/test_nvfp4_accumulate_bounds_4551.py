@@ -16,6 +16,10 @@ import re
 import pytest
 import torch
 
+
+# The accumulate kernel and its IR come from Triton.
+pytest.importorskip("triton")
+
 from gptqmodel.nn_modules.qlinear import w4a_nvfp4_triton
 from gptqmodel.utils.rocm import IS_ROCM
 

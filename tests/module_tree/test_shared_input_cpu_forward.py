@@ -10,8 +10,7 @@ definition matches the activations actually observed.
 """
 
 from contextlib import contextmanager
-from copy import deepcopy
-from functools import lru_cache
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,12 +19,15 @@ import transformers
 from defuser import convert_model
 
 from gptqmodel.models.auto import MODEL_MAP
+from gptqmodel.models.ports.interns1.configuration_interns1 import InternS1Config
+from gptqmodel.models.ports.internvl_chat.configuration_internvl_chat import InternVLChatConfig
+from gptqmodel.models.ports.spark2_5.configuration_spark import Spark2_5Config
+from gptqmodel.models.ports.spark2_5.modeling_spark import Spark2_5ForCausalLM
 from gptqmodel.models.shared_input import build_shared_input_plan, probe_shared_inputs
 
 
 QC = SimpleNamespace(dynamic=None)
 VOCAB = 64
-SPARK_MODEL_ID = "XHToken/Spark-X2.5-4B"
 
 _DENSE = {
     "hidden_size": 32,
@@ -91,14 +93,11 @@ def _jamba_cfg():
     )
 
 
-@lru_cache(maxsize=1)
-def _load_spark_config():
-    return transformers.AutoConfig.from_pretrained(SPARK_MODEL_ID, trust_remote_code=True)
-
-
 def _spark_cfg():
-    # Use the published remote config/model code, but shrink it to a tiny CPU fixture.
-    cfg = deepcopy(_load_spark_config())
+    # Use the pinned release config through the package-owned class, then shrink it.
+    cfg = Spark2_5Config.from_pretrained(
+        Path(__file__).resolve().parents[1] / "fixtures/ports/spark2_5/fixtures"
+    )
     cfg.vocab_size = VOCAB
     cfg.hidden_size = 32
     cfg.intermediate_size = 48
@@ -318,8 +317,7 @@ def _build(name):
     cfg = factory()
     qmodel_cls = MODEL_MAP[cfg.model_type]
     if name == "spark2_5":
-        qmodel_cls.before_model_load(qmodel_cls, SPARK_MODEL_ID, False)
-        model = transformers.AutoModelForCausalLM.from_config(cfg, trust_remote_code=True).eval()
+        model = Spark2_5ForCausalLM(cfg).eval()
     else:
         model = transformers.AutoModelForCausalLM.from_config(cfg).eval()
     convert_model(model, cleanup_original=False)
@@ -398,6 +396,10 @@ def test_only_real_forward_verified_definitions_dedup(model_type):
     model_cls = MODEL_MAP[model_type]
     covered = _verified_model_types()
     cfg = SimpleNamespace(model_type=model_type)
+    if model_type == "interns1":
+        cfg = InternS1Config(text_config={"model_type": "qwen3"})
+    elif model_type == "internvl_chat":
+        cfg = InternVLChatConfig(llm_config={"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3"})
     if isinstance(model_cls.dynamic_expert_index, str):
         setattr(cfg, model_cls.dynamic_expert_index, 2)
     plan = model_cls.shared_input_plan(cfg, QC)
@@ -604,4 +606,3 @@ def test_moe_unrouted_expert_is_reported_unverified():
     routed = [m for m in plan.modules if m.startswith("mlp.experts.") and report.call_counts[m]]
     assert len(routed) == 3  # exactly one expert (gate/up/down) ran for the single token
     assert len(report.unverified) == 3 * 2  # 3 idle experts x (gate/up group, down group)
-

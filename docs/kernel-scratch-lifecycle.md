@@ -20,7 +20,7 @@ For grouped-query attention, it expands key heads for the score product and
 value heads for the final probability product. The score path applies bias,
 masking and optional sinks before FP32 softmax. The cropped probabilities
 return to the query dtype before dropout and the final matrix product.
-[Implementation](../gptqmodel/models/inkling2_loop/modeling.py#L174)
+[Implementation](../gptqmodel/models/ports/inkling2_loop/modeling.py#L175)
 
 | Scratch | Previous lifetime | Current lifetime |
 | --- | --- | --- |

@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from PIL import Image
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import _frame_columns, batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
@@ -17,6 +17,7 @@ from ...utils.model import MODALITY, get_module, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
@@ -25,7 +26,7 @@ from ._vlm_calibration import (
 
 QWEN_VL_UTILS_INSTALL_HINT = (
     "qwen_vl_utils is required for Qwen3-VL video inputs. "
-    "Install it with `pip install qwen-vl-utils`."
+    "Install it with `pip install 'gptqmodel[video]'`."
 )
 
 
@@ -159,7 +160,12 @@ def _load_fetch_video():
 
 
 class BaseQwen3VLGPTQ(DeepStackReplayMixin, BaseQModel):
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     # Wrapped Qwen3-VL layouts keep the text decoder under ``language_model``;
     # direct layouts expose the same norm without the outer prefix.
@@ -369,8 +375,15 @@ class BaseQwen3VLGPTQ(DeepStackReplayMixin, BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
+        processor = self.__dict__.get("processor")
+        if processor is not None:
+            return processor
         try:
-            return AutoProcessor.from_pretrained(self.model_local_path)
+            return self.loader.load_processor(
+                self.model_local_path,
+                config=self.model.config,
+                tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+            )
         except Exception as exc:
             raise RuntimeError(
                 "Unable to load the Qwen3-VL processor for model "

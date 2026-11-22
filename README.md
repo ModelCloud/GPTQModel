@@ -208,10 +208,12 @@ EXL3 supports 1.5, 2.5, and 3.5 bits per weight with `mul1` and 2.5, 3.0, and 3.
 
 ### Inference and deployment 🚢
 
-Run compatible checkpoints directly with GPT-QModel, integrate with Transformers
-(import `gptqmodel` first so packed MoE experts load through the
-[native bridge](https://github.com/ModelCloud/GPTQModel/blob/main/docs/hf-interop.md)),
-or deploy supported GPTQ/AWQ formats through vLLM and SGLang. Apple silicon has
+Load GPT-QModel checkpoints with `GPTQModel.load`. GPT-QModel never patches
+Transformers, so plain `AutoModelForCausalLM.from_pretrained` reads only what
+Transformers itself supports: no per-module `dynamic` configs, per-expert MoE
+tensors or GPT-QModel-only formats (see
+[Hugging Face interop](https://github.com/ModelCloud/GPTQModel/blob/main/docs/hf-interop.md)).
+You can also deploy supported GPTQ/AWQ formats through vLLM and SGLang. Apple silicon has
 native MLX quantization and packed inference. Optional projection fusion can
 combine supported attention and MLP operations without changing the saved format.
 
@@ -289,6 +291,12 @@ pip install gptqmodel
 # Or: uv pip install gptqmodel
 ```
 
+For ports that use timm or torchvision, install `pip install 'gptqmodel[vision]'`
+with a torchvision build compatible with your PyTorch installation. These
+optional dependencies are loaded when the affected vision component is used;
+core text installations do not install them. See the
+[optional dependencies](docs/transformers5-model-ports.md#optional-dependencies).
+
 PyTorch **2.13.x or >= 2.15.0** is required; known-vulnerable versions are
 blocked by the [runtime safety check](https://github.com/ModelCloud/GPTQModel/blob/main/docs/torch-runtime-safety-gate.md).
 Compiled package backends build and cache extensions on first use (JIT),
@@ -301,7 +309,9 @@ for source installs and platform setup. Install vLLM or SGLang in a separate
 environment aligned with that engine's dependency pins.
 
 The native GGUF C++ backends live in the `gguf` extra
-(`llama-cpp-python>=0.3.37`, which vendors ggml 1.0). `GGUF_CPP` reads the
+(`llama-cpp-python>=0.3.37`, which vendors ggml 1.0). The extra also installs
+the `gguf` package, which loading a `.gguf` file through Transformers' GGUF
+integration requires. `GGUF_CPP` reads the
 loaded release through `ggml_version()`; ggml 1.0 adds the `F8_E4M3` tensor
 type, which the native GGUF reader can dequantize.
 
@@ -322,11 +332,13 @@ print(model.tokenizer.decode(tokens))
 ```
 
 [Loading and inference](https://github.com/ModelCloud/GPTQModel/wiki/Loading-and-Inference)
-covers backend selection, generation, and adapters. Only enable
-`trust_remote_code=True` for checkpoint code you trust. For model types the
-installed Transformers implements natively, the native class is used unless the
-checkpoint declares a remote-only layout; see
-[`docs/trust-remote-code-isolation.md`](docs/trust-remote-code-isolation.md#native-override-of-explicit-trust).
+covers backend selection, generation, and adapters. GPT-QModel requires
+Transformers 5.23 (`transformers>=5.23.0,<5.24`) and Python 3.11+. Model definitions use native Transformers
+implementations or model ports shipped with GPT-QModel; ports ignore checkpoint
+`auto_map`. Running unsupported checkpoint Python requires both
+`trust_remote_code=True` and `GPTQ_BYPASS_SAFETY_CHECKS=1`. See the
+[model loading policy](docs/trust-remote-code-isolation.md) and the
+[model port inventory](docs/transformers5-model-ports.md).
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on
@@ -463,6 +475,9 @@ also appreciated. Ongoing sponsors will be credited on this README page.
 
 GPT-QModel is licensed under [Apache-2.0](https://github.com/ModelCloud/GPTQModel/blob/main/LICENSE). The optional, JIT-loaded
 Swordfish kernel is [AGPL-3.0-or-later](https://github.com/ModelCloud/GPTQModel/blob/main/licenses/SWORDFISH).
+
+Model ports keep the copyright headers, notices and licenses of the code they
+derive from; see the [model port inventory](docs/transformers5-model-ports.md).
 
 ## Attributions and citations 📚
 

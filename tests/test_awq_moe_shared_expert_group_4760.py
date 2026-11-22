@@ -98,6 +98,12 @@ class _Layer(nn.Module):
             # DeepSeek V2 MoE layers own no dense `mlp` projections; the tree
             # declares them only for the alternative layouts.
             self.mlp.shared_experts = _Projection()
+            # The definition drops the MLA latent-norm and `o_proj` folds, so
+            # it reads those owners from every real decoder layer.
+            self.self_attn = nn.Module()
+            self.self_attn.q_a_layernorm = nn.LayerNorm(WIDTH)
+            self.self_attn.kv_a_layernorm = nn.LayerNorm(WIDTH)
+            self.self_attn.o_proj = nn.Linear(WIDTH, WIDTH, bias=False)
         else:  # pragma: no cover - programming error
             raise AssertionError(kind)
 

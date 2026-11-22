@@ -6,10 +6,16 @@ import torch
 from ...utils.model import nested_move_to
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class JambaQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     shared_input_verified_model_types = frozenset({"jamba"})
 
     # `feed_forward` is the MoE root on sparse layers, so the fusion planner

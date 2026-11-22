@@ -15,37 +15,22 @@ Anything that sizes a cache-flush buffer from ``L2_cache_size`` therefore
 flushes 8 MiB against a 64 MiB cache and measures a warm cache. Inductor does
 exactly that.
 
-What this patches
------------------
-This is the Python half of https://github.com/pytorch/pytorch/pull/203965
-("[ROCm] Expose last-level cache size and use read-based benchmark flushing"):
-
-1. ``_CudaDeviceProperties.last_level_cache_size`` -- a new property that
-   queries HSA's byte-valued cache array and falls back to ``L2_cache_size``.
-   ``L2_cache_size`` itself is left untouched; it was never wrong.
-2. ``InductorBenchmarker.get_device_cache_size`` -- use ``max(L2, LLC)`` so a
-   flush buffer actually covers the outermost cache.
-3. ``BenchmarkRequest.do_bench_with_cudagraphs`` -- same ``max(L2, LLC)`` when
-   sizing the rotated CUDA-graph input pool.
-
-The PR's fourth part (reading rather than writing the ROCm flush buffer) is not
-back-ported: the installed Triton path already uses a 256 MiB flush on ROCm,
-which covers the 64 MiB LLC, and the read-vs-write change only affects the
-reported timing, not which kernel is selected.
-
-The C++ property cannot be monkeypatched, so (1) attaches a Python property to
-the pybind class. That is enough for every Python consumer, including (2) and
-(3).
+What this does
+-------------
+It only *reports* the cache geometry (HSA's byte-valued cache array, the same
+data https://github.com/pytorch/pytorch/pull/203965 exposes). GPT-QModel never
+patches torch or Inductor: the earlier back-port that attached
+``_CudaDeviceProperties.last_level_cache_size`` and rewrote Inductor's flush
+sizing process-wide was removed. Use the upstream PyTorch fix for Inductor.
 
 Usage
 -----
     from gptqmodel.utils import rocm_llc
 
-    rocm_llc.apply()                    # idempotent, never raises
     print(rocm_llc.cache_levels(0))     # (L1, L2, L3, L4) in bytes, or None
     print(rocm_llc.last_level_cache_size(0))
 
-Or inspect the hardware without patching anything::
+Or inspect the hardware from the command line::
 
     python -m gptqmodel.rocm_llc
 
@@ -56,10 +41,7 @@ residency is not pinnable; measured throughput still has to be verified.
 from __future__ import annotations
 
 import ctypes
-import inspect
 import logging
-import re
-import textwrap
 import threading
 from typing import Any
 
@@ -241,216 +223,11 @@ def last_level_cache_size(device: int | str | torch.device | None = None) -> int
     return l2
 
 
-# ---------------------------------------------------------------------------
-# Monkeypatches
-# ---------------------------------------------------------------------------
-
-_STATE: dict[str, Any] = {"applied": False, "restore": [], "status": {}}
-
-
-def _patched_property() -> property:
-    def fget(self: Any) -> int:
-        try:
-            return last_level_cache_size()
-        except Exception:  # noqa: BLE001 - a property must never raise
-            return int(getattr(self, "L2_cache_size", 0))
-
-    return property(fget)
-
-
-def _patch_props() -> str:
-    cls = getattr(torch._C, "_CudaDeviceProperties", None)
-    if cls is None:
-        return "skipped: no _CudaDeviceProperties"
-    try:
-        had = "last_level_cache_size" in getattr(cls, "__dict__", {})
-        previous = getattr(cls, "last_level_cache_size", None)
-
-        def restore() -> None:
-            if had:
-                setattr(cls, "last_level_cache_size", previous)
-            else:
-                try:
-                    delattr(cls, "last_level_cache_size")
-                except AttributeError:
-                    pass
-
-        _STATE["restore"].append(restore)
-        setattr(cls, "last_level_cache_size", _patched_property())
-    except (AttributeError, TypeError) as exc:
-        return f"skipped: {exc}"
-    return "already provided by torch, overridden" if had else "applied"
-
-
-def _rebind(cls: Any, name: str, replacement: Any, original: Any) -> None:
-    _STATE["restore"].append(lambda: setattr(cls, name, original))
-    setattr(cls, name, replacement)
-
-
-def _patch_benchmarker() -> str:
-    """Use ``max(L2, LLC)`` for the Inductor benchmark flush buffer.
-
-    Replaced as a whole function rather than by rewriting source: the body is
-    short and only depends on two helpers that have been stable for years.
-    """
-
-    from torch._dynamo.device_interface import get_interface_for_device
-
-    try:
-        from torch._inductor.runtime.benchmarking import (
-            InductorBenchmarker,
-            _normalize_gpu_device_type,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"skipped: {exc}"
-
-    original = getattr(InductorBenchmarker, "get_device_cache_size", None)
-    if original is None:
-        return "skipped: get_device_cache_size not found"
-
-    def get_device_cache_size(self: Any, device_type: Any = None) -> int:
-        if "L2_cache_size" in self.__dict__:
-            return self.__dict__["L2_cache_size"]
-        device_type = _normalize_gpu_device_type(device_type)
-        device_interface = get_interface_for_device(device_type)
-        device = device_interface.current_device()
-        props = device_interface.get_device_properties(device)
-        # The outermost cache need not have the largest capacity.
-        cache_size = max(
-            getattr(props, "L2_cache_size", 0) or 0,
-            getattr(props, "last_level_cache_size", 0) or 0,
-        )
-        return cache_size or 256 * 1024 * 1024
-
-    get_device_cache_size.__doc__ = original.__doc__
-    _rebind(InductorBenchmarker, "get_device_cache_size", get_device_cache_size, original)
-    return "applied"
-
-
-_CUDAGRAPH_RE = re.compile(
-    r"(?P<i>[ \t]*)cache_size = next\(\s*\(\s*"
-    r'getattr\(props, attr\)\s*for attr in \("L2_cache_size", "last_level_cache_size"\)\s*'
-    r"if getattr\(props, attr, None\)\s*\),\s*256 \* 1024 \* 1024,\s*\)",
-    re.S,
-)
-
-
-def _cudagraph_replacement(match: re.Match[str]) -> str:
-    i = match.group("i")
-    return (
-        f"{i}cache_size = (\n"
-        f'{i}    max(\n'
-        f'{i}        getattr(props, "L2_cache_size", 0) or 0,\n'
-        f'{i}        getattr(props, "last_level_cache_size", 0) or 0,\n'
-        f"{i}    )\n"
-        f"{i}    or 256 * 1024 * 1024\n"
-        f"{i})"
-    )
-
-
-def _patch_cudagraph() -> str:
-    """Size the rotated CUDA-graph input pool from ``max(L2, LLC)``.
-
-    The expression lives inside a ~150 line method, and the surrounding code is
-    version specific, so this is a source rewrite. The owning class is located
-    by content rather than by name: the public ``do_bench_with_cudagraphs`` on
-    the request classes is an abstract stub that raises ``NotImplementedError``,
-    while the implementation sits on ``GPUDeviceBenchmarkMixin`` and is shared
-    by every GPU request subclass. Patching the mixin once covers them all.
-    """
-
-    try:
-        import torch._inductor.autotune_process as module
-    except Exception as exc:  # noqa: BLE001
-        return f"skipped: {exc}"
-
-    owners: list[tuple[Any, Any, str]] = []
-    for obj in vars(module).values():
-        if not inspect.isclass(obj):
-            continue
-        fn = obj.__dict__.get("do_bench_with_cudagraphs")
-        if fn is None:
-            continue
-        try:
-            src = textwrap.dedent(inspect.getsource(fn))
-        except (OSError, TypeError):
-            continue
-        if "cache_size = next(" in src:
-            owners.append((obj, fn, src))
-    if not owners:
-        return "skipped: torch source changed"
-
-    namespace = dict(vars(module))
-    patched_any = False
-    for cls, original, src in owners:
-        if src.lstrip().startswith("@"):
-            continue
-        patched, count = _CUDAGRAPH_RE.subn(_cudagraph_replacement, src)
-        if count != 1:
-            continue
-        try:
-            exec(compile(patched, f"<rocm_llc {module.__name__}.{cls.__name__}>", "exec"), namespace)
-            replacement = namespace["do_bench_with_cudagraphs"]
-        except Exception as exc:  # noqa: BLE001 - never break the caller
-            log.debug("rocm_llc: cudagraph rewrite failed: %s", exc)
-            continue
-        _rebind(cls, "do_bench_with_cudagraphs", replacement, original)
-        patched_any = True
-    return "applied" if patched_any else "skipped: torch source changed"
-
-
-def apply(*, benchmarker: bool = True, cudagraph: bool = True) -> dict[str, str]:
-    """Install the back-port. Idempotent, cheap, and never raises.
-
-    Returns a mapping of component to ``"applied"``, ``"already ..."`` or
-    ``"skipped: <reason>"`` so a caller can log exactly what took effect.
-    """
-
-    if _STATE["applied"]:
-        return dict(_STATE["status"])
-
-    status: dict[str, str] = {}
-    from .utils.kernel import get_kernel_config
-
-    if not get_kernel_config().rocm_llc:
-        status["props"] = "skipped: KernelConfig.rocm_llc=False"
-        _STATE.update(applied=True, status=status)
-        return status
-    if not torch.version.hip:
-        status["props"] = "skipped: not ROCm"
-        _STATE.update(applied=True, status=status)
-        return status
-
-    status["props"] = _patch_props()
-    if benchmarker:
-        status["benchmarker"] = _patch_benchmarker()
-    if cudagraph:
-        status["cudagraph"] = _patch_cudagraph()
-
-    _STATE.update(applied=True, status=status)
-    for name, result in status.items():
-        if result.startswith("skipped") and "not ROCm" not in result:
-            log.debug("rocm_llc: %s %s", name, result)
-    return status
-
-
-def unapply() -> None:
-    """Undo every patch. Intended for tests."""
-
-    for restore in reversed(_STATE["restore"]):
-        try:
-            restore()
-        except Exception:  # noqa: BLE001
-            pass
-    _STATE.update(applied=False, restore=[], status={})
-
-
 def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="Report AMD cache geometry as torch sees it.")
-    parser.add_argument("--apply", action="store_true", help="install the back-port and show the result")
-    args = parser.parse_args()
+    parser.parse_args()
 
     if not torch.cuda.is_available():
         print("no GPU visible")
@@ -458,10 +235,6 @@ def main() -> int:
     if torch.version.hip is None:
         print("not a ROCm build; last-level cache is reported as L2 by torch")
         return 0
-
-    if args.apply:
-        for name, result in apply().items():
-            print(f"patch {name}: {result}")
 
     print(f"{'dev':>3} {'name':>28} {'L1':>9} {'L2':>10} {'L3 (MALL)':>11} {'L4':>10} {'torch LLC':>11}")
     for device in range(torch.cuda.device_count()):

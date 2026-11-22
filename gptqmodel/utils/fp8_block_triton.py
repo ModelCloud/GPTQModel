@@ -39,6 +39,8 @@ try:  # pragma: no cover - import availability is environment dependent
     from triton import knobs as _triton_knobs
     from triton.runtime import driver as _triton_driver
 
+    from .triton_jit import jit as triton_jit
+
     TRITON_AVAILABLE = True
 except Exception:  # pragma: no cover
     triton = None
@@ -122,7 +124,7 @@ def _launch_device(device: torch.device):
 
 if TRITON_AVAILABLE:
 
-    @triton.jit
+    @triton_jit
     def _fp8_block_decode_kernel(
         w_ptr,
         s_ptr,
@@ -166,7 +168,7 @@ if TRITON_AVAILABLE:
             mask=mask,
         )
 
-    @triton.jit
+    @triton_jit
     def _fp8_block_gemv_kernel(
         x_ptr,
         w_ptr,

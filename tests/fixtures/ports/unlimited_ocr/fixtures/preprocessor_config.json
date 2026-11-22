@@ -1,0 +1,20 @@
+{
+  "image_processor_type": "UnlimitedOcrImageProcessor",
+  "do_convert_rgb": true,
+  "do_resize": true,
+  "resample": 3,
+  "do_rescale": true,
+  "rescale_factor": 0.00392156862745098,
+  "do_normalize": true,
+  "crop_to_patches": true,
+  "min_patches": 2,
+  "max_patches": 32,
+  "tile_size": 640,
+  "background_color": [127, 127, 127],
+  "size": {
+    "height": 1024,
+    "width": 1024
+  },
+  "image_mean": [0.5, 0.5, 0.5],
+  "image_std": [0.5, 0.5, 0.5]
+}

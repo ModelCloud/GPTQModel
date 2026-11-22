@@ -1,10 +1,11 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 from accelerate import init_empty_weights
 from safetensors import safe_open
 from torch import nn
-from transformers import AutoConfig, AutoModelForMultimodalLM, DiffusionGemmaConfig
+from transformers import AutoModelForMultimodalLM, DiffusionGemmaConfig
 from transformers.models.diffusion_gemma.generation_diffusion_gemma import (
     DiffusionGemmaGenerationConfig,
     EntropyBoundSamplerConfig,
@@ -72,11 +73,18 @@ def _tiny_model():
     return AutoModelForMultimodalLM.from_config(_tiny_config(), dtype=torch.float32).eval()
 
 
-def test_diffusion_gemma_local_checkpoint_selects_definition():
-    config = AutoConfig.from_pretrained(MODEL_PATH)
+@pytest.fixture
+def diffusion_gemma_checkpoint(tmp_path):
+    _tiny_model().save_pretrained(tmp_path)
+    return tmp_path
+
+
+def test_diffusion_gemma_local_checkpoint_selects_definition(diffusion_gemma_checkpoint):
+    checkpoint = str(diffusion_gemma_checkpoint)
+    config = auto.load_model_config(checkpoint)
 
     assert config.model_type == "diffusion_gemma"
-    assert auto.check_and_get_model_definition(MODEL_PATH) is DiffusionGemmaQModel
+    assert auto.check_and_get_model_definition(checkpoint) is DiffusionGemmaQModel
 
 
 def test_diffusion_gemma_module_tree_covers_dense_and_packed_experts():
@@ -87,7 +95,7 @@ def test_diffusion_gemma_module_tree_covers_dense_and_packed_experts():
     )
     flat_modules = {name for block in layer_modules for name in block}
 
-    assert DiffusionGemmaQModel.loader is AutoModelForMultimodalLM
+    assert DiffusionGemmaQModel.loader.model_class == "gptqmodel.models.ports.native.auto.NativeForMultimodalLM"
     assert DiffusionGemmaQModel.turtle_materialize_tie_weights is False
     assert DiffusionGemmaQModel.modality == [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
     assert DiffusionGemmaQModel.extract_layers_node() == ["model.encoder.language_model.layers"]
@@ -176,13 +184,14 @@ def test_diffusion_gemma_capture_inputs_match_vision_dtype():
     assert moved["image_position_ids"].device == torch.device("cpu")
 
 
-def test_diffusion_gemma_lazy_source_maps_tied_encoder_and_fused_experts_to_decoder():
-    # The shell captures encoder layers, but the released checkpoint owns the
+def test_diffusion_gemma_lazy_source_maps_tied_encoder_and_fused_experts_to_decoder(diffusion_gemma_checkpoint):
+    # The shell captures encoder layers, but the unquantized checkpoint owns the
     # tied text tensors under decoder.layers. Verify both the namespace remap
     # and the packed-expert split that LazyTurtle performs on demand.
-    config = AutoConfig.from_pretrained(MODEL_PATH, local_files_only=True)
+    checkpoint = str(diffusion_gemma_checkpoint)
+    config = DiffusionGemmaQModel.loader.load_config(checkpoint)
     with init_empty_weights(include_buffers=True):
-        shell = AutoModelForMultimodalLM.from_config(config)
+        shell = DiffusionGemmaQModel.loader.from_config(config)
     _convert_model_with_defuser(DiffusionGemmaQModel, shell, cleanup_original=False)
     DiffusionGemmaQModel.after_defuser_conversion(shell)
 
@@ -199,7 +208,7 @@ def test_diffusion_gemma_lazy_source_maps_tied_encoder_and_fused_experts_to_deco
     }
 
     turtle = LazyTurtle.maybe_create(
-        model_local_path=MODEL_PATH,
+        model_local_path=checkpoint,
         config=config,
         model_init_kwargs={"device_map": {"": "cpu"}},
         module_tree=DiffusionGemmaQModel.module_tree,

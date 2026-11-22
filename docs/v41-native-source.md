@@ -2,6 +2,8 @@
 
 Carry the V4.1-specific architecture contract, packed source execution, one-tensor source reads, memory-mapped PLE gathers, native attention/index selection, RMS normalization and explicit mHC/window replay state. This family remains an explicit calibration API, without a new automatic MODEL_MAP registration.
 
+The decoder, rotary, RMSNorm, attention, indexer and expert classes these helpers bind come from the package-owned Transformers 5.23-ABI port in `gptqmodel/models/ports/deepseek_v41` (ported from DeepSeek's reference `inference/` code), not from a `transformers.models` family.
+
 This page describes the shipped API and conditional calls carried from the working fork. It is a structural call map, with no invented execution ordering between public entry points. Solid edges name calls present in the source; dashed edges expose class entry points. Rejected states and propagated failures are marked separately.
 
 ```mermaid

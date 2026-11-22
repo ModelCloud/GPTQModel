@@ -1,0 +1,23 @@
+GPT-QModel Qwen2.5-VL native composite and headless text binding
+Copyright 2026 ModelCloud.ai
+
+Both Qwen2_5_VLForConditionalGeneration and Qwen2_5_VLTextModel are used
+directly, without a custom model or causal head.
+Transformers v5.23.0, revision 52b080b6416a7897e2af90febeb4dfad22b84d19:
+Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team.
+Apache License 2.0: see LICENSE. No native decoder or vision code is vendored.
+
+The small config and tensor-shape test fixtures (tests/fixtures/ports/qwen2_5_vl)
+were obtained from Qwen/Qwen2.5-VL-3B-Instruct at revision
+66285546d2b821cf421d4f5eb2576359d3770cd3.
+That checkpoint's separate Qwen Research License is preserved in
+LICENSE.Qwen3B. It is not an Apache-only checkpoint license; this package
+does not grant rights to the trained weights or redistribute tensor payloads.
+
+Additional config and factual tensor-shape metadata were inspected from
+hf-tiny-v2/tiny-random-Qwen2_5_VLTextModel at revision
+3d88ac2485f48cc590e717ba208662768db347e9. This independent tiny-random
+publication declares the native headless architecture; it is not trained
+model quality evidence. No code or tensor payload from that repository is
+vendored or redistributed. Its publication does not change the native
+Transformers Apache-2.0 code license or grant trained-weight rights.

@@ -6,7 +6,7 @@
 from typing import Dict, Optional
 
 from PIL import Image
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
@@ -15,6 +15,7 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig
+from ..local import LocalModelLoader
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
@@ -26,7 +27,12 @@ from .qwen2 import Qwen2QModel
 class Ovis2QModel(BaseQModel):
     fusable = FusableConfig("ovis2").merge(Qwen2QModel.fusable)
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     pre_lm_head_norm_module = ["model.language_model.norm", "model.language_model.model.norm"]
 
@@ -82,7 +88,7 @@ class Ovis2QModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path)
+        return self.__dict__.get("processor") or type(self).loader.load_processor(self.model_local_path)
 
     @staticmethod
     def process_vision_info(

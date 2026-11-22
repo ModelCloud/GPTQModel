@@ -127,7 +127,7 @@ def _assert_no_new_smi_threads(baseline: set[int | None]) -> None:
 def test_calibration_rejected_before_the_looper_leaves_no_smi_threads(
     tmp_path, dataset, message
 ):
-    """The calibration checks run in ``LoopProcessor.__init__``, before any loop."""
+    """Calibration is prepared once before any processor or looper is built."""
 
     baseline = {thread.ident for thread in _smi_threads()}
     qmodel = _build_qmodel(tmp_path)
@@ -183,6 +183,8 @@ def test_later_processor_failure_releases_the_processors_already_built(
     # The prologue must release every processor it built, not only the ones a
     # looper would have seen.
     assert released, "the built processors were never released"
+    assert "GPTQProcessor" in released, released
+    assert "EoraProcessor" not in released
     _assert_no_new_smi_threads(baseline)
 
 

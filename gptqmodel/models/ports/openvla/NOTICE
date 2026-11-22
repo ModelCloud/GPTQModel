@@ -1,0 +1,20 @@
+OpenVLA / Prismatic Transformers 5 port
+
+Derived from the OpenVLA project, copyright (c) 2024 Moo Jin Kim,
+Karl Pertsch and Siddharth Karamcheti, under the MIT License in LICENSE.
+Package adaptations copyright (c) 2026 ModelCloud.ai.
+Adapted from https://github.com/openvla/openvla at revision
+c8f03f48af692657d3060c19588038c7220e9af9 (prismatic/extern/hf, prismatic/vla).
+
+The source model card labels OpenVLA checkpoints MIT and identifies Llama-2,
+DINOv2 and SigLIP as their underlying components. The bundled released tokenizer
+assets have Llama-2 lineage: LICENSE-LLAMA2 and LLAMA2-USE-POLICY.md reproduce
+Meta's terms and acceptable-use policy. This port does not relicense underlying
+models, tokenizer data or training datasets. No trained model weights are bundled.
+
+Llama 2 is licensed under the LLAMA 2 Community License,
+Copyright (c) Meta Platforms, Inc. All Rights Reserved.
+
+Native text implementations come from the installed Transformers package;
+vision implementations come from the installed timm package. Those dependencies
+retain their own licenses. No checkpoint Python is imported or executed at runtime.

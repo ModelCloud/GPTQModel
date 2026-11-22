@@ -21,6 +21,7 @@ include gptqmodel_nf12/README.md
 recursive-include gptqmodel_ext/nf12_hip *.cuh *.hip *.cpp README.md
 recursive-include gptqmodel_ext/nf12_tenstorrent *.h *.cpp
 recursive-include gptqmodel_ext/tt_blockfloat_hip *.h *.hip *.cpp *.py README.md
+exclude gptqmodel_ext/tt_blockfloat_hip/tt_blockfloat_hip_selftest.cpp
 recursive-include gptqmodel_ext/gptq_block *.cu *.cpp
 recursive-include gptqmodel_ext/int4_qzero_group_scaled_cpu *.cpp *.hpp NOTICE
 recursive-include gptqmodel_ext/hadamard *.h *.cuh *.cu *.cpp LICENSE
@@ -28,11 +29,24 @@ recursive-include gptqmodel_ext/swordfish *.h *.hpp *.cuh *.cu *.cpp *.py LICENS
 include gptqmodel_ext/swordfish/licenses/LICENSE
 recursive-include gptqmodel/exllamav3/util/hadamard_data *.txt
 include licenses/*
+recursive-include gptqmodel/models/ports *.md *.txt *.json *.ttf *.model *.jinja LICENSE* *LICENSE *LICENSE.pdf NOTICE* ACKNOWLEDGEMENTS*
+# Release inventories, original tokenizer samples and tests are checkout-only.
+prune gptqmodel/models/ports/*/fixtures
+prune gptqmodel/models/ports/*/tests
+recursive-exclude gptqmodel/models/ports *.gz *.zst central_fixture_proposals.json module_plan_fixture.json
+recursive-exclude gptqmodel/models/ports checkpoint_ownership.json checkpoint_contracts.json checkpoint_inventory.json
+recursive-exclude gptqmodel/models/ports checkpoint-schema.json checkpoint_metadata.json upstream_config.json
+recursive-exclude gptqmodel/models/ports registry_plan.json module_plan_case.json
+recursive-exclude gptqmodel/models/ports tokenizer_contracts.json tokenizer_oracle.json tokenizer_reference.json
+exclude gptqmodel/models/ports/nemotron_omni/source_config.json
+recursive-exclude gptqmodel/models/ports/minicpm_o checkpoint-*-config.json checkpoint-*-checkpoint-layout.json
 include gptqmodel_ext/pack_block_cpu.cpp
 include gptqmodel_ext/floatx_cpu.cpp
 include gptqmodel_ext/marlin/generate_kernels.py
 include gptqmodel_ext/machete/generate.py
 recursive-exclude gptqmodel_ext __pycache__ *.pyc
 prune gptqmodel_ext/machete/generated
+prune gptqmodel_ext/ttbfp/tests
+prune gptqmodel_ext/ttbfp/tools
 prune tests/
 prune format/

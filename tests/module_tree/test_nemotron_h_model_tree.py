@@ -159,12 +159,12 @@ def test_nemotron_omni_reuses_the_nemotron_h_layer_declaration():
     from gptqmodel.models.definitions.nemotron_omni import NemotronOmniQModel
 
     tree = NemotronOmniQModel.module_tree
-    assert tree[:4] == ["language_model", "backbone", "layers", "#"]
+    assert tree[:4] == ["language_model", "model", "layers", "#"]
     # One shared declaration: a local copy is how the routed experts, shared
     # experts, router and conv silently disappeared from the Omni definition.
     assert tree[4] is NEMOTRON_H_LAYER_MODULES
     assert NemotronHQModel.module_tree[3] is NEMOTRON_H_LAYER_MODULES
-    assert NemotronOmniQModel.extract_layers_node() == ["language_model.backbone.layers"]
+    assert NemotronOmniQModel.extract_layers_node() == ["language_model.model.layers"]
 
 
 def test_nemotron_omni_plan_covers_moe_router_conv_and_experts():

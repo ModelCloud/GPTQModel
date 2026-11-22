@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from packaging.specifiers import SpecifierSet
+from packaging.requirements import Requirement
 from packaging.version import Version
 
 from gptqmodel._torch_safety import (
@@ -326,20 +326,20 @@ def test_pinned_tenstorrent_runtime_agrees_with_its_installer():
         assert f"{BYPASS_ENV}=" not in installer, "pinned Torch is safe; drop the override"
 
 
-def test_python310_requirement_floor_avoids_every_range():
-    """Python 3.10 has no patched wheel, so the floor must pick the safe 2.13.x line."""
+def test_torch_requirement_floor_avoids_every_range():
+    """Every supported Python version must install a patched Torch release."""
 
     repo = Path(__file__).resolve().parents[1]
     requirement = (repo / "requirements.txt").read_text()
-    lines = [
-        line
+    requirements = [
+        Requirement(line)
         for line in requirement.splitlines()
-        if line.startswith("torch>=") and 'python_version < "3.11"' in line
+        if line.startswith("torch>=")
     ]
-    assert len(lines) == 1, lines
+    assert len(requirements) == 1
+    assert requirements[0].marker is None
 
-    specifier = SpecifierSet(lines[0].split(";", 1)[0].removeprefix("torch"))
-    assert specifier.contains("2.13.0")
-    assert not specifier.contains(LAST_VULNERABLE_TORCH_VERSION)
-    assert not specifier.contains("2.14.0")
-    assert not specifier.contains("2.14.1")
+    specifier = requirements[0].specifier
+    assert specifier.contains(WEIGHTS_ONLY_ADVISORY.patched_version())
+    for versions in AFFECTED_VERSIONS.values():
+        assert not any(specifier.contains(version, prereleases=True) for version in versions)

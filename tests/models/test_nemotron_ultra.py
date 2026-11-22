@@ -16,7 +16,7 @@ class TestNemotronUltra(ModelTest):
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
 
     def test_nemotron_ultra(self):
         self.quantize_and_evaluate()

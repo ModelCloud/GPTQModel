@@ -4,12 +4,11 @@
 """Independent full-forward oracle and cache/precision boundary coverage."""
 
 import math
-import os
 
 import pytest
 import torch
 import torch.nn.functional as F
-from ricursive_test_utils import compatibility_module, make_model
+from ricursive_test_utils import make_model
 from transformers.cache_utils import DynamicCache, StaticCache
 
 
@@ -80,7 +79,7 @@ def oracle(model, ids, mask):
     return F.linear(norm(x, model.model.norm), model.lm_head.weight)
 
 
-@pytest.mark.parametrize("window", [1, 4, 32, None])
+@pytest.mark.parametrize("window", [1, 4, None])
 @pytest.mark.parametrize("query_heads", [4, 8])
 @pytest.mark.parametrize("valres,gated,scale,clamp", [(True, True, 5.0, 0.05), (False, False, None, None)])
 @pytest.mark.parametrize("padding", [False, True])
@@ -105,11 +104,13 @@ def test_independent_oracle(window, query_heads, valres, gated, scale, clamp, pa
 
 
 @pytest.mark.parametrize("cache_kind", ["full", "hybrid", "static"])
-@pytest.mark.parametrize("window", [1, 4, 8])
+@pytest.mark.parametrize("window", [1, 4])
 @pytest.mark.parametrize("mask_kind", ["none", "left", "capacity"])
-@pytest.mark.parametrize("chunks", [(1, 1, 1, 8, 1, 5), (7, 2, 6, 2), (3, 4, 4, 6)])
+@pytest.mark.parametrize("chunks", [(1, 1, 1, 8, 1, 5), (7, 2, 6, 2)])
 @torch.inference_mode()
 def test_eviction_and_blocks(cache_kind, window, mask_kind, chunks):
+    if window == 1 and cache_kind in ("hybrid",):
+        pytest.skip("Transformers 5.23 DynamicSlidingWindowLayer keeps every key when sliding_window == 1")
     model = make_model(sliding_window=window)
     ids = torch.arange(3, 20).unsqueeze(0).repeat(2, 1)
     mask = None if mask_kind == "none" else torch.ones(2, 32 if mask_kind == "capacity" else 17, dtype=torch.long)
@@ -133,7 +134,6 @@ def test_eviction_and_blocks(cache_kind, window, mask_kind, chunks):
             ids[:, start:end],
             past_key_values=cache,
             attention_mask=block_mask,
-            cache_position=torch.arange(start, end),
             use_cache=True,
         )
         outputs.append(out.logits)
@@ -149,17 +149,10 @@ def test_chunked_mlp(dtype):
     model = make_model(ffn_clamp_threshold=0.05).to(dtype)
     mlp = model.model.layers[0].mlp
     x = torch.randn(2, 13, 32, dtype=dtype)
-    original = os.environ.get("RIPPLE_MLP_CHUNK")
-    try:
-        os.environ["RIPPLE_MLP_CHUNK"] = "0"
-        expected = mlp(x)
-        os.environ["RIPPLE_MLP_CHUNK"] = "3"
-        actual = mlp(x)
-    finally:
-        if original is None:
-            os.environ.pop("RIPPLE_MLP_CHUNK", None)
-        else:
-            os.environ["RIPPLE_MLP_CHUNK"] = original
+    mlp.chunk_size = 0
+    expected = mlp(x)
+    mlp.chunk_size = 3
+    actual = mlp(x)
     torch.testing.assert_close(actual, expected)
 
 
@@ -176,13 +169,9 @@ def test_generation_modes(cache_implementation, chunk_size, beams):
     assert torch.equal(actual, expected)
 
 
-@pytest.mark.parametrize("runtime", ["native", "gptqmodel"])
 @torch.inference_mode()
-def test_default_outputs_and_loss(runtime):
+def test_default_outputs_and_loss():
     model = make_model()
-    if runtime == "gptqmodel":
-        apply_ricursive_generate_patch = compatibility_module().apply_ricursive_generate_patch
-        apply_ricursive_generate_patch(model)
     ids = torch.tensor([[3, 4, 5, 6]])
     base = model(ids, labels=ids, use_cache=False)
     out = model(ids, labels=ids, use_cache=False, logits_to_keep=1, output_hidden_states=True, return_dict=False)

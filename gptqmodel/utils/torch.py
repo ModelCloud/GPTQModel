@@ -1170,32 +1170,6 @@ def accelerator_context_claimed(device_type: str, index: Optional[int] = None) -
 
 
 _ACCELERATOR_DEVICE_TYPES = frozenset({"cuda", "xpu", "npu", "mps"})
-_DEFUSER_CONVERSION_LOCK = threading.RLock()
-
-
-def model_accelerator_devices(model) -> List[str]:
-    """Concrete accelerator ordinals that already hold model parameters or buffers.
-
-    Placement is read from the tensors rather than inferred from a selector: a
-    fused-expert model is converted while it still lives on CPU/meta, and a
-    model converted after placement keeps its real ordinals.
-    """
-
-    devices: List[str] = []
-    seen = set()
-    for source in (getattr(model, "parameters", None), getattr(model, "buffers", None)):
-        if not callable(source):
-            continue
-        for tensor in source():
-            device = getattr(tensor, "device", None)
-            if device is None or device.type not in _ACCELERATOR_DEVICE_TYPES:
-                continue
-            name = str(device)
-            if name in seen:
-                continue
-            seen.add(name)
-            devices.append(name)
-    return devices
 
 
 def _first_accelerator_tensor_device(value) -> Optional[torch.device]:
@@ -1298,58 +1272,6 @@ def model_execution_device_scope(model, *inputs):
             yield
         return
     yield
-
-
-@contextmanager
-def defuser_conversion_scope(model):
-    """Bound Defuser's ``clear_memory()`` to the devices the model occupies.
-
-    Defuser's fused-expert conversion calls ``clear_memory()`` without a device
-    list, and that helper synchronizes the *current* CUDA device. Converting a
-    CPU/meta model therefore initializes the primary context of cuda:0 --
-    hundreds of MiB on a GPU the caller excluded with ``device=("cuda:1",)`` or
-    with a CPU-only load (#5105). The pinned Defuser API accepts no device
-    argument, so scope the module-level reference it calls for the duration of
-    the conversion:
-
-    * a model that already holds accelerator tensors synchronizes exactly those
-      ordinals, preserving the barrier its own data needs;
-    * a CPU/meta model passes a CPU-only list, so no accelerator is claimed.
-      ``torch.cuda.empty_cache()`` still runs and does not create a context.
-
-    Defuser also synchronizes XPU unconditionally; that remains outside this
-    scope because the pinned API exposes no per-device hook for it.
-    """
-
-    if not torch.cuda.is_available():
-        # Defuser's CUDA branch is skipped entirely without a CUDA runtime.
-        yield
-        return
-
-    device_list = model_accelerator_devices(model) or ["cpu"]
-
-    try:
-        from defuser.modeling import moe_experts_interface as defuser_moe
-    except Exception:  # pragma: no cover - optional dependency layout
-        yield
-        return
-
-    original = getattr(defuser_moe, "clear_memory", None)
-    if not callable(original):
-        yield
-        return
-
-    def _scoped_clear_memory(*args, **kwargs):
-        if len(args) < 2 and "device_list" not in kwargs:
-            kwargs["device_list"] = device_list
-        return original(*args, **kwargs)
-
-    with _DEFUSER_CONVERSION_LOCK:
-        defuser_moe.clear_memory = _scoped_clear_memory
-        try:
-            yield
-        finally:
-            defuser_moe.clear_memory = original
 
 
 def torch_sync(device: torch.device = None):

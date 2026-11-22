@@ -255,19 +255,17 @@ Measured on Qwen2.5-0.5B-Instruct-GPTQ-Int4 with
 | AUTO, before | `MarlinLinear` | `ValueError: GPTQ Marlin requires CUDA tensors, got cpu` | n/a |
 | AUTO, after | `TritonV2Linear` | loads | bitwise equal (`rel 0.0`) |
 
-### The Transformers/Optimum bridge derives the same contract
+### Transformers/Optimum selectors derive the same contract
 
 `GPTQModel.load` is not the only entry point that can receive an offloading map.
-`AutoModelForCausalLM.from_pretrained` reaches the kernels through three
-selectors, and all three must derive `cpu_offload` from the map they are handed
-(#5022):
+`AutoModelForCausalLM.from_pretrained` reaches the kernels through two public
+selectors that Transformers and Optimum call, and both must derive
+`cpu_offload` from the map they are handed (#5022):
 
 * `gptqmodel.utils.importer.hf_select_quant_linear` — Transformers' GPTQ
   quantizer (`GptqHfQuantizer`).
 * `gptqmodel.utils.importer.hf_select_quant_linear_v2` — Optimum's
   `GPTQQuantizer.convert_model` and Transformers' AWQ `replace_with_awq_linear`.
-* `gptqmodel.utils.hf_load.hf_gptqmodel_prepare_model_for_load` — the native
-  bridge, which calls `make_quant` directly instead of a selector.
 
 `utils.importer.device_map_uses_cpu` is the single implementation (the native
 loader's `_device_map_uses_cpu` delegates to it), and

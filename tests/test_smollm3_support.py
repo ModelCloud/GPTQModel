@@ -4,15 +4,13 @@ from transformers import SmolLM3Config, SmolLM3ForCausalLM
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.llama import LlamaQModel
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
 
-def test_smollm3_model_type_selects_llama_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="smollm3")
+def test_smollm3_model_type_selects_llama_definition(tmp_path):
+    CONFIG_MAPPING["smollm3"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/smollm3") is LlamaQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is LlamaQModel
 
 
 def test_smollm3_quantization_groups_match_runtime_projection_order():

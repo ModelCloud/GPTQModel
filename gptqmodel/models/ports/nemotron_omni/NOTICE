@@ -1,0 +1,21 @@
+GPT-QModel Nemotron Nano Omni compatibility binding
+
+Copyright (c) 2025-2026 NVIDIA CORPORATION. All rights reserved.
+Copyright 2026 ModelCloud.ai.
+
+Adapted from NVIDIA's NemotronH_Nano_Omni_Reasoning_V3 modeling.py,
+configuration.py and EVS, revision e5e9932441de940c9a62185c870ea5bcd4cd24e2,
+and the Apache-2.0 Transformers 5.23.0 Nemotron-H Omni implementation.
+The original modeling.py/configuration.py copyright and license headers
+identify Apache License 2.0; LICENSE preserves that license. EVS uses the
+Apache-2.0 Transformers implementation; the inspected standalone upstream
+evs.py has no file header and is not copied into this package.
+The Parakeet, RADIO and Nemotron-H implementations remain Transformers
+dependencies, not copied modeling implementations in this package.
+
+The NVIDIA checkpoint model card separately identifies the NVIDIA Open
+Model Agreement for the model/weights. This source-code license does not
+relicense NVIDIA's trained weights, tokenizer data or accompanying assets.
+https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/
+
+No checkpoint Python is loaded or executed at runtime.

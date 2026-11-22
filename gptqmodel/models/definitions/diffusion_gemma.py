@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 import torch
 from torch import nn
-from transformers import AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 from transformers.pytorch_utils import id_tensor_storage
 
 from ...nn_modules.qlinear import BaseQuantLinear
@@ -17,6 +17,7 @@ from ...utils.model import MODALITY, get_module_by_name_prefix, move_to, nested_
 from ...utils.torch import torch_empty_cache
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
@@ -140,8 +141,10 @@ def _same_tensor_storage(left: torch.Tensor, right: torch.Tensor) -> bool:
     return id_tensor_storage(left) == id_tensor_storage(right)
 
 
-def _refresh_tied_weight_metadata(model, include_layer_ties: bool = False) -> None:
-    """Refresh tie metadata after defusion/quantization changes module aliases."""
+def _refresh_tied_weight_metadata(
+    model, include_layer_ties: bool = False, *, loading_quantized: bool = False
+) -> None:
+    """Refresh tie metadata for the current defused or quantized layer layout."""
 
     core = model.model
     if not _encoder_decoder_tied(model):
@@ -156,26 +159,29 @@ def _refresh_tied_weight_metadata(model, include_layer_ties: bool = False) -> No
     tied_weights = getattr(core, "_tied_weights_keys", None) or {}
     layer_markers = ("encoder.language_model.layers", "decoder.layers")
     # Defusion changes the module tree after the original tie map was built.
-    # Keep only stable non-layer aliases here, then infer layer aliases from
-    # live storage below so stale mappings cannot hide checkpoint tensors.
+    # Keep stable non-layer aliases, then rebuild layer aliases from the
+    # current layout so stale mappings cannot hide checkpoint tensors.
     stable_weights = {
         target: source
         for target, source in tied_weights.items()
         if not any(marker in str(target) or marker in str(source) for marker in layer_markers)
     }
 
-    if include_layer_ties:
+    if include_layer_ties or loading_quantized:
         encoder_layers = core.encoder.language_model.layers
         decoder_layers = core.decoder.layers
         for layer_index, (encoder_layer, decoder_layer) in enumerate(zip(encoder_layers, decoder_layers)):
             encoder_tensors = dict(encoder_layer.named_parameters(remove_duplicate=False))
-            encoder_tensors.update(encoder_layer.named_buffers(remove_duplicate=False))
             decoder_tensors = dict(decoder_layer.named_parameters(remove_duplicate=False))
-            decoder_tensors.update(decoder_layer.named_buffers(remove_duplicate=False))
+            if not loading_quantized:
+                encoder_tensors.update(encoder_layer.named_buffers(remove_duplicate=False))
+                decoder_tensors.update(decoder_layer.named_buffers(remove_duplicate=False))
 
             for relative_name, encoder_tensor in encoder_tensors.items():
                 decoder_tensor = decoder_tensors.get(relative_name)
-                if decoder_tensor is None or not _same_tensor_storage(encoder_tensor, decoder_tensor):
+                if decoder_tensor is None or decoder_tensor.shape != encoder_tensor.shape:
+                    continue
+                if not loading_quantized and not _same_tensor_storage(encoder_tensor, decoder_tensor):
                     continue
                 stable_weights[f"decoder.layers.{layer_index}.{relative_name}"] = (
                     f"encoder.language_model.layers.{layer_index}.{relative_name}"
@@ -191,7 +197,12 @@ class DiffusionGemmaQModel(BaseQModel):
     fusable = FusableConfig("diffusion_gemma").merge(LlamaFusableConfig(), profiles=("gate_up",))
 
 
-    loader = AutoModelForMultimodalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForMultimodalLM",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
     require_load_processor = True
     support_batch_quantize = False
     layer_modules_strict = False
@@ -272,15 +283,13 @@ class DiffusionGemmaQModel(BaseQModel):
 
     @classmethod
     def after_make_quant(cls, model):
-        # A saved checkpoint stores the encoder owner only: `make_quant`
-        # replaces the encoder leaves with `QuantLinear` and leaves the tied
-        # decoder dense with `torch.empty` storage. Reattach those leaves and
-        # the remaining dense aliases here, before the loader's checkpoint
-        # guard runs; `after_model_load` is too late because the guard raises
-        # first (#5514). The untied case stays refused by
-        # `pre_quantize_generate_hook_start` and is a no-op here (#5411).
+        # Checkpoints store the packed encoder leaves once. Share their
+        # modules before loading. Declare the remaining parameter ties in
+        # metadata so tie_weights can select the populated side after loading.
+        # Sharing dense storage now would let Accelerate retie to a sibling
+        # whose checkpoint key was absent and discard the populated value.
         _sync_decoder_quantized_modules(model)
-        _sync_decoder_tied_parameters(model)
+        _refresh_tied_weight_metadata(model, loading_quantized=True)
         return model
 
     def after_model_load(self, model, load_quantized_model=False):
@@ -397,7 +406,14 @@ class DiffusionGemmaQModel(BaseQModel):
         return additional_inputs
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
+        processor = getattr(self, "processor", None)
+        if processor is not None:
+            return processor
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
 
     @classmethod
     def prepare_inputs_for_conversations(

@@ -7,7 +7,6 @@ import copy
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 import torch
 from model_test import ModelTest
 from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
@@ -15,6 +14,7 @@ from transformers.masking_utils import create_causal_mask, create_recurrent_atte
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.solar_open2 import SolarOpen2QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.ports.solar_open2 import SolarOpen2Config, SolarOpen2ForCausalLM
 from gptqmodel.quantization.config import VramStrategy
 from gptqmodel.utils.hf import build_shell_model
 from gptqmodel.utils.structure import LazyTurtle
@@ -24,12 +24,6 @@ MODEL_PATH = Path("/monster/data/model/Solar-Open2-250B")
 
 
 def _tiny_model():
-    transformers = pytest.importorskip("transformers")
-    SolarOpen2Config = getattr(transformers, "SolarOpen2Config", None)
-    SolarOpen2ForCausalLM = getattr(transformers, "SolarOpen2ForCausalLM", None)
-    if SolarOpen2Config is None or SolarOpen2ForCausalLM is None:
-        pytest.skip("Installed Transformers does not provide Solar Open 2")
-
     config = SolarOpen2Config(
         vocab_size=64,
         hidden_size=16,
@@ -58,8 +52,7 @@ def _tiny_model():
 def test_solar_open2_model_type_selects_definition(monkeypatch):
     fake_config = SimpleNamespace(model_type="solar_open2")
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: fake_config)
 
     assert auto.check_and_get_model_definition("/tmp/solar-open2") is SolarOpen2QModel
 
@@ -114,11 +107,12 @@ def test_solar_open2_replay_rebuilds_full_and_linear_attention_masks():
     assert linear_inputs["attention_mask"].shape == padding_mask.shape
 
 
-def test_solar_open2_lazy_turtle_materializes_defused_expert_weights(tmp_path):
+def test_solar_open2_lazy_turtle_materializes_released_expert_weights(tmp_path):
     source = _tiny_model()
-    packed_experts = source.model.layers[0].mlp.experts
-    expected_gate, expected_up = packed_experts.gate_up_proj[0].detach().chunk(2, dim=0)
-    expected_down = packed_experts.down_proj[0].detach()
+    source_expert = source.model.layers[0].mlp.experts[0]
+    expected_gate = source_expert.gate_proj.weight.detach().clone()
+    expected_up = source_expert.up_proj.weight.detach().clone()
+    expected_down = source_expert.down_proj.weight.detach().clone()
     source.save_pretrained(tmp_path, safe_serialization=True)
 
     shell = build_shell_model(
@@ -128,7 +122,8 @@ def test_solar_open2_lazy_turtle_materializes_defused_expert_weights(tmp_path):
         device_map={"": "cpu"},
         _fast_init=True,
     )
-    assert _convert_model_with_defuser(SolarOpen2QModel, shell, cleanup_original=False) is True
+    _convert_model_with_defuser(SolarOpen2QModel, shell, cleanup_original=False)
+    assert isinstance(shell.model.layers[0].mlp.experts, torch.nn.ModuleList)
     turtle = LazyTurtle(
         model_local_path=str(tmp_path),
         config=shell.config,
@@ -166,8 +161,8 @@ class TestSolarOpen2(ModelTest):
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
-
     def test_solar_open2(self):
         self.quantize_and_evaluate()
+
 
 __all__ = ["TestSolarOpen2"]

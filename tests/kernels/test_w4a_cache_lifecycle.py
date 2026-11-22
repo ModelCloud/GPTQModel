@@ -762,6 +762,7 @@ def test_rocm_rejects_the_w4a_backend(monkeypatch, cls):
 
 def test_rocm_kernels_refuse_before_lowering(monkeypatch):
     """Direct kernel calls must report the platform, not a PassManager crash."""
+    pytest.importorskip("triton")
     from gptqmodel.nn_modules.qlinear import w4a_nvfp4_triton as nvfp4_triton
     from gptqmodel.nn_modules.qlinear import w4a_triton
 

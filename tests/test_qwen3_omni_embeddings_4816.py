@@ -4,7 +4,8 @@
 """Qwen3-Omni must expose the thinker embedding endpoints (issue #4816).
 
 transformers 5.22 leaves ``get_input_embeddings`` unimplemented on
-``Qwen3OmniMoeForConditionalGeneration`` and returns ``None`` from
+``Qwen3OmniMoeForConditionalGeneration`` (vendored unchanged in
+``gptqmodel.models.ports.native.qwen3_omni_moe``, which the definition loads) and returns ``None`` from
 ``get_output_embeddings`` because the getter delegates to it. Both endpoints
 live on the nested ``thinker``, so ``quantize()`` crashed during input capture
 before layer 0. These tests use a meta-device tiny config: no checkpoint and no
@@ -14,11 +15,15 @@ before layer 0. These tests use a meta-device tiny config: no checkpoint and no
 import pytest
 import torch
 from torch import nn
-from transformers import PreTrainedModel, Qwen3OmniMoeConfig, Qwen3OmniMoeForConditionalGeneration
+from transformers import PreTrainedModel
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
+from gptqmodel.models.ports.native.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeConfig
+from gptqmodel.models.ports.native.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+    Qwen3OmniMoeForConditionalGeneration,
+)
 from gptqmodel.utils.model import thinker_text_model
 
 
@@ -93,22 +98,22 @@ def test_qwen3_omni_resolves_the_thinker_embedding_endpoints():
     assert Qwen3OmniMoeGPTQ.lm_head == "thinker.lm_head"
 
 
-def test_qwen3_omni_patches_the_hf_getters_for_the_quantized_load_path():
+def test_qwen3_omni_loaded_instance_resolves_hf_getters_without_patching_the_class():
     model = _tiny_qwen3_omni()
-    instance = _wrapper(Qwen3OmniMoeGPTQ, model)
     wrapper_cls = Qwen3OmniMoeForConditionalGeneration
-    original = (wrapper_cls.get_input_embeddings, wrapper_cls.get_output_embeddings)
-    try:
-        instance.before_model_load("", False)
-        # The quantized loader discovers the endpoints on the HF class itself.
-        assert model.get_input_embeddings() is thinker_text_model(model).embed_tokens
-        assert model.get_output_embeddings() is model.thinker.lm_head
-        # A second load must not wrap the patch again.
-        patched = (wrapper_cls.get_input_embeddings, wrapper_cls.get_output_embeddings)
-        instance.before_model_load("", False)
-        assert (wrapper_cls.get_input_embeddings, wrapper_cls.get_output_embeddings) == patched
-    finally:
-        wrapper_cls.get_input_embeddings, wrapper_cls.get_output_embeddings = original
+    class_state = dict(vars(wrapper_cls))
+    Qwen3OmniMoeGPTQ.after_defuser_conversion(model)
+    # The quantized loader discovers the endpoints on the loaded model itself.
+    assert model.get_input_embeddings() is thinker_text_model(model).embed_tokens
+    assert model.get_output_embeddings() is model.thinker.lm_head
+    # Only this instance changed: the vendored class is untouched.
+    assert dict(vars(wrapper_cls)) == class_state
+    assert wrapper_cls.get_input_embeddings is PreTrainedModel.get_input_embeddings
+    with pytest.raises(NotImplementedError):
+        _tiny_qwen3_omni().get_input_embeddings()
+    # Idempotent.
+    Qwen3OmniMoeGPTQ.after_defuser_conversion(model)
+    assert model.get_output_embeddings() is model.thinker.lm_head
 
 
 def test_composite_wrapper_without_overrides_resolves_the_input_embedding():

@@ -9,7 +9,7 @@ L2-clip children, a gated ``o_proj`` pair, short convolutions) and four decoder
 layer classes: sliding/full attention, each with a looped and a non-looped
 variant. The looped variants add q/k/v/mlp message gates.
 
-The architecture is implemented in ``gptqmodel/models/inkling2_loop``, so every
+The architecture is implemented in ``gptqmodel/models/ports/inkling2_loop``, so every
 case here builds the real model class from a tiny config: nothing depends on a
 Transformers release shipping an ``inkling2_loop`` implementation.
 """
@@ -61,7 +61,7 @@ ATTENTION_LEAVES = (
 def _inkling2_modules():
     """Return the clean-room Inkling2Loop configuration/modeling modules."""
 
-    from gptqmodel.models.inkling2_loop import configuration, modeling
+    from gptqmodel.models.ports.inkling2_loop import configuration, modeling
 
     return configuration, modeling
 
@@ -98,6 +98,68 @@ def _tiny_config(configuration):
             "text_hidden_size": hidden,
         },
     )
+
+
+def test_inkling2_loop_public_loader_uses_local_code_and_checkpoint_keys(tmp_path, monkeypatch):
+    pytest.importorskip("torchvision")
+    from PIL import Image
+    from safetensors.torch import save_file
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import PreTrainedTokenizerFast
+    from transformers.conversion_mapping import get_checkpoint_conversion_mapping
+
+    from gptqmodel import GPTQModel
+
+    configuration, modeling = _inkling2_modules()
+    config = _tiny_config(configuration)
+    config.image_token_id = 4
+    config.text_config.eos_token_id = 3
+    config.vision_config.patch_size = 2
+    config.auto_map = {"AutoConfig": "missing.BadConfig", "AutoModelForMultimodalLM": "missing.BadModel"}
+    config.save_pretrained(tmp_path)
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(WordLevel(
+            {"[UNK]": 0, "[PAD]": 1, "[BOS]": 2, "[EOS]": 3, "<|unused_200054|>": 4},
+            unk_token="[UNK]",
+        )),
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+        bos_token="[BOS]",
+        eos_token="[EOS]",
+        additional_special_tokens=["<|unused_200054|>"],
+    )
+    tokenizer.save_pretrained(tmp_path)
+    (tmp_path / "processor_config.json").write_text(json.dumps({
+        "processor_class": "Inkling2Processor",
+        "image_processor": {"image_processor_type": "Inkling2ImageProcessor", "size": {"height": 4, "width": 4}},
+        "auto_map": {"AutoProcessor": "missing.BadProcessor"},
+    }))
+    source = modeling.Inkling2LoopForConditionalGeneration(config)
+    checkpoint = {key: tensor.clone().contiguous() for key, tensor in source.state_dict().items()}
+    for runtime, released in (
+        ("model.language_model.embed_tokens.weight", "model.llm.embed.weight"),
+        ("model.language_model.layers.1.attention_input.query", "model.llm.attn_res.attn_queries.0"),
+    ):
+        checkpoint[released] = checkpoint.pop(runtime)
+    save_file(checkpoint, tmp_path / "model.safetensors", metadata={"format": "pt"})
+
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    wrapper = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=True)
+    assert isinstance(wrapper.model, modeling.Inkling2LoopForConditionalGeneration)
+    assert get_checkpoint_conversion_mapping("inkling2_loop") is None
+    for name in ("model.language_model.embed_tokens.weight", "model.language_model.layers.1.attention_input.query"):
+        torch.testing.assert_close(wrapper.model.state_dict()[name], source.state_dict()[name], rtol=0, atol=0)
+    assert wrapper.awq_get_modules_for_scaling(None, {}, {}) == []
+    image_inputs = wrapper.processor.image_processor(Image.new("RGB", (7, 3)), return_tensors="pt")
+    assert image_inputs["image_grid_thw"].tolist() == [[1, 1, 2]]
+    assert wrapper.processor.replace_image_token(image_inputs, 0) == "<|unused_200054|>" * 2
+    with torch.no_grad():
+        output = wrapper.model(
+            input_ids=torch.tensor([[2, 4, 4, 7]]), use_cache=False, **image_inputs,
+        )
+    assert output.logits.shape == (1, 4, config.text_config.unpadded_vocab_size)
+    assert torch.isfinite(output.logits).all()
 
 
 def test_inkling2_config_preserves_unused_kwargs_with_expert_manifest(tmp_path):

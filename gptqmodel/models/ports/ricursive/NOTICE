@@ -1,0 +1,16 @@
+Ricursive / Ripple package-owned Transformers 5 implementation
+
+Configuration and modeling code adapted from ricursiveAI/Ripple-65B-Preview,
+revision 2f007aabfcedd0f8763d86d08f9aa0afbc344cea:
+https://huggingface.co/ricursiveAI/Ripple-65B-Preview/tree/2f007aabfcedd0f8763d86d08f9aa0afbc344cea
+
+Additional schema/tokenizer evidence from ricursiveAI/Ripple-65B-Base-Preview,
+revision 6187d1108a25fcc31681ec942ec3c581721b9fe1:
+https://huggingface.co/ricursiveAI/Ripple-65B-Base-Preview/tree/6187d1108a25fcc31681ec942ec3c581721b9fe1
+
+The upstream repositories declare Apache-2.0 (see the repository LICENSE).
+
+Modifications by ModelCloud.ai, 2026: explicit package-owned loading and native
+Transformers 5 generation/cache APIs, config-owned MLP chunking, immutable
+disabled-window cache metadata, native serialized-BPE tokenizer binding,
+effective ungated module plans, and conservative plain AWQ qualification.

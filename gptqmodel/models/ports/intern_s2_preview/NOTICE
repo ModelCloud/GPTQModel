@@ -1,0 +1,14 @@
+Intern-S2 Preview software adapted for package-owned loading in GPT-QModel.
+Upstream: internlm/Intern-S2-Preview
+Revision: 4f57cab513689b089019fce4ad24e26520df183c
+
+Model, configuration and processor:
+Copyright 2025 The Qwen Team and The HuggingFace Inc. team.
+
+Scientific tokenizer:
+Copyright 2025 The Intern team and Shanghai AI Lab team.
+
+Adaptations: ModelCloud.ai, 2026.
+Licensed under the Apache License, Version 2.0 (repository root LICENSE).
+The text decoder, hybrid cache and shared vision layers are imported from
+Hugging Face Transformers (models/qwen3_5_moe), not copied.

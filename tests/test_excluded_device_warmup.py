@@ -210,38 +210,34 @@ def test_prewarm_target_follows_the_filtered_pool(monkeypatch):
     assert auto._resolve_prewarm_device(None, None) == torch.device("cuda")
 
 
-def test_defuser_conversion_scope_passes_the_model_devices(monkeypatch):
-    """The cache flush must receive the devices the converted model occupies.
+def test_defuser_conversion_on_a_cpu_model_claims_no_accelerator(monkeypatch):
+    """Converting a CPU/meta model must not synchronize any CUDA device (#5105).
 
-    Defuser calls ``clear_memory()`` with no argument, so the scope injects the
-    list. A CPU/meta model gets a CPU-only list (no synchronize); a model that
-    already holds CUDA tensors gets exactly those ordinals.
+    Defuser >= 0.0.32 scopes its cache flush to the devices the model occupies,
+    so GPT-QModel calls it unmodified instead of swapping ``clear_memory``.
     """
 
     defuser_moe = pytest.importorskip("defuser.modeling.moe_experts_interface")
-    from gptqmodel.utils.torch import defuser_conversion_scope
+    from gptqmodel.models.loader import _convert_model_with_defuser
 
+    synced = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    calls = []
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda device=None: synced.append(device))
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: synced.append("empty"))
+    monkeypatch.setattr(defuser_moe, "_unfuse_experts_weights_inplace", lambda *a, **k: True)
+    original_clear_memory = defuser_moe.clear_memory
 
-    def recorder(*args, **kwargs):
-        calls.append(kwargs)
+    model = torch.nn.Module()
+    model.experts = torch.nn.Linear(2, 2)
+    model.config = SimpleNamespace(model_type="mixtral")
+    definition = SimpleNamespace(module_tree=None)
+    _convert_model_with_defuser(definition, model, cleanup_original=False)
 
-    monkeypatch.setattr(defuser_moe, "clear_memory", recorder)
-
-    def _model(device):
-        tensor = SimpleNamespace(device=torch.device(device))
-        return SimpleNamespace(parameters=lambda: iter([tensor]), buffers=lambda: iter([]))
-
-    with defuser_conversion_scope(_model("cpu")):
-        defuser_moe.clear_memory()
-        assert defuser_moe.clear_memory is not recorder
-    assert defuser_moe.clear_memory is recorder
-    with defuser_conversion_scope(_model("cuda:1")):
-        defuser_moe.clear_memory()
-
-    assert calls[0]["device_list"] == ["cpu"]
-    assert calls[1]["device_list"] == ["cuda:1"]
+    assert synced == []
+    # GPT-QModel never patches Defuser.
+    assert defuser_moe.clear_memory is original_clear_memory
 
 
 def _patch_sync_surface(monkeypatch, torch_utils, claimed):

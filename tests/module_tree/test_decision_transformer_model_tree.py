@@ -17,9 +17,11 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import DecisionTransformerConfig
 
 from gptqmodel.models.auto import MODEL_MAP
+from gptqmodel.models.ports.native.decision_transformer.configuration_decision_transformer import (
+    DecisionTransformerConfig,
+)
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
 
 

@@ -99,7 +99,9 @@ def test_jamba_declares_mamba_x_proj():
 
 
 def _tiny_axk2_config():
-    return transformers.AXK2Config(
+    from gptqmodel.models.ports.native.axk2.configuration_axk2 import AXK2Config
+
+    return AXK2Config(
         vocab_size=64,
         hidden_size=32,
         intermediate_size=48,
@@ -212,7 +214,7 @@ def _assert_after(indices, producer: str, consumer: str) -> None:
         ),
         (
             "bailing_moe",
-            {"self_attn.kv_b_proj": 1, "self_attn.o_proj": 2},
+            {"self_attn.kv_a_proj_with_mqa": 1, "self_attn.kv_b_proj": 2, "self_attn.o_proj": 3},
         ),
         (
             "deepseek_vl_v2",

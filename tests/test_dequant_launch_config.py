@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import pytest
 
+
+# The launch table lives in the Triton dequant kernel module, which imports triton.
+pytest.importorskip("triton")
+
 from gptqmodel.nn_modules.triton_utils.dequant import (
     DEQUANT_NUM_STAGES,
     DEQUANT_NUM_WARPS,

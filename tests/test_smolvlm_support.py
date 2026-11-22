@@ -12,6 +12,7 @@ from transformers import AutoConfig, SmolVLMConfig, SmolVLMForConditionalGenerat
 from gptqmodel.models import auto
 from gptqmodel.models.definitions import smolvlm as smolvlm_definition
 from gptqmodel.models.definitions.smolvlm import SmolVLMQModel
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
 
 def _tiny_smolvlm():
@@ -36,13 +37,10 @@ def _tiny_smolvlm():
     return config, SmolVLMForConditionalGeneration(config)
 
 
-def test_smolvlm_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="smolvlm")
+def test_smolvlm_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["smolvlm"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/smolvlm") is SmolVLMQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is SmolVLMQModel
     assert auto.MODEL_MAP["smolvlm"] is SmolVLMQModel
 
 

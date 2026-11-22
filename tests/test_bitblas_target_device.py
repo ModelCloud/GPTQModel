@@ -65,3 +65,15 @@ def test_import_bitblas_probes_the_selected_logical_device(monkeypatch):
     bitblas_module.import_bitblas()
 
     assert detected == [1]
+
+
+def test_import_bitblas_does_not_replace_bitblas_target_detection(monkeypatch):
+    _install_fake_bitblas(monkeypatch)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    fake_bitblas = sys.modules["bitblas"]
+
+    bitblas_module.import_bitblas()
+
+    # GPT-QModel passes its detected target to `Matmul(target=...)` and never
+    # rebinds BitBLAS's own detector.
+    assert "auto_detect_nvidia_target" not in vars(fake_bitblas)

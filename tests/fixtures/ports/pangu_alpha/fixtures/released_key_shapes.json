@@ -1,0 +1,28 @@
+{
+  "tensor_key_ranges": [
+    ["lm_head.weight", [], [40000, 2560]],
+    ["transformer.h.{}.attn.bias", ["0-31"], [1, 1, 1024, 1024]],
+    ["transformer.h.{}.attn.c_proj.bias", ["0-31"], [2560]],
+    ["transformer.h.{}.attn.c_proj.weight", ["0-31"], [2560, 2560]],
+    ["transformer.h.{}.attn.k_proj.bias", ["0-31"], [2560]],
+    ["transformer.h.{}.attn.k_proj.weight", ["0-31"], [2560, 2560]],
+    ["transformer.h.{}.attn.masked_bias", ["0-31"], []],
+    ["transformer.h.{}.attn.q_proj.bias", ["0-31"], [2560]],
+    ["transformer.h.{}.attn.q_proj.weight", ["0-31"], [2560, 2560]],
+    ["transformer.h.{}.attn.v_proj.bias", ["0-31"], [2560]],
+    ["transformer.h.{}.attn.v_proj.weight", ["0-31"], [2560, 2560]],
+    ["transformer.h.{}.ln_1.bias", ["0-31"], [2560]],
+    ["transformer.h.{}.ln_1.weight", ["0-31"], [2560]],
+    ["transformer.h.{}.ln_2.bias", ["0-31"], [2560]],
+    ["transformer.h.{}.ln_2.weight", ["0-31"], [2560]],
+    ["transformer.h.{}.mlp.c_fc.bias", ["0-31"], [10240]],
+    ["transformer.h.{}.mlp.c_fc.weight", ["0-31"], [10240, 2560]],
+    ["transformer.h.{}.mlp.c_proj.bias", ["0-31"], [2560]],
+    ["transformer.h.{}.mlp.c_proj.weight", ["0-31"], [2560, 10240]],
+    ["transformer.ln_f.bias", [], [2560]],
+    ["transformer.ln_f.weight", [], [2560]],
+    ["transformer.wpe.weight", [], [1024, 2560]],
+    ["transformer.wqe.weight", [], [1024, 2560]],
+    ["transformer.wte.weight", [], [40000, 2560]]
+  ]
+}

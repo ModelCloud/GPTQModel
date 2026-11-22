@@ -1,0 +1,55 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architecture": "resnet26",
+  "architectures": null,
+  "chunk_size_feed_forward": 0,
+  "do_pooling": true,
+  "dtype": null,
+  "initializer_range": 0.02,
+  "is_encoder_decoder": false,
+  "label_names": [
+   "LABEL_0",
+   "LABEL_1"
+  ],
+  "model_args": {
+   "channels": [
+    16,
+    16,
+    16,
+    16
+   ]
+  },
+  "model_type": "timm_wrapper",
+  "num_classes": 2,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "problem_type": null,
+  "return_dict": true,
+  "transformers_version": "5.23.0"
+ },
+ "config_class": "TimmWrapperConfig",
+ "config_module": "configuration_timm_wrapper",
+ "extra_inputs": {},
+ "float_inputs": {
+  "pixel_values": {
+   "dtype": "float32",
+   "shape": [
+    3,
+    3,
+    32,
+    32
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_timm_wrapper",
+   "TimmWrapperModel"
+  ],
+  [
+   "modeling_timm_wrapper",
+   "TimmWrapperForImageClassification"
+  ]
+ ]
+}

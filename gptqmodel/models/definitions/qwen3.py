@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..ports.qwen3 import Qwen3Loader
 from . import LlamaQModel
 
 
@@ -13,8 +14,10 @@ class Qwen3QModel(LlamaQModel):
     ahead of the attention projections. We mark those helper modules as
     non-quantized so the layer walker captures the complete structure.
     """
+
     fusable = FusableConfig("qwen3").merge(LlamaFusableConfig())
 
+    loader = Qwen3Loader()
 
     shared_input_verified_model_types = frozenset({"qwen3"})
 

@@ -10,6 +10,8 @@ from typing import Any, Dict, Mapping, Optional
 
 import torch
 
+from .security import require_remote_code_permission
+
 
 VLLM_VERSION: Optional[str] = None
 VLLM_IMPORT_ERROR: Optional[Exception] = None
@@ -160,6 +162,7 @@ def load_model_by_vllm(
     model,
     **kwargs,
 ):
+    require_remote_code_permission(kwargs.get("trust_remote_code", False))
     _require_vllm()
     return LLM(
         model=model,

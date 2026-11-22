@@ -25,6 +25,7 @@ import triton.language as tl
 
 from gptqmodel.utils.arch import tuning_family
 from gptqmodel.utils.kernel import get_kernel_config
+from gptqmodel.utils.triton_jit import jit as triton_jit
 
 
 PARO_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
@@ -146,7 +147,7 @@ def get_same_device_cm(t):
     return torch.cuda.device(t.device.index)
 
 
-@triton.jit
+@triton_jit
 def paro_dequantize_kernel(
     qweight_ptr,
     scales_ptr,
@@ -218,7 +219,7 @@ def paro_dequantize_kernel(
     tl.store(result_ptr + result_offsets, iweights, result_masks)
 
 
-@triton.jit
+@triton_jit
 def paro_gemm_kernel(
     a_ptr,
     b_ptr,

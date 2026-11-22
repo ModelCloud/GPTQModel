@@ -8,7 +8,7 @@ from typing import Dict, Optional
 
 import torch
 from PIL import Image
-from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
@@ -22,6 +22,7 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from ._omni_thinker_layout import OmniThinkerCheckpointLayoutMixin
 from ._thinker_embeddings import ThinkerEmbeddingsMixin
@@ -50,7 +51,6 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, OmniThinkerCheckpointLayoutMixin, T
 
     # transformers 5.22 leaves `get_input_embeddings`/`get_output_embeddings`
     # unimplemented on the Omni wrapper; both endpoints live on `thinker`.
-    HF_WRAPPER_CLASS_NAME = "Qwen3OmniMoeForConditionalGeneration"
     lm_head = "thinker.lm_head"
 
     # The thinker decoder is calibrated on activations that include the vision
@@ -63,15 +63,16 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, OmniThinkerCheckpointLayoutMixin, T
         "return_audio": False,
     }
 
-    loader = AutoModelForTextToWaveform
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForTextToWaveform",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     dynamic_expert_index = "num_experts"
 
-    # transformers 5.22 nests the thinker decoder under `language_model`.
-    pre_lm_head_norm_module = [
-        "thinker.model.language_model.norm",
-        "thinker.model.norm",
-    ]
+    pre_lm_head_norm_module = "thinker.model.language_model.norm"
 
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
@@ -101,7 +102,7 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, OmniThinkerCheckpointLayoutMixin, T
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path)
+        return self.__dict__.get("processor") or type(self).loader.load_processor(self.model_local_path)
 
     def _prepare_calibration_batches(self, conversations, batch_size):
         processor = self.__dict__.get("processor") or self.load_processor()
@@ -237,6 +238,6 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, OmniThinkerCheckpointLayoutMixin, T
             self.pre_lm_head_norm_module = f"{text_prefix}.norm"
         # need to load processor for save processor_config and chat_template
         if not load_quantized_model and self.require_load_processor:
-            self.processor = AutoProcessor.from_pretrained(self.model_local_path)
+            self.processor = type(self).loader.load_processor(self.model_local_path, config=model.config)
 
         return model

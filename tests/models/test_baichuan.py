@@ -9,7 +9,7 @@ from model_test import ModelTest
 
 
 class TestBaiChuan(ModelTest):
-    """Compat coverage for Baichuan remote tokenizer loading and monolithic checkpoint handling."""
+    """Baichuan local modeling and monolithic checkpoint integration coverage."""
 
     NATIVE_MODEL_ID = "/monster/data/model/Baichuan2-7B-Chat" # "baichuan-inc/Baichuan2-7B-Chat"
     NATIVE_ARC_CHALLENGE_ACC = 0.4104
@@ -19,15 +19,15 @@ class TestBaiChuan(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_FAST = {"A100": 0.3771, "RTX4090": 0.3890}
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = {"A100": 0.3890, "RTX4090": 0.4001}
     MODEL_MAX_LEN = 4096
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 6
     OFFLOAD_TO_DISK = False  # Local checkpoint is a monolithic .bin, so LazyTurtle offload is unavailable.
     ASSERT_INFERENCE = True
 
     def test_baichuan(self):
-        # Baichuan's remote tokenizer imports sentencepiece eagerly, so skip before model load when absent.
+        # Tokenizer normalization belongs to Tokenicer; modeling is package-owned.
         if importlib.util.find_spec("sentencepiece") is None:
-            self.skipTest("Baichuan tokenizer remote code requires sentencepiece")
+            self.skipTest("Baichuan tokenizer requires sentencepiece")
 
         self.quantize_and_evaluate()

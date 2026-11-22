@@ -485,61 +485,19 @@ past", never as an empty tuple that legacy code will index; a native
 transformers class is never wrapped; a definition's hook runs on every load
 path and must stay idempotent because quantize and reload can share a process.
 
-## M. Legacy `generate()` input contract and cache storage (issue #5090)
+## M. Hymba `generate()` and the `flex` attention hint (issue #5090)
 
-The #4121 adapter restored the transformers-4 KV-cache shape but not three
-other inputs that `generate()` used to hand a remote
-`prepare_inputs_for_generation`. Hymba (`nvidia/Hymba-1.5B-Base`/`-Instruct`)
-hit all three in sequence: fixing one only surfaced the next.
-
-| Removed transformers-4 behaviour | Hymba failure on `main` |
-| --- | --- |
-| an all-ones `attention_mask` is always passed | `AttributeError: 'NoneType' object has no attribute 'device'` |
-| `position_ids` is left to the model | `RuntimeError: shape '[-1, 134]' is invalid for input of size 6` |
-| `Cache.__len__`/`get_max_length()` read the cache's own storage | `AttributeError: 'HybridMambaAttentionDynamicCache' object has no attribute 'layers'` |
-
-In addition, transformers 5 validates `config._attn_implementation` in
-`PreTrainedModel.__init__` *before* `HymbaModel.__init__` copies the model's own
-`attn_implementation_new` into it, so the checkpoint's `flex` value now fails
-the load with `ValueError: Specified attn_implementation="flex" is not
-supported` even though a supported fallback already exists in
-`_normalize_remote_code_config_compat`.
-
-```mermaid
-flowchart TD
-    G["GenerationMixin.generate<br/>transformers 5"] --> M{"all-ones mask<br/>dropped?"}
-    M -- "Yes, no padding" --> A["adapter rebuilds the all-ones mask<br/>spans this step's input_ids"]
-    M -- No --> B["keep the caller's mask"]
-    G --> P{"remote declares<br/>position_ids?"}
-    P -- No --> C["drop HF-synthesized position_ids<br/>remote builds its own"]
-    P -- Yes --> D["forward position_ids unchanged"]
-    G --> K["cache from generate()"]
-    K --> L{"cache has layers?"}
-    L -- No --> E["len -> legacy key_cache<br/>get_max_length -> None"]
-    L -- Yes --> F["transformers 5 layer API"]
-    A --> R["remote prepare_inputs_for_generation"]
-    B --> R
-    C --> R
-    D --> R
-    E --> R
-    F --> R
-    R --> X["forward / decode"]
-    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
-    X -.->|"before this change"| Y["AttributeError / RuntimeError"]
-    class Y failure;
-```
-
-All three shims are generic and live in the shared adapter
-(`install_legacy_generation_compat`) and the cache surface
-(`_patch_transformers_remote_code_compat`); no family name appears in them. A
-remote implementation that *does* declare `position_ids` keeps receiving the
-caller's value, and an explicit non-all-ones mask is never replaced.
-
-The mask is rebuilt only for a pre-5.x callee (one without
-`next_sequence_length`) and only when transformers dropped it, so a padded
-generation keeps its real mask. The cache shim defers to the legacy
-`key_cache`/`value_cache` lists only when the object has no `layers`; a real
-`layers`-based cache keeps the transformers-5 answers.
+Hymba's original remote code relied on three transformers-4 `generate()`
+inputs (an always-present all-ones `attention_mask`, model-built
+`position_ids`, and a cache whose length is read from its own storage) and on
+copying `attn_implementation_new` (`flex`) into `_attn_implementation` after
+transformers 5 had already validated it. GPT-QModel no longer runs that remote
+code or patches Transformers for it: Hymba is a package-owned port
+(`gptqmodel/models/ports/hymba`) whose `prepare_inputs_for_generation`, cache
+and config implement the transformers 5.23 contract directly, and whose
+`HymbaConfig` maps the serialized execution hint to portable SDPA.
+`tests/test_hymba_local_port.py` covers greedy and beam `generate()`;
+`tests/test_hymba_bf16_load_4888.py` covers the `flex` hint.
 
 ## Measured behaviour
 
@@ -570,15 +528,13 @@ quality claims for full checkpoints.
 | `tests/module_tree/test_nemotron_h_model_tree.py` | real-model `model` tree root and native mixer projection coverage |
 | `tests/test_falcon_h1_support.py` | `mup_vector` restoration and idempotence |
 | `tests/module_tree/test_registered_module_plans.py` | updated Nemotron-H registry plan |
-| `tests/test_hymba_bf16_load_4888.py` | #5090: Hymba's `attn_implementation_new` selection reaches `_attn_implementation` inside the supported set |
+| `tests/test_hymba_bf16_load_4888.py` | #5090: the checkpoint's `flex` hint loads the package-owned Hymba with SDPA |
 | `tests/test_remote_code_rotary_restore.py` | fp64 oracle for legacy `inv_freq`/cos/sin, meta-shell skip, native-style skip, idempotence |
 | `tests/test_hf_config_compat.py` | legacy unscaled RoPE stays `None`, modern `rope_parameters` preserved, ChatGLM aliases, `OutputRecorder` shim, cache-length helpers restored from the layer API |
-| `tests/test_hf_config_compat.py` | #5090: `Cache.__len__`/`get_max_length()` fall back to legacy storage without disturbing `layers`-based caches |
 | `tests/test_lazy_turtle_conversion_mapping.py` | chained `.bin` conversion error, legacy tied-key normalization before save |
 | `tests/test_spark2_5_support.py` | AUTO_NF12 source-weight dtype/shape/device contract |
 | `tests/models/test_chatglm.py` | native and tiny from-config `generate()` |
 | `tests/test_legacy_generation_compat.py` | native load runs `before_model_load`; empty cache becomes `None`; `cache[0][0]`/`seen_tokens`/`get_usable_length`; `num_layers`/`n_layer` -> `num_hidden_layers` |
-| `tests/test_legacy_generation_compat.py` | #5090: dropped all-ones mask is rebuilt; an explicit mask is kept; HF-built `position_ids` are dropped while a declared one is forwarded |
 | `tests/models/test_ouro.py`, `tests/models/test_spark2_5.py` | native `generate()` after the pre-load hook installs the mask-helper shim |
 | `tests/models/test_deci.py`, `test_exaone.py`, `test_nanbeige42.py`, `test_minicpm.py`, `test_baichuan.py`, `test_pangu_alpha.py`, `test_hymba.py` | quantize+ARC path also asserts real generated text (`ASSERT_INFERENCE`) |
 

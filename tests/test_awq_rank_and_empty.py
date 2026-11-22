@@ -1,3 +1,7 @@
+import importlib
+import importlib.util
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -17,11 +21,37 @@ from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.paro import ParoLinear
-from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear, SwordfishLinear
 from gptqmodel.utils.awq import awq_runtime_available
 from gptqmodel.utils.kernel import KernelConfig
+
+
+# ParoTritonLinear imports Triton kernels at module scope; every other class
+# below imports on a CPU-only host.
+HAS_TRITON = importlib.util.find_spec("triton") is not None
+if HAS_TRITON:
+    from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
+else:
+    ParoTritonLinear = None
+
+
+_TRITON_GEMM_MODULE = "gptqmodel.quantization.awq.modules.triton.gemm"
+
+
+def _triton_gemm_module(monkeypatch):
+    """Return the module ``AwqGemmTritonFn`` imports its kernels from.
+
+    The dispatch under test replaces both kernel entry points with fakes, so
+    it does not need Triton. On a host without Triton the real module cannot
+    be imported; stand in an empty module for the duration of the test.
+    """
+
+    if HAS_TRITON:
+        return importlib.import_module(_TRITON_GEMM_MODULE)
+    stub = types.ModuleType(_TRITON_GEMM_MODULE)
+    monkeypatch.setitem(sys.modules, _TRITON_GEMM_MODULE, stub)
+    return stub
 
 
 def _fake_quant_tensors(in_features=32, out_features=8, group_size=32):
@@ -59,16 +89,9 @@ def _patch_backend(monkeypatch, backend, calls):
         monkeypatch.setattr(
             gemm_awq_triton, "awq_gemm_triton", fake_gemm, raising=False
         )
-        monkeypatch.setattr(
-            "gptqmodel.quantization.awq.modules.triton.gemm.awq_dequantize_triton",
-            fake_dequant,
-            raising=False,
-        )
-        monkeypatch.setattr(
-            "gptqmodel.quantization.awq.modules.triton.gemm.awq_gemm_triton",
-            fake_gemm,
-            raising=False,
-        )
+        triton_gemm = _triton_gemm_module(monkeypatch)
+        monkeypatch.setattr(triton_gemm, "awq_dequantize_triton", fake_dequant, raising=False)
+        monkeypatch.setattr(triton_gemm, "awq_gemm_triton", fake_gemm, raising=False)
         return gemm_awq_triton.AwqGemmTritonFn
 
     def fake_dequant(qweight, scales, qzeros, *_args):
@@ -291,6 +314,8 @@ def test_awq_gemm_module_inference_does_not_clone_batched_output(
         not torch.cuda.is_available() or not awq_runtime_available()
     ):
         pytest.skip("AwqGEMMLinear needs the native CUDA AWQ extension")
+    if backend == "triton" and not HAS_TRITON:
+        pytest.skip("AwqGEMMTritonLinear construction validates the installed triton")
     module = _awq_gemm_module(monkeypatch, backend)
 
     original = torch.Tensor.clone
@@ -365,7 +390,11 @@ def test_empty_linear_output_keeps_autograd_connection(shape):
         AwqGEMVLinear,
         AwqGEMVFastLinear,
         ParoLinear,
-        ParoTritonLinear,
+        pytest.param(
+            ParoTritonLinear,
+            id="ParoTritonLinear",
+            marks=pytest.mark.skipif(not HAS_TRITON, reason="ParoTritonLinear requires triton"),
+        ),
     ],
 )
 def test_representative_qlinear_empty_shape_without_native_extension(linear_cls):

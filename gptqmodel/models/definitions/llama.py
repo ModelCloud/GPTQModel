@@ -5,9 +5,48 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
+
+
+class _LlamaAliasLoader(LocalModelLoader):
+    def __get__(self, instance, owner):
+        # Other definitions inherit this module tree, not this alias allowlist.
+        return self if owner is LlamaQModel else BaseQModel.loader
 
 
 class LlamaQModel(BaseQModel):
+    loader = _LlamaAliasLoader(
+        config_class="gptqmodel.models.ports.llama.dispatch.LlamaAliasConfig",
+        model_class="gptqmodel.models.ports.llama.dispatch.LlamaAliasForCausalLM",
+        # Original Yi (YiTokenizer) and StableLM Epoch (Arcade100k) tokenizers
+        # were released only as checkpoint Python.
+        remote_tokenizer_model_types=("yi", "stablelm_epoch"),
+    )
+
+    @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
+        config = getattr(model, "config", None)
+        extras = []
+        if getattr(config, "model_type", None) == "longllama":
+            extras.append("rotary_emb:!")
+        if getattr(config, "model_type", None) == "cohere" and getattr(config, "use_qk_norm", False):
+            extras.extend(("q_norm:!", "k_norm:!"))
+        if getattr(config, "model_type", None) == "stablelm" and getattr(config, "qk_layernorm", False):
+            for prefix, heads in (("q", config.num_attention_heads), ("k", config.num_key_value_heads)):
+                extras.extend(f"{prefix}_layernorm.norms.{index}:!" for index in range(heads))
+        if extras:
+            tree[-1]["self_attn"] = tuple(dict.fromkeys((*tree[-1]["self_attn"], *extras)))
+        return tree
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        config = self.model.config
+        if (config.model_type in {"longllama", "stablelm_epoch", "yi"}
+                or (config.model_type == "cohere" and config.use_qk_norm)
+                or (config.model_type == "stablelm" and config.qk_layernorm)):
+            return []
+        return super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+
     # Model-wide rotation fuses `input_layernorm` into q/k/v and
     # `post_attention_layernorm` into gate/up, then resets both norms to unit
     # gain. That is only exact for the plain Llama layout: an `x * w` RMSNorm

@@ -1,0 +1,280 @@
+# Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
+# Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
+# Copyright 2025 the HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import math
+
+from transformers.image_utils import ImageInput, make_flat_list_of_images, make_nested_list_of_images
+from transformers.processing_utils import (
+    BatchFeature,
+    ProcessingKwargs,
+    ProcessorMixin,
+    TextKwargs,
+    Unpack,
+)
+from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
+from transformers.utils import auto_docstring, logging
+from transformers.utils.deprecation import deprecate_attr
+
+
+logger = logging.get_logger(__name__)
+
+
+class DeprecatedLfm2VlTextKwargs(TextKwargs, total=False):
+    """
+    use_image_special_tokens (`bool`, *optional*, defaults to `True`):
+        Deprecated, use [`Lfm2VlProcessorKwargs.use_image_special_tokens`] instead.
+        Whether to use special image tokens (`<|image_start|>` and `<|image_end|>`) to delimit image sequences
+        in the text. When enabled, images are wrapped with these tokens to clearly mark image boundaries.
+        When disabled, only the image token itself is used without delimiters.
+    """
+
+    use_image_special_tokens: bool | None
+
+
+class Lfm2VlProcessorKwargs(ProcessingKwargs, total=False):
+    """
+    use_image_special_tokens (`bool`, *optional*, defaults to `True`):
+        Whether to use special image tokens (`<|image_start|>` and `<|image_end|>`) to delimit image sequences
+        in the text. When enabled, images are wrapped with these tokens to clearly mark image boundaries.
+        When disabled, only the image token itself is used without delimiters.
+    """
+
+    text_kwargs: DeprecatedLfm2VlTextKwargs
+    use_image_special_tokens: bool
+
+
+@auto_docstring
+class Lfm2VlProcessor(ProcessorMixin):
+    valid_processor_kwargs = Lfm2VlProcessorKwargs
+
+    text_kwargs = {
+        "add_special_tokens": False,
+    }
+    images_kwargs = {
+        "return_row_col_info": True,
+    }
+    use_image_special_tokens = True
+
+    def __init__(
+        self,
+        image_processor,
+        tokenizer,
+        chat_template: str | None = None,
+        **kwargs,
+    ):
+        self.image_token = getattr(tokenizer, "image_token", "<image>")
+        self.image_token_id = (
+            tokenizer.image_token_id
+            if hasattr(tokenizer, "image_token_id")
+            else tokenizer.convert_tokens_to_ids(self.image_token)
+        )
+        self.image_start_token = getattr(tokenizer, "image_start_token", "<|image_start|>")
+        self.image_end_token = getattr(tokenizer, "image_end_token", "<|image_end|>")
+        self.image_thumbnail_token = getattr(tokenizer, "image_thumbnail_token", "<|img_thumbnail|>")
+        super().__init__(image_processor, tokenizer, chat_template=chat_template, **kwargs)
+
+    @auto_docstring
+    def __call__(
+        self,
+        images: ImageInput | None = None,
+        text: TextInput | PreTokenizedInput | list[TextInput] | list[PreTokenizedInput] | None = None,
+        **kwargs: Unpack[ProcessingKwargs],
+    ):
+        images, text, *_ = self.prepare_inputs_layout(images=images, text=text, **kwargs)
+        self.validate_inputs(images=images, text=text, **kwargs)
+
+        merged_kwargs = self._merge_kwargs(
+            tokenizer_init_kwargs=self.tokenizer.init_kwargs if hasattr(self, "tokenizer") else {},
+            **kwargs,
+        )
+
+        if "use_image_special_tokens" in merged_kwargs["text_kwargs"]:
+            logger.warning_once(
+                "Passing `use_image_special_tokens` in `text_kwargs` is deprecated "
+                "and will be removed in v5.29.0. "
+                "Pass it directly to the processor instead."
+            )
+
+        # text_kwargs has priority for backwards compatibility
+        use_image_special_tokens = merged_kwargs["text_kwargs"].pop(
+            "use_image_special_tokens", merged_kwargs["use_image_special_tokens"]
+        )
+
+        processed_images = {}
+        images_replacements = []
+        if images is not None:
+            processed_images, images_replacements = self._process_images(
+                images, use_image_special_tokens=use_image_special_tokens, **merged_kwargs["images_kwargs"]
+            )
+
+        text_inputs = {}
+        return_tensors = merged_kwargs["text_kwargs"].get("return_tensors", None)
+        if text is not None:
+            # text_kwargs has priority for backwards compatibility
+            return_mm_token_type_ids = merged_kwargs["text_kwargs"].pop(
+                "return_mm_token_type_ids", merged_kwargs["return_mm_token_type_ids"]
+            )
+            return_text_replacement_offsets = merged_kwargs["text_kwargs"].pop(
+                "return_text_replacement_offsets", merged_kwargs["return_text_replacement_offsets"]
+            )
+
+            text, text_replacement_offsets = self.get_text_with_replacements(text, images_replacements)
+            text_inputs = self.tokenizer(text, **merged_kwargs["text_kwargs"])
+            self._check_special_mm_tokens(text, text_inputs, modalities=["image"])
+
+            if return_text_replacement_offsets:
+                text_inputs["text_replacement_offsets"] = text_replacement_offsets
+
+            if return_mm_token_type_ids:
+                text_inputs["mm_token_type_ids"] = self.create_mm_token_type_ids(text_inputs["input_ids"])
+
+        # Pop unused keys from the inputs, e.g. inputs used only to compute number of image tokens
+        data = {**text_inputs, **processed_images}
+        data = {k: v for k, v in data.items() if k not in self.unused_input_names}
+        return BatchFeature(data, tensor_type=return_tensors, skip_tensor_conversion=self.skip_tensor_conversion)
+
+    def prepare_inputs_layout(
+        self,
+        images: ImageInput | None = None,
+        text: TextInput | PreTokenizedInput | list[TextInput] | list[PreTokenizedInput] | None = None,
+        **kwargs: Unpack[ProcessingKwargs],
+    ):
+        images, text, *_ = super().prepare_inputs_layout(images=images, text=text, **kwargs)
+        if images is not None:
+            images = self.image_processor.fetch_images(images)
+            images = make_nested_list_of_images(images)
+        return images, text, None, None
+
+    def validate_inputs(
+        self,
+        images: ImageInput | None = None,
+        text: TextInput | PreTokenizedInput | list[TextInput] | list[PreTokenizedInput] | None = None,
+        **kwargs: Unpack[ProcessingKwargs],
+    ):
+        super().validate_inputs(images=images, text=text, **kwargs)
+        if text is None and images is None:
+            raise ValueError("You must provide one of `text` or `images`.")
+
+        if images is not None and text is None:
+            raise ValueError(
+                "You must provide `text` when `images` is provided. Minimal text consists of a single image token."
+            )
+
+        if text is not None and images is not None:
+            n_images_in_text = [sample.count(self.image_token) for sample in text]
+            n_images_in_images = [len(sublist) for sublist in images]
+            if n_images_in_text != n_images_in_images:
+                raise ValueError(
+                    f"The number of {self.image_token} tokens in each prompt should be the same as the number of images passed."
+                    f" Found {n_images_in_text} {self.image_token} tokens and {n_images_in_images} images per sample."
+                )
+
+    def _process_images(self, images: ImageInput, use_image_special_tokens: bool, **kwargs):
+        processed_images = self.image_processor(images, **kwargs)
+
+        image_replacements = []
+        images = make_flat_list_of_images(images)
+        for idx in range(len(images)):
+            replacement_text = self.replace_image_token(
+                processed_images, image_idx=idx, use_image_special_tokens=use_image_special_tokens, **kwargs
+            )
+            image_replacements.append(replacement_text)
+        return processed_images, image_replacements
+
+    def replace_image_token(self, image_inputs: dict, image_idx: int, **kwargs) -> str:
+        rows = image_inputs["image_rows"][image_idx]
+        cols = image_inputs["image_cols"][image_idx]
+        image_size = image_inputs["image_sizes"][image_idx]
+
+        use_thumbnail = kwargs.get("use_thumbnail", self.image_processor.use_thumbnail)
+        tokens_per_tile, tokens_for_image = self._get_image_num_tokens(image_size, **kwargs)
+        placeholder_tokens = self._build_image_tokens(
+            rows, cols, tokens_per_tile, tokens_for_image, use_thumbnail, kwargs.get("use_image_special_tokens")
+        )
+        return placeholder_tokens
+
+    def _build_image_tokens(
+        self,
+        rows: int,
+        cols: int,
+        tokens_per_tile: int,
+        tokens_for_image: int,
+        use_thumbnail: bool,
+        use_image_special_tokens: bool,
+    ) -> str:
+        """Build the expanded token string for a single image."""
+        parts = []
+
+        if use_image_special_tokens:
+            parts.append(self.image_start_token)
+
+        is_multi_tile = rows > 1 or cols > 1
+        if is_multi_tile:
+            for row in range(rows):
+                for col in range(cols):
+                    if use_image_special_tokens:
+                        parts.append(f"<|img_row_{row + 1}_col_{col + 1}|>")
+                    parts.append(self.image_token * tokens_per_tile)
+
+            if use_thumbnail:
+                if use_image_special_tokens:
+                    parts.append(self.image_thumbnail_token)
+                parts.append(self.image_token * tokens_for_image)
+        else:
+            parts.append(self.image_token * tokens_for_image)
+
+        if use_image_special_tokens:
+            parts.append(self.image_end_token)
+
+        return "".join(parts)
+
+    def _compute_tokens_per_tile(self, tile_size: int, encoder_patch_size: int, downsample_factor: int) -> int:
+        """Compute the number of tokens for a single tile."""
+        num_patches = tile_size // encoder_patch_size
+        downsampled_patches = math.ceil(num_patches / downsample_factor)
+        return downsampled_patches * downsampled_patches
+
+    def _compute_tokens_for_image(self, image_size: list[int], encoder_patch_size: int, downsample_factor: int) -> int:
+        """Compute the number of tokens for a resized image (used for single-tile or thumbnail)."""
+        image_height, image_width = image_size
+        patches_h = math.ceil((image_height // encoder_patch_size) / downsample_factor)
+        patches_w = math.ceil((image_width // encoder_patch_size) / downsample_factor)
+        return patches_h * patches_w
+
+    def _get_image_num_tokens(self, image_size: list[int], **images_kwargs) -> tuple[int, int]:
+        """
+        Compute token counts for image processing.
+
+        Returns:
+            tuple[int, int]: (tokens_per_tile, tokens_for_image)
+                - tokens_per_tile: tokens for each tile in multi-tile mode
+                - tokens_for_image: tokens for the resized image (single-tile) or thumbnail (multi-tile)
+        """
+        tile_size = images_kwargs.get("tile_size", self.image_processor.tile_size)
+        downsample_factor = images_kwargs.get("downsample_factor", self.image_processor.downsample_factor)
+        encoder_patch_size = images_kwargs.get("encoder_patch_size", self.image_processor.encoder_patch_size)
+
+        tokens_per_tile = self._compute_tokens_per_tile(tile_size, encoder_patch_size, downsample_factor)
+        tokens_for_image = self._compute_tokens_for_image(image_size, encoder_patch_size, downsample_factor)
+
+        return tokens_per_tile, tokens_for_image
+
+    @property
+    def unused_input_names(self) -> list[str]:
+        return ["image_rows", "image_cols", "image_sizes", "token_type_ids"]
+
+
+__getattr__ = deprecate_attr(__name__, remove={"Lfm2VlTextKwargs": (DeprecatedLfm2VlTextKwargs, "5.29.0")})
+__all__ = ["Lfm2VlProcessor"]

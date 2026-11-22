@@ -27,8 +27,12 @@ ruff --version
 # skipped every subpackage added since then (`looper`, `adapter`, `eora`,
 # `exllamav3`, `hf_kernels`, `hf_minimax_m2`) despite those shipping in the
 # wheel. A new subpackage must be covered automatically.
+# Vendored Transformers sources under gptqmodel/models/ports/native/<family> are
+# excluded in pyproject.toml; the hand-written registry files are named here.
 ruff check \
   gptqmodel \
+  gptqmodel/models/ports/native/auto/__init__.py \
+  gptqmodel/models/ports/native/auto/_registry.py \
   docs/eora \
   tests \
   setup.py

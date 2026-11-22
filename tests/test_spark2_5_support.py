@@ -1,37 +1,29 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+"""Spark definition regressions use executable package-owned decoder instances."""
 
-import sys
-import types
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.spark2_5 import Spark2_5QModel
+from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.ports.spark2_5.modeling_spark import Spark2_5ForCausalLM
+from tests.test_spark2_5_local_port import tiny_model
 
 
-def test_spark2_5_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="spark2_5")
+def test_spark2_5_model_type_selects_definition(tmp_path, monkeypatch):
+    tiny_model().config.save_pretrained(tmp_path)
 
-    monkeypatch.setattr(
-        auto,
-        "resolve_trust_remote_code",
-        lambda path, trust_remote_code=False: trust_remote_code,
-    )
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda path: None)
-    monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: fake_config,
-    )
+    def checkpoint_python_forbidden(*args, **kwargs):
+        raise AssertionError("Package-owned Spark must never import checkpoint Python")
 
-    assert (
-        auto.check_and_get_model_definition(
-            "/monster/data/model/Spark-X2.5-4B", trust_remote_code=True
-        )
-        is Spark2_5QModel
-    )
+    monkeypatch.setattr("transformers.dynamic_module_utils.get_class_from_dynamic_module", checkpoint_python_forbidden)
+    for trust in (False, True):
+        assert auto.check_and_get_model_definition(str(tmp_path), trust_remote_code=trust) is Spark2_5QModel
+    assert isinstance(Spark2_5QModel.loader, LocalModelLoader)
 
 
 def test_spark2_5_module_tree_matches_decoder_boundaries():
@@ -41,7 +33,7 @@ def test_spark2_5_module_tree_matches_decoder_boundaries():
         quantize_config=SimpleNamespace(dynamic=None),
     )
 
-    assert Spark2_5QModel.require_trust_remote_code is True
+    assert Spark2_5QModel.require_trust_remote_code is False
     assert Spark2_5QModel.shared_input_verified(config) is True
     assert Spark2_5QModel.extract_layers_node() == ["model.layers"]
     assert Spark2_5QModel.pre_lm_head_norm_module == "model.norm"
@@ -53,19 +45,13 @@ def test_spark2_5_module_tree_matches_decoder_boundaries():
         ["mlp.down_proj"],
     ]
 
-    full_modules = {
-        module
-        for block in Spark2_5QModel.full_layer_modules(model_config=config)
-        for module in block
-    }
+    full_modules = {module for block in Spark2_5QModel.full_layer_modules(model_config=config) for module in block}
     assert {
         "input_layernorm:!",
         "self_attn.g_proj:!",
         "post_attention_layernorm:!",
     } <= full_modules
-    assert "self_attn.g_proj" not in {
-        module for block in layer_modules for module in block
-    }
+    assert "self_attn.g_proj" not in {module for block in layer_modules for module in block}
 
     plan = Spark2_5QModel.shared_input_plan(
         model_config=config,
@@ -77,113 +63,37 @@ def test_spark2_5_module_tree_matches_decoder_boundaries():
     )
 
 
-def test_spark2_5_before_model_load_adapts_both_legacy_mask_helpers(monkeypatch):
-    remote_module = types.ModuleType("fake_spark2_5_mask_remote")
-
-    def fake_causal_mask(**kwargs):
-        return kwargs
-
-    class FakeSparkModel:
-        pass
-
-    FakeSparkModel.__module__ = remote_module.__name__
-    remote_module.create_causal_mask = fake_causal_mask
-    remote_module.create_sliding_window_causal_mask = fake_causal_mask
-    monkeypatch.setitem(sys.modules, remote_module.__name__, remote_module)
-    monkeypatch.setattr(
-        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
-        lambda class_ref, model_local_path: FakeSparkModel,
-    )
-
-    Spark2_5QModel.before_model_load(
-        Spark2_5QModel, "/monster/data/model/Spark-X2.5-4B", False
-    )
-
-    for mask_name in ("create_causal_mask", "create_sliding_window_causal_mask"):
-        mask = getattr(remote_module, mask_name)
-        assert mask._gptqmodel_spark_mask_compat is True
-        assert mask(input_embeds="hidden", cache_position="positions") == {
-            "inputs_embeds": "hidden",
-        }
+@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
+def test_spark2_5_current_native_masks_and_hybrid_cache_repeated_load(tmp_path, implementation):
+    model = tiny_model()
+    model.save_pretrained(tmp_path)
+    tokens = torch.tensor([[3, 4, 5, 6, 7, 8]])
+    for _ in range(2):
+        loaded = Spark2_5QModel.loader.from_pretrained(tmp_path, attn_implementation=implementation).eval()
+        assert type(loaded) is Spark2_5ForCausalLM
+        with torch.inference_mode():
+            expected = loaded(tokens, use_cache=False).logits
+            prefix = loaded(tokens[:, :2])
+            continuation = loaded(tokens[:, 2:], past_key_values=prefix.past_key_values)
+        torch.testing.assert_close(continuation.logits, expected[:, 2:], atol=1e-6, rtol=1e-5)
+        assert continuation.past_key_values.get_seq_length() == tokens.shape[1]
 
 
-def test_spark2_5_before_model_load_is_idempotent(monkeypatch):
-    remote_module = types.ModuleType("fake_spark2_5_idempotent_remote")
-
-    def fake_causal_mask(**kwargs):
-        return kwargs
-
-    class FakeSparkModel:
-        pass
-
-    FakeSparkModel.__module__ = remote_module.__name__
-    remote_module.create_causal_mask = fake_causal_mask
-    remote_module.create_sliding_window_causal_mask = fake_causal_mask
-    monkeypatch.setitem(sys.modules, remote_module.__name__, remote_module)
-    monkeypatch.setattr(
-        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
-        lambda class_ref, model_local_path: FakeSparkModel,
-    )
-
-    Spark2_5QModel.before_model_load(Spark2_5QModel, "/tmp/spark2_5", False)
-    first_helpers = tuple(
-        getattr(remote_module, name)
-        for name in ("create_causal_mask", "create_sliding_window_causal_mask")
-    )
-    Spark2_5QModel.before_model_load(Spark2_5QModel, "/tmp/spark2_5", True)
-    second_helpers = tuple(
-        getattr(remote_module, name)
-        for name in ("create_causal_mask", "create_sliding_window_causal_mask")
-    )
-
-    assert second_helpers == first_helpers
-
-
-def test_spark2_5_after_model_load_supplies_quantized_gate_weight_dtype():
-    class FakeQuantLinear(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.compute_dtype = torch.bfloat16
-            self.register_buffer("scales", torch.ones(1, dtype=torch.bfloat16))
-
-    gate_proj = FakeQuantLinear()
-    model = SimpleNamespace(
-        model=SimpleNamespace(
-            layers=[SimpleNamespace(mlp=SimpleNamespace(gate_proj=gate_proj))],
-        ),
-    )
-
-    assert not hasattr(gate_proj, "weight")
-    returned = Spark2_5QModel.after_model_load(Spark2_5QModel, model, True)
-
-    assert returned is model
-    assert gate_proj.weight.numel() == 0
-    assert gate_proj.weight.dtype is torch.bfloat16
-    assert "weight" not in gate_proj.state_dict()
-
-
-def test_spark2_5_after_model_load_leaves_dense_model_unchanged():
-    dense = torch.nn.Linear(4, 4, bias=False)
-    model = SimpleNamespace(
-        model=SimpleNamespace(
-            layers=[SimpleNamespace(mlp=SimpleNamespace(gate_proj=dense))],
-        ),
-    )
-    original_weight = dense.weight
-
-    returned = Spark2_5QModel.after_model_load(Spark2_5QModel, model, False)
-
-    assert returned is model
-    assert dense.weight is original_weight
+def test_spark2_5_dense_gate_uses_real_weight_without_remote_hook():
+    model = tiny_model().bfloat16()
+    weight = model.model.layers[0].mlp.gate_proj.weight
+    assert Spark2_5QModel.after_model_load(Spark2_5QModel, model, False) is model
+    assert model.model.layers[0].mlp.gate_proj.weight is weight
+    assert weight.shape == (48, 32)
+    with torch.inference_mode():
+        assert model(torch.tensor([[3, 4, 5]])).logits.isfinite().all()
 
 
 def test_auto_nf12_hooked_linear_exposes_source_weight_contract():
-    """Issue #4093 item 7: remote forwards read `.weight.dtype`/`.shape`.
+    """The legacy packed adapter retains its bounded source-weight metadata.
 
-    Spark-X2.5 reads `self.mlp.gate_proj.weight.dtype` inside the decoder
-    forward (modeling_spark.py:244), and the legacy Llama-shaped `q_proj.weight`
-    dtype casts do the same. The packed NF12 replacement must expose that
-    contract without materializing the matrix.
+    The local Spark port uses norm-owned dtype and no longer needs this adapter
+    contract; keep the generic NF12 regression for older source-derived callers.
     """
 
     from gptqmodel.nn_modules.hooked_linear import HookedLinear

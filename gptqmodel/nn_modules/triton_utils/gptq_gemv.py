@@ -76,6 +76,8 @@ import torch
 import triton
 import triton.language as tl
 
+from gptqmodel.utils.triton_jit import jit as triton_jit
+
 from ...utils.arch import arch_class, normalize_arch, tuning_family
 
 
@@ -148,7 +150,7 @@ def block_k_for(in_features: int, arch=None) -> int:
     return min(cap, max(32, 1 << (in_features - 1).bit_length()))
 
 
-@triton.jit
+@triton_jit
 def _gptq_gemv_kernel(
     x_ptr, qweight_ptr, scales_ptr, qzeros_ptr, g_idx_ptr, out_ptr,
     in_features: tl.constexpr, out_features: tl.constexpr,

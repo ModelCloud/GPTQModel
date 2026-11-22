@@ -221,23 +221,21 @@ are present, so the MLX difference does not cost activation accuracy.
 ### Transformers interop
 
 Transformers 5.x only warns `Unknown quantization type` and then loads a
-plain model whose packed tensors were randomly initialized. GPT-QModel
-registers a refusing quantizer for every packed format transformers does
-not implement. The names live in one table
-(`gptqmodel/_quant_methods.py:REFUSED_HF_QUANT_METHODS`) so another format
-extends the same registration.
+plain model whose packed tensors were randomly initialized. GPT-QModel never
+registers into Transformers, so it registers no refusing quantizer; load these
+checkpoints with `GPTQModel.load`. The names live in one table
+(`gptqmodel/_quant_methods.py:REFUSED_HF_QUANT_METHODS`), and the writer's
+save-time `hf_compat_warnings` names the loader for every entry.
 
-| `quant_method` | Checkpoint | Transformers loader |
+| `quant_method` | Checkpoint | Plain Transformers |
 |---|---|---|
-| `gptqmodel_gguf` | packed GGUF | `GPTQModelGGUFHfQuantizer` refuses |
-| `exl3` | EXL3 trellis | `GPTQModelRefusingHfQuantizer` refuses |
-| `macaq` | MACaQ MXFP4 | `GPTQModelRefusingHfQuantizer` refuses |
-| `paro` | Paro | `GPTQModelRefusingHfQuantizer` refuses |
-| `qqq` | QQQ | `GPTQModelRefusingHfQuantizer` refuses |
-| `nf12` | NF12 | `GPTQModelRefusingHfQuantizer` refuses |
-| `tt-blockfloat` | Tenstorrent block-float | `GPTQModelRefusingHfQuantizer` refuses |
-
-Each refusal names `GPTQModel.load` and vLLM as the supported loaders.
+| `gptqmodel_gguf` | packed GGUF | warns, random init |
+| `exl3` | EXL3 trellis | warns, random init |
+| `macaq` | MACaQ MXFP4 | warns, random init |
+| `paro` | Paro | warns, random init |
+| `qqq` | QQQ | warns, random init |
+| `nf12` | NF12 | warns, random init |
+| `tt-blockfloat` | Tenstorrent block-float | warns; the shipped `auto_map` modeling file loads it ([Tenstorrent](tenstorrent.md)) |
 
 ## Relationship to GPTQ
 

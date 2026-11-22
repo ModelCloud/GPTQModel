@@ -3,10 +3,15 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Cohere2MoeQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     # Cohere2-MoE uses dense prefix layers followed by routed MoE layers, both
     # under the same `mlp` attribute.
     fusable = FusableConfig("cohere2_moe").merge(LlamaFusableConfig(), profiles=("qkv",))

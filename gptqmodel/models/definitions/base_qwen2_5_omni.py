@@ -8,7 +8,7 @@ from typing import Dict, Optional
 
 import torch
 from PIL import Image
-from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.audio import process_audio_info
 from ...utils.calibration import batched_conversations
@@ -17,6 +17,7 @@ from ...utils.model import MODALITY, thinker_multimodal_model, thinker_text_mode
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ._omni_thinker_layout import OmniThinkerCheckpointLayoutMixin
 from ._thinker_embeddings import ThinkerEmbeddingsMixin
 from ._vlm_calibration import (
@@ -34,64 +35,16 @@ _THINKER_LAYER_MODULES = {
 }
 
 
-def _patch_qwen2_5_omni_talker_prepare_inputs_for_generation(talker_cls):
-    original = getattr(talker_cls, "prepare_inputs_for_generation", None)
-    if original is None or getattr(original, "_gptqmodel_qwen2_5_omni_compat", False):
-        return
-
-    def prepare_inputs_for_generation(
-        self,
-        input_ids,
-        input_text_ids,
-        past_key_values=None,
-        attention_mask=None,
-        inputs_embeds=None,
-        thinker_reply_part=None,
-        cache_position=None,
-        position_ids=None,
-        use_cache=True,
-        pixel_values=None,
-        pixel_values_videos=None,
-        image_grid_thw=None,
-        video_grid_thw=None,
-        input_audio_features=None,
-        audio_feature_attention_mask=None,
-        audio_feature_lengths=None,
-        use_audio_in_video=False,
-        video_second_per_grid=None,
-        **kwargs,
-    ):
-        model_inputs = super(talker_cls, self).prepare_inputs_for_generation(
-            input_ids,
-            past_key_values=past_key_values,
-            attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
-            cache_position=cache_position,
-            use_cache=use_cache,
-            thinker_reply_part=thinker_reply_part,
-            input_text_ids=input_text_ids,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
-            use_audio_in_video=use_audio_in_video,
-            audio_feature_lengths=audio_feature_lengths,
-            video_second_per_grid=video_second_per_grid,
-            **kwargs,
-        )
-        model_inputs["position_ids"] = None
-        return model_inputs
-
-    prepare_inputs_for_generation._gptqmodel_qwen2_5_omni_compat = True
-    talker_cls.prepare_inputs_for_generation = prepare_inputs_for_generation
-
-
 class BaseQwen2_5_OmniGPTQ(OmniThinkerCheckpointLayoutMixin, ThinkerEmbeddingsMixin, BaseQModel):
     ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
     ATTENTION_MASKS_DTYPE = torch.long
-    require_monkeypatch = True
 
-    HF_WRAPPER_CLASS_NAME = "Qwen2_5OmniForConditionalGeneration"
-
-    loader = AutoModelForTextToWaveform
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForTextToWaveform",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     lm_head = "thinker.lm_head"
     # transformers 5.22 nests the thinker decoder under `language_model`.
@@ -124,16 +77,6 @@ class BaseQwen2_5_OmniGPTQ(OmniThinkerCheckpointLayoutMixin, ThinkerEmbeddingsMi
         # Calibration only needs the thinker's forward pass. The speech
         # generation wrapper requires a talker even for text-only checkpoints.
         return self.model.thinker(**example, use_cache=use_cache)
-
-    def monkey_patch(self):
-        talker = getattr(getattr(self, "model", None), "talker", None)
-        if talker is None:
-            return
-
-        if not getattr(type(talker), "__module__", "").startswith("transformers.models.qwen2_5_omni."):
-            return
-
-        _patch_qwen2_5_omni_talker_prepare_inputs_for_generation(type(talker))
 
     def pre_quantize_generate_hook_start(self):
         # load speaker
@@ -249,7 +192,14 @@ class BaseQwen2_5_OmniGPTQ(OmniThinkerCheckpointLayoutMixin, ThinkerEmbeddingsMi
         return self.model.thinker(*args, **kwargs)
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path)
+        processor = self.__dict__.get("processor")
+        if processor is not None:
+            return processor
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
 
     def prepare_dataset(self, calibration_dataset, calibration_dataset_concat_size=None, batch_size: int = 1, **kwargs):
         label = type(self).__name__

@@ -8,7 +8,6 @@ from model_test import ModelTest
 
 class TestNemotronHPuzzle(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-BF16" # nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-BF16
-    TRUST_REMOTE_CODE = True
     USE_FLASH_ATTN = False
 
     # MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride(num_experts_per_tok="all"))

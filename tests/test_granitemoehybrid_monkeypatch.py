@@ -4,7 +4,6 @@
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 
 from gptqmodel.models.definitions.granitemoehybrid import GraniteMoeHybridQModel
@@ -45,21 +44,10 @@ class _QuantMambaBase(torch.nn.Module):
 
 
 class _EagerOnlyMamba(_QuantMambaBase):
-    """Matches Transformers releases that only expose the eager `forward`."""
+    """Matches the Transformers 5.23 layer, which only exposes `forward`."""
 
     def forward(self, input_states, cache_params=None, attention_mask=None):
         return self._record_eager(input_states, cache_params, attention_mask)
-
-
-class _LegacyTorchForwardMamba(_QuantMambaBase):
-    """Matches older Transformers releases that expose `torch_forward`."""
-
-    def torch_forward(self, input_states, cache_params=None, attention_mask=None):
-        return self._record_eager(input_states, cache_params, attention_mask)
-
-    def forward(self, *args, **kwargs):
-        self.path = "fast"
-        return "fast"
 
 
 def _qmodel_with_mamba(mamba):
@@ -78,7 +66,6 @@ def _assert_quantized_forward_uses_eager(mamba):
     result = mamba(
         hidden_states,
         cache_params=cache_params,
-        cache_position=torch.arange(2),
         attention_mask=attention_mask,
     )
 
@@ -91,12 +78,8 @@ def _assert_quantized_forward_uses_eager(mamba):
     }
 
 
-def test_granitemoehybrid_quantized_mamba_uses_eager_forward_without_torch_forward():
+def test_granitemoehybrid_quantized_mamba_uses_eager_forward():
     _assert_quantized_forward_uses_eager(_EagerOnlyMamba())
-
-
-def test_granitemoehybrid_quantized_mamba_uses_torch_forward_when_present():
-    _assert_quantized_forward_uses_eager(_LegacyTorchForwardMamba())
 
 
 def test_granitemoehybrid_monkey_patch_is_idempotent():
@@ -114,18 +97,22 @@ def test_granitemoehybrid_monkey_patch_is_idempotent():
     assert mamba(torch.zeros(1, 2, 64)) == "eager"
 
 
-def test_real_granitemoehybrid_layer_installs_monkey_patch():
-    pytest.importorskip("transformers")
-    from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
+def test_real_granitemoehybrid_layer_is_patched_per_instance_only():
+    from gptqmodel.models.ports.native.granitemoehybrid.modeling_granitemoehybrid import (
         GraniteMoeHybridMambaLayer,
     )
 
-    original_forward = GraniteMoeHybridMambaLayer.forward
+    class_state = dict(vars(GraniteMoeHybridMambaLayer))
     layer = object.__new__(GraniteMoeHybridMambaLayer)
+    torch.nn.Module.__init__(layer)
+    other = object.__new__(GraniteMoeHybridMambaLayer)
+    torch.nn.Module.__init__(other)
     qmodel = _qmodel_with_mamba(layer)
 
-    try:
-        qmodel.monkey_patch()
-        assert GraniteMoeHybridMambaLayer.forward is not original_forward
-    finally:
-        GraniteMoeHybridMambaLayer.forward = original_forward
+    qmodel.monkey_patch()
+    qmodel.monkey_patch()
+
+    assert dict(vars(GraniteMoeHybridMambaLayer)) == class_state
+    assert vars(layer)["forward"].__func__._gptqmodel_granite_patch
+    assert vars(layer)["forward"].__self__ is layer
+    assert "forward" not in vars(other)

@@ -16,11 +16,12 @@ import torch
 import torch.nn.functional as F
 from bench_nf12_tenstorrent import _errors, _runtime, _same
 from PIL import Image
-from transformers import AutoTokenizer, Inkling2ImageProcessor
 
-from gptqmodel.models.inkling2_loop import Inkling2LoopForConditionalGeneration, install_inkling2_nf12
-from gptqmodel.models.inkling2_loop.tenstorrent_nf12 import _targets
-from gptqmodel.models.inkling2_loop.vision import _bilinear_taps
+from gptqmodel.models.ports.inkling2_loop import Inkling2LoopForConditionalGeneration, install_inkling2_nf12
+from gptqmodel.models.ports.inkling2_loop.image_processing import Inkling2ImageProcessor
+from gptqmodel.models.ports.inkling2_loop.tenstorrent_nf12 import _targets
+from gptqmodel.models.ports.inkling2_loop.vision import _bilinear_taps
+from gptqmodel.models.ports.native.auto import NativeTokenizer
 
 
 def _vision_inputs(checkpoint):
@@ -140,7 +141,7 @@ def main():
         print(json.dumps({"phase": "baseline_vision", "cases": list(cases)}), flush=True)
         paired = {}
         if not args.vision_only:
-            tokenizer = AutoTokenizer.from_pretrained(args.checkpoint, local_files_only=True)
+            tokenizer = NativeTokenizer.from_pretrained(args.checkpoint, local_files_only=True)
             text_ids = tokenizer("Describe the colors.", return_tensors="pt").input_ids
             image_inputs = cases["processor_pair"]
             image_tokens = int(image_inputs["image_grid_thw"].prod(-1).sum())

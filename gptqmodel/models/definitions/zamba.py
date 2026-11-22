@@ -1,16 +1,17 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-from ...utils.logger import setup_logger
 from ...utils.model import move_to
 from ..base import BaseQModel
-
-
-log = setup_logger()
+from ..local import LocalModelLoader
 
 
 class ZambaQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     layer_modules_strict = False
-    require_monkeypatch = True
     require_pkgs = ["mamba_ssm>=2.3.1", "causal_conv1d>=1.2.0"]
 
     pre_lm_head_norm_module = "model.final_layernorm"
@@ -57,57 +58,3 @@ class ZambaQModel(BaseQModel):
             additional_inputs["layer_idx"] = layer_idx
 
         return additional_inputs
-
-    def monkey_patch(self):
-        from transformers.models.zamba import modeling_zamba
-
-        def forward(
-            self,
-            hidden_states,
-            cache_params=None,
-            attention_mask=None,
-            **kwargs,
-        ):
-            is_fast_path_available = all(
-                (
-                    getattr(modeling_zamba, "selective_state_update", None),
-                    getattr(modeling_zamba, "selective_scan_fn", None),
-                    getattr(modeling_zamba, "causal_conv1d_fn", None),
-                    getattr(modeling_zamba, "causal_conv1d_update", None),
-                    getattr(modeling_zamba, "mamba_inner_fn", None),
-                )
-            )
-
-            if is_fast_path_available and "cuda" in hidden_states.device.type:
-                return self.cuda_kernels_forward(hidden_states, cache_params, attention_mask=attention_mask)
-
-            return self.slow_forward(hidden_states, cache_params, attention_mask=attention_mask)
-
-        model_root = getattr(self.model, "model", None)
-        layers = getattr(model_root, "layers", None)
-        if layers is None:
-            return
-
-        for layer in layers:
-            candidates = []
-
-            mixer = getattr(layer, "mamba", None)
-            if mixer is not None:
-                candidates.append(mixer)
-
-            mamba_decoder = getattr(layer, "mamba_decoder", None)
-            if mamba_decoder is not None:
-                nested_mixer = getattr(mamba_decoder, "mamba", None)
-                if nested_mixer is not None:
-                    candidates.append(nested_mixer)
-
-            for mixer in candidates:
-                if mixer.__class__.__name__ == "ZambaMambaMixer":
-                    mixer_class = type(mixer)
-                    if not all(hasattr(mixer_class, name) for name in ("slow_forward", "cuda_kernels_forward")):
-                        log.info.once(
-                            "Zamba mixer does not expose the legacy slow/fast forward methods; "
-                            "leaving the upstream forward in place because it selects kernels internally."
-                        )
-                        continue
-                    mixer_class.forward = forward

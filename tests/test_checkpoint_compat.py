@@ -286,25 +286,6 @@ def test_hf_compat_warning_for_every_gptqmodel_only_method():
     ) == []
 
 
-def test_every_refused_method_registers_a_refusing_quantizer():
-    from transformers.quantizers import auto as hf_auto
-
-    from gptqmodel._quant_methods import REFUSED_HF_QUANT_METHODS
-    from gptqmodel.utils.hf_refusing_quantizer import (
-        GPTQModelRefusingHfQuantizer,
-        GPTQModelRefusingQuantizationConfig,
-    )
-
-    for quant_method in REFUSED_HF_QUANT_METHODS:
-        assert (
-            hf_auto.AUTO_QUANTIZER_MAPPING[quant_method] is GPTQModelRefusingHfQuantizer
-        )
-        assert (
-            hf_auto.AUTO_QUANTIZATION_CONFIG_MAPPING[quant_method]
-            is GPTQModelRefusingQuantizationConfig
-        )
-
-
 def _reference_pack_8bit(codes: torch.Tensor) -> torch.Tensor:
     """Independent little-endian lane-order reference for 8-bit AWQ words."""
 

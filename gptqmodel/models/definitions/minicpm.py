@@ -4,9 +4,18 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
+from ..moe_lifecycle import W1W3W2MoELifecycleHooks
 
 
 class MiniCPMGPTQ(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.minicpm.configuration_minicpm.MiniCPMConfig",
+        model_class="gptqmodel.models.ports.minicpm.modeling_minicpm.MiniCPMForCausalLM",
+        config_architectures=("MiniCPMForCausalLM",),
+    )
+    dynamic_expert_index = "num_experts"
+    moe_lifecycle_hooks = W1W3W2MoELifecycleHooks()
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [
@@ -20,3 +29,15 @@ class MiniCPMGPTQ(BaseQModel):
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]
+
+    @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
+        blocks = tree[-1]
+        if getattr(getattr(model, "config", None), "num_experts", 0) and "mlp:moe" not in blocks:
+            blocks.pop("mlp", None)
+            blocks["mlp:moe"] = {
+                "gate": ("gate:!",),
+                "experts": {"#": ("w1:0:gate", "w3:0:up", "w2:1:down")},
+            }
+        return tree

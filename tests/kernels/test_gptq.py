@@ -177,6 +177,9 @@ class ForwardResult:
     total_ms: float
     mean_ms: float
 
+# Every case loads the checkpoint and the EoRA adapter onto ``DEVICE`` (cuda:0)
+# and compares GPU kernels against the torch kernel on that device.
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA or ROCm GPU required")
 class TestKernelOutput(unittest.TestCase):
     # model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
     model_path = "sliuau/Llama-3.2-3B_4bits_128group_size"

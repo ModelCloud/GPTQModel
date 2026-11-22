@@ -7,7 +7,7 @@ placing the model for inference. The implementation is introduced in
 [PR #5977](https://github.com/ModelCloud/GPTQModel/pull/5977).
 
 ```python
-from gptqmodel.models.inkling2_loop import install_inkling2_nf12
+from gptqmodel.models.ports.inkling2_loop import install_inkling2_nf12
 from gptqmodel.utils.ttnn_runtime import close_mesh, open_mesh
 
 mesh = open_mesh(device_id=0, owner="inkling-nf12")
@@ -26,10 +26,10 @@ device int32 IDs. The model's remaining operators run where the model is placed.
 
 | Site | Dense forward at `0071b1aa0` | With the opt-in installer |
 | --- | --- | --- |
-| Token embedding and RMS gain | `gptqmodel/models/inkling2_loop/modeling.py:876` | `_NF12Embedding` runs gather and calls the existing `embed_norm` |
-| LM head, valid vocabulary crop, softcap | `gptqmodel/models/inkling2_loop/modeling.py:1315` | `_NF12Linear` supplies BF16 logits to the existing crop and FP32 softcap |
-| Patch projection and position taps | `gptqmodel/models/inkling2_loop/vision.py:224`, `:228`, `:310` | The same vision forward calls the fitted linear and gather modules |
-| Vision blocks and four-patch merger | `gptqmodel/models/inkling2_loop/vision.py:80`, `:115`, `:259`, `:340` | Each target projection calls the same tiled linear with its checkpoint bias |
+| Token embedding and RMS gain | `Inkling2LoopNormedEmbedding.forward` | `_NF12Embedding` runs gather and calls the existing `embed_norm` |
+| LM head, valid vocabulary crop, softcap | `Inkling2LoopForConditionalGeneration.forward` | `_NF12Linear` supplies BF16 logits to the existing crop and FP32 softcap |
+| Patch projection and position taps | `Inkling2LoopVisionEmbeddings.forward` | The same vision forward calls the fitted linear and gather modules |
+| Vision blocks and four-patch merger | `Inkling2LoopVisionLayer.forward` and `Inkling2LoopVisionMerger.forward` | Each target projection calls the same tiled linear with its checkpoint bias |
 
 ```mermaid
 flowchart TD

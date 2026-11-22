@@ -10,7 +10,6 @@ class TestRaon1Mini(ModelTest):
     NATIVE_MODEL_ID = os.environ.get(
         "RAON1_MINI_MODEL_ID", "KRAFTON/Raon-1-mini-preview"
     )
-    TRUST_REMOTE_CODE = True
     USE_FLASH_ATTN = False
     EVAL_TASKS_SLOW = {
         "arc_challenge": {

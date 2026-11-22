@@ -6,7 +6,7 @@
 from typing import Any, Dict, Optional
 
 import torch
-from transformers import AutoConfig, AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
 from ...utils.calibration import batched_conversations
@@ -14,22 +14,14 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
-from ..inkling2_loop import (
-    Inkling2LoopConfig,
-    Inkling2LoopForConditionalGeneration,
-    Inkling2LoopPackedExperts,
-)
-from ..inkling2_loop.experts import (
+from ..local import LocalModelLoader
+from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ..ports.inkling2_loop.experts import (
     Inkling2LoopPackedExpertLinear,
+    Inkling2LoopPackedExperts,
     defuse_packed_experts,
 )
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
-
-AutoConfig.register("inkling2_loop", Inkling2LoopConfig, exist_ok=True)
-AutoModelForMultimodalLM.register(
-    Inkling2LoopConfig, Inkling2LoopForConditionalGeneration, exist_ok=True
-)
 
 # Every decoder layer takes the attention-residual bank as its second
 # positional argument. The generic capture keeps only ``hidden_states``, so the
@@ -117,7 +109,12 @@ class Inkling2LoopQModel(BaseQModel):
       the quantization processor packs that module.
     """
 
-    loader = AutoModelForMultimodalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.inkling2_loop.Inkling2LoopConfig",
+        model_class="gptqmodel.models.ports.inkling2_loop.Inkling2LoopForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.inkling2_loop.processing.Inkling2Processor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     require_load_processor = True
     require_trust_remote_code = False
@@ -130,9 +127,9 @@ class Inkling2LoopQModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.language_model.norm"
 
-    # ``o_proj.linear`` consumes the concatenated attention heads, whose width
-    # differs from the key/value projections under GQA.
-    awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj.linear"]
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        """Use plain quantization until looped attention and expert folds are qualified."""
+        return []
 
     def pre_quantize(self, module, module_path=None):
         """Materialize a layer, then split its packed experts into quantizable leaves.
@@ -302,9 +299,6 @@ class Inkling2LoopQModel(BaseQModel):
         language_model.message_input = move_to(language_model.message_input, device=CPU)
         core_model.vision_tower = move_to(core_model.vision_tower, device=CPU)
 
-    def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
-
     @classmethod
     def prepare_inputs_for_conversations(
         cls,
@@ -321,11 +315,9 @@ class Inkling2LoopQModel(BaseQModel):
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         del kwargs
-        processor = self.load_processor()
         calibration_data = []
         for batch in batched_conversations(calibration_dataset, batch_size):
-            calibration_data.append(self.prepare_inputs_for_conversations(processor, batch))
-        del processor
+            calibration_data.append(self.prepare_inputs_for_conversations(self.processor, batch))
         return calibration_data
 
     def move_input_capture_example(

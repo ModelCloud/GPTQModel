@@ -2,73 +2,67 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import builtins
-import sys
-from types import ModuleType, SimpleNamespace
+import json
 
 import pytest
-from torch import nn
-from transformers import AutoModel
+import torch
 
+from gptqmodel import GPTQModel
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.qwen_drive import QwenDriveQModel
+from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.ports.qwen_drive import QwenDriveConfig, QwenDriveForConditionalGeneration
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.utils import hf
+from tests.test_qwen_drive_local_port import media_inputs, tiny_config, write_checkpoint
 
 
-def test_qwen_drive_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="qwen_drive")
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda path: None)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+@pytest.mark.parametrize("subfolder", [None, "selected"])
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [None, "0", "1"])
+def test_qwen_drive_public_selection_precedes_optional_registration(tmp_path, monkeypatch, subfolder, trust, bypass):
+    source = tmp_path / "checkpoint"
+    selected = source / subfolder if subfolder else source
+    expected, marker = write_checkpoint(selected)
+    if subfolder:
+        # A root-level decoy must not override explicitly selected metadata.
+        (source / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    if bypass is None:
+        monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
+    else:
+        monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", bypass)
 
-    assert auto.check_and_get_model_definition("/tmp/qwen-drive") is QwenDriveQModel
-
-
-def test_qwen_drive_registration_imports_official_package(monkeypatch, tmp_path):
-    model_dir = tmp_path / "qwen-drive"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text('{"model_type": "qwen_drive"}', encoding="utf-8")
-    monkeypatch.setitem(sys.modules, "qwen_drive", ModuleType("qwen_drive"))
-
-    assert hf.ensure_qwen_drive_registered(str(model_dir)) is True
-
-
-def test_qwen_drive_registration_error_points_to_official_source(monkeypatch, tmp_path):
-    model_dir = tmp_path / "qwen-drive"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text('{"model_type": "qwen_drive"}', encoding="utf-8")
-    monkeypatch.delitem(sys.modules, "qwen_drive", raising=False)
-    original_import = builtins.__import__
-
-    def fail_qwen_drive_import(name, *args, **kwargs):
-        if name == "qwen_drive":
-            raise ImportError("not installed")
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fail_qwen_drive_import)
-
-    with pytest.raises(ImportError, match="QwenLM/Qwen-Drive-1.0"):
-        hf.ensure_qwen_drive_registered(str(model_dir))
-
-
-def test_qwen_drive_registration_ignores_other_model_types(monkeypatch, tmp_path):
-    model_dir = tmp_path / "qwen3"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text('{"model_type": "qwen3"}', encoding="utf-8")
-
-    def unexpected_import(name, *args, **kwargs):
-        if name == "qwen_drive":
-            raise AssertionError("qwen_drive should not be imported for another model type")
-        return original_import(name, *args, **kwargs)
+    def deny_registration(*args, **kwargs):
+        raise AssertionError("owned Qwen-Drive must precede optional registration")
 
     original_import = builtins.__import__
-    monkeypatch.setattr(builtins, "__import__", unexpected_import)
 
-    assert hf.ensure_qwen_drive_registered(str(model_dir)) is False
+    def deny_official(name, *args, **kwargs):
+        if name == "qwen_drive" or name.startswith("qwen_drive."):
+            raise AssertionError("owned Qwen-Drive must not import the official package")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(hf, "ensure_qwen_drive_registered", deny_registration)
+    monkeypatch.setattr(builtins, "__import__", deny_official)
+    selection = {"subfolder": subfolder} if subfolder else {}
+    assert type(hf.load_model_config(source, trust_remote_code=trust, **selection)) is QwenDriveConfig
+    assert auto.check_and_get_model_definition(source, trust_remote_code=trust, **selection) is QwenDriveQModel
+    loaded = GPTQModel.load(str(source), trust_remote_code=trust, device="cpu", dtype=torch.float32, **selection)
+    assert type(loaded.model) is QwenDriveForConditionalGeneration
+    assert loaded.trust_remote_code is False
+    assert not hasattr(loaded.model, "planning_expert")
+    assert not hasattr(loaded.model, "perception_model")
+    assert all(key.startswith("vlm.") for key in loaded.model.state_dict())
+    inputs = media_inputs()
+    with torch.inference_mode():
+        torch.testing.assert_close(loaded(**inputs, use_cache=False).logits,
+                                   expected.vlm(**inputs, use_cache=False).logits, rtol=0, atol=0)
+        assert loaded.generate(**inputs, max_new_tokens=1, do_sample=False).shape == (1, 6)
+    assert not marker.exists()
 
 
 def test_qwen_drive_definition_contract_and_module_tree():
-    assert QwenDriveQModel.loader is AutoModel
+    assert isinstance(QwenDriveQModel.loader, LocalModelLoader)
     assert QwenDriveQModel.require_trust_remote_code is False
     assert QwenDriveQModel.require_load_processor is False
     assert QwenDriveQModel.lm_head == "vlm.lm_head"
@@ -76,81 +70,14 @@ def test_qwen_drive_definition_contract_and_module_tree():
     assert QwenDriveQModel.rotary_embedding == "vlm.model.language_model.rotary_emb"
     assert QwenDriveQModel.extract_layers_node() == ["vlm.model.language_model.layers"]
 
-    blocks = QwenDriveQModel.simple_layer_modules(
-        model_config=SimpleNamespace(),
-        quantize_config=QuantizeConfig(),
-    )
+    blocks = QwenDriveQModel.simple_layer_modules(model_config=tiny_config(), quantize_config=QuantizeConfig())
     flat = {name for block in blocks for name in block}
     assert {
-        "self_attn.q_proj",
-        "self_attn.k_proj",
-        "self_attn.v_proj",
-        "self_attn.o_proj",
-        "linear_attn.in_proj_qkv",
-        "linear_attn.in_proj_z",
-        "linear_attn.out_proj",
-        "mlp.gate_proj",
-        "mlp.up_proj",
-        "mlp.down_proj",
+        "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
+        "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.out_proj",
+        "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
     } <= flat
     assert {
-        "self_attn.q_norm",
-        "self_attn.k_norm",
-        "linear_attn.norm",
-        "linear_attn.conv1d",
-        "linear_attn.in_proj_a",
-        "linear_attn.in_proj_b",
+        "self_attn.q_norm", "self_attn.k_norm", "linear_attn", "linear_attn.norm", "linear_attn.conv1d",
+        "linear_attn.in_proj_a", "linear_attn.in_proj_b",
     }.isdisjoint(flat)
-
-
-class _FakeVLM(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.proj = nn.Linear(2, 2, bias=False)
-        self.forward_kwargs = None
-        self.generate_kwargs = None
-
-    def forward(self, *args, **kwargs):
-        self.forward_kwargs = (args, kwargs)
-        return "forwarded"
-
-    def generate(self, *args, **kwargs):
-        self.generate_kwargs = (args, kwargs)
-        return "generated"
-
-
-class _FakeQwenDrive(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.vlm = _FakeVLM()
-        self.planning_expert = nn.Linear(2, 2, bias=False)
-
-
-def _definition_for(model):
-    definition = QwenDriveQModel.__new__(QwenDriveQModel)
-    nn.Module.__init__(definition)
-    definition.model = model
-    return definition
-
-
-def test_qwen_drive_text_calls_delegate_to_vlm():
-    wrapped = _FakeQwenDrive()
-    definition = _definition_for(wrapped)
-
-    assert definition.forward(input_ids="ids") == "forwarded"
-    assert wrapped.vlm.forward_kwargs == ((), {"input_ids": "ids"})
-    assert definition.generate(input_ids="ids") == "generated"
-    assert wrapped.vlm.generate_kwargs == ((), {"input_ids": "ids"})
-
-
-def test_qwen_drive_discards_unreleased_random_planner_state():
-    wrapped = _FakeQwenDrive()
-    definition = _definition_for(wrapped)
-
-    definition.after_model_load(wrapped)
-
-    assert "planning_expert" not in wrapped._modules
-    assert wrapped(input_ids="ids") == "forwarded"
-    assert wrapped.vlm.forward_kwargs == ((), {"input_ids": "ids"})
-    assert all(not name.startswith("planning_expert.") for name in wrapped.state_dict())
-    assert any(name.startswith("vlm.") for name in wrapped.state_dict())

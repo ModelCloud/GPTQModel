@@ -5,15 +5,13 @@ from torch import nn
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.gemma4_unified import Gemma4UnifiedForConditionalGenerationGPTQ
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
 
-def test_gemma4_unified_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="gemma4_unified")
+def test_gemma4_unified_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["gemma4_unified"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/gemma4-unified") is Gemma4UnifiedForConditionalGenerationGPTQ
+    assert auto.check_and_get_model_definition(str(tmp_path)) is Gemma4UnifiedForConditionalGenerationGPTQ
 
 
 def test_gemma4_unified_module_tree_excludes_per_layer_input_paths():

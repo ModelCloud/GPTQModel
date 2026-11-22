@@ -1,24 +1,19 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Legacy-layout VL checkpoints must survive a re-save and the HF bridge (#4802).
+"""Legacy-layout VL checkpoints must survive a re-save (#4802).
 
 Transformers 4.x Gemma-3 VL checkpoints store the text decoder under
 ``language_model.model.layers.*`` while Transformers 5 builds
 ``model.language_model.layers.*``. ``GPTQModel.load`` already converts the keys
-for inference, but the save-time export shell and the Transformers/Optimum
-bridge matched checkpoint names verbatim, so:
-
-* ``save()`` refused (or zero-filled) every quantized tensor of the rebuilt
-  shell, and
-* ``AutoModelForImageTextToText.from_pretrained`` raised
-  "could not match quantized checkpoint tensors to model modules".
+for inference, but the save-time export shell matched checkpoint names
+verbatim, so ``save()`` refused (or zero-filled) every quantized tensor of the
+rebuilt shell.
 
 These tests build tiny CPU models for Gemma-3 VL, InternVL and Qwen2-VL,
-quantize them, rewrite the checkpoint into the legacy layout, and then exercise
-both bridges end to end.
+quantize them, rewrite the checkpoint into the legacy layout, and then re-save
+and reload them through ``GPTQModel``.
 """
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -34,7 +29,6 @@ from gptqmodel.models.writer import (
     _validate_export_shell_quantized_slots,
 )
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from gptqmodel.utils.hf_load import hf_gptqmodel_prepare_model_for_load
 
 
 # --------------------------------------------------------------------------- #
@@ -338,54 +332,3 @@ def test_vl_legacy_checkpoint_resave_roundtrip(tmp_path, model_type, monkeypatch
     before = _normalized_state_dict(quantized_dir, wrapped, model_type)
     after = _normalized_state_dict(resaved_dir, reloaded, model_type)
     _assert_state_dicts_equal(before, after)
-
-
-# --------------------------------------------------------------------------- #
-# HF bridge: the manifest names must be converted before ``find_modules``.
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.parametrize("model_type", sorted(VL_CASES))
-def test_hf_bridge_matches_legacy_vl_quantized_modules(tmp_path, model_type):
-    model = _tiny_model(model_type)
-    legacy_prefix = VL_CASES[model_type][2]
-
-    (tmp_path / "quantize_config.json").write_text(
-        json.dumps(
-            {
-                "bits": 4,
-                "group_size": -1,
-                "desc_act": False,
-                "sym": True,
-                "format": "gptq",
-                "quant_method": "gptq",
-                "meta": {"quantizer": ["gptqmodel:test"]},
-            }
-        ),
-        encoding="utf-8",
-    )
-    save_file(
-        {
-            f"{legacy_prefix}.qweight": torch.zeros((1, 8), dtype=torch.int32),
-            "language_model.model.layers.0.self_attn.q_proj.qweight"
-            if model_type != "qwen2_vl"
-            else "model.layers.0.self_attn.q_proj.qweight": torch.zeros(
-                (1, 8), dtype=torch.int32
-            ),
-        },
-        tmp_path / "model.safetensors",
-    )
-
-    context = hf_gptqmodel_prepare_model_for_load(
-        model,
-        checkpoint_files=[tmp_path / "model.safetensors"],
-        device_map={"": "cpu"},
-        backend=BACKEND.GPTQ_TORCH,
-        dtype=torch.float16,
-    )
-
-    layer = model.model.language_model.layers[0]
-    assert isinstance(layer.mlp.down_proj, BaseQuantLinear)
-    assert isinstance(layer.self_attn.q_proj, BaseQuantLinear)
-    assert context is not None
-    assert context.quantize_config.bits == 4

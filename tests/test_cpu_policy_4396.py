@@ -4,15 +4,12 @@
 
 from __future__ import annotations
 
-import sys
-import types
 from types import SimpleNamespace
 
 import pytest
 
 import gptqmodel
 from gptqmodel.models import auto
-from gptqmodel.utils import internal_gguf
 from gptqmodel.utils.backend_config import RuntimeConfig
 from gptqmodel.utils.kernel import KernelConfig, configure_kernel, reset_kernel_config
 from gptqmodel.utils.p2p import P2PConfig
@@ -22,13 +19,14 @@ def _fake_quantize_config():
     return SimpleNamespace(kernel=None, runtime=None, p2p=None, dynamic=False, preprocessors=None)
 
 
-def _install_fake_dense_load(monkeypatch, captured, pool_sizes):
-    fake_config = SimpleNamespace(model_type="llama", quantization_config=None)
-    monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
-        staticmethod(lambda *args, **kwargs: fake_config),
-    )
+def _install_fake_dense_load(monkeypatch, tmp_path, captured, pool_sizes):
+    """Write a real unquantized llama config.json; stub only the definition load."""
+
+    from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
+
+    CONFIG_MAPPING["llama"](
+        hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, vocab_size=32
+    ).save_pretrained(tmp_path)
     monkeypatch.setattr(auto, "native_floatx_source_format", lambda *args, **kwargs: None)
 
     class _Definition:
@@ -39,6 +37,7 @@ def _install_fake_dense_load(monkeypatch, captured, pool_sizes):
             return SimpleNamespace(loaded=True)
 
     monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: _Definition)
+    return str(tmp_path)
 
 
 @pytest.fixture
@@ -59,12 +58,12 @@ def isolated_pool(monkeypatch):
             pool.shutdown(wait=True)
 
 
-def test_from_pretrained_installs_runtime_cpu_workers_before_the_pool(isolated_pool, monkeypatch):
+def test_from_pretrained_installs_runtime_cpu_workers_before_the_pool(isolated_pool, monkeypatch, tmp_path):
     captured, pool_sizes = [], []
-    _install_fake_dense_load(monkeypatch, captured, pool_sizes)
+    model_dir = _install_fake_dense_load(monkeypatch, tmp_path, captured, pool_sizes)
 
     auto.GPTQModel.from_pretrained(
-        "fake/model",
+        model_dir,
         quantize_config=_fake_quantize_config(),
         runtime=RuntimeConfig(cpu_workers=2),
         device="cpu",
@@ -77,18 +76,18 @@ def test_from_pretrained_installs_runtime_cpu_workers_before_the_pool(isolated_p
     assert captured[0]["runtime"].cpu_workers == 2
 
 
-def test_second_load_resizes_the_existing_singleton_pool(isolated_pool, monkeypatch):
+def test_second_load_resizes_the_existing_singleton_pool(isolated_pool, monkeypatch, tmp_path):
     captured, pool_sizes = [], []
-    _install_fake_dense_load(monkeypatch, captured, pool_sizes)
+    model_dir = _install_fake_dense_load(monkeypatch, tmp_path, captured, pool_sizes)
 
     auto.GPTQModel.from_pretrained(
-        "fake/model",
+        model_dir,
         quantize_config=_fake_quantize_config(),
         runtime=RuntimeConfig(cpu_workers=2),
         device="cpu",
     )
     auto.GPTQModel.from_pretrained(
-        "fake/model",
+        model_dir,
         quantize_config=_fake_quantize_config(),
         runtime=RuntimeConfig(cpu_workers=5),
         device="cpu",
@@ -98,14 +97,14 @@ def test_second_load_resizes_the_existing_singleton_pool(isolated_pool, monkeypa
     assert len(gptqmodel.get_device_thread_pool()._worker_groups["cpu"]) == 5
 
 
-def test_from_pretrained_forwards_kernel_and_p2p_to_the_definition(isolated_pool, monkeypatch):
+def test_from_pretrained_forwards_kernel_and_p2p_to_the_definition(isolated_pool, monkeypatch, tmp_path):
     captured, pool_sizes = [], []
-    _install_fake_dense_load(monkeypatch, captured, pool_sizes)
+    model_dir = _install_fake_dense_load(monkeypatch, tmp_path, captured, pool_sizes)
     policy = KernelConfig(gguf_cpp_native_matmul=False, gguf_cpp_threads=3)
     p2p = P2PConfig(mode="off")
 
     auto.GPTQModel.from_pretrained(
-        "fake/model",
+        model_dir,
         quantize_config=_fake_quantize_config(),
         kernel=policy,
         p2p=p2p,
@@ -156,31 +155,3 @@ def test_each_retired_env_var_warns_exactly_once(monkeypatch):
     text = "\n".join(calls)
     assert "KernelConfig.torch_streaming" in text
     assert "RuntimeConfig.cpu_workers" in text
-
-
-def test_install_runtime_keeps_an_imported_real_gguf(monkeypatch):
-    real = types.ModuleType("gguf")
-    monkeypatch.setitem(sys.modules, "gguf", real)
-
-    assert internal_gguf.install_runtime() is real
-    assert sys.modules["gguf"] is real
-
-
-def test_install_runtime_does_not_shadow_an_installed_gguf(monkeypatch):
-    monkeypatch.delitem(sys.modules, "gguf", raising=False)
-    monkeypatch.setattr(
-        internal_gguf.importlib.util,
-        "find_spec",
-        lambda name: object() if name == "gguf" else None,
-    )
-
-    assert internal_gguf.install_runtime() is None
-    assert "gguf" not in sys.modules
-
-
-def test_install_runtime_installs_the_shim_when_gguf_is_absent(monkeypatch):
-    monkeypatch.delitem(sys.modules, "gguf", raising=False)
-    monkeypatch.setattr(internal_gguf.importlib.util, "find_spec", lambda name: None)
-
-    assert internal_gguf.install_runtime() is internal_gguf
-    assert sys.modules["gguf"] is internal_gguf

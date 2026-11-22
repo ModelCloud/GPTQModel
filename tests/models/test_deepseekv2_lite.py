@@ -15,7 +15,7 @@ class TestDeepseekV2Lite(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
     NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,
@@ -28,4 +28,3 @@ class TestDeepseekV2Lite(ModelTest):
 
     def test_deepseekv2lite(self):
         self.quantize_and_evaluate()
-

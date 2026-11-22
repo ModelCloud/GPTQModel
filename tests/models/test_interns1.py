@@ -10,7 +10,7 @@ from model_test import ModelTest
 
 class TestInternS1(ModelTest):
     NATIVE_MODEL_ID = "./tmp/Intern-S1-mini"
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 1
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
