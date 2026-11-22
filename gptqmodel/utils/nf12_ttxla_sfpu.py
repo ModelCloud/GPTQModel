@@ -94,7 +94,9 @@ class TTXLASFPUNF12Head:
         words = self.planes if baseline is None else baseline
         rows = x.reshape(-1, k)
         activation = pad(rows, (0, 0, 0, round_up(len(rows), 32) - len(rows)))
+        # Eight activation tiles fit alongside the decode slab for the 2,304-wide Inkling head.
+        activation_tiles = next(group for group in (8, 4, 2, 1) if group * 32 <= len(activation)) if k <= 2304 else 1
         # One executable traverses the token slabs. Separate lazy Generic
         # operations can lose their outputs when TT-XLA lowers concatenation.
-        result = _launch(activation, words, self.metadata, n, self.exp_base)[:len(rows)]
+        result = _launch(activation, words, self.metadata, n, self.exp_base, activation_tiles=activation_tiles)[:len(rows)]
         return result.reshape(*x.shape[:-1], n)
