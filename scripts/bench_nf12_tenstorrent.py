@@ -194,7 +194,7 @@ def _linear(w, name, runtime, backend, repeats, sizes, *, bias=None, exhaustive=
             "packed_bytes": descriptor.packed_bytes, "resident_bytes": layer.resident_bytes,
             "packed": result, "bf16": matched, "oracle": _errors(out, golden),
             "fp32_output_scratch_bytes": round_up(m, 32) * round_up(n, 32) * 4 if bias is not None else 0,
-            "l1_circular_bytes_per_core": 1536 + 64 * 64 + 2048 * (2 + 2 * block) + (8192 if bias is not None else 4096),
+            "l1_circular_bytes_per_core": 1536 + 64 * 64 + 256 * 4 + 2048 * (2 + 2 * block) + (8192 if bias is not None else 4096),
         }
         if block > 1:
             _, record["single_m_tile"] = _measure(lambda: call(resident, False, 1), sync, repeats,

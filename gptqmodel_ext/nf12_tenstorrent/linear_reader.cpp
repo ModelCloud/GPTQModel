@@ -9,25 +9,22 @@ struct GroupPairs {
     uint32_t pair3;
 };
 
-inline uint32_t join_bf16_pair(uint32_t low, uint32_t even_high, uint32_t odd_high) {
-    return (low & 0xff) | ((even_high & 0xff) << 8) | ((low & 0xff00) << 8) | (odd_high << 24);
+inline uint32_t join_bf16_pair(uint32_t low, uint32_t high) {
+    return (low & 0xff) | ((low & 0xff00) << 8) | high;
 }
 
-inline GroupPairs decode_regular_pairs(Group group, uint32_t base_bytes) {
-    // Each byte addition is independent since B + 7 cannot carry into the sign bit.
-    const uint32_t even = (group.meta & 0x87878787u) + base_bytes;
-    const uint32_t odd = (((group.meta << 1) & 0x80808080u) | ((group.meta >> 3) & 0x07070707u)) + base_bytes;
+inline GroupPairs decode_regular_pairs(Group group, const uint32_t* exponent) {
     return {
-        join_bf16_pair(group.low0, even, odd),
-        join_bf16_pair(group.low0 >> 16, even >> 8, odd >> 8),
-        join_bf16_pair(group.low1, even >> 16, odd >> 16),
-        join_bf16_pair(group.low1 >> 16, even >> 24, odd >> 24),
+        join_bf16_pair(group.low0, exponent[group.meta & 0xff]),
+        join_bf16_pair(group.low0 >> 16, exponent[(group.meta >> 8) & 0xff]),
+        join_bf16_pair(group.low1, exponent[(group.meta >> 16) & 0xff]),
+        join_bf16_pair(group.low1 >> 16, exponent[group.meta >> 24]),
     };
 }
 
-inline GroupPairs decode_pairs(Group group, uint32_t base_bytes, uint32_t escape_page) {
+inline GroupPairs decode_pairs(Group group, const uint32_t* exponent, uint32_t escape_page) {
     if (group.meta != 0) {
-        return decode_regular_pairs(group, base_bytes);
+        return decode_regular_pairs(group, exponent);
     }
     const auto* entry = reinterpret_cast<volatile const uint32_t*>(escape_page + (group.low0 % 4) * 16);
     return {entry[0], entry[1], entry[2], entry[3]};
@@ -48,13 +45,12 @@ inline void store_group_pairs(volatile uint32_t* output, const GroupPairs& a, co
 template <typename Packed, typename Escapes>
 inline void decode_tile(
     uint32_t nt, uint32_t kt, uint32_t dst, uint32_t scratch,
-    uint32_t n_atoms, uint32_t base, const Packed& packed, const Escapes& escapes) {
+    uint32_t n_atoms, const uint32_t* exponent, const Packed& packed, const Escapes& escapes) {
     constexpr uint32_t k_tiles = NF12_CONFIG(1);
     auto* tile = reinterpret_cast<volatile uint32_t*>(dst);
     const auto* atom = reinterpret_cast<volatile const uint32_t*>(scratch);
     const uint32_t first_face = 2 * (kt % 2);
     const uint32_t escape_addr = scratch + 1536;
-    const uint32_t base_bytes = base * 0x01010101u;
     for (uint32_t nh = 0; nh < 2; ++nh) {
         const uint32_t nb = nt * 2 + nh;
         if (nb >= n_atoms) {
@@ -80,7 +76,7 @@ inline void decode_tile(
                     const auto b = load_group(atom, first_face + f, lane + 4);
                     if (a.meta != 0 && b.meta != 0) {
                         store_group_pairs(face + row_pair * 16 + col_pair,
-                                          decode_regular_pairs(a, base_bytes), decode_regular_pairs(b, base_bytes));
+                                          decode_regular_pairs(a, exponent), decode_regular_pairs(b, exponent));
                     } else {
                         fetch_escape(a, escapes, face_escapes + lane * 64);
                         fetch_escape(b, escapes, face_escapes + (lane + 4) * 64);
@@ -102,8 +98,8 @@ inline void decode_tile(
             const auto a = load_group(atom, first_face + f, lane);
             const auto b = load_group(atom, first_face + f, lane + 4);
             store_group_pairs(tile + (2 * f + nh) * 128 + row_pair * 16 + col_pair,
-                              decode_pairs(a, base_bytes, escape_page),
-                              decode_pairs(b, base_bytes, escape_page + 4 * 64));
+                              decode_pairs(a, exponent, escape_page),
+                              decode_pairs(b, exponent, escape_page + 4 * 64));
         }
     }
 }
@@ -132,6 +128,15 @@ void kernel_main() {
     constexpr uint32_t n_atoms = NF12_CONFIG(0);
 #endif
 
+    auto* exponent = reinterpret_cast<uint32_t*>(scratch + 1536 + 64 * 64);
+    if constexpr (!dense) {
+        for (uint32_t meta = 0; meta < 256; ++meta) {
+            const uint32_t even = (meta & 0x87) + base;
+            const uint32_t odd = (((meta << 1) & 0x80) | ((meta >> 3) & 7)) + base;
+            exponent[meta] = (even << 8) | (odd << 24);
+        }
+    }
+
     for (uint32_t nt = start; nt < end; ++nt) {
         for (uint32_t mt = 0; mt < m_tiles; mt += m_block) {
             const uint32_t count = m_block < m_tiles - mt ? m_block : m_tiles - mt;
@@ -148,7 +153,7 @@ void kernel_main() {
                     noc_async_read_page(nt * k_tiles + kt, w, get_write_ptr(0));
                     noc_async_read_barrier();
                 } else {
-                    decode_tile(nt, kt, get_write_ptr(0), scratch, n_atoms, base, w, escapes);
+                    decode_tile(nt, kt, get_write_ptr(0), scratch, n_atoms, exponent, w, escapes);
                 }
                 cb_push_back(0, 1);
             }

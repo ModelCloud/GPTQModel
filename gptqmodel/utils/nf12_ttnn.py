@@ -12,7 +12,7 @@ from .ttnn_runtime import import_ttnn
 
 
 _GATHER_SCRATCH = 1536 + 64 + 128 + 16 * 64
-_LINEAR_SCRATCH = 1536 + 64 * 64
+_LINEAR_SCRATCH = 1536 + 64 * 64 + 256 * 4
 
 
 def _cores(ttnn, device, tasks):

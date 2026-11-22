@@ -64,7 +64,7 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
             _cb(0, "BFloat16", 2048, 2),
             _cb(1, "BFloat16", 2048, 2 * m_block),
             _cb(16, "Float32" if wide else "BFloat16", out_page, 2),
-            _cb(24, "UInt32", 1536 + 64 * 64),
+            _cb(24, "UInt32", 1536 + 64 * 64 + 256 * 4),
         ]
         kernels = [
             ("linear_reader", "noc", [0, 1, 2], [n // 16, kt, mt, m_block, base, int(dense), nt]),
