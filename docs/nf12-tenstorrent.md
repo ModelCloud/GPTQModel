@@ -354,6 +354,37 @@ read. Each entry is median / p95 in milliseconds.
 | 128 | 184.82 / 190.53 | 75.41 / 191.73 |
 | 256 | 247.95 / 527.07 | 159.98 / 277.20 |
 
+### SFPU full-head prototype on source-main TTNN
+
+The prototype groups four consecutive `[K, N]` BF16 tiles into three tiled
+16-bit planes and streams additional absolute bit patches for escaped entries.
+The SFPU rebuilds one K slab in L1 using its 32-wide integer lanes. The matrix
+engine then accumulates the decoded slab in ascending K order with FP32
+destination registers. The same worker performs both steps. The prototype
+uses one packed resident weight and bounds the decoded slab to one worker's
+output tile. The matched BF16 benchmark uses the same activation placement,
+output geometry and matrix schedule.
+
+| Full released LM head, M=1, chip 2 | NF12 SFPU | Matched BF16 |
+| --- | ---: | ---: |
+| Resident weights and sparse metadata | 695,807,872 B | 926,318,592 B |
+| Median / p95, 40 synchronized interleaved launches | 2.087 / 2.131 ms | 2.491 / 2.532 ms |
+| Effective weight bandwidth | 333.4 GB/s | 371.9 GB/s |
+| Temporary DRAM for reconstructed weights | 0 B | 0 B |
+
+The packed path ran 1.193× faster at the median and matched the BF16 results
+bit-for-bit. The SFPU path used 311,424 B of L1 circular buffers per worker,
+including 144 KiB each for decoded weights and activations. Reconstructing
+special BF16 values, including signed zeros, subnormals, infinities and NaN
+payloads, was also tested before arithmetic. This result is for the source-main
+TTNN prototype at M=1.
+
+```bash
+TT_VISIBLE_DEVICES=2 TT_MESH_GRAPH_DESC_PATH=/path/to/p150_mesh_graph_descriptor.textproto \
+  PYTHONPATH=. python scripts/bench_nf12_sfpu_decode.py --chip 0 --size 201024 \
+  --linear --checkpoint /path/to/Inkling-2-Mini --repeats 40
+```
+
 ## Mixed-runtime model validation
 
 Using Transformers 5.23.0, the NF12 matrices ran on P300c chip 0. The existing
