@@ -45,10 +45,12 @@ void kernel_main() {
     const uint32_t n_tiles = end - start;
     constexpr uint32_t m_tiles = NF12_CONFIG(4);
     constexpr uint32_t m_group = NF12_CONFIG(5);
+    constexpr uint32_t dest_tiles = 1;
 #else
     const uint32_t n_tiles = get_arg_val<uint32_t>(0);
-    constexpr uint32_t m_tiles = 1;
-    constexpr uint32_t m_group = 1;
+    constexpr uint32_t m_tiles = NF12_CONFIG(3);
+    constexpr uint32_t m_group = m_tiles;
+    constexpr uint32_t dest_tiles = m_group < 4 ? m_group : 4;
 #endif
 
     compute_kernel_hw_startup<SrcOrder::Reverse>(activation, decoded, output);
@@ -117,16 +119,22 @@ void kernel_main() {
 #else
             cb_wait_front(decoded, k_tiles);
 #endif
-            for (uint32_t local_m = 0; local_m < live; ++local_m) {
+            // Keep the decoded weights in L1 and advance each destination in K order.
+            for (uint32_t local_m = 0; local_m < live; local_m += dest_tiles) {
+                const uint32_t count = live - local_m < dest_tiles ? live - local_m : dest_tiles;
                 tile_regs_acquire();
                 for (uint32_t k = 0; k < k_tiles; ++k) {
-                    matmul_tiles(activation, decoded, local_m * k_tiles + k, k, 0);
+                    for (uint32_t i = 0; i < count; ++i) {
+                        matmul_tiles(activation, decoded, (local_m + i) * k_tiles + k, k, i);
+                    }
                 }
                 tile_regs_commit();
                 tile_regs_wait();
-                cb_reserve_back(output, 1);
-                pack_tile(0, output);
-                cb_push_back(output, 1);
+                for (uint32_t i = 0; i < count; ++i) {
+                    cb_reserve_back(output, 1);
+                    pack_tile(i, output);
+                    cb_push_back(output, 1);
+                }
                 tile_regs_release();
             }
 #ifdef NF12_PJRT

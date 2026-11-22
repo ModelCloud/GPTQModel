@@ -17,9 +17,9 @@ void write_results(const Output& output, uint32_t start, uint32_t end, const App
     constexpr uint32_t m_tiles = NF12_CONFIG(4);
     constexpr uint32_t m_group = NF12_CONFIG(5);
 #else
-    constexpr uint32_t n_tiles = 0;
-    constexpr uint32_t m_tiles = 1;
-    constexpr uint32_t m_group = 1;
+    constexpr uint32_t n_tiles = NF12_CONFIG(4);
+    constexpr uint32_t m_tiles = NF12_CONFIG(5);
+    constexpr uint32_t m_group = m_tiles;
 #endif
 
     for (uint32_t m = 0; m < m_tiles; m += m_group) {
@@ -99,5 +99,5 @@ void kernel_main() {
 #else
     constexpr bool single_row = NF12_CONFIG(3) != 0;
 #endif
-    write<NF12_CONFIG(1) != 0, NF12_CONFIG(2) != 0, single_row, NF12_ACCESSORS(4)>();
+    write<NF12_CONFIG(1) != 0, NF12_CONFIG(2) != 0, single_row, NF12_ACCESSORS(6)>();
 }

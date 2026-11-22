@@ -17,6 +17,9 @@ from .nf12_ttnn import _cb, _cores, _kernel
 from .ttnn_runtime import import_ttnn
 
 
+_MAX_ACTIVATION_TILES = 8
+
+
 @dataclass(frozen=True)
 class _SFPUStorageDescriptor:
     layout: str
@@ -90,8 +93,24 @@ def _transcode(descriptor, weight):
     return planes, _metadata_pages(headers, torch.cat(patch_parts))
 
 
+def _packed_pages(k_tiles, prefetch_groups):
+    return min(prefetch_groups * 6, k_tiles // 4 * 3)
+
+
+def _linear_l1_bytes(k_tiles, activation_tiles, *, dense, metadata, prefetch_groups, single_row=False):
+    pages = (activation_tiles + 1) * k_tiles + 2
+    if not dense:
+        pages += _packed_pages(k_tiles, prefetch_groups)
+    return pages * 2048 + 128 * int(bool(metadata)) + 64 * int(single_row)
+
+
 def _linear_operation(ttnn, device, words, activation, n, k, base, *, dense, metadata, prefetch_groups, single_row=False):
-    shape = (n // 32, 32) if single_row else (32, n)
+    m, activation_k = activation.shape
+    activation_tiles = m // 32
+    if (activation_k != k or m % 32 or not 1 <= activation_tiles <= _MAX_ACTIVATION_TILES
+            or (single_row and activation_tiles != 1)):
+        raise ValueError("SFPU activation group must fit between one and eight full input tiles")
+    shape = (n // 32, 32) if single_row else (m, n)
     layout = ttnn.ROW_MAJOR_LAYOUT if single_row else ttnn.TILE_LAYOUT
     output = ttnn.allocate_tensor_on_device(ttnn.Shape(shape), ttnn.bfloat16, layout,
                                            device, ttnn.DRAM_MEMORY_CONFIG)
@@ -99,24 +118,24 @@ def _linear_operation(ttnn, device, words, activation, n, k, base, *, dense, met
     k_tiles = k // 32
     geometry = (k_tiles, int(dense))
     reader = _kernel(ttnn, "sfpu_linear_reader", ttnn.ReaderConfigDescriptor(), cores, assignments,
-                     (*geometry, prefetch_groups), [words, activation],
+                     (*geometry, prefetch_groups, activation_tiles), [words, activation],
                      lambda start, end: [words.buffer_address(), activation.buffer_address(), start, end])
     compute = _kernel(ttnn, "sfpu_linear_compute", ttnn.ComputeConfigDescriptor(fp32_dest_acc_en=True),
-                      cores, assignments, (*geometry, base), (), lambda start, end: [end - start])
+                      cores, assignments, (*geometry, base, activation_tiles), (), lambda start, end: [end - start])
     metadata_addresses = [tensor.buffer_address() for tensor in metadata]
     writer = _kernel(ttnn, "sfpu_linear_writer", ttnn.WriterConfigDescriptor(), cores, assignments,
-                     (*geometry, int(bool(metadata)), int(single_row)), [output, *metadata],
+                     (*geometry, int(bool(metadata)), int(single_row), n // 32, activation_tiles), [output, *metadata],
                      lambda start, end: [output.buffer_address(), start, end, *metadata_addresses])
     weight_views = [ttnn.CBFormatDescriptor(buffer_index=2, data_format=ttnn.bfloat16, page_size=2048)]
     if not dense:
         weight_views.append(ttnn.CBFormatDescriptor(buffer_index=16, data_format=ttnn.uint16, page_size=2048))
     buffers = [
-        _cb(ttnn, cores, 1, ttnn.bfloat16, 2048, k_tiles),
+        _cb(ttnn, cores, 1, ttnn.bfloat16, 2048, activation_tiles * k_tiles),
         ttnn.CBDescriptor(total_size=k_tiles * 2048, core_ranges=cores, format_descriptors=weight_views),
         _cb(ttnn, cores, 17, ttnn.bfloat16, 2048, 2),
     ]
     if not dense:
-        buffers.append(_cb(ttnn, cores, 0, ttnn.uint16, 2048, min(prefetch_groups * 6, k_tiles // 4 * 3)))
+        buffers.append(_cb(ttnn, cores, 0, ttnn.uint16, 2048, _packed_pages(k_tiles, prefetch_groups)))
     if metadata:
         buffers.append(_cb(ttnn, cores, 24, ttnn.uint32, 128))
     if single_row:

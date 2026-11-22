@@ -11,7 +11,7 @@ void kernel_main() {
     constexpr uint32_t k_tiles = NF12_CONFIG(0);
     constexpr bool dense = NF12_CONFIG(1);
     constexpr uint32_t prefetch_groups = NF12_CONFIG(2);
-    constexpr auto weights_args = TensorAccessorArgs<NF12_ACCESSORS(3)>();
+    constexpr auto weights_args = TensorAccessorArgs<NF12_ACCESSORS(4)>();
     constexpr auto input_args = TensorAccessorArgs<weights_args.next_compile_time_args_offset()>();
     const auto weights = TensorAccessor(weights_args, NF12_ADDRESS(0),
 #ifdef NF12_PJRT
@@ -26,8 +26,8 @@ void kernel_main() {
     constexpr uint32_t m_tiles = NF12_CONFIG(4);
     constexpr uint32_t m_group = NF12_CONFIG(5);
 #else
-    constexpr uint32_t m_tiles = 1;
-    constexpr uint32_t m_group = 1;
+    constexpr uint32_t m_tiles = NF12_CONFIG(3);
+    constexpr uint32_t m_group = m_tiles;
 #endif
 
     constexpr uint32_t block_tiles = dense ? 4 : 3;

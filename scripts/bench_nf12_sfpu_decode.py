@@ -17,9 +17,15 @@ import torch
 from bench_nf12_tenstorrent import _errors, _measure, _same
 from safetensors import safe_open
 
-from gptqmodel.utils.nf12_tenstorrent import prepare_nf12
+from gptqmodel.utils.nf12_tenstorrent import prepare_nf12, round_up
 from gptqmodel.utils.nf12_ttnn import TTNNNF12, _cb, _cores, _kernel
-from gptqmodel.utils.nf12_ttnn_sfpu import _linear_operation, _pack_four, _to_tiles
+from gptqmodel.utils.nf12_ttnn_sfpu import (
+    _MAX_ACTIVATION_TILES,
+    _linear_l1_bytes,
+    _linear_operation,
+    _pack_four,
+    _to_tiles,
+)
 from gptqmodel.utils.ttnn_runtime import import_ttnn
 
 
@@ -112,7 +118,7 @@ def _measure_linear_pair(calls, sync, repeats):
     return tuple((statistics.median(times), sorted(times)[math.ceil(0.95 * repeats) - 1]) for times in elapsed)
 
 
-def _exercise_linear(ttnn, device, sync, size, repeats, checkpoint, prefetch_groups, m_sizes):
+def _exercise_linear(ttnn, device, sync, size, repeats, checkpoint, prefetch_groups, m_sizes, activation_sizes):
     base, weight = _weight(size, checkpoint, False)
     n, k = weight.shape
     if (k // 128) % prefetch_groups:
@@ -132,30 +138,47 @@ def _exercise_linear(ttnn, device, sync, size, repeats, checkpoint, prefetch_gro
 
     for m in m_sizes:
         x = torch.randn((m, k), generator=torch.Generator().manual_seed(54)).bfloat16()
-        activations = [
-            ttnn.from_torch(torch.nn.functional.pad(rows, (0, 0, 0, 32 - len(rows))), dtype=ttnn.bfloat16,
-                            layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-            for rows in x.split(32)
-        ]
-        calls = []
-        for dense, words, metadata, _ in residents:
-            slabs = [_linear_operation(ttnn, device, words, activation, n, k, base, dense=dense, metadata=metadata,
-                                       prefetch_groups=1 if dense else prefetch_groups) for activation in activations]
-            calls.append(lambda slabs=slabs: tuple(slab() for slab in slabs))
-
-        timings = _measure_linear_pair(calls, sync, repeats)
-        results = [torch.cat([ttnn.to_torch(output) for output in call()]) for call in calls]
-        _same(*results)
         golden = torch.nn.functional.linear(x.float(), weight.float()).bfloat16()
-        oracle = _errors(results[1][:m], golden)
-        assert oracle["scaled_rmse"] <= 0.002, oracle
-        for (dense, _, _, weight_bytes), (median, p95) in zip(residents, timings):
-            print(json.dumps({"kind": "matched_bf16_linear" if dense else "sfpu_linear", "shape": [n, k], "m": m,
-                              "weight_bytes": weight_bytes, "weight_passes": len(activations), "median_us": median,
-                              "p95_us": p95, "effective_GBps": weight_bytes * len(activations) / median / 1000}),
-                  flush=True)
-        print(json.dumps({"matched_linear_exact": True, "shape": [n, k], "m": m,
-                          "packed_prefetch_groups": prefetch_groups, "torch_fp32_oracle": oracle}), flush=True)
+        exact_reference = None
+        for activation_size in dict.fromkeys(min(size, round_up(m, 32) // 32) for size in activation_sizes):
+            activations = [
+                ttnn.from_torch(
+                    torch.nn.functional.pad(rows, (0, 0, 0, round_up(len(rows), 32) - len(rows))),
+                    dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                ) for rows in x.split(activation_size * 32)
+            ]
+            activation_tiles = max(activation.shape[0] // 32 for activation in activations)
+            calls, l1_bytes = [], []
+            for dense, words, metadata, _ in residents:
+                groups = 1 if dense else prefetch_groups
+                l1_bytes.append(_linear_l1_bytes(
+                    k // 32, activation_tiles, dense=dense, metadata=metadata, prefetch_groups=groups,
+                ))
+                slabs = [
+                    _linear_operation(ttnn, device, words, activation, n, k, base, dense=dense, metadata=metadata,
+                                      prefetch_groups=groups) for activation in activations
+                ]
+                calls.append(lambda slabs=slabs: tuple(slab() for slab in slabs))
+
+            timings = _measure_linear_pair(calls, sync, repeats)
+            results = [torch.cat([ttnn.to_torch(output) for output in call()]) for call in calls]
+            _same(*results)
+            if exact_reference is None:
+                exact_reference = results[0]
+            else:
+                _same(results[0], exact_reference)
+            oracle = _errors(results[1][:m], golden)
+            assert oracle["scaled_rmse"] <= 0.002, oracle
+            for (dense, _, _, weight_bytes), (median, p95), scratch in zip(residents, timings, l1_bytes):
+                print(json.dumps({
+                    "kind": "matched_bf16_linear" if dense else "sfpu_linear", "shape": [n, k], "m": m,
+                    "activation_tiles": activation_tiles, "weight_bytes": weight_bytes, "weight_passes": len(activations),
+                    "l1_circular_bytes_per_worker": scratch, "median_us": median, "p95_us": p95,
+                    "effective_GBps": weight_bytes * len(activations) / median / 1000,
+                }), flush=True)
+            print(json.dumps({"matched_linear_exact": True, "shape": [n, k], "m": m,
+                              "activation_tiles": activation_tiles, "packed_prefetch_groups": prefetch_groups,
+                              "torch_fp32_oracle": oracle}), flush=True)
 
 
 def main():
@@ -168,6 +191,8 @@ def main():
     parser.add_argument("--linear", action="store_true", help="Run the bias-free SFPU and matmul experiment")
     parser.add_argument("--prefetch-groups", type=int, default=1, help="Read this many compressed groups per NoC batch")
     parser.add_argument("--m", nargs="+", type=int, default=[1], help="Logical M sizes to validate in linear mode")
+    parser.add_argument("--activation-tiles", nargs="+", type=int, default=[1],
+                        help="Number of 32-row activation tiles to reuse per weight slab")
     args = parser.parse_args()
     if args.size < 64 or args.size % 64 or args.repeats < 1:
         parser.error("Use a size that is a positive multiple of 64 and at least one repeat")
@@ -177,6 +202,8 @@ def main():
         parser.error("The number of prefetch groups must be positive")
     if min(args.m) < 1:
         parser.error("M sizes must be positive")
+    if not 1 <= min(args.activation_tiles) <= max(args.activation_tiles) <= _MAX_ACTIVATION_TILES:
+        parser.error(f"Use between one and {_MAX_ACTIVATION_TILES} activation tiles")
     torch.set_num_threads(3)
     ttnn = import_ttnn()
     device = ttnn.open_device(device_id=args.chip)
@@ -187,7 +214,7 @@ def main():
 
             if args.linear:
                 _exercise_linear(ttnn, device, sync, args.size, args.repeats, args.checkpoint,
-                                 args.prefetch_groups, args.m)
+                                 args.prefetch_groups, args.m, args.activation_tiles)
             else:
                 _exercise(ttnn, device, ttnn.to_torch, sync, args.size, args.repeats, args.checkpoint, args.special)
     finally:
