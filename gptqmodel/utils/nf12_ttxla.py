@@ -34,7 +34,12 @@ def _cb(index, data_format, page_size, count=1):
 
 def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, arg_roles, **_unused):
     fields = operation_id.removeprefix(_PREFIX).split(".")
-    op, n, k, m, base, m_block, flag = fields[0], *map(int, fields[1:])
+    if len(fields) != 7:
+        raise ValueError(f"Invalid TT-XLA NF12 operation ID {operation_id!r}: expected seven fields")
+    op = fields[0]
+    n, k, m, base, m_block, flag = (
+        int(fields[1]), int(fields[2]), int(fields[3]), int(fields[4]), int(fields[5]), int(fields[6]),
+    )
     if tuple(mesh_shape) != (1, 1) or any(
         "<interleaved>" not in layout or "<dram>" not in layout or "!ttcore.tile<32x32" not in layout
         for layout in layouts

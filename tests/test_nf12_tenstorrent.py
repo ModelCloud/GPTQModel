@@ -35,3 +35,11 @@ def test_signed_ids_before_narrowing():
     actual = normalize_ids(ids, 32, padding_idx=-1)
     assert actual.dtype == torch.int32
     assert actual.tolist() == [-1, 0, 16, -1, -1, -1, -1]
+
+
+@pytest.mark.parametrize("suffix", ["linear.16.64.1.57.1", "linear.16.64.1.57.1.0.0"])
+def test_ttxla_artifact_rejects_wrong_number_of_fields(suffix):
+    from gptqmodel.utils.nf12_ttxla import _PREFIX, _artifact
+
+    with pytest.raises(ValueError, match="expected seven fields"):
+        _artifact(_PREFIX + suffix, "", [], [], [], (1, 1), "")
