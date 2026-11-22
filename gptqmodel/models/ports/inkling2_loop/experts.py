@@ -83,6 +83,27 @@ def _route(
 ):
     """Yield ``(expert, token rows, routing slots)`` for every expert that received tokens."""
 
+    if (top_k_index.device.type == "cpu" and top_k_index.ndim == 2 and top_k_index.dtype == torch.long
+            and num_experts > 0 and not torch.compiler.is_compiling()):
+        if not top_k_index.numel():
+            return
+        # The dense expert mask visits slots first and token indices second.
+        # A stable sort of those positions preserves that order within each expert.
+        sorted_ids, order = top_k_index.T.flatten().sort(stable=True)
+        experts, counts = torch.unique_consecutive(sorted_ids, return_counts=True)
+        expert_ids = experts.tolist()
+        if expert_ids[0] < 0:
+            raise RuntimeError("Class values must be non-negative.")
+        if expert_ids[-1] >= num_experts:
+            raise RuntimeError("Class values must be smaller than num_classes.")
+        slots, tokens = order // len(top_k_index), order % len(top_k_index)
+        start = 0
+        for expert, count in zip(expert_ids, counts.tolist(), strict=True):
+            end = start + count
+            yield expert, tokens[start:end], slots[start:end]
+            start = end
+        return
+
     expert_mask = F.one_hot(top_k_index, num_classes=num_experts).permute(2, 1, 0)
     for expert_idx in range(num_experts):
         slots, tokens = torch.where(expert_mask[expert_idx])
