@@ -156,7 +156,8 @@ run the vision cases without the CPU language model.
 UMD discovered two cards with PCIe-visible ASICs `{0, 1}` and `{2, 3}`.
 The active chip-to-chip Ethernet links form a path with two reported channels
 per edge. PCIe carries host traffic. The Ethernet path carries inter-chip
-fabric traffic. All measurements in this document use one ASIC's local DRAM.
+fabric traffic. Linux reported PCIe Gen4 ×4 links for all four ASICs. All
+measurements in this document use one ASIC's local DRAM.
 
 ```text
 chip 0 -- 2 channels -- chip 3 -- 2 channels -- chip 2 -- 2 channels -- chip 1
@@ -436,14 +437,45 @@ blocks. This comparison uses the same row blocking for BF16 and NF12.
 
 On chip 1, 20 matched M=256 launches measured 16.473 / 16.907 ms NF12 and
 19.678 / 20.034 ms BF16. All eight 32-row blocks matched bit-for-bit. The
-installed Torch adapter was also tested with fresh activation upload and
-host result reads, taking 6.00 ms packed versus 6.28 ms matched BF16 at M=1,
-and 14.15 ms versus 14.81 ms at M=33 in the mixed-runtime setup on chip 2.
+installed Torch adapter reads back a single BF16 row for a one-row block.
+The writer copies raw words from the two upper tile faces into 64 extra bytes
+of worker L1 per output tile. It reduces the M=1 result transfer from
+12,865,536 to 402,048 bytes. A 24-sample chip 2 comparison included fresh
+activation uploads and host reads. At M=1 it measured 6.98 ms with the padded
+NF12 output, 2.75 ms with the compact NF12 output, and 3.03 ms with the compact
+matched BF16 output. The M=33 medians were 15.99, 11.66, and 12.63 ms,
+respectively. Both output paths returned identical BF16 bits.
 
 ```bash
 TT_VISIBLE_DEVICES=2 TT_MESH_GRAPH_DESC_PATH=/path/to/p150_mesh_graph_descriptor.textproto \
   PYTHONPATH=. python scripts/bench_nf12_sfpu_decode.py --chip 0 --size 201024 \
   --linear --checkpoint /path/to/Inkling-2-Mini --repeats 40
+```
+
+### SFPU full-head prototype on bundled TT-XLA
+
+The TT-XLA version uses the same three-plane representation. It carries the
+packed planes and sparse metadata in interleaved INT32 tiles. The resolver's
+version-2 circular-buffer ABI supplies a separate one-page BF16 ready token.
+The unpack thread temporarily reads the shared L1 UInt16 slab in the BF16
+format after the writer applies its exact escape patches. The TT-XLA metadata
+shape encodes the exponent base to distinguish equal-shaped weights in its
+executable cache.
+
+| Released LM head at M=1, chip 0 | NF12 SFPU | Matched BF16 |
+| --- | ---: | ---: |
+| Resident weights and metadata | 695,828,480 B | 926,318,592 B |
+| Median / p95, 40 interleaved launches with host completion | 7.017 / 8.249 ms | 7.900 / 8.440 ms |
+| Circular-buffer L1 per worker | 313,472 B | 299,008 B |
+| Temporary DRAM for reconstructed weights | 0 B | 0 B |
+
+The packed output matched BF16 bit-for-bit. The median speedup was 1.126×.
+This benchmark uses the bundled development runtime in the manifest and its
+low-level Blackhole kernel headers.
+
+```bash
+PJRT_DEVICE=TT PYTHONPATH=. python scripts/bench_nf12_sfpu_xla.py --chip 0 \
+  --size 201024 --checkpoint /path/to/Inkling-2-Mini --repeats 40
 ```
 
 ## Mixed-runtime model validation
