@@ -40,7 +40,8 @@ def _apply_axial_rotary(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     q_dtype, k_dtype = query.dtype, key.dtype
     query, key = query.float(), key.float()
-    cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
+    # Broadcast the token positions over batch and head axes of [B, H, T, D].
+    cos, sin = cos.float(), sin.float()
     query = query * cos + _rotate_pairs(query) * sin
     key = key * cos + _rotate_pairs(key) * sin
     return query.to(q_dtype), key.to(k_dtype)
@@ -101,8 +102,8 @@ class Inkling2LoopVisionAttention(nn.Module):
             weights = F.softmax(weights.float(), dim=-1).to(q.dtype)
             weights = F.dropout(weights, p=self.attention_dropout, training=self.training)
             pieces.append(torch.matmul(weights, v))
-        attended = torch.cat(pieces, dim=2)
-        return self.out_proj(attended.reshape(tokens, -1).contiguous())
+        attended = torch.cat(pieces, dim=2).transpose(1, 2)
+        return self.out_proj(attended.reshape(tokens, -1))
 
 
 class Inkling2LoopVisionMLP(nn.Module):
@@ -157,9 +158,9 @@ def _patch_positions(
 
 
 def _bilinear_taps(
-    grid_h: int, grid_w: int, side: int
+    grid_h: int, grid_w: int, side: int, merge: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Gather indices/weights that resample a ``side x side`` table to ``(grid_h, grid_w)``."""
+    """Resample the learned position table in the patch stream's merge order."""
 
     def taps(target: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # align_corners=False mapping from a destination cell to the source grid
@@ -171,12 +172,9 @@ def _bilinear_taps(
 
     row_low, row_high, row_frac = taps(grid_h)
     col_low, col_high, col_frac = taps(grid_w)
-    row_low = row_low.repeat_interleave(grid_w)
-    row_high = row_high.repeat_interleave(grid_w)
-    col_low = col_low.repeat(grid_h)
-    col_high = col_high.repeat(grid_h)
-    row_frac = row_frac.repeat_interleave(grid_w)
-    col_frac = col_frac.repeat(grid_h)
+    rows, cols = _patch_positions(grid_h, grid_w, merge)
+    row_low, row_high, row_frac = row_low[rows], row_high[rows], row_frac[rows]
+    col_low, col_high, col_frac = col_low[cols], col_high[cols], col_frac[cols]
     indices = torch.stack(
         [
             row_low * side + col_low,
@@ -227,7 +225,7 @@ class Inkling2LoopVisionEmbeddings(nn.Module):
 
         position_embeddings = []
         for grid_h, grid_w in grids:
-            indices, weights = _bilinear_taps(grid_h, grid_w, self.grid_size)
+            indices, weights = _bilinear_taps(grid_h, grid_w, self.grid_size, merge)
             indices = indices.to(pixel_values.device)
             weights = weights.to(pixel_values.device)
             position_embeddings.append((self.position_embedding(indices) * weights[:, :, None]).sum(1))

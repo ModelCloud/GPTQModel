@@ -113,14 +113,28 @@ class Inkling2LoopExperts(nn.Module):
         top_k_index: torch.Tensor,
         top_k_weights: torch.Tensor,
     ) -> torch.Tensor:
+        return self._forward_routed(hidden_states, top_k_index, top_k_weights)
+
+    def _forward_routed(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> torch.Tensor:
         final_hidden_states = torch.zeros_like(hidden_states, dtype=torch.float32)
         for expert_idx, tokens, slots in _route(
             hidden_states, top_k_index, top_k_weights, self.num_experts
         ):
             current = hidden_states[tokens]
-            current = F.linear(current, self.gate_up_proj[expert_idx])
-            current = self._apply_gate(current, top_k_weights[tokens, slots, None])
-            current = F.linear(current, self.down_proj[expert_idx])
+            routing_weight = top_k_weights[tokens, slots, None]
+            expert = self._modules.get(str(expert_idx))
+            if expert is None:
+                current = F.linear(current, self.gate_up_proj[expert_idx])
+                current = self._apply_gate(current, routing_weight)
+                current = F.linear(current, self.down_proj[expert_idx])
+            else:
+                current = self.act_fn(expert.gate_proj(current), expert.up_proj(current), routing_weight)
+                current = expert.down_proj(current)
             final_hidden_states.index_add_(0, tokens, current.to(final_hidden_states.dtype))
         return final_hidden_states.to(hidden_states.dtype)
 
