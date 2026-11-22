@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // decode.h is prepended by the host.
 
-template <typename Accessor>
-inline void read_aligned_128(const Accessor& input, uint32_t offset, uint32_t address) {
+template <uint32_t bytes, typename Accessor>
+inline void read_aligned(const Accessor& input, uint32_t offset, uint32_t address) {
     const uint32_t within = offset % 4096;
-    const uint32_t first = within <= 4096 - 128 ? 128 : 4096 - within;
+    const uint32_t first = within <= 4096 - bytes ? bytes : 4096 - within;
     noc_async_read(input.get_noc_addr(offset / 4096, within), address, first);
-    if (first != 128) {
-        noc_async_read(input.get_noc_addr(offset / 4096 + 1), address + first, 128 - first);
+    if (first != bytes) {
+        noc_async_read(input.get_noc_addr(offset / 4096 + 1), address + first, bytes - first);
     }
 }
 
@@ -22,29 +22,43 @@ template <typename Packed, typename Escapes, typename Ids, typename Out>
 void gather_row_major(const Packed& packed, const Escapes& escapes, const Ids& ids, const Out& out,
                       uint32_t n, uint32_t base, uint32_t scratch) {
     constexpr uint32_t blocks = NF12_CONFIG(0) / 64;
-    NF12_RANGE(NF12_CONFIG(1) / 2, 0, 0);
-    const uint32_t id_addr = scratch + 128;
+    // Two adjacent 96-byte blocks naturally align on a 64-byte boundary for even row strides.
+    constexpr uint32_t block_group = blocks % 2 == 0 ? 2 : 1;
+    constexpr uint32_t read_bytes = block_group == 2 ? 192 : 128;
+    constexpr uint32_t column_tasks = blocks / block_group;
+    constexpr uint32_t output_tiles = 2 * block_group;
+    constexpr uint32_t groups = 16 * block_group;
+    NF12_RANGE(NF12_CONFIG(1) / output_tiles, 0, 0);
+    const uint32_t id_addr = scratch + 32 * read_bytes;
     const uint32_t tile_addr = id_addr + 128;
-    const uint32_t escape_addr = tile_addr + 2 * 2048;
+    const uint32_t escape_addr = tile_addr + output_tiles * 2048;
     const auto* id_words = reinterpret_cast<volatile const uint32_t*>(id_addr);
     auto* tiles = reinterpret_cast<volatile uint32_t*>(tile_addr);
     uint32_t cached_id_tile = 0xffffffff;
 
     for (uint32_t task = start; task < end; ++task) {
-        const uint32_t row_tile = task / blocks;
+        const uint32_t row_tile = task / column_tasks;
         if (row_tile != cached_id_tile) {
             cached_id_tile = row_tile;
             noc_async_read(ids.get_noc_addr(row_tile), id_addr, 64);
             noc_async_read(ids.get_noc_addr(row_tile, 1024), id_addr + 64, 64);
             noc_async_read_barrier();
         }
-        const uint32_t block = task % blocks;
+        const uint32_t block = task % column_tasks * block_group;
+        for (uint32_t r = 0; r < 32; ++r) {
+            const uint32_t id = id_words[r];
+            if (id < n && (r == 0 || id != id_words[r - 1])) {
+                const uint32_t offset = (id * blocks + block) * 96;
+                read_aligned<read_bytes>(packed, offset & ~63u, scratch + r * read_bytes);
+            }
+        }
+        noc_async_read_barrier();
         for (uint32_t r = 0; r < 32; ++r) {
             const uint32_t id = id_words[r];
             auto* row = tiles + tile_slot(r, 0) / 2;
             if (id >= n || (r != 0 && id == id_words[r - 1])) {
                 const auto* previous = tiles + tile_slot((r + 31) % 32, 0) / 2;
-                for (uint32_t face = 0; face < 4; ++face) {
+                for (uint32_t face = 0; face < 2 * output_tiles; ++face) {
                     const uint32_t face_offset = (face / 2) * 512 + (face % 2) * 128;
                     for (uint32_t word = 0; word < 8; ++word) {
                         row[face_offset + word] = id >= n ? 0 : previous[face_offset + word];
@@ -54,15 +68,14 @@ void gather_row_major(const Packed& packed, const Escapes& escapes, const Ids& i
             }
 
             const uint32_t offset = (id * blocks + block) * 96;
-            read_aligned_128(packed, offset & ~63u, scratch);
-            noc_async_read_barrier();
-            const uint32_t record = scratch + (offset & 63u);
-            const auto* metas = reinterpret_cast<volatile const uint16_t*>(record);
-            const auto* lows = reinterpret_cast<volatile const uint32_t*>(record + 32);
+            const uint32_t record = scratch + r * read_bytes + (offset & 63u);
             uint32_t pending = 0;
-            for (uint32_t group = 0; group < 16; ++group) {
-                const uint32_t meta = metas[group];
-                const uint32_t low = lows[group];
+            for (uint32_t group = 0; group < groups; ++group) {
+                const uint32_t chunk = record + (group / 16) * 96;
+                const auto* metas = reinterpret_cast<volatile const uint16_t*>(chunk);
+                const auto* lows = reinterpret_cast<volatile const uint32_t*>(chunk + 32);
+                const uint32_t meta = metas[group % 16];
+                const uint32_t low = lows[group % 16];
                 if (meta == 0) {
                     const uint32_t position = 64 + low / 8 * 64;
                     noc_async_read(escapes.get_noc_addr(position / 4096, position % 4096),
@@ -81,14 +94,16 @@ void gather_row_major(const Packed& packed, const Escapes& escapes, const Ids& i
                 const uint32_t group = __builtin_ctz(pending);
                 pending &= pending - 1;
                 const auto* escaped = reinterpret_cast<volatile const uint32_t*>(escape_addr + group * 64);
-                const uint32_t entry = (lows[group] % 8) * 2;
+                const auto* lows = reinterpret_cast<volatile const uint32_t*>(record + (group / 16) * 96 + 32);
+                const uint32_t entry = (lows[group % 16] % 8) * 2;
                 const uint32_t dst = (group / 8) * 512 + (group / 4 % 2) * 128 + group % 4;
                 row[dst] = escaped[entry];
                 row[dst + 4] = escaped[entry + 1];
             }
         }
-        noc_async_write_page(task * 2, out, tile_addr);
-        noc_async_write_page(task * 2 + 1, out, tile_addr + 2048);
+        for (uint32_t tile = 0; tile < output_tiles; ++tile) {
+            noc_async_write_page(task * output_tiles + tile, out, tile_addr + tile * 2048);
+        }
         noc_async_write_barrier();
     }
 }

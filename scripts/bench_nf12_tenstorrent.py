@@ -149,7 +149,7 @@ def _embedding(w, name, runtime, backend, repeats, *, exhaustive=False, row_majo
             full, atom_read = _measure(lambda: layer.gather_device(resident, index.numel(), full_atoms=True),
                                        sync, repeats, index.numel() * w.shape[1] * 2)
             _same(copy(full)[:, :w.shape[1]].reshape_as(out), out)
-        column_block_bytes = 128 if row_major else 192 if backend == "ttnn" else 2 * 1536
+        column_block_bytes = (128 if padded_k % 128 else 96) if row_major else 192 if backend == "ttnn" else 2 * 1536
         print(json.dumps({
             "op": "embedding", "tensor": name, "case": label, "ids": index.numel(), "shape": list(w.shape),
             "packed_bytes": descriptor.packed_bytes, "resident_bytes": layer.resident_bytes,
@@ -223,6 +223,12 @@ def _smoke(runtime, backend, repeats, *, row_major=False):
     special = w.view(torch.int16)
     special[32, [0, 1, 8, 9]] = raw[[0, 1, 4, 5]]
     special[40, [0, 1, 8, 9]] = raw[[2, 3, 6, 7]]
+    if backend == "ttxla" and row_major:
+        # Use both layouts in one lazy runtime to cover executable-cache reuse.
+        make, device, _, _ = runtime
+        canonical = make(device, *prepare_nf12(w, "synthetic.special"))
+        index = torch.arange(32)
+        _same(canonical.embedding(index).cpu(), w[index])
     _embedding(w, "synthetic.special", runtime, backend, repeats, exhaustive=True, row_major=row_major)
     w = torch.randn(97, 97).bfloat16() * 0.03125
     _linear(w, "synthetic.linear", runtime, backend, repeats, [1, 67, 160])

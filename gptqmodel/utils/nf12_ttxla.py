@@ -57,7 +57,9 @@ def _artifact(operation_id, version_tag, shapes, dtypes, layouts, mesh_shape, ar
                     tuple(shapes[1]), (1, round_up(m, 32)), (round_up(m, 32), k)]
         expected_dtypes = ("si32", "si32", "si32", "bf16")
         tasks = round_up(m, 32) // 32 * (k // 32)
-        cbs = [_cb(24, "UInt32", 128 + 128 + 2 * 2048 + 16 * 64)]
+        row_block_group = 1 if k % 128 else 2
+        row_read_bytes = 128 if row_block_group == 1 else 192
+        cbs = [_cb(24, "UInt32", 32 * row_read_bytes + 128 + row_block_group * (2 * 2048 + 16 * 64))]
         kernels = [("gather_xla", "noc", [0, 1, 2, 3], [k, tasks])]
     elif op == "linear":
         nt, kt, mt = round_up(n, 32) // 32, k // 32, round_up(m, 32) // 32
