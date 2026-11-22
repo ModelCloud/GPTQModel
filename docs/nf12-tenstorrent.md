@@ -515,27 +515,31 @@ hidden size and BF16 dtype.
 
 | Tokens | Dense mask median / p95 µs | Grouped CPU median / p95 µs | Median speedup |
 | ---: | ---: | ---: | ---: |
-| 1 | 215.3 / 229.8 | 16.6 / 18.1 | 13.0× |
-| 4 | 228.0 / 234.7 | 38.0 / 39.5 | 6.0× |
-| 32 | 312.1 / 326.3 | 114.2 / 116.1 | 2.7× |
-| 128 | 768.1 / 1,008.0 | 140.8 / 147.3 | 5.5× |
-| 256 | 2,174.5 / 2,241.4 | 144.2 / 153.2 | 15.1× |
+| 1 | 206.7 / 279.0 | 15.4 / 16.6 | 13.4× |
+| 4 | 228.7 / 231.7 | 36.5 / 38.1 | 6.3× |
+| 32 | 322.0 / 354.3 | 115.3 / 118.8 | 2.8× |
+| 128 | 1,009.7 / 1,055.7 | 140.6 / 150.6 | 7.2× |
+| 256 | 1,370.1 / 1,378.2 | 146.1 / 157.0 | 9.4× |
 
 The FP32 TTNN probe on P300c chip 2 uses resident gate weights and correction
-bias. The following layer-0 medians include synchronized launch time, from
-eight samples. The mixed-runtime column also uploads inputs and reads the
-logits, selected IDs and weights back to CPU.
+bias. The following layer-0 timings are median / p95 from 64 launches. The
+mixed-runtime column uploads inputs and reads logits, IDs and weights to CPU.
 
 | Tokens | CPU gate µs | TTNN gate µs | CPU top-k µs | TTNN top-k µs | CPU through weights µs | Resident TTNN through weights µs | Mixed TTNN through weights µs |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 73.9 | 48.1 | 1.5 | 42.3 | 86.2 | 224.7 | 324.1 |
-| 32 | 2,282.2 | 47.2 | 5.2 | 40.1 | 2,302.7 | 210.9 | 328.3 |
+| 1 | 72.8 / 74.0 | 47.1 / 53.7 | 1.5 / 1.6 | 39.2 / 42.1 | 81.9 / 91.6 | 156.8 / 173.2 | 301.7 / 316.6 |
+| 4 | 282.6 / 284.7 | 46.9 / 49.5 | 1.8 / 1.9 | 39.2 / 40.0 | 293.5 / 296.8 | 174.7 / 215.5 | 323.5 / 401.5 |
+| 32 | 2,287.5 / 2,312.6 | 47.3 / 71.2 | 5.0 / 5.4 | 39.4 / 42.6 | 2,296.2 / 2,352.9 | 149.6 / 155.1 | 297.2 / 322.6 |
+| 128 | 9,169.0 / 9,961.3 | 79.9 / 89.3 | 16.5 / 48.5 | 42.7 / 51.6 | 9,447.8 / 9,603.3 | 181.3 / 365.1 | 517.9 / 610.3 |
+| 256 | 18,464.4 / 18,886.3 | 77.2 / 84.9 | 190.1 / 201.6 | 40.0 / 44.0 | 18,480.7 / 18,962.0 | 187.2 / 238.2 | 1,032.7 / 1,110.1 |
 
-On ordinary inputs, TTNN top-k selected the same ID sets and returned a
-different order from Torch, including when both received identical CPU scores.
-At an all-equal cutoff it returned different expert IDs for both test rows.
-The full TTNN pipeline also produced nonzero score differences. The eager
-CPU grouping optimization keeps the original gate and score calculation.
+With identical CPU scores, TTNN top-k matched the ID set on all 1,263 ordinary
+rows and the slot order on zero rows. At an all-equal cutoff it selected
+different expert ID sets on all six rows. In the full TTNN pipeline, six of
+the 1,263 ordinary rows selected a different expert set. The maximum absolute
+logit difference was 0.001530. On rows with matching expert sets, the maximum
+absolute normalized weight difference was 0.000318. The eager CPU grouping
+optimization keeps the original gate and score calculation.
 
 The source-main CPU build in this probe uses Eigen for BLAS. The available
 MKL-enabled CPU build ran the same layer-0 FP32 gate in 15.2 µs at M=1 and
