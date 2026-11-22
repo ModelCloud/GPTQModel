@@ -206,6 +206,12 @@ using the following source revisions and SFPI 7.96.0.
 | TT-XLA main | `fdc3b7773674081b8f8c0698de3400d8d899dc8f`, uses its own TT-MLIR and TT-Metal source pins |
 | Tenstorrent PyTorch/XLA default branch | `a3fb00817690c82bef596c74243a213986c358a4`, TorchGen fails against PyTorch main because the fork registers removed operators such as `qr` |
 
+The local native environment was subsequently rebuilt and installed from
+TT-Metal main `fb1591e4ef978c91b09e8292e0fb4eabc85b1f96` with the same source
+PyTorch. Chip 2 passed the row embedding, rounding, bias, and cache reuse
+smoke. The full head matched BF16 at M=1 and 256. Its grouped M=256 medians
+were 4.196 ms NF12 and 3.156 ms BF16 over eight synchronized samples.
+
 Checkpoint data came from the public
 [Inkling-2-Mini revision](https://huggingface.co/thinkingmachines/Inkling-2-Mini/tree/b85c3cfa615fc413cc9af3379f491b963f3b586a).
 Its checkpoint index SHA-256 is
@@ -319,6 +325,23 @@ The native kernel uses 5,568 bytes per worker for the tuned one-ID schedule
 and 24,832 bytes for the general 32-ID schedule. Its repeated-ID schedule
 reads one packed row for all 32 outputs. The [native benchmark](nf12-tenstorrent-row-embedding.md)
 records the synchronized latency and the exact row checks.
+
+TT-XLA used 60 synchronized launches on chip 0 with both inputs resident.
+Latency includes the host read that forces completion. Every released row
+passed the raw BF16 check.
+
+| IDs | Row NF12 median / p95 | Dense BF16 median / p95 |
+| --- | ---: | ---: |
+| One | 235.541 / 400.778 µs | 187.349 / 286.198 µs |
+| 32 repeated | 285.281 / 387.913 µs | 123.016 / 283.032 µs |
+| 32 contiguous | 234.719 / 322.407 µs | 169.594 / 267.483 µs |
+| 32 scattered | 300.280 / 413.112 µs | 162.060 / 308.181 µs |
+
+```bash
+PJRT_DEVICE=TT PYTHONPATH=. python scripts/bench_nf12_tenstorrent.py --backend ttxla \
+  --chip 0 --row-major-embedding --embedding-only --checkpoint /path/to/Inkling-2-Mini \
+  --exhaustive --repeats 60
+```
 
 ### TT-XLA LM head
 
@@ -701,3 +724,17 @@ The native run verified all 144 logical matrices and 580 matched device BF16
 calls. Swapping only the merged vision tokens reduced scaled image logit RMSE
 from 24.88% to 0.0824% on the frozen pair. The device BF16 control reproduces
 the NF12 vision arithmetic bit-for-bit on the same activations.
+
+With `embedding_layout="row_major"`, both backends again verified all 144
+matrices and 580 forward calls. The token and vision position tables used the
+shared CUDA/RDNA encoding. Both text runs had 100% top-1/5/10 overlap against
+their respective CPU reference. Full image logit scaled RMSE was 18.83% on
+source-main TTNN and 24.88% on the bundled TT-XLA runtime. Supplying the CPU
+BF16 vision tokens reduced those numbers to 0.0828% and 0.0824%.
+
+```bash
+PYTHONPATH=. python scripts/validate_inkling2_nf12_tenstorrent.py --backend ttnn \
+  --chip 0 --embedding-layout row_major --checkpoint /path/to/Inkling-2-Mini --verify-weights
+PJRT_DEVICE=TT PYTHONPATH=. python scripts/validate_inkling2_nf12_tenstorrent.py --backend ttxla \
+  --chip 0 --embedding-layout row_major --checkpoint /path/to/Inkling-2-Mini --verify-weights
+```
