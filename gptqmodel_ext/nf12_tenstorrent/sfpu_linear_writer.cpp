@@ -11,6 +11,7 @@ void write_results(const Output& output, uint32_t start, uint32_t end, const App
     constexpr auto decoded_raw = tt::CBIndex::c_16;
     constexpr auto final_cb = tt::CBIndex::c_17;
     constexpr uint32_t k_tiles = get_compile_time_arg_val(0);
+    constexpr bool single_row = get_compile_time_arg_val(3) != 0;
 
     for (uint32_t n = start; n < end; ++n) {
         if constexpr (!dense) {
@@ -21,7 +22,20 @@ void write_results(const Output& output, uint32_t start, uint32_t end, const App
             cb_push_back(decoded, k_tiles);
         }
         cb_wait_front(final_cb, 1);
-        noc_async_write_page(n, output, get_read_ptr(final_cb));
+        const uint32_t tile_address = get_read_ptr(final_cb);
+        if constexpr (single_row) {
+            const uint32_t row_address = get_write_ptr(25);
+            auto* row = reinterpret_cast<volatile uint32_t*>(row_address);
+            const auto* tile = reinterpret_cast<volatile const uint32_t*>(tile_address);
+            // Copy the first row of each of the two upper BF16 faces as raw words.
+            for (uint32_t word = 0; word < 8; ++word) {
+                row[word] = tile[word];
+                row[8 + word] = tile[128 + word];
+            }
+            noc_async_write_page(n, output, row_address);
+        } else {
+            noc_async_write_page(n, output, tile_address);
+        }
         noc_async_write_barrier();
         cb_pop_front(final_cb, 1);
         if constexpr (!dense) {
@@ -54,4 +68,4 @@ void write() {
     }
 }
 
-void kernel_main() { write<get_compile_time_arg_val(1) != 0, get_compile_time_arg_val(2) != 0, 3>(); }
+void kernel_main() { write<get_compile_time_arg_val(1) != 0, get_compile_time_arg_val(2) != 0, 4>(); }

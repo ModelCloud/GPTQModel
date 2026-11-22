@@ -90,8 +90,10 @@ def _transcode(descriptor, weight):
     return planes, _metadata_pages(headers, torch.cat(patch_parts))
 
 
-def _linear_operation(ttnn, device, words, activation, n, k, base, *, dense, metadata, prefetch_groups):
-    output = ttnn.allocate_tensor_on_device(ttnn.Shape((32, n)), ttnn.bfloat16, ttnn.TILE_LAYOUT,
+def _linear_operation(ttnn, device, words, activation, n, k, base, *, dense, metadata, prefetch_groups, single_row=False):
+    shape = (n // 32, 32) if single_row else (32, n)
+    layout = ttnn.ROW_MAJOR_LAYOUT if single_row else ttnn.TILE_LAYOUT
+    output = ttnn.allocate_tensor_on_device(ttnn.Shape(shape), ttnn.bfloat16, layout,
                                            device, ttnn.DRAM_MEMORY_CONFIG)
     cores, assignments = _cores(ttnn, device, n // 32)
     k_tiles = k // 32
@@ -103,7 +105,7 @@ def _linear_operation(ttnn, device, words, activation, n, k, base, *, dense, met
                       cores, assignments, (*geometry, base), (), lambda start, end: [end - start])
     metadata_addresses = [tensor.buffer_address() for tensor in metadata]
     writer = _kernel(ttnn, "sfpu_linear_writer", ttnn.WriterConfigDescriptor(), cores, assignments,
-                     (*geometry, int(bool(metadata))), [output, *metadata],
+                     (*geometry, int(bool(metadata)), int(single_row)), [output, *metadata],
                      lambda start, end: [output.buffer_address(), start, end, *metadata_addresses])
     weight_views = [ttnn.CBFormatDescriptor(buffer_index=2, data_format=ttnn.bfloat16, page_size=2048)]
     if not dense:
@@ -117,6 +119,8 @@ def _linear_operation(ttnn, device, words, activation, n, k, base, *, dense, met
         buffers.append(_cb(ttnn, cores, 0, ttnn.uint16, 2048, min(prefetch_groups * 6, k_tiles // 4 * 3)))
     if metadata:
         buffers.append(_cb(ttnn, cores, 24, ttnn.uint32, 128))
+    if single_row:
+        buffers.append(_cb(ttnn, cores, 25, ttnn.uint32, 64))
     program = ttnn.ProgramDescriptor(kernels=[reader, compute, writer], semaphores=[], cbs=buffers)
     return lambda: ttnn.generic_op([words, activation, *metadata, output], program)
 
@@ -161,6 +165,7 @@ class TTNNSFPUNF12Head:
                                          dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
                                          device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
             call = _linear_operation(ttnn, self.device, self.planes, activation, n, k, self.exp_base,
-                                     dense=False, metadata=self.metadata, prefetch_groups=1)
-            result[start : start + len(slab)].copy_(ttnn.to_torch(call())[: len(slab)])
+                                     dense=False, metadata=self.metadata, prefetch_groups=1, single_row=len(slab) == 1)
+            host_output = ttnn.to_torch(call()).reshape(-1, n)
+            result[start : start + len(slab)].copy_(host_output[: len(slab)])
         return result.reshape(*x.shape[:-1], n)
