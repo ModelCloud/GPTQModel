@@ -268,6 +268,20 @@ def mxfp4_rtn_signed_index(
 
 
 @torch.no_grad()
+def _finite_frexp_exponent(value: torch.Tensor) -> torch.Tensor:
+    """Return ``e`` from ``value = mantissa * 2**e`` with ``mantissa`` in ``[0.5, 1)``.
+
+    The exponent is the per-block power-of-two scale used to score a candidate
+    grid in a normalized domain.  A non-finite input (the packer still has to
+    emit ``0xFF``/NaN bytes for it) keeps a zero shift so the non-finite value
+    survives unchanged instead of becoming an exponent-driven overflow.
+    """
+
+    _, exponent = torch.frexp(value)
+    return torch.where(torch.isfinite(value), exponent, torch.zeros_like(exponent))
+
+
+@torch.no_grad()
 def screen_block_exponents(
     weight: torch.Tensor,
     hessian_diagonal: torch.Tensor,
@@ -282,19 +296,50 @@ def screen_block_exponents(
     diagonal, the screen is separable per block.  Off-diagonal coupling is
     handled afterwards by :func:`flip_refine_levels`, with the chosen
     exponents frozen.
+
+    Candidates are scored after dividing the residual by one power of two
+    chosen per ``(row, block)``.  It is the same positive constant for every
+    candidate, so the argmin and the first-minimum tie order are unchanged,
+    but the score no longer follows the block's absolute magnitude.  Squaring
+    an unnormalized FP32 residual underflows to ``0`` once the block is small
+    enough (every candidate ties, so the first offset wins) and overflows to
+    ``+inf`` once it is large enough (same first-offset winner).  The residual
+    shift also cancels the ``E8M0`` clamp mismatch, so the screen stays a
+    genuine comparison for every finite block whose candidates are
+    representable.
+
+    The Hessian diagonal is used as stored.  Its scale is one positive factor
+    that every candidate shares, so it is already common and renormalizing it
+    cannot change the choice; a per-block factor derived from the block
+    maximum would additionally flush a small entry next to a large one, and
+    when the large entry's residual is exactly zero that would hand the block
+    to the flushed entry's rounded-away error.  With the residual normalized
+    to its own scale, the product stays inside FP32 for a diagonal far wider
+    than any calibration Hessian produces.
     """
 
     out_features, in_features = weight.shape
     groups = in_features // block_size
     device = weight.device
     grid = _device_const(E2M1_VALUES, device)
+    work = weight.float().view(out_features, groups, block_size)
+
     hdiag = hessian_diagonal.float().view(1, groups, block_size)
+
+    # ``amax = mantissa * 2**exponent`` with ``mantissa`` in ``[0.5, 1)``, and
+    # the offset-0 scale is ``2**(exponent - 3)``, which maps ``amax`` into
+    # ``[4, 8)``.  Dividing the residual by that power of two keeps both
+    # operands of the subtraction at the block's own magnitude: the residual
+    # is at most a few multiples of the scale, so its square can neither
+    # underflow nor overflow while the unnormalized one could.
+    residual_exp = _finite_frexp_exponent(work.abs().amax(dim=-1, keepdim=True)) - 3
 
     best_error = best_index = best_log2 = best_scale = None
     for offset in offsets:
         signed_index, log2_scale, scale_element = mxfp4_rtn_signed_index(weight, block_size, offset)
-        dequant = grid[signed_index] * scale_element
-        error = ((weight.float() - dequant).pow(2).view(out_features, groups, block_size) * hdiag).sum(-1)
+        dequant = (grid[signed_index] * scale_element).view(out_features, groups, block_size)
+        residual = torch.ldexp(work - dequant, -residual_exp)
+        error = (residual * residual * hdiag).sum(-1)
         if best_error is None:
             best_error, best_index, best_log2, best_scale = error, signed_index, log2_scale, scale_element
             continue
