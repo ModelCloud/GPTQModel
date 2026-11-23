@@ -91,7 +91,7 @@ docs/transformers5-model-ports.md). Every supported model is selected by its def
      The oracle may import `transformers.models.*` **in tests only**.
    - **Release inventory:** the full-size meta model's key/shape inventory
      matches the released checkpoint index (store a sha256, not the JSON).
-   - **Layout and arithmetic parity:** for a changed packed or defused route,
+   - **Routed experts and packed vision.** When an expert representation changes,
      hand-label physical rows in released checkpoint order. Use distinct gate
      and up values and a fractional routing weight that distinguishes BF16
      rounding before and after multiplication. Compare each executable route

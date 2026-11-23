@@ -14,6 +14,13 @@ The examples below trace landed fixes. [Audited revision](https://github.com/Mod
 | Inkling vision order ([#5974](https://github.com/ModelCloud/GPTQModel/pull/5974), [#5976](https://github.com/ModelCloud/GPTQModel/pull/5976)) | Compare packed attention to separate per-image SDPA with explicit token/head axes. Zero the pixel projection and label the learned position table. On a 2×4 grid the two 2×2 merge blocks consume indices 0,1,4,5 then 2,3,6,7. A single block hides the permutation. | [Vision attention and positions](../../../../tests/test_inkling2_loop_vision.py) |
 | CPU packing under inference mode ([original fix #5833](https://github.com/ModelCloud/GPTQModel/pull/5833), [packer split #5919](https://github.com/ModelCloud/GPTQModel/pull/5919), [repair #5990](https://github.com/ModelCloud/GPTQModel/pull/5990)) | The ambient-mode buffer check already existed when the original packer lost its override. Re-run both block and original packers on refactors. Leave inference mode, copy different packed values into the destination with `assign=False` and inspect the stored words. | [Mutable packed buffers](../../../../tests/test_packed_buffer_state_dict_5814.py) |
 
+**Historical checks.** Running the capture fixtures on the parent of #5994
+gave top-1 overlap 1 for the flipped token and NaN KLD for identical FP32
+and BF16 logits. On the parent of #5990, only the original packer with
+`assign=False` failed, during the copy into `qweight` and `scales`. The block
+packer and both replacement cases passed. All seven cases pass on the
+audited revision. [Capture parent](https://github.com/ModelCloud/GPTQModel/commit/570af1e0b34cf1ede54c7a645d4e7c8ab4438dcf) · [Packing parent](https://github.com/ModelCloud/GPTQModel/commit/d8099894acaa475ddab0922c1a65872ed9021bcd)
+
 ## AWQ fold ownership
 
 LFM3 attention and convolution layers permit different norm folds. PanGu's
