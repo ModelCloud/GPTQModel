@@ -144,6 +144,106 @@ def _mse_normalizer(scales: torch.Tensor) -> torch.Tensor:
     return torch.where(torch.isfinite(factor) & (factor > 0), factor, largest)
 
 
+def _value_limit_like(
+    value_limit: float | torch.Tensor | None,
+    scale: torch.Tensor,
+) -> float | torch.Tensor | None:
+    """Broadcast a finite-magnitude bound to ``scale``'s shape.
+
+    Callers pass the bound in the domain the reconstruction is computed in:
+    the source weight dtype's finite maximum, divided by any smoothing factor
+    that is restored afterwards. A scalar bounds every lane; a per-row vector
+    carries one entry per fitted lane and is aligned with that lane's axis:
+    the trailing axis for a fitted ``[rows]`` grid and for the ``[candidates,
+    rows]`` MSE candidate axis, the leading axis for the ``[rows, candidates,
+    1]`` shrink-search workspace. Aligning on the lane axis (instead of letting
+    a ``[rows, 1]`` vector broadcast blindly) keeps a square group from
+    producing a ``[rows, rows]`` bound that would silently clamp with the wrong
+    shape.
+    """
+
+    if value_limit is None:
+        return None
+    limit = torch.as_tensor(value_limit, dtype=scale.dtype, device=scale.device)
+    if limit.numel() == 1:
+        return limit.reshape(())
+    lanes = limit.reshape(-1)
+    if scale.dim() == 0:
+        raise ValueError(
+            f"value_limit with {lanes.numel()} entries cannot bound a scalar grid"
+        )
+    # The lane axis is the one whose length matches the bound: trailing for the
+    # fitted grid and the candidate axis, leading for the ``[rows, n, 1]``
+    # shrink workspace. Ambiguity is impossible there because the trailing
+    # length of the workspace is one.
+    for axis in (scale.dim() - 1, 0):
+        if scale.shape[axis] == lanes.numel():
+            shape = [1] * scale.dim()
+            shape[axis] = lanes.numel()
+            return lanes.reshape(shape)
+    raise ValueError(
+        f"value_limit with {lanes.numel()} entries cannot bound a grid of "
+        f"shape {tuple(scale.shape)}"
+    )
+
+
+def _finite_code_bounds(
+    scale: torch.Tensor,
+    zero: torch.Tensor,
+    maxq_value: int,
+    requires_groupwise_processing: bool,
+    value_limit: float | torch.Tensor | None,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Integer code range whose affine reconstruction stays finite.
+
+    A code grid fitted on the FP32 copy of a weight can reconstruct a value
+    outside the finite range of the source dtype (FP16 ``2 * amax / 15`` at
+    ``amax = 61440`` gives ``-16 * amax / 15 = -65536``).  Narrowing that
+    reconstruction then stores ``-inf`` in the replay weight.  The grid itself
+    is valid; the missing constraint is that the *selected codes* must be
+    representable in the dtype the reconstruction is narrowed back to.
+
+    ``value_limit`` is that finite magnitude, already divided by any smoothing
+    factor the caller restores after quantization, and broadcastable to
+    ``scale``.  The returned inclusive bounds are intersected with the grid's
+    own ``[0, maxq]`` (or ``[-maxq, maxq]`` for a signed/groupsize-only grid).
+    ``None`` bounds mean the caller asked for no constraint.
+    """
+
+    if value_limit is None or maxq_value < 0:
+        return None, None
+
+    limit = _value_limit_like(value_limit, scale)
+    limit = torch.as_tensor(limit, dtype=scale.dtype, device=scale.device)
+    usable = torch.isfinite(scale) & (scale > 0) & torch.isfinite(limit) & (limit >= 0)
+    # A non-finite scale is a different defect; leave the full grid visible to
+    # validation instead of inventing a constraint from it.
+    safe_scale = torch.where(usable, scale, torch.ones_like(scale))
+    safe_limit = torch.where(usable, limit, torch.zeros_like(limit))
+
+    steps = torch.floor(safe_limit / safe_scale)
+    # ``limit / scale`` can round up by one ULP, which would admit a code whose
+    # reconstruction (the same product, re-rounded) exceeds the limit. Step
+    # down whenever the product is over the bound.
+    steps = torch.where(safe_scale * steps > safe_limit, steps - 1, steps)
+    steps = torch.where(
+        usable,
+        steps.clamp_min(0),
+        torch.full_like(steps, float(maxq_value)),
+    )
+
+    if requires_groupwise_processing:
+        lo = torch.clamp(-steps, min=-maxq_value)
+        hi = torch.clamp(steps, max=maxq_value)
+    else:
+        lo = torch.clamp(zero - steps, 0, maxq_value)
+        hi = torch.clamp(zero + steps, 0, maxq_value)
+    # A zero point outside ``[0, maxq]`` is a broken grid, not a finite-range
+    # case; keep the range non-empty so the clamp cannot invert its bounds.
+    lo = torch.minimum(lo, hi)
+    return lo, hi
+
+
 def narrowing_loses_codes(weight_dtype: torch.dtype, bits: int, sym: bool) -> bool:
     """Whether narrowing a reconstruction to ``weight_dtype`` can move a code.
 
@@ -201,17 +301,34 @@ def _neutralize_dead_columns(
     return dead
 
 
-def quantize(x, scale, zero, maxq, requires_groupwise_processing: bool):
+def quantize(
+    x,
+    scale,
+    zero,
+    maxq,
+    requires_groupwise_processing: bool,
+    *,
+    code_lo: torch.Tensor | None = None,
+    code_hi: torch.Tensor | None = None,
+):
     if maxq < 0:
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
 
     scale, zero = _replace_zero_scale(scale, zero)
 
     if requires_groupwise_processing:
-        q = torch.clamp(torch.round(x / scale), -maxq, maxq)
+        q = torch.clamp(
+            torch.round(x / scale),
+            -maxq if code_lo is None else code_lo,
+            maxq if code_hi is None else code_hi,
+        )
         return scale * q
     else:
-        q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
+        q = torch.clamp(
+            torch.round(x / scale) + zero,
+            0 if code_lo is None else code_lo,
+            maxq if code_hi is None else code_hi,
+        )
         return scale * (q - zero)
 
 
@@ -226,6 +343,7 @@ def _mse_shrink_grid(
     guard_zero_scale: bool,
     scale: torch.Tensor,
     zero: torch.Tensor,
+    value_limit: float | torch.Tensor | None = None,
     grid_budget: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pick each channel's best ``(scale, zero)`` candidate by ``|deq(x)-x|^mse``.
@@ -245,6 +363,11 @@ def _mse_shrink_grid(
     to zero for high ``mse`` or a uniformly rescaled row.  The stored objective
     is therefore the true score divided by ``normalizer ** mse``; only its
     ordering is consumed.
+
+    ``value_limit`` (when given) bounds each lane's integer codes to the
+    reconstruction magnitudes the source dtype can hold, so a candidate grid
+    is scored on the codes that will actually be narrowed and packed rather
+    than on an endpoint that overflows on the way out.
     """
     dev = x.device
     rows, cols = x.shape
@@ -317,12 +440,19 @@ def _mse_shrink_grid(
             s3, z3 = safe_scale.unsqueeze(-1), safe_zero.unsqueeze(-1)
             torch.div(xr, s3, out=q)
             q.round_()
+            lo, hi = _finite_code_bounds(
+                safe_scale, safe_zero, maxq_value, groupwise, value_limit
+            )
             if groupwise:
-                q.clamp_(-maxq_value, maxq_value)
+                lo = -maxq_value if lo is None else lo.unsqueeze(-1)
+                hi = maxq_value if hi is None else hi.unsqueeze(-1)
+                q.clamp_(lo, hi)
                 q.mul_(s3)
             else:
                 # Same op order as ``quantize``: +zero, clamp, -zero, *scale.
-                q.add_(z3).clamp_(0, maxq_value).sub_(z3).mul_(s3)
+                lo = 0 if lo is None else lo.unsqueeze(-1)
+                hi = maxq_value if hi is None else hi.unsqueeze(-1)
+                q.add_(z3).clamp_(lo, hi).sub_(z3).mul_(s3)
         q.sub_(xr)
         q.abs_()
         q.div_(normalizer)
@@ -364,6 +494,13 @@ class Quantizer(nn.Module):
         self._maxq_value = 0
         self.register_buffer("scale", torch.zeros(shape))
         self.register_buffer("zero", torch.zeros(shape))
+        # Inclusive integer code range of the grid last fitted by
+        # ``find_params``, derived from the fitted ``scale``/``zero``. ``None``
+        # means the grid's natural range. Non-persistent buffers so they follow
+        # ``scale``/``zero`` through ``.to()``/``.cuda()`` while staying out of
+        # the checkpoint: they mirror the fitted grid, they are not new state.
+        self.register_buffer("code_lo", None, persistent=False)
+        self.register_buffer("code_hi", None, persistent=False)
 
         self.name=name
 
@@ -423,13 +560,24 @@ class Quantizer(nn.Module):
         self._maxq_value = int(self.maxq)
 
     def find_params(
-        self, x, weight=False, *, scale_min: float | torch.Tensor = SCALE_STORAGE_FLOOR,
+        self,
+        x,
+        weight=False,
+        *,
+        scale_min: float | torch.Tensor = SCALE_STORAGE_FLOOR,
+        value_limit: float | torch.Tensor | None = None,
     ):
         """Fit ranges; ``scale_min`` is a weight bound in the input's domain.
 
         A smoother that later restores a per-row factor must divide the FP16
         storage floor by that factor and pass the resulting row vector here.
         Activation ranges and ternary endpoints do not use this weight bound.
+
+        ``value_limit`` is the finite magnitude the caller narrows the
+        reconstruction to, also in the post-restore domain. It bounds the
+        fitted grid's codes so no reconstruction leaves the source dtype's
+        finite range; leave it ``None`` for callers that keep the FP32
+        reconstruction.
         """
         dev = x.device
         if self.maxq.device != dev:
@@ -505,7 +653,15 @@ class Quantizer(nn.Module):
             self._mse_shrink_grid(
                 x, xmin, xmax, mse,
                 scale_min=scale_min if weight and self._maxq_value >= 0 else None,
+                value_limit=value_limit,
             )
+        self.code_lo, self.code_hi = _finite_code_bounds(
+            self.scale,
+            self.zero,
+            self._maxq_value,
+            self.requires_groupwise_processing(),
+            value_limit,
+        )
         if not self.perchannel:
             if weight:
                 tmp = shape[0]
@@ -513,21 +669,36 @@ class Quantizer(nn.Module):
                 tmp = shape[1] if len(shape) != 3 else shape[2]
             self.scale = self.scale.repeat(tmp)
             self.zero = self.zero.repeat(tmp)
+            if self.code_lo is not None:
+                self.code_lo = self.code_lo.repeat(tmp)
+                self.code_hi = self.code_hi.repeat(tmp)
 
         if weight:
             shape = [-1] + [1] * (len(shape) - 1)
             self.scale = self.scale.reshape(shape)
             self.zero = self.zero.reshape(shape)
+            if self.code_lo is not None:
+                self.code_lo = self.code_lo.reshape(shape)
+                self.code_hi = self.code_hi.reshape(shape)
             return
         if len(shape) == 4:
             self.scale = self.scale.reshape((1, -1, 1, 1))
             self.zero = self.zero.reshape((1, -1, 1, 1))
+            if self.code_lo is not None:
+                self.code_lo = self.code_lo.reshape((1, -1, 1, 1))
+                self.code_hi = self.code_hi.reshape((1, -1, 1, 1))
         if len(shape) == 3:
             self.scale = self.scale.reshape((1, 1, -1))
             self.zero = self.zero.reshape((1, 1, -1))
+            if self.code_lo is not None:
+                self.code_lo = self.code_lo.reshape((1, 1, -1))
+                self.code_hi = self.code_hi.reshape((1, 1, -1))
         if len(shape) == 2:
             self.scale = self.scale.unsqueeze(0)
             self.zero = self.zero.unsqueeze(0)
+            if self.code_lo is not None:
+                self.code_lo = self.code_lo.unsqueeze(0)
+                self.code_hi = self.code_hi.unsqueeze(0)
 
     def _mse_shrink_grid(
         self,
@@ -537,6 +708,7 @@ class Quantizer(nn.Module):
         mse: float,
         *,
         scale_min: float | torch.Tensor | None,
+        value_limit: float | torch.Tensor | None = None,
     ) -> None:
         """Evaluate every shrink-grid candidate's scale/zero and keep the winners.
 
@@ -613,6 +785,7 @@ class Quantizer(nn.Module):
             guard_zero_scale=True,
             scale=self.scale,
             zero=self.zero,
+            value_limit=value_limit,
             grid_budget=mse_cfg.grid_budget if isinstance(mse_cfg, MSEConfig) else None,
         )
 
@@ -620,7 +793,15 @@ class Quantizer(nn.Module):
         # ``maxq`` is a device tensor, so passing it into the elementwise helper
         # would make its ``maxq < 0`` branch and clamp bounds read the scalar back
         # to the host on every block.  ``_maxq_value`` mirrors it exactly.
-        return quantize(x, self.scale, self.zero, self._maxq_value, self.requires_groupwise_processing())
+        return quantize(
+            x,
+            self.scale,
+            self.zero,
+            self._maxq_value,
+            self.requires_groupwise_processing(),
+            code_lo=self.code_lo,
+            code_hi=self.code_hi,
+        )
 
     # def enabled(self):
     #     return self.maxq > 0

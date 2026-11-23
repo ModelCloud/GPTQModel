@@ -22,6 +22,7 @@ from .config import (
     SmoothRowCol,
     SmoothSoftNorm,
 )
+from .quantizer import _finite_code_bounds
 
 
 # For Gaussian-like rows, raw MAD ~= 0.67449 * sigma. Normalize MAD so the
@@ -218,16 +219,37 @@ def smooth_block(
     raise ValueError(f"smooth_block does not implement {type(method).__name__}")
 
 
-def _eval_mse(block_f, min_val, max_val, base_zero, qcfg, maxq, shrink, eps, weights=None):
+def _eval_mse(
+    block_f,
+    min_val,
+    max_val,
+    base_zero,
+    qcfg,
+    maxq,
+    shrink,
+    eps,
+    weights=None,
+    value_limit=None,
+):
     """Compute MSE for shrinkage factors [rows, n, 1].
 
     ``weights`` has shape ``[rows, 1, columns]`` and carries the per-element
     saliency used to reduce over the group. It represents how much a weight's
     quantization error is expected to reach the layer output.
+
+    ``value_limit`` (when given) restricts each candidate's codes to the
+    magnitudes the caller narrows the reconstruction to, so the search scores
+    the codes that will actually be packed rather than an endpoint that
+    overflows on the way out.
     """
     scale = torch.clamp((max_val.unsqueeze(1) * shrink - min_val.unsqueeze(1) * shrink) / maxq, min=eps)
     zero = base_zero.unsqueeze(1).expand_as(scale) if qcfg.sym else torch.round(-min_val.unsqueeze(1) * shrink / scale)
-    q = torch.clamp(torch.round(block_f.unsqueeze(1) / scale + zero), 0, maxq)
+    lo, hi = _finite_code_bounds(scale, zero, maxq, False, value_limit)
+    # ``scale`` is ``[rows, candidates, 1]``, so the bounds already carry both
+    # the lane and candidate axes and clamp broadcast over the code columns.
+    lo = 0 if lo is None else lo
+    hi = maxq if hi is None else hi
+    q = torch.clamp(torch.round(block_f.unsqueeze(1) / scale + zero), lo, hi)
 
     err = ((q - zero) * scale - block_f.unsqueeze(1)).pow(2)
     if weights is None:
@@ -330,6 +352,7 @@ def mse_optimal_quant(
     maxshrink: float,
     eps: float = 1e-8,
     weights: Optional[torch.Tensor] = None,
+    value_limit: float | torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Ternary search over shrink factors: O(log steps).
 
@@ -346,6 +369,10 @@ def mse_optimal_quant(
     visible at the layer output; in a trained transformer it is not, and
     clipping a row's largest weights can lower the unweighted error while
     raising the layer's output error.
+
+    ``value_limit`` bounds every candidate's integer codes to the magnitudes
+    the caller narrows the reconstruction to, so the winner is scored on the
+    codes that will be packed instead of one that overflows on the way out.
     """
     block_f = block.float()
     rows = block_f.shape[0]
@@ -375,7 +402,7 @@ def mse_optimal_quant(
     endpoint_err = _eval_mse(
         block_f, min_val, max_val, base_zero, qcfg, maxq,
         torch.stack([l, r], dim=1).view(rows, 2, 1), eps,
-        weights=weights,
+        weights=weights, value_limit=value_limit,
     )
     shrunk_better = endpoint_err[:, 0] < endpoint_err[:, 1]
     best_err = torch.where(shrunk_better, endpoint_err[:, 0], endpoint_err[:, 1])
@@ -386,7 +413,7 @@ def mse_optimal_quant(
         err = _eval_mse(
             block_f, min_val, max_val, base_zero, qcfg, maxq,
             torch.stack([mid1, mid2], dim=1).view(rows, 2, 1), eps,
-            weights=weights,
+            weights=weights, value_limit=value_limit,
         )
 
         for i, p in enumerate([mid1, mid2]):
@@ -401,7 +428,7 @@ def mse_optimal_quant(
     refinement = torch.stack([torch.clamp(best_p - delta, shrink, 1.0), best_p, torch.clamp(best_p + delta, shrink, 1.0)], dim=1).view(rows, 3, 1)
     refine_err = _eval_mse(
         block_f, min_val, max_val, base_zero, qcfg, maxq, refinement, eps,
-        weights=weights,
+        weights=weights, value_limit=value_limit,
     )
     refine_best_err, refine_index = refine_err.min(dim=1)
     # Refinement always contains the incumbent, but keep the comparison
@@ -416,7 +443,12 @@ def mse_optimal_quant(
     # Final quantization
     scale_best = torch.clamp((max_val - min_val) * best_p / maxq, min=eps)
     zero_best = base_zero if qcfg.sym else torch.round(-min_val * best_p / scale_best)
-    q = torch.clamp(torch.round(block_f / scale_best + zero_best), 0, maxq)
+    lo, hi = _finite_code_bounds(scale_best, zero_best, maxq, False, value_limit)
+    q = torch.clamp(
+        torch.round(block_f / scale_best + zero_best),
+        0 if lo is None else lo,
+        maxq if hi is None else hi,
+    )
     dequant_best = (q - zero_best) * scale_best
 
     return dequant_best, scale_best, zero_best
