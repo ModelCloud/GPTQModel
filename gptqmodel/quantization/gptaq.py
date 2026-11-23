@@ -179,9 +179,17 @@ class GPTAQ(GPTQ):
                     self.module, native_inp, columns_first=True
                 )
 
+        # ``inp`` is [columns, tokens] here, so ``shape[1]`` is the calibration
+        # token count. A routed expert can receive only padding rows; there is
+        # nothing to accumulate, and the request-count normalization below
+        # would decay the running Hessian without adding anything to it (FOEM
+        # guards the same case for the shared MoE path, #5768).
+        token_count = inp.shape[1]
+        if token_count == 0:
+            return 0, None, inp.device
+
         self._accumulate_device_batch(inp, native_inp, batch_request_count)
         self._gptaq_batch_request_count += batch_request_count
-        token_count = inp.shape[1]
         self.nsamples += token_count
         # The Hessian partial is accumulated per device above, so no per-batch
         # ``xtx`` is handed back to the caller.
