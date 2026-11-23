@@ -98,11 +98,44 @@ def test_assignment_can_under_spend_and_legacy_api_is_preserved():
         rco.budget_constrained_argmax(scores, weights, costs, 1.)
 
 
+def test_achieved_bits_gathers_per_group_costs_and_uses_fp64():
+    assignment = torch.tensor([0, 1, 1, 0])
+    weights = torch.tensor([1., 1., 1., 1.])
+    shared = torch.tensor([2., 4.])
+    per_group = torch.tensor([[2., 4.], [2., 4.], [2., 3.], [2., 4.]])
+    assert rco.achieved_bits(assignment, weights, shared) == 3.0
+    assert rco.achieved_bits(assignment, weights, per_group) == 2.75
+    # Large equal counts whose FP32 sum loses the fractional part.
+    wide = torch.full((2,), 16777217.0)
+    exact = rco.achieved_bits(torch.tensor([0, 1]), wide, torch.tensor([2., 4.]))
+    assert exact == 3.0
+
+
 @pytest.mark.parametrize('value', [float('nan'), float('inf'), -float('inf')])
 def test_nonfinite_scores_are_rejected(value):
     with pytest.raises(ValueError, match='finite'):
         rco.budget_constrained_argmax(torch.tensor([[0., value]]), torch.ones(1),
                                     torch.tensor([2., 3.]), 3.)
+
+
+@pytest.mark.parametrize('groups', [64, 448, 800])
+def test_compiled_and_torch_dp_agree_on_large_equal_group_grids(groups):
+    """The C++ kernel is a drop-in for the Torch fallback, not a policy choice."""
+    if rco._rco_dp_compiled() is None:
+        pytest.skip("the compiled RCO DP needs a C++ toolchain")
+    scores = torch.zeros(groups, 2, dtype=torch.float64)
+    scores[:, 1] = 1.0
+    weights = torch.ones(groups, dtype=torch.float64)
+    costs = torch.tensor([2.0, 4.0], dtype=torch.float64)
+    budget = round(2.5 * 500)
+    units = torch.round(costs * weights[:, None] / weights.sum() * 500).long()
+    kernel = rco._budget_dp(scores, units, budget, groups, 2)
+    fallback = rco._budget_dp_torch(scores, units.tolist(), budget, groups, 2)
+    assert torch.equal(kernel, fallback)
+    assert torch.equal(
+        rco.budget_constrained_argmax(scores, weights, costs, 2.5),
+        rco.budget_constrained_argmax(scores, weights, costs, 2.5),
+    )
 
 
 def _interpolated_linear(candidates, *, dtype, device='cpu'):

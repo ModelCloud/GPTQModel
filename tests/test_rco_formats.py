@@ -31,6 +31,7 @@ from gptqmodel.quantization.rco_formats import (
     awq_runtime_requirement,
     default_resolution,
     discover_projections,
+    enforce_budget,
     module_weights,
     relative_reconstruction_error,
     repair_overspend,
@@ -268,6 +269,38 @@ def test_repair_overspend_reaches_the_budget_without_mutating_the_input():
     # One k4 -> k2 swap saves two bits for the same score loss as two k4 -> k3
     # swaps, so the greedy repair takes the single larger step.
     assert repaired.tolist() == [0, 2, 2, 0]
+
+
+def test_enforce_budget_repairs_an_overspent_assignment():
+    assignment = torch.tensor([1, 1, 1, 0])
+    scores = torch.tensor([[0.0, 10.0]] * 4)
+    weights = torch.ones(4)
+    costs = torch.tensor([2.0, 4.0])
+    enforced = enforce_budget(assignment, scores, weights, costs, 2.5)
+    achieved = float((costs[enforced].double() * weights).sum() / weights.sum())
+    assert achieved <= 2.5
+    assert int((enforced == 1).sum()) == 1
+
+
+def test_enforce_budget_leaves_a_feasible_assignment_unchanged():
+    assignment = torch.tensor([1, 0, 0, 0])
+    scores = torch.tensor([[0.0, 10.0]] * 4)
+    weights = torch.ones(4)
+    costs = torch.tensor([2.0, 4.0])
+    enforced = enforce_budget(assignment, scores, weights, costs, 2.5)
+    assert enforced.tolist() == assignment.tolist()
+
+
+def test_enforce_budget_refuses_an_infeasible_target():
+    with pytest.raises(RCOFormatError, match="cheapest feasible"):
+        enforce_budget(torch.zeros(2), torch.zeros(2, 2), torch.ones(2),
+                       torch.tensor([2.0, 4.0]), 1.5)
+
+
+def test_enforce_budget_rejects_misshaped_inputs():
+    with pytest.raises(RCOFormatError, match="agree in shape"):
+        enforce_budget(torch.zeros(2), torch.zeros(3, 2), torch.ones(2),
+                       torch.tensor([2.0, 4.0]), 3.0)
 
 
 def test_large_allocation_never_overspends_the_budget():

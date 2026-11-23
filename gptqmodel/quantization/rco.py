@@ -349,12 +349,22 @@ def _budget_dp_torch(gained, steps, budget, n_layers, n_options):
 
 
 def achieved_bits(assignment, weights, costs):
-    """Parameter-weighted bits per parameter of a discrete assignment."""
+    """Parameter-weighted bits per parameter of a discrete assignment.
+
+    Reported as an FP64 value: this is the exact budget an exported plan claims,
+    and accumulating hundreds of large parameter counts in FP32 can disagree
+    with the FP64 check its consumer performs on load.
+    """
     # The assignment comes back on the search device while the caller may hold
-    # the cost vector on the host, so gather on the assignment's device.
-    costs = costs.to(assignment.device)
-    selected = costs[assignment].float()
-    return float((selected * weights.to(assignment.device)).sum() / weights.sum())
+    # the cost vector on the host, so gather everything on the host.
+    assignment = torch.as_tensor(assignment).detach().to(device="cpu", dtype=torch.long)
+    costs = torch.as_tensor(costs).detach().to(device="cpu", dtype=torch.float64)
+    weights = torch.as_tensor(weights).detach().to(device="cpu", dtype=torch.float64)
+    if costs.ndim == 1:
+        selected = costs[assignment]
+    else:
+        selected = costs[torch.arange(len(assignment)), assignment]
+    return float((selected * weights).sum() / weights.sum())
 
 
 
