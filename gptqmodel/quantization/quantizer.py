@@ -91,6 +91,59 @@ def _replace_zero_scale(
     return safe_scale, safe_zero
 
 
+def _mse_normalizer(scales: torch.Tensor) -> torch.Tensor:
+    """Return one power-of-two residual normalizer per row for the shrink grid.
+
+    The grid scores ``sum_j |deq_j - x_j| ** norm``.  Raising a residual to a
+    high ``norm`` underflows to zero long before the comparison consumes it:
+    in float32 every residual below ``1e-45 ** (1 / norm)`` ties at ``0``,
+    which is ``~1.6e-3`` steps at ``norm = 16``.  All candidates then tie, the
+    first-minimum rule keeps the unshrunk incumbent, and the selection stops
+    being invariant under a uniform rescale of the row.
+
+    Dividing every residual by one row constant preserves the winner: the
+    constant is the same positive factor for every candidate and
+    ``(r/2**k) ** norm = r ** norm / 2 ** (k * norm)`` is strictly increasing
+    in ``r``.  The factor is a power of two, so the division is exact and
+    neither zero errors nor equal candidates change their order or their
+    first-minimum tie break.
+
+    The reference is the row's largest positive candidate step, rounded up to
+    the next power of two.  A fitted candidate's residual is a fraction of its
+    own step, so dividing by a step of the same row keeps every residual of
+    order one instead of following the row's absolute magnitude into the
+    subnormal range.  The factor is never below the step, so the normalized
+    residual stays within ``maxq`` code steps and the power cannot overflow
+    where the unnormalized score did not.
+
+    For an extreme ``norm`` a visibly bad candidate can still overflow to
+    ``+inf``.  That only removes it from the comparison, which the caller's
+    strict ``<`` and NaN-to-``+inf`` handling already express; a finite
+    candidate always outranks it.
+    """
+
+    positive = torch.isfinite(scales) & (scales > 0)
+    # ``amax`` over a masked copy keeps the reduction on the device; rows with
+    # no usable step fall back to a unit normalizer (all-zero groups, NaN/inf
+    # candidates).  Their objectives stay non-finite or exactly zero, which
+    # the caller's NaN handling already covers.
+    largest = torch.where(
+        positive, scales, torch.full_like(scales, float("inf"))
+    ).amax(dim=0)
+    usable = torch.isfinite(largest) & (largest > 0)
+    largest = torch.where(usable, largest, torch.ones_like(largest))
+    # ``frexp`` splits a finite positive value into a mantissa in ``[0.5, 1)``
+    # and an integer exponent, so ``2 ** exponent`` is an exact power of two
+    # not below the reference.  ``exp2`` builds it with one plain elementwise
+    # kernel, so the path runs unchanged on every supported backend and device
+    # instead of depending on ``ldexp``'s per-backend coverage.
+    _, exponent = torch.frexp(largest)
+    factor = torch.exp2(exponent.to(largest.dtype))
+    # ``exp2`` overflows to ``inf`` for an extreme exponent; the reference step
+    # itself is then the exact fallback.
+    return torch.where(torch.isfinite(factor) & (factor > 0), factor, largest)
+
+
 def narrowing_loses_codes(weight_dtype: torch.dtype, bits: int, sym: bool) -> bool:
     """Whether narrowing a reconstruction to ``weight_dtype`` can move a code.
 
@@ -180,11 +233,18 @@ def _mse_shrink_grid(
     ``scales``/``zeros`` list every ``(n_candidates, rows)`` candidate in
     priority order.  The per-step loop previously launched a dozen small
     kernels per candidate; batching the grid collapses that into a few large
-    ops per chunk.  Candidate order, objective values, and the first-minimum
-    tie break are identical to evaluating candidates one at a time, so the
-    returned ``scale``/``zero`` are bitwise-equal to the sequential loop's
-    result.  ``scale``/``zero`` are the current winners the candidates must
-    beat.
+    ops per chunk.  Candidate order and the first-minimum tie break are
+    identical to evaluating candidates one at a time, so the returned
+    ``scale``/``zero`` are the sequential loop's winner.  ``scale``/``zero``
+    are the current winners the candidates must beat.
+
+    The objective is scored on a per-row power-of-two normalizer derived from
+    the candidate grid (see ``_mse_normalizer``).  It is one positive constant
+    per row for every candidate, so the selected candidate is the same one the
+    unnormalized objective picks, but ``|deq - x| ** mse`` no longer underflows
+    to zero for high ``mse`` or a uniformly rescaled row.  The stored objective
+    is therefore the true score divided by ``normalizer ** mse``; only its
+    ordering is consumed.
     """
     dev = x.device
     rows, cols = x.shape
@@ -195,6 +255,14 @@ def _mse_shrink_grid(
     work_dtype = torch.result_type(x, scales)
     scales = scales.to(work_dtype)
     zeros = zeros.to(work_dtype)
+    # Normalize every candidate's residuals by one per-row power of two before
+    # the power.  The factor is selected from the candidate grid, never from
+    # ``x`` alone: a fitted residual is a fraction of the row's step, so the
+    # powered value stays representable instead of following the row's
+    # absolute magnitude to zero for a high ``mse`` or a rescaled row.  The
+    # division is exact in every supported dtype, so a zero error stays zero
+    # and equal candidates stay equal.
+    normalizer = _mse_normalizer(scales).unsqueeze(-1)
     # The affine path needs only the ``q`` workspace; trits additionally
     # hold two f32 dequant masks while forming the output.
     elem_size = torch.empty((), dtype=work_dtype).element_size()
@@ -257,6 +325,7 @@ def _mse_shrink_grid(
                 q.add_(z3).clamp_(0, maxq_value).sub_(z3).mul_(s3)
         q.sub_(xr)
         q.abs_()
+        q.div_(normalizer)
         q.pow_(mse)
         err = (
             q_phys[:n].sum(dim=1)

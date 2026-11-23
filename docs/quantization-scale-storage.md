@@ -15,6 +15,67 @@ and MSE candidates. Activation ranges and ternary endpoints retain their own
 semantics. An exactly zero range uses the existing sentinel range; a nonzero
 range whose division underflows to zero instead receives the storage bound.
 
+## MSE objective normalization
+
+The shrink grid minimizes `sum_j |deq_j - x_j| ** norm` per row, with `norm`
+set by `MSEConfig.norm` (the default `2.4`, historically `2`). Raising a small
+residual to a high `norm` underflows: in FP32 the largest residual that still
+survives `norm = 16` is about `1e-45 ** (1 / 16) ~ 1.6e-3` of the row's step.
+Every candidate then scores exactly `0`, and the first-minimum rule keeps the
+unshrunk incumbent. The selected scale therefore depends on the row's absolute
+magnitude rather than on the shape of its error distribution, and a uniformly
+rescaled row can select a different candidate.
+
+`_mse_normalizer` divides every candidate's residuals by one per-row power of
+two before the power:
+
+```mermaid
+flowchart TD
+    F["Quantizer.find_params"] --> G["_mse_shrink_grid<br/>scales: [n_candidates, rows]"]
+    G --> N["_mse_normalizer:<br/>largest positive candidate step,<br/>rounded up to 2**k"]
+    N --> D["per chunk:<br/>|deq - x| / 2**k"]
+    D --> P["pow_(norm)"]
+    P --> S["sum over the row"]
+    S --> A["argmin ... first minimum"]
+    A --> O["scale, zero"]
+    style N fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+```
+
+The normalizer is one positive constant per row for all candidates, so
+`(r / 2**k) ** norm = r ** norm / 2 ** (k * norm)` is strictly increasing in
+`r`: the same candidate wins and the first-minimum tie break is unchanged. A
+power of two makes the division exact, so an already-zero error stays zero and
+equal candidates stay equal. Because the reference is the row's largest
+candidate step, the normalized residual stays within `maxq` code steps and the
+power cannot overflow where the unnormalized score did not; a candidate that
+still overflows to `+inf` is simply never selected, which is the existing
+strict-`<`/NaN behavior.
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| Residual before the power | Raw absolute residual | Absolute residual divided by `2**k`, one `k` per row |
+| `norm = 16`, `x` scaled by `1e-3` | Every objective underflows to `0`; candidate `0` wins | Objectives stay finite; candidate `6` wins, matching an FP64 oracle |
+| Zero-error candidate | Exactly `0` | Exactly `0` (the division is exact) |
+| Equal candidates | First minimum wins | First minimum wins |
+| Candidate chunking | Same winner at every budget | Same winner at every budget |
+
+`tests/test_find_params_mse_grid.py` pins this with an independently written
+FP64 reconstruction and score over the same representable FP32 candidate
+parameters, at `norm = 2.4` and `norm = 16`, across input multipliers
+`1`, `1e-3`, `2**-10` and `2**10`, with both a single-candidate and a
+full-grid chunk budget, plus explicit zero-error and tie-order controls.
+
+Scope: one constant per row removes the magnitude dependence and matches the
+FP64 oracle through `norm = 32`. It is not equivalent to a log-domain scorer
+for arbitrary exponents. Beyond about `norm = 40`, terms of a row whose
+normalized residual is below `1` still underflow individually once raised to
+that power, so a candidate can tie at `0` again. A fully exponent-independent
+score needs `log2`/`logsumexp` evaluation, which rounds the default `norm =
+2.4` selection differently and is a separate change. Selections for `norm`
+`2.0`, `2.4` and `8.0` are bit-identical to the previous code across `bits`
+`2`, `3`, `4`, `8` and both symmetric and asymmetric grids; only `norm = 16`
+changes, and only for the small-magnitude rows this section describes.
+
 ```mermaid
 flowchart TD
     Q["Quantizer.find_params"] --> W{"Integer weight quantization?"}
