@@ -497,6 +497,12 @@ Two things remain untested and would be the next steps: a wider option set than
 to differentiate blocks), and a larger model where per-layer sensitivity is
 actually heterogeneous.
 
+### Interpolation precision
+
+The search evaluates the model with each projection replaced by a mix of its
+candidate tensors. That mix is a convex combination of the exact stored
+candidates; [RCO weight-interpolation precision](../rco-interpolation-precision.md)
+documents its arithmetic, gradient and the narrow-delta failure it replaced.
 
 ### Teacher-KL and per-projection allocation
 

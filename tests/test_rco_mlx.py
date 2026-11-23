@@ -339,13 +339,13 @@ def test_mlx_projection_matches_torch_oracle_in_low_precision(dtype_name):
         raw = to_torch(actual.astype(mx.float32)).detach().cpu().float()
         visible = to_torch(actual).detach().cpu().float()
 
-        # Reconstruct the exact candidate storage and model-dtype interpolation
-        # used by both backends, then evaluate the projection in float64. This
+        # Reconstruct the exact candidate storage and module-dtype mix used by
+        # both backends, then evaluate the projection in float64. This
         # separates kernel arithmetic error from the required output cast.
         stored_low = mx.array(low.numpy()).astype(dtype)
         stored_reference = mx.array(reference.numpy()).astype(dtype)
-        mixed_delta = stored_low - stored_reference
-        mixed = stored_reference + mx.array(probabilities[0].item()).astype(dtype) * mixed_delta
+        mixed = mx.array(probabilities[1].item()).astype(dtype) * stored_reference
+        mixed = mixed + mx.array(probabilities[0].item()).astype(dtype) * stored_low
         mx.eval(mixed)
         mixed_oracle = to_torch(mixed).detach().cpu().float()
         oracle = values.double() @ mixed_oracle.double().T
@@ -381,14 +381,7 @@ def test_mlx_projection_matches_torch_oracle_in_low_precision(dtype_name):
 
 @pytest.mark.parametrize("dtype_name", ["float16", "bfloat16"])
 def test_mlx_interpolation_matches_torch_backend_precision(dtype_name):
-    """MLX must interpolate in the same dtype as the Torch backend.
-
-    ``rco._WeightInterpolation`` multiplies a zero-dimensional float32
-    probability by a model-dtype delta, and Torch's scalar type promotion keeps
-    that product in the model dtype. MLX promotes a float32 array against a
-    low-precision array to float32 instead, which would widen every
-    interpolated projection and search a different objective than Torch.
-    """
+    """MLX and Torch must mix the candidates with the same arithmetic."""
     mx, _ = mlx_modules()
     mx.random.seed(20260518)
     torch.manual_seed(20260518)
@@ -407,11 +400,11 @@ def test_mlx_interpolation_matches_torch_backend_precision(dtype_name):
 
     class _Owner:
         def __init__(self):
-            self._deltas = [(low - source).to(torch_dtype), (mid - source).to(torch_dtype)]
+            self._candidates = [low, mid, source]
             self._probs = probabilities
 
-        def deltas(self, _name):
-            return self._deltas
+        def candidates(self, _name):
+            return self._candidates
 
         def probabilities(self, _index):
             return self._probs
@@ -420,7 +413,7 @@ def test_mlx_interpolation_matches_torch_backend_precision(dtype_name):
             return 0
 
         def reference_index(self):
-            return len(self._deltas)
+            return len(self._candidates) - 1
 
     with torch.no_grad():
         torch_mixed = rco._WeightInterpolation(_Owner(), name)(source).to(torch_dtype)
@@ -466,6 +459,50 @@ def test_mlx_interpolation_matches_torch_backend_precision(dtype_name):
         assert int(differing.sum()) <= max(2, int(0.01 * differing.numel()))
     finally:
         interpolated.cleanup()
+
+
+@pytest.mark.parametrize("dtype_name", ["float16", "bfloat16"])
+def test_mlx_hard_selection_reproduces_the_selected_candidate(dtype_name):
+    """A one-hot assignment must evaluate exactly the candidate it selects.
+
+    The Torch backend is covered by ``test_rco.py``; this mirrors the same
+    invariant for the MLX replacement linear, whose candidates are stored in
+    the layer dtype and never rebuilt from a narrow delta.
+    """
+    mx, _ = mlx_modules()
+    model = tiny_mlx_model()
+    dtype = getattr(mx, dtype_name)
+    torch_dtype = torch.float16 if dtype_name == "float16" else torch.bfloat16
+    model.set_dtype(dtype)
+    mx.eval(model.parameters())
+
+    name = "model.layers.0.mlp.down_proj"
+    original = rco_mlx._child(model, name)
+    shape = tuple(original.weight.shape)
+    low = torch.ones(shape, dtype=torch_dtype)
+    reference = torch.full(shape, 1000.0, dtype=torch_dtype)
+    interpolated = rco_mlx.MLXInterpolatedLlamaLayers(
+        model,
+        {name: [low.float(), reference.float()]},
+        torch.tensor([low.numel()]),
+        torch.tensor([2.0, 3.0]),
+    )
+    values = mx.ones((1, shape[1]), dtype=dtype)
+    try:
+        for index, expected in enumerate((low, reference)):
+            onehot = np.zeros((1, 2), dtype=np.float32)
+            onehot[0, index] = 1
+            interpolated.set_probs(mx.array(onehot))
+            actual = rco_mlx._child(model, name)(values)
+            assert actual.dtype == dtype
+            visible = to_torch(actual.astype(mx.float32)).detach().cpu().float()
+            selected = expected.to(torch_dtype).float()
+            oracle = torch.ones(1, shape[1]) @ selected.T
+            assert bool(torch.isfinite(visible).all())
+            torch.testing.assert_close(visible, oracle, rtol=0, atol=0)
+    finally:
+        interpolated.cleanup()
+    assert rco_mlx._child(model, name) is original
 
 
 def test_mlx_search_restores_original_linear_and_exact_budget():
