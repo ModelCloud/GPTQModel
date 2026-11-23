@@ -118,6 +118,34 @@ def _iter_tensors(value):
             yield from _iter_tensors(item)
 
 
+class LiveFloatBytes(TorchDispatchMode):
+    """Track the peak bytes of freshly-allocated floating tensors.
+
+    Views are excluded (`_base is None`), and any tensor that collected is
+    dropped, so the peak is what the assignment itself keeps alive at once. This
+    counts bytes rather than tensor shapes because the exact pass tiles rows and
+    candidates differently from the screen.
+    """
+
+    def __init__(self):
+        self._live = {}
+        self.peak_bytes = 0
+        self.largest = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        output = func(*args, **(kwargs or {}))
+        for tensor in _iter_tensors(output):
+            if tensor._base is None and tensor.is_floating_point():
+                self._live[id(tensor)] = weakref.ref(tensor), tensor.numel() * tensor.element_size()
+        for key, (ref, _) in list(self._live.items()):
+            if ref() is None:
+                del self._live[key]
+        live = sum(size for _, size in self._live.values())
+        self.peak_bytes = max(self.peak_bytes, live)
+        self.largest = max(self.largest, max((size for _, size in self._live.values()), default=0))
+        return output
+
+
 class FullSizeAllocationCounter(TorchDispatchMode):
     """Count live freshly-allocated tensors of exactly one `numel`/dtype.
 
@@ -155,8 +183,24 @@ class FullSizeAllocationCounter(TorchDispatchMode):
 # ---------------------------------------------------------------------------
 # item 2: chunked assignment
 # ---------------------------------------------------------------------------
-def test_chunked_assign_matches_prefix_algorithm_bitwise():
-    """The `addmm` form must not change assignment or residual bits."""
+def _exact_oracle(data, centroids):
+    """Independent float64 direct-difference assignment and distance."""
+
+    difference = data.to(torch.float64).unsqueeze(1) - centroids.to(
+        torch.float64
+    ).unsqueeze(0)
+    distance = difference.square().sum(dim=2)
+    return distance.argmin(dim=1), distance.min(dim=1).values
+
+
+def test_chunked_assign_matches_exact_oracle_not_the_expanded_legacy_form():
+    """The assignment must follow the exact distance, not the old bit pattern.
+
+    The pre-fix form evaluated `||c||^2 - 2 x.c` and added `||x||^2` back. Its
+    cancellation let a one-ULP neighbour beat an exact codebook entry, so this
+    pins the assignment to an independent float64 direct-difference oracle and
+    keeps the legacy helper only as the documented pre-fix control.
+    """
 
     generator = torch.Generator().manual_seed(17)
     data = torch.randn(257, 4, generator=generator)
@@ -167,15 +211,20 @@ def test_chunked_assign_matches_prefix_algorithm_bitwise():
     actual_assignment, actual_residual = _chunked_assign(
         data, centroids, chunk_bytes=chunk_bytes
     )
-    expected_assignment, expected_residual = legacy_chunked_assign(
-        data, centroids, chunk_bytes=chunk_bytes
-    )
+    expected_assignment, expected_distance = _exact_oracle(data, centroids)
     assert torch.equal(actual_assignment, expected_assignment)
-    assert torch.equal(actual_residual, expected_residual)
+    assert torch.allclose(
+        actual_residual.double(), expected_distance, rtol=1e-6, atol=1e-6
+    )
+    # A sum of squares cannot be negative, unlike the expanded form that added
+    # `||x||^2` back into a cancelled value.
+    assert float(actual_residual.min()) >= 0.0
 
-    # Exact ties resolve to the lowest index in both forms.
+    # Exact ties resolve to the lowest index, and a one-ULP neighbour does not.
     tie = torch.tensor([[0.5, 0.0]])
     tie_codebook = torch.tensor([[0.0, 0.0], [1.0, 0.0]])
+    assert int(_chunked_assign(tie, tie_codebook)[0][0]) == 0
+    assert int(_exact_oracle(tie, tie_codebook)[0][0]) == 0
     assert torch.equal(
         _chunked_assign(tie, tie_codebook)[0],
         legacy_chunked_assign(tie, tie_codebook, chunk_bytes=1024)[0],
@@ -183,29 +232,49 @@ def test_chunked_assign_matches_prefix_algorithm_bitwise():
 
 
 def test_chunked_assign_keeps_one_distance_temporary():
-    """At most one chunk-sized distance buffer may be live (was three)."""
+    """Live distance bytes stay inside the caller's chunk budget (was three)."""
 
     generator = torch.Generator().manual_seed(11)
-    data = torch.randn(1000, 4, generator=generator)
-    centroids = torch.randn(8, 4, generator=generator)
-    chunk_bytes = 8 * data.element_size() * 50
-    rows_per_chunk = chunk_bytes // (8 * data.element_size())
-    distance_numel = rows_per_chunk * centroids.shape[0]
+    rows, dim = 4096, 4
+    data = torch.randn(rows, dim, generator=generator)
+    centroids = torch.randn(512, dim, generator=generator)
+    chunk_bytes = 256 * 1024
 
-    legacy_counter = FullSizeAllocationCounter(distance_numel, data.dtype)
+    legacy_counter = LiveFloatBytes()
     with legacy_counter:
         legacy_chunked_assign(data, centroids, chunk_bytes=chunk_bytes)
-    # The pre-fix form allocated several full-size temporaries (the matmul, the
-    # `2.0 *` product and their difference). The exact count depends on the
-    # torch matmul implementation (2 on torch 2.15), so pin only that the
-    # legacy form really did hold more than the chunked one below.
-    assert legacy_counter.max_live >= 2
+    # The pre-fix form kept the matmul result, its `2.0 *` product and their
+    # difference live together: three chunk-sized score blocks.
+    assert legacy_counter.largest >= chunk_bytes
+    assert legacy_counter.peak_bytes > 2 * chunk_bytes
 
-    counter = FullSizeAllocationCounter(distance_numel, data.dtype)
+    counter = LiveFloatBytes()
     with counter:
         _chunked_assign(data, centroids, chunk_bytes=chunk_bytes)
-    assert counter.total == 1000 // rows_per_chunk
-    assert counter.max_live == 1
+    # One score block, plus the assignment's own row-shaped intermediates.
+    assert counter.largest <= chunk_bytes
+    assert counter.peak_bytes <= chunk_bytes + 4 * rows * dim * data.element_size() + 4 * rows
+
+
+def test_exact_assignment_honours_the_chunk_budget_for_tall_inputs():
+    """The direct pass tiles rows too, so a tall input cannot outgrow the budget."""
+
+    generator = torch.Generator().manual_seed(13)
+    rows, dim = 8192, 4
+    data = torch.randn(rows, dim, generator=generator)
+    centroids = torch.randn(64, dim, generator=generator)
+    chunk_bytes = 64 * 1024
+    # Work stays under the direct-pass threshold, so this exercises the tile.
+    assert rows * centroids.shape[0] * dim <= vptq_module._EXACT_ASSIGN_WORK
+
+    counter = LiveFloatBytes()
+    with counter:
+        _chunked_assign(data, centroids, chunk_bytes=chunk_bytes)
+
+    # No single tensor is chunk sized; the difference, its square and the
+    # running result are row tiles.
+    assert counter.largest <= rows * dim * data.element_size()
+    assert counter.peak_bytes <= chunk_bytes + 4 * rows * dim * data.element_size() + 4 * rows
 
 
 # ---------------------------------------------------------------------------

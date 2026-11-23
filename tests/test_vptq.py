@@ -2357,6 +2357,229 @@ def test_vptq_chunked_assign_returns_true_squared_distance():
     assert torch.allclose(exact_residual, torch.zeros(2), atol=1e-6)
 
 
+def direct_assign_oracle(data, centroids):
+    """Independent nearest centroid from direct float64 differences."""
+
+    difference = data.to(torch.float64).unsqueeze(1) - centroids.to(
+        torch.float64
+    ).unsqueeze(0)
+    distance = difference.square().sum(dim=2)
+    return distance.argmin(dim=1), distance.min(dim=1).values
+
+
+def direct_distance_oracle(row, centroids):
+    """Full float64 squared distance from one row to every centroid."""
+
+    difference = row.to(torch.float64).unsqueeze(0) - centroids.to(
+        torch.float64
+    )
+    return difference.square().sum(dim=1)
+
+
+def one_ulp_pair(vector_len, dtype):
+    """The reported fixture: an exact match and its one-ULP neighbour."""
+
+    exact = torch.ones(vector_len, dtype=dtype)
+    neighbour = exact.clone()
+    neighbour[0] = torch.nextafter(
+        neighbour[0], torch.tensor(float("inf"), dtype=dtype)
+    )
+    return exact, neighbour
+
+
+@pytest.mark.parametrize("vector_len", [8, 16, 32], ids=["len8", "len16", "len32"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+def test_vptq_exact_centroid_beats_its_one_ulp_neighbour(vector_len, dtype):
+    """An exact codebook entry must win against a neighbour one storage ULP away.
+
+    The distance was scored as `||c||^2 - 2 x.c` in float32. Both terms are of
+    the order of the row magnitude and they cancel, so the true gap between the
+    exact entry and its neighbour rounded away and the neighbour won. Float64
+    direct differences give the true distance, and they are the oracle here.
+    """
+
+    exact, neighbour = one_ulp_pair(vector_len, dtype)
+    data = exact.float().unsqueeze(0)
+
+    for codebook in (
+        torch.stack([neighbour, exact]),
+        torch.stack([exact, neighbour]),
+    ):
+        centroids = codebook.float()
+        distances = direct_distance_oracle(data[0], centroids)
+        # The fixture is a real non-tie: the exact entry has zero distance and
+        # the neighbour is strictly farther away.
+        assert float(distances.min()) == 0.0
+        assert float(distances.max()) > 0.0
+        expected_index = int(distances.argmin())
+        assert float(distances[expected_index]) == 0.0
+        assert torch.equal(centroids[expected_index], data[0])
+
+        assignment, residual = _chunked_assign(data, centroids)
+        assert int(assignment[0]) == expected_index
+        assert float(residual[0]) == 0.0
+
+
+@pytest.mark.parametrize("vector_len", [4, 16, 32], ids=["len4", "len16", "len32"])
+def test_vptq_far_outlier_codebooks_keep_the_exact_match(vector_len):
+    """A codebook spanning far outliers must not lose the exact entry.
+
+    Mean-centring the screen removes the component shared by the row and its
+    neighbours, but a codebook whose outliers are orders of magnitude larger
+    still cancels: the reference point is pulled far away and the float32 score
+    of the two close entries rounds to the same value. Only the direct pass can
+    decide this row.
+    """
+
+    row = torch.ones(vector_len, dtype=torch.float16).float().unsqueeze(0)
+    exact, neighbour = one_ulp_pair(vector_len, torch.float16)
+    for far in (10.0, 1e3, 3e4, 6e4):
+        for count in (1, 8, 512):
+            far_rows = torch.full((count, vector_len), far, dtype=torch.float16)
+            centroids = torch.cat(
+                [neighbour.unsqueeze(0), exact.unsqueeze(0), far_rows]
+            ).float()
+            distances = direct_distance_oracle(row[0], centroids)
+            assert int(distances.argmin()) == 1
+            assert float(distances.min()) == 0.0
+
+            assignment, residual = _chunked_assign(row, centroids)
+            assert int(assignment[0]) == 1
+            assert float(residual[0]) == 0.0
+
+
+def test_vptq_assignment_separates_a_true_tie_from_a_one_ulp_offset():
+    """Ties must pick the lowest index; a strictly nearer entry must not tie."""
+
+    centroids = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]])
+    cases = {
+        "tie01": torch.tensor([[0.5, 0.0]]),
+        "tie12": torch.tensor([[1.5, 0.0]]),
+        "tie23": torch.tensor([[2.5, 0.0]]),
+        "below01": torch.tensor([[0.5 - 1e-7, 0.0]]),
+        "above01": torch.tensor([[0.5 + 1e-7, 0.0]]),
+        "exact0": torch.tensor([[0.0, 0.0]]),
+        "exact3": torch.tensor([[3.0, 0.0]]),
+    }
+
+    import itertools
+
+    for order in itertools.permutations(range(4)):
+        codebook = centroids[list(order)]
+        for name, row in cases.items():
+            distances = direct_distance_oracle(row[0], codebook)
+            expected_index = int(distances.argmin())
+            assignment, residual = _chunked_assign(row, codebook)
+            assert int(assignment[0]) == expected_index, (name, order)
+            assert torch.allclose(
+                residual.double(), distances.min(), rtol=1e-6, atol=1e-6
+            ), (name, order)
+            if name.startswith("exact"):
+                # An exact entry has zero distance and cannot be beaten.
+                assert float(residual[0]) == 0.0
+            if name.startswith("tie"):
+                # Equal distance keeps the lower codebook index: the first of the
+                # two permuted positions that hold the tied entries.
+                tied = distances == distances.min()
+                assert int(tied.sum()) == 2, (name, order)
+                assert int(assignment[0]) == int(tied.nonzero().min())
+
+
+@pytest.mark.parametrize("chunk_rows", [1, 2, 3, 7])
+def test_vptq_assignment_chunk_boundaries_keep_the_exact_match(chunk_rows):
+    """Chunk boundaries must not change which entry wins.
+
+    The chunk is expressed in bytes, so the same data is cut differently from
+    the direct-pass row tile. Both shapes must reproduce the float64 oracle.
+    """
+
+    generator = torch.Generator().manual_seed(23)
+    base = torch.randn(32, 8, generator=generator) * 0.02
+    centroids = base.repeat_interleave(4, dim=0).contiguous()
+    exact_rows = centroids[torch.randint(0, centroids.shape[0], (24,), generator=generator)]
+    neighbour = torch.nextafter(
+        centroids[:8], torch.full_like(centroids[:8], float("inf"))
+    )
+    data = torch.cat([exact_rows, neighbour, centroids[:8]])
+    chunk_bytes = chunk_rows * centroids.shape[0] * data.element_size()
+
+    expected_index, expected_distance = direct_assign_oracle(data, centroids)
+    assignment, residual = _chunked_assign(data, centroids, chunk_bytes=chunk_bytes)
+    assert torch.equal(assignment, expected_index)
+    assert torch.allclose(
+        residual.double(), expected_distance, rtol=1e-6, atol=1e-6
+    )
+    # Duplicated codebooks leave an exact match at distance zero.
+    assert torch.all(residual >= 0)
+    assert float(residual[:8].max()) == 0.0
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_vptq_weighted_kmeans_separates_a_one_ulp_pair(seed):
+    """Two centres must represent two vectors that differ by one storage ULP.
+
+    Both vectors were assigned to the same centre, so the training inertia could
+    never reach zero even though a zero-error codebook exists.
+    """
+
+    first = torch.ones(16, dtype=torch.float16)
+    second = first.clone()
+    second[0] = torch.nextafter(
+        second[0], torch.tensor(float("inf"), dtype=torch.float16)
+    )
+    data = torch.stack([first, second]).float()
+
+    centroids, assignment = _weighted_kmeans(
+        data, 2, None, iters=10, tol=0.0, seed=seed
+    )
+    reconstructed = centroids[assignment].double()
+    sse = float((data.double() - reconstructed).square().sum())
+    assert sse == 0.0
+    assert sorted(int(index) for index in assignment.tolist()) == [0, 1]
+
+
+@pytest.mark.parametrize("vector_len", [16, 32], ids=["len16", "len32"])
+def test_vptq_quantize_column_stores_the_exact_index(vector_len):
+    """The stored index and the packed column must agree with the distance.
+
+    The reported defect was visible downstream: the wrong index was stored for a
+    column that had an exact codebook match, and the reported residual did not
+    show it.
+    """
+
+    exact, neighbour = one_ulp_pair(vector_len, torch.float16)
+    column = torch.ones(vector_len, dtype=torch.float16).float()
+    codebook = torch.stack([neighbour, exact]).float()
+    qcfg = VPTQConfig(
+        vector_lens=[-1, vector_len],
+        num_centroids=[-1, 2],
+        num_res_centroids=[-1, -1],
+    )
+    quantizer = VPTQ(
+        module=torch.nn.Linear(vector_len, vector_len, bias=False), qcfg=qcfg
+    )
+    quantizer._outlier_size = 0
+    quantizer._group_size = vector_len
+    quantizer._group_num = 1
+
+    assignment, _ = _chunked_assign(column.unsqueeze(0), codebook)
+    assert int(assignment[0]) == 1
+
+    quantized, index, res_index = quantizer._quantize_column(
+        column.unsqueeze(1),
+        0,
+        group_bounds=[(0, 1)],
+        vector_lens=[-1, vector_len],
+        centroids={1: codebook},
+        res_centroids={1: None},
+    )
+    assert index is not None
+    assert index.flatten().tolist() == [1]
+    assert res_index is None
+    sse = float((column.double() - quantized.double().squeeze(1)).square().sum())
+    assert sse == 0.0
+
+
 @pytest.mark.parametrize(
     "shape",
     [(6,), (2, 6), (2, 3, 6), (2, 3, 5, 6)],

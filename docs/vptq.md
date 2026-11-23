@@ -269,6 +269,77 @@ qcfg = VPTQConfig(
 normalizes per-channel ranges before vector quantization; both are optional
 and trade extra quantization time for accuracy.
 
+## Nearest-centroid assignment
+
+Both the codebook fit (`_weighted_kmeans`) and the sequential column pass
+(`_quantize_column`) ask the same question: which codebook entry is the squared
+nearest to a weight sub-vector? `gptqmodel/quantization/vptq.py::_chunked_assign`
+owns that answer, and it must return the entry with the smallest true
+`||x - c||^2`, not the smallest value of an algebraically equal expression
+computed in low precision.
+
+### Old flow: expanded distance only
+
+```mermaid
+flowchart TD
+    A["row block x"] --> B["addmm: ||c||^2 - 2 x.c in float32"]
+    B --> C["min -> index"]
+    C --> D["residual = score + ||x||^2"]
+    D --> E["k-means inertia / GPTQ column error"]
+```
+
+The expanded form keeps a large codebook affordable, but `||c||^2` and `x.c` are
+each of the order of the weight magnitude while their difference is the distance
+between two candidates. When a row sits close to a codebook entry the FFMA
+result rounds to the same value for the exact entry and for a neighbour one
+stored ULP away, so `min` resolves the tie by index instead of by distance. The
+same cancellation let the reported residual fall below zero, and the loss that
+consumed it disagreed with the index that was stored.
+
+### New flow: centred screen plus direct re-decision
+
+```mermaid
+flowchart TD
+    A["_chunked_assign(data, centroids)"] --> B{"rows * centroids * dim <= work bound"}
+    B -- yes --> C["_exact_assign: float64 (x - c)^2, tiled"]
+    C --> R["return index, direct distance"]
+    B -- no --> D["_screen_setup: shift by codebook mean"]
+    D --> E["float32 screen + AM-GM rounding bound"]
+    E --> F{"runner-up - best <= bound?"}
+    F -- no --> G["keep screened index"]
+    F -- yes --> H["_exact_assign on flagged rows only"]
+    G --> I["_direct_residual at stored index"]
+    H --> I
+    I --> R
+```
+
+* The screen subtracts the codebook mean from both operands, so
+  `||x' - c'||^2 - ||x'||^2 = ||c'||^2 - 2 x'.c'` is of the order of the
+  codebook spread rather than the weight magnitude, and the argmin is unchanged.
+* The screen accumulates in float32 (float64 for float64 callers) and computes a
+  per-row rounding bound from the operand norms. A row whose winner does not
+  clear the runner-up by that bound is re-decided from direct float64
+  differences against the whole codebook. Far-outlier entries inflate the bound,
+  so they route to the direct pass instead of hiding a close neighbour.
+* The residual always comes from a direct difference at the stored index, so it
+  cannot be negative and it agrees with the codebook entry the checkpoint
+  records.
+* Both passes tile rows and candidate ranges by `chunk_bytes`; a tall input or a
+  wide codebook cannot materialize `rows x centroids x vector_len` at once.
+* Ties resolve to the lowest codebook index in both paths.
+
+| Situation | Before | After |
+| --- | --- | --- |
+| Row equals codebook entry `c1`; `c0` differs by one FP16 ULP, `vector_len=16` | stores `0`, residual `0`, column SSE `9.5e-7` | stores `1`, residual `0`, column SSE `0` |
+| Two vectors one ULP apart, two centres, `kmeans_iters=10` | both rows to centre `0`, inertia `4.77e-7` | one row per centre, inertia `0` |
+| Exact tie at the midpoint of two entries | lowest index (unchanged) | lowest index (unchanged) |
+| Far outliers plus a one-ULP neighbour | neighbour can win | exact entry wins |
+
+The screen decides the common case without a host read. The work bound chooses
+the direct pass for the small per-column assignments of the sequential pass,
+where a single scalar read per chunk would drain the device pipeline; large
+codebook fits stay on the screen and pay one read per chunk.
+
 ## Inference and checkpoint compatibility
 
 Checkpoints saved by GPT-QModel contain `FORMAT.VPTQ`. `BACKEND.AUTO`, the
