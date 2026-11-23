@@ -46,7 +46,7 @@ def _block_run(native, inputs, bits):
     if native:
         column_group = torch.tensor(column_groups, device="cuda", dtype=torch.int32)
         gptq_block_update(
-            work, hinv, scale, zero, column_group,
+            work, hinv, scale, zero, column_group, None, None,
             quantized, errors, losses, (1 << bits) - 1,
         )
     else:

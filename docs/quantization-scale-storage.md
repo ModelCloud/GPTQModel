@@ -168,6 +168,56 @@ flowchart TD
 | Scale / zero point | Fitted range | Unchanged |
 | Packing source | Recovered from the replay weight | Same codes, same recovery |
 
+### The GPTQ solvers
+
+RTN is not the only consumer of the narrowed grid. Every GPTQ-family solver
+(`GPTQ.quantize`, the ungrouped pre-pass, static groups, the embedding block,
+the CPU-fallback refits, and the eager per-column/group path) fits its grid on
+an FP32 copy and then calls `GPTQ._narrow_reconstruction` to write the
+reconstruction back into the module's weight dtype. The fused 128-column CUDA
+block update makes the same choice inside the kernel, so it has to receive the
+same code range as the eager path or replay and packing diverge.
+
+All of those fits now go through `GPTQ._fit_weight_params`, which passes
+`value_limit = _finite_value_limit(module.weight.dtype)`. Smoothed refits divide
+that limit by the restored smoothing factor with `_scaled_value_limit`. The
+bounded range travels to the fused kernel as two optional
+`block_update(..., code_lo, code_hi, ...)` tensors on the same `[groups, rows]`
+layout as `scale`/`zero`; a null pair keeps the natural `[0, maxq]` grid, so an
+unbounded caller is bitwise unchanged. A launch that would mix bounded and
+unbounded groups raises instead of silently dropping the bound.
+
+```mermaid
+flowchart TD
+    A["GPTQ weight fit"] --> B{"_finite_value_limit<br/>weight dtype"}
+    B -- "FP32 / integer" --> C["value_limit = None"]
+    B -- "FP16 / BF16" --> D["value_limit = finfo(dtype).max"]
+    C --> E["_fit_weight_params"]
+    D --> E
+    E --> F["find_params(value_limit=...)"]
+    F --> G["code_lo / code_hi"]
+    G --> H{"Fused block?"}
+    H -- yes --> I["block_update(code_lo, code_hi)"]
+    H -- no --> J["Quantizer.quantize(code_lo, code_hi)"]
+    I --> K["_narrow_reconstruction"]
+    J --> K
+    K --> L["Finite replay weight;<br/>packer recovers the same codes"]
+    style L fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+```
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| GPTQ INT4 symmetric, `amax = 61440`, FP16 | Negative endpoint code `0`, replay `-inf` | Code `1`, replay `-57344` |
+| GPTQ INT4 symmetric, `amax = 65504`, FP16 | Code `0`, replay `-inf` | Finite endpoint, `-61152` |
+| GPTQ INT4 symmetric, `amax = 61408`, FP16 | Code `0`, replay `-65504` | Unchanged |
+| GPTQ fused block update | `[0, maxq]` clamp | Same clamp, optionally bounded per `(group, row)` |
+| GPTQ unbounded caller (FP32, activation fit) | `[0, maxq]` | Bitwise unchanged |
+
+The source weight is never rewritten, the live module keeps its own dtype, and
+the narrowed tensor is never clamped after the cast: only the selected codes
+move. Replay sampling, the next layer's capture, and the codes the packers
+recover from the replay weight therefore all come from the same bounded grid.
+
 `RTN.quantize` follows the same contract as `GPTQ._fallback_quantize`: its
 `SmoothMSE` branch passes `eps=SCALE_STORAGE_FLOOR`, and its `SmoothRowCol`
 branch passes `scale_min = SCALE_STORAGE_FLOOR / scale_factor` to

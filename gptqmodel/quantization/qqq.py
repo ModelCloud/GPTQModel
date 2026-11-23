@@ -1206,12 +1206,16 @@ class QQQ:
                         column_group = torch.tensor(
                             column_groups, device=W.device, dtype=torch.int32
                         )
+                    # QQQ's own quantizer has no code-bound state; keep the
+                    # natural ``[0, maxq]`` grid bitwise unchanged.
                     fused_block_update(
                         W1,
                         Hinv1,
                         block_scale,
                         block_zero,
                         column_group,
+                        None,
+                        None,
                         Q1,
                         Err1,
                         Losses1,

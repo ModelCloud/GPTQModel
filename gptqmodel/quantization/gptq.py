@@ -53,6 +53,7 @@ from .quantizer import (
     HF_OPTIMUM,
     SCALE_STORAGE_FLOOR,
     Quantizer,
+    _finite_code_bounds,
     _floor_scale_for_storage,
     _neutralize_dead_columns,
     _replace_zero_scale,
@@ -105,6 +106,71 @@ def _is_memory_allocation_failure(exc: BaseException) -> bool:
     if any(marker in text for marker in _MEMORY_ALLOCATION_ERROR_MARKERS):
         return True
     return "out of memory" in text
+
+
+def _finite_value_limit(weight_dtype: torch.dtype) -> Optional[float]:
+    """Largest magnitude a weight grid may reconstruct in ``weight_dtype``.
+
+    GPTQ fits its grid on an FP32 copy and then narrows the reconstruction
+    back to the module's weight dtype for replay and packing
+    (``GPTQ._narrow_reconstruction``). A symmetric INT4 grid stores
+    ``zero = 8`` and ``scale = 2 * amax / 15``, so the negative endpoint of a
+    group rounds to code ``0`` and reconstructs ``-16 * amax / 15``, which is
+    strictly larger than ``amax``. At ``amax = 61440`` that is ``-65536``:
+    finite as an input and as a scale, but outside FP16's range, so the
+    narrowed replay weight becomes ``-inf`` even though every source
+    parameter was finite.
+
+    The grid and its ties-to-even rounding are correct; the missing constraint
+    is that the *selected codes* have to stay representable in the dtype the
+    reconstruction is narrowed to. ``Quantizer.find_params(value_limit=...)``
+    applies that bound, and the resulting ``code_lo``/``code_hi`` range is
+    what ``Quantizer.quantize`` (and the fused block kernel) clamp to.
+
+    Integer dtypes express their range as counts, not magnitudes, and FP32 is
+    the computation dtype, so both keep the unconstrained grid.
+    """
+
+    if not weight_dtype.is_floating_point or weight_dtype == torch.float32:
+        return None
+    return float(torch.finfo(weight_dtype).max)
+
+
+def _scaled_value_limit(
+    value_limit: Optional[float], scale_factor: Optional[torch.Tensor]
+) -> float | torch.Tensor | None:
+    """Express a final-domain finite bound in a smoothed quantization domain.
+
+    Row/column smoothing multiplies the reconstruction by ``scale_factor``
+    after the codes are chosen, so the bound the narrowed weight must respect
+    has to be divided by that factor before it reaches
+    ``Quantizer.find_params``. ``None`` stays ``None`` so unsmoothed callers
+    keep the unconstrained grid.
+    """
+
+    if value_limit is None or scale_factor is None:
+        return value_limit
+    return value_limit / scale_factor
+
+
+def _fused_code_bounds(
+    quantizer: Quantizer, device: torch.device
+) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """Return one group's fused-kernel code bounds as flat ``[rows]`` tensors.
+
+    ``Quantizer.find_params`` stores the inclusive code range for the grid it
+    just fitted. The fused block kernel needs it on the same ``[groups, rows]``
+    layout as ``scale``/``zero``, so the caller adds the group axis when a
+    block names exactly one group and stacks these rows when it names several.
+    ``None`` means the grid has no bound (an FP32 module or an unconstrained
+    activation fit) and the kernel keeps its natural ``[0, maxq]`` range.
+    """
+
+    code_lo = quantizer.code_lo
+    code_hi = quantizer.code_hi
+    if code_lo is None or code_hi is None:
+        return None, None
+    return code_lo.flatten().to(device=device), code_hi.flatten().to(device=device)
 
 
 def _log_hessian_verbose() -> bool:
@@ -1226,6 +1292,24 @@ class GPTQ:
     def create_quantizer(self, name: str) -> Quantizer:
         return Quantizer(qcfg=self.qcfg, name=name)
 
+    def _fit_weight_params(self, weight: torch.Tensor, quantizer: Optional[Quantizer] = None):
+        """Fit a weight grid bounded by the dtype the reconstruction narrows to.
+
+        Every weight fit in the GPTQ family must pass the same finite bound:
+        the block pass narrows its FP32 reconstruction back to
+        ``self.module.weight.dtype`` and the packers recover codes from that
+        narrowed tensor, so a grid endpoint outside the dtype's finite range
+        would store ``-inf`` and corrupt both replay and packing. Activations
+        are never narrowed, so they keep the unconstrained grid.
+        """
+
+        target = self.quantizer if quantizer is None else quantizer
+        target.find_params(
+            weight,
+            weight=True,
+            value_limit=_finite_value_limit(self.module.weight.dtype),
+        )
+
     def shape(self):
         if hasattr(self, "module"):
             return self.module.weight.shape
@@ -1316,6 +1400,14 @@ class GPTQ:
         asymmetric codes. Keep the FP32 reconstruction for packing in that
         case and let the caller move it into ``module.state`` before the
         replay copy replaces the parameter (#5721).
+
+        Range is a separate constraint from code recovery. Every weight grid in
+        this family is fitted through ``_fit_weight_params``, which bounds the
+        selected codes by ``_finite_value_limit(self.module.weight.dtype)``, so
+        this cast cannot turn a finite reconstruction into ``inf``. The cast is
+        deliberately not followed by a clamp: changing the stored value
+        without changing the selected code would desynchronize replay from the
+        codes the packers recover.
         """
 
         if isinstance(self.module, transformers.Conv1D):
@@ -2677,8 +2769,12 @@ class GPTQ:
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
+        # The fallback narrows ``Q`` to the module dtype below, so a strategy
+        # grid whose endpoint exceeds that dtype's finite range would store
+        # ``-inf`` in the replay weight. Bound the selected codes here too.
+        value_limit = _finite_value_limit(self.module.weight.dtype)
 
-        def _affine_quantize(block_mod, lo, hi, scale_min):
+        def _affine_quantize(block_mod, lo, hi, scale_min, value_limit):
             """Quantize one group against a range that includes zero.
 
             ``lo``/``hi`` are the strategy's desired endpoints. Extending them
@@ -2703,7 +2799,14 @@ class GPTQ:
                 zero = torch.full_like(scale, (maxq + 1) // 2)
             else:
                 zero = torch.clamp(torch.round(-lo / scale), 0, maxq)
-            q = torch.clamp(torch.round(block_mod / scale + zero), 0, maxq)
+            lo_code, hi_code = _finite_code_bounds(
+                scale, zero, maxq, False, value_limit
+            )
+            q = torch.clamp(
+                torch.round(block_mod / scale + zero),
+                0 if lo_code is None else lo_code,
+                maxq if hi_code is None else hi_code,
+            )
             return (q - zero) * scale, scale, zero
 
         for start in range(0, self.columns, effective_group_size):
@@ -2720,6 +2823,7 @@ class GPTQ:
                     maxshrink=mse_maxshrink,
                     eps=SCALE_STORAGE_FLOOR,
                     weights=weights,
+                    value_limit=value_limit,
                 )
             else:
                 block_mod, scale_factor = smooth_block(
@@ -2737,21 +2841,23 @@ class GPTQ:
                     w_min = block_mod.min(dim=1, keepdim=True).values
                     w_max = block_mod.max(dim=1, keepdim=True).values
                     dequant, scale, zero = _affine_quantize(
-                        block_mod, w_min, w_max, scale_min
+                        block_mod, w_min, w_max, scale_min, value_limit
                     )
                 elif strategy == FallbackStrategy.MEAN:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     max_dev = torch.max((block_mod - mean).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
                     dequant, scale, zero = _affine_quantize(
-                        block_mod, mean - max_dev, mean + max_dev, scale_min
+                        block_mod, mean - max_dev, mean + max_dev, scale_min,
+                        value_limit,
                     )
                 elif strategy == FallbackStrategy.MEDIAN:
                     median = block_mod.median(dim=1, keepdim=True).values
                     max_dev = torch.max((block_mod - median).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
                     dequant, scale, zero = _affine_quantize(
-                        block_mod, median - max_dev, median + max_dev, scale_min
+                        block_mod, median - max_dev, median + max_dev, scale_min,
+                        value_limit,
                     )
                 elif strategy == FallbackStrategy.STDCLIP:
                     mean = block_mod.mean(dim=1, keepdim=True)
@@ -2760,12 +2866,15 @@ class GPTQ:
                     lo = mean - sigma * std
                     hi = mean + sigma * std
                     dequant, scale, zero = _affine_quantize(
-                        block_mod, lo, hi, scale_min
+                        block_mod, lo, hi, scale_min, value_limit
                     )
                 elif strategy == FallbackStrategy.RTN:
+                    # ``scale_factor`` is restored after quantization, so a
+                    # bound on the final weight domain is divided by it.
                     self.quantizer.find_params(
                         block_mod, weight=True,
                         scale_min=scale_min.flatten() if isinstance(scale_min, torch.Tensor) else scale_min,
+                        value_limit=_scaled_value_limit(value_limit, scale_factor),
                     )
                     dequant = self.quantizer.quantize(block_mod)
                     scale, zero = _replace_zero_scale(
@@ -2945,7 +3054,7 @@ class GPTQ:
         for start_col in range(0, self.columns, group_size):
             end_col = min(start_col + group_size, self.columns)
             block = weight[:, start_col:end_col]
-            self.quantizer.find_params(block, weight=True)
+            self._fit_weight_params(block)
             quantized[:, start_col:end_col] = self.quantizer.quantize(block)
             scales.append(self.quantizer.scale)
             zeros.append(self.quantizer.zero)
@@ -3199,7 +3308,7 @@ class GPTQ:
         # refit at each group boundary, so a grouped whole-projection range
         # search would be discarded after its shrink search ran (#5830).
         if self.qcfg.group_size == -1:
-            self.quantizer.find_params(W, weight=True)
+            self._fit_weight_params(W)
 
         # g_idx = []
         scale = []
@@ -3212,7 +3321,7 @@ class GPTQ:
             groups = []
             for i in range(0, self.columns, self.qcfg.group_size):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i: (i + self.qcfg.group_size)], weight=True)
+                self._fit_weight_params(W[:, i: (i + self.qcfg.group_size)], quantizer)
 
                 scale.append(quantizer.scale)
                 zero.append(quantizer.zero)
@@ -3241,7 +3350,7 @@ class GPTQ:
                 perm = perm.to(device=cpu_device)
                 W = W.to(device=cpu_device)[:, perm]
                 self.H = self.H.to(device=cpu_device)[perm][:, perm]
-                self.quantizer.find_params(W, weight=True)
+                self._fit_weight_params(W)
                 if self.qcfg.static_groups:
                     scale, zero = _move_static_groups(groups, cpu_device)
             else:
@@ -3283,7 +3392,7 @@ class GPTQ:
                 final_perm = final_perm.to(device=cpu_device)
                 W = W.to(device=cpu_device)[:, final_perm]
                 self.H = self.H.to(device=cpu_device)[final_perm][:, final_perm]
-                self.quantizer.find_params(W, weight=True)
+                self._fit_weight_params(W)
                 if self.qcfg.static_groups:
                     scale, zero = _move_static_groups(groups, cpu_device)
             else:
@@ -3338,7 +3447,7 @@ class GPTQ:
                 cpu_device = torch.device("cpu")
                 self.H = self.H.to(device=cpu_device)
                 W = W.to(device=cpu_device)
-                self.quantizer.find_params(W, weight=True)
+                self._fit_weight_params(W)
                 if self.qcfg.static_groups:
                     scale, zero = _move_static_groups(groups, cpu_device)
                 self._disable_shared_hessian_cache()
@@ -3378,14 +3487,14 @@ class GPTQ:
                     if dead_columns is not None:
                         W.masked_fill_(dead_columns.to(device=cpu_device).unsqueeze(0), 0.0)
                     if not self.qcfg.static_groups:
-                        self.quantizer.find_params(W, weight=True)
+                        self._fit_weight_params(W)
                     if block_column_perm is not None:
                         W = W[:, block_column_perm.to(device=cpu_device)]
                 else:
                     W = block_input_host
                     block_input_host = None
                     if not self.qcfg.static_groups:
-                        self.quantizer.find_params(W, weight=True)
+                        self._fit_weight_params(W)
                 if Hinv is not None:
                     Hinv = Hinv.to(device=cpu_device)
                 if self.qcfg.static_groups:
@@ -3454,9 +3563,8 @@ class GPTQ:
                                         group_start + self.qcfg.group_size,
                                         i2,
                                     )
-                                    self.quantizer.find_params(
+                                    self._fit_weight_params(
                                         W[:, group_start:group_end],
-                                        weight=True,
                                     )
                                     scale.append(self.quantizer.scale)
                                     zero.append(self.quantizer.zero)
@@ -3538,6 +3646,8 @@ class GPTQ:
                                 )
                                 or block_static_group is not None
                             )
+                            block_code_lo = None
+                            block_code_hi = None
                             if uniform_group:
                                 # Every column of this block resolves to the same
                                 # quantizer group, so the per-column bookkeeping
@@ -3545,9 +3655,7 @@ class GPTQ:
                                 if block_group_size != -1:
                                     if not self.qcfg.static_groups:
                                         if i1 % block_group_size == 0:
-                                            self.quantizer.find_params(
-                                                W[:, i1 : i1 + block_group_size], weight=True,
-                                            )
+                                            self._fit_weight_params(W[:, i1 : i1 + block_group_size])
                                         if (i1 // block_group_size) - now_idx == -1:
                                             scale.append(self.quantizer.scale)
                                             zero.append(self.quantizer.zero)
@@ -3563,10 +3671,18 @@ class GPTQ:
                                 )
                                 block_scale = block_scale.flatten().unsqueeze(0)
                                 block_zero = block_zero.flatten().unsqueeze(0)
+                                block_code_lo, block_code_hi = _fused_code_bounds(
+                                    self.quantizer, W.device
+                                )
+                                if block_code_lo is not None:
+                                    block_code_lo = block_code_lo.unsqueeze(0)
+                                    block_code_hi = block_code_hi.unsqueeze(0)
                                 column_group = _uniform_column_group(count, W.device)
                             else:
                                 block_scales = []
                                 block_zeros = []
+                                block_code_los = []
+                                block_code_his = []
                                 column_groups = []
                                 parameter_indices = {}
                                 for i in range(count):
@@ -3574,9 +3690,7 @@ class GPTQ:
                                     if self.qcfg.group_size != -1:
                                         if not self.qcfg.static_groups:
                                             if column % self.qcfg.group_size == 0:
-                                                self.quantizer.find_params(
-                                                    W[:, column : column + self.qcfg.group_size], weight=True,
-                                                )
+                                                self._fit_weight_params(W[:, column : column + self.qcfg.group_size])
                                             if (column // self.qcfg.group_size) - now_idx == -1:
                                                 scale.append(self.quantizer.scale)
                                                 zero.append(self.quantizer.zero)
@@ -3598,13 +3712,31 @@ class GPTQ:
                                         )
                                         block_scales.append(block_scale.flatten())
                                         block_zeros.append(block_zero.flatten())
+                                        bound_lo, bound_hi = _fused_code_bounds(
+                                            self.quantizer, W.device
+                                        )
+                                        block_code_los.append(bound_lo)
+                                        block_code_his.append(bound_hi)
                                     column_groups.append(group_index)
 
                                 block_scale = torch.stack(block_scales)
                                 block_zero = torch.stack(block_zeros)
+                                # A module has one weight dtype, so every group
+                                # either has a code bound or none does. Refuse a
+                                # mix instead of silently dropping the bound.
+                                bounded = [value is not None for value in block_code_los]
+                                if any(bounded):
+                                    if not all(bounded):
+                                        raise RuntimeError(
+                                            "fused block update mixed bounded and "
+                                            "unbounded code ranges"
+                                        )
+                                    block_code_lo = torch.stack(block_code_los)
+                                    block_code_hi = torch.stack(block_code_his)
                                 column_group = torch.tensor(column_groups, device=W.device, dtype=torch.int32)
                             fused_block_update(
                                 W1, Hinv1, block_scale, block_zero, column_group,
+                                block_code_lo, block_code_hi,
                                 Q1, Err1, Losses1, (1 << self.qcfg.bits) - 1,
                             )
                         else:
@@ -3616,7 +3748,7 @@ class GPTQ:
                                 if self.qcfg.group_size != -1:
                                     if not self.qcfg.static_groups:
                                         if (i1 + i) % self.qcfg.group_size == 0:
-                                            self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + self.qcfg.group_size)], weight=True)
+                                            self._fit_weight_params(W[:, (i1 + i) : (i1 + i + self.qcfg.group_size)])
 
                                         if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
                                             scale.append(self.quantizer.scale)
