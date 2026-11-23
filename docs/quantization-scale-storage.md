@@ -276,3 +276,73 @@ scales, zero points and reconstructed weights. The separate MSE-grid suite
 also checks `(96, 512)` weights against a sequential Torch oracle with exact
 selected scales/zero points. These are quantizer and packing measurements;
 they do not measure inference kernel arithmetic or performance.
+
+## Finite symmetric AWQ export grids
+
+AWQ's symmetric grid decodes code `c` as `c * stored_scale` in the kernel's
+decode dtype. The RTN stage fits that grid as `amax / max_code`, and the
+division rounds to the *nearest* representable scale. A finite `amax` can
+therefore select a scale whose top code is not finite: FP16 `65504 / 7`
+rounds up to `9360`, and `7 * 9360 == 65520` is the value FP16 rounds to
+infinity. Staging used to clamp the overflowing product back to `65504`, so
+the staged tensor and the checkpoint disagreed: the packer still kept code
+15, `qweight` was `0xffffffff`, and a narrow decode returned `inf`.
+
+The staged grid, the stored scale and the code the packer recovers must name
+one grid point in the dtype the kernel decodes. That dtype is the checkpoint
+scale width, not the source weight width: GEMM and Marlin keep an FP16 or
+BF16 source scale and otherwise store FP16, while GEMV and GEMV-fast always
+store FP16.
+
+```mermaid
+flowchart TD
+    A["symmetric RTN: amax = |w|max"] --> B["scale = (amax / max_code).to(source dtype)"]
+    B --> C{"max_code * scale.to(decode dtype) finite?"}
+    C -- "yes (ordinary group)" --> D["keep scale unchanged"]
+    C -- "no (rounding artefact)" --> E["scale = largest decode-dtype scale whose top code is finite"]
+    D --> F["codes = round(w / scale)"]
+    E --> F
+    F --> G["bound = floor(decode_max / scale); codes = clamp(codes, -bound, bound)"]
+    G --> H["staged = codes * scale"]
+    H --> I["packer stores scale and codes"]
+    I --> J["kernel decodes c * stored_scale finitely"]
+    style E fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+    style J fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+```
+
+Only a group whose amplitude is representable but whose *top product* is not
+is repaired, so an ordinary group keeps its exact previous scale and its grid
+is bit-identical. A group whose amplitude is itself outside the decode dtype
+has already given up its top codes through the clip decision, so its selected
+interval is preserved and only the codes that cannot be exported are capped.
+The bound uses the finite maximum itself rather than a `1 - eps` margin: a
+product at or below the maximum rounds back into range, and a margin would
+discard a code that fits (it would turn `7 * 9352` into code 6).
+
+The clip search scores candidates on the same grid. Its in-place
+pseudo-quantize path repairs the scale and clamps the codes before writing the
+reconstruction, so a candidate is never judged on a grid the packer would not
+store.
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| FP16 `amax = 65504`, `bits = 4`, symmetric | scale `9360`, staged `65504`, stored code 15 decoding `65520 -> inf` | scale `9352`, staged `65472`, stored code 15 decoding `65472` |
+| FP16 `amax = -65504` | same overflowing scale, `inf` | scale `9352`, signed code `-7`, decoding `-65472` |
+| Ordinary representable group | `amax / max_code` grid | Same grid, bit-identical |
+| Amplitude outside the decode dtype (for example STDCLIP `180000`) | Selected interval kept, top codes clamped | Selected interval kept, top codes clamped (unchanged) |
+| Clip-search candidate scoring | Scored on the unrepaired scale | Scored on the exported grid |
+| GEMV-fast / LLM-AWQ offset layouts | Offset `-8 * scale` stored, `inf` | `scaled_zero_offset` still rejects the pack: the offset bound is stricter, so no scale is lowered on its behalf |
+
+The offset layouts are deliberately left fail-closed rather than repaired.
+Their checkpoint stores `-2 ** (bits - 1) * scale` as an FP16 offset, and
+`-8 * 9360` overflows FP16 even though the top code alone would fit. Lowering
+the scale enough to represent that offset would reduce the range from `65472`
+to about `57312` and lose real precision on ordinary groups. Those layouts
+therefore keep `scaled_zero_offset` as their guard and reject the pack before
+writing a corrupt checkpoint.
+
+`tests/test_awq_symmetric_grid_finite.py` pins the chain from staging through
+packing to decoding: `65504`, `-65504`, `65472` and `60000` in GEMM and GEMV
+layouts, exact `qweight`/`qzeros` words, the in-place candidate-search parity,
+the offset layouts' rejection, an FP32 source narrowed to FP16 storage, a
+subnormal-scale control, and a bit-identical ordinary-range control.
