@@ -88,6 +88,7 @@ from ..utils.model import (
     set_moe_topk,
 )
 from ..utils.module_locks import parent_module_lock
+from ..utils.packing_math import awq_storage_dtype
 from ..utils.torch import CPU
 
 
@@ -432,11 +433,95 @@ def _awq_bound_affine_codes(
     return codes.clamp_(0, max_code)
 
 
+def _awq_symmetric_decode_dtype(
+    dtype: torch.dtype, fmt: Optional[FORMAT]
+) -> torch.dtype:
+    """Dtype in which a symmetric group's checkpoint scale is decoded.
+
+    AWQ GEMM and Marlin keep an FP16/BF16 source scale and otherwise store
+    FP16; GEMV, GEMV-fast and LLM-AWQ always store FP16. BitBLAS keeps the
+    packed scale at the source precision. The staged grid must be finite in
+    this dtype, not only in the source weight dtype: a wider source scale is
+    narrowed by the packer, and the kernel decodes the narrowed value.
+    """
+
+    if fmt == FORMAT.BITBLAS:
+        return dtype
+    return awq_storage_dtype(dtype, gemm=fmt in (FORMAT.GEMM, FORMAT.MARLIN))
+
+
+@functools.lru_cache(maxsize=None)
+def _awq_symmetric_scale_limit(decode_dtype: torch.dtype, factor: int) -> float:
+    """Largest ``decode_dtype`` scale whose top code decodes finitely.
+
+    A symmetric group decodes code ``c`` as ``c * scale``, so its checkpoint is
+    only usable while ``factor * stored_scale`` is finite. ``amax / max_code``
+    rounds to the nearest representable scale and can cross the overflow
+    midpoint: FP16 ``65504 / 7`` rounds *up* to 9360 and ``7 * 9360`` is 65520,
+    the value FP16 rounds to infinity. The largest usable FP16 scale is the next
+    representable value down, 9352, whose top code decodes to 65464.
+
+    The finite maximum itself is a usable bound: a product at or below it rounds
+    back into range. So only a rounding artefact is stepped over, and a margin
+    such as ``limit * (1 - eps)`` would drop a code that does fit (it would cut
+    ``7 * 9352`` down to code 6).
+
+    ``factor`` is the widest decoded magnitude in units of the scale, which is
+    the top code of the grid. GEMV-fast and LLM-AWQ store an additional
+    ``-2 ** (bits - 1) * scale`` offset in the checkpoint and reject a
+    non-finite one in ``scaled_zero_offset``; that check is strictly stronger
+    than this bound, so it stays their fail-closed guard and no scale is
+    lowered here on its behalf.
+    """
+
+    zero = torch.zeros((), dtype=decode_dtype)
+    limit = torch.tensor(
+        float(torch.finfo(decode_dtype).max) / factor, dtype=torch.float64
+    ).to(decode_dtype)
+    # The float64 division can land one step above the bound and the narrow
+    # cast can round up to it, so step down until the top product is finite.
+    for _ in range(2):
+        if bool(torch.isfinite(limit * factor)):
+            break
+        limit = torch.nextafter(limit, zero)
+    return float(limit)
+
+
+def _awq_symmetric_code_bound(
+    scales: torch.Tensor, max_code: int, decode_dtype: torch.dtype
+) -> torch.Tensor:
+    """Largest symmetric code magnitude whose decoded value is finite.
+
+    A group decodes code ``c`` as ``c * scale``, so a group whose scale is
+    large enough for its top code to overflow the decode dtype cannot be
+    exported whole. ``floor(limit / scale)`` keeps every code that does decode
+    finitely; an ordinary group resolves to ``max_code`` and keeps its grid.
+
+    The quotient runs in float64 and the product is rechecked in the decode
+    dtype, because a quotient that rounds up would admit a code whose narrow
+    product overflows. The bound is a per-group column, so the caller can
+    clamp a whole candidate tile without another reduction.
+    """
+
+    limit = torch.tensor(
+        float(torch.finfo(decode_dtype).max),
+        dtype=torch.float64,
+        device=scales.device,
+    )
+    stored = scales.to(decode_dtype)
+    bound = torch.floor(limit / stored.to(torch.float64)).clamp(max=max_code)
+    bound = torch.where(
+        torch.isfinite(bound.to(decode_dtype) * stored), bound, bound - 1
+    )
+    return bound.clamp_(min=0).to(scales.dtype)
+
+
 def _awq_bound_symmetric_codes(
     codes: torch.Tensor,
     scales: torch.Tensor,
     min_code: int,
     max_code: int,
+    decode_dtype: torch.dtype,
 ) -> torch.Tensor:
     """Cap a symmetric code at the largest magnitude that decodes finitely.
 
@@ -447,10 +532,68 @@ def _awq_bound_symmetric_codes(
     unchanged.
     """
 
-    limits = torch.finfo(codes.dtype)
-    limit = limits.max * (1 - limits.eps)
-    safe = torch.floor(limit / scales.float()).clamp(max=max_code).to(codes.dtype)
-    return torch.maximum(torch.minimum(codes, safe), -safe).clamp_(min_code, max_code)
+    bound = _awq_symmetric_code_bound(scales, max_code, decode_dtype)
+    return torch.maximum(torch.minimum(codes, bound), -bound).clamp_(min_code, max_code)
+
+
+def _awq_symmetric_grid(
+    w: torch.Tensor,
+    amplitude: torch.Tensor,
+    min_code: int,
+    max_code: int,
+    decode_dtype: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Stage a symmetric group on the grid the packer will actually store.
+
+    ``amplitude`` is the magnitude the grid is fitted to: ``amax`` for RTN, the
+    selected fallback interval otherwise. The staged value, the stored scale
+    and the code the packer recovers must all name the same grid point, in the
+    dtype the kernel decodes.
+
+    The scale is repaired only when the group's amplitude is representable but
+    ``max_code * stored_scale`` is not: that is the FP16
+    ``65504 / 7 -> 9360`` rounding artefact, and lowering the scale to 9352
+    keeps code 7 usable instead of losing it. A group whose amplitude is itself
+    outside the decode dtype has already given up its top codes, so its scale
+    stays as the strategy selected and only the codes that cannot be exported
+    are capped. Ordinary ranges do neither and keep their exact previous grid.
+    """
+
+    scales = _awq_repair_symmetric_scale(
+        (amplitude / max_code).to(w.dtype), amplitude, max_code, decode_dtype
+    )
+    codes = torch.round(w / scales)
+    codes = _awq_bound_symmetric_codes(
+        codes, scales, min_code, max_code, decode_dtype
+    )
+    return codes * scales, scales
+
+
+def _awq_repair_symmetric_scale(
+    scales: torch.Tensor,
+    amplitude: torch.Tensor,
+    factor: int,
+    decode_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Move only the scales whose top code cannot be exported onto the grid.
+
+    A group whose amplitude is already outside the decode dtype has given up
+    its top codes through the clip decision, so its scale is not tightened
+    here; that would silently change the selected interval. A non-finite scale
+    is the packer's fail-closed storage error and is left for it to report.
+    Every other group, which is the whole ordinary case, keeps its exact
+    previous scale, so its grid is bit-identical and no host read is needed.
+    """
+
+    stored = scales.to(decode_dtype)
+    overflowing = (
+        torch.isfinite(stored)
+        & torch.isfinite(amplitude.to(decode_dtype))
+        & ~torch.isfinite(stored * factor)
+    )
+    return torch.where(
+        overflowing, _awq_symmetric_scale_limit(decode_dtype, factor), scales
+    )
 
 
 #: Sentinel for "the root rotary has not been resolved yet". A resolved `None`
@@ -5471,6 +5614,10 @@ class AWQProcessor(LoopProcessor):
 
         strategy = FallbackStrategy.RTN if strategy is None else FallbackStrategy(strategy)
         effective_format = self.qcfg.format if format is None else format
+        # A symmetric grid decodes as `code * stored_scale` in this dtype, so the
+        # exportable grid must be checked at the checkpoint's scale width, not
+        # the source weight width.
+        decode_dtype = _awq_symmetric_decode_dtype(input_dtype, effective_format)
         if strategy is not FallbackStrategy.RTN:
             minimum, maximum = _awq_strategy_bounds(w, strategy)
             if sym:
@@ -5480,16 +5627,10 @@ class AWQProcessor(LoopProcessor):
                 min_int = -(2 ** (bits - 1))
                 # Divide the wide amplitude before narrowing; the scale always
                 # fits (STDCLIP's widest FP16 endpoint is |center| + 3 * std
-                # <= 4 * 65504, so its scale is at most 37431). A widened
-                # interval can still put a near-maximum weight on a code whose
-                # product overflows, so repair those codes. Narrow intervals
-                # keep the previous grid.
-                wide_bounds = maximum.dtype != input_dtype
-                scales = (maximum / max_int).to(input_dtype)
-                codes = torch.clamp(torch.round(w / scales), min_int, max_int)
-                if wide_bounds:
-                    codes = _awq_bound_symmetric_codes(codes, scales, min_int, max_int)
-                w = codes * scales
+                # <= 4 * 65504, so its scale is at most 37431).
+                w, scales = _awq_symmetric_grid(
+                    w, maximum, min_int, max_int, decode_dtype
+                )
             else:
                 minimum, maximum = affine_range_with_zero(minimum, maximum)
                 max_int = 2**bits - 1
@@ -5521,15 +5662,27 @@ class AWQProcessor(LoopProcessor):
             max_val = w.abs().amax(dim=1, keepdim=True)
             max_val = max_val.clamp(min=1e-5)
             max_int = 2 ** (bits - 1) - 1
-            min_int = -(2 ** (bits - 1))
-            scales = max_val / max_int
-            w = torch.clamp(torch.round(w / scales), min_int, max_int) * scales
+            # `amax / max_int` rounds to the nearest representable scale, so a
+            # finite maximum weight can still land on a top code whose product
+            # is not representable in the checkpoint's decode dtype.
+            w, scales = _awq_symmetric_grid(
+                w, max_val, -(2 ** (bits - 1)), max_int, decode_dtype
+            )
 
-        # A single reduction and host read covers both guards. Non-finite
+        # A single reduction and host read covers every guard. Non-finite
         # scales and NaN dequantized weights are independent failures, but each
         # full-tensor scan previously synchronized the stream separately. An
         # infinite scale is as fatal as NaN: it turns every code into 0 * inf.
-        assert not bool((~torch.isfinite(scales) | torch.isnan(w)).any())
+        failures = ~torch.isfinite(scales) | torch.isnan(w)
+        if sym:
+            # The staged value must be the grid point the checkpoint stores, in
+            # the dtype the kernel decodes. A value that only becomes finite
+            # through the input-dtype clamp below is not stored: the packer
+            # keeps the overflowing code and the kernel recovers infinity. The
+            # selected interval itself may exceed the decode dtype (STDCLIP's
+            # endpoints do), so check the values, not `max_int * scale`.
+            failures = failures | ~torch.isfinite(w.to(decode_dtype))
+        assert not bool(failures.any())
         if input_dtype.is_floating_point:
             limits = torch.finfo(input_dtype)
             w.clamp_(limits.min, limits.max)
@@ -5612,9 +5765,25 @@ class AWQProcessor(LoopProcessor):
             max_val = max_val.clamp(min=1e-5)
             max_int = 2 ** (bits - 1) - 1
             scales = max_val / max_int
+            # Score the candidate on the same grid the packer writes. A scale
+            # whose top code decodes to `inf` in the checkpoint dtype would make
+            # the candidate look worse for a reason unrelated to the clipping
+            # decision, so apply the same per-group repair the staged weights
+            # get.
+            effective_format = self.qcfg.format if format is None else format
+            decode_dtype = _awq_symmetric_decode_dtype(
+                dst_view.dtype, effective_format
+            )
+            scales = _awq_repair_symmetric_scale(
+                scales, max_val, max_int, decode_dtype
+            )
 
             torch.div(src_view, scales, out=dst_view)
             torch.round(dst_view, out=dst_view)
+            # Cap the candidate's codes exactly like the staged grid, so a
+            # clipped `abs_max` scores the reconstruction the packer stores.
+            bound = _awq_symmetric_code_bound(scales, max_int, decode_dtype)
+            torch.clamp(dst_view, -bound, bound, out=dst_view)
             dst_view.mul_(scales)
         if dst_view.dtype.is_floating_point:
             limits = torch.finfo(dst_view.dtype)
