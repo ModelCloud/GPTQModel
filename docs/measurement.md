@@ -92,6 +92,13 @@ names (`metrics=Metric.PPL`), or a mix.
   read (`nll`, `sampled_logits`), both produced by one forward, so the runner
   fuses them. A metric that needed a different capture - a weight-space metric,
   say - would get its own pass instead of silently sharing one.
+- **Sampled logits keep the model's dtype.** The capture stores the positions
+  exactly as the model returned them; the metrics promote to FP32 when they
+  compute. Narrowing the sample to FP16 rounded distinct FP32 logits together,
+  hiding a top-token flip, and turned finite BF16 logits above 65504 into
+  infinities, so a model compared with itself reported NaN. FP32 models now
+  store a 4-byte sample instead of a 2-byte one; BF16 and FP16 models are
+  unchanged.
 
 ## Grades
 
