@@ -817,6 +817,58 @@ def _check_packed_q8_1_fields(packed: np.ndarray) -> None:
     raise _q8_1_unrepresentable_field(field, index, int(blocks.shape[0]), None)
 
 
+# ``qtype -> ((header byte offset, field label), ...)`` for the simple block
+# formats whose only FP16 header field is the block scale. ``block_q4_0`` and
+# ``block_q8_0`` both begin with ``fp16 d``; every code is relative to it, so a
+# non-finite ``d`` makes the whole block unreadable.
+_GGUF_FP16_HEADER_FIELDS = {
+    "Q4_0": ((0, "block scale d"),),
+    "Q8_0": ((0, "block scale d"),),
+}
+
+
+def _simple_unrepresentable_field(qtype: str, label: str, index: int, blocks: int) -> ValueError:
+    return ValueError(
+        f"GGUF {qtype} cannot store the {label} in FP16: block {index} of {blocks} "
+        f"falls outside the finite FP16 range +/-{np.finfo(np.float16).max:g}. "
+        "Pack a format whose stored fields cover the block magnitude (for example Q8_K), "
+        "or keep the block in range."
+    )
+
+
+def _check_packed_fp16_fields(packed: np.ndarray | torch.Tensor, qtype: str) -> None:
+    """Reject published bytes whose FP16 header field is not finite.
+
+    A simple block stores its scale by casting a finite FP32 value, so a block
+    above the FP16 range publishes ``inf`` and decodes to ``inf``/``NaN`` code
+    products. The field dtype is fixed by the format, and both the ``gguf``
+    reference packer and the NumPy fallback emit the same bytes, so the range
+    is enforced on the packed header at the shared exit rather than in one
+    packer.
+
+    ``packed`` may be the NumPy bytes from ``_pack_gguf_tensor_numpy`` or the
+    MLX packer's Torch result, which is why the check reads only the stored
+    header bytes.
+    """
+
+    fields = _GGUF_FP16_HEADER_FIELDS.get(qtype)
+    if not fields:
+        return
+    if torch.is_tensor(packed):
+        packed = packed.detach().to(device="cpu", dtype=torch.uint8).contiguous().numpy()
+    type_size = _GGUF_TYPE_INFO[qtype]["type_size"]
+    blocks = np.asarray(packed, dtype=np.uint8).reshape(-1, type_size)
+    for offset, label in fields:
+        # The stored bytes are already non-finite, so no finite value is recoverable.
+        stored = blocks[:, offset : offset + 2].copy().view(np.float16).reshape(-1)
+        unrepresentable = ~np.isfinite(stored)
+        if not unrepresentable.any():
+            continue
+        raise _simple_unrepresentable_field(
+            qtype, label, int(np.flatnonzero(unrepresentable)[0]), int(blocks.shape[0])
+        )
+
+
 def _gguf_quantize_q8_1(blocks: np.ndarray) -> np.ndarray:
     # block_q8_1 = { fp16 d, fp16 s, int8 qs[32] }; s = sum(d * q), used by
     # upstream dot kernels that fold the scale-sum into int8 dot products.
@@ -1101,6 +1153,9 @@ def _dequantize_prism_q1_0_g128_torch(
 def _quantize_gguf_tensor_numpy(weight: np.ndarray, tensor_qtype) -> np.ndarray:
     resolved_qtype = _resolve_gguf_tensor_qtype(tensor_qtype)
     packed = _pack_gguf_tensor_numpy(weight, resolved_qtype)
+    # Covers whichever packer served the call, including the installed ``gguf``
+    # reference quantizer and the native ggml bridge.
+    _check_packed_fp16_fields(packed, resolved_qtype)
     if resolved_qtype == "Q8_1":
         # The format stores its auxiliary scale-sum in FP16, which no packer can
         # widen. Reject unreadable bytes whichever packer produced them.
@@ -1631,7 +1686,9 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
 
         weight = weight.contiguous()
         if _mlx_quantization_available() and weight.numel() >= _MLX_GGUF_MIN_ELEMENTS:
-            return _gguf_quantize_weight_mlx_to_torch(weight, self.gguf_tensor_qtype)
+            packed = _gguf_quantize_weight_mlx_to_torch(weight, self.gguf_tensor_qtype)
+            _check_packed_fp16_fields(packed, self.gguf_tensor_qtype)
+            return packed
 
         quantized = _gguf_quantize(weight.numpy(), self.gguf_tensor_qtype)
         return torch.from_numpy(np.ascontiguousarray(quantized)).to(torch.uint8)
