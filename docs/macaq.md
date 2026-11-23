@@ -218,6 +218,81 @@ are present, so the MLX difference does not cost activation accuracy.
   to the base `-:pattern` rule before shared normalization, so it no longer
   crashes `MacaqConfig`.
 
+### Exponent screen is scored per block in a normalized domain
+
+`screen_block_exponents` compares candidate E8M0 exponents per `(row, block)`
+by `sum_j H_jj (w_j - deq_j)^2`. Scored in the block's own units, that sum
+scales with `2**(2k)` when the block is rescaled by `2**k`, and FP32 cannot
+hold the whole E8M0-representable range:
+
+- Small finite blocks underflowed every candidate to `0`, so all candidates
+  tied and the first configured offset won.
+- Large finite blocks overflowed every candidate to `+inf`, so the strict `<`
+  comparison again left the first offset in place.
+
+Both outcomes made the selected exponent depend on the block's absolute
+magnitude instead of its error distribution, and the wrong choice was written
+into the packed codes and E8M0 scale bytes. A 32-value BF16 row with a unit
+peak and 31 values of `0.13` under an identity Hessian selects exponent `-2`
+at `2**0`. Scaled by `2**-80` it selected `-81` instead of the FP64 optimum
+`-82`; scaled by `2**80` it selected `79` instead of `78`, with a normalized
+SSE of `0.447` instead of `0.000739` both times.
+
+The screen now scores in a normalized domain: it divides every candidate's
+residual by one per-block power of two derived from the block peak before
+squaring, so the score no longer follows the block's absolute magnitude. The
+Hessian diagonal is used as stored — its scale is already one common positive
+factor, so renormalizing it cannot move the argmin. Taking that factor from
+the block maximum would be actively wrong: it flushes a small entry next to a
+large one, and when the large entry's residual is exactly zero the block would
+be decided by the flushed entry's rounded-away error.
+
+```mermaid
+flowchart TD
+    W["weight block<br/>[out, groups, 32]"] --> E1["frexp(amax) - 3<br/>residual exponent"]
+    E1 --> R["residual = ldexp(w - deq, -e1)<br/>exact power-of-two scaling"]
+    H["hessian diagonal block<br/>used as stored"] --> S["sum(residual * residual * H_jj)"]
+    R --> S
+    S --> C["strict less-than<br/>first offset wins ties"]
+    C --> O["frozen exponent, packed codes and scale bytes"]
+    style E1 fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+```
+
+The shift is one positive power of two per `(row, block)`, identical for every
+candidate, so the argmin and the first-minimum tie order cannot change.
+`ldexp` is exact for a power-of-two multiplicand, so a zero residual stays
+zero and equal candidates stay equal. The residual is scaled by the offset-0
+scale, which is at most `2**24` away from a clamped candidate, so the
+normalized square stays inside FP32 exactly when the unnormalized one could
+not. Non-finite inputs keep a zero shift, so the packer still emits its
+existing `0xFF`/NaN bytes.
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| Residual before the square | Block's absolute units | Divided by the block's own power of two |
+| Hessian diagonal | Used as stored | Used as stored (its scale is already common) |
+| Common factor for candidates | None | Same positive factor for all |
+| Block at `2**-80` | All candidates score `0`; first offset wins | All candidates finite; the FP64 argmin wins |
+| Block at `2**80` | All candidates score `+inf`; first offset wins | All candidates finite; the FP64 argmin wins |
+| Ordinary block | Unchanged | Bit-identical selection |
+| Ties | First offset wins | First offset wins |
+
+`tests/test_macaq_exponent_screen_scale.py` pins this with an independent
+FP64 oracle that enumerates the same three E8M0 exponents and rounds from an
+explicit E2M1 table. It covers the control, `2**-80` and `2**80` scales, exact
+code equality across the rescale, zero blocks, a non-uniform positive
+diagonal, a block whose largest diagonal entry hides the real error in a
+`1e-38` column, a diagonal spanning `1e-30`..`1e30`, uniform diagonal
+magnitudes across `1e-44`..`1e38`, zero/inf/NaN diagonals, the clamped bottom
+of the E8M0 range, and the pack-to-decode round trip at the public entry point.
+
+Scope: this removes the magnitude dependence for finite blocks whose
+candidates stay inside FP32 after normalization. It does not add candidates
+outside the configured `exp_offsets`, and it does not change `flip_refine_levels`,
+which still runs on the frozen exponent. Kernel inference from the
+re-quantized packed payload was checked separately on accelerator hardware;
+the weight bytes are produced by the same packer.
+
 ### Transformers interop
 
 Transformers 5.x only warns `Unknown quantization type` and then loads a

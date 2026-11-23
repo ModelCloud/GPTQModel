@@ -229,6 +229,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [GSQ fused relaxation precision contract](gsq-fused-relaxation-precision.md)
 - [Per-linear GSQ scalar refinement](gsq-scalar-refinement.md)
 - [RCO discrete budget export](rco-budget-export.md)
+- [RCO weight-interpolation precision](rco-interpolation-precision.md)
 - [Runtime LoRA output composition](lora-runtime-output.md)
 - [PEFT LoRA Training and Adapter Loading](peft.md)
 

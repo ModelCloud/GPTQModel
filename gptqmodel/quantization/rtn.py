@@ -31,6 +31,27 @@ from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, Quantizer, narrowing_los
 _MLX_RTN_MIN_ELEMENTS = 256 * 1024
 
 
+def _finite_value_limit(weight_dtype: torch.dtype) -> float | None:
+    """Largest magnitude the normalized grid may reconstruct in ``weight_dtype``.
+
+    ``RTN.quantize`` narrows its FP32 reconstruction back to the source weight
+    dtype. A symmetric grid fitted as ``scale = 2 * amax / (2**bits - 1)``
+    rounds the negative endpoint of the group to code ``-2**(bits-1)``, so the
+    reconstruction is ``2**bits * amax / (2**bits - 1)`` and is strictly larger
+    than ``amax``. Once that exceeds the dtype's finite maximum the narrowed
+    replay weight is ``-inf``. Bounding the codes the grid may select by this
+    limit keeps the reconstruction representable instead of clamping the
+    narrowed tensor afterwards.
+
+    Integer dtypes express their range as counts, not magnitudes, so they keep
+    the unconstrained grid.
+    """
+
+    if not weight_dtype.is_floating_point:
+        return None
+    return float(torch.finfo(weight_dtype).max)
+
+
 @lru_cache(maxsize=1)
 def _mlx_rtn_quantization_available() -> bool:
     if sys.platform != "darwin" or platform.machine() != "arm64":
@@ -230,6 +251,9 @@ class RTN:
                         # its row's dot product, so do not let the search clip
                         # it just because the bulk gets a smaller step.
                         weights=element_saliency_weights(block),
+                        # The replay weight is narrowed to the source dtype,
+                        # so score the codes that stay finite there.
+                        value_limit=_finite_value_limit(self.module.weight.dtype),
                     )
                 else:
                     block_mod, scale_factor = smooth_block(
@@ -244,10 +268,17 @@ class RTN:
                         SCALE_STORAGE_FLOOR if scale_factor is None
                         else SCALE_STORAGE_FLOOR / scale_factor
                     )
+                    # The finite bound lives in the restored weight domain as
+                    # well: ``dequant * scale_factor`` is what narrows to the
+                    # source dtype, so divide by the factor it is scaled by.
+                    value_limit = _finite_value_limit(self.module.weight.dtype)
+                    if value_limit is not None and scale_factor is not None:
+                        value_limit = value_limit / scale_factor
                     self.quantizer.find_params(
                         block_mod,
                         weight=True,
                         scale_min=scale_min.flatten() if isinstance(scale_min, torch.Tensor) else scale_min,
+                        value_limit=value_limit,
                     )
                     dequant = self.quantizer.quantize(block_mod)
                     scale = self.quantizer.scale

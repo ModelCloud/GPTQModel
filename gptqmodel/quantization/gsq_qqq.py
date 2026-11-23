@@ -43,8 +43,12 @@ def qqq_candidate_values(codes, scales, *, group_size, in_features, channel_scal
     extra_axis = codes.ndim == 3
     values = codes.float()
     if group_size == in_features:
-        # Packer divides in source scale precision before FP32 storage.
-        channel = (scales / 16).float()
+        # QQQLinear.pack widens the producer scale to FP32 and only then divides
+        # by ``2 ** (8 - bits)`` (16 for its sole supported width, 4 bit). A
+        # narrow source division happens first in the source dtype, so an FP16
+        # scale that is representable after narrowing can round to zero there
+        # and the deployed channel grid silently diverges. Mirror the packer.
+        channel = scales.float() / 16
         if not torch.isfinite(channel).all() or (channel <= 0).any():
             raise ValueError("QQQ channel scales must remain finite and positive after storage")
         signed = torch.where(values >= 8, values - 16, values)

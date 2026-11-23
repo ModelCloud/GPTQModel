@@ -313,9 +313,14 @@ def _nvfp4_mse_quantize_blocks(
     """
     recipe = nvfp4_kernel_recipe(recipe)
     block_amax = blocks.abs().amax(dim=-1, keepdim=True)
-    # Compare candidates in units of a per-block power of two.  Scaling by
-    # 2**-e is exact for finite values, so this keeps the ranking identical to
-    # the absolute SSE while preventing FP32 overflow for large activations.
+    # Compare candidates and solve the least-squares scale in units of a
+    # per-block power of two.  Scaling by 2**-e is exact for finite values, so
+    # this keeps both the ranking and the optimal scale identical to the
+    # absolute arithmetic while preventing FP32 overflow for large activations.
+    # The refinement must use the same coordinates as the error: its numerator
+    # grows with the activation magnitude and overflows for activations that are
+    # finite only because the global scale is large, which silently drops the
+    # otherwise representable E4M3 optimum.
     _, block_exponent = torch.frexp(block_amax)
     block_exponent = block_exponent.to(torch.int32)
     best_error = torch.full_like(block_amax, torch.inf)
@@ -323,16 +328,26 @@ def _nvfp4_mse_quantize_blocks(
     best_values = torch.zeros_like(blocks)
     seeds = []
 
-    def evaluate(local: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        scale = local.float() * global_scale
-        values = _e2m1_nearest_values(blocks / scale)
+    def normalized(value: torch.Tensor) -> torch.Tensor:
         # ``ldexp`` scales exactly, which ``2**-e`` cannot for subnormal blocks
         # (the power itself can overflow), but it launches on the *current*
         # device and faults when ``blocks`` lives on another GPU (#5263). Enter
         # the tensors' device so the launch targets the right one.
         with torch.cuda.device(blocks.device) if blocks.is_cuda else nullcontext():
-            scaled_blocks = torch.ldexp(blocks, -block_exponent)
-            scaled_scale = torch.ldexp(scale, -block_exponent)
+            return torch.ldexp(value, -block_exponent)
+
+    def normalized_global_scale() -> torch.Tensor:
+        # A scalar or single-element global scale broadcasts against the block
+        # shape in `evaluate`; materialize that broadcast here so the exact
+        # power-of-two scaling does not resize a 0-dim operand.
+        scale = torch.as_tensor(global_scale, device=blocks.device)
+        return normalized(torch.broadcast_tensors(scale, block_amax)[0])
+
+    def evaluate(local: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        scale = local.float() * global_scale
+        values = _e2m1_nearest_values(blocks / scale)
+        scaled_blocks = normalized(blocks)
+        scaled_scale = normalized(scale)
         reconstructed = values * scaled_scale
         # A zero code reconstructs to exactly zero; avoid 0 * inf when the
         # candidate scale itself overflows.
@@ -353,13 +368,24 @@ def _nvfp4_mse_quantize_blocks(
 
     def refine(values: torch.Tensor) -> torch.Tensor:
         denominator = values.square().sum(dim=-1, keepdim=True)
-        optimal = (blocks * values).sum(dim=-1, keepdim=True) / denominator.clamp_min(1.0)
-        inverse = optimal / global_scale
+        # The scalar least-squares optimum ``sum(x * c) / sum(c**2)`` is a
+        # value on the activation scale, so its FP32 numerator overflows for
+        # activations that stay finite only because the global scale absorbs
+        # their magnitude.  Solve in the same per-block power-of-two
+        # coordinates as the error and divide by the equally normalized global
+        # scale: the ratio is unchanged, and the division and the later E4M3
+        # rounding both happen at a safe magnitude.
+        optimal = (normalized(blocks) * values).sum(dim=-1, keepdim=True) / \
+            denominator.clamp_min(1.0)
+        inverse = optimal / normalized_global_scale()
         inverse = torch.where(
             denominator > 0,
             inverse.clamp(min=2.0**-9, max=FP8_E4M3_MAX),
             torch.ones_like(inverse),
         )
+        # ``0 / 0`` can only appear when the normalized global scale underflows
+        # to zero while the block contributes no signal; saturation there keeps
+        # the same E4M3 upper bound the absolute division clamped to.
         return inverse.to(torch.float8_e4m3fn)
 
     maxima = (FP4_E2M1_MAX,) if recipe == "nvidia" else (4.0, FP4_E2M1_MAX)

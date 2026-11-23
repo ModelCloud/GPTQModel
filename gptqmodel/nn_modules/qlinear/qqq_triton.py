@@ -10,6 +10,11 @@ from triton.language.extra import libdevice
 from gptqmodel.utils.triton_jit import jit as triton_jit
 
 
+#: The least positive FP32 subnormal, as a Triton constexpr so the kernel can
+#: reference it. Mirrors ``gptqmodel.quantization.activation_floatx``.
+_FP32_MIN_SUBNORMAL = tl.constexpr(2.0**-149)
+
+
 @triton_jit
 def _quantize_rows(X, Q, S, K: tl.constexpr, BLOCK: tl.constexpr):
     # rows * K can exceed 2^31 for a very large prefill batch; compute the row
@@ -23,8 +28,14 @@ def _quantize_rows(X, Q, S, K: tl.constexpr, BLOCK: tl.constexpr):
     row_has_nan = tl.max((values != values).to(tl.int32), 0) > 0
     # Match Torch's scalar division: multiply by the FP32 reciprocal of 127.
     # Replacing this with div.rn changes codes at exact half-step boundaries.
-    scale = tl.max(tl.abs(values), 0) * (1.0 / 127.0)
-    scale = tl.where(scale == 0, 1.0, scale)
+    row_max = tl.max(tl.abs(values), 0)
+    scale = row_max * (1.0 / 127.0)
+    # Mirror ``qqq_activation_scale``: only a maximum of exactly zero takes the
+    # unit scale. A subnormal maximum whose quotient flushes to zero is still
+    # encodable on the least positive FP32 subnormal, and the unit scale would
+    # erase its codes.
+    scale = tl.where(row_max == 0, 1.0, scale)
+    scale = tl.where((row_max != 0) & (scale == 0), _FP32_MIN_SUBNORMAL, scale)
     scale = tl.where(row_has_nan, float("nan"), scale)
     codes = libdevice.nearbyint(tl.div_rn(values, scale))
     codes = tl.minimum(tl.maximum(codes, -128.0), 127.0).to(tl.int8)

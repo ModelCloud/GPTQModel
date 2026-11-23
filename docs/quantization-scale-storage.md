@@ -103,6 +103,71 @@ Thus multiplying by that factor after code selection preserves a packable
 scale in the original weight domain. `Quantizer.find_params` accepts this
 per-row bound through `scale_min` for RTN, including RTN's optional MSE search.
 
+## Finite reconstruction range
+
+A packable scale is not the only constraint on the selected code. A symmetric
+grid stores `zero = 2 ** (bits - 1)` and `scale = 2 * amax / (2**bits - 1)`,
+so the group's negative endpoint rounds to code `-2 ** (bits - 1)` and
+reconstructs `2**bits * amax / (2**bits - 1)`, which is strictly larger than
+`amax`. Weight-only RTN quantizes an FP32 copy and then narrows the
+reconstruction back to the source weight dtype for replay. At
+`amax = 61440` the INT4 negative endpoint reconstructs `-65536`; narrowing
+that to FP16 stores `-inf` in the replay weight even though every source
+parameter was finite, and the non-finite value then feeds the next layer's
+calibration capture.
+
+The grid and its ties-to-even rounding are correct. What is missing is a
+bound on which codes the grid may select: the reconstruction for a chosen
+code has to stay inside the finite range of the dtype it is narrowed to.
+`Quantizer.find_params(..., value_limit=...)` therefore derives an inclusive
+code range from the fitted `scale`/`zero`:
+
+```
+steps = floor(value_limit / scale)      # one step down if the product rounds up
+lo    = clamp(zero - steps, 0, maxq)
+hi    = clamp(zero + steps, 0, maxq)
+```
+
+`value_limit` is the source dtype's `finfo(dtype).max`, divided by any
+smoothing factor that is restored after quantization, and it is aligned with
+the fitted lane axis (trailing for a `[rows]` grid and the MSE candidate axis,
+leading for the `[rows, candidates, 1]` shrink workspace). The MSE shrink grid
+and the SmoothMSE ternary search score each candidate with its own bounded
+code range, so the winner is the grid that will actually be packed rather than
+an endpoint that overflows on the way out. `None` keeps the grid's natural
+`[0, maxq]` (or `[-maxq, maxq]` for a signed grid) and leaves every existing
+caller bitwise unchanged.
+
+The narrowed tensor is never clamped after the cast, and the live module keeps
+its own dtype; only the selected codes move, so the replay weight and the
+codes the packers recover from it agree.
+
+```mermaid
+flowchart TD
+    R["RTN.quantize"] --> D{"Source dtype floating?"}
+    D -- no --> N["value_limit = None"]
+    D -- yes --> F["value_limit = finfo(dtype).max<br/>/ restored smoothing factor"]
+    N --> P["Quantizer.find_params"]
+    F --> P
+    P --> S["Fit scale / zero<br/>and MSE candidates"]
+    S --> B["_finite_code_bounds:<br/>steps = floor(value_limit / scale)"]
+    B --> C["Quantizer.quantize with<br/>code_lo / code_hi"]
+    C --> O["Narrow to the source dtype"]
+    O --> V{"Finite?"}
+    V -- yes --> W["Replay weight and pack codes<br/>come from the same grid"]
+    V -- no --> E["Unchanged grid endpoint exceeded the dtype"]
+    style W fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+    style E fill:#fee,stroke:#c33
+```
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| INT4 symmetric, `amax = 61440`, FP16 | Negative endpoint code `0`, replay `-inf` | Code `1`, replay `-57344` |
+| INT4 symmetric, `amax = 61408`, FP16 | Code `0`, replay `-65504` | Unchanged |
+| Ordinary weight ranges | Natural `[0, maxq]` codes | Unchanged (bounds resolve to the natural range) |
+| Scale / zero point | Fitted range | Unchanged |
+| Packing source | Recovered from the replay weight | Same codes, same recovery |
+
 `RTN.quantize` follows the same contract as `GPTQ._fallback_quantize`: its
 `SmoothMSE` branch passes `eps=SCALE_STORAGE_FLOOR`, and its `SmoothRowCol`
 branch passes `scale_min = SCALE_STORAGE_FLOOR / scale_factor` to
@@ -195,6 +260,18 @@ so a clipped grid is accepted only when it lowers the *weighted* error. The
 uniform weight MSE is no longer the contract: it can rise slightly while the
 weighted output error falls.
 
+`_normalize_weights` scales each row by its largest positive weight before it
+sums. The sum itself is accumulated in the work dtype and can overflow to
+`+inf` even though every supplied saliency is finite; `finite / inf` is then
+zero, so the whole row silently scored every candidate with zero weights and
+the search kept the unshrunk grid. A common rescale of all 128 saliencies from
+`1` to `1e38` turned a scale of `0.1083531305193901` (FP64 MSE
+`2.0778878098365143e-4`) into `0.13333334028720856` (MSE
+`1.137153072955355e-3`, 5.47x). Dividing by the row maximum is one positive
+factor per row, so it cannot change the argmin, and the scaled sum is bounded
+by `columns`. An all-zero row still falls back to the uniform weight, and
+negative or nonfinite entries are still cleared first.
+
 ```mermaid
 flowchart TD
     S["mse_optimal_quant(block)"] --> W["weights = Hessian diagonal<br/>or |w| + mean(|w|)"]
@@ -225,7 +302,11 @@ rows, in symmetric and asymmetric modes, through the direct search and the
 `tests/test_smooth_mse_saliency_criterion.py` pins the weighting itself: a
 heavy-tail row that the uniform mean clips must stay on the unshrunk grid, the
 Gaussian control must still clip, and the GPTQ fallback must protect the
-channel marked by the Hessian diagonal.
+channel marked by the Hessian diagonal. It also pins the normalization
+invariant: a common positive scale (`1`, `1e36`, `1e38`) of a 1-D Hessian
+diagonal or 2-D per-element saliency must leave the returned weights summing to
+one and the selected scales, codes and reconstruction bit-identical, across
+uniform, sparse and nonuniform rows and through the GPTQ fallback.
 
 ```mermaid
 flowchart TD
@@ -276,3 +357,73 @@ scales, zero points and reconstructed weights. The separate MSE-grid suite
 also checks `(96, 512)` weights against a sequential Torch oracle with exact
 selected scales/zero points. These are quantizer and packing measurements;
 they do not measure inference kernel arithmetic or performance.
+
+## Finite symmetric AWQ export grids
+
+AWQ's symmetric grid decodes code `c` as `c * stored_scale` in the kernel's
+decode dtype. The RTN stage fits that grid as `amax / max_code`, and the
+division rounds to the *nearest* representable scale. A finite `amax` can
+therefore select a scale whose top code is not finite: FP16 `65504 / 7`
+rounds up to `9360`, and `7 * 9360 == 65520` is the value FP16 rounds to
+infinity. Staging used to clamp the overflowing product back to `65504`, so
+the staged tensor and the checkpoint disagreed: the packer still kept code
+15, `qweight` was `0xffffffff`, and a narrow decode returned `inf`.
+
+The staged grid, the stored scale and the code the packer recovers must name
+one grid point in the dtype the kernel decodes. That dtype is the checkpoint
+scale width, not the source weight width: GEMM and Marlin keep an FP16 or
+BF16 source scale and otherwise store FP16, while GEMV and GEMV-fast always
+store FP16.
+
+```mermaid
+flowchart TD
+    A["symmetric RTN: amax = |w|max"] --> B["scale = (amax / max_code).to(source dtype)"]
+    B --> C{"max_code * scale.to(decode dtype) finite?"}
+    C -- "yes (ordinary group)" --> D["keep scale unchanged"]
+    C -- "no (rounding artefact)" --> E["scale = largest decode-dtype scale whose top code is finite"]
+    D --> F["codes = round(w / scale)"]
+    E --> F
+    F --> G["bound = floor(decode_max / scale); codes = clamp(codes, -bound, bound)"]
+    G --> H["staged = codes * scale"]
+    H --> I["packer stores scale and codes"]
+    I --> J["kernel decodes c * stored_scale finitely"]
+    style E fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+    style J fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+```
+
+Only a group whose amplitude is representable but whose *top product* is not
+is repaired, so an ordinary group keeps its exact previous scale and its grid
+is bit-identical. A group whose amplitude is itself outside the decode dtype
+has already given up its top codes through the clip decision, so its selected
+interval is preserved and only the codes that cannot be exported are capped.
+The bound uses the finite maximum itself rather than a `1 - eps` margin: a
+product at or below the maximum rounds back into range, and a margin would
+discard a code that fits (it would turn `7 * 9352` into code 6).
+
+The clip search scores candidates on the same grid. Its in-place
+pseudo-quantize path repairs the scale and clamps the codes before writing the
+reconstruction, so a candidate is never judged on a grid the packer would not
+store.
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| FP16 `amax = 65504`, `bits = 4`, symmetric | scale `9360`, staged `65504`, stored code 15 decoding `65520 -> inf` | scale `9352`, staged `65472`, stored code 15 decoding `65472` |
+| FP16 `amax = -65504` | same overflowing scale, `inf` | scale `9352`, signed code `-7`, decoding `-65472` |
+| Ordinary representable group | `amax / max_code` grid | Same grid, bit-identical |
+| Amplitude outside the decode dtype (for example STDCLIP `180000`) | Selected interval kept, top codes clamped | Selected interval kept, top codes clamped (unchanged) |
+| Clip-search candidate scoring | Scored on the unrepaired scale | Scored on the exported grid |
+| GEMV-fast / LLM-AWQ offset layouts | Offset `-8 * scale` stored, `inf` | `scaled_zero_offset` still rejects the pack: the offset bound is stricter, so no scale is lowered on its behalf |
+
+The offset layouts are deliberately left fail-closed rather than repaired.
+Their checkpoint stores `-2 ** (bits - 1) * scale` as an FP16 offset, and
+`-8 * 9360` overflows FP16 even though the top code alone would fit. Lowering
+the scale enough to represent that offset would reduce the range from `65472`
+to about `57312` and lose real precision on ordinary groups. Those layouts
+therefore keep `scaled_zero_offset` as their guard and reject the pack before
+writing a corrupt checkpoint.
+
+`tests/test_awq_symmetric_grid_finite.py` pins the chain from staging through
+packing to decoding: `65504`, `-65504`, `65472` and `60000` in GEMM and GEMV
+layouts, exact `qweight`/`qzeros` words, the in-place candidate-search parity,
+the offset layouts' rejection, an FP32 source narrowed to FP16 storage, a
+subnormal-scale control, and a bit-identical ordinary-range control.

@@ -136,3 +136,193 @@ def test_compiled_and_torch_dp_agree_on_large_equal_group_grids(groups):
         rco.budget_constrained_argmax(scores, weights, costs, 2.5),
         rco.budget_constrained_argmax(scores, weights, costs, 2.5),
     )
+
+
+def _interpolated_linear(candidates, *, dtype, device='cpu'):
+    """Build a real one-input Linear and install the production parametrization."""
+    model = torch.nn.Module()
+    model.proj = torch.nn.Linear(1, 1, bias=False).to(device=device, dtype=dtype)
+    options = [candidate.to(dtype=dtype, device=device) for candidate in candidates]
+    model.proj.weight.data = options[-1].clone()
+    costs = torch.arange(2., 2. + len(options))
+    owner = rco.InterpolatedLlamaLayers(
+        model, {'proj': [option.clone() for option in options]},
+        torch.ones(2), costs, control_device=device).setup()
+    return model, owner
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize('values', [[1., 1000.], [-60000., 60000.], [.25, -.75]])
+@pytest.mark.parametrize('search_forward', [False, True])
+def test_one_hot_forward_reproduces_the_selected_candidate(dtype, values, search_forward):
+    """A hard assignment must evaluate exactly the candidate it selects.
+
+    Deltas materialized in the model dtype round the difference, so
+    ``reference + delta`` need not return the candidate, and two finite
+    candidates can differ by more than the dtype's range. The search forward
+    fed to the objective must match the selected candidate exactly, including
+    the straight-through ``onehot - soft.detach() + soft`` form.
+    """
+    candidates = torch.tensor(values, dtype=dtype).reshape(-1, 1, 1)
+    model, owner = _interpolated_linear(list(candidates), dtype=dtype)
+    values_in = torch.ones(1, 1, dtype=dtype)
+    soft = torch.linspace(.2, .8, len(values))
+    try:
+        for index in range(len(values)):
+            onehot = torch.zeros(1, len(values))
+            onehot[0, index] = 1
+            owner.set_probs(onehot - soft + soft if search_forward else onehot)
+            with torch.no_grad():
+                actual = model.proj(values_in)
+            assert actual.dtype == dtype
+            assert bool(torch.isfinite(actual).all())
+            assert actual.item() == candidates[index].to(dtype).item()
+    finally:
+        owner.cleanup()
+
+
+def test_soft_interpolation_gradient_matches_wide_oracle():
+    """Gradients keep the reference form ``dL/dp_k = <G, W_k - W_ref>``."""
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    candidates = [torch.randn(3, 2).to(dtype) * 40, torch.randn(3, 2).to(dtype) * 40,
+                  torch.randn(3, 2).to(dtype) * 40]
+    model, owner = _interpolated_linear(candidates, dtype=dtype)
+    owner.alpha.data = torch.tensor([[.3, -.2, .1]])
+    values_in = torch.randn(4, 2, dtype=dtype)
+    upstream = torch.randn(4, 3, dtype=dtype)
+    try:
+        loss = (model.proj(values_in) * upstream).sum()
+        alpha_gradient, = torch.autograd.grad(loss, owner.alpha)
+        # Independent FP64 oracle: the same convex mix, softmax and chain rule.
+        alpha64 = owner.alpha.detach().double()
+        probs64 = torch.softmax(alpha64[0], dim=-1)
+        weights64 = torch.stack([candidate.double() for candidate in candidates])
+        grad_mixed = upstream.double().T @ values_in.double()
+        grad_probs = torch.stack([(grad_mixed * weight).sum() for weight in weights64])
+        jacobian = torch.diag(probs64) - probs64[:, None] * probs64[None, :]
+        expected = jacobian.T @ grad_probs
+        assert bool(torch.isfinite(alpha_gradient).all())
+        torch.testing.assert_close(alpha_gradient.double()[0], expected, rtol=5e-3, atol=5e-3)
+    finally:
+        owner.cleanup()
+
+
+def test_hard_selection_gradient_stays_finite_for_out_of_range_candidates():
+    """Finite candidates that differ beyond the dtype range must not poison grads.
+
+    The removed delta form materialized ``-inf`` for this pair, and the
+    reference selection then produced ``nan``. The straight-through search
+    gradient must instead use the exact wide difference of the two stored
+    candidates.
+    """
+    dtype = torch.float16
+    candidates = [torch.tensor([[-60000.]]), torch.tensor([[60000.]])]
+    model, owner = _interpolated_linear(candidates, dtype=dtype)
+    owner.alpha.data = torch.tensor([[.4, -.3]])
+    values_in = torch.ones(1, 1, dtype=dtype)
+    try:
+        for index in range(len(candidates)):
+            onehot = torch.zeros(1, len(candidates))
+            onehot[0, index] = 1
+            # Same straight-through form the search builds from ``alpha``.
+            soft = torch.softmax(owner.alpha, dim=-1)
+            owner.set_probs(onehot - soft.detach() + soft)
+            loss = model.proj(values_in).sum()
+            gradient, = torch.autograd.grad(loss, owner.alpha)
+            assert bool(torch.isfinite(gradient).all())
+            # ``values_in`` is all ones, so dL/dp is the column sum of each
+            # candidate difference: -120000 for the first option and zero for
+            # the reference, whose coefficient is the leftover mass. Chain
+            # through the softmax of the same probabilities.
+            probabilities = torch.softmax(owner.alpha.double()[0], dim=-1)
+            jacobian = torch.diag(probabilities) - probabilities[:, None] * probabilities[None, :]
+            expected = jacobian.T @ torch.tensor([-120000., 0.], dtype=torch.float64)
+            torch.testing.assert_close(gradient.double()[0], expected, rtol=5e-3, atol=5e-3)
+            with torch.no_grad():
+                owner.clear_probs()
+                owner.set_probs(onehot)
+                assert model.proj(values_in).item() == (candidates[index] if index == 0 else 60000.)
+    finally:
+        owner.cleanup()
+
+
+def test_grouped_interpolation_shares_one_decision_and_cleanup_restores():
+    dtype, names = torch.float16, ['a', 'b']
+    model = torch.nn.Module()
+    sources = {}
+    for name in names:
+        setattr(model, name, torch.nn.Linear(2, 2, bias=False).to(dtype))
+        sources[name] = getattr(model, name).weight.detach().clone()
+    options = {name: [sources[name] * .25, sources[name]] for name in names}
+    owner = rco.InterpolatedLlamaLayers(
+        model, options, torch.ones(2), torch.tensor([2., 3.]),
+        control_device='cpu', groups=[names]).setup()
+    assert [owner.index_of(name) for name in names] == [0, 0]
+    owner.set_probs(torch.tensor([[0., 1.]]))
+    try:
+        with torch.no_grad():
+            for name in names:
+                assert torch.equal(getattr(model, name).weight, sources[name])
+                output = getattr(model, name)(torch.ones(1, 2, dtype=dtype))
+                assert torch.equal(output, torch.ones(1, 2, dtype=dtype) @ sources[name].T)
+    finally:
+        owner.cleanup()
+    for name in names:
+        assert isinstance(getattr(model, name).weight, torch.nn.Parameter)
+        assert torch.equal(getattr(model, name).weight, sources[name])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='needs an accelerator')
+def test_interpolation_follows_a_device_move_and_cleanup_restores_it():
+    """Candidates and the cleanup reference must follow ``model.to(device)``."""
+    candidates = [torch.tensor([[1.]]), torch.tensor([[1000.]])]
+    model, owner = _interpolated_linear(candidates, dtype=torch.bfloat16)
+    model.to('cuda')
+    owner.set_probs(torch.tensor([[1., 0.]], device='cuda'))
+    try:
+        with torch.no_grad():
+            actual = model.proj(torch.ones(1, 1, dtype=torch.bfloat16, device='cuda'))
+        assert actual.item() == 1. and actual.is_cuda
+        # A dtype move must carry the candidates too: the mix stays in the
+        # module dtype the contract requires.
+        model.to(torch.float16)
+        owner.clear_probs()
+        owner.set_probs(torch.tensor([[0., 1.]], device='cuda'))
+        with torch.no_grad():
+            later = model.proj(torch.ones(1, 1, dtype=torch.float16, device='cuda'))
+        assert later.item() == 1000. and later.dtype == torch.float16
+        owner.set_probs(torch.tensor([[1., 0.]], device='cuda'))
+        with torch.no_grad():
+            first = model.proj(torch.ones(1, 1, dtype=torch.float16, device='cuda'))
+        assert first.item() == 1.
+    finally:
+        owner.cleanup()
+    assert model.proj.weight.is_cuda
+    assert model.proj.weight.item() == 1000.
+
+
+def test_tiled_gradient_matches_the_untiled_reduction(monkeypatch):
+    """The bounded backward scratch must match the untiled reduction."""
+    torch.manual_seed(3)
+    candidates = [torch.randn(6, 4, dtype=torch.float32) * 30,
+                  torch.randn(6, 4, dtype=torch.float32) * 30,
+                  torch.randn(6, 4, dtype=torch.float32) * 30]
+    model, owner = _interpolated_linear(candidates, dtype=torch.float16)
+    owner.alpha.data = torch.tensor([[.4, -.1, .2]])
+    values = torch.randn(2, 4, dtype=torch.float16)
+    upstream = torch.randn(2, 6, dtype=torch.float16)
+    try:
+        loss = (model.proj(values) * upstream).sum()
+        untiled_gradient, = torch.autograd.grad(loss, owner.alpha)
+        # ``raising=False``: the whole mix is bounded per tile, so a revision
+        # without the knob simply runs the untiled reduction twice.
+        monkeypatch.setattr(rco, '_INTERPOLATION_CHUNK_ELEMENTS', 4, raising=False)
+        tiled_loss = (model.proj(values) * upstream).sum()
+        tiled_gradient, = torch.autograd.grad(tiled_loss, owner.alpha)
+        # The tiled backward sums each tile separately, so only the FP32
+        # summation order may differ from the untiled reduction.
+        torch.testing.assert_close(tiled_gradient, untiled_gradient, rtol=1e-6, atol=1e-6)
+        assert bool(torch.isfinite(tiled_gradient).all())
+    finally:
+        owner.cleanup()
