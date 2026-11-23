@@ -26,6 +26,11 @@ from gptqmodel.quantization.qqq_activation import qqq_activation_quantize
 
 CPU = pytest.mark.cpu
 
+#: The least positive FP32 subnormal, ``2**-149``. A positive row maximum below
+#: ``127 * 2**-150`` divides to zero in FP32 even though the row itself is
+#: representable, so the deployed scale has to be floored here.
+_FP32_MIN_SUBNORMAL = 2.0**-149
+
 
 def _deployed_quant(monkeypatch, x):
     """The real portable-kernel grid, with the Triton path disabled.
@@ -65,6 +70,22 @@ def _assert_calibration_matches_deployment(monkeypatch, x, *, teacher=None):
     assert (cross.double() - cross_ref).abs().max() <= 1e-6 * max(1.0, cross_ref.abs().max())
     # The calibration's own codes/scale are the ones it accumulates moments
     # from; they must be the deployed ones, not merely close.
+    calib_codes, calib_scale = qqq_activation_quantize(x)
+    assert torch.equal(calib_codes, deployed_codes.contiguous())
+    torch.testing.assert_close(calib_scale, deployed_scale, rtol=0, atol=0)
+    return deployed_codes, deployed_scale
+
+
+def _assert_helper_matches_deployment(monkeypatch, x):
+    """Codes and scale only, for rows whose FP32 moments would underflow.
+
+    ``_assert_calibration_matches_deployment`` also compares the accumulated
+    moments with an FP64 oracle. Squaring a subnormal operand underflows to
+    zero in FP32, which is a pre-existing limit of FP32 moment accumulation and
+    not the grid this fixture pins, so compare the grid operands directly.
+    """
+
+    deployed_codes, deployed_scale = _deployed_quant(monkeypatch, x)
     calib_codes, calib_scale = qqq_activation_quantize(x)
     assert torch.equal(calib_codes, deployed_codes.contiguous())
     torch.testing.assert_close(calib_scale, deployed_scale, rtol=0, atol=0)
@@ -137,6 +158,136 @@ def test_zero_and_nonzero_rows_coexist_without_poisoning_the_moments(monkeypatch
     assert (codes[0] == 0).all()
     assert scale[0].item() == 1.0
     assert scale[1].item() > 0
+
+
+@CPU
+@pytest.mark.parametrize(
+    "value,expected_scale,expected_code",
+    [
+        # A genuinely zero row keeps the unit scale and decodes to zero.
+        (0.0, 1.0, 0),
+        # 7u/127 = 0.055u and 63u/127 = 0.496u both round to zero in FP32, so
+        # the pre-fix unit scale erased them. The floored scale keeps the codes
+        # that reconstruct the input exactly.
+        (7 * _FP32_MIN_SUBNORMAL, _FP32_MIN_SUBNORMAL, 7),
+        (63 * _FP32_MIN_SUBNORMAL, _FP32_MIN_SUBNORMAL, 63),
+        # 64u/127 = 0.504u rounds up to one subnormal step, so this row never
+        # needed the floor; it is the control that keeps the quotient path.
+        (64 * _FP32_MIN_SUBNORMAL, _FP32_MIN_SUBNORMAL, 64),
+        (127 * _FP32_MIN_SUBNORMAL, _FP32_MIN_SUBNORMAL, 127),
+        # 200u/127 = 1.575u rounds to 2u, so the row saturates at code 100 and
+        # still reconstructs 200u exactly.
+        (200 * _FP32_MIN_SUBNORMAL, 2 * _FP32_MIN_SUBNORMAL, 100),
+    ],
+)
+def test_fp32_subnormal_row_keeps_its_codes(monkeypatch, value, expected_scale, expected_code):
+    """Issue: a finite subnormal row was misread as an all-zero row."""
+
+    x = torch.tensor([[value]], dtype=torch.float32)
+    codes, scale = _assert_helper_matches_deployment(monkeypatch, x)
+
+    assert codes.item() == expected_code
+    assert scale.item() == expected_scale
+    if value:
+        # Every one of these rows is an exact multiple of its scale, so the
+        # recovered operand equals the stored input bit for bit.
+        assert (codes.float() * scale).item() == x.item()
+
+
+@CPU
+def test_zero_and_subnormal_rows_keep_distinct_scales(monkeypatch):
+    """The zero-row convention must not leak into a finite subnormal row."""
+
+    x = torch.tensor(
+        [[0.0, 0.0], [7 * _FP32_MIN_SUBNORMAL, 3 * _FP32_MIN_SUBNORMAL]],
+        dtype=torch.float32,
+    )
+    codes, scale = _assert_helper_matches_deployment(monkeypatch, x)
+
+    assert scale[0].item() == 1.0 and scale[1].item() == _FP32_MIN_SUBNORMAL
+    assert codes[0].tolist() == [0, 0]
+    assert codes[1].tolist() == [7, 3]
+
+
+@CPU
+def test_subnormal_row_projects_to_the_reference_value(monkeypatch):
+    """The erased row was invisible to every consumer of the INT8 operand.
+
+    A subnormal activation times a large weight is still representable, so the
+    pre-fix zero codes made the whole row contribute exactly nothing.
+    """
+
+    x = torch.tensor([[7 * _FP32_MIN_SUBNORMAL, 3 * _FP32_MIN_SUBNORMAL]], dtype=torch.float32)
+    codes, scale = _deployed_quant(monkeypatch, x)
+    weight = torch.tensor([[2.0**100], [0.0]], dtype=torch.float64)
+
+    projected = (codes.double() * scale.double()) @ weight
+    reference = x.double() @ weight
+    assert projected.item() != 0
+    torch.testing.assert_close(projected, reference, rtol=0, atol=0)
+
+
+@CPU
+def test_torch_linear_forward_keeps_a_subnormal_activation_row(monkeypatch):
+    """The next consumer: an exact identity projection must keep the row.
+
+    The fixture is exact end to end, so the assertion is equality rather than a
+    tolerance: the weight is the identity, its INT4 codes are ``0``/``1`` with
+    a channel scale of ``1/16``, and the channelwise INT8 plane is therefore
+    ``16 * identity``. The forward's ``(accum * s1) * s_channel`` order is exact
+    for the power-of-two channel scale, so the visible output must reproduce the
+    input row bit for bit. The pre-fix unit scale erased the codes, so the whole
+    row projected to exactly zero and this test failed at the equality
+    assertion, not on a tolerance.
+    """
+
+    # Keep the arithmetic in Torch so the assertion describes the activation
+    # grid under test rather than a host-specific packed-CPU kernel.
+    monkeypatch.setattr(qqq_mod, "_qqq_cpu_kernel", lambda: None)
+
+    in_features, out_features = 128, 128
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=torch.float16)
+    with torch.no_grad():
+        linear.weight.copy_(torch.eye(out_features, in_features))
+    module = qqq_mod.QQQTorchLinear(
+        bits=4,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+    )
+    module.pack(linear, torch.ones(out_features, 1, dtype=torch.float16))
+    module.post_init()
+    module.eval()
+
+    torch.testing.assert_close(
+        module._unpermute_scales(module.s_channel, module._scale_perm_single_i).reshape(-1),
+        torch.full((out_features,), 1.0 / 16.0, dtype=torch.float32),
+        rtol=0,
+        atol=0,
+    )
+    assert torch.equal(
+        module._int8_weight_for_forward(),
+        (torch.eye(out_features, in_features, dtype=torch.int8) * 16),
+    )
+
+    x = torch.zeros(1, in_features, dtype=torch.float32)
+    x[0, :2] = torch.tensor(
+        [7 * _FP32_MIN_SUBNORMAL, 3 * _FP32_MIN_SUBNORMAL], dtype=torch.float32
+    )
+    quant_x, scale = module.dynamic_quant(x)
+    assert quant_x[0, :2].tolist() == [7, 3]
+    assert scale.item() == _FP32_MIN_SUBNORMAL
+
+    with torch.inference_mode():
+        output = module(x)
+
+    assert output.dtype == torch.float32
+    assert torch.isfinite(output).all()
+    # An identity weight with channel scale 1/16 is the identity, so the
+    # projection has to reproduce the subnormal row exactly.
+    torch.testing.assert_close(output, x, rtol=0, atol=0)
 
 
 @CPU
@@ -273,3 +424,26 @@ def test_triton_quantizer_matches_the_torch_grid():
         triton_codes, triton_scale = triton_dynamic_quant(x)
         assert torch.equal(triton_codes, torch_codes), dtype
         torch.testing.assert_close(triton_scale, torch_scale, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton quantizer requires a CUDA device")
+@pytest.mark.parametrize("value,expected_code", [
+    (0.0, 0),
+    (7 * _FP32_MIN_SUBNORMAL, 7),
+    (63 * _FP32_MIN_SUBNORMAL, 63),
+    (64 * _FP32_MIN_SUBNORMAL, 64),
+])
+def test_triton_quantizer_keeps_fp32_subnormal_rows(value, expected_code):
+    """The deployed CUDA quantizer must not read a subnormal row as zero."""
+
+    from gptqmodel.nn_modules.qlinear.qqq_triton import dynamic_quant as triton_dynamic_quant
+
+    x = torch.tensor([[value, 0.0]], dtype=torch.float32, device="cuda")
+    codes, scale = triton_dynamic_quant(x)
+    torch_codes, torch_scale = qqq_activation_quantize(x)
+
+    assert torch.equal(codes, torch_codes)
+    torch.testing.assert_close(scale, torch_scale, rtol=0, atol=0)
+    assert codes[0, 0].item() == expected_code
+    expected_scale = 1.0 if value == 0.0 else _FP32_MIN_SUBNORMAL
+    assert scale.item() == expected_scale
