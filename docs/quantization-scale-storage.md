@@ -103,6 +103,71 @@ Thus multiplying by that factor after code selection preserves a packable
 scale in the original weight domain. `Quantizer.find_params` accepts this
 per-row bound through `scale_min` for RTN, including RTN's optional MSE search.
 
+## Finite reconstruction range
+
+A packable scale is not the only constraint on the selected code. A symmetric
+grid stores `zero = 2 ** (bits - 1)` and `scale = 2 * amax / (2**bits - 1)`,
+so the group's negative endpoint rounds to code `-2 ** (bits - 1)` and
+reconstructs `2**bits * amax / (2**bits - 1)`, which is strictly larger than
+`amax`. Weight-only RTN quantizes an FP32 copy and then narrows the
+reconstruction back to the source weight dtype for replay. At
+`amax = 61440` the INT4 negative endpoint reconstructs `-65536`; narrowing
+that to FP16 stores `-inf` in the replay weight even though every source
+parameter was finite, and the non-finite value then feeds the next layer's
+calibration capture.
+
+The grid and its ties-to-even rounding are correct. What is missing is a
+bound on which codes the grid may select: the reconstruction for a chosen
+code has to stay inside the finite range of the dtype it is narrowed to.
+`Quantizer.find_params(..., value_limit=...)` therefore derives an inclusive
+code range from the fitted `scale`/`zero`:
+
+```
+steps = floor(value_limit / scale)      # one step down if the product rounds up
+lo    = clamp(zero - steps, 0, maxq)
+hi    = clamp(zero + steps, 0, maxq)
+```
+
+`value_limit` is the source dtype's `finfo(dtype).max`, divided by any
+smoothing factor that is restored after quantization, and it is aligned with
+the fitted lane axis (trailing for a `[rows]` grid and the MSE candidate axis,
+leading for the `[rows, candidates, 1]` shrink workspace). The MSE shrink grid
+and the SmoothMSE ternary search score each candidate with its own bounded
+code range, so the winner is the grid that will actually be packed rather than
+an endpoint that overflows on the way out. `None` keeps the grid's natural
+`[0, maxq]` (or `[-maxq, maxq]` for a signed grid) and leaves every existing
+caller bitwise unchanged.
+
+The narrowed tensor is never clamped after the cast, and the live module keeps
+its own dtype; only the selected codes move, so the replay weight and the
+codes the packers recover from it agree.
+
+```mermaid
+flowchart TD
+    R["RTN.quantize"] --> D{"Source dtype floating?"}
+    D -- no --> N["value_limit = None"]
+    D -- yes --> F["value_limit = finfo(dtype).max<br/>/ restored smoothing factor"]
+    N --> P["Quantizer.find_params"]
+    F --> P
+    P --> S["Fit scale / zero<br/>and MSE candidates"]
+    S --> B["_finite_code_bounds:<br/>steps = floor(value_limit / scale)"]
+    B --> C["Quantizer.quantize with<br/>code_lo / code_hi"]
+    C --> O["Narrow to the source dtype"]
+    O --> V{"Finite?"}
+    V -- yes --> W["Replay weight and pack codes<br/>come from the same grid"]
+    V -- no --> E["Unchanged grid endpoint exceeded the dtype"]
+    style W fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+    style E fill:#fee,stroke:#c33
+```
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| INT4 symmetric, `amax = 61440`, FP16 | Negative endpoint code `0`, replay `-inf` | Code `1`, replay `-57344` |
+| INT4 symmetric, `amax = 61408`, FP16 | Code `0`, replay `-65504` | Unchanged |
+| Ordinary weight ranges | Natural `[0, maxq]` codes | Unchanged (bounds resolve to the natural range) |
+| Scale / zero point | Fitted range | Unchanged |
+| Packing source | Recovered from the replay weight | Same codes, same recovery |
+
 `RTN.quantize` follows the same contract as `GPTQ._fallback_quantize`: its
 `SmoothMSE` branch passes `eps=SCALE_STORAGE_FLOOR`, and its `SmoothRowCol`
 branch passes `scale_min = SCALE_STORAGE_FLOOR / scale_factor` to
