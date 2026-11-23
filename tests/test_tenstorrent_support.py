@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from gptqmodel.models._const import DEVICE
+from gptqmodel.nn_modules.qlinear._numerics import linear_wide_bias
 from gptqmodel.nn_modules.qlinear.tt_xla import XLALinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
@@ -170,6 +171,20 @@ def test_cpu_dequant_matches_independent_formula():
     assert torch.equal(actual, expected)
     assert layout.scales.dtype == torch.bfloat16
     assert layout.bias.dtype == torch.bfloat16
+    assert layout.wide_bias is False
+
+
+def test_cpu_repack_rejects_a_bias_fp32_itself_cannot_hold():
+    """Preparation refuses rather than silently approximating.
+
+    An FP64 bias value just past the FP32 grid cannot be kept wide either, so
+    the packed conversion fails before placement instead of narrowing it.
+    """
+
+    bias = torch.full((8,), 1.0 + 2.0**-40, dtype=torch.float64)
+    fixture = _unit_row_fixture(bias)
+    with pytest.raises(NotImplementedError, match="FP32 cannot represent"):
+        _layout(fixture)
 
 
 # ---------------------------------------------------------------------------
@@ -635,6 +650,133 @@ def test_forward_never_retains_expanded_weights(cpu_xla_layout):
         if isinstance(value, torch.Tensor) and name not in {"qweight", "qzeros", "scales", "g_idx", "bias"}
     }
     assert all(not name.startswith(("weight_", "dequant", "codes")) for name in tensor_attrs)
+
+
+def _unit_row_fixture(bias):
+    """Symmetric 4-bit GPTQ-v2 8x8 layer whose decoded weight has one unit term.
+
+    Zero point 8, code 9 at ``[0, 0]``, every other code 8 and unit scales
+    decode to ``W[0, 0] == 1`` and zero elsewhere, so only the first input
+    feature reaches the first output.
+    """
+
+    codes = torch.full((8, 8), 8, dtype=torch.int32)
+    codes[0, 0] = 9
+    groups, out_features = 1, 8
+    raw_zeros = torch.full((groups, out_features), 8, dtype=torch.int32)
+    fixture = {
+        "qweight": _pack_nibbles(codes),
+        "qzeros": _pack_output_nibbles(raw_zeros),
+        "scales": torch.ones((groups, out_features), dtype=torch.float32),
+        "g_idx": torch.zeros(8, dtype=torch.int32),
+        "bias": bias,
+        "in_features": 8,
+        "out_features": 8,
+        "group_size": -1,
+        "qzero_format": 2,
+        "format": FORMAT.GPTQ_V2,
+    }
+    return fixture
+
+
+def test_cpu_repack_keeps_an_inexact_bias_wide():
+    """A bias BF16 cannot hold is not narrowed in the derived runtime operand.
+
+    FP16 ``1001`` rounds to BF16 ``1000``, so the dequantized ``-1000`` dot
+    plus that rounded copy returns ``0`` where the checkpoint describes ``1``.
+    The registered bias must keep its stored value; only the layout's operand
+    dtype/exactness flag changes.
+    """
+
+    for bias_value, wide in ((1000.0, False), (1001.0, True), (1004.0, False)):
+        bias = torch.full((8,), bias_value, dtype=torch.float16)
+        layout = _layout(_unit_row_fixture(bias))
+        assert layout.wide_bias is wide, bias_value
+        assert layout.bias.dtype is (torch.float32 if wide else torch.bfloat16)
+        assert layout.bias[0].item() == bias_value
+        # The registered checkpoint value was never rewritten.
+        assert bias[0].item() == bias_value and bias.dtype is torch.float16
+
+
+def test_xla_forward_uses_the_wide_epilogue_for_an_inexact_bias(cpu_xla_layout):
+    """Forward must return ``1`` for a cancelling dot with an inexact bias."""
+
+    bias = torch.full((8,), 1001.0, dtype=torch.float16)
+    fixture = _unit_row_fixture(bias)
+    module = XLALinear(
+        bits=4, group_size=-1, sym=True, desc_act=False,
+        in_features=8, out_features=8, bias=True,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    )
+    module.qweight.copy_(fixture["qweight"])
+    module.qzeros.copy_(fixture["qzeros"])
+    module.scales.copy_(fixture["scales"])
+    module.g_idx.copy_(fixture["g_idx"])
+    module.bias.copy_(bias)
+    module.qzero_format(2)
+    module.post_init()
+
+    assert module._tt_layout.wide_bias is True
+    assert module._tt_layout.bias[0].item() == 1001.0
+    # The registered bias keeps the checkpoint value and dtype: the wide path
+    # reads it, it does not rewrite it to match a rounded copy.
+    assert module.bias.dtype is torch.float16
+    assert module.bias[0].item() == 1001.0
+    assert XLALinear.MODEL_DTYPE_BUFFERS == ()
+
+    x = torch.zeros(1, 8, dtype=torch.bfloat16)
+    x[0, 0] = -1000.0
+    actual = module._matmul_epilogue(x, module._tt_layout)
+    # Independent oracle: only ``W[0, 0]`` is one, so the wide dot is ``-1000``
+    # in output 0 and zero elsewhere; the checkpoint bias is 1001.
+    decoded = dequantize_tt_packed_4bit(module._tt_layout)
+    unit = torch.zeros(8, 8)
+    unit[0, 0] = 1.0
+    assert torch.equal(decoded, unit)
+    expected = (x.float() @ decoded + 1001.0).to(torch.bfloat16)
+    assert torch.equal(actual, expected)
+    assert actual.dtype is torch.bfloat16
+    # Only the final cast to the activation dtype rounds: 1001 becomes the
+    # nearest BF16 value, but the cancelling output keeps its residual of 1.
+    assert actual[0, 0].item() == 1.0
+    assert actual[0, 1].item() == torch.tensor(1001.0).to(torch.bfloat16).item()
+
+
+def test_wide_bias_output_rounds_once_to_the_activation_dtype():
+    weights = torch.ones(2, 2, dtype=torch.bfloat16)
+    flat = torch.full((1, 2), 0.5, dtype=torch.bfloat16)
+    bias = torch.tensor([1e-3, -1e-3], dtype=torch.float32)
+    out = linear_wide_bias(flat, weights.t(), bias)
+    assert out.dtype is torch.bfloat16
+    expected = (flat.float() @ weights.float() + bias).to(torch.bfloat16)
+    assert torch.equal(out, expected)
+
+
+def test_tt_layout_rebuilds_when_the_bias_operand_changes(cpu_xla_layout):
+    """A bias write must not leave the previous derived operand in the cache."""
+
+    fixture = _unit_row_fixture(torch.full((8,), 1000.0, dtype=torch.float16))
+    module = XLALinear(
+        bits=4, group_size=-1, sym=True, desc_act=False,
+        in_features=8, out_features=8, bias=True,
+        pack_dtype=torch.int32, format=FORMAT.GPTQ_V2,
+    )
+    module.qweight.copy_(fixture["qweight"])
+    module.qzeros.copy_(fixture["qzeros"])
+    module.scales.copy_(fixture["scales"])
+    module.g_idx.copy_(fixture["g_idx"])
+    module.bias.copy_(fixture["bias"])
+    module.qzero_format(2)
+    module.post_init()
+    assert module._build_tt_layout().wide_bias is False
+
+    # An in-place write is invisible to the packed-word version keys, so the
+    # bias must be part of the placement key.
+    module.bias.copy_(torch.full((8,), 1001.0, dtype=torch.float16))
+    rebuilt = module._build_tt_layout()
+    assert rebuilt.wide_bias is True
+    assert rebuilt.bias.dtype is torch.float32
+    assert rebuilt.bias[0].item() == 1001.0
 
 
 # ---------------------------------------------------------------------------

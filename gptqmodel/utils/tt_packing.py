@@ -46,6 +46,33 @@ def _ceil_div(value: int, divisor: int) -> int:
     return (value + divisor - 1) // divisor
 
 
+def bias_round_trips_bf16(bias: torch.Tensor) -> bool:
+    """Whether ``bias`` has the same values after a BF16 round trip.
+
+    A TT kernel that takes the bias as a BF16 launch operand may only do so
+    when the cast is exact: the epilogue adds the operand it is given, so a
+    rounded copy erases the residual a cancelling dot product should keep.
+    ``torch.equal`` also rejects NaN, which no exact cast can preserve.
+    """
+
+    if not bias.is_floating_point():
+        raise TypeError(f"expected a floating bias, got {bias.dtype}")
+    return bool(torch.equal(bias.to(torch.bfloat16).to(bias.dtype), bias))
+
+
+def bias_round_trips_fp32(bias: torch.Tensor) -> bool:
+    """Whether ``bias`` survives an FP32 round trip exactly.
+
+    The wide epilogue stores the derived operand in FP32, so a value FP32
+    cannot hold has no exact wide form either and must be rejected during
+    preparation instead of being approximated silently.
+    """
+
+    if not bias.is_floating_point():
+        raise TypeError(f"expected a floating bias, got {bias.dtype}")
+    return bool(torch.equal(bias.to(torch.float32).to(bias.dtype), bias))
+
+
 @dataclass(frozen=True)
 class TTPackedGPTQLayout:
     """Persistent, packed-only tensors consumed by a TT GPTQ kernel."""
@@ -56,6 +83,9 @@ class TTPackedGPTQLayout:
     scales: torch.Tensor
     g_idx: torch.Tensor
     bias: Optional[torch.Tensor]
+    # ``bias`` had no exact BF16 form, so it is kept in FP32 and has to be
+    # added to an FP32 product. A BF16 epilogue cannot consume it.
+    wide_bias: bool
     in_features: int
     out_features: int
     group_size: int
@@ -225,11 +255,25 @@ def repack_gptq_for_tt(
     groups = packed_scales.shape[0]
     if int(packed_g_idx.min()) < 0:
         packed_g_idx = (packed_g_idx.to(torch.int64) % groups).to(torch.int32)
-    packed_bias = (
-        None
-        if bias is None
-        else bias.detach().to(device="cpu", dtype=torch.bfloat16, copy=True).contiguous()
-    )
+
+    # The BF16 kernel epilogue consumes the bias at BF16, so only an exact
+    # round trip may be narrowed. Everything else keeps the checkpoint value
+    # in FP32 for the wide epilogue; rewriting the registered bias to match a
+    # rounded copy would hide the loss instead of preserving it.
+    packed_bias = None
+    wide_bias = False
+    if bias is not None:
+        bias_cpu = bias.detach().to(device="cpu", copy=True)
+        if bias_round_trips_bf16(bias_cpu):
+            packed_bias = bias_cpu.to(dtype=torch.bfloat16).contiguous()
+        else:
+            if not bias_round_trips_fp32(bias_cpu):
+                raise NotImplementedError(
+                    f"bias dtype {bias_cpu.dtype} holds values that FP32 cannot "
+                    "represent exactly; TT inference cannot keep this bias wide."
+                )
+            packed_bias = bias_cpu.to(dtype=torch.float32).contiguous()
+            wide_bias = True
 
     # The byte-plane ABI is fixed-width. Validate every uploaded index/scale
     # dimension before placement so a malformed checkpoint fails here rather
@@ -264,6 +308,7 @@ def repack_gptq_for_tt(
         scales=packed_scales,
         g_idx=packed_g_idx,
         bias=packed_bias,
+        wide_bias=wide_bias,
         in_features=in_features,
         out_features=out_features,
         group_size=group_size,
@@ -326,6 +371,8 @@ __all__ = [
     "TT_GPTQ_PACK_BITS",
     "TT_GPTQ_PACK_FACTOR",
     "TTPackedGPTQLayout",
+    "bias_round_trips_bf16",
+    "bias_round_trips_fp32",
     "dequantize_tt_packed_4bit",
     "repack_gptq_for_tt",
     "unpack_tt_byte_planes_bf16",
