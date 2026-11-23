@@ -339,6 +339,265 @@ def test_q8_1_in_range_fields_stay_bit_exact(block):
     )
 
 
+# ``(qtype, divisor)`` for the two simple block formats whose stored scale is a
+# bare FP16 ``d``. ``divisor`` maps a block's peak magnitude to the scale the
+# packer casts, so the fixtures derive their inputs from FP16 itself rather than
+# hardcoding magnitudes per format.
+_SIMPLE_FP16_SCALE_QTYPES = [("Q4_0", 8.0), ("Q8_0", 127.0)]
+_FP16_MAX = float(np.finfo(np.float16).max)
+# FP16's finite range ends at 65504 and the next representable magnitude would
+# be 65536, so 65520 is the rounding midpoint above which the cast overflows.
+_FP16_OVERFLOW_MIDPOINT = 65520.0
+
+
+def _simple_fp16_scale(block: np.ndarray, divisor: float) -> np.float64:
+    """Independently derive the FP32 scale the packer casts for a block."""
+
+    return np.float64(np.abs(block).max()) / np.float64(divisor)
+
+
+def _packed_fp16_scale(packed: np.ndarray, qtype: str) -> np.ndarray:
+    type_size = _GGUF_TYPE_INFO[qtype]["type_size"]
+    blocks = np.asarray(packed, dtype=np.uint8).reshape(-1, type_size)
+    # Both simple formats store the block scale in the first two bytes.
+    return blocks[:, :2].copy().view(np.float16).reshape(-1)
+
+
+@pytest.mark.parametrize("qtype,divisor", _SIMPLE_FP16_SCALE_QTYPES)
+def test_simple_formats_reject_nonfinite_fp16_scale(qtype, divisor):
+    """Q4_0/Q8_0 must not publish an FP16 block scale that rounds to ``inf``.
+
+    Both blocks store ``d`` by casting a finite FP32 value. Above the FP16
+    range that cast publishes ``inf``, and decoding multiplies it by a code that
+    should be zero, turning a zero weight into ``NaN``. The installed ``gguf``
+    reference packer and the NumPy fallback emit identical bytes, so the guard
+    belongs to the shared exit and is asserted here on the packed bytes.
+    """
+
+    _skip_without_quantizer(qtype)
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+    block = np.full(block_size, np.float32(_FP16_OVERFLOW_MIDPOINT * divisor), dtype=np.float32)
+    block[0] = 0.0
+
+    with pytest.raises(ValueError) as excinfo:
+        _quantize_gguf_tensor_numpy(block.reshape(1, -1), qtype)
+
+    message = str(excinfo.value)
+    assert qtype in message
+    assert "block scale d" in message
+    assert "block 0 of 1" in message
+    assert "FP16" in message
+    # The scale is finite in FP32 and leaves range only in the required cast.
+    scale = _simple_fp16_scale(block, divisor)
+    assert np.isfinite(scale)
+    with np.errstate(over="ignore"):
+        assert not np.isfinite(np.float16(scale))
+    # The published bytes are exactly what decoding turns into ``inf``/``NaN``,
+    # so a guard on the packed header is the only place that can stop them.
+    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        unguarded = gguf_module._pack_gguf_tensor_numpy(block.reshape(1, -1), qtype)
+    assert not np.isfinite(_packed_fp16_scale(unguarded, qtype)).all()
+    assert not np.isfinite(_dequantize_gguf_tensor_numpy(unguarded, qtype)).all()
+
+
+@pytest.mark.parametrize("qtype,divisor", _SIMPLE_FP16_SCALE_QTYPES)
+def test_simple_formats_keep_finite_fp16_scale(qtype, divisor):
+    """The largest finite FP16 scale must still pack and keep its exact layout."""
+
+    _skip_without_quantizer(qtype)
+    block = np.zeros(_GGUF_TYPE_INFO[qtype]["block_size"], dtype=np.float32)
+    block[1:] = np.float32(_FP16_MAX * divisor)
+    weight = block.reshape(1, -1)
+
+    with np.errstate(over="ignore"):
+        packed = _quantize_gguf_tensor_numpy(weight, qtype)
+        scale = _packed_fp16_scale(packed, qtype)
+    assert np.isfinite(scale).all(), scale
+    # The pre-cast scale is at the largest finite FP16 value; Q4_0 negates its
+    # signed extremum, so the magnitude is what both formats must preserve.
+    assert abs(float(scale[0])) == np.float16(_FP16_MAX)
+
+    # In-range blocks keep the existing ggml layout: the guard may not rewrite
+    # the published bytes, including when the reference package is installed.
+    if _GGUF_AVAILABLE:
+        pristine = gguf_lib.quantize(weight, gguf_lib.GGMLQuantizationType[qtype])
+        np.testing.assert_array_equal(packed, pristine)
+
+
+@pytest.mark.parametrize("qtype,divisor", _SIMPLE_FP16_SCALE_QTYPES)
+def test_simple_formats_report_the_failing_block(qtype, divisor):
+    """A mixed matrix names the failing block and steers callers to a wider format."""
+
+    _skip_without_quantizer(qtype)
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+    weight = np.zeros((1, block_size * 2), dtype=np.float32)
+    weight[0, :block_size] = 1.0
+    weight[0, block_size:] = np.float32(_FP16_OVERFLOW_MIDPOINT * divisor)
+
+    with pytest.raises(ValueError) as excinfo:
+        _quantize_gguf_tensor_numpy(weight, qtype)
+
+    message = str(excinfo.value)
+    assert "block 1 of 2" in message
+    assert "block scale d" in message
+    # The message must point at a wider stored field instead of implying the
+    # GGUF layout can be widened.
+    assert "Q8_K" in message
+
+
+@pytest.mark.parametrize("qtype,divisor", _SIMPLE_FP16_SCALE_QTYPES)
+def test_simple_formats_guard_covers_every_packer(qtype, divisor):
+    """The shared exit validates bytes from the `gguf` package and the fallback."""
+
+    _skip_without_quantizer(qtype)
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+    weight = np.full((1, block_size), np.float32(_FP16_OVERFLOW_MIDPOINT * divisor), dtype=np.float32)
+
+    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
+
+    original = gguf_module._GGUF_AVAILABLE
+    try:
+        if _GGUF_AVAILABLE:
+            # The reference package writes ``inf`` here, so a guard that only
+            # inspected the NumPy fallback's intermediates would miss it.
+            gguf_module._GGUF_AVAILABLE = True
+            with pytest.raises(ValueError, match="block scale d"):
+                _quantize_gguf_tensor_numpy(weight, qtype)
+        gguf_module._GGUF_AVAILABLE = False
+        with pytest.raises(ValueError, match="block scale d"):
+            _quantize_gguf_tensor_numpy(weight, qtype)
+    finally:
+        gguf_module._GGUF_AVAILABLE = original
+
+
+@pytest.mark.parametrize("qtype,divisor", _SIMPLE_FP16_SCALE_QTYPES)
+def test_simple_formats_guard_reads_torch_packed_bytes(qtype, divisor):
+    """The MLX packer returns a torch tensor, so the exit check must read one."""
+
+    _skip_without_quantizer(qtype)
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+    weight = np.full((1, block_size), np.float32(_FP16_OVERFLOW_MIDPOINT * divisor), dtype=np.float32)
+
+    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        packed = gguf_module._pack_gguf_tensor_numpy(weight, qtype)
+    as_tensor = torch.from_numpy(np.ascontiguousarray(packed)).to(torch.uint8)
+    with pytest.raises(ValueError, match="block scale d"):
+        gguf_module._check_packed_fp16_fields(as_tensor, qtype)
+    # An in-range payload stays accepted on the same tensor entry point.
+    gguf_module._check_packed_fp16_fields(
+        torch.from_numpy(
+            np.ascontiguousarray(gguf_module._pack_gguf_tensor_numpy(weight * 0.0, qtype))
+        ).to(torch.uint8),
+        qtype,
+    )
+
+
+@pytest.mark.parametrize("alias,divisor", [("q4_0", 8.0), ("q8_0", 127.0)])
+def test_simple_export_fails_before_publishing_a_checkpoint(alias, divisor):
+    """The export packer must fail closed, not store an unreadable qweight.
+
+    ``GGUFTorchLinear.pack_original`` is what an export writes into the module
+    buffer that is later serialized. An out-of-range source block must raise
+    there, before any checkpoint can contain the non-finite header, and an
+    in-range block must still pack with the same bytes it always had.
+    """
+
+    qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
+    in_features = _GGUF_TYPE_INFO[qtype]["block_size"]
+
+    def build(peak: float) -> torch.nn.Linear:
+        lin = torch.nn.Linear(in_features, 2, bias=False)
+        with torch.no_grad():
+            lin.weight.fill_(float(np.float32(peak)))
+        return lin
+
+    def module() -> GGUFTorchLinear:
+        return GGUFTorchLinear(
+            bits=alias,
+            group_size=-1,
+            sym=True,
+            desc_act=False,
+            in_features=in_features,
+            out_features=2,
+            bias=False,
+            register_buffers=False,
+        )
+
+    out_of_range = module()
+    with pytest.raises(ValueError, match="block scale d"):
+        out_of_range.pack_original(build(_FP16_OVERFLOW_MIDPOINT * divisor), None, None)
+    # The rejected pack must not publish any packed buffer at all.
+    assert "qweight" not in out_of_range._buffers
+
+    in_range = module()
+    in_range.pack_original(build(_FP16_MAX * divisor), None, None)
+    stored = _packed_fp16_scale(in_range.qweight.numpy(), qtype)
+    assert np.isfinite(stored).all(), stored
+    # The narrow path keeps the exact reference bytes; only out-of-range input
+    # changes behavior.
+    if _GGUF_AVAILABLE:
+        reference = gguf_lib.quantize(
+            in_range._weight_to_matrix(build(_FP16_MAX * divisor)).numpy().copy(),
+            gguf_lib.GGMLQuantizationType[qtype],
+        )
+        np.testing.assert_array_equal(in_range.qweight.numpy(), reference)
+
+
+@pytest.mark.parametrize("alias,divisor", [("q4_0", 8.0), ("q8_0", 127.0)])
+def test_simple_in_range_export_round_trips_through_safetensors(tmp_path, alias, divisor):
+    """An accepted export must stay readable after a real save and reload."""
+
+    from safetensors.torch import load_file, save_file
+
+    qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
+    in_features = _GGUF_TYPE_INFO[qtype]["block_size"]
+
+    def build() -> GGUFTorchLinear:
+        module = GGUFTorchLinear(
+            bits=alias,
+            group_size=-1,
+            sym=True,
+            desc_act=False,
+            in_features=in_features,
+            out_features=2,
+            bias=True,
+        )
+        lin = torch.nn.Linear(in_features, 2, bias=True)
+        with torch.no_grad():
+            lin.weight.fill_(float(np.float32(_FP16_MAX * divisor)))
+            lin.bias.copy_(torch.tensor([1.0, -2.0]))
+        module.pack_original(lin, None, None)
+        return module
+
+    source = build()
+    path = tmp_path / f"{alias}.safetensors"
+    save_file({name: value.contiguous() for name, value in source.state_dict().items()}, str(path))
+
+    reloaded = GGUFTorchLinear(
+        bits=alias,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=2,
+        bias=True,
+    )
+    reloaded.load_state_dict(load_file(str(path)), strict=True)
+
+    torch.testing.assert_close(reloaded.qweight, source.qweight, rtol=0, atol=0)
+    torch.testing.assert_close(reloaded.bias, source.bias, rtol=0, atol=0)
+    stored = _packed_fp16_scale(reloaded.qweight.numpy(), qtype)
+    assert np.isfinite(stored).all(), stored
+    decoded = _dequantize_gguf_tensor_numpy(reloaded.qweight.numpy(), qtype)
+    assert np.isfinite(decoded).all()
+
+
 @pytest.mark.parametrize("alias", ALL_ALIASES)
 def test_gguf_quantize_dequantize_roundtrip(alias):
     """Pack every alias and verify dequant stays inside its precision budget."""
