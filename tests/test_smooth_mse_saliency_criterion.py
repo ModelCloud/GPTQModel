@@ -656,7 +656,6 @@ def test_saliency_normalization_is_invariant_to_a_positive_row_scale(case, form,
         block, qcfg, MAXQ, steps=32, maxshrink=0.8, weights=weights
     )
     control = (weights / magnitude).to(device)
-    weights = weights.to(device)
     control_dequant, control_scale, _control_zero = mse_optimal_quant(
         block, qcfg, MAXQ, steps=32, maxshrink=0.8, weights=control
     )
