@@ -126,6 +126,42 @@ refuses `weight.prepare` on the GPTQ/AWQ targets instead of dropping it.
 - `tests/qcfg/test_config_validation_4668.py` — payload key validation.
 
 
+## RMS smoothers and representable magnitudes (#6014)
+
+`SmoothRowCol` and `SmoothSoftNorm` rescale by a root-mean-square, so the
+restore multiplies the quantized block by the same factor. `SmoothRowCol` was
+written as `block.pow(2).mean(dim).sqrt()`, which squares before it reduces. A
+lane whose RMS is representable still overflowed: for FP32 a constant row of
+`2**62` already produced `inf` from the mean's accumulator, and `2**70`
+overflowed the single square. The normalized block then became `0` and the
+restore `0 * inf` became `nan`.
+
+`_safe_rms` divides each element by its lane's absolute maximum before
+squaring, so every squared term is at most one and the mean of a lane's terms
+is at most one; the positive lane maximum is restored afterwards. The scaled
+form runs only for a lane whose elements are all finite and whose plain RMS is
+not, so a representable lane keeps the previous arithmetic bit for bit and a
+non-finite element still propagates `inf`/`nan`. An all-zero lane is exactly
+zero; `eps` clamping is unchanged.
+
+| Block (FP32) | Before | After | FP64 oracle |
+| --- | --- | --- | --- |
+| constant row `2**62` | `scale_factor=inf`, restore `nan` | `2**62` | `2**62` |
+| constant row `2**70` | `scale_factor=inf`, restore `nan` | `2**70` | `2**70` |
+| constant row `2**120` | `scale_factor=inf`, restore `nan` | `2**120` | `2**120` |
+| `SmoothSoftNorm`, `+-2**70` zero-mean row | `nan` | `+-2**70` | `+-2**70` |
+| ordinary `randn` row | unchanged | unchanged | — |
+
+This is a pre-processing range fix, not a common-model accuracy change: weights
+this large usually fail the FP16 checkpoint scale storage check later. The
+benefit is a finite, clearly-bounded result for a legal BF16/FP32 source
+instead of an early `nan`.
+
+- `tests/test_smooth_rms_overflow_6014.py` — helper, both smoother consumers,
+  the real `RTN.quantize` path, the representable-block control, and the
+  all-zero/non-finite cases, all against an independent FP64 oracle.
+
+
 ## Other options accepted but never applied (#5583)
 
 The same audit covers the other shared fields. `desc_act`, `mse`, `gptaq` and
