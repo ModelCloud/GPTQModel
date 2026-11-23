@@ -963,8 +963,8 @@ def test_gptq_bypasses_zero_scale_and_logs_once(monkeypatch, act_group_aware):
 
     original_find_params = gptq.quantizer.find_params
 
-    def find_params_with_zero_scale(x, weight=False):
-        original_find_params(x, weight=weight)
+    def find_params_with_zero_scale(x, weight=False, **kwargs):
+        original_find_params(x, weight=weight, **kwargs)
         gptq.quantizer.scale[0, 0] = 0
 
     monkeypatch.setattr(gptq.quantizer, "find_params", find_params_with_zero_scale)
@@ -1023,8 +1023,8 @@ def test_specialized_quantizers_sanitize_zero_scale_before_return(monkeypatch, k
 
     original_find_params = task.quantizer.find_params
 
-    def find_params_with_zero_scale(x, weight=False):
-        original_find_params(x, weight=weight)
+    def find_params_with_zero_scale(x, weight=False, **kwargs):
+        original_find_params(x, weight=weight, **kwargs)
         task.quantizer.scale[0, 0] = 0
 
     monkeypatch.setattr(

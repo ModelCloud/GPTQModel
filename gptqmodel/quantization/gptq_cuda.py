@@ -48,9 +48,22 @@ def gptq_block_update(
     scale: torch.Tensor,
     zero: torch.Tensor,
     column_group: torch.Tensor,
+    code_lo: torch.Tensor | None,
+    code_hi: torch.Tensor | None,
     quantized: torch.Tensor,
     errors: torch.Tensor,
     losses: torch.Tensor,
     maxq: int,
 ) -> None:
-    _EXTENSION.op("block_update")(work, hinv, scale, zero, column_group, quantized, errors, losses, maxq)
+    """Run the fused 128-column block update.
+
+    ``code_lo``/``code_hi`` are the optional inclusive integer code range per
+    ``(group, row)`` that keeps each reconstruction inside the destination
+    dtype's finite range. Passing both as ``None`` keeps the natural
+    ``[0, maxq]`` grid exactly as before.
+    """
+
+    _EXTENSION.op("block_update")(
+        work, hinv, scale, zero, column_group, code_lo, code_hi,
+        quantized, errors, losses, maxq,
+    )

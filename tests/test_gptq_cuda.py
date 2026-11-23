@@ -168,7 +168,7 @@ def test_cuda_block_rounding_ties_and_saturation_match_eager(bits):
     cuda_error = torch.empty_like(work)
     cuda_loss = torch.empty_like(work)
     gptq_cuda.gptq_block_update(
-        cuda_work, hinv, scale, zero, column_group,
+        cuda_work, hinv, scale, zero, column_group, None, None,
         cuda_q, cuda_error, cuda_loss, maxq,
     )
     for actual, expected in zip(
@@ -194,7 +194,9 @@ def test_cuda_block_preserves_nan_quantization():
     q = torch.empty_like(work)
     errors = torch.empty_like(work)
     losses = torch.empty_like(work)
-    gptq_cuda.gptq_block_update(work, hinv, scale, zero, column_group, q, errors, losses, 15)
+    gptq_cuda.gptq_block_update(
+        work, hinv, scale, zero, column_group, None, None, q, errors, losses, 15
+    )
     assert torch.isnan(q[0, 0])
     assert torch.isnan(errors[0, 0])
     assert torch.isnan(losses[0, 0])

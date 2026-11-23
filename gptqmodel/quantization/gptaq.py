@@ -492,7 +492,7 @@ class GPTAQ(GPTQ):
         # not set the per-channel scale that every live column is quantized
         # with. GPTQ/QQQ got this ordering in #5611; the subclasses that
         # re-implement the block pass kept the old order (#5714).
-        self.quantizer.find_params(W, weight=True)
+        self._fit_weight_params(W)
 
         # g_idx = []
         scale = []
@@ -505,7 +505,7 @@ class GPTAQ(GPTQ):
             groups = []
             for i in range(0, self.columns, self.qcfg.group_size):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i: (i + self.qcfg.group_size)], weight=True)
+                self._fit_weight_params(W[:, i: (i + self.qcfg.group_size)], quantizer)
 
                 scale.append(quantizer.scale)
                 zero.append(quantizer.zero)
@@ -614,9 +614,9 @@ class GPTAQ(GPTQ):
                 # the block loop, so rebuild the pre-reorder measurement from
                 # the natural column order to match a run that never left the
                 # host.
-                self.quantizer.find_params(W[:, invperm], weight=True)
+                self._fit_weight_params(W[:, invperm])
             else:
-                self.quantizer.find_params(W, weight=True)
+                self._fit_weight_params(W)
             if self.qcfg.static_groups:
                 scale, zero = _move_static_groups(groups, cdu_device)
 
@@ -664,7 +664,7 @@ class GPTAQ(GPTQ):
                 if self.qcfg.group_size != -1:
                     if not self.qcfg.static_groups:
                         if (i1 + i) % self.qcfg.group_size == 0:
-                            self.quantizer.find_params(W[:, (i1 + i): (i1 + i + self.qcfg.group_size)], weight=True)
+                            self._fit_weight_params(W[:, (i1 + i): (i1 + i + self.qcfg.group_size)])
 
                         if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
                             scale.append(self.quantizer.scale)

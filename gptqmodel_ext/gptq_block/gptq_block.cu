@@ -15,6 +15,7 @@ constexpr int kWidth = 128;
 __global__ void block_update_kernel(
     float* work, const float* hinv, const float* scale, const float* zero,
     const int32_t* column_group,
+    const float* code_lo, const float* code_hi, int64_t code_stride,
     float* quantized, float* errors, float* losses, int64_t rows,
     int64_t work_stride, int64_t hinv_stride_row, int64_t hinv_stride_col, int64_t scale_stride,
     int64_t zero_stride, int64_t column_group_stride, int64_t quant_stride, int64_t error_stride,
@@ -36,8 +37,14 @@ __global__ void block_update_kernel(
             const float diagonal = hinv[pivot * hinv_stride_row + pivot * hinv_stride_col];
             const float rounded = nearbyintf(__fdiv_rn(value, row_scale));
             const float shifted = __fadd_rn(rounded, row_zero);
+            // The host may pass a per-(group, row) inclusive code range whose
+            // reconstruction stays inside the destination dtype's finite
+            // range. A null pointer keeps the natural ``[0, maxq]`` grid so
+            // existing callers stay bitwise identical.
+            const float lo = code_lo == nullptr ? 0.0f : code_lo[group * code_stride + row];
+            const float hi = code_hi == nullptr ? maxq : code_hi[group * code_stride + row];
             // CUDA fminf/fmaxf discard NaNs; torch.clamp preserves them.
-            const float code = isnan(shifted) ? shifted : fminf(fmaxf(shifted, 0.0f), maxq);
+            const float code = isnan(shifted) ? shifted : fminf(fmaxf(shifted, lo), hi);
             const float q = __fmul_rn(row_scale, __fsub_rn(code, row_zero));
             const float residual = __fsub_rn(value, q);
             const float squared = __fmul_rn(residual, residual);
@@ -60,6 +67,8 @@ __global__ void block_update_kernel(
 void block_update_cuda(
     at::Tensor work, const at::Tensor& hinv, const at::Tensor& scale,
     const at::Tensor& zero, const at::Tensor& column_group,
+    const c10::optional<at::Tensor>& code_lo,
+    const c10::optional<at::Tensor>& code_hi,
     at::Tensor quantized, at::Tensor errors,
     at::Tensor losses, int64_t maxq) {
     TORCH_CHECK(maxq >= 3 && maxq <= 255 && ((maxq + 1) & maxq) == 0,
@@ -89,12 +98,34 @@ void block_update_cuda(
                     "outputs must match work and have contiguous columns");
     }
 
+    // Optional per-(group, row) inclusive code range. Both entries must name
+    // the same `[groups, rows]` layout as `scale`/`zero`; a single missing
+    // entry is a caller bug because the kernel treats a null bound as the
+    // natural grid for that endpoint only.
+    TORCH_CHECK(code_lo.has_value() == code_hi.has_value(),
+                "code_lo and code_hi must be provided together");
+    const float* code_lo_ptr = nullptr;
+    const float* code_hi_ptr = nullptr;
+    int64_t code_stride = 0;
+    if (code_lo.has_value()) {
+        for (const auto* bound : {&code_lo.value(), &code_hi.value()}) {
+            TORCH_CHECK(bound->device() == device, "code bounds must use the work device");
+            TORCH_CHECK(bound->scalar_type() == at::kFloat, "code bounds must be float32");
+            TORCH_CHECK(bound->sizes() == scale.sizes(), "code bounds must match [groups, rows]");
+            TORCH_CHECK(bound->stride(1) == 1, "code bounds must have contiguous rows");
+        }
+        code_lo_ptr = code_lo->const_data_ptr<float>();
+        code_hi_ptr = code_hi->const_data_ptr<float>();
+        code_stride = code_lo->stride(0);
+    }
+
     c10::cuda::CUDAGuard guard(device);
     auto stream = at::cuda::getCurrentCUDAStream(device.index());
     block_update_kernel<<<rows, kWidth, 0, stream>>>(
         work.data_ptr<float>(), hinv.const_data_ptr<float>(),
         scale.const_data_ptr<float>(), zero.const_data_ptr<float>(),
         column_group.const_data_ptr<int32_t>(),
+        code_lo_ptr, code_hi_ptr, code_stride,
         quantized.data_ptr<float>(), errors.data_ptr<float>(),
         losses.data_ptr<float>(), rows, work.stride(0), hinv.stride(0), hinv.stride(1),
         scale.stride(0), zero.stride(0), column_group.stride(0),
