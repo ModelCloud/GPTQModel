@@ -77,6 +77,51 @@ input magnitudes from `1e-6` to `1e15` found no selected-scale or output
 difference. For large finite activations the scaled form stays finite, so a
 real candidate replaces the all-zero default.
 
+### Least-squares refinement in the scaled coordinates
+
+The `least_squares` and `least_squares_grid` recipes add a scalar
+least-squares refinement `sum(x * c) / sum(c**2)` per E2M1 code assignment
+`c`. The refinement originally solved that quotient in absolute FP32 while the
+error was already ranked in per-block power-of-two units. An activation and
+its global scale that are both finite but near the top of the FP32 range make
+the numerator `sum(blocks * values)` overflow to infinity, so `optimal` becomes
+infinite, the clamp saturates `inverse` at the E4M3 upper bound, that candidate
+loses the comparison, and the search silently keeps the worse seed. The public
+output stays finite, so an `isfinite` check does not see it.
+
+The refinement now evaluates the same quotient in the per-block power-of-two
+coordinates used for the error:
+
+```mermaid
+flowchart TD
+    A["refine(values)"] --> B["denominator = sum(values ** 2)"]
+    B --> C["optimal = sum(ldexp(blocks, -e) * values) / max(denominator, 1)"]
+    C --> D["inverse = optimal / ldexp(global_scale, -e)"]
+    D --> E{"denominator > 0?"}
+    E -->|"no"| F["inverse = 1"]
+    E -->|"yes"| G["clamp inverse to [2**-9, 448]"]
+    G --> H["round to E4M3FN"]
+    F --> H
+    H --> I["evaluate(local) ranks the candidate"]
+```
+
+`ldexp` scales the numerator, the block values, and the global scale by the
+same exact power of two, so the ratio, the clamp, and the E4M3 rounding are
+unchanged for ordinary activations. A fixed 16-element FP32 block at global
+scale `0.001`, compared with the identical problem scaled by `2**124`, now
+selects the same E4M3 scale and the same normalized SSE; a FP64 oracle that
+enumerates the 126 positive finite E4M3 scales supplies the expected optimum.
+`four_six` remains the negative control because it never refines, and
+`least_squares_grid` recovered this fixture through its neighborhood search
+without the refinement fix, so it is not evidence that the underlying
+`refine` overflow is gone.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Refinement coordinates | absolute FP32 numerator; overflows for large finite activations | per-block power-of-two numerator and global-scale divisor; stays finite |
+| Overflow result | `optimal = inf`, saturation at the E4M3 upper bound, candidate rejected, worse seed retained | finite optimum at a safe magnitude, then the true E4M3 rounding |
+| Ordinary activations | — | selected scale and output byte-identical across every recipe |
+
 | Mechanism | Before | After |
 | --- | --- | --- |
 | Error accumulation | absolute FP32 SSE; overflows to `inf` | per-block power-of-two scaled SSE; stays finite |
