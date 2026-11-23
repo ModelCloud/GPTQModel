@@ -29,7 +29,11 @@ from gptqmodel.quantization.config import (
     RTNConfig,
     SmoothMSE,
 )
-from gptqmodel.quantization.fallback_smooth import mse_optimal_quant, smooth_applies
+from gptqmodel.quantization.fallback_smooth import (
+    _normalize_weights,
+    mse_optimal_quant,
+    smooth_applies,
+)
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.quantization.qqq import QQQ
 from gptqmodel.quantization.rtn import RTN
@@ -587,3 +591,165 @@ def test_default_smooth_mse_from_every_config_form_reaches_the_rtn_search_at_g64
 
     _rtn_grid(block, smooth, group_size=64)
     assert captured, "the default SmoothMSE search was skipped at group_size=64"
+
+
+# Large but finite saliencies: their FP32 row sum overflows to +inf even though
+# every element is representable, and ``finite / inf`` then zeroed the whole
+# objective. The bound below keeps the scaled error product representable.
+LARGE_SALIENCY = 1e38
+
+
+def _saliency_rows():
+    """Nonuniform, sparse and uniform positive saliency fixtures."""
+    torch.manual_seed(5286)
+    nonuniform = torch.rand(4, GROUP_SIZE) + 0.05
+    sparse = torch.zeros(2, GROUP_SIZE)
+    sparse[0, ::4] = torch.rand(GROUP_SIZE // 4) + 0.5
+    sparse[1, :98] = torch.rand(98) + 0.25
+    uniform = torch.ones(1, GROUP_SIZE)
+    return {"nonuniform": nonuniform, "sparse": sparse, "uniform": uniform}
+
+
+@pytest.mark.parametrize("case", sorted(_saliency_rows()), ids=sorted(_saliency_rows()))
+@pytest.mark.parametrize("form", ["channel", "element"], ids=["hessian-diagonal", "per-element"])
+@pytest.mark.parametrize("magnitude", [1.0, 1e36, LARGE_SALIENCY], ids=["1", "1e36", "1e38"])
+@pytest.mark.parametrize("device", DEVICES)
+def test_saliency_normalization_is_invariant_to_a_positive_row_scale(case, form, magnitude, device):
+    """A common positive saliency factor must not change the selected grid (#5997 class).
+
+    Every supplied weight is finite and positive, so the normalized objective
+    is the same up to a positive per-row constant. ``1e38`` used to sum to
+    ``+inf`` in FP32 and normalize to an all-zero row, which flattened every
+    candidate score to zero and kept the unshrunk baseline.
+    """
+
+    base = _saliency_rows()[case] * magnitude
+    rows = base.shape[0]
+    # A 1-D Hessian diagonal has one value per input channel, so every row uses
+    # the same proportions; the 2-D form keeps a distinct row per weight row.
+    weights = base[0] if form == "channel" else base
+    block = torch.full((rows, GROUP_SIZE), 0.1, device=device)
+    block[:, 0] = -1.0
+
+    normalized = _normalize_weights(
+        weights, rows, GROUP_SIZE, device=block.device, dtype=torch.float32
+    )
+    assert torch.isfinite(normalized).all()
+    total = normalized.sum(dim=2)
+    assert bool((total > 0).all()), "a finite positive row normalized to zero"
+    torch.testing.assert_close(total, torch.ones_like(total), rtol=1e-5, atol=1e-6)
+
+    # The normalized weights must match the row's own proportions, not a
+    # saturation of the largest element.
+    if form == "channel":
+        channel = base[0].double()
+        expected = (channel / channel.sum()).expand(rows, -1)
+    else:
+        reference = base.double()
+        expected = reference / reference.sum(dim=1, keepdim=True)
+    torch.testing.assert_close(
+        normalized.squeeze(1).double().cpu(), expected, rtol=1e-5, atol=1e-6
+    )
+
+    qcfg = RTNConfig(bits=4, group_size=GROUP_SIZE, sym=True, smooth=SmoothMSE())
+    dequant, scale, _zero = mse_optimal_quant(
+        block, qcfg, MAXQ, steps=32, maxshrink=0.8, weights=weights
+    )
+    control = (weights / magnitude).to(device)
+    control_dequant, control_scale, _control_zero = mse_optimal_quant(
+        block, qcfg, MAXQ, steps=32, maxshrink=0.8, weights=control
+    )
+
+    # The trigger must be real: the unscaled saliency picks a grid that is not
+    # the plain unshrunk one.
+    unshrunk_scale = (2.0 * block.abs().amax(dim=1, keepdim=True) / MAXQ).clamp_min(1e-8)
+    assert not torch.equal(control_scale, unshrunk_scale)
+
+    assert control_scale is not None
+    assert torch.equal(scale, control_scale), (
+        "a positive saliency scale changed the selected shrink factor"
+    )
+    codes = (block / scale + _zero).round()
+    control_codes = (block / control_scale + _control_zero).round()
+    assert torch.equal(codes, control_codes)
+    torch.testing.assert_close(dequant, control_dequant, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("form", ["channel", "element"], ids=["hessian-diagonal", "per-element"])
+def test_all_zero_saliency_row_keeps_the_uniform_fallback(form):
+    """An all-zero row still means "every weight is equally important"."""
+
+    rows, columns = 2, 8
+    weights = torch.zeros(columns) if form == "channel" else torch.zeros(rows, columns)
+    normalized = _normalize_weights(
+        weights, rows, columns, device="cpu", dtype=torch.float32
+    )
+    torch.testing.assert_close(
+        normalized,
+        torch.full((rows, 1, columns), 1.0 / columns),
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("form", ["channel", "element"], ids=["hessian-diagonal", "per-element"])
+def test_saliency_sanitizing_still_drops_negative_and_nonfinite_values(form):
+    """The pre-existing cleanup must survive the overflow-safe normalization."""
+
+    rows, columns = 2, 4
+    values = torch.tensor([1.0, -3.0, float("inf"), 2.0])
+    weights = values.clone() if form == "channel" else values.repeat(rows, 1)
+    normalized = _normalize_weights(
+        weights, rows, columns, device="cpu", dtype=torch.float32
+    )
+    expected = torch.tensor([1.0, 0.0, 0.0, 2.0]) / 3.0
+    torch.testing.assert_close(
+        normalized[:, 0, :],
+        expected.expand(rows, columns),
+        rtol=1e-6,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_gptq_fallback_hessian_diagonal_is_invariant_to_its_scale(device):
+    """The consumer's own grid must not change when the diagonal is rescaled."""
+
+    # A Gaussian block: the saliency-weighted search normally shrinks it, so an
+    # all-zero normalized row (the pre-fix overflow) would visibly keep p = 1.
+    torch.manual_seed(5286)
+    block = torch.randn(8, GROUP_SIZE)
+    qcfg = GPTQConfig(
+        bits=4,
+        group_size=GROUP_SIZE,
+        sym=True,
+        fallback=Fallback(strategy=FallbackStrategy.RTN, smooth=SmoothMSE()),
+        offload_to_disk=False,
+    )
+
+    def run(diagonal_amplitude):
+        source = torch.nn.Linear(
+            GROUP_SIZE, block.shape[0], bias=False, device=device
+        )
+        with torch.no_grad():
+            source.weight.copy_(block.to(device))
+        task = GPTQ(source, qcfg)
+        task.quantizer.configure(perchannel=True)
+        torch.manual_seed(5287)
+        diagonal = torch.rand(GROUP_SIZE, device=device) + 0.25
+        hessian = torch.zeros(GROUP_SIZE, GROUP_SIZE, device=device)
+        hessian.diagonal().copy_(diagonal * diagonal_amplitude)
+        task.H = hessian
+        return task._fallback_quantize(FallbackStrategy.RTN, blocksize=GROUP_SIZE)[0]
+
+    control = run(1.0)
+    rescaled = run(LARGE_SALIENCY)
+    # The trigger: the searched grid must differ from the unshrunk baseline,
+    # otherwise an all-zero weight row would go unnoticed.
+    unshrunk = _unshrunk_dequant(block).to(device)
+    assert not torch.equal(control, unshrunk), (
+        "the fixture never shrank, so it cannot expose an all-zero weight row"
+    )
+    assert torch.equal(rescaled, control), (
+        "the Hessian diagonal magnitude changed the fallback grid"
+    )

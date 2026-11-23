@@ -243,6 +243,14 @@ def _normalize_weights(weights: Optional[torch.Tensor], rows: int, columns: int,
     calibration-free path penalize relative errors on large weights. Each row
     is normalized to sum to one so rows with different scales contribute
     comparably; an all-zero row falls back to a uniform weight.
+
+    Normalization divides by the row's largest positive weight before summing.
+    The sum is accumulated in the work dtype and can overflow to ``+inf`` even
+    when every weight is finite, and ``finite / inf`` is zero: a row of large
+    finite saliencies then silently scored every candidate with zero weights
+    and the search kept the unshrunk grid. The row maximum is one positive
+    factor per row, so dividing by it cannot change the argmin, while every
+    scaled weight is at most one and their sum is bounded by ``columns``.
     """
     if weights is None:
         return None
@@ -264,9 +272,11 @@ def _normalize_weights(weights: Optional[torch.Tensor], rows: int, columns: int,
             f"weights must be 1-D or 2-D, got {weights.dim()}-D"
         )
     weights = torch.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-    total = weights.sum(dim=2, keepdim=True)
+    row_max = weights.amax(dim=2, keepdim=True)
+    scaled = weights / torch.where(row_max > 0, row_max, torch.ones_like(row_max))
+    total = scaled.sum(dim=2, keepdim=True)
     uniform = torch.full_like(weights, 1.0 / columns)
-    return torch.where(total > 0, weights / total.clamp_min(eps), uniform)
+    return torch.where(total > 0, scaled / total.clamp_min(eps), uniform)
 
 
 def element_saliency_weights(block: torch.Tensor, *, eps: float = 1e-12) -> torch.Tensor:
