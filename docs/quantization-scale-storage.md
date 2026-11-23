@@ -195,6 +195,18 @@ so a clipped grid is accepted only when it lowers the *weighted* error. The
 uniform weight MSE is no longer the contract: it can rise slightly while the
 weighted output error falls.
 
+`_normalize_weights` scales each row by its largest positive weight before it
+sums. The sum itself is accumulated in the work dtype and can overflow to
+`+inf` even though every supplied saliency is finite; `finite / inf` is then
+zero, so the whole row silently scored every candidate with zero weights and
+the search kept the unshrunk grid. A common rescale of all 128 saliencies from
+`1` to `1e38` turned a scale of `0.1083531305193901` (FP64 MSE
+`2.0778878098365143e-4`) into `0.13333334028720856` (MSE
+`1.137153072955355e-3`, 5.47x). Dividing by the row maximum is one positive
+factor per row, so it cannot change the argmin, and the scaled sum is bounded
+by `columns`. An all-zero row still falls back to the uniform weight, and
+negative or nonfinite entries are still cleared first.
+
 ```mermaid
 flowchart TD
     S["mse_optimal_quant(block)"] --> W["weights = Hessian diagonal<br/>or |w| + mean(|w|)"]
@@ -225,7 +237,11 @@ rows, in symmetric and asymmetric modes, through the direct search and the
 `tests/test_smooth_mse_saliency_criterion.py` pins the weighting itself: a
 heavy-tail row that the uniform mean clips must stay on the unshrunk grid, the
 Gaussian control must still clip, and the GPTQ fallback must protect the
-channel marked by the Hessian diagonal.
+channel marked by the Hessian diagonal. It also pins the normalization
+invariant: a common positive scale (`1`, `1e36`, `1e38`) of a 1-D Hessian
+diagonal or 2-D per-element saliency must leave the returned weights summing to
+one and the selected scales, codes and reconstruction bit-identical, across
+uniform, sparse and nonuniform rows and through the GPTQ fallback.
 
 ```mermaid
 flowchart TD
