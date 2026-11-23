@@ -91,6 +91,14 @@ docs/transformers5-model-ports.md). Every supported model is selected by its def
      The oracle may import `transformers.models.*` **in tests only**.
    - **Release inventory:** the full-size meta model's key/shape inventory
      matches the released checkpoint index (store a sha256, not the JSON).
+   - **Routed experts and packed vision.** When an expert representation changes,
+     hand-label physical rows in released checkpoint order. Use distinct gate
+     and up values and a fractional routing weight that distinguishes BF16
+     rounding before and after multiplication. Compare each executable route
+     with the same hand-computed output. For packed vision, use unequal image
+     lengths and an explicit per-image, per-head attention oracle. Mark learned
+     positions on a rectangular patch grid that spans two merge blocks.
+     [Inkling fixtures and fix history](../gptqmodel-regression-test-design/references/2026-11-23-regressions.md)
    - **Isolation:** loads without `trust_remote_code` and without the bypass,
      and ignores a hostile `auto_map`.
    - **Plans:** module-plan tests and an explicit AWQ policy

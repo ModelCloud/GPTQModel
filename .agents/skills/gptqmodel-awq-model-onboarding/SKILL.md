@@ -130,6 +130,12 @@ does not replace them; checkpoint smoke tests are complementary evidence.
 Useful working references (extend the relevant patterns, not their expected
 outputs):
 
+- When narrowing a generic group, assert the exact surviving producers and
+  consumers on each affected variant. A loop that checks neutrality for every
+  emitted group also passes for an empty plan. Run a known unsafe group on a
+  disposable layer with nonuniform scales and check that the full output
+  changes. PanGu's top query and Inkling's post-attention norm are
+  [worked examples](../gptqmodel-regression-test-design/references/2026-11-23-regressions.md).
 - `tests/module_tree/test_awq_relationships.py`: native full-output neutral
   folds, parallel branches, nonlinear boundaries, nested/shared consumers.
 - `tests/test_awq_scale_search_safety.py`: identity candidates, independent

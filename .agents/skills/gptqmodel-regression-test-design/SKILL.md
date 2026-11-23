@@ -21,7 +21,8 @@ consumer**, not just the helper or first successful call. Select the applicable
 cases below and record the evidence in the PR. For landed fixes and the tests
 to extend, see the audits from [Nov 17](references/2026-11-17-regressions.md),
 [Nov 18](references/2026-11-18-regressions.md), [Nov 19](references/2026-11-19-regressions.md),
-[Nov 20](references/2026-11-20-regressions.md) and [Nov 21](references/2026-11-21-regressions.md).
+[Nov 20](references/2026-11-20-regressions.md), [Nov 21](references/2026-11-21-regressions.md)
+and [Nov 23](references/2026-11-23-regressions.md).
 
 ## 1. Write the invariant before the patch
 
@@ -81,6 +82,13 @@ For changed serialization/load/offload paths, exercise the applicable sequence:
 `pack -> forward -> save -> load -> forward -> re-save -> reload -> forward`.
 Also test direct `state_dict()` copies into **fresh and already initialized**
 modules, `load_state_dict(assign=False/True)`, and offload/restore where used.
+
+When a packer is split or its decorators move, run each affected public
+`pack_impl` inside an outer `torch.inference_mode()`. Construct the destination
+before entering that context. After leaving it, load a second, distinguishable
+checkpoint with `assign=False` before the first forward and compare the packed
+buffers. An `assign=True` control exercises replacement and can pass even when
+the existing buffers reject an in-place copy.
 
 - Assert the complete owned tensor-key set, storage dtype, packed values, and
   layout markers, plus forward parity. A matching marker alone cannot prove
@@ -261,6 +269,24 @@ Follow [tokenizer ownership](../gptqmodel-tokenizer-normalization/SKILL.md) for
 reusable normalization and [AWQ safety](../gptqmodel-awq-model-onboarding/SKILL.md)
 for native replay, routing, and source/consumer qualification. Do not duplicate
 those architecture gates with tree-generated fake models.
+
+### Measurement windows, batching and logit capture
+
+- For PPL, label token positions and enumerate the original next-token pairs.
+  Count each scored target exactly once across overlapping windows, adjacent
+  windows and the short tail. Use a position-local model with unequal losses
+  to compare the public PPL against the unsliced-row calculation. Real models
+  can change their predictions when their available context changes.
+- For sampled metrics, hold the input rows and sampling cap fixed. Put the
+  only changed prediction in a short row beside longer rows, then vary batch
+  size to include a partial final batch. Check the sampled position count
+  and calculate each metric over the concatenated sample. For normalized
+  RMSE, accumulate reference energy across the same elements before dividing.
+- Exercise capture through `BaseQModel.measure`. Swap two FP32 logits that
+  round to the same FP16 value and assert the top-1 flip and nonzero error.
+  On a separate BF16 model, compare a finite logit above 65504 with itself
+  and require exact zero divergence. These probes distinguish rounding away
+  a real change from introducing one during capture.
 
 ### Arithmetic and tensor geometry
 
