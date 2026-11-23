@@ -50,6 +50,29 @@ log = setup_logger()
 _HESSIAN_DTYPE = torch.float64
 _DISTANCE_CHUNK_BYTES = 256 * 1024 * 1024
 _LOSS_CHUNK_BYTES = 64 * 1024 * 1024
+# Worst-case factor on the screening error bound. The bound is derived from the
+# operand magnitudes and covers the two compared scores; the factor absorbs the
+# epilogue rounding and accumulation-order differences.
+_DISTANCE_ERROR_SLACK = 8.0
+# Byte budget for one tile of the direct-difference pass. A direct comparison
+# materializes one `vector_len`-wide difference per candidate pair, so its tile
+# is smaller than the screen's.
+_EXACT_DISTANCE_CHUNK_BYTES = 64 * 1024 * 1024
+# Work bound (`rows * centroids * vector_len`) below which the assignment is
+# decided by direct differences over the whole problem. Both regimes below are
+# exact and both return a direct residual; the bound only chooses the cheaper
+# shape of the same arithmetic.
+#
+# It exists because the sequential quantization pass assigns once per column,
+# thousands of times per layer, and each of those assignments covers only a few
+# hundred thousand vector elements. The screened form needs one host read per
+# chunk to learn whether any row must be re-decided, and that read drains the
+# device pipeline the loop otherwise keeps full. A direct comparison needs no
+# read, but it costs `vector_len` difference and square terms per pair instead of
+# one fused dot product, so it only wins while the problem is small. Codebook
+# fits stay far above this bound: they compare hundreds of millions of pairs and
+# can afford the single host read.
+_EXACT_ASSIGN_WORK = 1 << 22
 _EPS = 1e-12
 
 
@@ -164,6 +187,161 @@ def _vectors_to_matrix(vectors: torch.Tensor, cols: int, padded_rows: int, rows:
     return data[:rows]
 
 
+def _screen_setup(
+    centroids: torch.Tensor,
+    data: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare the mean-shifted screen and its rounding bound for a codebook.
+
+    The screen is the expanded form `||c||^2 - 2 x.c`, which is what keeps a
+    large codebook affordable, but both of its terms are as large as the
+    operands and they cancel. The omitted `||x||^2` is constant per row, so the
+    component shared by a row and its neighbours adds nothing to the argmin and
+    can be removed before the product by shifting both operands by one
+    reference `m`:
+
+        ||x - c||^2 - ||x - m||^2 = ||c - m||^2 - 2 (x - m).(c - m)
+
+    What is left is of the order of the codebook spread rather than the weight
+    magnitude, so the quantities that cancel are the small ones.
+
+    A shifted product is still not proof of the winner: its rounding error
+    grows with the operand magnitudes, so a row whose best score does not
+    clear the runner-up by the bound below is re-decided from direct
+    differences. With `2 ||x'|| ||c'|| <= ||x'||^2 + ||c'||^2` (AM-GM) the
+    error of a score gap is affine in `||x'||^2` and in the largest
+    `||c'||^2`, so no square root and no per-row codebook norm are needed:
+
+        gap_error <= error_slope * (||x'||^2 + max ||c'||^2)
+
+    The screen accumulates in the row dtype's wide float (float32 for the
+    float16/bfloat16 codebooks VPTQ stores) because the true gap between two
+    stored centroids is at least one storage ULP, about `2^-11` relative, while
+    a shifted float32 product over `vector_len` terms rounds at about
+    `vector_len * 2^-24` relative. Centering is what buys that margin: without
+    it the row component dominates and even a float64 screen lets a one-ULP
+    neighbour win.
+
+    Returns `(shifted_centroids_transposed, centroid_norms, reference,
+    error_slope, centroid_norm_max)`.
+    """
+
+    wide = _screen_dtype(centroids, data)
+    centroids = centroids.to(wide)
+    reference = centroids.mean(dim=0)
+    shifted = centroids - reference
+    centroid_norms = (shifted * shifted).sum(dim=1)
+    centroid_norm_max = centroid_norms.abs().max().clamp_min(0)
+    dim = centroids.shape[1]
+    # One score rounds `dim` dot products and `dim` squared terms; two scores
+    # are compared, and the slack absorbs the epilogue and accumulation-order
+    # differences.
+    error_slope = (
+        _DISTANCE_ERROR_SLACK * float(torch.finfo(wide).eps) * (dim + 2)
+    )
+    return shifted.t(), centroid_norms, reference, error_slope, centroid_norm_max
+
+
+def _screen_dtype(centroids: torch.Tensor, data: torch.Tensor) -> torch.dtype:
+    """Wide float the screening product accumulates in.
+
+    VPTQ stores codebooks in float16/bfloat16 and quantizes float32 columns, so
+    float32 covers those without widening the score block to eight bytes. A
+    float64 codebook or row (direct callers, tests) keeps float64 so the screen
+    does not become the narrowest operand.
+    """
+
+    if centroids.dtype == torch.float64 or data.dtype == torch.float64:
+        return torch.float64
+    return torch.float32
+
+
+def _screen_tolerance(
+    shifted_rows: torch.Tensor,
+    error_slope: float,
+    centroid_norm_max: torch.Tensor,
+) -> torch.Tensor:
+    """Rounding-error bound on the screen gap of `shifted_rows`.
+
+    `shifted_rows` is already offset by the codebook reference, which is what
+    makes `||x'||^2` here the magnitude the screen actually multiplies.
+    """
+
+    shifted_norm = shifted_rows.square().sum(dim=1)
+    return torch.add(
+        error_slope * centroid_norm_max, shifted_norm, alpha=error_slope
+    )
+
+
+def _exact_assign(
+    rows: torch.Tensor,
+    centroids: torch.Tensor,
+    *,
+    chunk_bytes: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Nearest centroid by direct float64 differences.
+
+    `sum((x - c)^2)` has no large term that cancels, so an exact codebook entry
+    beats a one-ULP neighbour and a true tie resolves to the lowest index.
+    Row and candidate tiles are both bounded by `chunk_bytes`, so neither a wide
+    codebook nor a tall input can allocate `rows x centroids x vector_len` at
+    once.
+
+    Returns `(index, squared_distance)`. The distance is the selected tile's
+    minimum, so a caller that needs a residual gets it without a second pass and
+    without adding a constant back into a cancelled score. It is float64, like
+    the differences it came from.
+    """
+
+    num_rows, dim = rows.shape
+    num_centroids = centroids.shape[0]
+    if num_centroids < 1:
+        raise ValueError("VPTQ: assignment needs at least one centroid.")
+
+    # One candidate pair materializes a float64 difference of `dim` elements,
+    # its square and the float64 distance reduced from that.
+    pair_bytes = max(1, dim * 8 * 2 + 8)
+    candidates = min(num_centroids, max(1, chunk_bytes // (num_rows * pair_bytes)))
+    rows_per_tile = min(
+        num_rows, max(1, chunk_bytes // max(1, candidates * pair_bytes))
+    )
+
+    selected = torch.empty(num_rows, dtype=torch.int64, device=rows.device)
+    distance_out = torch.empty(num_rows, dtype=torch.float64, device=rows.device)
+    for row_start in range(0, num_rows, rows_per_tile):
+        row_end = min(row_start + rows_per_tile, num_rows)
+        wide_rows = rows[row_start:row_end].to(torch.float64)
+        tile_selected = None
+        tile_best = None
+        for start in range(0, num_centroids, candidates):
+            end = min(start + candidates, num_centroids)
+            difference = (
+                wide_rows.unsqueeze(1) - centroids[start:end].to(torch.float64).unsqueeze(0)
+            ).square()
+            distance = difference.sum(dim=2)
+            del difference
+            best_distance, best_index = distance.min(dim=1)
+            best_index = best_index + start
+            del distance
+            if tile_selected is None:
+                tile_selected = best_index
+                tile_best = best_distance
+            else:
+                # A smaller distance wins; an equal one keeps the smaller index,
+                # so a true tie resolves to the lowest codebook entry.
+                closer = (best_distance < tile_best) | (
+                    (best_distance == tile_best) & (best_index < tile_selected)
+                )
+                tile_selected = torch.where(closer, best_index, tile_selected)
+                tile_best = torch.where(closer, best_distance, tile_best)
+                del closer
+            del best_distance, best_index
+        selected[row_start:row_end] = tile_selected
+        distance_out[row_start:row_end] = tile_best
+        del wide_rows, tile_selected, tile_best
+    return selected, distance_out
+
+
 def _chunked_assign(
     data: torch.Tensor,
     centroids: torch.Tensor,
@@ -172,38 +350,154 @@ def _chunked_assign(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Assign each row of `data` to its nearest centroid.
 
-    Returns `(assignment, squared_distance_to_assigned_centroid)`. Distance
-    blocks are chunked so peak memory stays bounded for large codebooks.
+    Returns `(assignment, squared_distance_to_assigned_centroid)`.
+
+    The screen is the expanded squared distance `||c||^2 - 2 x.c`. It keeps a
+    large codebook affordable, but its terms are as large as the operands and
+    they cancel: when the component shared by a row and its neighbours is much
+    larger than the distance between two candidates, scores that differ in
+    exact arithmetic round to the same value, so an exact codebook match could
+    lose to a neighbour one ULP away. Summing `||x||^2` back into that
+    cancelled value also let the reported residual go negative and disagree
+    with the stored codebook entry.
+
+    Both are fixed where the distance is computed, not in the loss:
+
+    * Both operands are shifted by the codebook mean, as in
+      :func:`_screen_setup`, which removes the shared component before the
+      product while leaving the argmin unchanged.
+    * The screen accumulates in a wide float and a row whose winner does not
+      clear the runner-up by the derived error bound is re-decided by
+      :func:`_exact_assign` from direct differences against the whole codebook.
+      That removes the last rounding step between a stored centroid and a
+      duplicate or a one-ULP neighbour, and it is what makes the exact match win
+      even when the codebook also holds far-away outliers.
+
+    The residual is always the direct difference at the selected centroid, so
+    it agrees with the stored index and, as a sum of squares, cannot be
+    negative. `min(dim=)` documents that a tie resolves to the lowest index.
     """
 
     num_rows = data.shape[0]
     num_centroids = centroids.shape[0]
-    rows_per_chunk = max(1, chunk_bytes // max(1, num_centroids * data.element_size()))
+    if num_centroids < 1:
+        raise ValueError("VPTQ: assignment needs at least one centroid.")
 
-    centroids_norm = (centroids * centroids).sum(dim=1)
+    # Small problems are decided outright by direct differences, which needs no
+    # host read. See `_EXACT_ASSIGN_WORK` for why that matters to the caller
+    # that assigns once per column.
+    exact_bytes = min(chunk_bytes, _EXACT_DISTANCE_CHUNK_BYTES)
+    if num_rows * num_centroids * data.shape[1] <= _EXACT_ASSIGN_WORK:
+        assignment, distance = _exact_assign(
+            data, centroids, chunk_bytes=exact_bytes
+        )
+        # The distance is accumulated in float64, then stored in the row dtype
+        # like every other residual this function returns.
+        return assignment, distance.to(data.dtype)
+
+    # One score entry is a wide float, so the byte budget is the same as the
+    # former expanded block.
+    screen_dtype = _screen_dtype(centroids, data)
+    rows_per_chunk = max(
+        1, chunk_bytes // max(1, num_centroids * torch.finfo(screen_dtype).bits // 8)
+    )
+
+    shifted_centroids_t, centroid_norms, reference, error_slope, centroid_norm_max = (
+        _screen_setup(centroids, data)
+    )
+
     assignment = torch.empty(num_rows, dtype=torch.int64, device=data.device)
     residual = torch.empty(num_rows, dtype=data.dtype, device=data.device)
 
     for start in range(0, num_rows, rows_per_chunk):
         end = min(start + rows_per_chunk, num_rows)
         block = data[start:end]
+        shifted_block = block.to(screen_dtype) - reference
         # `||c||^2 - 2 x.c` is the expanded squared distance minus `||x||^2`.
         # The omitted term is constant per row, so it cannot change the argmin,
-        # but the returned residual must add it back to be a true distance.
+        # but the returned residual must be a true distance, which
+        # `_direct_residual` guarantees without the cancellation.
         #
-        # `addmm` fuses the scaling and the subtraction into the GEMM epilogue,
-        # so only one chunk-sized buffer is live instead of the matmul result,
-        # its `2.0 *` product and their difference. `alpha=-2.0` is a power of
-        # two, so the fused form is bitwise identical to the expanded one.
-        distance = torch.addmm(
-            centroids_norm.unsqueeze(0), block, centroids.t(), alpha=-2.0
+        # `addmm` fuses the scaling and the subtraction into the product's
+        # epilogue, so only one chunk-sized score is live instead of the matmul
+        # result, its `-2 *` product and their difference. `alpha=-2.0` is a
+        # power of two, so the fused form is bitwise identical to the expanded
+        # one.
+        score = torch.addmm(
+            centroid_norms.unsqueeze(0),
+            shifted_block,
+            shifted_centroids_t,
+            alpha=-2.0,
         )
-        best_distance, best_index = distance.min(dim=1)
-        # Release the distance block before the residual allocates `block * block`.
-        del distance
+        best_score, best_index = score.min(dim=1)
+        # Blanking the winner in place reads the runner-up without a second
+        # score block. Any other centroid scores no better than the runner-up,
+        # so a gap wider than the bound decides the row.
+        score.scatter_(1, best_index.unsqueeze(1), float("inf"))
+        runner_up = score.min(dim=1).values
+        tolerance = _screen_tolerance(shifted_block, error_slope, centroid_norm_max)
+        ambiguous = (runner_up - best_score) <= tolerance
+        del runner_up, score, tolerance, best_score
+
+        # Only the rows the screen cannot separate pay for the exact pass. The
+        # ambiguity mask is per row, so its index list is a chunk-row vector
+        # rather than a scan of the `rows x centroids` score block, which would
+        # cost more than the screen itself. A flagged row is then re-decided
+        # against every centroid in float64: that needs no band and cannot lose
+        # a one-ULP neighbour.
+        #
+        # The `any()` test is what keeps the common case cheap. It costs a
+        # single scalar read, while materializing the index list of an empty
+        # mask forces the whole pipeline to drain — and this function runs once
+        # per column during the sequential quantization pass.
+        if ambiguous.any():
+            flagged = ambiguous.nonzero().squeeze(1)
+            best_index[flagged] = _exact_assign(
+                block.index_select(0, flagged),
+                centroids,
+                chunk_bytes=exact_bytes,
+            )[0]
+            del flagged
         assignment[start:end] = best_index
-        residual[start:end] = best_distance + (block * block).sum(dim=1)
+        residual[start:end] = _direct_residual(
+            block, centroids, best_index, chunk_bytes=exact_bytes
+        )
+        del best_index, ambiguous, shifted_block
     return assignment, residual
+
+
+def _direct_residual(
+    rows: torch.Tensor,
+    centroids: torch.Tensor,
+    index: torch.Tensor,
+    *,
+    chunk_bytes: Optional[int] = None,
+) -> torch.Tensor:
+    """Squared distance from every row to its selected centroid, directly.
+
+    `(x - c)^2` has no cancelling term and cannot be negative, unlike the
+    expanded screen with the omitted `||x||^2` added back to it. Row tiles keep
+    the two `rows x dim` intermediates inside `chunk_bytes` when the caller
+    passes the budget it also gave the assignment.
+    """
+
+    wide = torch.float32 if rows.dtype in (torch.float16, torch.bfloat16) else rows.dtype
+    num_rows, dim = rows.shape
+    if chunk_bytes is None:
+        tile = num_rows
+    else:
+        # The difference and its square are both live for one element each.
+        tile = max(1, chunk_bytes // max(1, dim * torch.finfo(wide).bits // 4))
+        tile = min(tile, num_rows)
+    residual = torch.empty(num_rows, dtype=wide, device=rows.device)
+    for start in range(0, num_rows, tile):
+        end = min(start + tile, num_rows)
+        difference = rows[start:end].to(wide) - centroids.index_select(
+            0, index[start:end]
+        ).to(wide)
+        residual[start:end] = difference.square().sum(dim=1)
+        del difference
+    return residual
 
 
 def _weighted_kmeans(
