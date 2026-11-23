@@ -106,6 +106,35 @@ def _clamp_block(block: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor) -> tor
     return torch.max(torch.min(block, hi), lo)
 
 
+def _safe_rms(block: torch.Tensor, dim: int) -> torch.Tensor:
+    """Root-mean-square over ``dim`` that survives a representable RMS.
+
+    ``block.pow(2).mean(dim)`` squares before it reduces, so a lane whose RMS
+    is representable still returns ``inf`` once an element exceeds
+    ``sqrt(finfo(dtype).max)``. The reduction can overflow even earlier: one
+    squared element may fit while the mean's accumulator sums many of them
+    past the dtype limit. Both overflow before the final RMS does.
+
+    Dividing each element by its lane's absolute maximum bounds every squared
+    term by one, so the mean of ``block.shape[dim]`` terms is at most one and
+    the positive lane maximum is then restored. The scaled form is used only
+    for a lane whose elements are all finite and whose plain RMS is not, so
+    every representable lane keeps the previous arithmetic bit for bit and
+    non-finite inputs still propagate ``inf``/``nan`` unchanged. An all-zero
+    lane returns exactly zero from either form.
+    """
+
+    plain = block.pow(2).mean(dim=dim, keepdim=True).sqrt()
+    lane_max = block.abs().amax(dim=dim, keepdim=True)
+    safe = torch.where(lane_max > 0, lane_max, torch.ones_like(lane_max))
+    scaled = (block / safe).pow(2).mean(dim=dim, keepdim=True).sqrt() * safe
+    # ``lane_max`` is finite exactly when every element of the lane is finite
+    # (``amax`` propagates ``nan`` and selects ``inf``), so this excludes lanes
+    # whose input is already non-finite and would turn into ``inf/inf``.
+    repair = torch.isfinite(lane_max) & ~torch.isfinite(plain)
+    return torch.where(repair, scaled, plain)
+
+
 def smooth_applies(
     method: Optional[SmoothMethod],
     group_size: Optional[int],
@@ -145,17 +174,17 @@ def smooth_block(
     if isinstance(method, SmoothRowCol):
         axis = (method.axis or "row").lower()
         if axis == "col":
-            col_rms = block.pow(2).mean(dim=0, keepdim=True).sqrt().clamp(min=eps)
+            col_rms = _safe_rms(block, dim=0).clamp(min=eps)
             scale_factor = col_rms.mean().view(1, 1)
         else:
-            scale_factor = block.pow(2).mean(dim=1, keepdim=True).sqrt().clamp(min=eps)
+            scale_factor = _safe_rms(block, dim=1).clamp(min=eps)
         return block / scale_factor, scale_factor
 
     block_f = block.float()
 
     if isinstance(method, SmoothSoftNorm):
         mean = block_f.mean(dim=1, keepdim=True)
-        rms = (block_f - mean).pow(2).mean(dim=1, keepdim=True).sqrt().clamp(min=eps)
+        rms = _safe_rms(block_f - mean, dim=1).clamp(min=eps)
         k = float(method.k)
         block_norm = (block_f - mean) / rms
         block_norm = torch.clamp(block_norm, -k, k)
