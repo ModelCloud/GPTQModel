@@ -209,6 +209,71 @@ def test_qqq_gsq_hard_objective_does_not_regress(group_size):
     assert len(history) == 3
 
 
+@pytest.mark.parametrize(
+    "scale_value",
+    [
+        2.0 ** -24,        # smallest FP16 subnormal: a source division rounds to zero
+        2.0 ** -21,        # half an FP16 subnormal step: a source division rounds to zero
+        9 * 2.0 ** -24,    # one FP16 step above the zero threshold
+        2.0 ** -20,        # control: representable after a source-dtype division
+        1e-4,              # ordinary scale whose source division rounds
+        1.0,               # control
+    ],
+)
+def test_qqq_channelwise_candidates_decode_the_packer_fp32_scale(scale_value):
+    """The candidate adapter must divide the stored scale in FP32 like ``pack``.
+
+    Channelwise QQQ stores ``scale / 16`` after widening the producer scale to
+    FP32. Dividing first in the source dtype rounds an FP16 scale to zero in
+    the subnormal range, so the adapter rejected representable inputs and
+    scored candidates on a grid the packed kernel never decodes.
+    """
+    from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
+    from gptqmodel.quantization import GSQConfig
+    from gptqmodel.quantization.gsq_qqq import (
+        qqq_candidate_values,
+        qqq_codes_to_packer_weight,
+        refine_qqq_codes,
+    )
+
+    out_features, in_features = 64, 128
+    scales = torch.full((out_features, 1), scale_value, dtype=torch.float16)
+    codes = torch.ones((out_features, in_features), dtype=torch.float32)
+    weight = qqq_codes_to_packer_weight(codes, scales, group_size=-1, dtype=torch.float16)
+
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=torch.float16)
+    with torch.no_grad():
+        linear.weight.copy_(weight)
+    packed = QQQTorchLinear(bits=4, group_size=-1, desc_act=False, sym=True,
+                            in_features=in_features, out_features=out_features,
+                            register_buffers=False)
+    packed.pack(linear, scales)
+    assert torch.equal(packed._unpack_weight_codes(),
+                       torch.ones((in_features, out_features), dtype=torch.uint8))
+
+    # Independent FP64 oracle: a channelwise nibble of 1 deploys as exactly the
+    # stored scale that the packer widened to FP32.
+    expected = codes.to(torch.float64) * scales.float().to(torch.float64)
+    plane, s_channel = packed._dequantize_weight_for_torch()
+    actual = (plane.to(torch.float64) * s_channel.to(torch.float64)).t()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    candidate = qqq_candidate_values(codes, scales, group_size=-1, in_features=in_features)
+    assert candidate.dtype == torch.float32
+    torch.testing.assert_close(candidate.to(torch.float64), expected, rtol=0, atol=0)
+
+    # The hard objective is zero on the deployed grid, so GSQ scores the same
+    # weights the packer writes and keeps the existing assignment.
+    selected, before, after, history = refine_qqq_codes(
+        codes.long(), scales, target=expected.float(), group_size=-1,
+        hessian=torch.eye(in_features), cross_moment=torch.zeros(in_features, in_features),
+        config=GSQConfig(enabled=True, steps=2, candidates=3, seed=7))
+    assert before == 0.0
+    assert after == 0.0
+    assert history[-1] == 0.0
+    assert torch.equal(selected, codes.long())
+
+
 def test_qqq_gsq_torch_checkpoint_roundtrip(tmp_path):
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
