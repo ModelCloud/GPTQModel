@@ -366,10 +366,16 @@ class InterpolatedLlamaLayers:
     candidate width for a decoder block is materialized once and the live
     weights are expressed as
 
-        W = W_ref + sum_k p_ik * (W_k - W_ref),
+        W = (1 - sum_{k != ref} p_ik) * W_ref + sum_{k != ref} p_ik * W_k,
 
-    with ``p_i = softmax(alpha_i)``. ``W_ref`` is the widest option, whose delta
-    is exactly zero, so it reproduces the reference implementation's baseline.
+    with ``p_i = softmax(alpha_i)``. ``W_ref`` is the widest option, so it
+    reproduces the reference implementation's baseline. The mix multiplies the
+    stored candidates directly instead of precomputing ``W_k - W_ref`` deltas:
+    a low-precision delta is lossy ("W_ref + delta" need not equal "W_k"), and
+    two finite candidates can differ by more than the model dtype can hold.
+    A one-hot assignment therefore reproduces the selected candidate exactly,
+    and the gradient is evaluated from the exact candidates in a wide
+    accumulator.
     """
 
     def __init__(self, model, layer_weights, weights, costs, *, control_device=None,
@@ -414,7 +420,6 @@ class InterpolatedLlamaLayers:
         self.alpha = torch.zeros(self.n_groups, self.n_options, dtype=torch.float32,
                                  device=self.control_device, requires_grad=True)
         self._originals = {}
-        self._deltas = {}
         self._probs_override = None
 
     def probabilities(self, index):
@@ -438,18 +443,15 @@ class InterpolatedLlamaLayers:
             self.layer_weights[name] = options
             reference = options[reference_index]
             self._originals[name] = reference
-            # Deltas must keep the parametrized weight's dtype: registering a
-            # parametrization may not change it. The reference implementation
-            # likewise stores bfloat16 deltas against a bfloat16 base.
-            self._deltas[name] = [(option - reference).to(dtype) for option in options]
             module.weight = nn.Parameter(reference.clone(), requires_grad=False)
             nn.utils.parametrize.register_parametrization(
                 module, 'weight', _WeightInterpolation(self, name))
         self.model.requires_grad_(False)
         return self
 
-    def deltas(self, name):
-        return self._deltas[name]
+    def candidates(self, name):
+        """Candidate weights for one module, stored in the module's dtype."""
+        return self.layer_weights[name]
 
     def index_of(self, name):
         return self._group_of[name]
@@ -481,12 +483,96 @@ class InterpolatedLlamaLayers:
             nn.utils.parametrize.remove_parametrizations(module, 'weight', leave_parametrized=False)
             with torch.no_grad():
                 module.weight.copy_(self._originals[name].to(module.weight.dtype))
-        self._deltas.clear()
         self._probs_override = None
 
 
+_INTERPOLATION_CHUNK_ELEMENTS = 8 * 1024 * 1024
+
+
+def _interpolation_tiles(tensor):
+    """Row slices that bound the wide interpolation scratch per candidate."""
+    if tensor.ndim < 2 or tensor.numel() <= _INTERPOLATION_CHUNK_ELEMENTS:
+        yield slice(None)
+        return
+    rows, columns = tensor.shape[0], tensor.numel() // tensor.shape[0]
+    step = max(1, _INTERPOLATION_CHUNK_ELEMENTS // columns)
+    for start in range(0, rows, step):
+        yield slice(start, min(start + step, rows))
+
+
+class _WeightMix(torch.autograd.Function):
+    """Mix the stored candidates directly and differentiate against them.
+
+    The forward value is a convex combination of the exact stored candidates in
+    the module's dtype, so a one-hot probability vector reproduces the selected
+    candidate bit for bit; no ``W_k - W_ref`` difference is ever formed, so two
+    finite candidates cannot overflow into ``inf``/``nan``. Backward recomputes
+    the wide dot products one candidate at a time from the stored values, so no
+    wide copy of a candidate outlives its use.
+    """
+
+    @staticmethod
+    def forward(ctx, probs, reference_index, reference, *candidates):
+        work = reference.dtype
+        # The reference weight absorbs the probability mass left over by the
+        # other options. Every product uses the stored candidate itself, so an
+        # exact 0/1 probability is an exact identity or an exact selection.
+        complement = 1 - (torch.sum(probs) - probs[reference_index])
+        ctx.save_for_backward(probs, reference, *candidates)
+        ctx.reference_index = reference_index
+        ctx.work_dtype = torch.float64 if work == torch.float64 else torch.float32
+        # The in-place epilogue keeps one weight-sized temporary for the whole
+        # mix; it never widens the weight.
+        mixed = complement.to(work) * reference
+        for index, candidate in enumerate(candidates):
+            if index == reference_index:
+                continue
+            mixed.addcmul_(probs[index].to(work), candidate)
+        return mixed
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        probs, reference, *candidates = ctx.saved_tensors
+        work = ctx.work_dtype
+        reference_index = ctx.reference_index
+        needs = ctx.needs_input_grad
+        grad_probs = grad_weight = None
+        if needs[0]:
+            with torch.no_grad():
+                # Scalars only: ``grad_out.to(work)`` would materialize a full
+                # wide copy of the activation gradient just to seed them.
+                dot_reference = torch.zeros((), dtype=work, device=grad_out.device)
+                dots = [None] * len(candidates)
+                for tile in _interpolation_tiles(reference):
+                    grad_row = grad_out[tile].to(work)
+                    dot_reference = dot_reference + (grad_row * reference[tile].to(work)).sum()
+                    for index, candidate in enumerate(candidates):
+                        if index == reference_index:
+                            continue
+                        dot = (grad_row * candidate[tile].to(work)).sum()
+                        dots[index] = dot if dots[index] is None else dots[index] + dot
+                    del grad_row
+                # The reference coefficient does not depend on ``p_ref``: it is
+                # the mass of the other options, left over at weight ``W_ref``.
+                # Every other candidate moves the base by -W_ref and adds +W_k,
+                # which is the reference implementation's gradient.
+                zero = dot_reference.new_zeros(())
+                values = [zero if index == reference_index else dots[index] - dot_reference
+                          for index in range(len(candidates))]
+                grad_probs = torch.stack(values).to(probs.dtype)
+        if needs[2]:
+            complement = 1 - (torch.sum(probs) - probs[reference_index])
+            # Only reached when the base weight itself is trainable; tile the
+            # wide product so it cannot hold a second weight-sized buffer.
+            grad_weight = torch.empty_like(reference)
+            for tile in _interpolation_tiles(reference):
+                grad_weight[tile] = (grad_out[tile].to(work)
+                                     * complement.to(work)).to(reference.dtype)
+        return (grad_probs, None, grad_weight) + (None,) * len(candidates)
+
+
 class _WeightInterpolation(torch.nn.Module):
-    """Parametrization applying ``W_ref + sum_k p_k * (W_k - W_ref)``."""
+    """Parametrization applying the convex mix of the stored candidates."""
 
     def __init__(self, owner, name):
         super().__init__()
@@ -494,14 +580,20 @@ class _WeightInterpolation(torch.nn.Module):
         self.name = name
 
     def forward(self, weight):
-        deltas = self.owner.deltas(self.name)
-        probs = self.owner.probabilities(self.owner.index_of(self.name)).to(weight.device)
-        mixed = weight
-        for offset, delta in enumerate(deltas):
-            if offset == self.owner.reference_index():
-                continue  # reference delta is exactly zero
-            mixed = mixed + probs[offset] * delta
-        return mixed
+        owner = self.owner
+        probs = owner.probabilities(owner.index_of(self.name)).to(device=weight.device)
+        return _WeightMix.apply(
+            probs, owner.reference_index(), weight, *owner.candidates(self.name))
+
+    def _apply(self, fn, recurse=True):
+        # Candidates and the cleanup reference live on the owner, outside the
+        # module tree, so a model device/dtype move must carry them along.
+        owner = self.owner
+        moved = [fn(candidate) for candidate in owner.candidates(self.name)]
+        owner.layer_weights[self.name] = moved
+        if self.name in owner._originals:
+            owner._originals[self.name] = moved[owner.reference_index()]
+        return self
 
 
 class LlamaTeacherKL:

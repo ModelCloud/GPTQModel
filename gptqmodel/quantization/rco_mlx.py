@@ -229,7 +229,7 @@ class MLXInterpolatedLlamaLayers:
         self.alpha = mx.zeros((self.n_groups, self.n_options), dtype=mx.float32)
         self._probs_override = None
         self._original_layers = {}
-        self._deltas = {}
+        self._candidates = {}
 
         for name in names:
             module = _child(model, name)
@@ -245,19 +245,18 @@ class MLXInterpolatedLlamaLayers:
             if any(option.shape != module.weight.shape for option in options):
                 raise ValueError(f"MLX RCO candidate shape differs from {name}")
             reference = options[-1]
-            deltas = [(option - reference) for option in options[:-1]]
             self._original_layers[name] = module
-            self._deltas[name] = deltas
+            self._candidates[name] = options
             replacement = _MLXWeightInterpolation(
                 owner=self,
                 name=name,
                 reference=reference,
                 bias=getattr(module, "bias", None),
                 output_dtype=dtype,
-                deltas=deltas,
+                candidates=options,
             ).module
             _replace_child(model, name, replacement)
-        mx.eval(self.alpha, self._deltas)
+        mx.eval(self.alpha, self._candidates)
 
     def probabilities(self, index):
         if self._probs_override is not None:
@@ -269,6 +268,10 @@ class MLXInterpolatedLlamaLayers:
 
     def reference_index(self):
         return self.n_options - 1
+
+    def candidates(self, name):
+        """Candidate weights for one module, stored in the module's dtype."""
+        return self._candidates[name]
 
     def set_probs(self, probabilities):
         """Set straight-through probabilities used by every projection."""
@@ -293,7 +296,7 @@ class MLXInterpolatedLlamaLayers:
         for name, module in self._original_layers.items():
             _replace_child(self.model, name, module)
         self._original_layers.clear()
-        self._deltas.clear()
+        self._candidates.clear()
         self._probs_override = None
         mx.eval(self.model.parameters())
 
@@ -313,7 +316,7 @@ class MLXInterpolatedLlamaLayers:
 class _MLXWeightInterpolation:
     """Replacement linear layer with the same projection output contract."""
 
-    def __init__(self, *, owner, name, reference, bias, output_dtype, deltas):
+    def __init__(self, *, owner, name, reference, bias, output_dtype, candidates):
         import mlx.nn as nn
 
         class Interpolation(nn.Module):
@@ -324,23 +327,27 @@ class _MLXWeightInterpolation:
                 self.reference = reference
                 self.bias = bias
                 self.output_dtype = output_dtype
-                self.deltas = list(deltas)
+                self.candidates = list(candidates)
 
             def __call__(self, values):
                 probabilities = self.owner.probabilities(self.owner.index_of(self.name))
-                mixed = self.reference
-                for offset, delta in enumerate(self.deltas):
-                    # Keep the interpolation in the model dtype. The Torch
-                    # backend multiplies a zero-dimensional float32
-                    # probability by a model-dtype delta, and Torch treats a
-                    # zero-dimensional operand as a scalar for type
-                    # promotion, so that product stays in the delta's dtype.
-                    # MLX promotes a float32 array against a low-precision
-                    # array to float32 instead, which would widen every
-                    # projection to float32 and diverge from the reference
-                    # search. Cast the scalar explicitly so both backends run
-                    # the same arithmetic in the same precision.
-                    mixed = mixed + probabilities[offset].astype(mixed.dtype) * delta
+                reference_index = self.owner.reference_index()
+                # Mix the exact stored candidates and weight the reference by
+                # the complement, matching the Torch backend. A model-dtype
+                # delta is lossy, and two finite candidates can differ by more
+                # than the model dtype can hold. Multiplying the candidates
+                # directly (instead of a stored delta) reproduces a hard
+                # selection exactly.
+                complement = 1.0 - (
+                    probabilities.sum() - probabilities[reference_index]
+                )
+                mixed = complement.astype(self.output_dtype) * self.reference
+                for offset, candidate in enumerate(self.candidates):
+                    if offset == reference_index:
+                        continue
+                    mixed = mixed + probabilities[offset].astype(
+                        self.output_dtype
+                    ) * candidate
                 output = values @ mixed.T
                 if self.bias is not None:
                     output = output + self.bias
