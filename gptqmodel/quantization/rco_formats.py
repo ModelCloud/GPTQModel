@@ -575,6 +575,41 @@ def repair_overspend(assignment, scores, weights, costs, target_bits):
     return assignment.to(device)
 
 
+def enforce_budget(assignment, scores, weights, costs, target_bits):
+    """Apply the float64 budget postcondition to a discrete assignment.
+
+    ``budget_constrained_argmax`` solves on a per-group rounded cost grid, so its
+    optimum can exceed the true parameter-weighted budget once the rounding
+    error accumulates over hundreds of groups. Every consumer that exports or
+    executes a discrete assignment must re-check that budget and repair an
+    overspend. ``scores`` follow ``allocate``'s convention: higher is better, so
+    the repair charges the score drop per bit saved. Repair only downgrades
+    options, and the cheapest feasible mix gets the same precondition as
+    ``allocate``, so an infeasible target fails here rather than being exported.
+    """
+    assignment = torch.as_tensor(assignment, dtype=torch.long, device="cpu").clone()
+    scores, weights, costs = (torch.as_tensor(tensor, dtype=torch.float64, device="cpu")
+                              for tensor in (scores, weights, costs))
+    if costs.ndim == 1:
+        costs = costs.expand(len(assignment), -1)
+    if scores.shape != tuple(costs.shape) or weights.shape != (len(assignment),):
+        raise RCOFormatError("RCO assignment, scores, weights and costs must agree in shape")
+    if not math.isfinite(target_bits) or target_bits <= 0:
+        raise RCOFormatError("RCO target must be finite and positive")
+    if not torch.isfinite(scores).all() or not torch.isfinite(costs).all() or (costs <= 0).any():
+        raise RCOFormatError("RCO scores and positive costs must be finite")
+    if not torch.isfinite(weights).all() or (weights <= 0).any():
+        raise RCOFormatError("RCO parameter weights must be finite and positive")
+    if _achieved(costs.argmin(1), weights, costs) > target_bits:
+        raise RCOFormatError("RCO target is below the cheapest feasible assignment")
+    if _achieved(assignment, weights, costs) > target_bits:
+        assignment = repair_overspend(assignment, scores, weights, costs, target_bits)
+    achieved = _achieved(assignment, weights, costs)
+    if achieved > target_bits:
+        raise RCOFormatError(f"RCO allocation overspent the budget: {achieved} > {target_bits}")
+    return assignment
+
+
 def _validate_inputs(scores, weights, costs, target, names):
     if not names or len(set(names)) != len(names) or any(not isinstance(name, str) or not name for name in names):
         raise RCOFormatError("RCO module names must be nonempty and unique")
@@ -623,11 +658,8 @@ def allocate(adapter, scores, weights, target_bits, *, names, resolution=None,
             raise
         # Rounding can make a feasible boundary budget unreachable on this grid.
         assignment = cheapest
-    if _achieved(assignment, weights, costs) > target_bits:
-        assignment = repair_overspend(assignment, scores, weights, costs, target_bits)
+    assignment = enforce_budget(assignment, scores, weights, costs, target_bits)
     achieved = _achieved(assignment, weights, costs)
-    if achieved > target_bits:
-        raise RCOFormatError(f"RCO allocation overspent the budget: {achieved} > {target_bits}")
     labels = adapter.labels()
     counts = {label: sum(labels[int(index)] == label for index in assignment) for label in labels}
     counts = {label: count for label, count in counts.items() if count}
@@ -659,6 +691,7 @@ __all__ = [
     "awq_runtime_requirement",
     "default_resolution",
     "discover_projections",
+    "enforce_budget",
     "module_weights",
     "reconstruction_scores",
     "relative_reconstruction_error",

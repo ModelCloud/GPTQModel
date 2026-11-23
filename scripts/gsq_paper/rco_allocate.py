@@ -146,6 +146,32 @@ def group_size_of(saved):
     return saved['signature']['group_size']
 
 
+def decode_assignment(logits, weights, costs, target_bits):
+    """Decode search logits into an assignment that satisfies the real budget.
+
+    ``budget_constrained_argmax`` promises only the discretized budget: it
+    rounds each group's cost onto a ``resolution`` grid before solving, and over
+    hundreds of groups that per-group rounding accumulates until the discrete
+    optimum spends more than ``target_bits`` in true parameter-weighted bits.
+    The DP is correct under its own contract, so the export tail owns the
+    postcondition: re-check the exact budget and reuse the shared repair, then
+    refuse an assignment that cannot be brought under the target.
+    """
+    from gptqmodel.quantization.rco import achieved_bits, budget_constrained_argmax
+    from gptqmodel.quantization.rco_formats import RCOFormatError, enforce_budget
+
+    try:
+        assignment = budget_constrained_argmax(logits, weights, costs, target_bits)
+        discrete = assignment.detach().to(torch.long)
+        # Search logits rank options higher-is-better, the same convention the
+        # shared repair charges as score drop per bit saved.
+        assignment = enforce_budget(assignment, logits, weights, costs, target_bits)
+    except (RCOFormatError, RuntimeError) as exc:
+        raise SystemExit(f'RCO export refused: {exc}')
+    repaired = bool(torch.any(discrete != assignment))
+    return assignment, achieved_bits(assignment, weights, costs), repaired
+
+
 def main():
     args = parse_args()
     out = Path(args.out)
@@ -172,8 +198,6 @@ def main():
     from gptqmodel.quantization.rco import (
         InterpolatedLlamaLayers,
         LlamaTeacherKL,
-        achieved_bits,
-        budget_constrained_argmax,
         discover_blocks,
         projected_gumbel_search,
     )
@@ -342,8 +366,15 @@ def main():
                     'weights': weights.cpu(), 'costs': costs.cpu(), 'names': names, 'groups': groups,
                     'target_bits': args.target_bits}, out / 'probs.pt')
 
-    assignment = budget_constrained_argmax(logits, weights, costs, args.target_bits)
-    exact = achieved_bits(assignment, weights, costs)
+    assignment, exact, repaired = decode_assignment(
+        logits, weights, costs, args.target_bits)
+    if exact > args.target_bits:
+        raise SystemExit(
+            f'RCO export refused: achieved {exact} bits per parameter exceeds '
+            f'the {args.target_bits} target')
+    if repaired:
+        print(f'  repaired the discrete assignment to {exact:.6f} bits per parameter '
+              f'under the {args.target_bits} target', flush=True)
 
     projection_bits = {name: options[option] for group, option in zip(groups, assignment.tolist())
                        for name in group}
@@ -375,6 +406,7 @@ def main():
         'drift_max': max(record['drift'] for record in history),
         'drift_final': history[-1]['drift'],
         'projection_bits_per_parameter': exact,
+        'budget_repair_applied': repaired,
         'width_counts': {f'W{width}': sum(options[option] == width for option in assignment.tolist())
                          for width in options},
         'search_seconds': search_seconds,

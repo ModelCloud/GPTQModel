@@ -63,6 +63,67 @@ def test_mlx_batch_size_never_drops_below_one_sequence():
     assert allocate.resolve_batch_size(None, 'mlx', 100_000, 2048) == 1
 
 
+@pytest.mark.parametrize('groups', [64, 448, 800])
+def test_decoded_assignment_honors_the_real_budget(groups):
+    """Per-group cost rounding cannot leak past the export tail.
+
+    Each group is one equal-parameter projection with W2/W4 options and prefers
+    W4, so the discrete optimum promotes as many groups as it can. The DP's
+    rounded cost grid admits ~39% W4 groups at 448 and ~56% at 800 groups even
+    though the true parameter-weighted budget allows only 11% and 25%.
+    """
+    from gptqmodel.quantization.rco import budget_constrained_argmax
+
+    logits = torch.zeros(groups, 2, dtype=torch.float64)
+    logits[:, 1] = 1.0
+    weights = torch.ones(groups, dtype=torch.float64)
+    costs = torch.tensor([2.0, 4.0], dtype=torch.float64)
+
+    # The DP itself is correct under its discretized contract; demonstrate the
+    # overspend it is entitled to so the regression cannot pass vacuously.
+    raw = budget_constrained_argmax(logits, weights, costs, 2.5)
+    allowed = int((2.5 * groups - 2 * groups) / 2)
+    if groups >= 448:
+        assert int((raw == 1).sum()) > allowed
+
+    assignment, exact, repaired = allocate.decode_assignment(logits, weights, costs, 2.5)
+    assert exact <= 2.5
+    assert int((assignment == 1).sum()) <= allowed
+    assert int((assignment == 1).sum()) == int((raw == 1).sum()) or repaired
+    assert repaired is (not torch.equal(raw, assignment))
+
+
+def test_decoded_assignment_keeps_a_feasible_optimum_unchanged():
+    """The control: a target the DP already meets must not be rewritten."""
+    logits = torch.tensor([[0.0, 0.0], [0.0, 1.0], [0.0, 0.0], [0.0, 0.0]], dtype=torch.float64)
+    weights = torch.ones(4, dtype=torch.float64)
+    costs = torch.tensor([2.0, 4.0], dtype=torch.float64)
+    assignment, exact, repaired = allocate.decode_assignment(logits, weights, costs, 2.5)
+    assert assignment.tolist() == [0, 1, 0, 0]
+    assert exact == 2.5 and repaired is False
+
+
+def test_decoded_assignment_handles_unequal_parameter_counts():
+    logits = torch.zeros(448, 2, dtype=torch.float64)
+    logits[:, 1] = 1.0
+    weights = torch.linspace(1.0, 5.0, 448, dtype=torch.float64)
+    costs = torch.tensor([2.0, 4.0], dtype=torch.float64)
+    assignment, exact, _ = allocate.decode_assignment(logits, weights, costs, 2.5)
+    selected = costs[assignment].double()
+    assert float((selected * weights).sum() / weights.sum()) == pytest.approx(exact)
+    assert exact <= 2.5 + 1e-12
+
+
+def test_decode_refuses_an_infeasible_target():
+    logits = torch.zeros(4, 2, dtype=torch.float64)
+    weights = torch.ones(4, dtype=torch.float64)
+    costs = torch.tensor([2.0, 4.0], dtype=torch.float64)
+    # 1.5 bits is below the W2 floor, so neither the DP nor the export tail may
+    # publish an assignment; the CLI must fail instead of writing JSON.
+    with pytest.raises(SystemExit, match='RCO export refused'):
+        allocate.decode_assignment(logits, weights, costs, 1.5)
+
+
 def tiny_model(dtype=torch.float64, hidden=16, layers=1):
     torch.manual_seed(13)
     config = LlamaConfig(vocab_size=32, hidden_size=hidden, intermediate_size=2*hidden,
