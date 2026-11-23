@@ -343,5 +343,155 @@ def test_mse_strided_transpose_objectives(budget):
     torch.testing.assert_close(torch.cat(errors), torch.stack(expected), rtol=0, atol=0)
 
 
+def _outlier_row(mult):
+    """The reported fixture: one outlier plus 127 equal interior weights."""
+    values = torch.full((127,), 0.13, dtype=torch.float32) * mult
+    values[0] = -1.0 * mult
+    return values.unsqueeze(0)
+
+
+def _fp64_shrink_selection(x, norm, *, bits=4, grid=100, maxshrink=0.8):
+    """Independent FP64 reconstruction and scoring of the FP32 candidate grid.
+
+    Builds the symmetric weight grid from the printed extremes, then evaluates
+    ``sum |deq - x| ** norm`` in float64.  Candidate parameters keep the
+    precision the quantizer actually stores (the grid is built in the input
+    dtype), but neither the reconstruction nor the objective reuses the
+    implementation under test.
+    """
+    rows = x.shape[0]
+    maxq = 2**bits - 1
+    target_zero = torch.zeros(rows, dtype=x.dtype, device=x.device)
+    xmin = torch.minimum(x.min(1)[0], target_zero)
+    xmax = torch.maximum(x.max(1)[0], target_zero)
+    xmax = torch.maximum(torch.abs(xmin), xmax)
+    xmin = -xmax
+    both_zero = xmax == 0
+    xmin = torch.where(both_zero, xmin - 1, xmin)
+    xmax = torch.where(both_zero, xmax + 1, xmax)
+    zero = torch.full_like(xmax, (maxq + 1) // 2)
+
+    steps = int(maxshrink * grid)
+    p = torch.tensor(
+        [1 - i / grid for i in range(steps)], dtype=x.dtype, device=x.device
+    ).unsqueeze(1)
+    xmin1 = p * xmin.unsqueeze(0)
+    xmax1 = p * xmax.unsqueeze(0)
+    scales = (xmax1 - xmin1) / maxq
+    # Weight scales are persisted in FP16 storage, so the grid is bounded the
+    # same way the quantizer bounds it.
+    floor = 2.0**-24
+    scales = torch.where(
+        (scales >= 0) & (scales < floor), torch.full_like(scales, floor), scales
+    )
+
+    x64 = x.to(torch.float64).unsqueeze(0)
+    s64 = scales.to(torch.float64).unsqueeze(-1)
+    z64 = zero.to(torch.float64).unsqueeze(0).unsqueeze(-1)
+    codes = torch.clamp(torch.round(x64 / s64) + z64, 0, maxq)
+    deq = s64 * (codes - z64)
+    err = (deq - x64).abs().pow(float(norm)).sum(dim=2)
+    index = err.argmin(dim=0)
+    best = scales.t().gather(1, index.unsqueeze(1)).squeeze(1)
+    return best, index
+
+
+def _selected_scale(norm, x, budget=None):
+    qcfg = QuantizeConfig(
+        bits=4, group_size=-1, sym=True,
+        mse={"norm": norm, "grid_budget": budget},
+    )
+    quantizer = Quantizer(qcfg)
+    quantizer.configure(perchannel=True)
+    quantizer.find_params(x, weight=True)
+    return quantizer.scale.reshape(-1)
+
+
+@pytest.mark.parametrize("norm", [2.4, 16.0])
+@pytest.mark.parametrize("mult", [1.0, 1e-3])
+@pytest.mark.parametrize("budget", [None, 0])
+def test_high_norm_selection_matches_fp64_oracle(norm, mult, budget):
+    """The shrink grid must match an FP64 oracle at every input magnitude.
+
+    Before the fix the powered residuals underflowed to zero, so every
+    candidate tied at ``0`` and the first-minimum rule kept the unshrunk
+    incumbent: at ``norm = 16`` and ``mult = 1e-3`` the quantizer returned
+    candidate 0 while the FP64 objective prefers candidate 6.
+    """
+    x = _outlier_row(mult)
+    expected_scale, expected_index = _fp64_shrink_selection(x, norm)
+    actual_scale = _selected_scale(norm, x, budget=budget)
+    assert torch.equal(actual_scale.to(torch.float32), expected_scale), (
+        f"norm={norm} mult={mult} budget={budget} "
+        f"picked {actual_scale.tolist()} instead of {expected_scale.tolist()} "
+        f"(oracle candidate {int(expected_index[0])})"
+    )
+
+
+@pytest.mark.parametrize("norm", [2.4, 16.0])
+@pytest.mark.parametrize("mult", [1.0, 1e-3])
+def test_high_norm_selection_is_chunk_size_invariant(norm, mult):
+    """One candidate per chunk must select exactly what the full grid selects."""
+    x = _outlier_row(mult)
+    whole_grid = _selected_scale(norm, x, budget=1 << 24)
+    single = _selected_scale(norm, x, budget=0)
+    torch.testing.assert_close(single, whole_grid, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("norm", [2.4, 16.0])
+def test_high_norm_selection_is_exactly_scale_invariant(norm):
+    """An exact power-of-two rescale must keep the same candidate index.
+
+    The candidate grid, the residuals and the objective all scale exactly, so
+    any change of winner is a scoring defect rather than a different optimum.
+    """
+    base = _outlier_row(1.0)
+    base_scale, base_index = _fp64_shrink_selection(base, norm)
+    expected_scale = _selected_scale(norm, base)
+    assert torch.equal(expected_scale.to(torch.float32), base_scale)
+
+    for mult in (2.0**-10, 2.0**10):
+        x = _outlier_row(mult)
+        oracle_scale, oracle_index = _fp64_shrink_selection(x, norm)
+        actual_scale = _selected_scale(norm, x)
+        assert int(oracle_index[0]) == int(base_index[0]), (
+            f"norm={norm} mult={mult}: the FP64 oracle moved from candidate "
+            f"{int(base_index[0])} to {int(oracle_index[0])}"
+        )
+        assert torch.equal(actual_scale.to(torch.float32), oracle_scale), (
+            f"norm={norm} mult={mult}: selected "
+            f"{actual_scale.tolist()} instead of {oracle_scale.tolist()}"
+        )
+
+
+@pytest.mark.parametrize("budget", [None, 0])
+def test_high_norm_zero_error_and_ties_keep_their_order(budget):
+    """Normalizing the residuals must not disturb zero errors or tie order."""
+    # Every candidate reconstructs this all-zero row exactly, so the objective
+    # ties at zero and the first candidate must win.
+    x = torch.zeros((1, 8), dtype=torch.float32)
+    scales = torch.tensor([0.125, 0.25, 0.5, 1.0], dtype=torch.float32)[:, None]
+    zeros = torch.full_like(scales, 8.0)
+    scale, _ = _mse_shrink_grid(
+        x, scales, zeros, 16.0, maxq_value=15, groupwise=False,
+        guard_zero_scale=True, scale=scales[0], zero=zeros[0],
+        grid_budget=budget,
+    )
+    assert torch.equal(scale, scales[0])
+
+    # Both ``0.25`` and ``0.5`` reconstruct this row exactly.  The first exact
+    # candidate must win over a later equal one and over neighbors whose
+    # nonzero residuals only stay finite after normalization.
+    x = torch.tensor([[-0.5, 0.5, 1.0, 1.5]], dtype=torch.float32)
+    scales = torch.tensor([0.125, 0.25, 0.5, 1.0], dtype=torch.float32)[:, None]
+    zeros = torch.full_like(scales, 8.0)
+    scale, _ = _mse_shrink_grid(
+        x, scales, zeros, 16.0, maxq_value=15, groupwise=False,
+        guard_zero_scale=True, scale=scales[0], zero=zeros[0],
+        grid_budget=budget,
+    )
+    assert torch.equal(scale, torch.full_like(scale, 0.25))
+
+
 if __name__ == "__main__":
     unittest.main()
