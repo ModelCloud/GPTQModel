@@ -119,6 +119,7 @@ buffers load exactly without further code.
 | `ParoLinear` | `("bias",)` | restores the default its `AwqTorchLinear` base drops; forward adds an activation-dtype runtime bias |
 | `MacaqLinear` | `("BH", "pre_scale")` | Hadamard block and pre-scale are built in `compute_dtype` and multiply activations; the bias is added after the FP32 reduction |
 | `ExllamaV3Linear`, `ExllamaV3TorchLinear` | `()` | `suh`/`svh` must stay FP16 for the Hadamard kernels |
+| `XLALinear` | `()` | a bias outside the BF16 grid is kept in FP32 and added after the wide reduction |
 
 Format-specific overrides stay where they were: the loader still forces FP8,
 GGUF, VPTQ and AllSpark biases plus the FP8 `weight_scale_inv` to FP32

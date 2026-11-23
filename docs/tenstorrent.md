@@ -92,24 +92,42 @@ flowchart TD
     Z["checkpoint qzeros<br/>GPTQ v1 or v2"] --> Y["decode logical zero point on CPU"]
     B --> C["uint8 byte planes<br/>out-major, packed"]
     Y --> D["packed zero planes + neg-one mask"]
-    C --> E["upload with scales, g_idx, bias to xla:N"]
+    BI["checkpoint bias<br/>any floating dtype"] --> BJ{"exact BF16<br/>round trip?"}
+    BJ -- yes --> BK["derived BF16 bias<br/>wide_bias = false"]
+    BJ -- no --> BN{"exact FP32<br/>round trip?"}
+    BN -- yes --> BL["derived FP32 bias<br/>wide_bias = true"]
+    BN -- no --> BM["NotImplementedError<br/>before placement"]:::fail
+    C --> E["upload planes, scales, g_idx to xla:N"]
     D --> E
+    BK --> E
+    BL --> E
     E --> F["forward: uint8 mask/shift"]
     F --> G["transient BF16 codes"]
-    G --> H["BF16 dequantize and matmul"]
-    H --> I["output + persistent BF16 bias"]
+    G --> H{"wide_bias?"}
+    H -- no --> I["BF16 dequantize and matmul<br/>add exact BF16 bias"]
+    H -- yes --> J["wide dequantize and matmul<br/>FP32 add of stored bias"]
+    I --> K["the activation-dtype output"]
+    J --> K
 
     classDef storage fill:#dcfce7,stroke:#15803d,color:#14532d;
     classDef transient fill:#fef3c7,stroke:#b45309,color:#78350f;
-    class C,D,E storage;
+    classDef fail fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d;
+    class C,D,E,BK,BL storage;
     class G transient;
+    class BM fail;
 ```
 
 The persistent layout is `weight_bytes[out, in/8, 4]`, plus packed zero planes,
-`zero_neg_one`, BF16 scales, `g_idx`, and optional BF16 bias. It is invalidated
-when the module is moved, a state dict is loaded, the checkpoint format changes,
-or packed tensor versions change. The `_tt_layout` is rebuilt for the new card
-after placement.
+`zero_neg_one`, BF16 scales, `g_idx`, and the derived bias operand. The bias is
+narrowed to BF16 only when the cast is exact; otherwise the layout keeps the
+checkpoint value in FP32 with `wide_bias = true`, and the forward adds it after
+the wide reduction and rounds the public output once. A bias whose stored values
+FP32 cannot represent is rejected during preparation. The registered
+checkpoint bias is never rewritten to match the derived copy.
+
+The layout is invalidated when the module is moved, a state dict is loaded, the
+checkpoint format changes, the bias operand changes, or packed tensor versions
+change. The `_tt_layout` is rebuilt for the new card after placement.
 
 ## Block-float checkpoint export and reload
 
@@ -842,7 +860,7 @@ stateDiagram-v2
     NativeTT --> Rejected: PJRT already owns chips
     NativeAdmitted --> Forward: packed layout on MeshDevice
     XLAAdmitted --> Forward: packed layout on xla:N
-    Forward --> Output: BF16 matmul or bias
+    Forward --> Output: BF16 output, narrow or wide bias epilogue
     Forward --> Rejected: CPU activation or non-BF16 input
 
     classDef bad fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d;

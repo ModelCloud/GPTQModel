@@ -24,7 +24,26 @@ from ...utils.tt_packing import (
 )
 from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
+from ._numerics import linear_wide_bias
 from ._runtime_cache import tensor_cache_key
+
+
+def _dequantize_layout(layout: TTPackedGPTQLayout) -> torch.Tensor:
+    """Expand the persistent byte planes into one call's BF16 weights.
+
+    The result is a transient operand of the forward, released with it. TT has
+    no FP16 type, so BF16 is the widest activation operand it carries.
+    """
+
+    codes = unpack_tt_byte_planes_bf16(layout.weight_bytes)[:, : layout.in_features]
+    zero_codes = unpack_tt_byte_planes_bf16(layout.zero_bytes)[:, : layout.out_features]
+    zero_codes = torch.where(
+        layout.zero_neg_one[:, : layout.out_features],
+        torch.full_like(zero_codes, -1.0),
+        zero_codes,
+    )
+    g_idx = layout.g_idx.to(torch.int64)
+    return layout.scales[g_idx] * (codes.transpose(0, 1) - zero_codes[g_idx])
 
 
 class XLALinear(GPTQQuantLinear):
@@ -57,6 +76,10 @@ class XLALinear(GPTQQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = []
     SUPPORTS_DTYPES = [torch.bfloat16]
+
+    # A bias outside the BF16 grid is kept in FP32 for the wide epilogue, so it
+    # must not follow the model dtype at load time.
+    MODEL_DTYPE_BUFFERS = ()
 
     REQUIRES_FORMAT_V2 = False
     QUANT_TYPE = "ttxla"
@@ -123,6 +146,9 @@ class XLALinear(GPTQQuantLinear):
             tensor_cache_key(self.qzeros),
             tensor_cache_key(self.scales),
             tensor_cache_key(self.g_idx),
+            # The layout carries a derived bias operand, so a bias replacement
+            # or an in-place write must rebuild it like the packed weights do.
+            tensor_cache_key(self.bias),
             self.qzero_format(),
         )
 
@@ -175,16 +201,33 @@ class XLALinear(GPTQQuantLinear):
     def dequantize_weight(self, num_itr: int = 1):
         if num_itr != 1:
             raise NotImplementedError("XLALinear supports only the single-group iteration layout.")
-        layout = self._build_tt_layout()
-        codes = unpack_tt_byte_planes_bf16(layout.weight_bytes)[:, : self.in_features]
-        zero_codes = unpack_tt_byte_planes_bf16(layout.zero_bytes)[:, : self.out_features]
-        zero_codes = torch.where(
-            layout.zero_neg_one[:, : self.out_features],
-            torch.full_like(zero_codes, -1.0),
-            zero_codes,
-        )
-        g_idx = layout.g_idx.to(torch.int64)
-        return layout.scales[g_idx] * (codes.transpose(0, 1) - zero_codes[g_idx])
+        return _dequantize_layout(self._build_tt_layout())
+
+    def _matmul_epilogue(
+        self, flat: torch.Tensor, layout: TTPackedGPTQLayout
+    ) -> torch.Tensor:
+        """Project ``flat`` with the packed weight and the layout's bias copy.
+
+        Split out of ``forward`` so the wide/narrow epilogue choice is testable
+        without a PJRT device; it is the only place the bias is applied.
+        """
+
+        weights = _dequantize_layout(layout)
+        try:
+            if layout.wide_bias:
+                # The checkpoint bias has no exact BF16 form (for example FP16
+                # ``1001``). ``linear_wide_bias`` runs the dot wide, adds the
+                # stored bias there and rounds the public output once, so the
+                # epilogue cannot act on an already-rounded copy.
+                return linear_wide_bias(flat, weights.t(), layout.bias)
+            output = torch.matmul(flat, weights)
+            if layout.bias is not None:
+                # B5: TT transfer rounds FP16 to BF16. The layout only holds an
+                # exact BF16 copy, so this add keeps the checkpoint value.
+                output = output + layout.bias
+            return output
+        finally:
+            del weights
 
     def forward(self, x: torch.Tensor):
         if x.device.type != "xla":
@@ -200,21 +243,7 @@ class XLALinear(GPTQQuantLinear):
         out_shape = x.shape[:-1] + (self.out_features,)
         flat = x.reshape(-1, self.in_features)
         layout = self._build_tt_layout()
-        codes = unpack_tt_byte_planes_bf16(layout.weight_bytes)[:, : self.in_features]
-        zero_codes = unpack_tt_byte_planes_bf16(layout.zero_bytes)[:, : self.out_features]
-        zero_codes = torch.where(
-            layout.zero_neg_one[:, : self.out_features],
-            torch.full_like(zero_codes, -1.0),
-            zero_codes,
-        )
-        g_idx = layout.g_idx.to(torch.int64)
-        weights = layout.scales[g_idx] * (codes.transpose(0, 1) - zero_codes[g_idx])
-        output = torch.matmul(flat, weights).reshape(out_shape)
-        if self.bias is not None:
-            # B5: TT transfer rounds FP16 to BF16. Use the packed BF16 copy so
-            # the bias dtype is honest before it reaches PJRT.
-            output = output + layout.bias
-        return output
+        return self._matmul_epilogue(flat, layout).reshape(out_shape)
 
 
 __all__ = ["XLALinear"]
