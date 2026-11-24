@@ -150,3 +150,29 @@ def test_exllamav3_modules_carry_the_lock():
     for cls in (ExllamaV3Linear, ExllamaV3TorchLinear):
         assert cls.forward._forward_dtype_locked
         assert cls._apply._forward_dtype_locked
+
+
+class _IntOnly(_Echo):
+    """A kernel whose every stored tensor is integer (no float buffer to cast)."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("qweight", torch.zeros(4, dtype=torch.int32))
+
+
+def test_cast_that_leaves_every_stored_dtype_unchanged_still_raises():
+    """The lock is on the activation dtype, not only on stored tensor dtypes.
+
+    ``.to(bfloat16)`` on an integer-only checkpoint leaves ``state_dict``
+    dtypes untouched, so probing the stored tensors alone cannot see the
+    request. It still asks the module to serve a second activation dtype, which
+    the contract rejects; the stored tensors must stay as they were.
+    """
+
+    module = _IntOnly()
+    module(torch.zeros(2, dtype=torch.float16))
+
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        module.to(torch.bfloat16)
+
+    assert module.qweight.dtype == torch.int32

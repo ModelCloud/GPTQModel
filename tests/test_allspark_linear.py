@@ -556,9 +556,19 @@ def test_runtime_state_dict_roundtrip_and_cache_invalidation(dtype):
     )
     torch.testing.assert_close(module(x), ref.to(dtype), rtol=2e-3, atol=2e-3)
 
-    # A device/dtype move keeps the checkpoint layout and rebuilds the cache.
-    module.to(torch.bfloat16 if dtype is torch.float16 else torch.float16)
-    assert {name: tensor.shape for name, tensor in module.state_dict().items()} == {
+    # Weight dtypes are frozen after the first forward
+    # (contracts/kernel/forward-dtype.md): the post-forward dtype move is a
+    # caller bug and must raise before any tensor changes dtype.
+    other = torch.bfloat16 if dtype is torch.float16 else torch.float16
+    with pytest.raises(RuntimeError, match="Weight dtypes are frozen"):
+        module.to(other)
+    assert {name: tensor.dtype for name, tensor in module.state_dict().items()}[
+        "scales"
+    ] == dtype
+
+    # A fresh module in the other dtype carries the same checkpoint layout.
+    fresh, _, _, _ = _load_gptq_module(other)
+    assert {name: tensor.shape for name, tensor in fresh.state_dict().items()} == {
         "qweight": torch.Size([64, 512]),
         "scales": torch.Size([1, 512]),
         "bias": torch.Size([512]),
