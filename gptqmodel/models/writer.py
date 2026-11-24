@@ -2466,9 +2466,17 @@ def ModelWriter(cls):
         # wrong logits after ``save()``.
         model_for_save = self.model
         if self.load_quantized_model and runtime_format != FORMAT.EXL3:
+            # The writer mixin is also used outside ``BaseQModel`` (tests and
+            # external integrators drive it directly). ``_checkpoint_repo_path``
+            # is recorded by the wrapper constructor, so fall back to the
+            # selected checkpoint path instead of requiring that attribute.
             model_for_save = self.get_model_with_quantize(
                 qcfg=quantize_config,
-                model_id_or_path=self._checkpoint_repo_path,
+                model_id_or_path=getattr(
+                    self,
+                    "_checkpoint_repo_path",
+                    getattr(self, "model_local_path", None),
+                ),
             )
             live_generation_config = getattr(self.model, "generation_config", None)
             if live_generation_config is not None:
