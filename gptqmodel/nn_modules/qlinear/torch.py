@@ -1439,11 +1439,16 @@ class TorchLinear(PackableQuantLinear):
         away from the single rounding the fused kernels perform (#5740).  Ask
         for the activation dtype when every decoded weight fits it; a decode
         that does not fit keeps the range-safe dtype.
+
+        A wide activation (FP32/FP64) takes the same rule: the fused kernels
+        form each weight in FP32 and round once to the activation dtype, so
+        decoding in the stored FP16 scale dtype would add a rounding the
+        fused path never performs.  It also keeps this fallback bitwise
+        aligned with the shared int4pack decode, which decodes a wide
+        activation in its own dtype (``decode_dtype_for_scales``).
         """
-        if (
-            activation_dtype in _HALF_DTYPES
-            and self.scales.dtype != activation_dtype
-            and self._decoded_weight_fits(activation_dtype)
+        if self.scales.dtype != activation_dtype and self._decoded_weight_fits(
+            activation_dtype
         ):
             return activation_dtype
         return self._decode_dtype()
