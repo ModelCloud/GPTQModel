@@ -507,6 +507,11 @@ class LeapQuantState:
         value = self._check_sequence("value", value, self.value_dim)
         alpha = self._check_sequence_alpha(alpha)
         beta = self._check_sequence_beta(beta)
+        for name, tensor in (("key", key), ("value", value), ("alpha", alpha), ("beta", beta)):
+            if tensor.shape[1] != query.shape[1]:
+                raise ValueError(
+                    f"LeapQuant {name} sequence length {tensor.shape[1]} differs from query length {query.shape[1]}"
+                )
         outputs = []
         for index in range(query.shape[1]):
             outputs.append(
@@ -747,7 +752,8 @@ class LeapQuantLinearAttentionLayer(LinearAttentionLayer):
     def reorder_cache(self, beam_idx: torch.Tensor) -> None:
         state = self._leapquant
         if state is None:
-            return super().reorder_cache(beam_idx)
+            super().reorder_cache(beam_idx)
+            return
 
         state._check_reorder_shape(beam_idx)
         conv_states = {
@@ -845,7 +851,7 @@ class LeapQuantGenerationMixin(GenerationMixin):
 
     def _prepare_cache_for_generation(
         self, generation_config, model_kwargs, generation_mode, batch_size, max_cache_length,
-    ):
+    ) -> None:
         cache = model_kwargs.get("past_key_values")
         decoder = self.get_decoder()
         state_quant = getattr(decoder, "_gptqmodel_state_quant", None)
@@ -863,6 +869,6 @@ class LeapQuantGenerationMixin(GenerationMixin):
                 model_kwargs["past_key_values"] = make_leapquant_cache(decoder.config, state_quant)
                 return
 
-        return super()._prepare_cache_for_generation(
+        super()._prepare_cache_for_generation(
             generation_config, model_kwargs, generation_mode, batch_size, max_cache_length,
         )

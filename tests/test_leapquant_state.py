@@ -295,3 +295,21 @@ def test_packed_restore_validates_before_replacing_live_state(invalid_field):
     torch.testing.assert_close(state.materialize(), (unit * 8).unsqueeze(-1), atol=0, rtol=0)
     actual = state.step(unit, unit, unit * 4, unit, unit * 0.5)
     torch.testing.assert_close(actual, unit * 6, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("field", ["key", "value", "alpha", "beta"])
+@pytest.mark.parametrize("length", [1, 3])
+def test_prefill_rejects_mismatched_lengths_before_consuming_tokens(field, length):
+    inputs = dict(zip(("query", "key", "value", "alpha", "beta"), _fixture("cpu", tokens=3), strict=True))
+    prompt = {name: tensor[:, 1:] for name, tensor in inputs.items()}
+    state = LeapQuantState(2, 2, 8, 8, LeapQuantConfig(window=4, rank=0, buffer_dtype=torch.float32), gate_dim=1)
+    state.step(*(tensor[:, 0] for tensor in inputs.values()))
+    previous = state.materialize()
+
+    with pytest.raises(ValueError, match="sequence length"):
+        state.prefill(**{**prompt, field: inputs[field][:, :length]})
+
+    assert state.window_count == 1
+    torch.testing.assert_close(state.materialize(), previous, rtol=0, atol=0)
+    expected, _ = _oracle_gdn(**inputs)
+    torch.testing.assert_close(state.prefill(**prompt), expected[:, 1:], rtol=0, atol=0)
