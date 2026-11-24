@@ -607,6 +607,17 @@ class FOEM(GPTQ):
             raise ValueError("FOEM requires `foem` configuration.")
         result_device = torch.device(self.module.weight.data.device)
 
+        # Same cohort sharing as GPTAQ: the members of one `:in=<tag>` group
+        # hold the same H/dXXT, so the cached tuple is one inverse and one
+        # delta product for the group. The scope keeps it away from GPTQ's
+        # plain factor and from GPTAQ's tuple.
+        factor_ordering = "desc_act" if self.qcfg.desc_act else (
+            "act_group_aware" if self.qcfg.act_group_aware else "natural"
+        )
+        factor_scope = (
+            f"foem:alpha={float(self.qcfg.foem.alpha)}:native={int(self.gptaq)}"
+        )
+
         W_raw = W.detach().clone()
 
         # The block loss is only consumed as one scalar, so keep a block-sized
@@ -682,7 +693,9 @@ class FOEM(GPTQ):
                 scale, zero = _move_static_groups(groups, cdu_device)
 
         (Hinv, damp, P), cpu_fallback_used = self._run_with_accelerator_oom_cpu_fallback(
-            _inverse_and_delta,
+            lambda: self._shared_factor_or_local(
+                factor_ordering, _inverse_and_delta, factor_scope
+            ),
             source_device=H.device,
             stage="Hessian inverse",
             prepare_cpu=_prepare_cpu,

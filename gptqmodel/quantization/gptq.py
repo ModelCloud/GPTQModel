@@ -2514,8 +2514,13 @@ class GPTQ:
             self._shared_hessian_cache = None
             self._shared_hessian_cache_disabled = False
 
-    def _shared_factor_key(self, ordering: str) -> Tuple[Any, ...]:
-        """Return a complete same-device compatibility key for a factor."""
+    def _shared_factor_key(self, ordering: str, scope: str = "") -> Tuple[Any, ...]:
+        """Return a complete same-device compatibility key for a factor.
+
+        ``scope`` separates artifacts of solvers that cache more than the
+        inverse for the same Hessian: GPTAQ and FOEM also cache their delta
+        product, and a GPTQ consumer must never receive that tuple.
+        """
 
         hessian = self.qcfg.hessian
         return (
@@ -2527,6 +2532,7 @@ class GPTQ:
             # Include device identity so a factor is reused only on its device.
             self.H.device.type if self.H is not None else None,
             self.H.device.index if self.H is not None else None,
+            str(scope),
             ordering,
             int(self.qcfg.group_size),
             bool(self.qcfg.desc_act),
@@ -2539,13 +2545,15 @@ class GPTQ:
             hessian.chunk_bytes,
         )
 
-    def _shared_factor_or_local(self, ordering: str, producer: Callable[[], Any]) -> Any:
+    def _shared_factor_or_local(
+        self, ordering: str, producer: Callable[[], Any], scope: str = ""
+    ) -> Any:
         cache = self._shared_hessian_cache
         if cache is None or self._shared_hessian_cache_disabled:
             return producer()
         try:
             return cache.get_or_compute(
-                self._shared_factor_key(ordering),
+                self._shared_factor_key(ordering, scope),
                 producer,
             )
         except RuntimeError as exc:

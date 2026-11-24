@@ -549,6 +549,19 @@ class GPTAQ(GPTQ):
             raise ValueError("GPTAQ requires `gptaq` configuration.")
         result_device = torch.device(self.module.weight.data.device)
 
+        # One inverse + delta product per shared-input cohort. Members of an
+        # `:in=<tag>` group hold the same H and dXXT, so the cache key below
+        # (H shape/dtype/device, ordering, group, damp) matches across them.
+        # The scope keeps this tuple - which carries the delta product - away
+        # from GPTQ's plain (Hinv, damp) artifact.
+        factor_ordering = "desc_act" if self.qcfg.desc_act else (
+            "act_group_aware" if self.qcfg.act_group_aware else "natural"
+        )
+        factor_scope = (
+            f"gptaq:alpha={float(self.qcfg.gptaq.alpha)}:"
+            f"native={int(self._use_native_delta)}"
+        )
+
         # The block loss is only consumed as one scalar, so keep a block-sized
         # fp32 scratch plus a device scalar instead of a full rows x columns
         # buffer (issue #5734). Every scratch column is written before it is
@@ -621,7 +634,9 @@ class GPTAQ(GPTQ):
                 scale, zero = _move_static_groups(groups, cdu_device)
 
         (Hinv, damp, P), cpu_fallback_used = self._run_with_accelerator_oom_cpu_fallback(
-            _inverse_and_delta,
+            lambda: self._shared_factor_or_local(
+                factor_ordering, _inverse_and_delta, factor_scope
+            ),
             source_device=H.device,
             stage="Hessian inverse",
             prepare_cpu=_prepare_cpu,

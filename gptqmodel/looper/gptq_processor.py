@@ -564,8 +564,11 @@ class GPTQProcessor(LoopProcessor):
             if follower_task is None or leader_task is None:
                 continue
             follower_task.adopt_hessian_from(leader_task)
-            if type(leader_task) is GPTQ and type(follower_task) is GPTQ:
+            if isinstance(leader_task, (GPTQ, GPTAQ, FOEM)) and type(leader_task) is type(follower_task):
                 # Publish the factor cache only after the follower owns its Hessian copy.
+                # GPTAQ and FOEM re-implement the block pass but consume the same
+                # inverse and delta product; they join under their own cache scope, so
+                # one cohort pays one Cholesky and one delta instead of one per sibling.
                 cache = caches.get(leader)
                 if cache is None:
                     cache = SharedHessianFactorCache(
