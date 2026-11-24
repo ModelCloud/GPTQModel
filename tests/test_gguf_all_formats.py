@@ -25,6 +25,8 @@ import gptqmodel.nn_modules.qlinear.gguf_cpp as gguf_cpp
 from gptqmodel.nn_modules.qlinear.gguf import (
     _GGUF_AVAILABLE,
     _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE,
+    _GGUF_FP16_HEADER_FIELDS,
+    _GGUF_QUANT_QTYPES,
     _GGUF_TYPE_INFO,
     GGUFTorchLinear,
     _dequantize_gguf_tensor_numpy,
@@ -596,6 +598,197 @@ def test_simple_in_range_export_round_trips_through_safetensors(tmp_path, alias,
     assert np.isfinite(stored).all(), stored
     decoded = _dequantize_gguf_tensor_numpy(reloaded.qweight.numpy(), qtype)
     assert np.isfinite(decoded).all()
+
+
+# ---------------------------------------------------------------------------
+# FP16 header fields for every block format
+# ---------------------------------------------------------------------------
+
+# Independent of ``_GGUF_FP16_HEADER_FIELDS``: these are the byte offsets and
+# field names of the ggml block layouts that the decoders read. ``IQ1_M`` has no
+# contiguous FP16 field; its scale is split across the high nibbles of the four
+# uint16 words at the end of the block.
+_EXPECTED_FP16_HEADER_FIELDS = {
+    "Q1_0": ((0, "block scale d"),),
+    "Q1_0_g128": ((0, "block scale d"),),
+    "Q2_0": ((0, "block scale d"),),
+    "Q4_0": ((0, "block scale d"),),
+    "Q4_1": ((0, "block scale d"), (2, "block min m")),
+    "Q5_0": ((0, "block scale d"),),
+    "Q5_1": ((0, "block scale d"), (2, "block min m")),
+    "Q8_0": ((0, "block scale d"),),
+    "Q8_1": ((0, "block scale d"), (2, "auxiliary scale-sum s")),
+    "Q2_K": ((80, "block scale d"), (82, "block min dmin")),
+    "Q3_K": ((108, "block scale d"),),
+    "Q4_K": ((0, "block scale d"), (2, "block min dmin")),
+    "Q5_K": ((0, "block scale d"), (2, "block min dmin")),
+    "Q6_K": ((208, "block scale d"),),
+    "IQ1_S": ((0, "block scale d"),),
+    "IQ2_XXS": ((0, "block scale d"),),
+    "IQ2_XS": ((0, "block scale d"),),
+    "IQ2_S": ((0, "block scale d"),),
+    "IQ3_XXS": ((0, "block scale d"),),
+    "IQ3_S": ((0, "block scale d"),),
+    "IQ4_NL": ((0, "block scale d"),),
+    "IQ4_XS": ((0, "block scale d"),),
+    "TQ1_0": ((52, "block scale d"),),
+    "TQ2_0": ((64, "block scale d"),),
+}
+_IQ1_M_SPLIT_SCALE_OFFSETS = (48, 50, 52, 54)
+_NO_FP16_HEADER_QTYPES = {"MXFP4", "NVFP4", "Q8_K"}
+# llama.cpp's IQ3 packers abort inside ggml on a float32-max input before they
+# return bytes, so that peak cannot be exercised end-to-end in this process.
+# The packed-byte guard test still covers both formats.
+_FP32_MAX_ABORTING_QTYPES = {"IQ3_S", "IQ3_XXS"}
+_QTYPE_TO_ALIAS = {
+    qtype: alias for alias, qtype in _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE.items()
+}
+
+
+def test_fp16_header_table_covers_every_format_with_a_stored_field():
+    """Every format with an FP16 header field is in the shared validation table."""
+
+    expected = set(_GGUF_QUANT_QTYPES) - _NO_FP16_HEADER_QTYPES
+    assert set(_GGUF_FP16_HEADER_FIELDS) | {"IQ1_M"} == expected
+    for qtype, fields in _EXPECTED_FP16_HEADER_FIELDS.items():
+        assert _GGUF_FP16_HEADER_FIELDS[qtype] == fields
+
+
+@pytest.mark.parametrize(
+    "qtype,offset,label",
+    [
+        (qtype, offset, label)
+        for qtype, fields in _EXPECTED_FP16_HEADER_FIELDS.items()
+        for offset, label in fields
+    ],
+)
+def test_fp16_header_guard_rejects_each_nonfinite_field(qtype, offset, label):
+    """A non-finite ``d``, ``dmin``, ``m`` or Q8_1 ``s`` must be named."""
+
+    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
+
+    type_size = _GGUF_TYPE_INFO[qtype]["type_size"]
+    blocks = np.zeros((1, type_size), dtype=np.uint8)
+    # 0x7C00 is positive infinity in little-endian FP16.
+    blocks[0, offset : offset + 2] = np.array([0x00, 0x7C], dtype=np.uint8)
+
+    with pytest.raises(ValueError) as excinfo:
+        gguf_module._check_packed_fp16_fields(blocks, qtype)
+
+    message = str(excinfo.value)
+    assert qtype in message
+    assert label in message
+    assert "block 0 of 1" in message
+
+
+def test_fp16_header_guard_reconstructs_iq1_m_split_scale():
+    """IQ1_M's nibble-split FP16 scale is validated even though it is not contiguous."""
+
+    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
+
+    type_size = _GGUF_TYPE_INFO["IQ1_M"]["type_size"]
+    blocks = np.zeros((2, type_size), dtype=np.uint8)
+    # 0x7C00 (inf) is the high nibbles 0, 0, C, 7 of the four scale words: the
+    # first word supplies bits 3..0 and the last word bits 15..12.
+    for offset, nibble in zip(_IQ1_M_SPLIT_SCALE_OFFSETS, (0x0, 0x0, 0xC, 0x7)):
+        blocks[1, offset + 1] |= np.uint8(nibble << 4)
+
+    with pytest.raises(ValueError) as excinfo:
+        gguf_module._check_packed_fp16_fields(blocks, "IQ1_M")
+    message = str(excinfo.value)
+    assert "IQ1_M" in message
+    assert "block scale d" in message
+    assert "block 1 of 2" in message
+
+    # The same block with a finite scale is accepted, so this is not a blanket
+    # rejection of IQ1_M.
+    blocks[1] = 0
+    gguf_module._check_packed_fp16_fields(blocks, "IQ1_M")
+
+
+@pytest.mark.parametrize("qtype", sorted(_GGUF_QUANT_QTYPES))
+@pytest.mark.parametrize(
+    "peak", [1e9, float(np.finfo(np.float32).max)], ids=["1e9", "fp32-max"]
+)
+def test_every_format_rejects_or_decodes_finite(qtype, peak):
+    """Out-of-range blocks must fail closed instead of publishing ``inf``/``NaN``."""
+
+    _skip_without_quantizer(qtype)
+    fp32_max = float(np.finfo(np.float32).max)
+    if peak == fp32_max and qtype in _FP32_MAX_ABORTING_QTYPES:
+        pytest.skip(
+            "native ggml IQ3 packer aborts on a float32-max input before returning "
+            "bytes; the packed-byte guard test covers this format"
+        )
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+    weight = np.zeros((1, block_size), dtype=np.float32)
+    weight[0, 0] = np.float32(peak)
+    if block_size > 1:
+        weight[0, 1] = np.float32(-peak)
+
+    try:
+        packed = _quantize_gguf_tensor_numpy(weight, qtype)
+    except ValueError as exc:
+        message = str(exc)
+        assert qtype in message
+        assert "block 0 of 1" in message
+        assert "FP16" in message
+        return
+
+    if qtype == "Q8_K" and peak == fp32_max:
+        # Q8_K stores an FP32 scale, so its header is always finite. The FP32
+        # code product can still leave float32 at this extreme input, which is
+        # an input-range limit, not an FP16 header defect.
+        header = np.asarray(packed, dtype=np.uint8).reshape(
+            -1, _GGUF_TYPE_INFO[qtype]["type_size"]
+        )[:, :4].copy().view(np.float32)
+        assert np.isfinite(header).all()
+    else:
+        assert np.isfinite(_dequantize_gguf_tensor_numpy(packed, qtype)).all()
+
+
+@pytest.mark.parametrize("qtype", sorted(_GGUF_QUANT_QTYPES))
+def test_every_format_keeps_in_range_bytes_and_decodes_finite(qtype):
+    """The guard must not reject or rewrite blocks that fit their stored fields."""
+
+    _skip_without_quantizer(qtype)
+    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
+
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+    rng = np.random.default_rng(0)
+    weight = (rng.standard_normal((1, block_size)) * 0.05).astype(np.float32)
+
+    guarded = _quantize_gguf_tensor_numpy(weight, qtype)
+    raw = gguf_module._pack_gguf_tensor_numpy(weight, qtype)
+    np.testing.assert_array_equal(np.asarray(guarded), np.asarray(raw))
+    assert np.isfinite(_dequantize_gguf_tensor_numpy(guarded, qtype)).all()
+
+
+@pytest.mark.parametrize("qtype", sorted(_GGUF_QUANT_QTYPES - _NO_FP16_HEADER_QTYPES))
+def test_every_format_export_fails_before_publishing(qtype):
+    """An export must raise before any unreadable ``qweight`` is stored."""
+
+    _skip_without_quantizer(qtype)
+    alias = _QTYPE_TO_ALIAS[qtype]
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+
+    module = GGUFTorchLinear(
+        bits=alias,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=block_size,
+        out_features=1,
+        bias=False,
+        register_buffers=False,
+    )
+    linear = torch.nn.Linear(block_size, 1, bias=False)
+    with torch.no_grad():
+        linear.weight.fill_(1e9)
+
+    with pytest.raises(ValueError, match="FP16"):
+        module.pack_original(linear, None, None)
+    assert "qweight" not in module._buffers
 
 
 @pytest.mark.parametrize("alias", ALL_ALIASES)

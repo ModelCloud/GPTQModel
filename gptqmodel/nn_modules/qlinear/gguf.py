@@ -796,35 +796,61 @@ def _check_q8_1_stored_fields(d: np.ndarray, s: np.ndarray) -> None:
 
 
 def _check_packed_q8_1_fields(packed: np.ndarray) -> None:
-    """Validate the FP16 header fields of packed Q8_1 bytes.
+    """Validate the FP16 ``d``/``s`` header fields of packed Q8_1 bytes.
 
-    ``_quantize_gguf_tensor_numpy`` prefers the installed ``gguf`` reference
-    quantizer or the native ggml bridge before the NumPy fallback, so the same
-    invariant is enforced on the bytes that would be published, not only in the
-    fallback.
+    Q8_1 is part of the shared ``_GGUF_FP16_HEADER_FIELDS`` table, so this
+    historical entry point delegates to the validator that runs on the bytes
+    published by every packer.
     """
 
-    type_size = _GGUF_TYPE_INFO["Q8_1"]["type_size"]
-    blocks = np.asarray(packed, dtype=np.uint8).reshape(-1, type_size)
-    # The header is the first four bytes of each block: fp16 d, then fp16 s.
-    stored = blocks[:, :4].copy().view(np.float16)
-    unrepresentable = ~np.isfinite(stored)
-    if not unrepresentable.any():
-        return
-    flattened = int(np.flatnonzero(unrepresentable.reshape(-1))[0])
-    index, field = divmod(flattened, 2)
-    # The stored bytes are already non-finite, so no finite value is recoverable.
-    raise _q8_1_unrepresentable_field(field, index, int(blocks.shape[0]), None)
+    # Q8_1 is in the shared table, so one implementation validates ``d`` and
+    # the auxiliary ``s`` for every packer.
+    _check_packed_fp16_fields(packed, "Q8_1")
 
 
-# ``qtype -> ((header byte offset, field label), ...)`` for the simple block
-# formats whose only FP16 header field is the block scale. ``block_q4_0`` and
-# ``block_q8_0`` both begin with ``fp16 d``; every code is relative to it, so a
-# non-finite ``d`` makes the whole block unreadable.
+# ``qtype -> ((header byte offset, field label), ...)`` for every block format
+# that stores a header field as FP16. A non-finite ``d``, ``dmin``, ``m`` or
+# Q8_1 ``s`` makes the whole block unreadable: the decoder multiplies it into
+# every code, so the block decodes to ``inf``/``NaN``. The field dtype is fixed
+# by the format, so the supported input range is narrowed instead of publishing
+# those bytes.
+#
+# The offsets follow the ggml block layouts that the decoders in this module and
+# the ``gguf`` reference package read. Formats whose header is FP32 (``Q8_K``),
+# FP8/E8M0 (``MXFP4``, ``NVFP4``) or split across nibbles (``IQ1_M``) are not
+# listed here; ``IQ1_M`` is validated separately below.
 _GGUF_FP16_HEADER_FIELDS = {
+    "Q1_0": ((0, "block scale d"),),
+    "Q1_0_g128": ((0, "block scale d"),),
+    "Q2_0": ((0, "block scale d"),),
     "Q4_0": ((0, "block scale d"),),
+    "Q4_1": ((0, "block scale d"), (2, "block min m")),
+    "Q5_0": ((0, "block scale d"),),
+    "Q5_1": ((0, "block scale d"), (2, "block min m")),
     "Q8_0": ((0, "block scale d"),),
+    "Q8_1": ((0, "block scale d"), (2, "auxiliary scale-sum s")),
+    "Q2_K": ((80, "block scale d"), (82, "block min dmin")),
+    "Q3_K": ((108, "block scale d"),),
+    "Q4_K": ((0, "block scale d"), (2, "block min dmin")),
+    "Q5_K": ((0, "block scale d"), (2, "block min dmin")),
+    "Q6_K": ((208, "block scale d"),),
+    "IQ1_S": ((0, "block scale d"),),
+    "IQ2_XXS": ((0, "block scale d"),),
+    "IQ2_XS": ((0, "block scale d"),),
+    "IQ2_S": ((0, "block scale d"),),
+    "IQ3_XXS": ((0, "block scale d"),),
+    "IQ3_S": ((0, "block scale d"),),
+    "IQ4_NL": ((0, "block scale d"),),
+    "IQ4_XS": ((0, "block scale d"),),
+    "TQ1_0": ((52, "block scale d"),),
+    "TQ2_0": ((64, "block scale d"),),
 }
+
+# ``block_iq1_m`` has no contiguous FP16 field. Its scale is the 16-bit value
+# assembled from the high nibble of each of the four little-endian ``uint16``
+# words at the end of the block (``scales``), which the reference decoder then
+# reinterprets as ``fp16``. An overflowing scale still publishes ``inf``/``NaN``.
+_IQ1_M_SCALE_OFFSETS = (48, 50, 52, 54)
 
 
 def _simple_unrepresentable_field(qtype: str, label: str, index: int, blocks: int) -> ValueError:
@@ -839,11 +865,12 @@ def _simple_unrepresentable_field(qtype: str, label: str, index: int, blocks: in
 def _check_packed_fp16_fields(packed: np.ndarray | torch.Tensor, qtype: str) -> None:
     """Reject published bytes whose FP16 header field is not finite.
 
-    A simple block stores its scale by casting a finite FP32 value, so a block
-    above the FP16 range publishes ``inf`` and decodes to ``inf``/``NaN`` code
-    products. The field dtype is fixed by the format, and both the ``gguf``
-    reference packer and the NumPy fallback emit the same bytes, so the range
-    is enforced on the packed header at the shared exit rather than in one
+    Every format stores its scale (and, where present, ``dmin``/``m``/``s``) by
+    casting a finite FP32 value, so a block above the FP16 range publishes
+    ``inf`` and decodes to ``inf``/``NaN`` code products. The field dtype is
+    fixed by the format, and every packer (the ``gguf`` reference package, the
+    NumPy fallback, the native ggml bridge and MLX) emits the same bytes, so the
+    range is enforced on the packed header at the shared exit rather than in one
     packer.
 
     ``packed`` may be the NumPy bytes from ``_pack_gguf_tensor_numpy`` or the
@@ -852,13 +879,14 @@ def _check_packed_fp16_fields(packed: np.ndarray | torch.Tensor, qtype: str) -> 
     """
 
     fields = _GGUF_FP16_HEADER_FIELDS.get(qtype)
-    if not fields:
+    split_offsets = _IQ1_M_SCALE_OFFSETS if qtype == "IQ1_M" else ()
+    if not fields and not split_offsets:
         return
     if torch.is_tensor(packed):
         packed = packed.detach().to(device="cpu", dtype=torch.uint8).contiguous().numpy()
     type_size = _GGUF_TYPE_INFO[qtype]["type_size"]
     blocks = np.asarray(packed, dtype=np.uint8).reshape(-1, type_size)
-    for offset, label in fields:
+    for offset, label in fields or ():
         # The stored bytes are already non-finite, so no finite value is recoverable.
         stored = blocks[:, offset : offset + 2].copy().view(np.float16).reshape(-1)
         unrepresentable = ~np.isfinite(stored)
@@ -867,6 +895,27 @@ def _check_packed_fp16_fields(packed: np.ndarray | torch.Tensor, qtype: str) -> 
         raise _simple_unrepresentable_field(
             qtype, label, int(np.flatnonzero(unrepresentable)[0]), int(blocks.shape[0])
         )
+    if split_offsets:
+        words = np.stack(
+            [
+                blocks[:, offset : offset + 2].copy().view(np.uint16).reshape(-1)
+                for offset in split_offsets
+            ],
+            axis=1,
+        )
+        # The first word supplies bits 3..0, then 7..4, 11..8 and 15..12.
+        shifts = np.array([12, 8, 4, 0], dtype=np.uint16)
+        raw = np.bitwise_or.reduce((words & np.uint16(0xF000)) >> shifts, axis=1).astype(
+            np.uint16
+        )
+        unrepresentable = ~np.isfinite(raw.view(np.float16))
+        if unrepresentable.any():
+            raise _simple_unrepresentable_field(
+                qtype,
+                "block scale d",
+                int(np.flatnonzero(unrepresentable)[0]),
+                int(blocks.shape[0]),
+            )
 
 
 def _gguf_quantize_q8_1(blocks: np.ndarray) -> np.ndarray:
@@ -1156,10 +1205,6 @@ def _quantize_gguf_tensor_numpy(weight: np.ndarray, tensor_qtype) -> np.ndarray:
     # Covers whichever packer served the call, including the installed ``gguf``
     # reference quantizer and the native ggml bridge.
     _check_packed_fp16_fields(packed, resolved_qtype)
-    if resolved_qtype == "Q8_1":
-        # The format stores its auxiliary scale-sum in FP16, which no packer can
-        # widen. Reject unreadable bytes whichever packer produced them.
-        _check_packed_q8_1_fields(packed)
     return packed
 
 
