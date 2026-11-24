@@ -4,8 +4,14 @@
 import pytest
 import torch
 
-from gptqmodel.quantization.config import MSEConfig, QuantizeConfig
-from gptqmodel.quantization.qqq import Quantizer, quantize
+from gptqmodel.quantization.config import (
+    Fallback,
+    FallbackStrategy,
+    MSEConfig,
+    QQQConfig,
+    QuantizeConfig,
+)
+from gptqmodel.quantization.qqq import QQQ, Quantizer, quantize
 
 
 def _raw_bytes(tensor):
@@ -326,3 +332,95 @@ def test_qqq_mse_grid_chunks(device, dtype, bits, sym, groupsize, budget, non_ne
     )
     torch.testing.assert_close(quantizer.scale.flatten(), scale, rtol=0, atol=0)
     torch.testing.assert_close(quantizer.zero.flatten(), zero, rtol=0, atol=0)
+
+
+# ``+/-2**127`` is exactly representable in BF16 but the affine span
+# ``2**128`` is not representable in the FP32 work dtype, so ``xmax - xmin``
+# overflows before the division even though the fitted step is finite. The
+# shared ``_affine_scale`` helper fits it by dividing each endpoint first.
+_BF16_EXTREME = 2.0**127
+_BF16_EXTREME_STEP = torch.tensor(2.0**128 / 15, dtype=torch.float64).float()
+
+
+@pytest.mark.parametrize("sym", [True, False])
+@pytest.mark.parametrize("mse", [False, True])
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="CUDA unavailable",
+    )),
+])
+def test_qqq_find_params_keeps_finite_affine_scale_at_bf16_extreme_endpoints(
+    sym, mse, device
+):
+    group = 128
+    weights = torch.zeros(2, group, dtype=torch.bfloat16, device=device)
+    weights[0, 0] = _BF16_EXTREME
+    weights[0, 2] = -_BF16_EXTREME
+    control = torch.linspace(-1.0, 1.0, group, device=device).to(torch.bfloat16)
+    weights[1] = control
+
+    quantizer = Quantizer()
+    quantizer.configure(bits=4, perchannel=True, sym=sym, groupsize=group, mse=mse)
+    quantizer.find_params(weights, weight=True)
+
+    # The overflow lane must take the representable step, not ``inf``.
+    assert torch.isfinite(quantizer.scale).all()
+    assert quantizer.scale.dtype == torch.float32
+    torch.testing.assert_close(
+        quantizer.scale[0, 0].cpu(), _BF16_EXTREME_STEP, rtol=0, atol=0
+    )
+
+    # The ordinary group keeps the bitwise-identical pre-fix fit.
+    control_f32 = control.float()
+    control_step = (control_f32.max() - control_f32.min()) / quantizer.maxq
+    assert quantizer.scale[1, 0] == control_step
+
+    # A finite scale must produce a finite reconstruction of the endpoints.
+    dequant = quantizer.quantize(weights)
+    assert torch.isfinite(dequant).all()
+    assert dequant[0, 0] > 0
+    assert dequant[0, 2] < 0
+
+
+@pytest.mark.parametrize("sym", [True, False])
+@pytest.mark.parametrize(
+    "strategy",
+    [FallbackStrategy.MIDPOINT, FallbackStrategy.MEAN, FallbackStrategy.MEDIAN],
+)
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="CUDA unavailable",
+    )),
+])
+def test_qqq_fallback_affine_grid_keeps_finite_scale_at_bf16_extreme_endpoints(
+    sym, strategy, device
+):
+    group = 128
+    weight = torch.zeros(4, group, dtype=torch.bfloat16, device=device)
+    weight[0, 0] = _BF16_EXTREME
+    weight[0, 2] = -_BF16_EXTREME
+    weight[1] = torch.linspace(-1.0, 1.0, group, device=device).to(torch.bfloat16)
+    layer = torch.nn.Linear(group, 4, bias=False, device=device)
+    with torch.no_grad():
+        layer.weight.copy_(weight)
+
+    qcfg = QQQConfig(
+        bits=4,
+        group_size=group,
+        sym=sym,
+        fallback=Fallback(strategy=strategy, threshold=False),
+    )
+    task = QQQ(layer, qcfg)
+
+    dequant, scale, zero, _g_idx, _duration, _loss, _damp, _extra, _samples = (
+        task._fallback_quantize(strategy)
+    )
+
+    assert torch.isfinite(scale).all()
+    torch.testing.assert_close(scale[0, 0].cpu(), _BF16_EXTREME_STEP, rtol=0, atol=0)
+    assert torch.isfinite(zero).all()
+    assert torch.isfinite(dequant).all()
+    assert dequant[0, 0] > 0
+    assert dequant[0, 2] < 0

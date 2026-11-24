@@ -748,7 +748,11 @@ class Quantizer(nn.Module):
             scale1 = xmax1
             zero1 = xmin1
         else:
-            scale1 = xmax1 / self.maxq if groupwise else (xmax1 - xmin1) / self.maxq
+            scale1 = (
+                xmax1 / self.maxq
+                if groupwise
+                else _affine_scale(xmin1, xmax1, self.maxq)
+            )
             # Evaluate the same representable scales that will be packed. Flooring
             # only the initial/final winner would select against a different grid,
             # and asymmetric zero points must be computed from the bounded scale.
