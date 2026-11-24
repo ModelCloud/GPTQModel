@@ -97,3 +97,5 @@ wider stored scale (`Q8_K`/`F16`). A mixed-block control asserts the
 underflowed block is rebuilt while the normal block keeps the reference
 bytes, and export tests run `GGUFTorchLinear.pack_original` and its forward
 on the repaired payload.
+
+Introduced in PR #6027.
