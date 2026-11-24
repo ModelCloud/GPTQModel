@@ -21,7 +21,7 @@ import json
 import os
 import sys
 import tempfile
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -47,6 +47,9 @@ from .tokenizer import TokenizerMetadata, build_tokenizer_metadata, tokenizer_ki
 log = setup_logger()
 
 GGUF_QUANTIZATION_VERSION = 2
+
+# These ggml types hold dot-product activations and have no weight dot kernel.
+_ACTIVATION_ONLY_QTYPES = {"Q8_1", "Q8_K"}
 
 #: Model types whose GGUF architecture name differs from ``model_type``.
 MODEL_TYPE_TO_ARCH = {
@@ -206,6 +209,7 @@ def _package_gguf(config: GGUFPackageConfig) -> Path:
     with _ShardReader.open(model_dir) as reader:
         _refuse_moe(model_config, reader.weight_map, arch)
         n_blocks = _require_int(model_config, "num_hidden_layers")
+        spec.validate_attention(model_config, n_blocks)
         tensor_map = gguf.get_tensor_name_map(_arch_enum(gguf, arch), n_blocks)
         tokenizer = _load_tokenizer(config, model_dir)
         tokenizer_meta = _build_tokenizer_metadata(config, tokenizer, model_config, spec)
@@ -498,8 +502,18 @@ def _plan_tensors(
                 raise UnsupportedQuantTypeError(
                     f"package(): `{module}` resolves to GGUF subtype `{alias}`, which has no ggml tensor type."
                 )
+            if qtype in _ACTIVATION_ONLY_QTYPES:
+                raise UnsupportedQuantTypeError(
+                    f"package(): `{module}` uses {qtype}, which llama.cpp cannot use as a weight type."
+                )
             info = _GGUF_TYPE_INFO[qtype]
-            storage_shape = tuple(int(value) for value in reader.slice(name).get_shape())
+            packed = reader.slice(name)
+            storage_dtype = packed.get_dtype()
+            if storage_dtype != "U8":
+                raise CheckpointFormatError(
+                    f"package(): `{name}` must contain packed uint8 bytes, got {storage_dtype}."
+                )
+            storage_shape = tuple(int(value) for value in packed.get_shape())
             if len(storage_shape) != 2:
                 raise CheckpointFormatError(
                     f"package(): `{name}` must be a 2-D packed matrix, got shape {storage_shape}."
@@ -576,7 +590,8 @@ def _plan_tensors(
             f"package(): the checkpoint is missing tensors a `{spec.arch}` GGUF file needs: {missing}."
         )
 
-    if model_config.get("tie_word_embeddings") is False and "output.weight" not in seen:
+    # The verified model configs default to untied embeddings.
+    if model_config.get("tie_word_embeddings", not spec.verified) is False and "output.weight" not in seen:
         raise CheckpointFormatError(
             "package(): `tie_word_embeddings` is false but the checkpoint has no `lm_head`; llama.cpp would "
             "tie the output projection to the embedding and change the model."
@@ -593,8 +608,9 @@ def _missing_required(
     present = {tensor.name for tensor in planned}
     required = {"token_embd.weight", "output_norm.weight"}
     if spec.verified:
+        leaves = _REQUIRED_BLOCK_LEAVES + spec.required_block_leaves
         for block in range(n_blocks):
-            required.update(f"blk.{block}.{leaf}" for leaf in _REQUIRED_BLOCK_LEAVES)
+            required.update(f"blk.{block}.{leaf}" for leaf in leaves)
     return sorted(required - present)
 
 
@@ -628,7 +644,7 @@ def _file_type(gguf: Any, quantize_config: Any, override: int) -> int:
 
 def _resolve_output(config: GGUFPackageConfig) -> str:
     out = config.out_path
-    if os.path.exists(out) and not config.overwrite:
+    if os.path.lexists(out) and not config.overwrite:
         raise FileExistsError(f"package(): {out!r} already exists; pass `overwrite=True` to replace it.")
     parent = os.path.dirname(out)
     if parent:
@@ -652,50 +668,47 @@ def _write_gguf(
     file_type: int,
 ) -> None:
     parent = os.path.dirname(out) or "."
-    handle, temp_path = tempfile.mkstemp(prefix=".gguf-package-", suffix=".gguf", dir=parent)
-    os.close(handle)
-
-    writer = gguf.GGUFWriter(path=None, arch=arch, use_temp_file=False)
+    handle, temp_name = tempfile.mkstemp(prefix=".gguf-package-", suffix=".gguf", dir=parent)
+    temp_path = Path(temp_name)
     try:
-        _add_metadata(
-            writer=writer,
-            model_config=model_config,
-            spec=spec,
-            tokenizer_meta=tokenizer_meta,
-            config=config,
-            n_blocks=n_blocks,
-            name=name,
-            file_type=file_type,
-        )
-        for tensor in plan:
-            _add_tensor_info(writer, gguf, tensor)
-        writer.write_header_to_file(path=Path(temp_path))
-        writer.write_kv_data_to_file()
-        writer.write_ti_data_to_file()
-        for tensor in plan:
-            writer.write_tensor_data(_materialize(reader, tensor))
-        writer.close()
-    except BaseException:
+        os.close(handle)
+        writer = gguf.GGUFWriter(path=None, arch=arch, use_temp_file=False)
         try:
+            _add_metadata(
+                writer=writer,
+                model_config=model_config,
+                spec=spec,
+                tokenizer_meta=tokenizer_meta,
+                config=config,
+                n_blocks=n_blocks,
+                name=name,
+                file_type=file_type,
+            )
+            for tensor in plan:
+                _add_tensor_info(writer, gguf, tensor)
+            writer.write_header_to_file(path=temp_path)
+            writer.write_kv_data_to_file()
+            writer.write_ti_data_to_file()
+            for tensor in plan:
+                writer.write_tensor_data(_materialize(reader, tensor))
             writer.close()
-        except Exception:
-            pass
-        _remove_if_present(temp_path)
-        raise
+        except BaseException:
+            # Keep the write error when closing an already failing writer.
+            with suppress(Exception):
+                writer.close()
+            raise
 
-    try:
         _verify_written(temp_path, plan)
-    except BaseException:
-        _remove_if_present(temp_path)
-        raise
-    os.replace(temp_path, out)
-
-
-def _remove_if_present(path: str) -> None:
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
+        if config.overwrite:
+            os.replace(temp_path, out)
+        else:
+            # Publish the complete file only if its destination is still free.
+            os.link(temp_path, out)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError as exc:
+            log.warn("package: could not remove temporary file %s: %s", temp_path, exc)
 
 
 def _add_metadata(
@@ -721,7 +734,6 @@ def _add_metadata(
     _maybe_uint32(writer, "add_feed_forward_length", model_config.get("intermediate_size"))
     writer.add_head_count(_require_int(model_config, "num_attention_heads"))
     _maybe_uint32(writer, "add_head_count_kv", model_config.get("num_key_value_heads"))
-    _maybe_float32(writer, "add_rope_freq_base", model_config.get("rope_theta"))
 
     dim = head_dim(model_config)
     writer.add_rope_dimension_count(dim)
@@ -747,6 +759,9 @@ def _add_metadata(
     if tokenizer_meta.chat_template:
         writer.add_chat_template(tokenizer_meta.chat_template)
 
+    duplicates = config.metadata.keys() & writer.kv_data[0].keys()
+    if duplicates:
+        raise PackageError(f"package(): metadata cannot replace generated keys: {sorted(duplicates)}.")
     for key, value in config.metadata.items():
         _add_scalar(writer, key, value)
 
@@ -771,10 +786,14 @@ def _add_scalar(writer: Any, key: str, value: Any) -> None:
     if isinstance(value, bool):
         writer.add_bool(key, value)
     elif isinstance(value, int):
-        if 0 <= value < 2**32:
+        if -(2**63) <= value < 0:
+            writer.add_int64(key, value)
+        elif 0 <= value < 2**32:
             writer.add_uint32(key, value)
-        else:
+        elif 0 <= value < 2**64:
             writer.add_uint64(key, value)
+        else:
+            raise PackageError(f"package(): metadata integer `{key}` is outside the GGUF 64-bit range.")
     elif isinstance(value, float):
         writer.add_float32(key, value)
     elif isinstance(value, str):
@@ -838,7 +857,7 @@ def _materialize(reader: _ShardReader, tensor: _PlannedTensor) -> np.ndarray:
         array = payload.numpy()
         if tensor.permutation is not None:
             array = array[tensor.permutation]
-        return np.ascontiguousarray(array, dtype=np.uint8)
+        return np.ascontiguousarray(array)
 
     if tensor.permutation is not None:
         order = torch.as_tensor(tensor.permutation, dtype=torch.long)
@@ -853,7 +872,7 @@ def _materialize(reader: _ShardReader, tensor: _PlannedTensor) -> np.ndarray:
     return np.ascontiguousarray(payload.to(torch.float32).numpy())
 
 
-def _verify_written(path: str, plan: Sequence[_PlannedTensor]) -> None:
+def _verify_written(path: Path, plan: Sequence[_PlannedTensor]) -> None:
     from ..utils.internal_gguf import GGUFReader
 
     reader = GGUFReader(path)

@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import math
 import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -23,8 +22,10 @@ from gptqmodel.packaging import (
     CheckpointFormatError,
     GGUFPackageConfig,
     PackageConfig,
+    PackageError,
     UnsafeTransformError,
     UnsupportedArchitectureError,
+    UnsupportedQuantTypeError,
     UnsupportedTensorError,
     package,
 )
@@ -55,7 +56,6 @@ KV_DIM = KV_HEADS * HEAD_DIM
 #: ``a``..``h`` plus the result of the single merge below.
 VOCAB = 9
 
-REAL_TOKENIZER_DIR = Path("/monster/data/model/Qwen3-0.6B")
 ARCH_ENUM = {
     "qwen2": gguf.MODEL_ARCH.QWEN2,
     "qwen3": gguf.MODEL_ARCH.QWEN3,
@@ -124,12 +124,12 @@ def _build_checkpoint(
     put("model.norm.weight", torch.ones(HIDDEN))
     put(_layer(0, "input_layernorm.weight"), torch.ones(HIDDEN))
     put(_layer(0, "post_attention_layernorm.weight"), torch.ones(HIDDEN))
-    if model_type != "llama":
+    if model_type == "qwen3":
         put(_layer(0, "self_attn.q_norm.weight"), torch.ones(HEAD_DIM))
         put(_layer(0, "self_attn.k_norm.weight"), torch.ones(HEAD_DIM))
     if include_lm_head:
         put("lm_head.qweight", _packed((vocab_size, HIDDEN), "Q4_K"))
-    if attention_bias:
+    if attention_bias or model_type == "qwen2":
         put(_layer(0, "self_attn.q_proj.bias"), torch.randn(Q_DIM) * 0.01)
         put(_layer(0, "self_attn.k_proj.bias"), torch.randn(KV_DIM) * 0.01)
         put(_layer(0, "self_attn.v_proj.bias"), torch.randn(KV_DIM) * 0.01)
@@ -326,7 +326,8 @@ def test_llama_permutes_qk_biases_too(tmp_path):
     )
 
 
-def test_llama3_rope_freqs_matches_the_piecewise_spec(tmp_path):
+@pytest.mark.parametrize("rope_key", ["rope_parameters", "rope_scaling"])
+def test_llama3_rope_freqs_matches_the_piecewise_spec(tmp_path, rope_key):
     scaling = {
         "rope_type": "llama3",
         "factor": 8.0,
@@ -336,14 +337,16 @@ def test_llama3_rope_freqs_matches_the_piecewise_spec(tmp_path):
     }
     root = tmp_path / "ckpt"
     root.mkdir()
-    _build_checkpoint(
-        root,
-        model_type="llama",
-        config_overrides={"rope_theta": 10000.0, "rope_scaling": scaling},
-    )
+    overrides = {"rope_theta": 10000.0, rope_key: scaling}
+    if rope_key == "rope_parameters":
+        scaling["rope_theta"] = 10000.0
+        overrides["rope_theta"] = 1000000.0
+    _build_checkpoint(root, model_type="llama", config_overrides=overrides)
     out = _run_package(root, tmp_path)
 
-    written = _tensors(out)
+    reader = gguf.GGUFReader(str(out))
+    assert reader.get_field("llama.rope.freq_base").contents() == 10000.0
+    written = {tensor.name: tensor for tensor in reader.tensors}
     assert "rope_freqs.weight" in written
     assert written["rope_freqs.weight"].tensor_type.name == "F32"
     assert written["rope_freqs.weight"].data.shape == (HEAD_DIM // 2,)
@@ -370,6 +373,50 @@ def test_llama3_rope_freqs_matches_the_piecewise_spec(tmp_path):
     )
 
 
+@pytest.mark.parametrize("model_type", ["qwen2", "qwen3", "llama"])
+def test_current_rope_parameters_set_frequency_base(tmp_path, model_type):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(
+        root,
+        model_type=model_type,
+        config_overrides={"rope_parameters": {"rope_type": "default", "rope_theta": 500000.0}},
+    )
+
+    reader = gguf.GGUFReader(str(_run_package(root, tmp_path)))
+    assert reader.get_field(f"{model_type}.rope.freq_base").contents() == 500000.0
+
+
+def test_linear_rope_scaling_is_preserved(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(
+        root,
+        config_overrides={"rope_parameters": {"rope_type": "linear", "rope_theta": 500000.0, "factor": 4.0}},
+    )
+
+    reader = gguf.GGUFReader(str(_run_package(root, tmp_path)))
+    scaling_type = reader.get_field("qwen3.rope.scaling.type")
+    assert scaling_type is not None and scaling_type.contents() == "linear"
+    assert reader.get_field("qwen3.rope.scaling.factor").contents() == 4.0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"rope_parameters": {"rope_type": "dynamic", "factor": 2.0}}, "RoPE"),
+        ({"use_sliding_window": True, "sliding_window": 64, "max_window_layers": 0}, "sliding"),
+        ({"layer_types": ["sliding_attention"], "sliding_window": 64}, "sliding"),
+    ],
+)
+def test_refuses_unsupported_attention_layout(tmp_path, overrides, message):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root, config_overrides=overrides)
+
+    with pytest.raises(UnsafeTransformError, match=message):
+        _run_package(root, tmp_path)
+    assert sorted(tmp_path.iterdir()) == [root]
 
 
 def test_untied_checkpoint_writes_the_output_projection(tmp_path):
@@ -403,6 +450,124 @@ def test_existing_output_requires_overwrite(tmp_path):
         _run_package(root, tmp_path)
     second = _run_package(root, tmp_path, overwrite=True)
     assert first == second
+
+
+def test_output_created_during_verification_is_preserved(tmp_path, monkeypatch):
+    import gptqmodel.packaging.gguf_package as module
+
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+    out = tmp_path / "model.gguf"
+    existing = b"another publisher's output"
+    verify = module._verify_written
+
+    def verify_and_publish(path, plan):
+        verify(path, plan)
+        with out.open("xb") as handle:
+            handle.write(existing)
+
+    monkeypatch.setattr(module, "_verify_written", verify_and_publish)
+    with pytest.raises(FileExistsError):
+        _run_package(root, tmp_path)
+    assert out.read_bytes() == existing
+    assert sorted(tmp_path.iterdir()) == [root, out]
+
+
+@pytest.mark.parametrize("failure_stage", ["construct", "replace"])
+def test_writer_failure_leaves_existing_output_and_cleans_temp_file(tmp_path, monkeypatch, failure_stage):
+    import gptqmodel.packaging.gguf_package as module
+
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+    out = _run_package(root, tmp_path)
+    existing = out.read_bytes()
+
+    def fail(*args, **kwargs):
+        raise OSError(f"injected {failure_stage} failure")
+
+    with monkeypatch.context() as patch:
+        if failure_stage == "construct":
+            patch.setattr(gguf, "GGUFWriter", fail)
+        else:
+            patch.setattr(module.os, "replace", fail)
+        with pytest.raises(OSError, match=f"injected {failure_stage} failure"):
+            _run_package(root, tmp_path, overwrite=True)
+    assert out.read_bytes() == existing
+    assert sorted(tmp_path.iterdir()) == [root, out]
+    assert _run_package(root, tmp_path, overwrite=True) == out
+    assert _tensors(out)["blk.0.ffn_down.weight"].tensor_type.name == "Q4_K"
+
+
+def test_refuses_metadata_that_replaces_generated_fields(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+
+    with pytest.raises(PackageError, match=r"general\.architecture"):
+        _run_package(root, tmp_path, metadata={"general.architecture": "llama"})
+    assert sorted(tmp_path.iterdir()) == [root]
+
+    reader = gguf.GGUFReader(str(_run_package(root, tmp_path, metadata={"general.description": "fixture"})))
+    assert reader.get_field("general.description").contents() == "fixture"
+
+
+def test_signed_extra_metadata_round_trips(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+
+    reader = gguf.GGUFReader(str(_run_package(root, tmp_path, metadata={"fixture.offset": -7})))
+    assert reader.get_field("fixture.offset").contents() == -7
+
+
+@pytest.mark.parametrize("alias", ["q8_1", "q8_k"])
+def test_refuses_activation_only_ggml_types_as_weights(tmp_path, alias):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(
+        root,
+        dynamic={".*down_proj": {"bits": alias}},
+        extra={_layer(0, "mlp.down_proj.qweight"): _packed((HIDDEN, INTERMEDIATE), alias.upper())},
+    )
+
+    with pytest.raises(UnsupportedQuantTypeError, match=alias.upper()):
+        _run_package(root, tmp_path)
+    assert sorted(tmp_path.iterdir()) == [root]
+
+
+def test_refuses_non_byte_packed_storage(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    name = _layer(0, "self_attn.q_proj.qweight")
+    _build_checkpoint(root, extra={name: _packed((Q_DIM, HIDDEN), "Q4_K").to(torch.int16)})
+
+    with pytest.raises(CheckpointFormatError, match=r"q_proj\.qweight.*uint8"):
+        _run_package(root, tmp_path)
+    assert sorted(tmp_path.iterdir()) == [root]
+
+
+@pytest.mark.parametrize(
+    ("model_type", "leaf", "gguf_name"),
+    [
+        ("qwen2", "self_attn.q_proj.bias", "attn_q.bias"),
+        ("qwen3", "self_attn.q_norm.weight", "attn_q_norm.weight"),
+        ("qwen3", "self_attn.k_norm.weight", "attn_k_norm.weight"),
+    ],
+)
+def test_refuses_missing_required_attention_tensors(tmp_path, model_type, leaf, gguf_name):
+    from safetensors.torch import save_file
+
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _, tensors = _build_checkpoint(root, model_type=model_type)
+    tensors.pop(_layer(0, leaf))
+    save_file(tensors, str(root / "model.safetensors"))
+
+    with pytest.raises(CheckpointFormatError, match=gguf_name):
+        _run_package(root, tmp_path)
+    assert sorted(tmp_path.iterdir()) == [root]
 
 
 def test_refuses_a_shape_the_arch_layout_does_not_allow(tmp_path):
@@ -461,6 +626,20 @@ def test_refuses_untied_checkpoint_without_lm_head(tmp_path):
     out_dir.mkdir()
     with pytest.raises(CheckpointFormatError, match="tie_word_embeddings"):
         _run_package(root, out_dir)
+
+
+def test_absent_tie_flag_uses_the_model_default(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+    config_path = root / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    del config["tie_word_embeddings"]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(CheckpointFormatError, match="tie_word_embeddings"):
+        _run_package(root, tmp_path)
+    assert sorted(tmp_path.iterdir()) == [root]
 
 
 def test_unregistered_architecture_fails_closed(tmp_path):
@@ -525,6 +704,25 @@ def test_output_directory_is_rejected(tmp_path):
         GGUFPackageConfig(model_path=str(root), out_path=str(tmp_path))
 
 
+@pytest.mark.parametrize("kind", ["unigram", "byte_fallback_bpe"])
+def test_refuses_sentencepiece_tokenizers_without_a_gguf_vocabulary(tmp_path, kind):
+    from tokenizers import Tokenizer, models
+    from transformers import PreTrainedTokenizerFast
+
+    if kind == "unigram":
+        tokenizer_model = models.Unigram([("a", 0.0), ("<unk>", -1.0)], unk_id=1)
+    else:
+        tokenizer_model = models.BPE(vocab={"a": 0, "<0xFF>": 1}, merges=[], byte_fallback=True)
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(tokenizer_model))
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root, model_type="llama")
+
+    with pytest.raises(PackageError, match="tokenizer"):
+        _run_package(root, tmp_path, tokenizer=tokenizer)
+    assert sorted(tmp_path.iterdir()) == [root]
+
+
 def test_tokenizer_metadata_fills_rows_past_the_vocabulary():
     meta = build_tokenizer_metadata(_tiny_tokenizer(), vocab_size=VOCAB + 4, tokenizer_pre="qwen2")
     assert len(meta.tokens) == VOCAB + 4
@@ -554,34 +752,54 @@ def test_token_type_constants_match_the_gguf_contract():
     ) == expected
 
 
-@pytest.mark.skipif(not REAL_TOKENIZER_DIR.is_dir(), reason="local Qwen3 tokenizer fixture is unavailable")
-def test_real_qwen3_tokenizer_covers_added_tokens():
-    from transformers import AutoTokenizer
+def test_tokenizer_metadata_covers_added_tokens():
+    from tokenizers import AddedToken
 
-    tokenizer = AutoTokenizer.from_pretrained(str(REAL_TOKENIZER_DIR), local_files_only=True)
-    meta = build_tokenizer_metadata(tokenizer, vocab_size=151936, tokenizer_pre="qwen2")
-    assert len(meta.tokens) == 151936
-    assert meta.tokens[151643] == "<|endoftext|>"
-    assert meta.token_types[151643] == TOKEN_TYPE_CONTROL
-    assert meta.tokens[151668] == "</think>"
-    assert meta.token_types[151668] == TOKEN_TYPE_USER_DEFINED
-    assert len(meta.merges) == 151387
-    assert meta.special_ids["eos"] == 151645
+    tokenizer = _tiny_tokenizer()
+    tokenizer.add_tokens([AddedToken("<|endoftext|>", normalized=False, special=True)], special_tokens=True)
+    tokenizer.add_tokens([AddedToken("</think>", normalized=False)])
+    meta = build_tokenizer_metadata(tokenizer, vocab_size=len(tokenizer) + 1, tokenizer_pre="qwen2")
+
+    assert meta.tokens[VOCAB:] == ("<|endoftext|>", "</think>", f"[PAD{VOCAB + 2}]")
+    assert meta.token_types[VOCAB:] == (TOKEN_TYPE_CONTROL, TOKEN_TYPE_USER_DEFINED, TOKEN_TYPE_UNUSED)
+    assert meta.special_ids["eos"] == 1
 
 
-@pytest.mark.skipif(not REAL_TOKENIZER_DIR.is_dir(), reason="local Qwen3 tokenizer fixture is unavailable")
-def test_llamacpp_loads_the_packaged_file(tmp_path):
+@pytest.mark.parametrize("model_type", ["qwen2", "qwen3", "llama"])
+def test_llamacpp_loads_the_packaged_file(tmp_path, model_type):
     llama_cpp = pytest.importorskip("llama_cpp")
-    from transformers import AutoTokenizer
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+    from transformers import PreTrainedTokenizerFast
 
-    tokenizer = AutoTokenizer.from_pretrained(str(REAL_TOKENIZER_DIR), local_files_only=True)
-    vocab_size = 151936
+    vocab = {token: index for index, token in enumerate(sorted(pre_tokenizers.ByteLevel.alphabet()))}
+    vocab["ab"] = len(vocab)
+    backend = Tokenizer(models.BPE(vocab=vocab, merges=[("a", "b")]))
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    backend.decoder = decoders.ByteLevel()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, eos_token="<|endoftext|>")
+
     root = tmp_path / "ckpt"
     root.mkdir()
-    _build_checkpoint(root, vocab_size=vocab_size)
-    out = _run_package(root, tmp_path, tokenizer=tokenizer)
+    _build_checkpoint(
+        root,
+        model_type=model_type,
+        vocab_size=len(tokenizer),
+        config_overrides={"rope_parameters": {"rope_type": "default", "rope_theta": 500000.0}},
+    )
+    tokenizer.save_pretrained(root)
+    out = package(GGUFPackageConfig(model_path=root, out_path=tmp_path / "model.gguf"))
 
-    model = llama_cpp.Llama(model_path=str(out), n_ctx=32, n_gpu_layers=0, verbose=False)
-    assert model.n_vocab() == vocab_size
-    for text in ("Hello, world! 你好", "def f(x):\n    return x + 1\n"):
-        assert model.tokenize(text.encode("utf-8")) == tokenizer.encode(text, add_special_tokens=False)
+    model = llama_cpp.Llama(
+        model_path=str(out), n_ctx=32, n_gpu_layers=0, n_threads=1, logits_all=True, verbose=False
+    )
+    try:
+        assert model.n_vocab() == len(tokenizer)
+        for text in ("ab cab! 你好", "def f(x):\n    return x + 1\n"):
+            ids = model.tokenize(text.encode("utf-8"), add_bos=False)
+            assert ids == tokenizer.encode(text, add_special_tokens=False)
+        model.eval(ids)
+        logits = model.scores[model.n_tokens - 1]
+        assert np.isfinite(logits).all()
+        assert np.any(logits != 0)
+    finally:
+        model.close()

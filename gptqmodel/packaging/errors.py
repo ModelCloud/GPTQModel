@@ -27,7 +27,7 @@ class UnsupportedArchitectureError(PackageError):
 
 
 class UnsupportedQuantTypeError(PackageError):
-    """A packed tensor uses a ggml type the installed writer cannot emit."""
+    """A packed tensor uses a ggml type unavailable for this export."""
 
 
 class UnsupportedTensorError(PackageError):

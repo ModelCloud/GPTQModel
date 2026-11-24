@@ -56,16 +56,11 @@ def tokenizer_kind(tokenizer: Any) -> str:
     backend = getattr(tokenizer, "backend_tokenizer", None)
     model = getattr(backend, "model", None)
     kind = type(model).__name__ if model is not None else ""
-    if kind == "BPE":
+    if kind == "BPE" and not model.byte_fallback:
         return "gpt2"
-    if kind == "Unigram":
-        return "llama"
-    if kind == "WordPiece":
-        return "bert"
     raise PackageError(
-        "package(): cannot describe this tokenizer in a GGUF file: no backend tokenizer or an "
-        f"unsupported model type ({kind or type(tokenizer).__name__}). Pass a fast BPE/Unigram/WordPiece "
-        "tokenizer through `tokenizer=`."
+        "package(): exporting a GGUF tokenizer requires a fast BPE tokenizer without SentencePiece byte "
+        f"fallback, got {kind or type(tokenizer).__name__}."
     )
 
 
