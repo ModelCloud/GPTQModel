@@ -21,7 +21,10 @@ import threading
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import TorchCpuAvx512Linear
+from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import (
+    TorchCpuAvx512Linear,
+    _fake_gemm_int4_qzero_group_scaled,
+)
 from gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
 from gptqmodel.utils.cpu_features import avx512_bf16_error, has_avx512_bf16
@@ -114,6 +117,25 @@ def _assert_matches_dense_reference(x, grad_out, weight):
     )
 
 
+def test_fake_int4_gemm_reports_the_output_width_for_both_layouts():
+    """The traced shape must be ``[rows, out_features]`` for GPTQ and AWQ.
+
+    ``weight.shape[0]`` is ``out_features`` for the GPTQ packed layout but
+    ``in_features`` for AWQ's ``[in_features, out_features // 2]`` layout, so
+    the fake implementation used to hand dynamo a width the real kernel never
+    returns and the traced reshape failed.
+    """
+
+    x = torch.zeros(4, IN_FEATURES, dtype=torch.bfloat16)
+    absmax = torch.zeros(IN_FEATURES // 128, OUT_FEATURES, dtype=torch.float32)
+    gptq_weight = torch.zeros(OUT_FEATURES, IN_FEATURES // 2, dtype=torch.int32)
+    awq_weight = torch.zeros(IN_FEATURES, OUT_FEATURES // 2, dtype=torch.int32)
+
+    for weight in (gptq_weight, awq_weight):
+        out = _fake_gemm_int4_qzero_group_scaled(x, weight, None, absmax, 128)
+        assert out.shape == (4, OUT_FEATURES), tuple(weight.shape)
+
+
 def test_avx512_awq_compiled_grad_forward_keeps_gradient():
     layer = _untransformed_awq_module()
     weight = _dequantized(layer)
@@ -140,13 +162,20 @@ def test_avx512_awq_compiled_grad_forward_keeps_the_runtime_latch():
 def test_avx512_awq_compiled_inference_forward_matches_eager():
     _skip_unless_avx512(TorchCpuAvx512AwqLinear)
 
-    layer = _untransformed_awq_module()
-    compiled = torch.compile(layer, backend="eager", fullgraph=True)
+    # The fused kernel consumes the runtime layout produced by
+    # ``transform_cpu``; a hand-built ``linear_mode="inference"`` module that
+    # was never transformed is not a reachable state. Use the real checkpoint
+    # fixture and let the eager warm-up install the layout.
+    layer = _awq_layer(TorchCpuAvx512AwqLinear)
+    layer.eval()
     x = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16)
 
     with torch.inference_mode():
-        traced = compiled(x)
         eager = layer(x)
+
+    compiled = torch.compile(layer, backend="eager", fullgraph=True)
+    with torch.inference_mode():
+        traced = compiled(x)
 
     torch.testing.assert_close(traced.float(), eager.float(), rtol=2e-2, atol=2e-2)
 
