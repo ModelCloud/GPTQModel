@@ -9,6 +9,33 @@ import torch.nn.functional as F
 from torch import nn
 
 
+def _log1p_exp_neg(x):
+    """`log1p(exp(-x))` evaluated only on (0, 1] so every element is geometry-invariant.
+
+    Torch's vectorized CPU `softplus`/`sigmoid` kernels switch vectorized libm
+    paths with the tensor length (on AVX512 the same value at length 16 and
+    length 64 differs by 1 ulp), so a full call and a chunked call over the
+    same values produced different bits. Building the stable identity from
+    elementwise ops whose inputs stay in (0, 1] keeps a token's gate bits
+    independent of how many tokens share the call, which is what makes a
+    cached split run reproduce the single full-sequence run exactly.
+    """
+    return torch.log1p(torch.exp(-x))
+
+
+def _softplus(x):
+    # Stable `softplus(x) == max(x, 0) + log1p(exp(-|x|))`. The `0.5 * (x + |x|)`
+    # form of `max(x, 0)` keeps the derivative at x == 0 equal to 0.5, matching
+    # `F.softplus`, and never evaluates `exp` at a positive argument.
+    return 0.5 * (x + x.abs()) + _log1p_exp_neg(x.abs())
+
+
+def _sigmoid(x):
+    # `sigmoid(x) == (1 + tanh(x / 2)) / 2`, which avoids the length-dependent
+    # fused `sigmoid`/`softplus` kernels and stays finite for any finite input.
+    return 0.5 * (1.0 + torch.tanh(0.5 * x))
+
+
 class ShortConvolution(nn.Conv1d):
     def __init__(self, hidden_size, kernel_size, activation="silu"):
         super().__init__(hidden_size, hidden_size, kernel_size, groups=hidden_size, bias=False)
@@ -58,8 +85,8 @@ def kda_forward(q, k, v, g, beta, A_log, dt_bias, initial_state=None, lower_boun
     k = k / torch.sqrt(k.square().sum(-1, keepdim=True) + 1e-6)
     g = g.float() + dt_bias.float().view(g.shape[-2:])
     decay = A_log.float().exp().view(-1, 1)
-    g = -decay * F.softplus(g) if lower_bound is None else lower_bound * torch.sigmoid(decay * g)
-    beta = beta.float().sigmoid()
+    g = -decay * _softplus(g) if lower_bound is None else lower_bound * _sigmoid(decay * g)
+    beta = _sigmoid(beta.float())
     if cu_seqlens is None:
         spans = [(i, 0, q.shape[1]) for i in range(q.shape[0])]
     else:
