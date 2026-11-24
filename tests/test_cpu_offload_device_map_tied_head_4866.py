@@ -192,7 +192,13 @@ def test_parameterless_module_gets_no_offload_hook():
     rotary = model.model.rotary_emb
     assert not any(True for _ in rotary.parameters())
     hook = getattr(rotary, "_hf_hook", None)
-    assert hook is not None and type(hook).__name__ == "AlignDevicesHook", (
-        f"expected an AlignDevicesHook on the parameterless module, got {type(hook).__name__}"
+    # The loader installs its own package-owned subclass, which keeps every
+    # placement tensor move from emptying the device cache. What matters here
+    # is that the parameterless module is placed by an alignment hook instead
+    # of ``cpu_offload_with_hook`` (which raised on its empty parameter list).
+    from gptqmodel.utils.offload_hooks import GPTQModelAlignDevicesHook
+
+    assert isinstance(hook, GPTQModelAlignDevicesHook), (
+        f"expected a GPTQModelAlignDevicesHook on the parameterless module, got {type(hook).__name__}"
     )
     assert torch.isfinite(_forward(model)).all()

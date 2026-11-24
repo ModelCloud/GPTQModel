@@ -1219,7 +1219,7 @@ def test_gguf_triton_uses_fixed_decode_launch_for_sm80_q1_0_g128(monkeypatch):
     monkeypatch.setattr(
         module,
         "_get_triton_cache",
-        lambda _device: {
+        lambda _device, wide_dot=False: {
             "fixed_decode_config": fixed_config,
             "sign_bytes": torch.empty((2, 16, 192), device="cuda", dtype=torch.uint8),
             "scale": torch.empty((2, 192), device="cuda", dtype=torch.float16),
@@ -1297,7 +1297,7 @@ def test_gguf_triton_routes_sm80_down_proj_to_u32_path(monkeypatch):
     monkeypatch.setattr(
         module,
         "_get_triton_cache",
-        lambda _device: {
+        lambda _device, wide_dot=False: {
             "use_u32": True,
             "fixed_decode_config": None,
             "sign_bytes": torch.empty((48, 16, 2048), device="cuda", dtype=torch.uint8),
@@ -1352,7 +1352,7 @@ def test_gguf_triton_routes_sm80_decode_2048x2048_to_k2048_specialized_u32_path(
     monkeypatch.setattr(
         module,
         "_get_triton_cache",
-        lambda _device: {
+        lambda _device, wide_dot=False: {
             "use_u32": True,
             "fixed_decode_config": None,
             "sign_bytes": torch.empty((16, 16, 2048), device="cuda", dtype=torch.uint8),
@@ -1407,7 +1407,7 @@ def test_gguf_triton_routes_sm80_decode_6144x2048_to_u32_path(monkeypatch):
     monkeypatch.setattr(
         module,
         "_get_triton_cache",
-        lambda _device: {
+        lambda _device, wide_dot=False: {
             "use_u32": True,
             "fixed_decode_config": None,
             "sign_bytes": torch.empty((48, 16, 2048), device="cuda", dtype=torch.uint8),
@@ -1454,7 +1454,7 @@ def test_gguf_triton_routes_decode_2048x1024_to_k2048_specialized_byte_path(monk
     monkeypatch.setattr(
         module,
         "_get_triton_cache",
-        lambda _device: {
+        lambda _device, wide_dot=False: {
             "use_u32": False,
             "fixed_decode_config": None,
             "sign_bytes": torch.empty((16, 16, 1024), device="cuda", dtype=torch.uint8),
@@ -1496,7 +1496,7 @@ def test_gguf_triton_routes_out_of_range_sm80_down_proj_to_byte_path(monkeypatch
     monkeypatch.setattr(
         module,
         "_get_triton_cache",
-        lambda _device: {
+        lambda _device, wide_dot=False: {
             "use_u32": True,
             "fixed_decode_config": None,
             "sign_bytes": torch.empty((48, 16, 2048), device="cuda", dtype=torch.uint8),
@@ -1543,7 +1543,7 @@ def test_gguf_triton_routes_non_decode_2048x1024_to_generic_byte_path(monkeypatc
     monkeypatch.setattr(
         module,
         "_get_triton_cache",
-        lambda _device: {
+        lambda _device, wide_dot=False: {
             "use_u32": False,
             "fixed_decode_config": None,
             "sign_bytes": torch.empty((16, 16, 1024), device="cuda", dtype=torch.uint8),
@@ -1597,7 +1597,7 @@ def test_gguf_triton_routes_sm89_decode_2048x1024_to_fixed_byte_path(monkeypatch
     monkeypatch.setattr(
         module,
         "_get_triton_cache",
-        lambda _device: {
+        lambda _device, wide_dot=False: {
             "use_u32": False,
             "fixed_decode_config": fixed_config,
             "sign_bytes": torch.empty((16, 16, 1024), device="cuda", dtype=torch.uint8),
@@ -1651,7 +1651,7 @@ def test_gguf_triton_routes_sm89_decode_2048x2048_to_exact_fixed_byte_path(monke
     monkeypatch.setattr(
         module,
         "_get_triton_cache",
-        lambda _device: {
+        lambda _device, wide_dot=False: {
             "use_u32": False,
             "fixed_decode_config": fixed_config,
             "sign_bytes": torch.empty((16, 16, 2048), device="cuda", dtype=torch.uint8),
@@ -1705,7 +1705,7 @@ def test_gguf_triton_routes_sm89_decode_2048x6144_to_exact_fixed_byte_path(monke
     monkeypatch.setattr(
         module,
         "_get_triton_cache",
-        lambda _device: {
+        lambda _device, wide_dot=False: {
             "use_u32": False,
             "fixed_decode_config": fixed_config,
             "sign_bytes": torch.empty((16, 16, 6144), device="cuda", dtype=torch.uint8),
@@ -1747,7 +1747,7 @@ def test_gguf_triton_routes_sm80_decode_2048x2048_out_of_range_to_byte_path(monk
     monkeypatch.setattr(
         module,
         "_get_triton_cache",
-        lambda _device: {
+        lambda _device, wide_dot=False: {
             "use_u32": True,
             "fixed_decode_config": None,
             "sign_bytes": torch.empty((16, 16, 2048), device="cuda", dtype=torch.uint8),
