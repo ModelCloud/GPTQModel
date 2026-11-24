@@ -1556,7 +1556,24 @@ def test_gguf_kernel_independent_packed_oracle(alias, dtype, path, monkeypatch):
         assert module.qweight.dtype == torch.uint8
         assert set(module._buffers) == {"qweight"}
         assert module._parameters == {}
-        pending = list(vars(module).values())
+        # The K-quant dequantizers keep one 2-8 byte `uint8` shift table per
+        # distinct shift tuple and device, allocated once per module lifetime
+        # so a CUDA-graph capture never rebuilds a pageable H2D copy (#5014).
+        # Those constants are not the weight, so they are checked separately
+        # instead of being allowed through the storage assertion below.
+        shift_tables = [
+            table
+            for tables in module._u8_shift_tables.values()
+            for table in tables.values()
+        ]
+        for table in shift_tables:
+            assert table.dtype == torch.uint8
+            assert table.numel() <= 8
+        pending = [
+            value
+            for name, value in vars(module).items()
+            if name != "_u8_shift_tables"
+        ]
         while pending:
             item = pending.pop()
             if isinstance(item, dict):

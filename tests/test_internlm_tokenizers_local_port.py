@@ -32,6 +32,12 @@ RELEASES = [
     ("internlm2", "internlm2_5-1_8b-chat", "57dcbc5455bf050d27a80f0ebd7808387caa714d"),
     ("internlm2", "internlm2-chat-7b", "c2ba64483dc50b3f8eb2d8271c4b9877a79ed2e2"),
 ]
+
+#: Released InternLM/InternLM2 vocabularies carry one piece that is a single NUL
+#: byte under ``byte_fallback``. sentencepiece 0.2.1/0.2.2 abort the whole load
+#: with "piece must not include null character"; 0.2.3 treats the piece as
+#: UNUSED and loads the vocabulary, so ``requirements.txt`` floors it there.
+MIN_SENTENCEPIECE = (0, 2, 3)
 HASHES = {
     "internlm": {
         "tokenizer.model": "aab622d98c98677a1a51f969e25765154487bf3e85c7819db105db2fcacba83f",
@@ -100,6 +106,47 @@ def bounded_threads():
 def release(request, tmp_path):
     copy_release_assets(tmp_path, request.param)
     return request.param[0], tmp_path
+
+
+def test_declared_sentencepiece_floor_parses_released_vocabularies():
+    """`requirements.txt` must floor sentencepiece where the release data loads.
+
+    Installing a version the declaration admits but the release cannot parse
+    turns every released-vocabulary test below into a dependency error rather
+    than a tokenizer result, which is how 0.2.1/0.2.2 surfaced.
+    """
+
+    import sentencepiece as spm
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    repo_root = Path(__file__).resolve().parents[1]
+    declared = [
+        Requirement(line.strip())
+        for line in (repo_root / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    [spec] = [requirement for requirement in declared if requirement.name.lower() == "sentencepiece"]
+    floors = [
+        Version(str(clause).split(">=", 1)[1].strip())
+        for clause in spec.specifier
+        if str(clause).startswith(">=")
+    ]
+    assert floors, f"sentencepiece is declared without a lower bound: {spec}"
+    floor = max(floors)
+    assert floor >= Version("0.2.3"), (
+        f"requirements.txt admits sentencepiece {floor}, which rejects the released "
+        "InternLM vocabularies"
+    )
+    assert Version(spm.__version__) >= floor
+
+    # The runtime check the floor exists for: load the pinned release bytes
+    # directly, independent of the tokenizer classes under test.
+    for family, repo, revision in RELEASES:
+        vocabulary = release_assets(family, repo, revision)["tokenizer.model"]
+        processor = spm.SentencePieceProcessor()
+        processor.LoadFromSerializedProto(vocabulary.read_bytes())
+        assert processor.get_piece_size() > 0
 
 
 @pytest.mark.parametrize("text,expected", [
