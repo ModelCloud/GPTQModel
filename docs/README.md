@@ -53,6 +53,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Post-quantization fusion planner](fusion-planner.md)
 - [GGUF bits and subtype resolution](gguf-config-resolution.md)
 - [GGUF checkpoint load policy](gguf-load-policy.md)
+- [GGUF single-file packaging](gguf-package.md)
 - [GGUF dense fallback precision](gguf-dense-fallback-precision.md)
 - [GGUF packed scale overflow cache](gguf-k-scale-overflow-cache.md)
 - [GGUF Q8_1 auxiliary-field range](gguf-q8-1-auxiliary-field-range.md)
