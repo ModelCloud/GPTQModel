@@ -10,7 +10,6 @@ from transformers import ProcessorMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
 from ...quantization.awq.utils.module import get_op_name
-from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
@@ -22,6 +21,7 @@ from ..ports.inkling2_loop.experts import (
     Inkling2LoopPackedExperts,
     defuse_packed_experts,
 )
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 # Every decoder layer takes the attention-residual bank as its second
@@ -350,11 +350,13 @@ class Inkling2LoopQModel(BaseQModel):
         )
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del kwargs
-        calibration_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size):
-            calibration_data.append(self.prepare_inputs_for_conversations(self.processor, batch))
-        return calibration_data
+        # Route through the shared #4228/#4308 contract: pre-tokenized rows and
+        # columnar mappings keep the base text path, and `concat_size` is
+        # rejected for conversations. The local conversation loop bypassed it
+        # and handed `[{"input_ids": ...}]` rows to `apply_chat_template`.
+        return prepare_vlm_calibration_dataset(
+            self, calibration_dataset, batch_size=batch_size, options=kwargs
+        )
 
     def move_input_capture_example(
         self,
