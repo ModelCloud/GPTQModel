@@ -203,7 +203,13 @@ class AllSparkAwqLinear(AWQuantLinear):
             return None
         key = tensor_cache_key(bias)
         if self._bias_key != key:
-            self._bias_value = narrow_bias_for_kernel(bias, self.compute_dtype)
+            # A caller may replace the buffer with an ``nn.Parameter``. The
+            # derived kernel copy is a cache, not model state: keep it a plain
+            # tensor so it never lands in ``state_dict``.
+            derived = narrow_bias_for_kernel(bias, self.compute_dtype)
+            self._bias_value = (
+                derived.detach() if isinstance(derived, torch.nn.Parameter) else derived
+            )
             self._bias_key = key
         return self._bias_value
 

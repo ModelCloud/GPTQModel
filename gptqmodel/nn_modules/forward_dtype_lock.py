@@ -77,6 +77,19 @@ def _check_apply_keeps_dtypes(module: t.nn.Module, fn) -> None:
     locked = getattr(module, "_forward_dtype_lock", None)
     if locked is None:
         return
+    # Compare the cast against the recorded activation dtype, not only against
+    # the dtypes currently stored. A kernel may legitimately keep scales, zeros
+    # or bias at a fixed width even when the activation dtype differs, so a
+    # `.to(dtype=...)` can leave every tensor's dtype unchanged while still
+    # asking the module to serve another activation dtype. That is a caller bug
+    # too (K1/K2): the module must raise instead of silently accepting it.
+    locked_probe = fn(t.empty(0, dtype=locked))
+    if isinstance(locked_probe, t.Tensor) and locked_probe.dtype != locked:
+        raise RuntimeError(
+            f"{module.__class__.__name__}({getattr(module, 'name', '')}): cannot change the module dtype "
+            f"from {locked} to {locked_probe.dtype} after the module's first forward (input dtype {locked}). "
+            f"Weight dtypes are frozen after the first forward; see {FORWARD_DTYPE_CONTRACT}."
+        )
     probed = {}
     # Check the whole subtree up front so a rejected cast leaves every child
     # untouched, not only this module's own tensors.
