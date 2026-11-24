@@ -334,29 +334,36 @@ def screen_block_exponents(
     # underflow nor overflow while the unnormalized one could.
     residual_exp = _finite_frexp_exponent(work.abs().amax(dim=-1, keepdim=True)) - 3
 
+    # ``torch.ldexp`` launches on the *current* CUDA device, so a weight on
+    # ``cuda:1`` while ``cuda:0`` stays current faults with an illegal memory
+    # access (#5263). Imported lazily: the kernel package pulls in the quant
+    # linear registry, which must not load while this module is imported.
+    from ..nn_modules.qlinear._numerics import tensor_device_context
+
     best_error = best_index = best_log2 = best_scale = None
-    for offset in offsets:
-        signed_index, log2_scale, scale_element = mxfp4_rtn_signed_index(weight, block_size, offset)
-        dequant = (grid[signed_index] * scale_element).view(out_features, groups, block_size)
-        residual = torch.ldexp(work - dequant, -residual_exp)
-        error = (residual * residual * hdiag).sum(-1)
-        if best_error is None:
-            best_error, best_index, best_log2, best_scale = error, signed_index, log2_scale, scale_element
-            continue
-        better = error < best_error
-        expand = better.unsqueeze(-1)
-        best_error = torch.where(better, error, best_error)
-        best_log2 = torch.where(better, log2_scale, best_log2)
-        best_index = torch.where(
-            expand,
-            signed_index.view(out_features, groups, block_size),
-            best_index.view(out_features, groups, block_size),
-        ).view(out_features, in_features)
-        best_scale = torch.where(
-            expand,
-            scale_element.view(out_features, groups, block_size),
-            best_scale.view(out_features, groups, block_size),
-        ).reshape(out_features, in_features)
+    with tensor_device_context(work):
+        for offset in offsets:
+            signed_index, log2_scale, scale_element = mxfp4_rtn_signed_index(weight, block_size, offset)
+            dequant = (grid[signed_index] * scale_element).view(out_features, groups, block_size)
+            residual = torch.ldexp(work - dequant, -residual_exp)
+            error = (residual * residual * hdiag).sum(-1)
+            if best_error is None:
+                best_error, best_index, best_log2, best_scale = error, signed_index, log2_scale, scale_element
+                continue
+            better = error < best_error
+            expand = better.unsqueeze(-1)
+            best_error = torch.where(better, error, best_error)
+            best_log2 = torch.where(better, log2_scale, best_log2)
+            best_index = torch.where(
+                expand,
+                signed_index.view(out_features, groups, block_size),
+                best_index.view(out_features, groups, block_size),
+            ).view(out_features, in_features)
+            best_scale = torch.where(
+                expand,
+                scale_element.view(out_features, groups, block_size),
+                best_scale.view(out_features, groups, block_size),
+            ).reshape(out_features, in_features)
     return best_index.contiguous(), best_log2, best_scale.contiguous()
 
 

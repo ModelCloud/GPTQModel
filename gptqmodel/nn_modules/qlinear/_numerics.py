@@ -57,6 +57,22 @@ def fp32_epilogue_context(device_type: str):
     return torch.autocast(device_type=device_type, enabled=False)
 
 
+def tensor_device_context(tensor: torch.Tensor):
+    """Enter ``tensor``'s CUDA device for an op that launches on the current one.
+
+    ``torch.ldexp`` (and a few other elementwise kernels with a scalar
+    exponent) dispatch on the *current* CUDA device instead of the operand's.
+    A tensor on ``cuda:1`` while ``cuda:0`` is current therefore faults with an
+    illegal memory access (#5263). Entering the operand's device makes the
+    launch target the right one; a CPU tensor needs no context at all, and the
+    caller's current device is restored on exit.
+    """
+
+    if tensor.is_cuda:
+        return torch.cuda.device(tensor.device)
+    return contextlib.nullcontext()
+
+
 def _can_fuse_hip_bias(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
 ) -> bool:
