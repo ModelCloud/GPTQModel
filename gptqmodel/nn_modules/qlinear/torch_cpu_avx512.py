@@ -27,7 +27,11 @@ log = setup_logger()
 def _fake_gemm_int4_qzero_group_scaled(input, weight, zeros, absmax, blocksize, bias=None):
     """FakeTensor shape for the AVX512 int4 GEMM (see ``extension.register_fake``)."""
 
-    return input.new_empty((input.shape[0], weight.shape[0]))
+    # ``weight`` is ``[out_features, in_features // 2]`` for the GPTQ layout but
+    # ``[in_features, out_features // 2]`` for the AWQ layout, so its leading
+    # dimension is not the output width. ``absmax``/``scales`` is always
+    # ``[groups, out_features]``; the traced reshape needs the real width.
+    return input.new_empty((input.shape[0], absmax.shape[-1]))
 
 
 def pack_hf_int4(codes: torch.Tensor) -> torch.Tensor:
