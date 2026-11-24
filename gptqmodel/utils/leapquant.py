@@ -12,6 +12,7 @@ vendor kernel, or a checkpoint format change.
 from __future__ import annotations
 
 from contextlib import nullcontext
+from copy import copy
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -358,7 +359,9 @@ class LeapQuantState:
 
         columns = min(r + self.config.lowrank_oversample, min(k, v))
         generator = torch.Generator(device="cpu").manual_seed(self.config.seed)
-        omega = torch.randn((v, columns), generator=generator, dtype=torch.float32).to(state.device)
+        omega = torch.randn(
+            (v, columns), generator=generator, device=generator.device, dtype=torch.float32,
+        ).to(state.device)
         q, _ = torch.linalg.qr(state @ omega)
         for _ in range(self.config.lowrank_iters):
             z, _ = torch.linalg.qr(state.transpose(-1, -2) @ q)
@@ -512,10 +515,13 @@ class LeapQuantState:
                 raise ValueError(
                     f"LeapQuant {name} sequence length {tensor.shape[1]} differs from query length {query.shape[1]}"
                 )
+        # A later token can fail even with finite inputs, e.g. when an FP16 buffer overflows.
+        pending = copy(self)
+        pending.__dict__.update(self._clone_tensors())
         outputs = []
         for index in range(query.shape[1]):
             outputs.append(
-                self.step(
+                pending.step(
                     query[:, index],
                     key[:, index],
                     value[:, index],
@@ -523,7 +529,9 @@ class LeapQuantState:
                     beta[:, index],
                 )
             )
-        return torch.stack(outputs, dim=1)
+        result = torch.stack(outputs, dim=1)
+        self.__dict__.update(pending.__dict__)
+        return result
 
     @torch.no_grad()
     def gdn_step(
@@ -586,6 +594,9 @@ class LeapQuantState:
             self.buffer_updates.zero_()
             self.buffer_alpha.zero_()
 
+    def _clone_tensors(self) -> dict[str, torch.Tensor]:
+        return {name: getattr(self, name).clone() for name in _STATE_TENSORS}
+
     def packed_state(self) -> Dict[str, Any]:
         """Return a boundary-consistent snapshot for cache save/restore."""
 
@@ -601,7 +612,7 @@ class LeapQuantState:
             "num_heads": self.num_heads,
             "key_dim": self.key_dim,
             "value_dim": self.value_dim,
-            **{name: getattr(self, name).clone() for name in _STATE_TENSORS},
+            **self._clone_tensors(),
             "window_count": self.window_count,
         }
 

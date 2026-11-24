@@ -313,3 +313,43 @@ def test_prefill_rejects_mismatched_lengths_before_consuming_tokens(field, lengt
     torch.testing.assert_close(state.materialize(), previous, rtol=0, atol=0)
     expected, _ = _oracle_gdn(**inputs)
     torch.testing.assert_close(state.prefill(**prompt), expected[:, 1:], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("device", _devices())
+@pytest.mark.parametrize("bad_value", [float("nan"), 2 ** 20])
+def test_failed_prefill_preserves_checkpoint_and_window_for_retry(device, bad_value):
+    state = LeapQuantState(
+        1, 1, 1, 1, LeapQuantConfig(rank=0, window=2, smooth=False, buffer_dtype=torch.float16), device=device,
+    )
+    unit = torch.ones(1, 1, 1, device=device)
+    state.step(unit, unit, unit * 2, unit, unit)
+    before = state.packed_state()
+    prompt = unit.unsqueeze(1).expand(-1, 2, -1, -1)
+    values = prompt.clone()
+    values[:, 1] = bad_value
+    with pytest.raises(ValueError, match="non-finite"):
+        state.prefill(prompt, prompt, values, prompt, prompt * 0.5)
+
+    after = state.packed_state()
+    for name, previous in before.items():
+        current = after[name]
+        if isinstance(previous, torch.Tensor):
+            torch.testing.assert_close(current, previous, rtol=0, atol=0)
+        else:
+            assert current == previous
+    # Starting from 2, beta=0.5 moves the state halfway toward 1 at each token.
+    expected = torch.tensor([1.5, 1.25], device=device).reshape_as(prompt)
+    torch.testing.assert_close(state.prefill(prompt, prompt, prompt, prompt, prompt * 0.5), expected, rtol=0, atol=0)
+    torch.testing.assert_close(state.materialize(), expected[:, -1:], rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a non-CPU default device")
+def test_randomized_compensator_respects_explicit_generator_device():
+    state = LeapQuantState(1, 1, 4, 4, LeapQuantConfig(rank=1, window=1), device="cuda")
+    key = torch.tensor([1.0, 2.0, 3.0, 4.0], device="cuda").reshape(1, 1, 4)
+    value = key.flip(-1)
+    gate = torch.ones(1, 1, device="cuda")
+    with torch.device(key.device):
+        state.step(key, key, value, gate, gate)
+    expected = key.unsqueeze(-1) * value.unsqueeze(-2)
+    torch.testing.assert_close(state.materialize(), expected, rtol=2e-3, atol=2e-3)

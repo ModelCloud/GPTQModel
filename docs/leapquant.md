@@ -133,6 +133,11 @@ The portable decode path replays the buffered window into a transient dense
 FP32 state for each step and releases it immediately; it is never retained.
 No dense state is retained after the call.
 
+`LeapQuantState.prefill()` processes a prompt on a temporary copy of the packed
+checkpoint and window buffer. It commits that copy once all outputs are ready.
+If a later token fails, the caller can correct the prompt and retry it against
+the original state. The model ports use their own prefill kernels.
+
 ## Storage
 
 The persistent representation is:
