@@ -4,8 +4,8 @@
 
 LeapQuant is an opt-in runtime quantizer for the fixed-size recurrent state of
 delta-rule linear attention. It is **not** a weight format: model weights,
-checkpoints, and `quant_method` are unchanged, and it composes with any weight
-quantization method.
+checkpoints, and `quant_method` are unchanged. LeapQuant composes with weight
+quantization in the supported GPT-QModel ports.
 
 Reference: *LeapQuant: Efficient Linear Attention with Accurate Recurrent State
 Quantization*, [arXiv:2609.38166](https://arxiv.org/abs/2609.38166).
@@ -65,8 +65,8 @@ model.enable_state_quant(None)  # use the unquantized path for new caches
 
 | Family | Port | Status |
 | --- | --- | --- |
-| Kimi K3 / Kimi Linear (KDA) | `models/ports/kimi_k3` | Supported |
-| Qwen3.5 / Qwen3-Next (GDN) | `models/ports/native/qwen3_5` | Supported |
+| Kimi K3 with KDA layers | `models/ports/kimi_k3` | Supported |
+| Qwen3.5 dense (GDN) | `models/ports/native/qwen3_5` | Supported |
 | GLM-5.3 (KDA) | `models/ports/native/glm5_next` | Supported |
 
 The quantizer applies to the delta-rule family whose update is a diagonal decay
@@ -78,6 +78,28 @@ head across its value-head group in the same order as the port's delta-rule
 kernel, and each value head keeps an independent packed state.
 
 ## Flow
+
+`generate()` prepares the cache before the first forward. Qwen3.5 and GLM-5.3
+resolve the decoder policy in `LeapQuantGenerationMixin`. The Kimi K3 port
+creates its own cache in `KimiLinearModel.forward`. A caller-provided cache
+retains the policy selected when it was created.
+
+```mermaid
+flowchart TD
+    A[Generate with caching] --> B{Caller supplies cache}
+    B -->|Yes| C[Keep the caller cache]
+    B -->|No| D{Decoder enables LeapQuant}
+    D -->|No| E[Build the port's dense cache]
+    D -->|Yes| F[Build the port's LeapQuant cache]
+    C --> G[Model forward]
+    E --> G
+    F --> G
+    G --> H{Packed recurrent state}
+    H -->|No| I[Run the dense recurrence]
+    H -->|Yes| J{Unpadded and unpacked input}
+    J -->|No| K[Raise before updating cache]
+    J -->|Yes| L[Run packed prefill or decode]
+```
 
 ```mermaid
 flowchart TD
@@ -97,10 +119,11 @@ flowchart TD
 
 | Area | Before | After (LeapQuant enabled) |
 | --- | --- | --- |
+| Generation cache | The generation framework creates the default dense cache for Qwen3.5 and GLM-5.3. | The decoder's LeapQuant policy selects a packed recurrent cache before the first forward. |
 | Decode state | `KimiDeltaAttention`, `Qwen3_5GatedDeltaNet`, and `Glm5NextTextLinearAttention` read and rewrite a dense recurrent tensor through the cache layer. | The cache layer owns a `LeapQuantState`; decode replays the packed checkpoint and buffered records, then re-quantizes at the window boundary. |
 | Cache ownership | A Transformers `LinearAttentionLayer` or `KimiDeltaCacheLayer` stores the dense recurrent tensor. | `LeapQuantLinearAttentionLayer` or `KimiDeltaCacheLayer(state_quant=...)` stores int8 codes, scales, Compensator factors, and the window buffer; the dense slot stays empty. |
 | Prefill | The port kernel writes the final dense state. | The same dense kernel runs, then `LeapQuantState.quantize_` checkpoints the final state and clears the window. |
-| Unsupported inputs | The port kernel handles padded or packed inputs. | Padded masks, `cu_seqlens`, prefix-cached state, `crop`, and beam expansion raise before any write. |
+| Invalid cache inputs | Ports process input masks and cache operations for their dense recurrence. | The packed path rejects padding, packed sequence boundaries, crop, and live batch expansion before updating the cache. |
 | Default | Dense FP32 recurrent state. | Unchanged: `state_quant=None` returns the original cache and kernel path. |
 
 Prefill uses the port's existing FP32 delta-rule kernel: the packed checkpoint
@@ -136,13 +159,13 @@ packed 4/6-bit containers are a follow-up. 8-bit is the recommended mode.
 
 The implementation fails closed instead of silently degrading:
 
-- Input must be unpadded. An all-ones mask is accepted; a real padding mask
-  raises.
-- Packed `cu_seqlens` is rejected on the quantized path.
-- Beam reordering is supported only when every packed component can be
-  permuted atomically at the same batch size; beam expansion is rejected.
-- Prefix caching of the recurrent state and speculative decoding are not
-  supported.
+- Use unpadded input with an optional 2D all-ones mask. The ports check this
+  before masking or changing the cache, including during single-token decode.
+- The packed path rejects `cu_seqlens` and other packed sequence boundaries.
+- Use the default dynamic cache for generation with LeapQuant. A cache can
+  reorder live sequences at the same batch size and rejects live expansion.
+- The packed cache supports ordinary generation and cached continuation.
+  Operations that require recurrent-state rollback raise.
 - Training and autograd are not supported.
 - The prefill path uses a transient dense state; it is not a memory-saving
   claim.
@@ -160,7 +183,9 @@ delta-rule recurrence, covers 4/6/8-bit, window boundaries, Compensator rank,
 smoothing, storage, reorder, and non-finite rejection. `test_leapquant_models.py`
 checks Kimi K3, Qwen3.5, and GLM-5.3 prefill/decode parity, packed-state
 ownership, cache-layer selection, padded-mask and `cu_seqlens` rejection, and
-the public toggle.
+the public toggle. The regressions also cover `generate()`, cache continuation
+after offload and reorder, and retries after an invalid packed restore or a
+quantization failure.
 
 The portable Torch path is a correctness and memory baseline, not a
 throughput-optimized kernel. On a small synthetic decode fixture

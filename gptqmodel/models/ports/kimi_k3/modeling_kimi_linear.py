@@ -29,7 +29,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import initialization as init
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicLayer, LinearAttentionLayer
+from transformers.cache_utils import Cache, DynamicLayer
 from transformers.generation import GenerationMixin
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -37,7 +37,12 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, can_return_tuple
 
-from ....utils.leapquant import LeapQuantConfig, LeapQuantState, mask_is_unpadded
+from ....utils.leapquant import (
+    LeapQuantCacheMixin,
+    LeapQuantConfig,
+    LeapQuantLinearAttentionLayer,
+    validate_leapquant_inputs,
+)
 from ..native.kimi_linear.modeling_kimi_linear import KimiLinearRMSNorm as KimiRMSNorm
 from ..native.kimi_linear.modeling_kimi_linear import eager_attention_forward
 from .checkpoint import ActiveKDAHeads, KimiCheckpointMixin
@@ -98,7 +103,7 @@ def pad_input(
     return out.view(batch_size, seq_len, *hidden_states.shape[1:])
 
 
-class KimiDeltaCacheLayer(LinearAttentionLayer):
+class KimiDeltaCacheLayer(LeapQuantLinearAttentionLayer):
     """KDA cache layer: q/k/v short-convolution states plus the delta-rule recurrent state.
 
     The states are the eager FLA kernels' own final states, stored as-is when
@@ -109,29 +114,8 @@ class KimiDeltaCacheLayer(LinearAttentionLayer):
     """
 
     def __init__(self, state_quant: LeapQuantConfig | None = None):
-        super().__init__(number_of_states=3)
+        super().__init__(number_of_states=3, state_quant=state_quant)
         self.cumulative_length = 0
-        self.state_quant = state_quant
-        self._leapquant: LeapQuantState | None = None
-        self._leapquant_shape = None
-
-    def leapquant_state(self, num_sequences, heads, key_dim, value_dim, device):
-        shape = (int(num_sequences), int(heads), int(key_dim), int(value_dim))
-        device = torch.device(device)
-        if self._leapquant is None or self._leapquant_shape != shape or self._leapquant.device != device:
-            if self.state_quant is None:
-                raise RuntimeError("Kimi KDA cache layer has no LeapQuant config")
-            self._leapquant = LeapQuantState(
-                num_sequences=shape[0],
-                num_heads=shape[1],
-                key_dim=shape[2],
-                value_dim=shape[3],
-                config=self.state_quant,
-                gate_dim=shape[2],
-                device=device,
-            )
-            self._leapquant_shape = shape
-        return self._leapquant
 
     def get_kda_states(self):
         """Return ``((conv_q, conv_k, conv_v), recurrent)`` or ``(None, None)`` before the first update."""
@@ -163,32 +147,9 @@ class KimiDeltaCacheLayer(LinearAttentionLayer):
     def reset(self) -> None:
         super().reset()
         self.cumulative_length = 0
-        if self._leapquant is not None:
-            self._leapquant.reset()
-
-    @property
-    def is_croppable(self) -> bool:
-        if self.state_quant is not None:
-            return False
-        return super().is_croppable
-
-    def reorder_cache(self, beam_idx: torch.Tensor) -> None:
-        if self._leapquant_shape is not None and self._leapquant is not None:
-            self._leapquant.reorder_(beam_idx)
-        super().reorder_cache(beam_idx)
-
-    def offload(self) -> None:
-        super().offload()
-        if self._leapquant_shape is not None and self._leapquant is not None:
-            self._leapquant.to("cpu")
-
-    def prefetch(self) -> None:
-        super().prefetch()
-        if self._leapquant_shape is not None and self._leapquant is not None and self.device is not None:
-            self._leapquant.to(self.device)
 
 
-class KimiDynamicCache(Cache):
+class KimiDynamicCache(LeapQuantCacheMixin, Cache):
     """Hybrid K3 cache: ``DynamicLayer`` for MLA layers and ``KimiDeltaCacheLayer`` for KDA layers.
 
     It also carries the merged multimodal attention/input masks so cached continuations can extend them.
@@ -200,6 +161,7 @@ class KimiDynamicCache(Cache):
             for index in range(config.num_hidden_layers)
         ]
         super().__init__(layers=layers)
+        self.state_quant = state_quant
         self.multimodal_attention_mask = None
         self.multimodal_input_mask = None
 
@@ -212,6 +174,7 @@ class KimiDynamicCache(Cache):
         return self.get_seq_length(layer_idx) + query_length, 0
 
     def reorder_cache(self, beam_idx: torch.LongTensor):
+        self._check_leapquant_reorder(beam_idx)
         for name in ("multimodal_attention_mask", "multimodal_input_mask"):
             mask = getattr(self, name)
             if mask is not None:
@@ -507,13 +470,8 @@ class KimiDeltaAttention(nn.Module):
         quant_layer = cache_params.layers[self.layer_idx] if cache_params is not None else None
         state_quant = getattr(quant_layer, "state_quant", None)
         if state_quant is not None:
-            if not mask_is_unpadded(attention_mask):
-                raise ValueError(
-                    "LeapQuant requires unpadded input; pass no attention_mask or an all-ones mask"
-                )
+            validate_leapquant_inputs(attention_mask, kwargs)
             attention_mask = None
-            if kwargs.get("cu_seqlens") is not None:
-                raise ValueError("LeapQuant does not support packed cu_seqlens")
         cu_seqlens = kwargs.get("cu_seqlens")
         indices = None
         if attention_mask is not None:
@@ -557,7 +515,12 @@ class KimiDeltaAttention(nn.Module):
 
         if state_quant is not None:
             quantizer = quant_layer.leapquant_state(
-                batch_size, self.num_heads, self.head_k_dim, self.head_dim, q.device
+                batch_size,
+                self.num_heads,
+                self.head_k_dim,
+                self.head_dim,
+                gate_dim=self.head_k_dim,
+                device=q.device,
             )
             if q_len == 1:
                 o = quantizer.kda_step(
@@ -1039,7 +1002,9 @@ def _apply_attn_res(prefix_sum, block_residual, proj, norm):
 
 
 class KimiLinearModel(KimiPreTrainedModel):
-    supports_state_quant = True
+    @property
+    def supports_state_quant(self) -> bool:
+        return any(self.config.is_kda_layer(index) for index in range(self.config.num_hidden_layers))
 
     def __init__(self, config: KimiLinearConfig):
         super().__init__(config)
@@ -1100,6 +1065,8 @@ class KimiLinearModel(KimiPreTrainedModel):
                 config=self.config,
                 state_quant=getattr(self, "_gptqmodel_state_quant", None),
             )
+        if past_key_values is not None and past_key_values.state_quant is not None:
+            validate_leapquant_inputs(attention_mask, kwargs)
 
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
         if position_ids is None:

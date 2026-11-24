@@ -11,13 +11,17 @@ from transformers.cache_utils import DynamicCache, DynamicLayer
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.ports.kimi_k3.configuration_kimi_k3 import KimiLinearConfig
 from gptqmodel.models.ports.kimi_k3.modeling_kimi_linear import KimiLinearForCausalLM
-from gptqmodel.models.ports.native.glm5_next.configuration_glm5_next import Glm5NextTextConfig
+from gptqmodel.models.ports.native.glm5_next.configuration_glm5_next import Glm5NextConfig, Glm5NextTextConfig
 from gptqmodel.models.ports.native.glm5_next.modeling_glm5_next import (
+    Glm5NextForConditionalGeneration,
     Glm5NextTextLinearAttention,
     Glm5NextTextModel,
 )
-from gptqmodel.models.ports.native.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
-from gptqmodel.models.ports.native.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+from gptqmodel.models.ports.native.qwen3_5.configuration_qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig
+from gptqmodel.models.ports.native.qwen3_5.modeling_qwen3_5 import (
+    Qwen3_5ForCausalLM,
+    Qwen3_5ForConditionalGeneration,
+)
 from gptqmodel.utils.leapquant import (
     LeapQuantConfig,
     LeapQuantLinearAttentionLayer,
@@ -153,6 +157,143 @@ def _glm_model_config():
     config._attn_implementation = "sdpa"
     config._experts_implementation = "eager"
     return config
+
+
+@pytest.mark.parametrize("device", _devices())
+@pytest.mark.parametrize("family", ["kimi", "qwen", "qwen-multimodal", "glm"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_generate_uses_packed_recurrent_state(device, family, dtype):
+    torch.manual_seed(42)
+    vision = {"depth": 1, "hidden_size": 16, "intermediate_size": 32, "num_heads": 2, "out_hidden_size": 32}
+    if family == "kimi":
+        model = KimiLinearForCausalLM(_kimi_config())
+    elif family == "qwen":
+        model = Qwen3_5ForCausalLM(_qwen_config())
+    elif family == "qwen-multimodal":
+        model = Qwen3_5ForConditionalGeneration(Qwen3_5Config(text_config=_qwen_config(), vision_config=vision))
+    else:
+        model = Glm5NextForConditionalGeneration(
+            Glm5NextConfig(text_config=_glm_model_config(), vision_config={**vision, "projection_intermediate_size": 32}),
+        )
+    wrapper = BaseQModel.__new__(BaseQModel)
+    nn.Module.__init__(wrapper)
+    wrapper.model = model.to(device=device, dtype=dtype).eval()
+    wrapper.tokenizer = None
+
+    ids = torch.tensor([[1, 5, 7, 9]], device=device)
+    kwargs = {"max_new_tokens": 3, "min_new_tokens": 3, "return_dict_in_generate": True}
+    if family == "qwen":
+        kwargs["cache_implementation"] = "dynamic"
+    config = LeapQuantConfig(bits=8, window=4, rank=2)
+    with eager_torch_ssm_kernels():
+        dense = wrapper.generate(ids, **kwargs)
+        wrapper.enable_state_quant(config)
+        packed = wrapper.generate(ids, **kwargs)
+
+    assert dense.past_key_values.layers[0].recurrent_states[0] is not None
+    layer = packed.past_key_values.layers[0]
+    assert getattr(layer, "state_quant", None) == config
+    assert layer.recurrent_states[0] is None
+    assert layer._leapquant.window_count == 2
+    assert packed.past_key_values.get_seq_length() == ids.shape[1] + 2
+    assert torch.equal(packed.sequences, dense.sequences)
+
+
+@pytest.mark.parametrize("device", _devices())
+@pytest.mark.parametrize("family", ["qwen", "glm"])
+def test_padded_decode_fails_before_cache_updates(device, family):
+    torch.manual_seed(53)
+    model = (
+        Qwen3_5ForCausalLM(_qwen_config()) if family == "qwen" else Glm5NextTextModel(_glm_model_config())
+    ).to(device).eval()
+    wrapper = BaseQModel.__new__(BaseQModel)
+    nn.Module.__init__(wrapper)
+    wrapper.model = model
+    wrapper.enable_state_quant(LeapQuantConfig(window=4, rank=2))
+    ids = torch.tensor([[1, 5, 7, 9]], device=device)
+
+    with eager_torch_ssm_kernels(), torch.no_grad():
+        cache = model(ids[:, :-1], use_cache=True).past_key_values
+        layer = cache.layers[0]
+        before = layer.conv_states[0].clone()
+        with pytest.raises(ValueError, match="unpadded"):
+            model(ids[:, -1:], past_key_values=cache, attention_mask=ids.ne(9))
+        torch.testing.assert_close(layer.conv_states[0], before, rtol=0, atol=0)
+        assert layer._leapquant.window_count == 0
+        assert cache.get_seq_length() == 3
+        model(ids[:, -1:], past_key_values=cache, attention_mask=torch.ones_like(ids))
+        assert cache.get_seq_length() == 4
+        assert layer._leapquant.window_count == 1
+
+
+@pytest.mark.parametrize("operation", ["crop", "expand", "repeat", "select"])
+def test_unsupported_cache_operation_preserves_attention_prefix(operation):
+    config = _qwen_config()
+    config.layer_types = ["full_attention", "linear_attention"]
+    model = Qwen3_5ForCausalLM(config).eval()
+    model.model._gptqmodel_state_quant = LeapQuantConfig(rank=2)
+    with eager_torch_ssm_kernels(), torch.no_grad():
+        cache = model(torch.tensor([[1, 5, 7, 9]]), use_cache=True).past_key_values
+    before = cache.layers[0].keys.clone()
+
+    if operation == "crop":
+        with pytest.raises(RuntimeError, match="cannot be cropped"):
+            cache.crop(-1)
+    elif operation == "repeat":
+        with pytest.raises(ValueError, match="cache batch expansion"):
+            cache.batch_repeat_interleave(2)
+    else:
+        reorder = cache.reorder_cache if operation == "expand" else cache.batch_select_indices
+        with pytest.raises(ValueError, match="one index per live sequence"):
+            reorder(torch.tensor([0, 0]))
+    torch.testing.assert_close(cache.layers[0].keys, before, rtol=0, atol=0)
+
+
+def test_generate_validates_new_cache_policy_and_honors_caller_cache():
+    model = Qwen3_5ForCausalLM(_qwen_config()).eval()
+    model.model._gptqmodel_state_quant = LeapQuantConfig(rank=2)
+    ids = torch.tensor([[1, 5, 7, 9]])
+    with eager_torch_ssm_kernels():
+        with pytest.raises(ValueError, match="requires a dynamic"):
+            model.generate(ids, max_new_tokens=2, cache_implementation="static")
+        with pytest.raises(ValueError, match="assisted generation is not supported"):
+            model.generate(ids, max_new_tokens=2, prompt_lookup_num_tokens=2)
+        cache = DynamicCache(config=model.config)
+        output = model.generate(ids, max_new_tokens=2, past_key_values=cache, return_dict_in_generate=True)
+        assert output.past_key_values is cache
+        assert cache.layers[0].recurrent_states[0] is not None
+        no_cache = model.generate(ids, max_new_tokens=2, use_cache=False, return_dict_in_generate=True)
+        assert no_cache.past_key_values is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="accelerator required for cache offload")
+def test_offloaded_cache_reorder_preserves_next_token():
+    torch.manual_seed(19)
+    model = Qwen3_5ForCausalLM(_qwen_config()).to("cuda").eval()
+    model.model._gptqmodel_state_quant = LeapQuantConfig(rank=2)
+    ids = torch.tensor([[1, 5, 7, 9, 11], [2, 4, 6, 8, 12]], device=model.device)
+    permutation = torch.tensor([1, 0], device=model.device)
+
+    with eager_torch_ssm_kernels(), torch.no_grad():
+        caches = [model(ids[:, :3], use_cache=True).past_key_values for _ in range(2)]
+        for cache in caches:
+            model(ids[:, 3:4], past_key_values=cache)
+
+        resident, offloaded = caches
+        layer = offloaded.layers[0]
+        layer.offload()
+        assert layer.conv_states[0].device.type == "cpu"
+        assert layer._leapquant.device.type == "cpu"
+        assert layer._leapquant.window_count == 1
+        resident.reorder_cache(permutation)
+        offloaded.reorder_cache(permutation)
+        layer.prefetch()
+
+        token = ids.index_select(0, permutation)[:, 4:]
+        expected = model(token, past_key_values=resident).logits
+        actual = model(token, past_key_values=offloaded).logits
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        assert layer._leapquant.window_count == 2
 
 
 @pytest.mark.parametrize("device", _devices())
@@ -317,6 +458,31 @@ def test_enable_state_quant_wrapper_validation():
     empty.model = nn.Module()
     with pytest.raises(ValueError, match="no LeapQuant-capable"):
         BaseQModel.enable_state_quant(empty, config)
+    stub._runtime_generate = object()
+    with pytest.raises(ValueError, match="no LeapQuant-capable"):
+        BaseQModel.enable_state_quant(stub, config)
+
+
+@pytest.mark.parametrize("family", ["kimi", "qwen", "glm"])
+def test_enable_state_quant_requires_a_recurrent_layer(family):
+    if family == "kimi":
+        config = _kimi_config()
+        config.linear_attn_config = None
+        model = KimiLinearForCausalLM(config)
+    elif family == "qwen":
+        config = _qwen_config()
+        config.layer_types = ["full_attention"] * config.num_hidden_layers
+        model = Qwen3_5ForCausalLM(config)
+    else:
+        config = _glm_model_config()
+        config.layer_types = ["deepseek_sparse_attention"] * config.num_hidden_layers
+        model = Glm5NextTextModel(config)
+
+    wrapper = BaseQModel.__new__(BaseQModel)
+    nn.Module.__init__(wrapper)
+    wrapper.model = model
+    with pytest.raises(ValueError, match="no LeapQuant-capable"):
+        wrapper.enable_state_quant(LeapQuantConfig())
 
 
 def test_kimi_rejects_padded_mask():

@@ -11,18 +11,31 @@ vendor kernel, or a checkpoint format change.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
 import torch.nn.functional as F
 from transformers.cache_utils import DynamicCache, LinearAttentionLayer
+from transformers.generation import GenerationMixin
+from transformers.generation.configuration_utils import GenerationMode
 
 
 _EPS = 1e-12
 _SUPPORTED_BITS = (4, 6, 8)
 _SUPPORTED_BUFFER_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 _FORMAT_VERSION = 1
+_STATE_TENSORS = (
+    "codes",
+    "key_scale",
+    "value_scale",
+    "factors_key",
+    "factors_value",
+    "buffer_keys",
+    "buffer_updates",
+    "buffer_alpha",
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +88,12 @@ class LeapQuantConfig:
 def _check_finite(name: str, tensor: torch.Tensor) -> None:
     if not torch.isfinite(tensor).all():
         raise ValueError(f"LeapQuant {name} contains non-finite values")
+
+
+def _fp32_context(device: torch.device):
+    if torch.amp.is_autocast_available(device.type) and torch.is_autocast_enabled(device.type):
+        return torch.autocast(device_type=device.type, enabled=False)
+    return nullcontext()
 
 
 def normalize_qk(query: torch.Tensor, key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -134,7 +153,7 @@ def kda_alpha(
     dt = dt_bias.float()
     a = a_log.float()
     if dt.ndim == 1:
-        dt = dt[:, None]
+        dt = dt.reshape(gate.shape[-2], -1)
     if a.ndim == 1:
         a = a[:, None]
     gate = gate + dt
@@ -149,13 +168,16 @@ def kda_alpha(
 def mask_is_unpadded(mask: Optional[torch.Tensor]) -> bool:
     """Return whether a linear-attention padding mask is equivalent to no padding."""
 
-    if mask is None:
-        return True
-    if mask.dtype == torch.bool:
-        return bool(mask.all())
-    if mask.dim() > 2:
-        return False
-    return bool(torch.isfinite(mask).all()) and bool((mask != 0).all())
+    return mask is None or (mask.ndim == 2 and bool((mask == 1).all()))
+
+
+def validate_leapquant_inputs(attention_mask, kwargs) -> None:
+    if isinstance(attention_mask, dict):
+        attention_mask = attention_mask.get("linear_attention")
+    if not mask_is_unpadded(attention_mask):
+        raise ValueError("LeapQuant requires unpadded input; pass no attention_mask or an all-ones mask")
+    if any(kwargs.get(name) is not None for name in ("cu_seqlens", "cu_seq_lens_q", "cu_seq_lens_k")):
+        raise ValueError("LeapQuant does not support packed cu_seqlens")
 
 
 class LeapQuantState:
@@ -209,6 +231,10 @@ class LeapQuantState:
     def reset(self, state: Optional[torch.Tensor] = None) -> None:
         """Reset to the zero checkpoint, or quantize ``state`` as the new checkpoint."""
 
+        if state is not None:
+            self.quantize_(state)
+            return
+
         b, h, k, v = self.num_sequences, self.num_heads, self.key_dim, self.value_dim
         r = self.config.rank
         cfg = self.config
@@ -221,8 +247,6 @@ class LeapQuantState:
         self.buffer_updates = torch.zeros((b, h, cfg.window, v), dtype=cfg.buffer_dtype, device=self.device)
         self.buffer_alpha = torch.zeros((b, h, cfg.window, self.gate_dim), dtype=torch.float32, device=self.device)
         self.window_count = 0
-        if state is not None:
-            self.quantize_(state)
 
     def _check_state(self, state: torch.Tensor) -> torch.Tensor:
         expected = (self.num_sequences, self.num_heads, self.key_dim, self.value_dim)
@@ -353,10 +377,11 @@ class LeapQuantState:
         state = self._check_state(state)
         _check_finite("state", state)
         qmax = self.config.qmax
-        factors_key, factors_value = self._fit_compensator(state)
-        factors_key = factors_key.to(torch.float16)
-        factors_value = factors_value.to(torch.float16)
-        approx = factors_key.float() @ factors_value.float().transpose(-1, -2)
+        with _fp32_context(state.device):
+            factors_key, factors_value = self._fit_compensator(state)
+            factors_key = factors_key.to(torch.float16)
+            factors_value = factors_value.to(torch.float16)
+            approx = factors_key.float() @ factors_value.float().transpose(-1, -2)
         residual = state - approx
 
         if self.config.smooth:
@@ -380,7 +405,8 @@ class LeapQuantState:
     def dequantize(self) -> torch.Tensor:
         """Materialize the checkpoint state in FP32 (transient)."""
 
-        approx = self.factors_key.float() @ self.factors_value.float().transpose(-1, -2)
+        with _fp32_context(self.codes.device):
+            approx = self.factors_key.float() @ self.factors_value.float().transpose(-1, -2)
         residual = (
             self.codes.float()
             / self.config.qmax
@@ -450,13 +476,19 @@ class LeapQuantState:
         next_state = decayed + key[..., :, None] * update[..., None, :]
         output = (next_state * query[..., :, None]).sum(dim=-2)
 
+        _check_finite("output", output)
         index = self.window_count
-        self.buffer_keys[:, :, index].copy_(key.to(self.config.buffer_dtype))
-        self.buffer_updates[:, :, index].copy_(update.to(self.config.buffer_dtype))
-        self.buffer_alpha[:, :, index].copy_(alpha)
-        self.window_count = index + 1
-        if self.window_count == self.config.window:
+        if index + 1 == self.config.window:
             self.quantize_(next_state)
+        else:
+            buffered_key = key.to(self.config.buffer_dtype)
+            buffered_update = update.to(self.config.buffer_dtype)
+            _check_finite("buffered key", buffered_key)
+            _check_finite("buffered update", buffered_update)
+            self.buffer_keys[:, :, index].copy_(buffered_key)
+            self.buffer_updates[:, :, index].copy_(buffered_update)
+            self.buffer_alpha[:, :, index].copy_(alpha)
+            self.window_count = index + 1
         return output
 
     @torch.no_grad()
@@ -564,17 +596,11 @@ class LeapQuantState:
             "num_heads": self.num_heads,
             "key_dim": self.key_dim,
             "value_dim": self.value_dim,
-            "codes": self.codes.clone(),
-            "key_scale": self.key_scale.clone(),
-            "value_scale": self.value_scale.clone(),
-            "factors_key": self.factors_key.clone(),
-            "factors_value": self.factors_value.clone(),
-            "buffer_keys": self.buffer_keys.clone(),
-            "buffer_updates": self.buffer_updates.clone(),
-            "buffer_alpha": self.buffer_alpha.clone(),
+            **{name: getattr(self, name).clone() for name in _STATE_TENSORS},
             "window_count": self.window_count,
         }
 
+    @torch.no_grad()
     def load_packed_state(self, packed: Dict[str, Any]) -> None:
         """Restore a snapshot produced by :meth:`packed_state`."""
 
@@ -585,6 +611,7 @@ class LeapQuantState:
             "window": self.config.window,
             "rank": self.rank,
             "smooth": self.config.smooth,
+            "buffer_dtype": str(self.config.buffer_dtype),
             "gate_dim": self.gate_dim,
             "num_sequences": self.num_sequences,
             "num_heads": self.num_heads,
@@ -594,21 +621,28 @@ class LeapQuantState:
         for name, value in expected.items():
             if packed.get(name) != value:
                 raise ValueError(f"LeapQuant packed-state {name} mismatch: {packed.get(name)!r} != {value!r}")
-        for name in (
-            "codes",
-            "key_scale",
-            "value_scale",
-            "factors_key",
-            "factors_value",
-            "buffer_keys",
-            "buffer_updates",
-            "buffer_alpha",
-        ):
+        count = packed.get("window_count")
+        if type(count) is not int or not 0 <= count < self.config.window:
+            raise ValueError("LeapQuant packed-state window_count must be within the active window")
+
+        tensors = {}
+        for name in _STATE_TENSORS:
             value = packed.get(name)
             if not isinstance(value, torch.Tensor):
                 raise TypeError(f"LeapQuant packed-state {name} must be a tensor")
-            setattr(self, name, value.to(device=self.device).clone())
-        self.window_count = int(packed["window_count"])
+            previous = getattr(self, name)
+            if value.shape != previous.shape or value.dtype != previous.dtype or value.layout != previous.layout:
+                raise ValueError(f"LeapQuant packed-state {name} has an incompatible shape, dtype, or layout")
+            value = value.to(device=self.device, copy=True)
+            if value.is_floating_point():
+                _check_finite(name, value)
+            if name in ("key_scale", "value_scale") and not (value > 0).all():
+                raise ValueError(f"LeapQuant packed-state {name} must be positive")
+            if name == "codes" and not ((value >= -self.config.qmax) & (value <= self.config.qmax)).all():
+                raise ValueError("LeapQuant packed-state codes are outside the configured bit range")
+            tensors[name] = value
+        self.__dict__.update(tensors)
+        self.window_count = count
 
     def checkpoint_bytes(self) -> int:
         return sum(
@@ -633,42 +667,31 @@ class LeapQuantState:
 
     def to(self, device: torch.device | str) -> "LeapQuantState":
         device = torch.device(device)
-        for name in (
-            "codes",
-            "key_scale",
-            "value_scale",
-            "factors_key",
-            "factors_value",
-            "buffer_keys",
-            "buffer_updates",
-            "buffer_alpha",
-        ):
-            setattr(self, name, getattr(self, name).to(device))
+        tensors = {name: getattr(self, name).to(device) for name in _STATE_TENSORS}
+        self.__dict__.update(tensors)
         self.device = device
         return self
+
+    def _check_reorder_shape(self, beam_idx: torch.Tensor) -> None:
+        if beam_idx.ndim != 1 or beam_idx.numel() != self.num_sequences:
+            raise ValueError("LeapQuant reorder requires one index per live sequence")
 
     @torch.no_grad()
     def reorder_(self, beam_idx: torch.Tensor) -> None:
         """Atomically reorder every packed component along the sequence axis."""
 
-        index = beam_idx.to(self.device).long()
-        if index.numel() != self.num_sequences:
-            raise ValueError("LeapQuant reorder requires one index per live sequence")
-        for name in (
-            "codes",
-            "key_scale",
-            "value_scale",
-            "factors_key",
-            "factors_value",
-            "buffer_keys",
-            "buffer_updates",
-            "buffer_alpha",
-        ):
-            setattr(self, name, getattr(self, name).index_select(0, index).contiguous())
+        self._check_reorder_shape(beam_idx)
+        index = beam_idx.to(device=self.device, dtype=torch.long)
+        tensors = {name: getattr(self, name).index_select(0, index) for name in _STATE_TENSORS}
+        self.__dict__.update(tensors)
 
 
 class LeapQuantLinearAttentionLayer(LinearAttentionLayer):
     """Transformers linear-attention cache layer with a packed LeapQuant state."""
+
+    @property
+    def is_compileable(self) -> bool:
+        return self.state_quant is None and super().is_compileable
 
     def __init__(
         self,
@@ -722,9 +745,18 @@ class LeapQuantLinearAttentionLayer(LinearAttentionLayer):
             self._leapquant.reset()
 
     def reorder_cache(self, beam_idx: torch.Tensor) -> None:
-        if self._leapquant is not None:
-            self._leapquant.reorder_(beam_idx)
-        super().reorder_cache(beam_idx)
+        state = self._leapquant
+        if state is None:
+            return super().reorder_cache(beam_idx)
+
+        state._check_reorder_shape(beam_idx)
+        conv_states = {
+            index: conv.index_select(0, beam_idx.to(conv.device))
+            for index, conv in self.conv_states.items()
+            if self.is_conv_states_initialized[index]
+        }
+        state.reorder_(beam_idx)
+        self.conv_states.update(conv_states)
 
     def offload(self) -> None:
         super().offload()
@@ -748,11 +780,37 @@ class LeapQuantLinearAttentionLayer(LinearAttentionLayer):
         return super().is_croppable
 
 
-class LeapQuantDynamicCache(DynamicCache):
+class LeapQuantCacheMixin:
+    """Validate batch operations before touching mixed attention cache layers."""
+
+    state_quant: Optional[LeapQuantConfig]
+
+    def _check_leapquant_reorder(self, beam_idx: torch.Tensor) -> None:
+        if self.state_quant is None:
+            return
+        for layer in self.layers:
+            if isinstance(layer, LeapQuantLinearAttentionLayer) and layer._leapquant is not None:
+                layer._leapquant._check_reorder_shape(beam_idx)
+
+    def batch_repeat_interleave(self, repeats: int) -> None:
+        if self.state_quant is None:
+            super().batch_repeat_interleave(repeats)
+        elif repeats != 1:
+            raise ValueError("LeapQuant does not support cache batch expansion")
+
+    def batch_select_indices(self, indices: torch.Tensor) -> None:
+        if self.state_quant is None:
+            super().batch_select_indices(indices)
+        else:
+            self.reorder_cache(indices)
+
+
+class LeapQuantDynamicCache(LeapQuantCacheMixin, DynamicCache):
     """DynamicCache whose linear-attention layers own packed LeapQuant state."""
 
     def __init__(self, config=None, state_quant: Optional[LeapQuantConfig] = None, **kwargs) -> None:
         super().__init__(config=config, **kwargs)
+        self.state_quant = state_quant
         if state_quant is None:
             return
         for index, layer in enumerate(self.layers):
@@ -764,6 +822,15 @@ class LeapQuantDynamicCache(DynamicCache):
             elif isinstance(layer, LinearAttentionLayer):
                 raise ValueError("LeapQuant does not support combined linear/full-attention cache layers")
 
+    def reorder_cache(self, beam_idx: torch.Tensor) -> None:
+        self._check_leapquant_reorder(beam_idx)
+        super().reorder_cache(beam_idx)
+
+    def crop(self, tokens_to_remove: int) -> None:
+        if self.state_quant is not None:
+            raise RuntimeError("LeapQuant recurrent state cannot be cropped")
+        super().crop(tokens_to_remove)
+
 
 def make_leapquant_cache(config, state_quant: Optional[LeapQuantConfig]):
     """Build the cache class a port should use for the requested state policy."""
@@ -771,3 +838,31 @@ def make_leapquant_cache(config, state_quant: Optional[LeapQuantConfig]):
     if state_quant is None:
         return DynamicCache(config=config)
     return LeapQuantDynamicCache(config=config, state_quant=state_quant)
+
+
+class LeapQuantGenerationMixin(GenerationMixin):
+    """Install the decoder's recurrent state policy before the generation loop."""
+
+    def _prepare_cache_for_generation(
+        self, generation_config, model_kwargs, generation_mode, batch_size, max_cache_length,
+    ):
+        cache = model_kwargs.get("past_key_values")
+        decoder = self.get_decoder()
+        state_quant = getattr(decoder, "_gptqmodel_state_quant", None)
+        create_packed = cache is None and generation_config.use_cache and state_quant is not None
+        reuse_packed = isinstance(cache, LeapQuantDynamicCache) and cache.state_quant is not None
+        if create_packed or reuse_packed:
+            if generation_config.is_assistant or generation_mode in (
+                GenerationMode.ASSISTED_GENERATION,
+                GenerationMode.CONTRASTIVE_SEARCH,
+            ):
+                raise ValueError("LeapQuant generation does not support cache rollback")
+            if create_packed:
+                if generation_config.cache_implementation not in (None, "dynamic"):
+                    raise ValueError("LeapQuant requires a dynamic generation cache")
+                model_kwargs["past_key_values"] = make_leapquant_cache(decoder.config, state_quant)
+                return
+
+        return super()._prepare_cache_for_generation(
+            generation_config, model_kwargs, generation_mode, batch_size, max_cache_length,
+        )

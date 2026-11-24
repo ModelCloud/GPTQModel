@@ -224,3 +224,74 @@ def test_config_and_mask_validation():
     assert mask_is_unpadded(torch.ones(1, 4, dtype=torch.bool))
     assert not mask_is_unpadded(torch.tensor([[1, 1, 0, 0]], dtype=torch.bool))
     assert not mask_is_unpadded(torch.tensor([[1.0, 1.0, float("-inf")]]))
+
+
+@pytest.mark.parametrize("device", _devices())
+@pytest.mark.parametrize("window", [2, 3])
+def test_failed_step_preserves_live_window_for_retry(device, window):
+    state = LeapQuantState(
+        1, 1, 1, 1,
+        LeapQuantConfig(window=window, rank=1, buffer_dtype=torch.float16),
+        device=device,
+    )
+    unit = torch.ones((1, 1, 1), device=device)
+    state.step(unit, unit, unit * 2, unit, unit)
+    before = state.packed_state()
+
+    # Window 2 fails while encoding the compensator. Window 3 would store an overflowing update.
+    value = unit * (2 ** 34)
+    with pytest.raises(ValueError, match="non-finite"):
+        state.step(unit, unit, value, unit, unit)
+
+    after = state.packed_state()
+    for name, previous in before.items():
+        current = after[name]
+        if isinstance(previous, torch.Tensor):
+            torch.testing.assert_close(current, previous, atol=0, rtol=0)
+        else:
+            assert current == previous
+    torch.testing.assert_close(state.step(unit, unit, unit * 4, unit, unit), unit * 4, atol=0, rtol=0)
+    torch.testing.assert_close(state.materialize(), (unit * 4).unsqueeze(-1), atol=0, rtol=0)
+    assert state.window_count == (2 % window)
+
+
+@pytest.mark.parametrize("device", _devices())
+def test_compensator_stays_fp32_under_autocast(device):
+    state = LeapQuantState(1, 1, 2, 2, LeapQuantConfig(rank=2), device=device)
+    expected = torch.tensor([[[[65536.0, 0.0], [0.0, 4.0]]]], device=device)
+
+    with torch.autocast(device_type=expected.device.type, dtype=torch.float16):
+        state.quantize_(expected)
+        actual = state.materialize()
+
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("invalid_field", ["buffer_dtype", "buffer_alpha", "window_count", "codes", "key_scale"])
+def test_packed_restore_validates_before_replacing_live_state(invalid_field):
+    config = LeapQuantConfig(window=3, rank=0, smooth=False, buffer_dtype=torch.float32)
+    state = LeapQuantState(1, 1, 1, 1, config)
+    unit = torch.ones(1, 1, 1)
+    state.step(unit, unit, unit * 2, unit, unit)
+    donor = LeapQuantState(1, 1, 1, 1, config)
+    donor.quantize_((unit * 8).unsqueeze(-1))
+    packed = donor.packed_state()
+    valid = packed[invalid_field]
+    packed[invalid_field] = {
+        "buffer_dtype": str(torch.float16),
+        "buffer_alpha": torch.empty(1),
+        "window_count": config.window,
+        "codes": packed["codes"].float(),
+        "key_scale": torch.full_like(packed["key_scale"], float("nan")),
+    }[invalid_field]
+
+    with pytest.raises(ValueError, match=invalid_field):
+        state.load_packed_state(packed)
+
+    torch.testing.assert_close(state.materialize(), (unit * 2).unsqueeze(-1), atol=0, rtol=0)
+    assert state.window_count == 1
+    packed[invalid_field] = valid
+    state.load_packed_state(packed)
+    torch.testing.assert_close(state.materialize(), (unit * 8).unsqueeze(-1), atol=0, rtol=0)
+    actual = state.step(unit, unit, unit * 4, unit, unit * 0.5)
+    torch.testing.assert_close(actual, unit * 6, atol=0, rtol=0)

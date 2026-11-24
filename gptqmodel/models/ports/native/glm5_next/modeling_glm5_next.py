@@ -31,8 +31,7 @@ from torch.nn import LayerNorm
 
 from transformers import initialization as init
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache
-from transformers.generation import GenerationMixin
+from transformers.cache_utils import Cache
 from transformers.integrations import (
     use_experts_implementation,
     use_kernel_forward_from_hub,
@@ -62,7 +61,12 @@ from transformers.utils.generic import (
 from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 from transformers.vision_utils import get_vision_attention_seqlens, get_vision_position_ids
 from .configuration_glm5_next import Glm5NextConfig, Glm5NextTextConfig, Glm5NextVisionConfig
-from .....utils.leapquant import make_leapquant_cache, mask_is_unpadded
+from .....utils.leapquant import (
+    LeapQuantDynamicCache,
+    LeapQuantGenerationMixin,
+    make_leapquant_cache,
+    validate_leapquant_inputs,
+)
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -680,12 +684,7 @@ class Glm5NextTextLinearAttention(nn.Module):
         quant_layer = cache_params.layers[self.layer_idx] if cache_params is not None else None
         state_quant = getattr(quant_layer, "state_quant", None)
         if state_quant is not None:
-            if not mask_is_unpadded(attention_mask):
-                raise ValueError(
-                    "LeapQuant requires unpadded input; pass no attention_mask or an all-ones mask"
-                )
-            if kwargs.get("cu_seqlens") is not None:
-                raise ValueError("LeapQuant does not support packed cu_seqlens")
+            validate_leapquant_inputs(attention_mask, kwargs)
         hidden_shape = (batch_size, seq_len, -1, self.head_dim)
 
         mixed_qkv = torch.cat(
@@ -1479,7 +1478,9 @@ class Glm5NextPreTrainedModel(NativePreTrainedModel):
 @auto_docstring
 class Glm5NextTextModel(Glm5NextPreTrainedModel):
     config: Glm5NextTextConfig
-    supports_state_quant = True
+    @property
+    def supports_state_quant(self) -> bool:
+        return "linear_attention" in self.config.layer_types
 
     def __init__(self, config: Glm5NextTextConfig):
         super().__init__(config)
@@ -1518,6 +1519,8 @@ class Glm5NextTextModel(Glm5NextPreTrainedModel):
                 self.config,
                 getattr(self, "_gptqmodel_state_quant", None),
             )
+        if isinstance(past_key_values, LeapQuantDynamicCache) and past_key_values.state_quant is not None:
+            validate_leapquant_inputs(attention_mask, kwargs)
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -2193,7 +2196,7 @@ def load_balancing_loss_func(
 
 
 @auto_docstring
-class Glm5NextForConditionalGeneration(Glm5NextPreTrainedModel, GenerationMixin):
+class Glm5NextForConditionalGeneration(Glm5NextPreTrainedModel, LeapQuantGenerationMixin):
     """
     Main Glm5Next conditional generation class.
     """

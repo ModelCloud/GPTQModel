@@ -5141,15 +5141,13 @@ class BaseQModel(nn.Module):
         if config is not None and not isinstance(config, LeapQuantConfig):
             raise TypeError(f"state_quant must be a LeapQuantConfig or None, got {type(config).__name__}")
 
-        targets = [
-            module
-            for module in self.model.modules()
-            if getattr(module, "supports_state_quant", False)
-        ]
+        targets = []
+        if getattr(self, "_runtime_generate", None) is None:
+            targets = [module for module in self.model.modules() if getattr(module, "supports_state_quant", False)]
         if config is not None and not targets:
             raise ValueError(
                 f"{type(self.model).__name__} has no LeapQuant-capable linear-attention port; "
-                "supported ports are Kimi K3 / Kimi Linear KDA, Qwen3.5 GDN, and GLM-5.3 KDA."
+                "supported ports are Kimi K3 KDA, dense Qwen3.5 GDN, and GLM-5.3 KDA."
             )
         for module in targets:
             module._gptqmodel_state_quant = config

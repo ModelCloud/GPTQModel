@@ -34,8 +34,8 @@ reference inventories, not a promise that every combination works on every devic
 † GSQ preserves the initializer's checkpoint format; it does not add a runtime format.
 
 LeapQuant is not a checkpoint format: it quantizes the linear-attention
-recurrent state at inference time, so it composes with any weight method and
-leaves `quant_method` unchanged. See [LeapQuant](leapquant.md).
+recurrent state at inference time in supported GPT-QModel ports and leaves
+`quant_method` unchanged. See [LeapQuant](leapquant.md).
 
 See [runtime loading](https://github.com/ModelCloud/GPTQModel/wiki/Loading-and-Inference),
 [prompt normalization](runtime-prompt-input-normalization.md), and

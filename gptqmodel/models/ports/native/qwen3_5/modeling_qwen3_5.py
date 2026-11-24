@@ -29,8 +29,7 @@ from torch import nn
 
 from transformers import initialization as init
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache
-from transformers.generation import GenerationMixin
+from transformers.cache_utils import Cache
 from transformers.integrations import use_kernel_forward_from_hub, use_kernel_func_from_hub_with_fallback, use_kernelized_func
 from transformers.integrations.accelerate import force_accelerate_hooks
 from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
@@ -71,7 +70,12 @@ from transformers.vision_utils import (
 )
 from ..auto import AutoModel
 from .configuration_qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig, Qwen3_5VisionConfig
-from .....utils.leapquant import make_leapquant_cache, mask_is_unpadded
+from .....utils.leapquant import (
+    LeapQuantDynamicCache,
+    LeapQuantGenerationMixin,
+    make_leapquant_cache,
+    validate_leapquant_inputs,
+)
 
 
 class Qwen3_5VisionRotaryEmbedding(nn.Module):
@@ -560,12 +564,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         quant_layer = cache_params.layers[self.layer_idx] if cache_params is not None else None
         state_quant = getattr(quant_layer, "state_quant", None)
         if state_quant is not None:
-            if not mask_is_unpadded(attention_mask):
-                raise ValueError(
-                    "LeapQuant requires unpadded input; pass no attention_mask or an all-ones mask"
-                )
-            if kwargs.get("cu_seq_lens_q") is not None or kwargs.get("cu_seqlens") is not None:
-                raise ValueError("LeapQuant does not support packed cu_seqlens")
+            validate_leapquant_inputs(attention_mask, kwargs)
         # Retrieve conv and recurrent states if there is a cache. They may be None if the layer is not initialized.
         if cache_params is not None:
             conv_state = cache_params.get_conv_state(self.layer_idx, state_idx=0)
@@ -659,7 +658,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
                     initial_state=quantizer.materialize(),
                     output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
-                    cu_seqlens=None,
+                    cu_seqlens=kwargs.pop("cu_seqlens", None),
                     **kwargs,
                 )
             core_attn_out = core_attn_out.to(query.dtype)
@@ -1250,7 +1249,9 @@ class Qwen3_5VisionModel(Qwen3_5PreTrainedModel):
 
 class Qwen3_5TextModel(Qwen3_5PreTrainedModel):
     config: Qwen3_5TextConfig
-    supports_state_quant = True
+    @property
+    def supports_state_quant(self) -> bool:
+        return "linear_attention" in self.config.layer_types
 
     def __init__(self, config: Qwen3_5TextConfig):
         super().__init__(config)
@@ -1288,6 +1289,8 @@ class Qwen3_5TextModel(Qwen3_5PreTrainedModel):
                 self.config,
                 getattr(self, "_gptqmodel_state_quant", None),
             )
+        if isinstance(past_key_values, LeapQuantDynamicCache) and past_key_values.state_quant is not None:
+            validate_leapquant_inputs(attention_mask, kwargs)
 
         # the hard coded `4` is for text, temporal, height and width.
         if position_ids is None:
@@ -1699,7 +1702,7 @@ class Qwen3_5Model(Qwen3_5PreTrainedModel):
 
 
 @auto_docstring
-class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, GenerationMixin):
+class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, LeapQuantGenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_gather_output"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
@@ -1778,7 +1781,7 @@ class Qwen3_5ForTokenClassification(GenericForTokenClassification, Qwen3_5PreTra
     config: Qwen3_5Config
 
 
-class Qwen3_5ForConditionalGeneration(Qwen3_5PreTrainedModel, GenerationMixin):
+class Qwen3_5ForConditionalGeneration(Qwen3_5PreTrainedModel, LeapQuantGenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.language_model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_gather_output"}
     # Reference: fix gemma3 grad acc #37208
