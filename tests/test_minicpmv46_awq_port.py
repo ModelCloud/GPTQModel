@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from torch import nn
 from transformers import MiniCPMV4_6Config, MiniCPMV4_6ForConditionalGeneration, Qwen3_5TextConfig
 
@@ -25,6 +26,20 @@ def one_thread():
     torch.set_num_threads(1)
     yield
     torch.set_num_threads(before)
+
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 
 def _config(heads=2, head_dim=8, hidden=32):

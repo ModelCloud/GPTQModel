@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn.functional as F
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import NemotronHForCausalLM, PreTrainedTokenizerFast
 
@@ -26,6 +27,19 @@ from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config
 from tests.port_assets import read_port_json
 
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 PORT = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/nemotron_omni"
 

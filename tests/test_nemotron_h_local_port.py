@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from torch.nn import functional as F
 
 from gptqmodel import CalibrationConfig
@@ -14,6 +15,20 @@ from gptqmodel.models.definitions.nemotron_h import NemotronHQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.nemotron_h import NemotronHConfig, NemotronHForCausalLM
+
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm`` at import time when
+    the distribution is installed, and those implementations are CUDA-only. The
+    invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 
 def config(**overrides):

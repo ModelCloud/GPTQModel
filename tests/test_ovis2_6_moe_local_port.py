@@ -8,6 +8,7 @@ from pathlib import Path
 import defuser
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -19,6 +20,19 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.ovis2_6_moe.configuration_ovis2_6 import Ovis2_6_Moe_Config, Ovis2_6_Next_Config
 from tests.port_assets import read_port_asset
 
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 FIXTURES = Path(__file__).parent / "fixtures/ports/ovis2_6_moe/fixtures"
 # Bit-exact weights reloaded as unaligned safetensors views can change CPU

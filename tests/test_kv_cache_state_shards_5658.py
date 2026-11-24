@@ -16,6 +16,7 @@ missed:
 import types
 
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from gptqmodel.utils.kv_cache import estimate_kv_cache
@@ -182,7 +183,7 @@ def test_zamba2_state_uses_its_declared_group_count():
 
     model = AutoModelForCausalLM.from_config(config).eval().to(torch.bfloat16)
     for tokens in (4, 32):
-        with torch.no_grad():
+        with torch.no_grad(), eager_torch_ssm_kernels():
             output = model(torch.randint(3, 20, (1, tokens)), use_cache=True)
         measured = _cache_bytes(output.past_key_values)
         assert measured == estimate.kv_bytes_for(tokens), (tokens, measured, estimate.kv_bytes_for(tokens))

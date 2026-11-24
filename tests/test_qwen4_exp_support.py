@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from torch import nn
 
 from gptqmodel.models import auto
@@ -14,6 +15,19 @@ from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 from gptqmodel.utils.model import apply_no_placement_to_device_map, simple_dispatch_model
 from gptqmodel.utils.structure import LazyTurtle
 
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 def _outer_config(num_experts=3):
     return SimpleNamespace(text_config=SimpleNamespace(num_experts=num_experts))

@@ -8,6 +8,7 @@ import json
 import numpy as np
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from torch.nn import functional as F
 
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
@@ -26,6 +27,20 @@ def bounded_cpu_threads():
     torch.set_num_threads(1)
     yield
     torch.set_num_threads(previous)
+
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 
 def tiny_config(kv_heads=2, bias=False, sandwich=True, layer_types=None):

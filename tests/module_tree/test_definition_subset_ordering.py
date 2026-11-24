@@ -13,12 +13,12 @@ coverage of every called ``nn.Linear`` for the audited definitions.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 import torch
 import transformers
+from eager_ssm_kernels import eager_torch_ssm_kernels as _eager_torch_mamba_kernels
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.loader import _convert_model_with_defuser
@@ -369,51 +369,6 @@ _FLOW_BUILDERS = {
     "lfm2_moe": _build_lfm2_moe_flow,
     "bailing_moe": _build_bailing_moe_flow,
 }
-
-
-_EAGER_MAMBA_KERNELS = {
-    "transformers.models.jamba.modeling_jamba": (
-        "causal_conv1d_fn",
-        "causal_conv1d_update",
-        "mamba_inner_fn",
-        "mamba_selective_scan",
-        "mamba_selective_state_update",
-    ),
-    "transformers.models.nemotron_h.modeling_nemotron_h": (
-        "mamba2_chunk_scan",
-        "mamba2_split_conv1d_scan_combined",
-        "mamba2_selective_state_update",
-    ),
-}
-
-
-@contextmanager
-def _eager_torch_mamba_kernels():
-    """Pin the Torch Mamba reference for one CPU forward.
-
-    ``transformers`` resolves ``mamba_ssm``/``causal_conv1d`` at import time and
-    those kernels are CUDA-only. The decorator keeps the undecorated Torch
-    reference on ``__wrapped__``; this data-flow probe runs on CPU, so it must
-    use that reference rather than hand a CPU tensor to a CUDA kernel.
-    """
-
-    import importlib
-
-    saved = []
-    try:
-        for module_path, names in _EAGER_MAMBA_KERNELS.items():
-            module = importlib.import_module(module_path)
-            for name in names:
-                wrapper = getattr(module, name, None)
-                reference = getattr(wrapper, "__wrapped__", None)
-                if wrapper is None or reference is None:
-                    continue
-                saved.append((module, name, wrapper))
-                setattr(module, name, reference)
-        yield
-    finally:
-        for module, name, wrapper in reversed(saved):
-            setattr(module, name, wrapper)
 
 
 def _is_routing_dependent(name: str) -> bool:

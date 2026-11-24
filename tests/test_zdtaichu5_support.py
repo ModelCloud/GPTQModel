@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from torch import nn
 from transformers import Qwen3_5TextConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
@@ -18,6 +19,19 @@ from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.utils.model import MODALITY
 from tests import test_image_fetch
 
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 def _tiny_qwen35_config():
     config = Qwen3_5TextConfig(

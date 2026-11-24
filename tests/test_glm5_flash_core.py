@@ -5,11 +5,26 @@ import json
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from safetensors.torch import save_file
 from torch import nn
 
 from gptqmodel.utils import glm5_flash_core as core
 from gptqmodel.utils import glm5_flash_mtp as mtp
+
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 
 def config():
