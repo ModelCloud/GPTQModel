@@ -594,7 +594,11 @@ def test_quantize_never_claims_the_excluded_device(tmp_path, mode):
     model_dir = _tiny_llama_dir(tmp_path)
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = visible
-    env["PYTHONPATH"] = str(REPO_ROOT)
+    # Keep the caller's isolated dependency path (for example a pinned Defuser)
+    # while making the checkout under test importable first.
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO_ROOT), *[p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]]
+    )
     env.setdefault("OMP_NUM_THREADS", "4")
 
     result = subprocess.run(
@@ -648,7 +652,11 @@ def test_quantize_fused_expert_moe_never_claims_the_excluded_device(tmp_path):
     model_dir = _tiny_olmoe_dir(tmp_path)
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = visible
-    env["PYTHONPATH"] = str(REPO_ROOT)
+    # Keep the caller's isolated dependency path (for example a pinned Defuser)
+    # while making the checkout under test importable first.
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO_ROOT), *[p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]]
+    )
     env.setdefault("OMP_NUM_THREADS", "4")
 
     result = subprocess.run(
@@ -745,7 +753,11 @@ print("APPS_END")
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = visible
-    env["PYTHONPATH"] = str(REPO_ROOT)
+    # Keep the caller's isolated dependency path (for example a pinned Defuser)
+    # while making the checkout under test importable first.
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO_ROOT), *[p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]]
+    )
     env.setdefault("OMP_NUM_THREADS", "4")
     env.setdefault("MKL_NUM_THREADS", "4")
     env.setdefault("OPENBLAS_NUM_THREADS", "4")

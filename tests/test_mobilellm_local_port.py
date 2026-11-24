@@ -608,7 +608,7 @@ def test_public_awq_scale_search_pack_infer_two_safetensors_cycles(tiny_config, 
         destination = tmp_path / f"quantized-{cycle}"
         wrapper.save(str(destination))
         assert list(destination.glob("*.safetensors")) and not list(destination.glob("*.bin"))
-        wrapper = GPTQModel.load(str(destination), backend=BACKEND.TORCH, dtype=torch.float16)
+        wrapper = GPTQModel.load(str(destination), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
         assert set(wrapper.model.state_dict()) == set(snapshot)
         for key, value in snapshot.items():
             torch.testing.assert_close(wrapper.model.state_dict()[key], value, rtol=0, atol=0)

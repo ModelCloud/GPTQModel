@@ -299,6 +299,15 @@ def test_norm_teacher_load_takes_the_model_load_lock(monkeypatch):
 
     monkeypatch.setattr(base_module, "model_load_lock", lambda: lock)
     monkeypatch.setattr(base_module, "AutoModelForCausalLM", _RecordingAutoModel)
+    # ``_requantize_norm`` resolves the teacher config before the model load;
+    # a synthetic id must not reach the Hub there either.
+    monkeypatch.setattr(base_module, "load_model_config", lambda *_a, **_k: _tiny_config())
+    # Transformers 5.23 routes every model through a ``LocalModelLoader``, so
+    # the Qwen2 teacher resolves through the port loader, not the auto class.
+    # Pin the loader factory the production path actually calls.
+    monkeypatch.setattr(
+        base_module, "local_model_loader_for_config", lambda _config: _RecordingAutoModel
+    )
     monkeypatch.setattr(
         "gptqmodel.quantization.norm_tuning.tune_norm_params",
         lambda *_args, **_kwargs: {"modules": []},

@@ -263,7 +263,12 @@ def test_public_hostile_auto_map_ignores_remote_code(tmp_path, monkeypatch, bypa
     tokenizer_payload["auto_map"] = {"AutoTokenizer": ["evil.Evil", "evil.Evil"]}
     tokenizer_path.write_text(json.dumps(tokenizer_payload))
     loaded = GPTQModel.load(
-        str(tmp_path), backend=BACKEND.TORCH, dtype=torch.float32, trust_remote_code=trust, attn_implementation="eager"
+        str(tmp_path),
+        backend=BACKEND.TORCH,
+        device="cpu",
+        dtype=torch.float32,
+        trust_remote_code=trust,
+        attn_implementation="eager",
     )
     assert loaded.trust_remote_code is False
     assert type(loaded.model) is (Qwen2_5_VLTextModel if text_only else Qwen2_5_VLForConditionalGeneration)
@@ -343,7 +348,9 @@ def test_public_headless_dense_two_save_cycles_and_generation_rejection(tmp_path
     with torch.inference_mode():
         expected = model(ids).last_hidden_state
     state = {key: value.clone() for key, value in model.state_dict().items()}
-    loaded = GPTQModel.load(str(source), backend=BACKEND.TORCH, dtype=torch.float32, attn_implementation="eager")
+    loaded = GPTQModel.load(
+        str(source), backend=BACKEND.TORCH, device="cpu", dtype=torch.float32, attn_implementation="eager"
+    )
     for index in range(2):
         destination = tmp_path / str(index)
         with pytest.raises(NotImplementedError, match="headless backbone"):
@@ -352,7 +359,11 @@ def test_public_headless_dense_two_save_cycles_and_generation_rejection(tmp_path
         loaded.tokenizer.save_pretrained(str(destination))
         assert list(destination.glob("*.safetensors")) and not list(destination.glob("*.bin"))
         loaded = GPTQModel.load(
-            str(destination), backend=BACKEND.TORCH, dtype=torch.float32, attn_implementation="eager"
+            str(destination),
+            backend=BACKEND.TORCH,
+            device="cpu",
+            dtype=torch.float32,
+            attn_implementation="eager",
         )
         assert type(loaded.model) is Qwen2_5_VLTextModel
         assert loaded.model.state_dict().keys() == state.keys()
@@ -426,7 +437,11 @@ def test_public_awq_packs_all_linears_and_reloads_twice(tmp_path, offload, kv_he
         wrapped.save(str(destination))
         assert list(destination.glob("*.safetensors")) and not list(destination.glob("*.bin"))
         wrapped = GPTQModel.load(
-            str(destination), backend=BACKEND.TORCH, dtype=torch.float16, attn_implementation="eager"
+            str(destination),
+            backend=BACKEND.TORCH,
+            device="cpu",
+            dtype=torch.float16,
+            attn_implementation="eager",
         )
         assert wrapped.model.state_dict().keys() == state.keys()
         for key, value in state.items():

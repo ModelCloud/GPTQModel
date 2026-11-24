@@ -345,7 +345,9 @@ def test_public_dense_hostile_checkpoint_policy_two_reloads(tmp_path, monkeypatc
     ids = torch.tensor([[1, 7, 9, 5]])
     with torch.no_grad():
         expected = source(ids, use_cache=False).logits
-    wrapper = GPTQModel.load(str(path), backend=BACKEND.TORCH, dtype=torch.float32, trust_remote_code=trust)
+    wrapper = GPTQModel.load(
+        str(path), backend=BACKEND.TORCH, device="cpu", dtype=torch.float32, trust_remote_code=trust
+    )
     for cycle in range(3):
         assert type(wrapper) is SolarOpen2QModel
         assert type(wrapper.model) is SolarOpen2ForCausalLM
@@ -358,7 +360,9 @@ def test_public_dense_hostile_checkpoint_policy_two_reloads(tmp_path, monkeypatc
             target = tmp_path / f"saved-{cycle}"
             wrapper.model.save_pretrained(target, safe_serialization=True)
             wrapper.tokenizer.save_pretrained(target)
-            wrapper = GPTQModel.load(str(target), backend=BACKEND.TORCH, dtype=torch.float32, trust_remote_code=trust)
+            wrapper = GPTQModel.load(
+                str(target), backend=BACKEND.TORCH, device="cpu", dtype=torch.float32, trust_remote_code=trust
+            )
 
 
 @pytest.mark.parametrize("offload,full_proj,dense_first", [(False, False, False), (True, True, False), (False, False, True)])

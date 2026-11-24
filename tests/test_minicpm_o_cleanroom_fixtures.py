@@ -24,7 +24,10 @@ from gptqmodel.models.ports.minicpm_o.cache import cache_from_pairs, cache_pairs
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "cleanroom" / "minicpm_o"
 VQ_AVAILABLE = find_spec("vector_quantize_pytorch") is not None
 needs_vq = pytest.mark.skipif(not VQ_AVAILABLE, reason="vector-quantize-pytorch is not installed")
-EXACT = {"atol": 0, "rtol": 0}
+# The fixture README allows atol=rtol=1e-5 when the implementation
+# deliberately changes op order; the Transformers 5.23 port migration
+# (d2dfb9385) did. Integer outputs still compare exactly by dtype.
+EXACT = {"atol": 1e-5, "rtol": 1e-5}
 
 
 @pytest.fixture(autouse=True, scope="module")
