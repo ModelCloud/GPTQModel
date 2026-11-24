@@ -19,6 +19,19 @@ every Arrow-backed input shape, and leaves a real ``content: None`` (which
 templates such as DeepSeek-R1 test with ``is none``) alone. ``arguments`` that
 is already a JSON string stays a string: templates such as DeepSeek-R1 insert
 it verbatim into a ``json`` block, so decoding it would corrupt the prompt.
+
+Transformers 5.23 makes the DeepSeek-R1 conversation unreachable through
+``apply_chat_template``: before rendering, ``tokenization_utils_base`` rebuilds
+every message as ``{k: v for k, v in msg.items() if v is not None}``, so a
+tool-call turn's real ``content: None`` is deleted. The published DeepSeek-R1
+template then falls from its ``content is none`` branch into its text branch,
+where its ``in`` test on the now-undefined ``content`` raises
+``UndefinedError: 'dict object' has no attribute 'content'``. The template
+itself is fine: rendering the same rows through it directly succeeds and
+inserts the JSON string verbatim. Because calibration renders exactly like
+inference does (``apply_chat_template``), the JSON-string contract below is
+pinned by (a) rendering the published template directly and (b) calibrating a
+template that does accept the row.
 """
 
 from __future__ import annotations
@@ -160,6 +173,30 @@ def _reference_ids(tokenizer, rows):
     ]
 
 
+def _render_published_template(tokenizer, messages, tools=None):
+    """Render with the tokenizer's published template, minus HF's ``None`` strip.
+
+    ``transformers`` 5.23's ``apply_chat_template`` deletes every message key
+    whose value is ``None`` before compiling the template
+    (``tokenization_utils_base``), which removes a tool-call turn's real
+    ``content: None``. ``render_jinja_template`` is the same renderer without
+    that pre-normalization, so it shows what the published template produces.
+    """
+
+    from transformers.utils.chat_template_utils import render_jinja_template
+
+    chat_template = tokenizer.get_chat_template(None, tools)
+    rendered, _ = render_jinja_template(
+        conversations=[messages],
+        tools=tools,
+        documents=None,
+        add_generation_prompt=False,
+        chat_template=chat_template,
+        **tokenizer.special_tokens_map,
+    )
+    return rendered[0]
+
+
 def _dataset(rows):
     datasets = pytest.importorskip(
         "datasets", reason="the HF `datasets` package is not installed"
@@ -249,6 +286,10 @@ def _prepare_texts(tokenizer, calibration_input):
 def test_json_string_arguments_stay_verbatim_for_raw_text_templates():
     """DeepSeek-R1 inserts `arguments` into a json block; it is not an object."""
 
+    # Imported here so a pre-fix run reaches the behavioural assertions above
+    # instead of failing collection on the missing symbol.
+    from gptqmodel.utils.calibration import _normalize_chat_messages
+
     tokenizer = _tokenizer(DEEPSEEK)
     rows = [
         {
@@ -285,11 +326,103 @@ def test_json_string_arguments_stay_verbatim_for_raw_text_templates():
         dataset[0]["messages"][1]["tool_calls"][0]["function"]["arguments"], str
     ), "fixture must store `arguments` as JSON text"
 
-    expected = _reference_ids(tokenizer, rows)
-    assert _prepared_ids(_prepare(tokenizer, dataset)) == expected
+    # Arrow injected the padding this test exists for: turns without a tool
+    # call carry `tool_calls: None`.
+    assert dataset[0]["messages"][0]["tool_calls"] is None
+    assert dataset[0]["messages"][2]["tool_calls"] is None
 
-    rendered = _prepare_texts(tokenizer, dataset)[0]
+    # Normalization drops only that padding: the JSON string stays a string and
+    # the tool-call turn's real `content: None` survives. Decoding `arguments`
+    # into an object would change the row.
+    normalized = _normalize_chat_messages(dataset[0]["messages"])
+    assert normalized == rows[0]["messages"]
+
+    # The published template renders that row verbatim: the JSON text lands in
+    # the ```json block, which an object (or any re-serialization) would not.
+    rendered = _render_published_template(
+        tokenizer, normalized, tools=rows[0]["tools"]
+    )
     assert '```json\n{"city": "Paris"}\n```' in rendered
+
+    # It is not renderable through `apply_chat_template` on transformers 5.23:
+    # that call deletes every message key whose value is None before rendering,
+    # which is exactly the `content: None` that marks a tool-call turn. The
+    # template falls into its text branch and raises on `'</think' in content`.
+    import jinja2
+
+    with pytest.raises(jinja2.exceptions.UndefinedError, match="content"):
+        tokenizer.apply_chat_template(
+            rows[0]["messages"],
+            tools=rows[0]["tools"],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+
+    # Calibration renders through that same API, so it raises for this row too
+    # rather than inventing tokens inference cannot emit. Rows the template does
+    # accept (a tool output) still calibrate to exactly the plain Python rows.
+    tool_rows = [
+        {
+            "messages": [
+                {"role": "user", "content": "Weather in Paris?"},
+                {"role": "tool", "content": "18C"},
+                {"role": "assistant", "content": "18C in Paris."},
+            ],
+            "tools": _tool("get_weather", "city"),
+        }
+    ]
+    tool_dataset = _dataset(tool_rows)
+    assert _prepared_ids(_prepare(tokenizer, tool_dataset)) == _reference_ids(
+        tokenizer, tool_rows
+    )
+
+    # A template that does accept tool calls pins the string end to end: a
+    # decoded mapping renders as a JSON object and changes every token.
+    llama = _tokenizer(LLAMA)
+    string_rows = [
+        {
+            "messages": [
+                {"role": "user", "content": "Weather in Paris?"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": json.dumps({"city": "Paris"}),
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "content": "18C"},
+                {"role": "assistant", "content": "18C in Paris."},
+            ],
+            "tools": _tool("get_weather", "city"),
+        },
+        {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello."},
+            ],
+            "tools": _tool("get_weather", "city"),
+        },
+    ]
+    string_dataset = _dataset(string_rows)
+    assert isinstance(
+        string_dataset[0]["messages"][1]["tool_calls"][0]["function"]["arguments"],
+        str,
+    ), "fixture must store `arguments` as JSON text"
+    # Llama-3.2 renders a user turn as a tool call when `tool_calls: None`
+    # survives, so this equality also proves the padding was dropped.
+    assert string_dataset[0]["messages"][0]["tool_calls"] is None
+    assert _prepared_ids(_prepare(llama, string_dataset)) == _reference_ids(
+        llama, string_rows
+    )
+    string_rendered = _prepare_texts(llama, string_dataset)[0]
+    assert '"parameters": "{\\"city\\": \\"Paris\\"}"' in string_rendered
+    assert '"parameters": {"city": "Paris"}' not in string_rendered
 
 
 def test_normalize_chat_messages_keeps_content_none_and_does_not_mutate():
