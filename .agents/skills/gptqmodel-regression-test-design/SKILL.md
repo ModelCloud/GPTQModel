@@ -21,8 +21,9 @@ consumer**, not just the helper or first successful call. Select the applicable
 cases below and record the evidence in the PR. For landed fixes and the tests
 to extend, see the audits from [Nov 17](references/2026-11-17-regressions.md),
 [Nov 18](references/2026-11-18-regressions.md), [Nov 19](references/2026-11-19-regressions.md),
-[Nov 20](references/2026-11-20-regressions.md), [Nov 21](references/2026-11-21-regressions.md)
-and [Nov 23](references/2026-11-23-regressions.md).
+[Nov 20](references/2026-11-20-regressions.md), [Nov 21](references/2026-11-21-regressions.md),
+[Nov 23](references/2026-11-23-regressions.md) and
+[Nov 24](references/2026-11-24-regressions.md).
 
 ## 1. Write the invariant before the patch
 
@@ -301,6 +302,31 @@ just the shared helper. For a per-channel grid, vary only a dead column and
 compare live weights, scales and zeros. For a replay-to-pack change, choose a
 code the replay dtype cannot recover and inspect the integer lane after the
 processor actually packs it; a close replay tensor is not evidence.
+
+- **Finite grid endpoints.** Identify the dtype used to fit the grid, store
+  its scale and replay or decode its codes. Pick adjacent source values where
+  the extreme code survives one reconstruction and overflows the next. Assert
+  the exact surviving code in each packed lane and the replay values. This
+  catches both an unchecked cast and an overzealous clamp. If the format
+  requires rejection, test the first invalid stored field and the last valid
+  payload. For a scale that rounds to zero, include a genuinely zero row
+  alongside a tiny nonzero row and inspect both scales and codes.
+- **Candidate ranking.** For a search whose optimum should survive a common
+  rescale, choose a row with a unique winner other than the first candidate.
+  Rescale by powers of two within the encodable range, including any global
+  scale that defines the units. Rank the actual representable candidates
+  independently in FP64. Check the selected index or local scale and the
+  decoded payload. Test ties and format floors separately, where the expected
+  decision can change.
+- **Exact selections.** For nearest-centroid search, place the exact match
+  second beside a one-storage-ULP neighbour, then reverse them. Check the
+  index and residual against direct FP64 differences. For one-hot mixing,
+  select each candidate in turn and compare the forward with that candidate
+  exactly. Large finite candidates of opposite signs expose a delta that
+  overflows before the selection.
+
+See the [endpoint, rescaling and selection fixtures](references/2026-11-24-regressions.md)
+for concrete values, controls and existing test families.
 
 When a memory budget is meant to change only chunk size, force the same
 unequal rows into one chunk and separate chunks. Check both the export and
