@@ -16,6 +16,7 @@ import importlib
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
@@ -107,6 +108,21 @@ FAMILIES = {
     for model_type in FAMILY_MODEL_TYPES
 }
 
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
+
+
 _BASE_CONFIG = {
     "vocab_size": 128,
     "hidden_size": 32,
@@ -124,72 +140,6 @@ _BASE_CONFIG = {
 # Composite (text + vision) configs keep the decoder under `text_config`; the
 # generic builder would only shrink the unused top-level fields.
 COMPOSITE_TEXT_CONFIG_FAMILIES = {"gemma4", "gemma4_unified"}
-
-
-def _kernel_fallback_implementation(func):
-    """Return the implementation a hub-kernel fallback wrapper resolved.
-
-    ``use_kernel_func_from_hub_with_fallback`` closes over the resolved
-    ``implementation`` cell, so the decorated module attribute always reports
-    ``transformers`` as its own module. The closure is the only place that says
-    whether the eager Torch reference or an external fused package is in use.
-    """
-
-    cells = dict(zip(getattr(func.__code__, "co_freevars", ()), func.__closure__ or ()))
-    implementation = cells.get("implementation")
-    if implementation is None:
-        return None
-    try:
-        return implementation.cell_contents
-    except ValueError:
-        return None
-
-
-# Modules whose Mamba-2 forward kernels ``transformers`` resolves through the
-# hub-kernel fallback decorator, paired with the attribute holding the wrapper.
-MAMBA_SSM_KERNEL_BINDINGS = (
-    ("transformers.models.mamba.modeling_mamba", ("mamba_selective_scan", "mamba_inner_fn")),
-    ("transformers.models.falcon_h1.modeling_falcon_h1", ("mamba2_chunk_scan", "mamba2_split_conv1d_scan_combined")),
-    ("transformers.models.nemotron_h.modeling_nemotron_h", ("mamba2_chunk_scan", "mamba2_split_conv1d_scan_combined")),
-)
-
-
-def _mamba_ssm_cpu_unavailable_reason():
-    """Report whether ``mamba_ssm`` would displace the eager Torch Mamba-2 path.
-
-    ``transformers`` resolves the Mamba-2 kernels through
-    ``use_kernel_func_from_hub_with_fallback``, which prefers an installed
-    ``mamba_ssm`` over its own eager reference. Those implementations are
-    CUDA-only: they raise ``Expected u.is_cuda()`` or hand a CPU pointer to
-    Triton. A host that merely happens to have the package installed therefore
-    cannot run this CPU-only fold invariant for the hybrid SSM families.
-
-    The check reads the resolved implementation out of each decorator closure
-    rather than testing whether the distribution imports, so a host without
-    ``mamba_ssm`` still runs the invariant against the Torch fallback.
-    """
-
-    displaced = []
-    for module_path, names in MAMBA_SSM_KERNEL_BINDINGS:
-        try:
-            module = importlib.import_module(module_path)
-        except Exception:
-            continue
-        for name in names:
-            wrapper = getattr(module, name, None)
-            if wrapper is None or not hasattr(wrapper, "__closure__"):
-                continue
-            implementation = _kernel_fallback_implementation(wrapper)
-            resolved = getattr(implementation, "__module__", "") or ""
-            if not resolved.startswith("mamba_ssm"):
-                continue
-            displaced.append(f"{module_path.rsplit('.', 1)[-1]}.{name}")
-    if not displaced:
-        return None
-    return (
-        "mamba_ssm displaced the eager Torch Mamba-2 path with CUDA-only kernels "
-        f"({', '.join(sorted(displaced))}); this CPU fold invariant needs the Torch fallback"
-    )
 
 
 def _field_names(config):
@@ -464,11 +414,6 @@ PLAIN_QUANTIZATION_FAMILIES = {
     "codegen", "gpt2",
 }
 
-# Hybrid SSM families whose decoder forward resolves Mamba-2 scan kernels through
-# `transformers`' hub-kernel fallback. When that decorator selects CUDA-only
-# `mamba_ssm` code the CPU-only fold invariant cannot execute at all.
-MAMBA_SSM_KERNEL_FAMILIES = {"falcon_h1", "falcon_mamba", "nemotron_h"}
-
 # Issue #4039 families that can be instantiated as a tiny ``AutoModelForCausalLM``.
 # ``exaone4_5`` and ``muse_glimmer`` are vision-language wrappers with no
 # ``AutoModelForCausalLM`` entry point; their flags are pinned statically by
@@ -531,12 +476,6 @@ def test_parallel_norm_group_cannot_score_only_attention(family):
 
 @pytest.mark.parametrize("family", sorted(FAMILIES))
 def test_scaling_groups_preserve_decoder_layer_output(family):
-    if family in MAMBA_SSM_KERNEL_FAMILIES:
-        # The invariant runs a real CPU forward; `mamba_ssm` would route it to
-        # CUDA-only kernels and fail on the device, not on the fold math.
-        reason = _mamba_ssm_cpu_unavailable_reason()
-        if reason is not None:
-            pytest.skip(reason)
     hf_model, qmodel, layers, tree = _tiny_model(family)
     plan = ModulePlan.from_tree(tree)
     ids = torch.randint(0, _vocab_size(hf_model.config), (1, 8))
@@ -679,44 +618,22 @@ def test_excluded_projection_is_never_a_fold_source(family):
     assert checked or family in PLAIN_QUANTIZATION_FAMILIES or family in {"falcon_mamba", "apertus", "lfm3"}, family
 
 
-# Jamba's Mamba-2 mixer resolves its scan/conv kernels through
-# `use_kernel_func_from_hub_with_fallback`, which prefers an installed
-# `mamba_ssm` (CUDA-only) over the eager Torch reference. The CPU fold invariant
-# needs the reference math, and the decoder is attention-interleaved, so the
-# default cache cannot be used either (`get_seq_length` rejects a cache that
-# holds only linear-attention layers).
-JAMBA_TORCH_KERNELS = (
-    "causal_conv1d_fn",
-    "causal_conv1d_update",
-    "mamba_inner_fn",
-    "mamba_selective_scan",
-    "mamba_selective_state_update",
-)
-
-
+# Jamba's decoder is attention-interleaved, so the default cache cannot be used
+# either (`get_seq_length` rejects a cache that holds only linear-attention
+# layers). The module-level kernel pin covers the CUDA-only mixer kernels.
 @pytest.fixture()
-def jamba_torch_mixer(monkeypatch):
+def jamba_torch_mixer():
     """Build a tiny Jamba whose mixer runs the eager Torch Mamba-2 reference."""
 
-    module = importlib.import_module("transformers.models.jamba.modeling_jamba")
-    restored = []
-    for name in JAMBA_TORCH_KERNELS:
-        wrapper = getattr(module, name)
-        reference = getattr(wrapper, "__wrapped__", None)
-        if reference is None:
-            continue
-        monkeypatch.setattr(module, name, reference)
-        restored.append(name)
     hf_model, qmodel, layers, tree = _tiny_model("jamba")
     hf_model.config.use_cache = False
-    return hf_model, qmodel, layers, tree, restored
+    return hf_model, qmodel, layers, tree
 
 
 def test_jamba_never_folds_x_proj_scale_into_excluded_dt_proj(jamba_torch_mixer):
     """Issue #4651: the fold must land on `in_proj`, never on excluded `dt_proj`."""
 
-    hf_model, qmodel, layers, tree, restored = jamba_torch_mixer
-    assert restored, "jamba: no hub-kernel wrapper resolved; the Torch reference was not installed"
+    hf_model, qmodel, layers, tree = jamba_torch_mixer
     plan = ModulePlan.from_tree(tree)
     layer = layers[0]
     nodes = qmodel.awq_get_modules_for_scaling(layer, _features(layer, plan), {})
@@ -764,7 +681,7 @@ def test_jamba_never_folds_x_proj_scale_into_excluded_dt_proj(jamba_torch_mixer)
 def test_jamba_awq_scaling_groups_preserve_decoder_layer_output(jamba_torch_mixer):
     """Full tiny-model invariant for the hybrid SSM decoder (#4651)."""
 
-    hf_model, qmodel, layers, tree, _restored = jamba_torch_mixer
+    hf_model, qmodel, layers, tree = jamba_torch_mixer
     plan = ModulePlan.from_tree(tree)
     ids = torch.randint(0, _vocab_size(hf_model.config), (1, 8))
     worst = 0.0

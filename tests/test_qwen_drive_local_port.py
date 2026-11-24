@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from safetensors import SafetensorError
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -36,6 +37,20 @@ RELEASED_ASSETS_SHA256 = {
     "chat_template.jinja": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
     "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
 }
+
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 
 def tiny_config(layout="hybrid", kv_heads=2, bias=False):

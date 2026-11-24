@@ -31,6 +31,7 @@ from awq_neutrality import (  # noqa: F401
     _wrapper,
     assert_awq_folds_neutral,
 )
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -79,7 +80,8 @@ def test_minicpmv_4_6_linear_attn_tags_preserve_layer_output():
     ids = torch.randint(2, 60, (1, 8))
 
     def forward():
-        return text(input_ids=ids).last_hidden_state
+        with eager_torch_ssm_kernels():
+            return text(input_ids=ids).last_hidden_state
 
     checked = []
     for layer in text.layers:
@@ -243,7 +245,8 @@ def test_qwen4_exp_shared_expert_folds_are_neutral():
     ids = torch.randint(2, 60, (1, 8))
 
     def forward():
-        output = model(input_ids=ids)
+        with eager_torch_ssm_kernels():
+            output = model(input_ids=ids)
         return output.logits if hasattr(output, "logits") else output.last_hidden_state
 
     checked = []
@@ -397,18 +400,13 @@ def _tiny_nemotron_h_mixers():
 
 
 def test_generic_planner_keeps_nemotron_h_mixer_norm_folds():
-    from test_awq_scaling_groups import _mamba_ssm_cpu_unavailable_reason
-
-    reason = _mamba_ssm_cpu_unavailable_reason()
-    if reason is not None:
-        pytest.skip(reason)
-
     model = _tiny_nemotron_h_mixers()
     definition = MODEL_MAP["nemotron_h"]
     ids = torch.randint(2, 60, (1, 8))
 
     def forward():
-        return model(input_ids=ids).logits
+        with eager_torch_ssm_kernels():
+            return model(input_ids=ids).logits
 
     checked = []
     for layer in model.model.layers:

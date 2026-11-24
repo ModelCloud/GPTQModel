@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 
 from gptqmodel import CalibrationConfig
 from gptqmodel.looper.awq_processor import (
@@ -154,14 +155,17 @@ def test_awq_batch_size_one_quantizes_a_mamba_hybrid(tmp_path):
         AWQConfig(bits=4, group_size=32, desc_act=False, device="cpu"),
         dtype=torch.bfloat16,
     )
-    quantized.quantize(
-        CalibrationConfig(
-            dataset=calibration,
-            batch_size=1,
-            min_length=1,
-        ),
-        backend=BACKEND.AWQ_TORCH,
-    )
+    # The port module is imported while loading, so pin its CPU references for
+    # the calibration forwards.
+    with eager_torch_ssm_kernels():
+        quantized.quantize(
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
+            backend=BACKEND.AWQ_TORCH,
+        )
 
     # The recurrent mixer must have been packed, not silently skipped.
     names = {name for name, _module in quantized.model.named_modules()}

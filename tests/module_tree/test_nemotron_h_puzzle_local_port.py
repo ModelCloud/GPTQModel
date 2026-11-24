@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from awq_neutrality import assert_awq_folds_neutral
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from torch import nn
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
@@ -168,7 +169,8 @@ def test_awq_scale_folds_preserve_mamba_attention_and_moe_block_outputs(override
     tree = NemotronHPuzzleQModel.module_tree
 
     def forward():
-        return model(input_ids=TOKENS[:1], use_cache=False).logits
+        with eager_torch_ssm_kernels():
+            return model(input_ids=TOKENS[:1], use_cache=False).logits
 
     seen = set()
     for layer in model.model.layers:

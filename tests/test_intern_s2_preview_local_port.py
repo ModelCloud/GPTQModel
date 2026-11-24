@@ -7,6 +7,7 @@ from shutil import copyfile
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -21,6 +22,20 @@ from gptqmodel.models.ports.intern_s2_preview.processing_interns2_preview import
 from gptqmodel.models.ports.intern_s2_preview.tokenization_interns1 import InternS1Tokenizer, bytes_to_unicode
 from gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
 from gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
+
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 
 def tiny_config(layer_types=None, **text_overrides):

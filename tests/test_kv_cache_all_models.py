@@ -19,6 +19,7 @@ import warnings
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from gptqmodel.models.auto import SUPPORTED_MODELS
@@ -183,7 +184,7 @@ def test_prediction_matches_the_cache_transformers_allocates(model_type, overrid
     assert estimate.is_exact is True
 
     for tokens in (4, 32):
-        with torch.no_grad():
+        with torch.no_grad(), eager_torch_ssm_kernels():
             output = model(torch.randint(3, 20, (1, tokens)), use_cache=True)
         measured = _cache_bytes(output.past_key_values)
         assert measured == estimate.kv_bytes_for(tokens), (

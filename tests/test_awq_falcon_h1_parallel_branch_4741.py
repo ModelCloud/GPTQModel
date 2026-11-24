@@ -21,6 +21,7 @@ import logging
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from test_awq_scaling_groups import _BASE_CONFIG, _features, _field_names, _tiny_model
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -132,19 +133,22 @@ def test_awq_scales_the_parallel_branch_instead_of_falling_back(tmp_path, monkey
 
     monkeypatch.setattr(AWQProcessor, "_search_best_scale", spy)
 
+    model = GPTQModel.load(
+        str(tmp_path / "source"),
+        AWQConfig(bits=4, group_size=32, device="cpu", offload_to_disk=False),
+        backend=BACKEND.TORCH,
+    )
+    layer0 = model.model.model.layers[0]
+    norm_before = layer0.input_layernorm.weight.detach().clone()
+    calibration = [{"input_ids": torch.randint(0, 128, (1, 8))} for _ in range(2)]
     try:
-        model = GPTQModel.load(
-            str(tmp_path / "source"),
-            AWQConfig(bits=4, group_size=32, device="cpu", offload_to_disk=False),
-            backend=BACKEND.TORCH,
-        )
-        layer0 = model.model.model.layers[0]
-        norm_before = layer0.input_layernorm.weight.detach().clone()
-        calibration = [{"input_ids": torch.randint(0, 128, (1, 8))} for _ in range(2)]
-        model.quantize(
-            CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
-            backend=BACKEND.TORCH,
-        )
+        # The port module is imported while loading, so pin its CPU references
+        # for the calibration forwards.
+        with eager_torch_ssm_kernels():
+            model.quantize(
+                CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+                backend=BACKEND.TORCH,
+            )
     finally:
         root.removeHandler(handler)
 

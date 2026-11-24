@@ -10,6 +10,7 @@ import pytest
 pytest.importorskip("torchvision")
 import torch
 from awq_neutrality import assert_awq_folds_neutral
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -79,7 +80,8 @@ def test_awq_scale_folds_preserve_hybrid_layer_output(kv_heads, bias, layout):
     inputs = visual_inputs()
 
     def forward():
-        return model(**inputs, use_cache=False).logits
+        with eager_torch_ssm_kernels():
+            return model(**inputs, use_cache=False).logits
 
     mlp = [("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"], []),
            ("mlp.up_proj", ["mlp.down_proj"], [])]

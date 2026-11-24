@@ -16,6 +16,7 @@ import re
 import pytest
 import torch
 from awq_neutrality import assert_awq_folds_neutral
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from safetensors.torch import load_file, save_file
 from transformers import CONFIG_MAPPING, DynamicCache
 
@@ -45,6 +46,19 @@ from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 LAYER_TYPES = ["linear_attention", "linear_attention", "linear_attention", "full_attention"] * 2
 # Hand-written plan for loop {start: 2, end: 6, eval_count: 2}: 0 1 | 2 3 4 5 | 2 3 4 5 | 6 7.

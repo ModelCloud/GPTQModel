@@ -6,6 +6,7 @@ import json
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 
 from gptqmodel import GPTQModel
 from gptqmodel.models import auto
@@ -15,6 +16,20 @@ from gptqmodel.models.ports.qwen_drive import QwenDriveConfig, QwenDriveForCondi
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.utils import hf
 from tests.test_qwen_drive_local_port import media_inputs, tiny_config, write_checkpoint
+
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 
 @pytest.mark.parametrize("subfolder", [None, "selected"])

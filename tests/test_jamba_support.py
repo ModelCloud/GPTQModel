@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -29,31 +30,24 @@ from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 
 
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
+
 class _JambaReplayProbe(JambaQModel):
     """Minimal instance stand-in: the replay hook only needs `model.config`."""
 
     def __init__(self, model):
         object.__setattr__(self, "model", model)
-
-
-def _use_torch_reference_kernels(monkeypatch):
-    """Keep this CPU test independent of the CUDA-only mamba-ssm / causal-conv1d packages.
-
-    When either package is installed, `JambaMambaMixer` binds its CUDA kernels at import
-    time and would raise on CPU tensors; force the torch reference implementations.
-    """
-
-    import transformers.models.jamba.modeling_jamba as modeling_jamba
-
-    for name in (
-        "causal_conv1d_fn",
-        "causal_conv1d_update",
-        "mamba_selective_scan",
-        "mamba_selective_state_update",
-    ):
-        fallback = getattr(getattr(modeling_jamba, name), "__wrapped__", None)
-        if fallback is not None:
-            monkeypatch.setattr(modeling_jamba, name, fallback)
 
 
 _CALIBRATION_TEXTS = [
@@ -178,10 +172,8 @@ def test_jamba_definition_contract_and_module_tree():
     assert "mamba.dt_proj:!" in full_names
 
 
-def test_jamba_moe_hooks_replay_every_routed_expert(monkeypatch):
+def test_jamba_moe_hooks_replay_every_routed_expert():
     """The declared MoE hooks must forward every routed expert during calibration."""
-
-    _use_torch_reference_kernels(monkeypatch)
 
     from defuser import convert_model
 
@@ -304,13 +296,11 @@ def test_jamba_replay_mask_is_causal_not_bidirectional():
     assert not torch.allclose(causal_output, bidirectional_output)
 
 
-def test_tiny_jamba_gptq_quantization_smoke(tmp_path: Path, monkeypatch):
+def test_tiny_jamba_gptq_quantization_smoke(tmp_path: Path):
     # GPTQModel.load() validates the definition's `mamba-ssm` requirement and
     # raises PackageNotFoundError when its metadata is absent. Only this smoke
     # run loads a model; the CPU contract tests above do not need the package.
     pytest.importorskip("mamba_ssm")
-
-    _use_torch_reference_kernels(monkeypatch)
 
     model_dir = tmp_path / "native"
     quantized_dir = tmp_path / "quantized"

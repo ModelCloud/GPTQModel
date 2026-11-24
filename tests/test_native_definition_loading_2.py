@@ -15,11 +15,25 @@ from pathlib import Path
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from safetensors.torch import load_file
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.local import LocalModelLoader
 
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "ports" / "native_parity"
 NATIVE = "gptqmodel.models.ports.native."

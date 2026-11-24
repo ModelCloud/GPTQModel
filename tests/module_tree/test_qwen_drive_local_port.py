@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 
 from gptqmodel.models.definitions.qwen_drive import QwenDriveQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
@@ -76,7 +77,8 @@ def test_awq_scale_folds_preserve_real_media_decoder_output(layout, kv_heads):
     inputs = media_inputs()
 
     def forward():
-        return model(**inputs, use_cache=False).logits
+        with eager_torch_ssm_kernels():
+            return model(**inputs, use_cache=False).logits
 
     mlp = {("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")), ("mlp.up_proj", ("mlp.down_proj",))}
     for layer, kind in zip(model.vlm.model.language_model.layers, model.config.vlm_config.text_config.layer_types):

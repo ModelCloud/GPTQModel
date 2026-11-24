@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from awq_neutrality import _capture, _quantized_features, assert_awq_folds_neutral
+from eager_ssm_kernels import eager_torch_ssm_kernels
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.nemotron_h import NemotronHQModel
@@ -132,7 +133,8 @@ def test_awq_folds_are_neutral_on_every_dense_mixer(heads, latent):
     ids = torch.tensor([[1, 5, 8, 9, 12]])
 
     def forward():
-        return model(input_ids=ids).logits
+        with eager_torch_ssm_kernels():
+            return model(input_ids=ids).logits
 
     emitted = {}
     for layer in model.model.layers:

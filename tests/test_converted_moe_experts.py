@@ -21,10 +21,24 @@ from pathlib import Path
 
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 
 from gptqmodel.models.loader import _convert_model_with_defuser
 from tests.test_defuser_vendored_classes import _build, _Definition
 
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ROUTED_LOOP_FAMILIES = ("mixtral", "qwen3_moe", "qwen2_moe", "qwen3_next")
@@ -130,9 +144,14 @@ _MAIN_AWQ_EXPERT_DIGESTS = {
     "mixtral": frozenset({
         "b9a9ecfd674b9e42f666491dbfbe16141062a1b7511b0484ffaad2ccc6da66a0",
         "96206e02419dd6eac36143a3b65e91a4e34b15475ef6efcfd7070e3db94ed2a3",
+        # AMD Zen5 sample host (AVX512), verified byte-for-byte against
+        # pristine main f4cc45255 on 2026-11-24.
+        "3406e0edd310add4d1eb665c54abeabebdb3c34662cbb8eb021d7c1fc165900d",
     }),
     "qwen3_moe": frozenset({
         "23b14c84e921198df0b3c9535c4a12c9ef39588d6077049da4cfaa8fa4a51d0d",
+        # Same host check as the mixtral entry above.
+        "c602571c250eee5354087888c223ce92ba6d907ae1a41602e40e434c8744061c",
     }),
 }
 

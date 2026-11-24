@@ -12,6 +12,7 @@ import pytest
 pytest.importorskip("torchvision")
 import torch
 from awq_neutrality import assert_awq_folds_neutral
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from torch import nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
@@ -71,9 +72,11 @@ def test_live_decoder_owners_defuser_and_plan_consumers(layout, bias):
     torch.manual_seed(41)
     model = InternS2PreviewForConditionalGeneration(tiny_config(layout, attention_bias=bias)).eval()
     ids = torch.tensor([[1, 2, 3, 4]])
-    expected = model(ids, use_cache=False).logits
+    with eager_torch_ssm_kernels():
+        expected = model(ids, use_cache=False).logits
     _convert_model_with_defuser(Definition, model, cleanup_original=True)
-    torch.testing.assert_close(model(ids, use_cache=False).logits, expected)
+    with eager_torch_ssm_kernels():
+        torch.testing.assert_close(model(ids, use_cache=False).logits, expected)
     wrapper = wrapper_for(model)
     plan = wrapper.module_plan()
     assert isinstance(plan, ModulePlan)
@@ -161,7 +164,8 @@ def test_awq_without_captured_features_quantizes_all_declared_linears_plainly(la
             assert not torch.equal(named.module.weight, original[named.name + ".weight"])
         changed = {name for name, value in layer.state_dict().items() if not torch.equal(value, original[name])}
         assert changed == {named.name + ".weight" for named in named_linears}
-    assert torch.isfinite(model(torch.tensor([[1, 2, 3, 4]]), use_cache=False).logits).all()
+    with eager_torch_ssm_kernels():
+        assert torch.isfinite(model(torch.tensor([[1, 2, 3, 4]]), use_cache=False).logits).all()
 
 
 EXPERT_GATE_UP = [f"mlp.{branch}.{projection}" for branch in ("shared_expert", "experts.0", "experts.1", "experts.2")
@@ -176,7 +180,8 @@ def test_awq_folds_preserve_hybrid_model_output(layout):
     ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]])
 
     def forward():
-        return model(ids, use_cache=False).logits
+        with eager_torch_ssm_kernels():
+            return model(ids, use_cache=False).logits
 
     for kind, layer in zip(layout, model.model.language_model.layers):
         checked = assert_awq_folds_neutral(Definition, model, layer, forward, tree=Definition.module_tree)

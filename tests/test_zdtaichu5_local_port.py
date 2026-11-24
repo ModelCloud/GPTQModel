@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn.functional as F
+from eager_ssm_kernels import eager_torch_ssm_kernels
 from PIL import Image
 from tokenizers import Tokenizer
 from transformers import TokenizersBackend
@@ -24,6 +25,20 @@ from tests.port_assets import read_port_asset, read_port_json
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/zdtaichu5/fixtures"
+
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 
 @pytest.fixture(autouse=True, scope="module")

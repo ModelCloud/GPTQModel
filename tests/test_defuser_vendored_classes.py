@@ -15,14 +15,29 @@ must be back on its vendored class. The oracle may import
 import importlib
 import io
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import defuser
 import pytest
 import torch
+from eager_ssm_kernels import eager_torch_ssm_kernels
 
 from gptqmodel.models.loader import _convert_model_with_defuser
 
+
+@pytest.fixture(autouse=True)
+def _pin_eager_torch_ssm_kernels():
+    """Run this module's CPU forwards on the Torch SSM/DeltaNet reference.
+
+    ``transformers`` binds ``causal_conv1d``/``mamba_ssm``/``fla`` at import time
+    when the distribution is installed, and those implementations are CUDA-only.
+    The invariants here feed CPU tensors, so pin the reference kept on
+    ``__wrapped__`` (upstream precedent #5537) instead of failing on the device.
+    """
+
+    with eager_torch_ssm_kernels():
+        yield
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "ports" / "native_parity"
 
@@ -45,6 +60,24 @@ FORWARD_UNAVAILABLE = {"dbrx"}
 
 class _Definition:
     pass
+
+
+@contextmanager
+def _serial_matmul():
+    """Pin the CPU matmul pool while an exact-parity oracle runs.
+
+    Two equivalent graphs can reduce in different orders when the CPU matmul is
+    parallel, which shows up as a 1-ulp logit difference. That is a property of
+    the thread pool, not of the converted model, so the exact oracle runs
+    single-threaded and restores the caller's pool afterwards.
+    """
+
+    previous = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        yield
+    finally:
+        torch.set_num_threads(previous)
 
 
 def _build(family, root):
@@ -162,7 +195,7 @@ def test_vendored_classes_are_defused_like_transformers(family):
         return
     vocab = native.config.get_text_config().vocab_size
     ids = torch.randint(1, min(vocab, 64), (2, 7), generator=torch.Generator().manual_seed(0))
-    with torch.no_grad():
+    with _serial_matmul(), torch.no_grad():
         _assert_native_logits(vendored(input_ids=ids).logits, native(input_ids=ids).logits, family)
 
 
@@ -232,5 +265,5 @@ def test_gptqmodel_load_of_a_transformers_saved_moe_checkpoint(family, tmp_path)
     defuser.convert_model(reloaded_native, cleanup_original=True)
     reloaded_native.set_attn_implementation(model.config._attn_implementation)
     ids = torch.randint(3, 30, (2, 7), generator=torch.Generator().manual_seed(0))
-    with torch.no_grad():
+    with _serial_matmul(), torch.no_grad():
         _assert_native_logits(model(input_ids=ids).logits, reloaded_native(input_ids=ids).logits, family)
