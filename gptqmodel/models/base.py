@@ -5126,6 +5126,36 @@ class BaseQModel(nn.Module):
     def after_model_load(self, model, load_quantized_model):
         return model
 
+    def enable_state_quant(self, config=None):
+        """Enable or disable LeapQuant recurrent-state quantization.
+
+        ``config`` is a :class:`gptqmodel.LeapQuantConfig`, or ``None`` to
+        restore the unquantized FP32 path. The setting lives on the live model
+        instances only and is never written into a checkpoint. Call this before
+        the first forward; an already-created recurrent-state cache keeps the
+        policy it was built with.
+        """
+
+        from ..utils.leapquant import LeapQuantConfig
+
+        if config is not None and not isinstance(config, LeapQuantConfig):
+            raise TypeError(f"state_quant must be a LeapQuantConfig or None, got {type(config).__name__}")
+
+        targets = [
+            module
+            for module in self.model.modules()
+            if getattr(module, "supports_state_quant", False)
+        ]
+        if config is not None and not targets:
+            raise ValueError(
+                f"{type(self.model).__name__} has no LeapQuant-capable linear-attention port; "
+                "supported ports are Kimi K3 / Kimi Linear KDA, Qwen3.5 GDN, and GLM-5.3 KDA."
+            )
+        for module in targets:
+            module._gptqmodel_state_quant = config
+        self.state_quant = config
+        return self
+
     @classmethod
     def after_make_quant(cls, model):
         """Reattach runtime modules that the quantized shell did not replace.

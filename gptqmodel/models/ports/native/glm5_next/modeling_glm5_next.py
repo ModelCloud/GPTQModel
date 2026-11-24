@@ -62,6 +62,7 @@ from transformers.utils.generic import (
 from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 from transformers.vision_utils import get_vision_attention_seqlens, get_vision_position_ids
 from .configuration_glm5_next import Glm5NextConfig, Glm5NextTextConfig, Glm5NextVisionConfig
+from .....utils.leapquant import make_leapquant_cache, mask_is_unpadded
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -676,6 +677,15 @@ class Glm5NextTextLinearAttention(nn.Module):
 
         # Set up dimensions for reshapes later
         batch_size, seq_len = hidden_states.shape[:2]
+        quant_layer = cache_params.layers[self.layer_idx] if cache_params is not None else None
+        state_quant = getattr(quant_layer, "state_quant", None)
+        if state_quant is not None:
+            if not mask_is_unpadded(attention_mask):
+                raise ValueError(
+                    "LeapQuant requires unpadded input; pass no attention_mask or an all-ones mask"
+                )
+            if kwargs.get("cu_seqlens") is not None:
+                raise ValueError("LeapQuant does not support packed cu_seqlens")
         hidden_shape = (batch_size, seq_len, -1, self.head_dim)
 
         mixed_qkv = torch.cat(
@@ -737,7 +747,39 @@ class Glm5NextTextLinearAttention(nn.Module):
         beta = torch.sigmoid(self.b_proj(hidden_states))
 
         # KDA
-        if recurrent_state is not None and seq_len == 1:
+        quantized_decode = state_quant is not None and seq_len == 1
+        if state_quant is not None:
+            quantizer = quant_layer.leapquant_state(
+                batch_size,
+                self.num_heads,
+                self.head_dim,
+                self.head_dim,
+                gate_dim=self.head_dim,
+                device=query.device,
+            )
+            if quantized_decode:
+                core_attn_out = quantizer.transformed_kda_step(
+                    query[:, 0],
+                    key[:, 0],
+                    value[:, 0],
+                    g[:, 0].exp(),
+                    beta[:, 0],
+                ).unsqueeze(1)
+                last_recurrent_state = None
+            else:
+                core_attn_out, last_recurrent_state = chunk_kimi_delta_attention(
+                    query,
+                    key,
+                    value,
+                    g=g,
+                    beta=beta,
+                    initial_state=quantizer.materialize(),
+                    output_final_state=True,
+                    use_qk_l2norm_in_kernel=True,
+                    **kwargs,
+                )
+            core_attn_out = core_attn_out.to(query.dtype)
+        elif recurrent_state is not None and seq_len == 1:
             core_attn_out, last_recurrent_state = recurrent_kimi_delta_attention(
                 query,
                 key,
@@ -762,7 +804,7 @@ class Glm5NextTextLinearAttention(nn.Module):
                 **kwargs,
             )
 
-        if cache_params is not None:
+        if cache_params is not None and not quantized_decode:
             cache_params.update_recurrent_state(last_recurrent_state.to(torch.float32), self.layer_idx)
 
         # Final gated norm and proj
@@ -1437,6 +1479,7 @@ class Glm5NextPreTrainedModel(NativePreTrainedModel):
 @auto_docstring
 class Glm5NextTextModel(Glm5NextPreTrainedModel):
     config: Glm5NextTextConfig
+    supports_state_quant = True
 
     def __init__(self, config: Glm5NextTextConfig):
         super().__init__(config)
@@ -1471,7 +1514,10 @@ class Glm5NextTextModel(Glm5NextPreTrainedModel):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache(config=self.config)
+            past_key_values = make_leapquant_cache(
+                self.config,
+                getattr(self, "_gptqmodel_state_quant", None),
+            )
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)

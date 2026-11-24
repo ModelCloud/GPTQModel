@@ -11,6 +11,7 @@ from contextlib import contextmanager
 
 from .._alloc_conf import apply_default_alloc_conf
 from ..utils.logger import setup_logger
+from ..utils.leapquant import LeapQuantConfig
 from ..utils.quant_metadata import describe_unsupported_metadata, find_unsupported_metadata
 
 log = setup_logger()
@@ -975,6 +976,7 @@ class GPTQModel:
             kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
             runtime: Optional[RuntimeConfig] = None,
+            state_quant: Optional["LeapQuantConfig"] = None,
             **kwargs,
     ):
         if type(fuse) is not bool:
@@ -1109,6 +1111,9 @@ class GPTQModel:
         # debug model structure
         # if debug:
         #     print_module_tree(m.model)
+
+        if state_quant is not None:
+            m.enable_state_quant(state_quant)
 
         # Weight quantization does not change the cache, so state what context
         # costs as soon as a model is loaded for inference.

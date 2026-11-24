@@ -71,6 +71,7 @@ from transformers.vision_utils import (
 )
 from ..auto import AutoModel
 from .configuration_qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig, Qwen3_5VisionConfig
+from .....utils.leapquant import make_leapquant_cache, mask_is_unpadded
 
 
 class Qwen3_5VisionRotaryEmbedding(nn.Module):
@@ -556,6 +557,15 @@ class Qwen3_5GatedDeltaNet(nn.Module):
 
         # Set up dimensions for reshapes later
         batch_size, seq_len, _ = hidden_states.shape
+        quant_layer = cache_params.layers[self.layer_idx] if cache_params is not None else None
+        state_quant = getattr(quant_layer, "state_quant", None)
+        if state_quant is not None:
+            if not mask_is_unpadded(attention_mask):
+                raise ValueError(
+                    "LeapQuant requires unpadded input; pass no attention_mask or an all-ones mask"
+                )
+            if kwargs.get("cu_seq_lens_q") is not None or kwargs.get("cu_seqlens") is not None:
+                raise ValueError("LeapQuant does not support packed cu_seqlens")
         # Retrieve conv and recurrent states if there is a cache. They may be None if the layer is not initialized.
         if cache_params is not None:
             conv_state = cache_params.get_conv_state(self.layer_idx, state_idx=0)
@@ -618,7 +628,42 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         # If the model is loaded in fp16, without the .float() here, A might be -inf
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
 
-        if recurrent_state is not None and seq_len == 1:
+        quantized_decode = state_quant is not None and seq_len == 1
+        if state_quant is not None:
+            quantizer = quant_layer.leapquant_state(
+                batch_size,
+                self.num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+                gate_dim=1,
+                device=query.device,
+            )
+            if quantized_decode:
+                core_attn_out = quantizer.gdn_step(
+                    query[:, 0],
+                    key[:, 0],
+                    value[:, 0],
+                    a[:, 0],
+                    b[:, 0],
+                    self.A_log,
+                    self.dt_bias,
+                ).unsqueeze(1)
+                last_recurrent_state = None
+            else:
+                core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
+                    query,
+                    key,
+                    value,
+                    g=g,
+                    beta=beta,
+                    initial_state=quantizer.materialize(),
+                    output_final_state=True,
+                    use_qk_l2norm_in_kernel=True,
+                    cu_seqlens=None,
+                    **kwargs,
+                )
+            core_attn_out = core_attn_out.to(query.dtype)
+        elif recurrent_state is not None and seq_len == 1:
             core_attn_out, last_recurrent_state = torch_recurrent_gated_delta_rule(
                 query,
                 key,
@@ -646,7 +691,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             )
 
         # Update cache
-        if cache_params is not None:
+        if cache_params is not None and not quantized_decode:
             cache_params.update_recurrent_state(last_recurrent_state, self.layer_idx)
 
         # reshape input data into 2D tensor
@@ -1205,6 +1250,7 @@ class Qwen3_5VisionModel(Qwen3_5PreTrainedModel):
 
 class Qwen3_5TextModel(Qwen3_5PreTrainedModel):
     config: Qwen3_5TextConfig
+    supports_state_quant = True
 
     def __init__(self, config: Qwen3_5TextConfig):
         super().__init__(config)
@@ -1238,7 +1284,10 @@ class Qwen3_5TextModel(Qwen3_5PreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache(config=self.config)
+            past_key_values = make_leapquant_cache(
+                self.config,
+                getattr(self, "_gptqmodel_state_quant", None),
+            )
 
         # the hard coded `4` is for text, temporal, height and width.
         if position_ids is None:
