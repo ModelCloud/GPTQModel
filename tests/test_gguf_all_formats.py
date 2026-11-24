@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ctypes
 import functools
+import sys
 import threading
 import time
 import warnings
@@ -27,7 +28,10 @@ from gptqmodel.nn_modules.qlinear.gguf import (
     _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE,
     _GGUF_TYPE_INFO,
     GGUFTorchLinear,
+    _check_packed_fp16_fields,
+    _clamp_fp16_scale,
     _dequantize_gguf_tensor_numpy,
+    _pack_gguf_tensor_numpy,
     _quantize_gguf_tensor_numpy,
 )
 from gptqmodel.nn_modules.qlinear.gguf_cpp import (
@@ -394,10 +398,8 @@ def test_simple_formats_reject_nonfinite_fp16_scale(qtype, divisor):
         assert not np.isfinite(np.float16(scale))
     # The published bytes are exactly what decoding turns into ``inf``/``NaN``,
     # so a guard on the packed header is the only place that can stop them.
-    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
-
     with np.errstate(over="ignore", invalid="ignore"):
-        unguarded = gguf_module._pack_gguf_tensor_numpy(block.reshape(1, -1), qtype)
+        unguarded = _pack_gguf_tensor_numpy(block.reshape(1, -1), qtype)
     assert not np.isfinite(_packed_fp16_scale(unguarded, qtype)).all()
     assert not np.isfinite(_dequantize_gguf_tensor_numpy(unguarded, qtype)).all()
 
@@ -455,8 +457,7 @@ def test_simple_formats_guard_covers_every_packer(qtype, divisor):
     block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
     weight = np.full((1, block_size), np.float32(_FP16_OVERFLOW_MIDPOINT * divisor), dtype=np.float32)
 
-    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
-
+    gguf_module = sys.modules["gptqmodel.nn_modules.qlinear.gguf"]
     original = gguf_module._GGUF_AVAILABLE
     try:
         if _GGUF_AVAILABLE:
@@ -480,17 +481,15 @@ def test_simple_formats_guard_reads_torch_packed_bytes(qtype, divisor):
     block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
     weight = np.full((1, block_size), np.float32(_FP16_OVERFLOW_MIDPOINT * divisor), dtype=np.float32)
 
-    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
-
     with np.errstate(over="ignore", invalid="ignore"):
-        packed = gguf_module._pack_gguf_tensor_numpy(weight, qtype)
+        packed = _pack_gguf_tensor_numpy(weight, qtype)
     as_tensor = torch.from_numpy(np.ascontiguousarray(packed)).to(torch.uint8)
     with pytest.raises(ValueError, match="block scale d"):
-        gguf_module._check_packed_fp16_fields(as_tensor, qtype)
+        _check_packed_fp16_fields(as_tensor, qtype)
     # An in-range payload stays accepted on the same tensor entry point.
-    gguf_module._check_packed_fp16_fields(
+    _check_packed_fp16_fields(
         torch.from_numpy(
-            np.ascontiguousarray(gguf_module._pack_gguf_tensor_numpy(weight * 0.0, qtype))
+            np.ascontiguousarray(_pack_gguf_tensor_numpy(weight * 0.0, qtype))
         ).to(torch.uint8),
         qtype,
     )
@@ -529,11 +528,9 @@ def _packed_simple_scale(packed: np.ndarray, qtype: str) -> np.ndarray:
 
 
 def test_clamp_fp16_scale_preserves_sign_and_zero():
-    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
-
     minimum = np.float32(2.0**-24)
     values = np.array([1e-8, -1e-8, 0.0, 1.0, minimum, -minimum], dtype=np.float32)
-    clamped = gguf_module._clamp_fp16_scale(values)
+    clamped = _clamp_fp16_scale(values)
     np.testing.assert_array_equal(
         clamped,
         np.array([minimum, -minimum, 0.0, 1.0, minimum, -minimum], dtype=np.float32),
@@ -592,9 +589,7 @@ def test_simple_underflow_repair_leaves_normal_blocks_byte_identical(qtype):
     normal = np.linspace(-1.0, 1.0, block_size, dtype=np.float32).reshape(1, -1)
     mixed = np.concatenate([normal, _simple_underflow_block(qtype, 1e-7)], axis=1)
 
-    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
-
-    pristine = gguf_module._pack_gguf_tensor_numpy(normal, qtype)
+    pristine = _pack_gguf_tensor_numpy(normal, qtype)
     packed = _quantize_gguf_tensor_numpy(mixed, qtype)
     type_size = _GGUF_TYPE_INFO[qtype]["type_size"]
     np.testing.assert_array_equal(packed[:, :type_size], pristine[:, :type_size])
@@ -655,8 +650,7 @@ def test_simple_underflow_repairs_every_packer(qtype):
     _skip_without_quantizer(qtype)
     weight = _simple_underflow_block(qtype, 1e-7)
 
-    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
-
+    gguf_module = sys.modules["gptqmodel.nn_modules.qlinear.gguf"]
     original = gguf_module._GGUF_AVAILABLE
     try:
         if _GGUF_AVAILABLE:
