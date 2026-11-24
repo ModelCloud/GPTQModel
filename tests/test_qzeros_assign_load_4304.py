@@ -137,6 +137,12 @@ def test_assign_true_is_idempotent_with_marker_carrying_refill():
 class _V1RuntimeTorchLinear(TorchLinear):
     """A buffer-backed GPTQ kernel that decodes v1 words, like Marlin."""
 
+    # This stand-in exists only to exercise the conversion path in-place. Kernel
+    # discovery walks every ``BaseQuantLinear`` subclass, so without the opt-out
+    # this class becomes a second selectable ``BACKEND.GPTQ_TORCH`` kernel and
+    # every later ``from_quantized``/``quantize`` call in the process fails with
+    # "Multiple kernels matched".
+    SUPPORTS_BACKEND_SELECTION = False
     REQUIRES_FORMAT_V2 = False
     SUPPORTS_BACKENDS = TorchLinear.SUPPORTS_BACKENDS
     SUPPORTS_METHODS = TorchLinear.SUPPORTS_METHODS

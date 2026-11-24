@@ -12,6 +12,7 @@ from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.pangu_alpha import PanguAlphaQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.pangu_alpha import GPTPanguConfig, GPTPanguForCausalLM
+from tests.awq_neutrality import _wrapper
 from tests.port_assets import read_port_json
 
 
@@ -71,4 +72,5 @@ def test_plan_owns_all_state_and_plain_awq_excludes_no_linear(device, layers, he
             spec = plan.find(owner)
             assert spec is not None, owner
             assert spec.quantize == isinstance(layer.get_submodule(owner), torch.nn.Linear)
-        assert PanguAlphaQModel.awq_get_modules_for_scaling(None, layer, {}, {}) == []
+        wrapper = _wrapper(PanguAlphaQModel, model, tree)
+        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []

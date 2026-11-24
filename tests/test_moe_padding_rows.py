@@ -23,6 +23,10 @@ from gptqmodel.looper.gptq_processor import GPTQProcessor
 class _RecordingTask:
     """Minimal GPTQ task: records the rows the hook hands to `add_batch`."""
 
+    # This double asserts on the kept output rows, so it must opt in to the
+    # output slice that `pre_process_fwd_hook` otherwise skips (#5724).
+    needs_module_output = True
+
     def __init__(self, module=None):
         self.module = module
         self.batches = []

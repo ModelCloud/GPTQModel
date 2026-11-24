@@ -957,8 +957,23 @@ def test_gpu_feasibility_and_best_format():
     assert hf_check_packing_feasibility(
         4, 32, False, True, backend=BACKEND.MARLIN, device=device, repack=True
     )
-    assert not hf_check_packing_feasibility(
+    # Asymmetric GPTQ checkpoints are repack targets too: #5924 added the
+    # uint4/uint8 native zero-point kernels, so a symmetric-only expectation
+    # is stale. Activation order (desc_act) still has no asymmetric image, so
+    # a validated layer geometry must reject that combination.
+    assert hf_check_packing_feasibility(
         4, 32, False, False, backend=BACKEND.MARLIN, device=device, repack=True
+    )
+    assert not hf_check_packing_feasibility(
+        4,
+        32,
+        True,
+        False,
+        backend=BACKEND.MARLIN,
+        device=device,
+        repack=True,
+        in_features=128,
+        out_features=64,
     )
 
     best = hf_check_best_packing_format(4, 32, False, True, device=device)

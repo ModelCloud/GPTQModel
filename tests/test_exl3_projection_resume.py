@@ -343,7 +343,7 @@ def test_completed_layer_deferral_replaces_packed_storage_with_meta_shell() -> N
         out_features=8,
         name="model.layers.0.proj",
         tensors={
-            "trellis": torch.zeros((8, 1, 8), dtype=torch.int16),
+            "trellis": torch.zeros((8, 1, 16), dtype=torch.int16),
             "suh": torch.ones(4, dtype=torch.float16),
             "svh": torch.ones(8, dtype=torch.float16),
             "mcg": torch.tensor([123], dtype=torch.int32),
@@ -393,7 +393,7 @@ def test_completed_layer_deferral_normalizes_disk_offloaded_meta_shell() -> None
         out_features=8,
         name="model.layers.0.proj",
         tensors={
-            "trellis": torch.zeros((8, 1, 8), dtype=torch.int16),
+            "trellis": torch.zeros((8, 1, 16), dtype=torch.int16),
             "suh": torch.ones(4, dtype=torch.float16),
             "svh": torch.ones(8, dtype=torch.float16),
             "mcg": torch.tensor([123], dtype=torch.int32),
@@ -493,6 +493,7 @@ def test_terminal_layer_finalization_does_not_reconstruct_deferred_weight(
     monkeypatch,
 ) -> None:
     processor = EXL3Processor.__new__(EXL3Processor)
+    processor.qcfg = SimpleNamespace()
     processor._stats_lock = threading.Lock()
     linear = nn.Linear(2, 3, bias=False, dtype=torch.bfloat16)
     module = NamedModule(
@@ -652,7 +653,7 @@ def test_restore_completed_layer_installs_packed_modules_without_hessian(
             store.commit(
                 request,
                 {
-                    "trellis": torch.arange(4096, dtype=torch.int16).reshape(1, 1, 4096),
+                    "trellis": torch.arange(128, dtype=torch.int16).reshape(1, 1, 128),
                     "suh": torch.ones(4, dtype=torch.float16),
                     "svh": torch.ones(4, dtype=torch.float16),
                     "mcg": torch.tensor([123], dtype=torch.int32),

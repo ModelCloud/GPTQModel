@@ -355,6 +355,18 @@ def test_share_cache_does_not_pin_source_after_layer(release):
         else:
             processor.finalize(model=None)
 
+        # The product releases the cache when the layer finishes; assert that
+        # explicitly rather than inferring it from storage liveness alone.
+        assert processor._native_share_caches == {}
+
+        # CPython 3.14t keeps the last returned frame's data stack cached on the
+        # thread state, so the capture frame's locals stay reachable until that
+        # thread runs another Python call. A no-op call cannot release a real
+        # thread-local cache (that would live in the thread's local dict), so it
+        # only drops the interpreter's frame cache and keeps the leak assertion
+        # meaningful.
+        worker.submit(lambda: None).result()
+
         # The worker thread is still alive, so a thread-local cache would
         # still be reachable here.
         assert source_ref.expired()
