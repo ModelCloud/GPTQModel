@@ -39,6 +39,8 @@ log = setup_logger()
 try:  # pragma: no cover - import availability is environment dependent
     import triton
     import triton.language as tl
+
+    from .triton_jit import jit as triton_jit
     TRITON_AVAILABLE = True
 except Exception:  # pragma: no cover
     triton = None
@@ -76,7 +78,7 @@ def _is_rocm() -> bool:
 
 if TRITON_AVAILABLE:
 
-    @triton.jit
+    @triton_jit
     def _decode_e2m1(codes):
         """E2M1 nibble codes (0-15) -> float32 magnitudes with sign."""
 
@@ -92,7 +94,7 @@ if TRITON_AVAILABLE:
         )
         return tl.where((codes & 8) != 0, -value, value)
 
-    @triton.jit
+    @triton_jit
     def _decode_e4m3(byte):
         """E4M3 (OCP `fn`, no infinities) byte -> float32."""
 
@@ -108,7 +110,7 @@ if TRITON_AVAILABLE:
         value = tl.where((raw & 127) == 127, float("nan"), value)
         return tl.where((raw & 128) != 0, -value, value)
 
-    @triton.jit
+    @triton_jit
     def _nvfp4_w4a16_kernel(
         a_ptr, b_ptr, bsc_ptr, c_ptr, bias_ptr, M, N, K,
         stride_am, stride_bn, stride_bsn, stride_cm,
@@ -156,7 +158,7 @@ if TRITON_AVAILABLE:
         c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :]
         tl.store(c_ptrs, acc.to(c_ptr.dtype.element_ty), mask=m_mask[:, None] & n_mask[None, :])
 
-    @triton.jit
+    @triton_jit
     def _mxfp8_w8a16_kernel(
         a_ptr, b_ptr, bsc_ptr, c_ptr, bias_ptr, M, N, K,
         stride_am, stride_bn, stride_bsn, stride_cm,

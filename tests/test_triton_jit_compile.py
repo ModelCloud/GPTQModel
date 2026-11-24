@@ -161,3 +161,34 @@ def test_macaq_triton_kernels_use_the_package_jit_function():
     jit_function = triton_jit.jit_function_class()
     assert type(macaq._dense_mx_gemm_kernel) is jit_function
     assert type(macaq._fp4_to_fp8_codes) is jit_function
+
+
+def test_nvfp4_and_tt_block_float_kernels_use_the_package_jit_function():
+    """A plain ``@triton.jit`` bypasses the single-flight cold-compile lock."""
+
+    pytest.importorskip("triton.runtime.jit")
+    if triton_jit._interpret_mode():
+        pytest.skip("TRITON_INTERPRET returns Triton's own JITFunction")
+    from gptqmodel.utils import nvfp4_triton, tt_blockfloat_triton
+
+    jit_function = triton_jit.jit_function_class()
+    bindings = (
+        (
+            nvfp4_triton,
+            (
+                "_decode_e2m1",
+                "_decode_e4m3",
+                "_nvfp4_w4a16_kernel",
+                "_mxfp8_w8a16_kernel",
+            ),
+        ),
+        (
+            tt_blockfloat_triton,
+            ("_decode_tile", "_gemv_partials", "_split_k_epilogue", "_gemm"),
+        ),
+    )
+    for module, names in bindings:
+        for name in names:
+            kernel = getattr(module, name, None)
+            assert kernel is not None, f"{module.__name__}.{name} was not built"
+            assert type(kernel) is jit_function, f"{module.__name__}.{name}"
