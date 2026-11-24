@@ -208,6 +208,12 @@ def test_post_quantize_move_keeps_shift_tables_off_meta(tmp_path, prebuild_table
 
 
 class _SwitchedKernel(TorchLinear):
+    # Assigned to an instance's ``__class__`` only. Kernel discovery walks every
+    # ``BaseQuantLinear`` subclass, so without the opt-out this stand-in becomes a
+    # second selectable ``BACKEND.GPTQ_TORCH`` kernel and later selection calls
+    # raise "Multiple kernels matched".
+    SUPPORTS_BACKEND_SELECTION = False
+
     def forward(self, x):
         return torch.full((*x.shape[:-1], self.out_features), 7.0, dtype=x.dtype)
 

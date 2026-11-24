@@ -242,8 +242,11 @@ def test_awq_module_pack_boundaries_and_dtype_moves(dtype):
     scales = torch.ones(n, 1, device="cuda", dtype=dtype)
     zeros = torch.full((n, 1), 128, device="cuda", dtype=torch.int32)
     mod.pack(dense, scales, zeros)
-    # Reproduce the format's input-dtype add/divide before ties-to-even rounding.
-    codes = (weight.t() + 128).round().clamp(0, 255).to(torch.int32)
+    # Reproduce the packer's operand order and precision: the affine offset is
+    # formed and applied in FP32 (the checkpoint-stored scale is the grid), so
+    # an exact-half weight rounds on that grid rather than in the input dtype
+    # (#5605). Widen before the add; the input-dtype add would round twice.
+    codes = (weight.t().float() + 128.0).round().clamp(0, 255).to(torch.int32)
     shifts = torch.arange(4, device="cuda", dtype=torch.int64) * 8
     expected = (codes.long().reshape(k, n // 4, 4) << shifts).sum(-1).to(torch.int32)
     torch.testing.assert_close(mod.qweight, expected, rtol=0, atol=0)
