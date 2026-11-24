@@ -534,6 +534,14 @@ def test_v41_gptq_export_preserves_engram_and_mtp(v41_checkpoint, tmp_path):
             handle.remove()
     assert seen
     assert wrapped.quantized and len(report["gptq"]) == 3
+    # The port installs fresh projection kernels, which start in training mode.
+    # Leave them in the eval state the loader produces: their training-mode
+    # decode rounds differently, so an in-session forward would no longer match
+    # the saved checkpoint's logits.
+    assert not wrapped.model.training
+    for path in ("layers.0.attn.wq_a", "layers.1.attn.wo_a"):
+        for projection in wrapped.model.get_submodule(path).projections:
+            assert not projection.training, path
 
     output = tmp_path / "gptq"
     wrapped.save(output, max_shard_size=11000)

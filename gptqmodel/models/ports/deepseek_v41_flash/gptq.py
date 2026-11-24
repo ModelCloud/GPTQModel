@@ -287,5 +287,13 @@ def quantize_projections(wrapper, calibration, projections):
     if use_exl3:
         bind_q4nx_routing(model, specs)
     model.config.gptqmodel_v41_projections = specs
+    # The port installs fresh kernel modules, which start in training mode even
+    # though the shell was loaded for inference. Their ``train`` transition also
+    # restores the checkpoint zero-point layout, so leave the finished model in
+    # the eval state the loader produces. This is the projection-level equivalent
+    # of the ``BaseQModel.quantize()`` epilogue that this override replaces;
+    # without it an in-session forward decodes through the training path and no
+    # longer matches the saved checkpoint's logits.
+    model.eval()
     wrapper.quantized = True
     return {config.method.value: reports}
