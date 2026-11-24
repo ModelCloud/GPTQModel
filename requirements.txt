@@ -12,7 +12,11 @@ requests>=2.34.2
 pypcre>=0.6.6
 tokenicer>=0.0.21
 tiktoken>=0.12.0
-sentencepiece>=0.2.1
+# 0.2.3 is the first release whose protobuf parser accepts the released
+# InternLM/InternLM2 and InternVL vocabularies: those carry a piece at index
+# 354 that is a single NUL byte under byte_fallback, which 0.2.1/0.2.2 reject
+# with "piece must not include null character" instead of treating as UNUSED.
+sentencepiece>=0.2.3
 logbar>=0.4.16
 jinja2>=3.1.6
 ninja>=1.13.2

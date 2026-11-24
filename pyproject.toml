@@ -98,7 +98,12 @@ bitsandbytes = [
 # its reader for Transformers'. NumPy stays declared here because the GGUF
 # reader/dequantizers import it and it is no longer a base requirement.
 gguf = [
-    "gguf>=0.10.0",
+    # 0.19.0 is the first release that defines the MXFP4 (39) and NVFP4 (40)
+    # quant types GPT-QModel packs, dequantizes and serves; 0.10.0-0.18.x
+    # raise `KeyError` on `GGMLQuantizationType["MXFP4"]`, so the extra must not
+    # advertise them as supported there (tests/test_gguf_all_formats.py runs the
+    # `gguf` oracle over every alias).
+    "gguf>=0.19.0",
     "llama-cpp-python>=0.3.37",
     "numpy>=2.4.6; python_version < \"3.12\"",
     "numpy>=2.5.4; python_version >= \"3.12\"",
