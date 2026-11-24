@@ -6,6 +6,8 @@
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
 import math
+from dataclasses import dataclass
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -22,6 +24,99 @@ HF_OPTIMUM = "hf_optimum"
 # codes so near-dead groups survive packing. This bounds the scale, not the
 # weight range: a low-bit group can span several of these steps.
 SCALE_STORAGE_FLOOR = 2.0**-24
+
+
+@dataclass(frozen=True)
+class ReplayBounds:
+    """The finite range a weight grid may reconstruct, derived once (#6020).
+
+    A weight grid is fitted on an FP32 working copy and then narrowed back to
+    the dtype the module replays in. The negative end of a symmetric grid
+    reconstructs ``2**bits * amax / (2**bits - 1)``, strictly wider than
+    ``amax``; at the dtype maximum that becomes ``inf`` and the replay weight
+    loses both the value and the codes the packers recover from it. This type
+    carries what a fit needs to stay inside that range, in the working domain:
+
+    - :attr:`value_limit` - the finite magnitude the reconstruction may reach;
+    - :attr:`scale_min` - the storage floor for the fitted scale.
+
+    ``restore_factor`` is for smoothed rows: the fit runs on ``weight / factor``
+    and the caller multiplies both the scale and the reconstruction by
+    ``factor`` afterwards, so a bound on the final weight is divided by it here.
+    """
+
+    replay_dtype: torch.dtype
+    scale_floor: Union[float, torch.Tensor] = SCALE_STORAGE_FLOOR
+    restore_factor: Optional[Union[float, torch.Tensor]] = None
+
+    def __post_init__(self):
+        if not isinstance(self.replay_dtype, torch.dtype):
+            raise TypeError(
+                "ReplayBounds.replay_dtype must be a torch.dtype, got "
+                f"`{type(self.replay_dtype).__name__}`."
+            )
+        if isinstance(self.scale_floor, torch.Tensor):
+            if not bool(torch.isfinite(self.scale_floor).all()) or bool(
+                (self.scale_floor <= 0).any()
+            ):
+                raise ValueError("ReplayBounds.scale_floor must be finite and positive.")
+        elif not (isinstance(self.scale_floor, (int, float)) and float(self.scale_floor) > 0):
+            raise ValueError(f"ReplayBounds.scale_floor must be positive, got {self.scale_floor!r}.")
+        if self.restore_factor is not None:
+            factor = self.restore_factor
+            if isinstance(factor, torch.Tensor):
+                if not bool(torch.isfinite(factor).all()) or bool((factor <= 0).any()):
+                    raise ValueError("ReplayBounds.restore_factor must be finite and positive.")
+            elif not (isinstance(factor, (int, float)) and float(factor) > 0):
+                raise ValueError(
+                    f"ReplayBounds.restore_factor must be positive, got {factor!r}."
+                )
+
+    @classmethod
+    def for_module(
+        cls,
+        module: torch.nn.Module,
+        *,
+        scale_floor: Union[float, torch.Tensor] = SCALE_STORAGE_FLOOR,
+        restore_factor: Optional[Union[float, torch.Tensor]] = None,
+    ) -> "ReplayBounds":
+        """Read the replay dtype from a module's weight."""
+
+        weight = getattr(module, "weight", None)
+        dtype = getattr(weight, "dtype", None)
+        if not isinstance(dtype, torch.dtype):
+            raise TypeError(
+                "ReplayBounds.for_module needs a module weight with a dtype, got "
+                f"`{type(module).__name__}`; build ReplayBounds(replay_dtype=...) directly."
+            )
+        return cls(
+            replay_dtype=dtype,
+            scale_floor=scale_floor,
+            restore_factor=restore_factor,
+        )
+
+    @property
+    def value_limit(self) -> Optional[Union[float, torch.Tensor]]:
+        """Finite reconstruction magnitude, or ``None`` when unconstrained.
+
+        Integer dtypes express a count, not a magnitude, and FP32 is the
+        working dtype itself, so both keep the unconstrained grid.
+        """
+
+        if not self.replay_dtype.is_floating_point or self.replay_dtype == torch.float32:
+            return None
+        limit: Union[float, torch.Tensor] = float(torch.finfo(self.replay_dtype).max)
+        if self.restore_factor is None:
+            return limit
+        return limit / self.restore_factor
+
+    @property
+    def scale_min(self) -> Union[float, torch.Tensor]:
+        """Storage floor for the fitted scale, in the smoothed domain."""
+
+        if self.restore_factor is None:
+            return self.scale_floor
+        return self.scale_floor / self.restore_factor
 
 
 def _floor_scale_for_storage(
@@ -482,6 +577,26 @@ def _mse_shrink_grid(
     return scale, zero
 
 
+@dataclass(frozen=True)
+class WeightGrid:
+    """One group's fitted grid: scale, zero and the inclusive code range.
+
+    A fit owns all four together (): callers that consume the
+    codes - the fused kernel through ``_fused_code_bounds``, the packers through
+    the replay weight - must use the range that was selected with *this* scale
+    and zero, not a recomputed one.
+    """
+
+    scale: torch.Tensor
+    zero: torch.Tensor
+    code_lo: Optional[torch.Tensor]
+    code_hi: Optional[torch.Tensor]
+
+    @property
+    def bounded(self) -> bool:
+        return self.code_lo is not None and self.code_hi is not None
+
+
 class Quantizer(nn.Module):
     def __init__(self, qcfg: BaseQuantizeConfig, shape=1, name: str=None):
         super(Quantizer, self).__init__()
@@ -558,6 +673,34 @@ class Quantizer(nn.Module):
         if trits:
             self.maxq = torch.tensor(-1)
         self._maxq_value = int(self.maxq)
+
+    def fit_weight(self, x: torch.Tensor, bounds: "ReplayBounds") -> "WeightGrid":
+        """Fit a weight grid inside ``bounds``; the only weight-fit entry.
+
+        A caller that cannot name the dtype its reconstruction narrows to
+        cannot know the admissible code range, and the unconstrained grid can
+        narrow to ``inf`` (#6001, #6012, #6020). Activation fits keep using
+        ``find_params(weight=False)``.
+        """
+
+        if not isinstance(bounds, ReplayBounds):
+            raise TypeError(
+                "Quantizer.fit_weight() requires ReplayBounds, got "
+                f"`{type(bounds).__name__}`; use ReplayBounds.for_module(module) or "
+                "ReplayBounds(replay_dtype=...) so the grid cannot exceed the replay dtype."
+            )
+        self.find_params(
+            x,
+            weight=True,
+            scale_min=bounds.scale_min,
+            value_limit=bounds.value_limit,
+        )
+        return WeightGrid(
+            scale=self.scale,
+            zero=self.zero,
+            code_lo=self.code_lo,
+            code_hi=self.code_hi,
+        )
 
     def find_params(
         self,

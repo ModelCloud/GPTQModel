@@ -9,7 +9,6 @@ import math
 import platform
 import sys
 import time
-from functools import lru_cache
 
 import torch
 import transformers
@@ -25,26 +24,17 @@ from .fallback_smooth import (
     smooth_block,
 )
 from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
-from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, Quantizer, narrowing_loses_codes
-
-
-_MLX_RTN_MIN_ELEMENTS = 256 * 1024
+from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, Quantizer, ReplayBounds, narrowing_loses_codes
 
 
 def _finite_value_limit(weight_dtype: torch.dtype) -> float | None:
     """Largest magnitude the normalized grid may reconstruct in ``weight_dtype``.
 
-    ``RTN.quantize`` narrows its FP32 reconstruction back to the source weight
-    dtype. A symmetric grid fitted as ``scale = 2 * amax / (2**bits - 1)``
-    rounds the negative endpoint of the group to code ``-2**(bits-1)``, so the
-    reconstruction is ``2**bits * amax / (2**bits - 1)`` and is strictly larger
-    than ``amax``. Once that exceeds the dtype's finite maximum the narrowed
-    replay weight is ``-inf``. Bounding the codes the grid may select by this
-    limit keeps the reconstruction representable instead of clamping the
-    narrowed tensor afterwards.
-
-    Integer dtypes express their range as counts, not magnitudes, so they keep
-    the unconstrained grid.
+    RTN's MSE branch scores a shrink candidate by the codes it would select, so
+    it needs the same finite bound the plain branch gets from
+    :class:`~gptqmodel.quantization.quantizer.ReplayBounds`. Integer dtypes
+    express their range as counts, not magnitudes, and FP32 is the working
+    dtype, so RTN treats a float32 source as bounded by its own finite maximum.
     """
 
     if not weight_dtype.is_floating_point:
@@ -52,7 +42,9 @@ def _finite_value_limit(weight_dtype: torch.dtype) -> float | None:
     return float(torch.finfo(weight_dtype).max)
 
 
-@lru_cache(maxsize=1)
+_MLX_RTN_MIN_ELEMENTS = 256 * 1024
+
+
 def _mlx_rtn_quantization_available() -> bool:
     if sys.platform != "darwin" or platform.machine() != "arm64":
         return False
@@ -222,6 +214,9 @@ class RTN:
 
         start_time = time.time()
         target_device = self.module.weight.device
+        # The grid is fitted on an FP32 copy and narrowed to this dtype for
+        # replay, so every fit below is bounded by it (#6020).
+        bounds = ReplayBounds.for_module(self.module)
         weights = self.clone_module(device=target_device)
         if _should_use_mlx_rtn_quantization(weights, self.qcfg):
             quantized, scale, zero = _quantize_rtn_weight_mlx_to_torch(
@@ -253,7 +248,7 @@ class RTN:
                         weights=element_saliency_weights(block),
                         # The replay weight is narrowed to the source dtype,
                         # so score the codes that stay finite there.
-                        value_limit=_finite_value_limit(self.module.weight.dtype),
+                        value_limit=bounds.value_limit,
                     )
                 else:
                     block_mod, scale_factor = smooth_block(
@@ -262,23 +257,12 @@ class RTN:
                         group_size=effective_group_size,
                     )
                     # Row/column smoothing restores ``scale_factor`` after
-                    # quantization, so bound the normalized scale in the final
-                    # weight domain before selecting codes.
-                    scale_min = (
-                        SCALE_STORAGE_FLOOR if scale_factor is None
-                        else SCALE_STORAGE_FLOOR / scale_factor
-                    )
-                    # The finite bound lives in the restored weight domain as
-                    # well: ``dequant * scale_factor`` is what narrows to the
-                    # source dtype, so divide by the factor it is scaled by.
-                    value_limit = _finite_value_limit(self.module.weight.dtype)
-                    if value_limit is not None and scale_factor is not None:
-                        value_limit = value_limit / scale_factor
-                    self.quantizer.find_params(
+                    # quantization: the fit runs on the normalized block, so the
+                    # storage floor and the finite bound both carry that factor
+                    # into the working domain once, inside ReplayBounds.
+                    self.quantizer.fit_weight(
                         block_mod,
-                        weight=True,
-                        scale_min=scale_min.flatten() if isinstance(scale_min, torch.Tensor) else scale_min,
-                        value_limit=value_limit,
+                        ReplayBounds.for_module(self.module, restore_factor=scale_factor),
                     )
                     dequant = self.quantizer.quantize(block_mod)
                     scale = self.quantizer.scale
