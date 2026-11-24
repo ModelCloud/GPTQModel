@@ -217,7 +217,17 @@ def encoder_stages_on_host(qcfg: Any) -> bool:
     :class:`BaseQuantizeConfig` surface.
     """
 
-    return getattr(qcfg, "method", None) in CPU_BACKED_ENCODER_METHODS
+    method = getattr(qcfg, "method", None)
+    if method is None:
+        return False
+    # A stub may carry `METHOD` itself, a plain string, or a `SimpleNamespace`
+    # `value` attribute; the last one is unhashable, so a direct set membership
+    # test raises instead of reporting the staging decision.
+    try:
+        method = _normalize_quant_method(getattr(method, "value", method))
+    except ValueError:
+        return False
+    return method in CPU_BACKED_ENCODER_METHODS
 
 
 # Bit widths each method's packer and kernels can actually realize.
