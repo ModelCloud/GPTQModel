@@ -74,6 +74,7 @@ def dense_decoder_shape(gguf_name: str, config: Mapping[str, Any]) -> tuple[int,
         "attn_q.bias": (query,),
         "attn_k.bias": (kv,),
         "attn_v.bias": (kv,),
+        "attn_output.bias": (hidden,),
         "attn_q_norm.weight": (dim,),
         "attn_k_norm.weight": (dim,),
         "ffn_norm.weight": (hidden,),
@@ -84,6 +85,9 @@ def dense_decoder_shape(gguf_name: str, config: Mapping[str, Any]) -> tuple[int,
         block["ffn_gate.weight"] = (size, hidden)
         block["ffn_up.weight"] = (size, hidden)
         block["ffn_down.weight"] = (hidden, size)
+        block["ffn_gate.bias"] = (size,)
+        block["ffn_up.bias"] = (size,)
+        block["ffn_down.bias"] = (hidden,)
     return block.get(match.group(1))
 
 
@@ -216,6 +220,10 @@ class ArchSpec:
             )
         if self.arch not in ("qwen2", "qwen3"):
             return
+        if self.arch == "qwen2" and query_dim(config) != config["hidden_size"]:
+            raise UnsafeTransformError("package(): the qwen2 layout requires query width to equal hidden_size.")
+        if self.arch == "qwen3" and config.get("attention_bias"):
+            raise UnsafeTransformError("package(): the qwen3 layout cannot represent the output projection bias.")
         layer_types = config.get("layer_types")
         if layer_types is not None:
             sliding = "sliding_attention" in layer_types
@@ -228,7 +236,14 @@ class ArchSpec:
         if sliding:
             raise UnsafeTransformError(f"package(): the {self.arch} layout cannot export sliding-window attention.")
 
+    def required_leaves(self, config: Mapping[str, Any]) -> tuple[str, ...]:
+        return self.required_block_leaves
+
     def expected_shape(self, gguf_name: str, config: Mapping[str, Any]) -> tuple[int, ...] | None:
+        if self.arch == "qwen3" and gguf_name.endswith(".attn_output.bias"):
+            raise UnsafeTransformError(
+                f"package(): the qwen3 layout cannot represent output projection bias {gguf_name!r}."
+            )
         return dense_decoder_shape(gguf_name, config)
 
 
@@ -240,6 +255,14 @@ class LlamaSpec(ArchSpec):
     tokenizer_pre_by_model: Mapping[str, str] = field(default_factory=lambda: {"gpt2": "llama-bpe"})
     verified: bool = True
     rope_types: tuple[str, ...] = ("default", "linear", "llama3")
+
+    def required_leaves(self, config: Mapping[str, Any]) -> tuple[str, ...]:
+        leaves = self.required_block_leaves
+        if config.get("attention_bias"):
+            leaves += ("attn_q.bias", "attn_k.bias", "attn_v.bias", "attn_output.bias")
+        if config.get("mlp_bias"):
+            leaves += ("ffn_gate.bias", "ffn_up.bias", "ffn_down.bias")
+        return leaves
 
     def row_permutation(self, gguf_name: str, config: Mapping[str, Any]) -> np.ndarray | None:
         heads = int(config["num_attention_heads"])

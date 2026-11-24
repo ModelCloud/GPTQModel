@@ -99,6 +99,8 @@ def _build_checkpoint(
     config_overrides=None,
     omit_config_keys=(),
     attention_bias=False,
+    mlp_bias=False,
+    heads=HEADS,
 ):
     from safetensors.torch import save_file
 
@@ -108,12 +110,13 @@ def _build_checkpoint(
     def put(name, tensor):
         tensors[name] = tensor.contiguous()
 
+    query_width = heads * HEAD_DIM
     down_qtype = "Q6_K" if dynamic else "Q4_K"
     for leaf, shape in (
-        ("self_attn.q_proj", (Q_DIM, HIDDEN)),
+        ("self_attn.q_proj", (query_width, HIDDEN)),
         ("self_attn.k_proj", (KV_DIM, HIDDEN)),
         ("self_attn.v_proj", (KV_DIM, HIDDEN)),
-        ("self_attn.o_proj", (HIDDEN, Q_DIM)),
+        ("self_attn.o_proj", (HIDDEN, query_width)),
         ("mlp.gate_proj", (INTERMEDIATE, HIDDEN)),
         ("mlp.up_proj", (INTERMEDIATE, HIDDEN)),
     ):
@@ -131,9 +134,14 @@ def _build_checkpoint(
     if include_lm_head:
         put("lm_head.qweight", _packed((vocab_size, HIDDEN), "Q4_K"))
     if attention_bias or model_type == "qwen2":
-        put(_layer(0, "self_attn.q_proj.bias"), torch.randn(Q_DIM) * 0.01)
+        put(_layer(0, "self_attn.q_proj.bias"), torch.randn(query_width) * 0.01)
         put(_layer(0, "self_attn.k_proj.bias"), torch.randn(KV_DIM) * 0.01)
         put(_layer(0, "self_attn.v_proj.bias"), torch.randn(KV_DIM) * 0.01)
+    if attention_bias:
+        put(_layer(0, "self_attn.o_proj.bias"), torch.randn(HIDDEN) * 0.01)
+    if mlp_bias:
+        for proj, width in (("gate", INTERMEDIATE), ("up", INTERMEDIATE), ("down", HIDDEN)):
+            put(_layer(0, f"mlp.{proj}_proj.bias"), torch.randn(width) * 0.01)
     for name, tensor in (extra or {}).items():
         put(name, tensor)
 
@@ -141,7 +149,7 @@ def _build_checkpoint(
         "architectures": [f"{model_type.capitalize()}ForCausalLM"],
         "model_type": model_type,
         "hidden_size": HIDDEN,
-        "num_attention_heads": HEADS,
+        "num_attention_heads": heads,
         "num_key_value_heads": KV_HEADS,
         "head_dim": HEAD_DIM,
         "intermediate_size": INTERMEDIATE,
@@ -152,6 +160,10 @@ def _build_checkpoint(
         "vocab_size": vocab_size,
         "tie_word_embeddings": tied,
     }
+    if attention_bias:
+        config["attention_bias"] = True
+    if mlp_bias:
+        config["mlp_bias"] = True
     config.update(config_overrides or {})
     for key in omit_config_keys:
         del config[key]
@@ -574,6 +586,56 @@ def test_refuses_missing_required_attention_tensors(tmp_path, model_type, leaf, 
     assert sorted(tmp_path.iterdir()) == [root]
 
 
+def test_refuses_wide_qwen2_query_projection(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root, model_type="qwen2", heads=2 * HEADS)
+    with pytest.raises(UnsafeTransformError, match="query width"):
+        _run_package(root, tmp_path)
+    assert sorted(tmp_path.iterdir()) == [root]
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_refuses_qwen3_output_projection_bias(tmp_path, declared):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    extra = {} if declared else {_layer(0, "self_attn.o_proj.bias"): torch.ones(HIDDEN)}
+    _build_checkpoint(root, config_overrides={"attention_bias": declared}, extra=extra)
+    with pytest.raises(UnsafeTransformError, match="output projection bias"):
+        _run_package(root, tmp_path)
+    assert sorted(tmp_path.iterdir()) == [root]
+
+
+@pytest.mark.parametrize(
+    ("projection", "gguf_name"),
+    [("self_attn.o_proj", "attn_output"), ("mlp.down_proj", "ffn_down"), ("mlp.up_proj", "ffn_up")],
+)
+def test_validates_llama_projection_biases(tmp_path, projection, gguf_name):
+    from safetensors.torch import save_file
+
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _, tensors = _build_checkpoint(root, model_type="llama", attention_bias=True, mlp_bias=True)
+    key = _layer(0, projection + ".bias")
+    bias = tensors.pop(key)
+    path = str(root / "model.safetensors")
+    save_file(tensors, path)
+    with pytest.raises(CheckpointFormatError, match=gguf_name):
+        _run_package(root, tmp_path)
+    assert sorted(tmp_path.iterdir()) == [root]
+
+    tensors[key] = bias[:-1]
+    save_file(tensors, path)
+    with pytest.raises(UnsafeTransformError, match=gguf_name):
+        _run_package(root, tmp_path)
+    assert sorted(tmp_path.iterdir()) == [root]
+
+    tensors[key] = bias
+    save_file(tensors, path)
+    written = _tensors(_run_package(root, tmp_path))
+    np.testing.assert_array_equal(written[f"blk.0.{gguf_name}.bias"].data, bias.numpy())
+
+
 def test_refuses_a_shape_the_arch_layout_does_not_allow(tmp_path):
     root = tmp_path / "ckpt"
     root.mkdir()
@@ -826,6 +888,9 @@ def test_llamacpp_loads_the_packaged_file(tmp_path, model_type):
         root,
         model_type=model_type,
         vocab_size=len(tokenizer),
+        heads=HEADS if model_type == "qwen2" else 2 * HEADS,
+        attention_bias=model_type == "llama",
+        mlp_bias=model_type == "llama",
         config_overrides={"rope_parameters": {"rope_type": "default", "rope_theta": 500000.0}},
         omit_config_keys=("max_position_embeddings", "rms_norm_eps"),
     )

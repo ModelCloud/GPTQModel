@@ -585,7 +585,7 @@ def _plan_tensors(
             f"`{spec.arch}`: {sorted(unmapped)}. Refusing to drop weights silently."
         )
 
-    missing = _missing_required(planned, n_blocks, spec)
+    missing = _missing_required(planned, n_blocks, spec, model_config)
     if missing:
         raise CheckpointFormatError(
             f"package(): the checkpoint is missing tensors a `{spec.arch}` GGUF file needs: {missing}."
@@ -605,11 +605,12 @@ def _missing_required(
     planned: Sequence[_PlannedTensor],
     n_blocks: int,
     spec: ArchSpec,
+    model_config: Mapping[str, Any],
 ) -> List[str]:
     present = {tensor.name for tensor in planned}
     required = {"token_embd.weight", "output_norm.weight"}
     if spec.verified:
-        leaves = _REQUIRED_BLOCK_LEAVES + spec.required_block_leaves
+        leaves = _REQUIRED_BLOCK_LEAVES + spec.required_leaves(model_config)
         for block in range(n_blocks):
             required.update(f"blk.{block}.{leaf}" for leaf in leaves)
     return sorted(required - present)

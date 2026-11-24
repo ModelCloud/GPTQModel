@@ -102,7 +102,10 @@ linear RoPE, plus Llama-3 scaling on Llama. They require full rotary dimensions.
 For registered architectures, omitted tensor dimensions, context length and RMSNorm epsilon
 use the source model configuration defaults. The target MLP uses SiLU, so these
 architectures accept `hidden_act` values `silu` and `swish`. Qwen2 and Qwen3
-exports require full attention in every layer.
+exports require full attention in every layer. Qwen2 also requires the query
+projection width to equal the embedding width. Qwen3 cannot export an attention
+output projection bias. Llama supports attention and MLP biases and checks the
+presence and shape of each bias enabled in the source configuration.
 The `metadata` option accepts scalar additions. Generated keys are reserved.
 
 Verified layouts: `qwen2`, `qwen3`, `llama`. An architecture without a spec has
