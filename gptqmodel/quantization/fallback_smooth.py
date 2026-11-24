@@ -248,6 +248,66 @@ def smooth_block(
     raise ValueError(f"smooth_block does not implement {type(method).__name__}")
 
 
+def _overflow_safe(raw: torch.Tensor, safe: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor) -> torch.Tensor:
+    """Keep ``raw`` unless a finite pair of bounds overflowed it.
+
+    ``raw`` is the shipped per-candidate expression and is retained verbatim so
+    every representable span keeps its exact rounding.  Only a span that went
+    non-finite from finite bounds falls back to ``safe``, which folds the
+    ``maxq`` division into each term before the subtraction.
+    """
+
+    overflowed = torch.isinf(raw) & torch.isfinite(lo) & torch.isfinite(hi)
+    return torch.where(overflowed, safe, raw)
+
+
+def _row_reference(min_val: torch.Tensor, max_val: torch.Tensor, block_f: torch.Tensor) -> torch.Tensor:
+    """Largest finite magnitude a row's residual can reach, as ``[rows, 1]``.
+
+    The reconstruction stays inside the fitted bounds, so a residual is bounded
+    by the larger of ``|min_val|``/``|max_val|`` and the row's own largest
+    weight.  The block maximum is folded in because a caller may pass bounds
+    tighter than the values it scores.  Non-finite bounds are not this defect;
+    they collapse to zero and take the unit divisor, matching the search's
+    existing handling of a non-finite candidate.
+    """
+
+    reference = torch.maximum(min_val.abs(), max_val.abs())
+    reference = torch.maximum(reference, block_f.abs().amax(dim=1, keepdim=True))
+    return torch.nan_to_num(reference, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+
+
+def _residual_normalizer(min_val: torch.Tensor, max_val: torch.Tensor, block_f: torch.Tensor) -> torch.Tensor:
+    """Return one power-of-two divisor per row for the squared residual.
+
+    Squaring a finite residual overflows the work dtype once the row's weights
+    approach its finite maximum: at ``|x| ~ 1e19`` in FP32 a residual of order
+    ``|x|`` has a square above ``3.4e38``.  Every candidate then scores
+    ``+inf`` and the strict ``<`` comparison keeps the unshrunk incumbent, so a
+    uniformly rescaled row silently selects a different grid.  Dividing by a
+    per-row constant cannot change the argmin, and because the divisor is a
+    power of two the division is exact: an exact reconstruction still scores
+    exactly zero and equal candidates stay equal.
+
+    The reference is the row's largest magnitude rounded up to the next power
+    of two, so a normalized residual is at most about two and its square, and
+    their sum over the group, stay finite.  Rows without a usable reference
+    (all-zero or non-finite bounds) keep a unit divisor.
+    """
+
+    reference = _row_reference(min_val, max_val, block_f)
+    usable = reference > 0
+    safe = torch.where(usable, reference, torch.ones_like(reference))
+    # ``frexp`` splits a finite positive value into a mantissa in ``[0.5, 1)``
+    # and an integer exponent, so ``2 ** exponent`` is the exact power of two
+    # at or above the reference.  ``exp2`` overflows for an extreme exponent;
+    # the finite reference itself is then an equally valid divisor.
+    _, exponent = torch.frexp(safe)
+    factor = torch.exp2(exponent.to(safe.dtype))
+    factor = torch.where(torch.isfinite(factor) & (factor > 0), factor, safe)
+    return torch.where(usable, factor, torch.ones_like(factor)).unsqueeze(1)
+
+
 def _eval_mse(
     block_f,
     min_val,
@@ -270,8 +330,26 @@ def _eval_mse(
     magnitudes the caller narrows the reconstruction to, so the search scores
     the codes that will actually be packed rather than an endpoint that
     overflows on the way out.
+
+    The residual is divided by one power of two per row before the square.
+    Squaring a residual of a row whose weights approach the work dtype's finite
+    range overflows even when the residual itself is finite, and the overflow
+    is not limited to the reduction: an individual squared term can be ``+inf``.
+    Every candidate then scores ``+inf`` and the strict ``<`` comparison keeps
+    the unshrunk incumbent, so a uniformly rescaled row silently changes its
+    selected grid. One positive constant per row is a strictly increasing
+    transform of the squared error, so the argmin, the zero-error handling and
+    the tie order are unchanged; the divisor is a power of two, so the division
+    is exact and a candidate that reconstructed the row exactly still scores
+    exactly zero.
     """
-    scale = torch.clamp((max_val.unsqueeze(1) * shrink - min_val.unsqueeze(1) * shrink) / maxq, min=eps)
+    lo_b = min_val.unsqueeze(1)
+    hi_b = max_val.unsqueeze(1)
+    raw_scale = (hi_b * shrink - lo_b * shrink) / maxq
+    # A finite pair of bounds near the dtype's finite maximum can overflow the
+    # span before the division; fold ``/ maxq`` into each term instead.
+    safe_scale = (hi_b / maxq - lo_b / maxq) * shrink
+    scale = torch.clamp(_overflow_safe(raw_scale, safe_scale, lo_b, hi_b), min=eps)
     zero = base_zero.unsqueeze(1).expand_as(scale) if qcfg.sym else torch.round(-min_val.unsqueeze(1) * shrink / scale)
     lo, hi = _finite_code_bounds(scale, zero, maxq, False, value_limit)
     # ``scale`` is ``[rows, candidates, 1]``, so the bounds already carry both
@@ -280,7 +358,8 @@ def _eval_mse(
     hi = maxq if hi is None else hi
     q = torch.clamp(torch.round(block_f.unsqueeze(1) / scale + zero), lo, hi)
 
-    err = ((q - zero) * scale - block_f.unsqueeze(1)).pow(2)
+    residual = (q - zero) * scale - block_f.unsqueeze(1)
+    err = (residual / _residual_normalizer(min_val, max_val, block_f)).pow(2)
     if weights is None:
         return err.mean(dim=2)
     return (err * weights).sum(dim=2)
@@ -469,8 +548,12 @@ def mse_optimal_quant(
         best_p,
     )
 
-    # Final quantization
-    scale_best = torch.clamp((max_val - min_val) * best_p / maxq, min=eps)
+    # Final quantization. The same finite-span overflow that the candidate
+    # scoring guards can hit the winning scale, so route it through the same
+    # safe arithmetic before the codes are built.
+    raw_scale_best = (max_val - min_val) * best_p / maxq
+    safe_scale_best = (max_val / maxq - min_val / maxq) * best_p
+    scale_best = torch.clamp(_overflow_safe(raw_scale_best, safe_scale_best, min_val, max_val), min=eps)
     zero_best = base_zero if qcfg.sym else torch.round(-min_val * best_p / scale_best)
     lo, hi = _finite_code_bounds(scale_best, zero_best, maxq, False, value_limit)
     q = torch.clamp(

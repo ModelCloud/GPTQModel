@@ -76,6 +76,62 @@ score needs `log2`/`logsumexp` evaluation, which rounds the default `norm =
 `2`, `3`, `4`, `8` and both symmetric and asymmetric grids; only `norm = 16`
 changes, and only for the small-magnitude rows this section describes.
 
+## SmoothMSE residual overflow
+
+The SmoothMSE shrink search (`mse_optimal_quant` in
+`gptqmodel/quantization/fallback_smooth.py`) scores
+`sum_j weights_j * (deq_j - x_j) ** 2`. Both the span that builds a candidate
+scale and the squared residual are evaluated in the work dtype. A finite row
+whose weights approach that dtype's finite maximum overflows twice: the
+subtraction `max_val - min_val` can exceed the maximum before the `maxq`
+division, and an individual squared residual can already be `+inf` even when
+the residual itself is finite. Every candidate then scores `+inf` and the
+strict `<` comparison keeps the unshrunk incumbent, so a uniformly rescaled row
+silently selects a different grid. The returned scale stays finite, so nothing
+downstream can tell the objective was destroyed.
+
+Two guards restore scale invariance without changing any representable result:
+
+- The span divides by `maxq` per term before subtracting, and the original
+  expression is kept verbatim unless it went non-finite from finite bounds, so
+  ordinary spans keep their exact rounding.
+- Each row's residual is divided by one power of two derived from the row's
+  largest magnitude before the square.
+
+```mermaid
+flowchart TD
+    S["mse_optimal_quant"] --> R["_overflow_safe:<br/>max_val / maxq - min_val / maxq,<br/>fallback only when the raw span is inf"]
+    R --> C["candidate scale, zero, codes"]
+    C --> D["residual = deq - x"]
+    D --> N["_residual_normalizer:<br/>row magnitude rounded up to 2**k"]
+    N --> P["(residual / 2**k) ** 2, times weights"]
+    P --> A["strict < ... argmin"]
+    A --> O["scale, zero"]
+    style N fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+```
+
+Both guards are one positive per-row constant, so the selected candidate is the
+same one the exact objective picks. The divisor is a power of two, so the
+division is exact: an exact reconstruction still scores exactly zero and equal
+candidates keep their first-minimum order. Ordinary inputs are bit-identical to
+the previous code across symmetric and asymmetric grids, `maxshrink` `0.2`,
+`0.5` and `0.8`, weighted and unweighted objectives.
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| Candidate span | `(hi - lo) / maxq` | `(hi / maxq - lo / maxq)`, only when the raw span overflowed |
+| Residual before the square | Raw `deq - x` | `(deq - x) / 2**k`, one `k` per row |
+| Seed 904 rescaled by `2**65`, unweighted | 15/16 rows changed; FP64 SSE 22.70 vs 18.30 baseline (about +24%) | 0/16 changed; SSE matches baseline |
+| Returned scale | Finite, so the failure was invisible | Finite; the objective stays finite |
+| Zero-error candidate | Exactly `0` | Exactly `0` (the division is exact) |
+
+`tests/test_smooth_mse_saliency_criterion.py` pins the per-element and
+Hessian-diagonal forms with a float64 dense-grid bound and an exact
+power-of-two rescale check; the last row of that table is the fixed defect.
+Scope: this bounds the residual of a representable row. It does not claim a
+scale outside the storage grid becomes storable; an unrepresentable scale is a
+separate storage defect.
+
 ```mermaid
 flowchart TD
     Q["Quantizer.find_params"] --> W{"Integer weight quantization?"}

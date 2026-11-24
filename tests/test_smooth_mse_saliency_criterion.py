@@ -753,3 +753,187 @@ def test_gptq_fallback_hessian_diagonal_is_invariant_to_its_scale(device):
     assert torch.equal(rescaled, control), (
         "the Hessian diagonal magnitude changed the fallback grid"
     )
+
+
+def _fp64_grid_best_error(
+    block: torch.Tensor, weights: torch.Tensor, *, maxshrink: float = 0.2, grid: int = 4000
+) -> torch.Tensor:
+    """Best float64 score on a dense symmetric shrink grid, per row.
+
+    Rebuilds the candidate grid and scores ``sum_j weights_j * (deq_j - x_j)**2``
+    entirely in float64, so the bound does not reuse the search's FP32
+    arithmetic or its normalizer. The dense grid can find candidates the
+    ternary search never probes, so it is an upper bound on the achievable
+    error, not a prediction of the exact selected scale.
+    """
+
+    ref = block.double()
+    w = weights.double()
+    max_abs = ref.abs().amax(dim=1, keepdim=True)  # [rows, 1]
+    ps = torch.linspace(
+        maxshrink, 1.0, grid, dtype=torch.float64, device=ref.device
+    ).view(-1, 1)  # [grid, 1]
+    # Candidate-major workspace: [grid, rows, 1] scale, broadcasting over codes.
+    scale = ((2.0 * max_abs.unsqueeze(0)) * ps.unsqueeze(-1) / MAXQ).clamp_min(1e-8)
+    zero = torch.full_like(scale, (MAXQ + 1) / 2.0)
+    codes = (ref.unsqueeze(0) / scale + zero).round().clamp(0, MAXQ)
+    deq = (codes - zero) * scale
+    error = ((deq - ref.unsqueeze(0)).pow(2) * w.unsqueeze(0)).sum(dim=2)  # [grid, rows]
+    return error.amin(dim=0)  # [rows]
+
+
+def _normalized_saliency(block: torch.Tensor) -> torch.Tensor:
+    """The consumer's row-normalized objective weight, computed in float64."""
+
+    reference = block.double()
+    weights = reference.abs()
+    weights = weights + weights.mean(dim=1, keepdim=True)
+    return weights / weights.sum(dim=1, keepdim=True)
+
+
+@pytest.mark.parametrize(
+    "form", ["element", "channel"], ids=["per-element", "hessian-diagonal"]
+)
+@pytest.mark.parametrize("device", DEVICES)
+def test_squared_residual_overflow_keeps_the_selected_grid(form, device):
+    """A uniform rescale must not change SmoothMSE's selected shrink factor.
+
+    The residual was squared in the work dtype before the reduction. A finite
+    row whose weights approach the FP32 range squares a residual above the
+    finite maximum, so every candidate scored ``+inf`` and the strict ``<``
+    kept the unshrunk incumbent. Seed 904 rescaled by ``2**70`` moved every
+    row and raised the FP64 objective by about 24%, with every returned scale
+    still finite. Normalizing each row's residual before the square restores
+    the exact power-of-two scale invariance.
+    """
+
+    torch.manual_seed(904)
+    block = torch.randn(16, GROUP_SIZE, device=device)
+    qcfg = RTNConfig(bits=4, group_size=GROUP_SIZE, sym=True)
+
+    def search(mult):
+        scaled = (block * mult).float()
+        if form == "element":
+            weights = _saliency(scaled)
+        else:
+            # A channel saliency is the Hessian diagonal: one value per input
+            # column, spread over five orders of magnitude so the row
+            # normalization is exercised rather than a uniform vector.
+            generator = torch.Generator(device=device).manual_seed(904)
+            weights = torch.rand(
+                GROUP_SIZE, generator=generator, device=device
+            ) * 1e5 + 1.0
+        dequant, scale, _zero = mse_optimal_quant(
+            scaled, qcfg, MAXQ, steps=32, maxshrink=0.2, weights=weights
+        )
+        return dequant, scale
+
+    control_dequant, control_scale = search(1.0)
+    # The trigger: the fixture must actually shrink, otherwise an overflow that
+    # reverts to the unshrunk baseline would be invisible.
+    unshrunk = _unshrunk_dequant(block).to(device)
+    assert not torch.equal(control_dequant, unshrunk), (
+        "the fixture never shrank, so it cannot expose an overflow that reverts "
+        "to the unshrunk baseline"
+    )
+
+    mult = 2.0**70
+    _scaled_dequant, scaled_scale = search(mult)
+    assert torch.isfinite(scaled_scale).all()
+    torch.testing.assert_close(
+        scaled_scale,
+        control_scale * mult,
+        rtol=2.0**-20,
+        atol=0.0,
+        msg="a uniform rescale changed the selected shrink factor",
+    )
+
+    # Independent float64 dense-grid bound: the selected grid must stay close to
+    # the best dense-grid candidate at both magnitudes. Before the fix the
+    # large row scored every candidate at ``+inf`` and kept the unshrunk
+    # incumbent, which scored about 24% above this bound. The ternary search is
+    # a local search, so the dense grid can probe candidates it never visits;
+    # the slack absorbs that gap and still rejects the regression.
+    def normalized(magnitude):
+        if form == "element":
+            return _normalized_saliency((block * magnitude).float())
+        generator = torch.Generator(device=device).manual_seed(904)
+        channel = torch.rand(
+            GROUP_SIZE, generator=generator, device=device
+        ) * 1e5 + 1.0
+        return (channel / channel.sum()).expand(block.shape[0], -1).double()
+
+    for magnitude in (1.0, mult):
+        scaled = (block * magnitude).float()
+        weights = normalized(magnitude)
+        dequant, _scale = search(magnitude)
+        achieved = (
+            (dequant.double() - scaled.double()).pow(2) * weights
+        ).sum(dim=1)
+        best = _fp64_grid_best_error(scaled, weights)
+        slack = 1.05
+        assert bool((achieved <= best * slack + 1e-12).all()), (
+            f"magnitude {magnitude!r}: search scored above the float64 "
+            f"dense-grid bound on rows {(achieved > best * slack).nonzero().flatten().tolist()}"
+        )
+
+
+@pytest.mark.parametrize("sym", [False, True], ids=["asymmetric", "symmetric"])
+@pytest.mark.parametrize("device", DEVICES)
+def test_residual_normalizer_preserves_normal_selection(sym, device):
+    """The normalizer must not move any selection at ordinary magnitudes.
+
+    It is one positive power of two per row, so the argmin is unchanged. This
+    pins that the safe arithmetic is a strict identity on representable spans
+    rather than a second scoring rule.
+    """
+
+    torch.manual_seed(904)
+    block = torch.randn(16, GROUP_SIZE, device=device)
+    qcfg = RTNConfig(bits=4, group_size=GROUP_SIZE, sym=sym)
+    weights = _saliency(block)
+
+    scaled = block * 2.0**8
+    dequant, scale, _zero = mse_optimal_quant(
+        scaled.float(), qcfg, MAXQ, steps=32, maxshrink=0.8, weights=weights * 2.0**8
+    )
+    reference, reference_scale, _reference_zero = mse_optimal_quant(
+        block.float(), qcfg, MAXQ, steps=32, maxshrink=0.8, weights=weights
+    )
+    torch.testing.assert_close(scale, reference_scale * 2.0**8, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(dequant, reference * 2.0**8, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_finite_span_overflow_keeps_a_finite_scale(device):
+    """A finite span that overflows before the maxq division must stay usable.
+
+    ``(max_val - min_val) / maxq`` forms ``2**128`` for a row whose endpoints
+    are ``+/-2**127`` in FP32, which is above the finite maximum even though
+    the true step ``2**128 / 15`` is representable. The final scale then went
+    ``inf`` and every code became ``nan``. Dividing by ``maxq`` per term before
+    the subtraction keeps the same rounding for representable spans.
+    """
+
+    block = torch.linspace(
+        -(2.0**127), 2.0**127, GROUP_SIZE, dtype=torch.float64
+    ).float().reshape(1, -1).to(device)
+    qcfg = RTNConfig(bits=4, group_size=GROUP_SIZE, sym=True)
+
+    dequant, scale, _zero = mse_optimal_quant(
+        block, qcfg, MAXQ, steps=32, maxshrink=0.2
+    )
+
+    assert torch.isfinite(block).all()
+    # The fixture must reach the span overflow, not a squared-residual
+    # overflow: both endpoints are finite and their difference is not.
+    assert not torch.isfinite(block.max() - block.min())
+    assert torch.isfinite(scale).all()
+    assert torch.isfinite(dequant).all()
+
+    # The unshrunk step is the exact FP64 span divided by maxq. The search may
+    # shrink it, but it must stay inside the candidate range and within one
+    # FP32 rounding of the unshrunk value at the top.
+    expected = (2.0**128) / MAXQ
+    assert float(scale.item()) <= expected * (1.0 + 2.0**-20)
+    assert float(scale.item()) >= expected * 0.2
