@@ -26,6 +26,7 @@ import torch
 from gptqmodel.nn_modules.qlinear.bitsandbytes import (
     BitsAndBytesLinear,
     _int8_chunked_fp32_epilogue,
+    _int8_fp32_epilogue_scale,
     _int8_vectorwise_quant_fp32,
 )
 
@@ -170,3 +171,36 @@ def test_ordinary_projection_keeps_pre_fix_accuracy():
 
     torch.testing.assert_close(out.double(), oracle, rtol=1e-6, atol=1e-6)
     torch.testing.assert_close(out.double(), pre_fix.double(), rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two CUDA devices")
+def test_epilogue_scales_on_a_non_current_device():
+    """``ldexp`` must run on the operands' device, not the current one (#5263).
+
+    ``torch.ldexp`` launches on the *current* CUDA device. A layer placed on
+    ``cuda:1`` while ``cuda:0`` stays current therefore hit an illegal memory
+    access in this epilogue. Run the exact 127**2 fixture on ``cuda:1`` with
+    ``cuda:0`` current and require the unit product, then compare against the
+    FP64 oracle. Without the device guard this aborts the process.
+    """
+
+    previous = torch.cuda.current_device()
+    try:
+        torch.cuda.set_device(0)
+        mm_out = torch.full((2, 4), 127.0**2, device="cuda:1", dtype=torch.float32)
+        x_stats = torch.full((2, 1), 2.0**120, device="cuda:1", dtype=torch.float32)
+        weight_scb = torch.full((1, 4), 2.0**-120, device="cuda:1", dtype=torch.float32)
+
+        actual = _int8_fp32_epilogue_scale(mm_out, x_stats, weight_scb)
+        torch.cuda.synchronize()
+        assert torch.cuda.current_device() == 0, "the guard must restore the caller's device"
+
+        expected = (
+            mm_out.double()
+            * (x_stats.double() / 127.0)
+            * (weight_scb.double() / 127.0)
+        )
+        assert actual.device.index == 1
+        torch.testing.assert_close(actual.double(), expected, rtol=0, atol=0)
+    finally:
+        torch.cuda.set_device(previous)

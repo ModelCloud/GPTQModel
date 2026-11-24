@@ -26,6 +26,7 @@ from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
 from ._compile_support import COMPILE_LEVEL
+from ._numerics import tensor_device_context
 from .gguf import _apply_optional_smoother
 
 
@@ -428,7 +429,11 @@ def _int8_fp32_epilogue_scale(
     # The ``/ 127**2`` rides on the sub-unit mantissas so the integer dot is
     # multiplied by values below one: no intermediate can overflow.
     scaled = mm_out.to(torch.float32) * (row_mant / 127.0) * (col_mant / 127.0)
-    return torch.ldexp(scaled, row_exp + col_exp)
+    # ``ldexp`` launches on the *current* CUDA device and faults when the
+    # operands live on another one (a ``device_map`` split, or a caller that
+    # left ``cuda:0`` current while this layer sits on ``cuda:1``) (#5263).
+    with tensor_device_context(scaled):
+        return torch.ldexp(scaled, row_exp + col_exp)
 
 
 def _int8_chunked_fp32_epilogue(

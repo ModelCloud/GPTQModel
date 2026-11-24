@@ -24,6 +24,7 @@ import torch
 
 from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 from gptqmodel.nn_modules.exllamav3_bf16_kernels import FP16_SAFE_AMAX
+from gptqmodel.nn_modules.qlinear._numerics import tensor_device_context
 from gptqmodel.quantization.activation_floatx import _nvfp4_mse_quantize_blocks
 from gptqmodel.quantization.dtype import decode_e8m0_scale
 from gptqmodel.utils.kimi_k3 import decode_mxfp4
@@ -69,11 +70,15 @@ def _prescale_reference(module, x):
     """The pre-#5263 eager expression, evaluated on the tensors' own device."""
     row_amax = module._row_amax(x)
     _, exponent = torch.frexp(row_amax / FP16_SAFE_AMAX)
-    scale = torch.where(
-        row_amax > FP16_SAFE_AMAX,
-        torch.ldexp(torch.ones_like(row_amax), exponent),
-        torch.ones_like(row_amax),
-    )
+    # ``torch.ldexp`` launches on the *current* device, so this reference must
+    # enter the operand's device too; otherwise the oracle faults instead of
+    # the code under test (#5263). CPU needs no context.
+    with tensor_device_context(row_amax):
+        scale = torch.where(
+            row_amax > FP16_SAFE_AMAX,
+            torch.ldexp(torch.ones_like(row_amax), exponent),
+            torch.ones_like(row_amax),
+        )
     return (x / scale).to(torch.float16), scale
 
 
@@ -180,17 +185,40 @@ def test_nvfp4_block_search_enters_the_tensor_device(monkeypatch):
 
 
 def test_no_unguarded_ldexp_outside_the_nvfp4_search():
-    """Only the guarded NVFP4 search may call ``torch.ldexp`` (#5263)."""
+    """Only the device-guarded sites may call ``torch.ldexp`` (#5263)."""
     offenders = sorted(
         path.relative_to(REPO_ROOT).as_posix()
         for path in (REPO_ROOT / "gptqmodel").rglob("*.py")
         if "torch.ldexp(" in path.read_text(encoding="utf-8")
     )
 
-    assert offenders == ["gptqmodel/quantization/activation_floatx.py"]
-    guarded = (REPO_ROOT / "gptqmodel/quantization/activation_floatx.py").read_text(
+    # The NVFP4 candidate search scales arbitrary values exactly and keeps
+    # ``ldexp``. The bitsandbytes INT8 FP32 epilogue (#5694) splits both absmaxes
+    # into mantissa/exponent and needs the same exact rescaling. MACAQ's
+    # residual screen normalizes the residual to the block's own power of two.
+    # All three must enter the tensors' device.
+    assert offenders == [
+        "gptqmodel/nn_modules/qlinear/bitsandbytes.py",
+        "gptqmodel/quantization/activation_floatx.py",
+        "gptqmodel/quantization/macaq.py",
+    ]
+    nvfp4 = (REPO_ROOT / "gptqmodel/quantization/activation_floatx.py").read_text(
         encoding="utf-8"
     )
-    # The remaining call site must keep its device guard.
-    assert "with torch.cuda.device(" in guarded
-    assert "nullcontext()" in guarded
+    # The NVFP4 site keeps its inline device guard.
+    assert "with torch.cuda.device(" in nvfp4
+    assert "nullcontext()" in nvfp4
+    bnb = (REPO_ROOT / "gptqmodel/nn_modules/qlinear/bitsandbytes.py").read_text(
+        encoding="utf-8"
+    )
+    # The bitsandbytes site routes through the shared guard helper.
+    assert "tensor_device_context(" in bnb
+    macaq = (REPO_ROOT / "gptqmodel/quantization/macaq.py").read_text(
+        encoding="utf-8"
+    )
+    assert "tensor_device_context(" in macaq
+    helper = (REPO_ROOT / "gptqmodel/nn_modules/qlinear/_numerics.py").read_text(
+        encoding="utf-8"
+    )
+    assert "def tensor_device_context(" in helper
+    assert "torch.cuda.device(" in helper
