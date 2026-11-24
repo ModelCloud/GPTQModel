@@ -59,8 +59,8 @@ MODEL_TYPE_TO_ARCH = {
 }
 
 #: Tensors llama.cpp may emit that carry no weights a GGUF file can store.
-_SKIPPED_TENSOR_MARKERS = (
-    "rotary_emb.inv_freq",
+_SKIPPED_TENSOR_SUFFIXES = (
+    ".rotary_emb.inv_freq",
     ".attention.masked_bias",
     ".attention.bias",
 )
@@ -205,11 +205,12 @@ def _package_gguf(config: GGUFPackageConfig) -> Path:
     quantize_config = _quantize_config(_load_quant_payload(model_dir, model_config))
     arch = _resolve_arch(model_config, config.architecture, gguf)
     spec = resolve_spec(arch, config.allow_unverified_arch)
+    model_config = spec.with_config_defaults(model_config)
 
     with _ShardReader.open(model_dir) as reader:
         _refuse_moe(model_config, reader.weight_map, arch)
         n_blocks = _require_int(model_config, "num_hidden_layers")
-        spec.validate_attention(model_config, n_blocks)
+        spec.validate_layout(model_config, n_blocks)
         tensor_map = gguf.get_tensor_name_map(_arch_enum(gguf, arch), n_blocks)
         tokenizer = _load_tokenizer(config, model_dir)
         tokenizer_meta = _build_tokenizer_metadata(config, tokenizer, model_config, spec)
@@ -425,7 +426,7 @@ def _build_tokenizer_metadata(
 
 
 def _is_skipped_tensor(name: str) -> bool:
-    return any(marker in name for marker in _SKIPPED_TENSOR_MARKERS)
+    return ("." + name).endswith(_SKIPPED_TENSOR_SUFFIXES)
 
 
 def _map_name(tensor_map: Any, hf_name: str) -> Optional[str]:

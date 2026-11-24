@@ -193,7 +193,27 @@ class ArchSpec:
             metadata[f"{self.arch}.rope.scaling.factor"] = _positive_rope_value(rope, "factor")
         return metadata
 
-    def validate_attention(self, config: Mapping[str, Any], n_blocks: int) -> None:
+    def with_config_defaults(self, config: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Resolve omitted layout fields from the same config class as the source model."""
+        if not self.verified:
+            return config
+        from ..models.ports.native.auto import CONFIG_MAPPING
+
+        config_class = CONFIG_MAPPING[self.arch]
+        fields = (
+            "vocab_size", "hidden_size", "intermediate_size", "num_hidden_layers",
+            "num_attention_heads", "num_key_value_heads", "head_dim",
+            "max_position_embeddings", "rms_norm_eps",
+        )
+        defaults = {key: getattr(config_class, key, None) for key in fields}
+        return {**defaults, **config}
+
+    def validate_layout(self, config: Mapping[str, Any], n_blocks: int) -> None:
+        activation = config.get("hidden_act", "silu")
+        if self.verified and activation not in ("silu", "swish"):
+            raise UnsafeTransformError(
+                f"package(): the {self.arch} layout uses SiLU and cannot export hidden_act={activation!r}."
+            )
         if self.arch not in ("qwen2", "qwen3"):
             return
         layer_types = config.get("layer_types")

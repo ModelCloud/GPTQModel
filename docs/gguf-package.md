@@ -60,7 +60,7 @@ flowchart TD
     C -- "yes" --> D["_resolve_arch and resolve_spec"]
     D --> E{"Registered layout or explicit opt-in?"}
     E -- "no" --> R2["UnsupportedArchitectureError"]
-    E -- "yes" --> W["ArchSpec.validate_attention and _build_tokenizer_metadata"]
+    E -- "yes" --> W["ArchSpec.validate_layout and _build_tokenizer_metadata"]
     W -- "incompatible" --> R3["Reject the layout"]
     W -- "valid" --> F["_plan_tensors checks names, storage, required tensors and shapes"]
     F -- "incompatible" --> R3
@@ -99,7 +99,10 @@ the expected logical shapes. The generic metadata
 `rope_parameters` supplies the frequency base and scaling, with a fallback to
 legacy `rope_theta`/`rope_scaling`. The verified layouts support default and
 linear RoPE, plus Llama-3 scaling on Llama. They require full rotary dimensions.
-Qwen2 and Qwen3 exports require full attention in every layer.
+For registered architectures, omitted tensor dimensions, context length and RMSNorm epsilon
+use the source model configuration defaults. The target MLP uses SiLU, so these
+architectures accept `hidden_act` values `silu` and `swish`. Qwen2 and Qwen3
+exports require full attention in every layer.
 The `metadata` option accepts scalar additions. Generated keys are reserved.
 
 Verified layouts: `qwen2`, `qwen3`, `llama`. An architecture without a spec has

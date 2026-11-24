@@ -97,6 +97,7 @@ def _build_checkpoint(
     embed_dtype=torch.float16,
     quantize_config_only=False,
     config_overrides=None,
+    omit_config_keys=(),
     attention_bias=False,
 ):
     from safetensors.torch import save_file
@@ -152,6 +153,8 @@ def _build_checkpoint(
         "tie_word_embeddings": tied,
     }
     config.update(config_overrides or {})
+    for key in omit_config_keys:
+        del config[key]
     if not quantize_config_only:
         config["quantization_config"] = qcfg.to_dict()
     (root / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -240,6 +243,7 @@ def test_metadata_and_tokenizer_arrays(tmp_path):
     reader = gguf.GGUFReader(str(out))
     assert reader.get_field("general.architecture").contents() == "qwen3"
     assert reader.get_field("qwen3.block_count").contents() == LAYERS
+    assert reader.get_field("qwen3.context_length").contents() == 128
     assert reader.get_field("qwen3.embedding_length").contents() == HIDDEN
     assert reader.get_field("qwen3.attention.head_count").contents() == HEADS
     assert reader.get_field("qwen3.attention.head_count_kv").contents() == KV_HEADS
@@ -584,6 +588,44 @@ def test_refuses_a_shape_the_arch_layout_does_not_allow(tmp_path):
     assert list(out_dir.iterdir()) == []
 
 
+@pytest.mark.parametrize("model_type", ["qwen2", "qwen3", "llama"])
+def test_refuses_unrepresentable_mlp_activation(tmp_path, model_type):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root, model_type=model_type, config_overrides={"hidden_act": "gelu"})
+
+    with pytest.raises(UnsafeTransformError, match="hidden_act.*gelu"):
+        _run_package(root, tmp_path)
+    assert not (tmp_path / "model.gguf").exists()
+
+
+@pytest.mark.parametrize(("model_type", "context_length"), [("qwen2", 32768), ("qwen3", 32768), ("llama", 2048)])
+def test_implicit_model_defaults_are_written(tmp_path, model_type, context_length):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root, model_type=model_type, omit_config_keys=("max_position_embeddings", "rms_norm_eps"))
+
+    reader = gguf.GGUFReader(str(_run_package(root, tmp_path)))
+    assert reader.get_field(f"{model_type}.context_length").contents() == context_length
+    assert reader.get_field(f"{model_type}.attention.layer_norm_rms_epsilon").contents() == pytest.approx(1e-6)
+
+
+def test_only_known_derived_buffers_are_ignored(tmp_path):
+    from safetensors.torch import save_file
+
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    buffer = "model.rotary_emb.inv_freq"
+    _, tensors = _build_checkpoint(root, extra={buffer: torch.ones(HEAD_DIM // 2)})
+    _run_package(root, tmp_path)
+    unexpected = buffer + "_scale.weight"
+    tensors[unexpected] = torch.ones(1)
+    save_file(tensors, str(root / "model.safetensors"))
+    with pytest.raises(UnsupportedTensorError, match=unexpected):
+        _run_package(root, tmp_path, out_name="invalid.gguf")
+    assert not (tmp_path / "invalid.gguf").exists()
+
+
 def test_refuses_an_unmapped_tensor(tmp_path):
     root = tmp_path / "ckpt"
     root.mkdir()
@@ -785,6 +827,7 @@ def test_llamacpp_loads_the_packaged_file(tmp_path, model_type):
         model_type=model_type,
         vocab_size=len(tokenizer),
         config_overrides={"rope_parameters": {"rope_type": "default", "rope_theta": 500000.0}},
+        omit_config_keys=("max_position_embeddings", "rms_norm_eps"),
     )
     tokenizer.save_pretrained(root)
     out = package(GGUFPackageConfig(model_path=root, out_path=tmp_path / "model.gguf"))
