@@ -13,6 +13,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 from gptqmodel.utils.triton_jit import jit as triton_jit
 
@@ -51,6 +52,66 @@ def _e2m1_values(codes):
     return tl.where((codes & 8) != 0, -value, value)
 
 
+@triton_jit
+def _frexp_exponent(value):
+    """Return ``torch.frexp``'s exponent for a nonnegative FP32 value."""
+    bits = value.to(tl.int32, bitcast=True)
+    exponent_field = (bits >> 23) & 0xFF
+    mantissa = bits & 0x7FFFFF
+    # Normals carry the exponent directly. A subnormal is ``mantissa * 2**-149``,
+    # so its frexp exponent is ``-117 - clz(mantissa)``. Zero keeps exponent 0,
+    # matching ``torch.frexp(0)``; clz(0) is never consumed because of the
+    # final select.
+    exponent = tl.where(
+        exponent_field == 0,
+        -117 - libdevice.clz(mantissa),
+        exponent_field - 126,
+    )
+    return tl.where(value == 0.0, 0, exponent)
+
+
+@triton_jit
+def _ldexp(value, exponent):
+    """Exact ``value * 2**exponent`` without a device ldexp call.
+
+    Split the shift into two representable powers of two. Multiplying by a
+    normal power of two is exact, so this matches ldexp for finite inputs,
+    including subnormals, and avoids the device ldexp's subnormal-input bug.
+    ``exponent`` is ``-frexp(amax)`` for a finite block, so each half stays in
+    ``[-126, 126]`` and both factors are finite normal FP32 values.
+    """
+    low = tl.maximum(tl.minimum(exponent, 126), -126)
+    high = exponent - low
+    low_factor = ((low + 127) << 23).to(tl.float32, bitcast=True)
+    high_factor = ((high + 127) << 23).to(tl.float32, bitcast=True)
+    return (value * low_factor) * high_factor
+
+
+@triton_jit
+def _scale_is_usable(scale):
+    # NaN fails the first comparison, so no separate self-equality check.
+    return (scale > 0) & (scale != float("inf"))
+
+
+@triton_jit
+def _normalized_block_sse(scaled_x, scale, values, block_exponent):
+    """Block SSE in the same per-block power-of-two units as the Torch replay.
+
+    The reference divides a block by ``2**frexp(amax)`` before squaring, which
+    is exact for finite values but keeps the ranking finite for blocks whose
+    absolute FP32 squares overflow or underflow. Ranking in absolute units can
+    therefore tie at ``inf`` or ``0`` and pick a different E4M3 scale than the
+    replay reference.
+    """
+    scaled_scale = _ldexp(scale, -block_exponent)[:, None]
+    # A zero code reconstructs to exactly zero; avoid 0 * inf when the
+    # candidate scale itself overflows.
+    reconstructed = tl.where(values == 0.0, 0.0, values * scaled_scale)
+    delta = reconstructed - scaled_x
+    error = tl.sum(delta * delta, axis=1)
+    return tl.where(_scale_is_usable(scale), error, float("inf"))
+
+
 @triton_jit(do_not_specialize=["M", "PADDED_M"])
 def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
                                    M, K: tl.constexpr,
@@ -65,6 +126,8 @@ def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
                 row < M, other=0).to(tl.float32)
     global_scale = tl.load(GlobalScale).to(tl.float32)
     maximum = tl.max(tl.abs(x), axis=1)
+    block_exponent = _frexp_exponent(maximum)
+    scaled_x = _ldexp(x, -block_exponent[:, None])
     # `tl.max` drops NaN, so a NaN block would keep a finite E4M3 scale and
     # the NaN would fold into a finite code. E4M3 0x7F is NaN and every
     # consumer multiplies by this scale; Inf has no finite scale either, so
@@ -78,13 +141,17 @@ def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
     inverse_six = tl.where(maximum > 0, inverse_six, 1.0)
     local_four = _to_e4m3_rn(inverse_four)
     local_six = _to_e4m3_rn(inverse_six)
-    scale_four = local_four.to(tl.float32)[:, None] * global_scale
-    scale_six = local_six.to(tl.float32)[:, None] * global_scale
-    codes_four = _e2m1_codes(tl.div_rn(x, scale_four))
-    codes_six = _e2m1_codes(tl.div_rn(x, scale_six))
-    delta_four = x - _e2m1_values(codes_four) * scale_four
-    delta_six = x - _e2m1_values(codes_six) * scale_six
-    use_four = tl.sum(delta_four * delta_four, axis=1) <= tl.sum(delta_six * delta_six, axis=1)
+    scale_four = local_four.to(tl.float32) * global_scale
+    scale_six = local_six.to(tl.float32) * global_scale
+    codes_four = _e2m1_codes(tl.div_rn(x, scale_four[:, None]))
+    codes_six = _e2m1_codes(tl.div_rn(x, scale_six[:, None]))
+    error_four = _normalized_block_sse(
+        scaled_x, scale_four, _e2m1_values(codes_four), block_exponent
+    )
+    error_six = _normalized_block_sse(
+        scaled_x, scale_six, _e2m1_values(codes_six), block_exponent
+    )
+    use_four = error_four <= error_six
     local = tl.where(use_four, local_four, local_six)
     codes = tl.where(use_four[:, None], codes_four, codes_six)
     low, high = tl.split(tl.reshape(codes, (64, 2)))
@@ -148,6 +215,9 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
                 row < M, other=0).to(tl.float32)
     global_scale = tl.load(GlobalScale).to(tl.float32)
     maximum = tl.max(tl.abs(x), axis=1)
+    block_exponent = _frexp_exponent(maximum)
+    scaled_x = _ldexp(x, -block_exponent[:, None])
+    scaled_global_scale = _ldexp(global_scale, -block_exponent)
     # Same NaN/Inf scale poisoning as `_quantize_nvfp4_input_four_six`.
     nonfinite = (tl.max((x != x).to(tl.int32), axis=1) > 0) | (
         maximum == float("inf")
@@ -158,14 +228,16 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
     inverse_six = tl.where(maximum > 0, inverse_six, 1.0)
     local_four = _to_e4m3_rn(inverse_four)
     local_six = _to_e4m3_rn(inverse_six)
-    scale_four = local_four.to(tl.float32)[:, None] * global_scale
-    scale_six = local_six.to(tl.float32)[:, None] * global_scale
-    codes_four = _e2m1_codes(tl.div_rn(x, scale_four))
-    codes_six = _e2m1_codes(tl.div_rn(x, scale_six))
-    delta_four = x - _e2m1_values(codes_four) * scale_four
-    delta_six = x - _e2m1_values(codes_six) * scale_six
-    error_four = tl.sum(delta_four * delta_four, axis=1)
-    error_six = tl.sum(delta_six * delta_six, axis=1)
+    scale_four = local_four.to(tl.float32) * global_scale
+    scale_six = local_six.to(tl.float32) * global_scale
+    codes_four = _e2m1_codes(tl.div_rn(x, scale_four[:, None]))
+    codes_six = _e2m1_codes(tl.div_rn(x, scale_six[:, None]))
+    error_four = _normalized_block_sse(
+        scaled_x, scale_four, _e2m1_values(codes_four), block_exponent
+    )
+    error_six = _normalized_block_sse(
+        scaled_x, scale_six, _e2m1_values(codes_six), block_exponent
+    )
     use_four = error_four <= error_six
     local = tl.where(use_four, local_four, local_six)
     codes = tl.where(use_four[:, None], codes_four, codes_six)
@@ -175,16 +247,20 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
     # rounded back to a real E4M3 hardware scale.  Keep only lower-SSE results.
     values_four = _e2m1_values(codes_four)
     denominator_four = tl.sum(values_four * values_four, axis=1)
-    optimal_four = tl.sum(x * values_four, axis=1) / tl.maximum(denominator_four, 1.0)
+    # Solve in the same per-block power-of-two coordinates as the error so the
+    # numerator cannot overflow for activations that are finite only because
+    # the global scale absorbs their magnitude.
+    optimal_four = tl.sum(scaled_x * values_four, axis=1) / tl.maximum(denominator_four, 1.0)
     inverse_four_refined = tl.minimum(
-        tl.maximum(optimal_four / global_scale, 2.0**-9), 448.0
+        tl.maximum(optimal_four / scaled_global_scale, 2.0**-9), 448.0
     )
     inverse_four_refined = tl.where(denominator_four > 0, inverse_four_refined, 1.0)
     local_four_refined = _to_e4m3_rn(inverse_four_refined)
-    scale_four_refined = local_four_refined.to(tl.float32)[:, None] * global_scale
-    codes_four_refined = _e2m1_codes(tl.div_rn(x, scale_four_refined))
-    delta_four_refined = x - _e2m1_values(codes_four_refined) * scale_four_refined
-    error_four_refined = tl.sum(delta_four_refined * delta_four_refined, axis=1)
+    scale_four_refined = local_four_refined.to(tl.float32) * global_scale
+    codes_four_refined = _e2m1_codes(tl.div_rn(x, scale_four_refined[:, None]))
+    error_four_refined = _normalized_block_sse(
+        scaled_x, scale_four_refined, _e2m1_values(codes_four_refined), block_exponent
+    )
     use_refined = error_four_refined < error
     local = tl.where(use_refined, local_four_refined, local)
     codes = tl.where(use_refined[:, None], codes_four_refined, codes)
@@ -192,16 +268,17 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
 
     values_six = _e2m1_values(codes_six)
     denominator_six = tl.sum(values_six * values_six, axis=1)
-    optimal_six = tl.sum(x * values_six, axis=1) / tl.maximum(denominator_six, 1.0)
+    optimal_six = tl.sum(scaled_x * values_six, axis=1) / tl.maximum(denominator_six, 1.0)
     inverse_six_refined = tl.minimum(
-        tl.maximum(optimal_six / global_scale, 2.0**-9), 448.0
+        tl.maximum(optimal_six / scaled_global_scale, 2.0**-9), 448.0
     )
     inverse_six_refined = tl.where(denominator_six > 0, inverse_six_refined, 1.0)
     local_six_refined = _to_e4m3_rn(inverse_six_refined)
-    scale_six_refined = local_six_refined.to(tl.float32)[:, None] * global_scale
-    codes_six_refined = _e2m1_codes(tl.div_rn(x, scale_six_refined))
-    delta_six_refined = x - _e2m1_values(codes_six_refined) * scale_six_refined
-    error_six_refined = tl.sum(delta_six_refined * delta_six_refined, axis=1)
+    scale_six_refined = local_six_refined.to(tl.float32) * global_scale
+    codes_six_refined = _e2m1_codes(tl.div_rn(x, scale_six_refined[:, None]))
+    error_six_refined = _normalized_block_sse(
+        scaled_x, scale_six_refined, _e2m1_values(codes_six_refined), block_exponent
+    )
     use_refined = error_six_refined < error
     local = tl.where(use_refined, local_six_refined, local)
     codes = tl.where(use_refined[:, None], codes_six_refined, codes)
@@ -210,14 +287,15 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
     # introduced by either branch while preserving monotone block SSE.
     values = _e2m1_values(codes)
     denominator = tl.sum(values * values, axis=1)
-    optimal = tl.sum(x * values, axis=1) / tl.maximum(denominator, 1.0)
-    inverse_refined = tl.minimum(tl.maximum(optimal / global_scale, 2.0**-9), 448.0)
+    optimal = tl.sum(scaled_x * values, axis=1) / tl.maximum(denominator, 1.0)
+    inverse_refined = tl.minimum(tl.maximum(optimal / scaled_global_scale, 2.0**-9), 448.0)
     inverse_refined = tl.where(denominator > 0, inverse_refined, 1.0)
     local_refined = _to_e4m3_rn(inverse_refined)
-    scale_refined = local_refined.to(tl.float32)[:, None] * global_scale
-    codes_refined = _e2m1_codes(tl.div_rn(x, scale_refined))
-    delta_refined = x - _e2m1_values(codes_refined) * scale_refined
-    error_refined = tl.sum(delta_refined * delta_refined, axis=1)
+    scale_refined = local_refined.to(tl.float32) * global_scale
+    codes_refined = _e2m1_codes(tl.div_rn(x, scale_refined[:, None]))
+    error_refined = _normalized_block_sse(
+        scaled_x, scale_refined, _e2m1_values(codes_refined), block_exponent
+    )
     use_refined = error_refined < tl.minimum(error, error_six_refined)
     local = tl.where(use_refined, local_refined, local)
     codes = tl.where(use_refined[:, None], codes_refined, codes)
@@ -226,18 +304,21 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
         # Search the bounded neighborhood of the coordinate-refined scale on
         # the real positive E4M3 bit grid. Positive finite E4M3FN bit patterns
         # 1..126 are monotonic hardware scales.
-        scale = local.to(tl.float32)[:, None] * global_scale
-        delta = x - _e2m1_values(codes) * scale
-        error = tl.sum(delta * delta, axis=1)
+        scale = local.to(tl.float32) * global_scale
+        error = _normalized_block_sse(
+            scaled_x, scale, _e2m1_values(codes), block_exponent
+        )
         center = local.to(tl.uint8, bitcast=True).to(tl.int32)
         for bit_offset in tl.static_range(-_E4M3_SEARCH_RADIUS,
                                           _E4M3_SEARCH_RADIUS + 1):
             candidate_bits = tl.minimum(tl.maximum(center + bit_offset, 1), 126).to(tl.uint8)
             candidate = candidate_bits.to(tl.float8e4nv, bitcast=True)
-            candidate_scale = candidate.to(tl.float32)[:, None] * global_scale
-            candidate_codes = _e2m1_codes(tl.div_rn(x, candidate_scale))
-            candidate_delta = x - _e2m1_values(candidate_codes) * candidate_scale
-            candidate_error = tl.sum(candidate_delta * candidate_delta, axis=1)
+            candidate_scale = candidate.to(tl.float32) * global_scale
+            candidate_codes = _e2m1_codes(tl.div_rn(x, candidate_scale[:, None]))
+            candidate_error = _normalized_block_sse(
+                scaled_x, candidate_scale, _e2m1_values(candidate_codes),
+                block_exponent,
+            )
             use_candidate = candidate_error < error
             error = tl.where(use_candidate, candidate_error, error)
             local = tl.where(use_candidate, candidate, local)
