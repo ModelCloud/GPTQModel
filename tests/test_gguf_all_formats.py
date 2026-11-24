@@ -496,6 +496,180 @@ def test_simple_formats_guard_reads_torch_packed_bytes(qtype, divisor):
     )
 
 
+# Simple blocks that store a bare FP16 scale, plus the byte offset of that
+# field. Q4_1/Q5_1 also carry an FP16 offset; TQ1_0/TQ2_0 keep the scale last.
+_SIMPLE_UNDERFLOW_D_OFFSETS = {
+    "Q2_0": 0,
+    "Q4_0": 0,
+    "Q4_1": 0,
+    "Q5_0": 0,
+    "Q5_1": 0,
+    "Q8_0": 0,
+    "Q8_1": 0,
+    "IQ4_NL": 0,
+    "TQ1_0": 52,
+    "TQ2_0": 64,
+}
+_SIMPLE_UNDERFLOW_QTYPES = ["Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1", "IQ4_NL"]
+_SIMPLE_UNDERFLOW_AMPLITUDES = (1e-6, 1e-7, 1e-8, float(np.finfo(np.float16).tiny))
+
+
+def _simple_underflow_block(qtype: str, amplitude: float) -> np.ndarray:
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+    block = np.full(block_size, np.float32(amplitude), dtype=np.float32)
+    block[0] = np.float32(-amplitude)
+    return block.reshape(1, -1)
+
+
+def _packed_simple_scale(packed: np.ndarray, qtype: str) -> np.ndarray:
+    type_size = _GGUF_TYPE_INFO[qtype]["type_size"]
+    blocks = np.asarray(packed, dtype=np.uint8).reshape(-1, type_size)
+    offset = _SIMPLE_UNDERFLOW_D_OFFSETS[qtype]
+    return blocks[:, offset : offset + 2].copy().view(np.float16).reshape(-1)
+
+
+def test_clamp_fp16_scale_preserves_sign_and_zero():
+    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
+
+    minimum = np.float32(2.0**-24)
+    values = np.array([1e-8, -1e-8, 0.0, 1.0, minimum, -minimum], dtype=np.float32)
+    clamped = gguf_module._clamp_fp16_scale(values)
+    np.testing.assert_array_equal(
+        clamped,
+        np.array([minimum, -minimum, 0.0, 1.0, minimum, -minimum], dtype=np.float32),
+    )
+
+
+@pytest.mark.parametrize("qtype", sorted(_SIMPLE_UNDERFLOW_D_OFFSETS))
+@pytest.mark.parametrize("amplitude", _SIMPLE_UNDERFLOW_AMPLITUDES)
+def test_simple_formats_never_silently_zero_a_nonzero_block(qtype, amplitude):
+    """A nonzero block must decode nonzero or fail closed, never publish ``d = 0``."""
+
+    _skip_without_quantizer(qtype)
+    weight = _simple_underflow_block(qtype, amplitude)
+
+    try:
+        packed = _quantize_gguf_tensor_numpy(weight, qtype)
+    except ValueError as exc:
+        message = str(exc)
+        assert qtype in message
+        assert "block 0 of 1" in message
+        assert "FP16" in message
+        assert "Q8_K" in message
+        return
+
+    stored = _packed_simple_scale(packed, qtype)
+    assert stored[0] != 0, (qtype, amplitude, stored)
+    decoded = _dequantize_gguf_tensor_numpy(packed, qtype)
+    assert np.any(decoded != 0), (qtype, amplitude, decoded)
+    assert np.isfinite(decoded).all()
+
+
+@pytest.mark.parametrize("qtype", _SIMPLE_UNDERFLOW_QTYPES)
+@pytest.mark.parametrize("amplitude", (1e-6, 1e-7))
+def test_simple_formats_repair_subnormal_scale(qtype, amplitude):
+    """A representable tiny block keeps its sign instead of decoding to zero."""
+
+    _skip_without_quantizer(qtype)
+    weight = _simple_underflow_block(qtype, amplitude)
+    packed = _quantize_gguf_tensor_numpy(weight, qtype)
+    stored = _packed_simple_scale(packed, qtype)
+    assert stored[0] != 0
+    decoded = _dequantize_gguf_tensor_numpy(packed, qtype)
+    assert np.any(decoded != 0)
+    # The clamped scale is the smallest representable one, so the decoded peak
+    # may round up or down but must stay in the same order of magnitude.
+    peak = float(np.abs(decoded).max())
+    assert 0.25 * amplitude <= peak <= 4.0 * amplitude
+
+
+@pytest.mark.parametrize("qtype", _SIMPLE_UNDERFLOW_QTYPES)
+def test_simple_underflow_repair_leaves_normal_blocks_byte_identical(qtype):
+    """Only the underflowed block is rewritten; in-range bytes stay unchanged."""
+
+    _skip_without_quantizer(qtype)
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+    normal = np.linspace(-1.0, 1.0, block_size, dtype=np.float32).reshape(1, -1)
+    mixed = np.concatenate([normal, _simple_underflow_block(qtype, 1e-7)], axis=1)
+
+    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
+
+    pristine = gguf_module._pack_gguf_tensor_numpy(normal, qtype)
+    packed = _quantize_gguf_tensor_numpy(mixed, qtype)
+    type_size = _GGUF_TYPE_INFO[qtype]["type_size"]
+    np.testing.assert_array_equal(packed[:, :type_size], pristine[:, :type_size])
+
+
+@pytest.mark.parametrize("qtype", ["Q4_1", "Q5_1"])
+def test_simple_offset_underflow_is_repaired(qtype):
+    """An FP16 ``m`` below the subnormal range must not erase a small element."""
+
+    _skip_without_quantizer(qtype)
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+    weight = np.ones((1, block_size), dtype=np.float32)
+    weight[0, 0] = 1e-8
+
+    packed = _quantize_gguf_tensor_numpy(weight, qtype)
+    decoded = _dequantize_gguf_tensor_numpy(packed, qtype)
+    assert decoded[0, 0] != 0
+    assert np.isfinite(decoded).all()
+
+
+def test_simple_underflow_reports_the_failing_block():
+    """An unrepresentable block names its index instead of publishing zeros."""
+
+    qtype = "Q8_0"
+    _skip_without_quantizer(qtype)
+    block_size = _GGUF_TYPE_INFO["Q8_0"]["block_size"]
+    weight = np.zeros((1, block_size * 3), dtype=np.float32)
+    weight[0, :block_size] = 1.0
+    weight[0, block_size : 2 * block_size] = 1e-8
+    weight[0, block_size] = -1e-8
+    weight[0, 2 * block_size :] = 1.0
+
+    with pytest.raises(ValueError) as excinfo:
+        _quantize_gguf_tensor_numpy(weight, qtype)
+
+    message = str(excinfo.value)
+    assert "block 1 of 3" in message
+    assert qtype in message
+    assert "Q8_K" in message
+
+
+@pytest.mark.parametrize("qtype", sorted(_SIMPLE_UNDERFLOW_D_OFFSETS))
+def test_simple_zero_block_stays_zero(qtype):
+    """An all-zero source block is the only block allowed to decode to zero."""
+
+    _skip_without_quantizer(qtype)
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+    weight = np.zeros((1, block_size), dtype=np.float32)
+    packed = _quantize_gguf_tensor_numpy(weight, qtype)
+    decoded = _dequantize_gguf_tensor_numpy(packed, qtype)
+    assert not np.any(decoded != 0)
+
+
+@pytest.mark.parametrize("qtype", ["Q4_0", "Q8_0", "Q8_1"])
+def test_simple_underflow_repairs_every_packer(qtype):
+    """The shared exit repairs bytes from the reference package and the fallback."""
+
+    _skip_without_quantizer(qtype)
+    weight = _simple_underflow_block(qtype, 1e-7)
+
+    import gptqmodel.nn_modules.qlinear.gguf as gguf_module
+
+    original = gguf_module._GGUF_AVAILABLE
+    try:
+        if _GGUF_AVAILABLE:
+            gguf_module._GGUF_AVAILABLE = True
+            packed = _quantize_gguf_tensor_numpy(weight, qtype)
+            assert np.any(_dequantize_gguf_tensor_numpy(packed, qtype) != 0)
+        gguf_module._GGUF_AVAILABLE = False
+        packed = _quantize_gguf_tensor_numpy(weight, qtype)
+        assert np.any(_dequantize_gguf_tensor_numpy(packed, qtype) != 0)
+    finally:
+        gguf_module._GGUF_AVAILABLE = original
+
+
 @pytest.mark.parametrize("alias,divisor", [("q4_0", 8.0), ("q8_0", 127.0)])
 def test_simple_export_fails_before_publishing_a_checkpoint(alias, divisor):
     """The export packer must fail closed, not store an unreadable qweight.
@@ -622,6 +796,68 @@ def test_gguf_quantize_dequantize_roundtrip(alias):
         0.0,
         atol=max(0.05, 0.75 * np.abs(weight).max()),
     )
+
+
+@pytest.mark.parametrize("alias", ["q4_0", "q8_0"])
+def test_simple_export_repairs_subnormal_scale(alias):
+    """An export with a subnormal block keeps nonzero weights in the checkpoint."""
+
+    qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
+    in_features = _GGUF_TYPE_INFO[qtype]["block_size"]
+    lin = torch.nn.Linear(in_features, 2, bias=False)
+    with torch.no_grad():
+        lin.weight.fill_(1e-7)
+        lin.weight[0, 0] = -1e-7
+
+    module = GGUFTorchLinear(
+        bits=alias,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=2,
+        bias=False,
+        register_buffers=False,
+    )
+    module.pack_original(lin, None, None)
+
+    stored = _packed_simple_scale(module.qweight.numpy(), qtype)
+    assert stored[0] != 0
+    decoded = _dequantize_gguf_tensor_numpy(module.qweight.numpy(), qtype)
+    assert np.any(decoded != 0)
+    assert np.isfinite(decoded).all()
+
+
+@pytest.mark.parametrize("alias", ["q4_0", "q8_0"])
+def test_simple_underflow_export_forward_stays_nonzero(alias):
+    """The repaired checkpoint must still produce a nonzero projection."""
+
+    qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
+    in_features = _GGUF_TYPE_INFO[qtype]["block_size"]
+    lin = torch.nn.Linear(in_features, 2, bias=False)
+    with torch.no_grad():
+        lin.weight.fill_(1e-7)
+        lin.weight[0, 0] = -1e-7
+
+    module = GGUFTorchLinear(
+        bits=alias,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=2,
+        bias=False,
+        register_buffers=False,
+    )
+    module.pack_original(lin, None, None)
+
+    x = torch.ones(1, in_features, dtype=torch.float32)
+    with torch.no_grad():
+        out = module(x)
+    assert torch.isfinite(out).all()
+    assert torch.any(out != 0)
 
 
 @pytest.mark.parametrize("alias", ALL_ALIASES)

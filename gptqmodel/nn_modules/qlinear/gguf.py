@@ -283,6 +283,28 @@ def _apply_optional_smoother(
     return smoothed
 
 
+# Smallest positive FP16 subnormal. A nonzero FP32 scale below this casts to
+# zero in FP16 and erases the whole block: K-quant superblock bases (#5628)
+# and the simple block formats below both clamp it and rebuild their codes.
+_FP16_MIN_SUBNORMAL = np.float16(2.0**-24)
+
+
+def _clamp_fp16_scale(scale: np.ndarray) -> np.ndarray:
+    """Keep a nonzero FP32 scale representable in FP16 before codes are built.
+
+    A simple block stores its scale as a bare FP16 field. Casting a nonzero
+    FP32 scale below the smallest FP16 subnormal produces zero, and every code
+    then decodes to zero. Raise such a scale to the smallest subnormal in FP32
+    so the codes are computed against the value that will be stored. Zero stays
+    zero (an all-zero block) and the sign is preserved.
+    """
+
+    scale = np.asarray(scale, dtype=np.float32)
+    minimum = np.float32(_FP16_MIN_SUBNORMAL)
+    underflow = (scale != 0) & (np.abs(scale) < minimum)
+    return np.where(underflow, np.sign(scale) * minimum, scale).astype(np.float32)
+
+
 def _gguf_quantize_q4_0(blocks: np.ndarray) -> np.ndarray:
     n_blocks = blocks.shape[0]
     block_size = _GGUF_TYPE_INFO["Q4_0"]["block_size"]
@@ -290,7 +312,7 @@ def _gguf_quantize_q4_0(blocks: np.ndarray) -> np.ndarray:
     imax = np.abs(blocks).argmax(axis=-1, keepdims=True)
     max_vals = np.take_along_axis(blocks, imax, axis=-1)
 
-    d = max_vals / -8.0
+    d = _clamp_fp16_scale(max_vals / -8.0)
     with np.errstate(divide="ignore"):
         inv_d = np.where(d == 0, 0, 1.0 / d)
 
@@ -304,6 +326,29 @@ def _gguf_quantize_q4_0(blocks: np.ndarray) -> np.ndarray:
     return np.concatenate([d, qs], axis=-1)
 
 
+def _gguf_quantize_q4_1(blocks: np.ndarray) -> np.ndarray:
+    n_blocks = blocks.shape[0]
+    block_size = _GGUF_TYPE_INFO["Q4_1"]["block_size"]
+
+    max_vals = blocks.max(axis=-1, keepdims=True)
+    min_vals = blocks.min(axis=-1, keepdims=True)
+
+    # block_q4_1 = { fp16 d, fp16 m, uint8 qs[16] }; value = d * q + m.
+    d = _clamp_fp16_scale((max_vals - min_vals) / 15.0)
+    m = _clamp_fp16_scale(min_vals)
+    with np.errstate(divide="ignore"):
+        inv_d = np.where(d == 0, 0, 1.0 / d)
+
+    qs = np.trunc((blocks.astype(np.float64) - m.astype(np.float64)) * inv_d.astype(np.float64) + 0.5)
+    qs = np.clip(qs, 0, 15).astype(np.uint8)
+    qs = qs.reshape((n_blocks, 2, block_size // 2))
+    qs = qs[:, 0, :] | (qs[:, 1, :] << np.uint8(4))
+
+    d = d.astype(np.float16).view(np.uint8)
+    m = m.astype(np.float16).view(np.uint8)
+    return np.concatenate([d, m, qs], axis=-1)
+
+
 def _gguf_quantize_q5_0(blocks: np.ndarray) -> np.ndarray:
     n_blocks = blocks.shape[0]
     block_size = _GGUF_TYPE_INFO["Q5_0"]["block_size"]
@@ -311,7 +356,7 @@ def _gguf_quantize_q5_0(blocks: np.ndarray) -> np.ndarray:
     imax = np.abs(blocks).argmax(axis=-1, keepdims=True)
     max_vals = np.take_along_axis(blocks, imax, axis=-1)
 
-    d = max_vals / -16.0
+    d = _clamp_fp16_scale(max_vals / -16.0)
     with np.errstate(divide="ignore"):
         inv_d = np.where(d == 0, 0, 1.0 / d)
 
@@ -328,14 +373,69 @@ def _gguf_quantize_q5_0(blocks: np.ndarray) -> np.ndarray:
     return np.concatenate([d, qh, qs], axis=-1)
 
 
+def _gguf_quantize_q5_1(blocks: np.ndarray) -> np.ndarray:
+    n_blocks = blocks.shape[0]
+    block_size = _GGUF_TYPE_INFO["Q5_1"]["block_size"]
+
+    max_vals = blocks.max(axis=-1, keepdims=True)
+    min_vals = blocks.min(axis=-1, keepdims=True)
+
+    # block_q5_1 = { fp16 d, fp16 m, uint8 qh[4], uint8 qs[16] };
+    # value = d * q + m with q in [0, 31].
+    d = _clamp_fp16_scale((max_vals - min_vals) / 31.0)
+    m = _clamp_fp16_scale(min_vals)
+    with np.errstate(divide="ignore"):
+        inv_d = np.where(d == 0, 0, 1.0 / d)
+
+    q = np.trunc((blocks.astype(np.float64) - m.astype(np.float64)) * inv_d.astype(np.float64) + 0.5)
+    q = np.clip(q, 0, 31).astype(np.uint8)
+
+    qs = q.reshape((n_blocks, 2, block_size // 2))
+    qs = (qs[:, 0, :] & np.uint8(0x0F)) | (qs[:, 1, :] << np.uint8(4))
+    qh = np.packbits((q >> np.uint8(4)).astype(np.uint8), axis=-1, bitorder="little").reshape(n_blocks, 4)
+
+    d = d.astype(np.float16).view(np.uint8)
+    m = m.astype(np.float16).view(np.uint8)
+    return np.concatenate([d, m, qh, qs], axis=-1)
+
+
 def _gguf_quantize_q8_0(blocks: np.ndarray) -> np.ndarray:
-    d = np.abs(blocks).max(axis=-1, keepdims=True) / 127.0
+    d = _clamp_fp16_scale(np.abs(blocks).max(axis=-1, keepdims=True) / 127.0)
     with np.errstate(divide="ignore"):
         inv_d = np.where(d == 0, 0, 1.0 / d)
     # ggml's Q8_0 reference rounds ties away from zero, not to nearest-even.
     # The optional `gguf` package packs Q8_0 with that rule, so the fallback
     # must emit the same bytes when that dependency is missing.
     qs = _gguf_roundf(blocks * inv_d).astype(np.int8).view(np.uint8)
+    d = d.astype(np.float16).view(np.uint8)
+    return np.concatenate([d, qs], axis=-1)
+
+
+_IQ4_NL_VALUES = np.array(
+    (-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113),
+    dtype=np.float64,
+)
+_IQ4_NL_MIDPOINTS = np.float64(0.5) * (_IQ4_NL_VALUES[:-1] + _IQ4_NL_VALUES[1:])
+
+
+def _gguf_quantize_iq4_nl(blocks: np.ndarray) -> np.ndarray:
+    n_blocks = blocks.shape[0]
+    block_size = _GGUF_TYPE_INFO["IQ4_NL"]["block_size"]
+
+    imax = np.abs(blocks).argmax(axis=-1, keepdims=True)
+    max_vals = np.take_along_axis(blocks, imax, axis=-1)
+
+    # block_iq4_nl = { fp16 d, uint8 qs[16] }; value = d * kvalues[code].
+    # ggml picks d = -max / 127 before searching the codebook.
+    d = _clamp_fp16_scale(max_vals / -127.0)
+    with np.errstate(divide="ignore"):
+        inv_d = np.where(d == 0, 0, 1.0 / d)
+
+    scaled = blocks.astype(np.float64) * inv_d.astype(np.float64)
+    codes = np.searchsorted(_IQ4_NL_MIDPOINTS, scaled).astype(np.uint8)
+    qs = codes.reshape((n_blocks, 2, block_size // 2))
+    qs = qs[:, 0, :] | (qs[:, 1, :] << np.uint8(4))
+
     d = d.astype(np.float16).view(np.uint8)
     return np.concatenate([d, qs], axis=-1)
 
@@ -382,7 +482,7 @@ def _gguf_roundf(values: np.ndarray) -> np.ndarray:
 
 
 def _gguf_quantize_q2_0(blocks: np.ndarray) -> np.ndarray:
-    d = np.abs(blocks).max(axis=-1, keepdims=True)
+    d = _clamp_fp16_scale(np.abs(blocks).max(axis=-1, keepdims=True))
     with np.errstate(divide="ignore"):
         inv_d = np.where(d == 0, 0, 1.0 / d)
     qs = np.clip(_gguf_roundf(blocks * inv_d).astype(np.int8) + 1, 0, 3).astype(np.uint8)
@@ -392,7 +492,7 @@ def _gguf_quantize_q2_0(blocks: np.ndarray) -> np.ndarray:
 
 
 def _gguf_quantize_tq1_0(blocks: np.ndarray) -> np.ndarray:
-    d = np.abs(blocks).max(axis=-1, keepdims=True)
+    d = _clamp_fp16_scale(np.abs(blocks).max(axis=-1, keepdims=True))
     with np.errstate(divide="ignore"):
         inv_d = np.where(d == 0, 0, 1.0 / d)
     qs = (_gguf_roundf(blocks * inv_d).astype(np.int8) + 1).astype(np.uint8)
@@ -414,7 +514,7 @@ def _gguf_quantize_tq1_0(blocks: np.ndarray) -> np.ndarray:
 
 
 def _gguf_quantize_tq2_0(blocks: np.ndarray) -> np.ndarray:
-    d = np.abs(blocks).max(axis=-1, keepdims=True)
+    d = _clamp_fp16_scale(np.abs(blocks).max(axis=-1, keepdims=True))
     with np.errstate(divide="ignore"):
         inv_d = np.where(d == 0, 0, 1.0 / d)
     qs = (_gguf_roundf(blocks * inv_d).astype(np.int8) + 1).astype(np.uint8)
@@ -503,13 +603,6 @@ def _torch_left_shift(values: torch.Tensor, shifts: int | torch.Tensor) -> torch
 
     shifted = values.to(torch.int64) * _torch_shift_factor(shifts, values.device)
     return shifted.to(values.dtype)
-
-
-# Smallest positive FP16 subnormal. A nonzero K-quant superblock base below
-# half of this rounds to zero in FP16 and erases the whole block, so the packer
-# clamps it to this value and rebuilds the codes against the stored base
-# (#5628).
-_FP16_MIN_SUBNORMAL = np.float16(2.0**-24)
 
 
 def _stored_k_base(base: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -869,11 +962,163 @@ def _check_packed_fp16_fields(packed: np.ndarray | torch.Tensor, qtype: str) -> 
         )
 
 
+# ``qtype -> (stored d byte offset, stored m byte offset or None)`` for the
+# simple blocks that store a bare FP16 scale. Q4_1/Q5_1 also store an FP16
+# offset ``m``; TQ1_0/TQ2_0 keep their scale at the end of the block.
+_SIMPLE_FP16_SCALE_FIELDS = {
+    "Q2_0": (0, None),
+    "Q4_0": (0, None),
+    "Q4_1": (0, 2),
+    "Q5_0": (0, None),
+    "Q5_1": (0, 2),
+    "Q8_0": (0, None),
+    "Q8_1": (0, None),
+    "IQ4_NL": (0, None),
+    "TQ1_0": (52, None),
+    "TQ2_0": (64, None),
+}
+
+
+def _simple_scale_underflow_error(qtype: str, index: int, blocks: int, peak: float) -> ValueError:
+    return ValueError(
+        f"GGUF {qtype} cannot represent block {index} of {blocks} in FP16: "
+        f"its nonzero scale/offset underflows the smallest FP16 subnormal "
+        f"({float(_FP16_MIN_SUBNORMAL):.3e}) and the block (peak {peak:.3e}) has no "
+        "nonzero code after clamping. Pack a format with a wider stored scale "
+        "(for example Q8_K or F16), or keep the block in range."
+    )
+
+
+def _repack_simple_blocks(blocks: np.ndarray, qtype: str) -> np.ndarray:
+    if qtype == "Q2_0":
+        return _gguf_quantize_q2_0(blocks)
+    if qtype == "Q4_0":
+        return _gguf_quantize_q4_0(blocks)
+    if qtype == "Q4_1":
+        return _gguf_quantize_q4_1(blocks)
+    if qtype == "Q5_0":
+        return _gguf_quantize_q5_0(blocks)
+    if qtype == "Q5_1":
+        return _gguf_quantize_q5_1(blocks)
+    if qtype == "Q8_0":
+        return _gguf_quantize_q8_0(blocks)
+    if qtype == "Q8_1":
+        return _gguf_quantize_q8_1(blocks)
+    if qtype == "IQ4_NL":
+        return _gguf_quantize_iq4_nl(blocks)
+    if qtype == "TQ1_0":
+        return _gguf_quantize_tq1_0(blocks)
+    if qtype == "TQ2_0":
+        return _gguf_quantize_tq2_0(blocks)
+    raise NotImplementedError(f"Unsupported simple GGUF qtype: {qtype}")
+
+
+def _repair_simple_scale_underflow(
+    weight: np.ndarray,
+    packed: np.ndarray,
+    qtype: str,
+) -> np.ndarray:
+    """Rebuild simple blocks whose stored FP16 scale underflowed to zero.
+
+    The ``gguf`` reference quantizer and the native ggml bridge cast a finite
+    FP32 block scale directly into a bare FP16 field. A nonzero scale below
+    the smallest FP16 subnormal therefore publishes ``d = 0``, and the block
+    decodes to all zeros even though its codes were built from the original
+    scale. The scale and codes must be rebuilt together, so this repairs only
+    the affected blocks against the source values and leaves every in-range
+    block byte-identical.
+
+    A block that still has no nonzero code after clamping cannot be
+    represented in the format and raises with its block index instead of
+    publishing a silently zeroed block.
+    """
+
+    fields = _SIMPLE_FP16_SCALE_FIELDS.get(qtype)
+    if fields is None:
+        return packed
+    info = _GGUF_TYPE_INFO[qtype]
+    block_size = info["block_size"]
+    type_size = info["type_size"]
+    source = np.asarray(weight, dtype=np.float32)
+    if source.ndim != 2 or source.shape[1] % block_size != 0:
+        return packed
+
+    source_blocks = np.ascontiguousarray(source).reshape(-1, block_size)
+    packed_array = np.asarray(packed, dtype=np.uint8)
+    blocks = np.ascontiguousarray(packed_array).reshape(-1, type_size)
+
+    d_offset, m_offset = fields
+    nonzero = np.any(source_blocks != 0, axis=-1)
+    stored_d = _stored_fp16_field(blocks, d_offset)
+    underflow = nonzero & (stored_d == 0)
+    if m_offset is not None:
+        stored_m = _stored_fp16_field(blocks, m_offset)
+        source_min = source_blocks.min(axis=-1)
+        source_max = source_blocks.max(axis=-1)
+        underflow = nonzero & (
+            ((stored_d == 0) & (source_max != source_min))
+            | ((stored_m == 0) & (source_min != 0))
+        )
+
+    suspicious = _simple_zero_code_suspects(qtype, source_blocks, blocks, d_offset, m_offset)
+    if not underflow.any() and not suspicious.any():
+        return packed
+
+    blocks = blocks.copy()
+    rows = np.flatnonzero(underflow)
+    if rows.size:
+        blocks[rows] = _repack_simple_blocks(source_blocks[rows], qtype)
+
+    # A fallback packer can clamp the scale and still round every code to the
+    # zero code. Decode only the blocks close enough to zero to be suspect.
+    suspicious = _simple_zero_code_suspects(qtype, source_blocks, blocks, d_offset, m_offset)
+    check_rows = np.union1d(rows, np.flatnonzero(suspicious))
+    if check_rows.size:
+        decoded = np.asarray(_dequantize_gguf_tensor_numpy(blocks[check_rows], qtype)).reshape(
+            check_rows.size, block_size
+        )
+        zero_rows = ~np.any(decoded != 0, axis=-1)
+        if zero_rows.any():
+            bad = int(check_rows[np.flatnonzero(zero_rows)[0]])
+            peak = float(np.abs(source_blocks[bad]).max())
+            raise _simple_scale_underflow_error(qtype, bad, int(source_blocks.shape[0]), peak)
+
+    return blocks.reshape(packed_array.shape)
+
+
+def _stored_fp16_field(blocks: np.ndarray, offset: int) -> np.ndarray:
+    return blocks[:, offset : offset + 2].copy().view(np.float16).astype(np.float32).reshape(-1)
+
+
+def _simple_zero_code_suspects(
+    qtype: str,
+    source_blocks: np.ndarray,
+    blocks: np.ndarray,
+    d_offset: int,
+    m_offset: int | None,
+) -> np.ndarray:
+    """Blocks close enough to zero that every code may have rounded to zero."""
+
+    peak = np.abs(source_blocks).max(axis=-1)
+    nonzero = np.any(source_blocks != 0, axis=-1)
+    stored_d = _stored_fp16_field(blocks, d_offset)
+    half_scale = np.float32(0.5) * np.abs(stored_d)
+    if qtype in ("Q4_1", "Q5_1"):
+        assert m_offset is not None
+        stored_m = _stored_fp16_field(blocks, m_offset)
+        return nonzero & (stored_m == 0) & (stored_d != 0) & (peak < half_scale)
+    if qtype == "IQ4_NL":
+        # Every codebook entry is nonzero, so a nonzero scale cannot erase the
+        # block through a zero code.
+        return np.zeros_like(nonzero)
+    return nonzero & (stored_d != 0) & (peak < half_scale)
+
+
 def _gguf_quantize_q8_1(blocks: np.ndarray) -> np.ndarray:
     # block_q8_1 = { fp16 d, fp16 s, int8 qs[32] }; s = sum(d * q), used by
     # upstream dot kernels that fold the scale-sum into int8 dot products.
     amax = np.abs(blocks).max(axis=1, keepdims=True)
-    d = np.where(amax == 0, 0.0, amax / 127.0).astype(np.float32)
+    d = _clamp_fp16_scale(np.where(amax == 0, np.float32(0.0), amax / np.float32(127.0)))
     safe_d = np.where(d == 0, 1.0, d)
     scaled = blocks * (np.float32(1.0) / safe_d)
     magnitude = np.abs(scaled)
@@ -1153,6 +1398,10 @@ def _dequantize_prism_q1_0_g128_torch(
 def _quantize_gguf_tensor_numpy(weight: np.ndarray, tensor_qtype) -> np.ndarray:
     resolved_qtype = _resolve_gguf_tensor_qtype(tensor_qtype)
     packed = _pack_gguf_tensor_numpy(weight, resolved_qtype)
+    # The reference quantizer and the native bridge write a bare FP16 scale, so
+    # a nonzero scale below the smallest subnormal still publishes ``d = 0``.
+    # Rebuild those blocks against the source values before validating bytes.
+    packed = _repair_simple_scale_underflow(weight, packed, resolved_qtype)
     # Covers whichever packer served the call, including the installed ``gguf``
     # reference quantizer and the native ggml bridge.
     _check_packed_fp16_fields(packed, resolved_qtype)
