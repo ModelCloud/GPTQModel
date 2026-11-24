@@ -90,6 +90,7 @@ python -m tests.kernels.gen_compile_matrix
 | `AwqGEMVTritonLinear` | `gemv_awq` | `CUDAGRAPH` | `CUDAGRAPH` | yes | no | explicit-selection-only GEMV decode kernel; no static-cache generate win measured (#4984) |
 | `AwqGemvFastMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
 | `AwqGemvMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
+| `AwqHummingLinear` | `humming` | `EAGER` | `EAGER` | no | no | - |
 | `AwqMacheteLinear` | `machete_awq` | `EAGER` | `EAGER` | no | no | - |
 | `AwqMarlinLinear` | `marlin_awq` | `EAGER` | `EAGER` | yes | no | - |
 | `AwqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | yes | - |
@@ -107,6 +108,9 @@ python -m tests.kernels.gen_compile_matrix
 | `GGUFTritonKernel` | `gguf_triton` | `EAGER` | `EAGER` | yes | no | static-cache generate() auto-compile stays off: no CPU win was measured for this kernel in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `GPTQBitBLASMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
 | `GPTQMarlinMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
+| `HummingFP8Linear` | `humming` | `EAGER` | `EAGER` | no | no | - |
+| `HummingLinear` | `humming` | `EAGER` | `EAGER` | no | no | - |
+| `HummingMXFP4Linear` | `humming` | `EAGER` | `EAGER` | no | no | - |
 | `LLMAwqLinear` | `gemv_fast_awq` | `EAGER` | `EAGER` | yes | no | - |
 | `LLMAwqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
 | `LLMAwqTorchLinear` | `gemv_fast_awq` | `INDUCTOR` | `INDUCTOR` | no | no | portable GEMV_FAST fallback; no measured static-cache win (#4984) |
