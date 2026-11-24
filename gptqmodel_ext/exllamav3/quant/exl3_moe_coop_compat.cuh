@@ -11,6 +11,14 @@ __forceinline__ __device__ float copysignf_pos(float a, float b)
 
 #if defined(USE_ROCM) || (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 750 || CUDART_VERSION < 11000))
 
+#if defined(USE_ROCM)
+// HIP has no CUDA `__expf`; `expf` lowers to the same device intrinsic.
+__inline__ __device__ float __expf(float x)
+{
+    return expf(x);
+}
+#endif
+
 __inline__ __device__ float tanh_opt(float x)
 {
     const float exp_val = -1.f * fabs(2 * x);

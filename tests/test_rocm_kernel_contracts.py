@@ -66,7 +66,19 @@ PLATFORM_RESTRICTED_KERNELS = set("""
     MacaqMlxQuantLinear NF12MlxQuantLinear
 """.split())
 KERNELS = sorted(
-    [*importer.iter_quant_linear_kernels(), TorchQuantEmbeddings, TTNNBlockFloat8Linear],
+    # ``iter_quant_linear_kernels`` walks every live subclass, including test
+    # doubles declared by other collected modules (e.g. the unvalidated AVX512
+    # subclass in ``test_cpu_int4_snapshot_5013``). This audit covers the
+    # kernels the package ships, not fixtures, so scope it to the package.
+    [
+        cls
+        for cls in [
+            *importer.iter_quant_linear_kernels(),
+            TorchQuantEmbeddings,
+            TTNNBlockFloat8Linear,
+        ]
+        if cls.__module__.startswith("gptqmodel.")
+    ],
     key=lambda c: c.__name__,
 )
 # MacaqTritonLinear imports without Triton but its device validation requires
@@ -291,10 +303,15 @@ _HIP_NATIVE_SYMBOLS = frozenset("""
     __int_as_float __float_as_int __uint_as_float __float_as_uint __byte_perm
     __funnelshift_r __funnelshift_l __funnelshift_rc __funnelshift_lc
     __fadd_rn __fsub_rn __fmul_rn __fdiv_rn __frcp_rn __fsqrt_rn __fmaf_rn
+    __dadd_rn __dsub_rn __dmul_rn __ddiv_rn
     __fminf __fmaxf __min __max __sincosf __saturatef
+    __float2int_rn __syncwarp
     __half __half2 __half2float __float2half __float2half_rn __float2half_rz
     __halves2half2 __low2half __high2half __half22float2 __floats2half2_rn
     __ushort_as_half __half_as_ushort __hmul __hadd __hsub __hlt __hgt __heq __hne __hle __hge
+    __hmul2 __hadd2 __low2float __high2float
+    __builtin_amdgcn_perm __builtin_amdgcn_ds_bpermute
+    __gfx1102__ __gfx1103__ __gfx1150__ __gfx1151__ __gfx1200__ __gfx1201__ __gfx1202__
     __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12 __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12
     __hip_bfloat16 __hip_bfloat162 __bfloat162float __float2bfloat16
     __halves2bfloat162 __low2bfloat16 __high2bfloat16 __bfloat1622float2
