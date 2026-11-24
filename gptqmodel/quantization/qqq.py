@@ -19,7 +19,12 @@ from torch.nn import functional as F
 from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
 from ..quantization.config import FallbackStrategy, MSEConfig, SmoothMSE
-from ..quantization.quantizer import HF_OPTIMUM, _mse_shrink_grid, _neutralize_dead_columns
+from ..quantization.quantizer import (
+    HF_OPTIMUM,
+    _affine_scale,
+    _mse_shrink_grid,
+    _neutralize_dead_columns,
+)
 from ..utils import setup_logger
 from ..utils.device import get_device
 from ..utils.kernel import resolve_kernel_config
@@ -211,7 +216,12 @@ class Quantizer(nn.Module):
             self.zero = xmin
         else:
             if self.groupsize != -1 or not self.sym:
-                self.scale = (xmax - xmin) / self.maxq
+                # Share the generic quantizer's overflow-safe affine fit:
+                # ``xmax - xmin`` overflows for a finite BF16 group that
+                # straddles ``+/-2**127`` even though the step is representable
+                # (#5857). Dividing each endpoint before the subtraction keeps
+                # only those lanes finite.
+                self.scale = _affine_scale(xmin, xmax, self.maxq)
                 if self.sym:
                     self.zero = torch.full_like(self.scale, (self._maxq_value + 1) / 2)
                 else:
@@ -242,7 +252,7 @@ class Quantizer(nn.Module):
                     zero1 = xmin1
                 else:
                     scale1 = (
-                        (xmax1 - xmin1) / self.maxq
+                        _affine_scale(xmin1, xmax1, self.maxq)
                         if not groupwise
                         else xmax1 / self.maxq
                     )
@@ -480,7 +490,9 @@ class QQQ:
                 lo, hi = symmetric_range_from_bounds(lo, hi)
             else:
                 lo, hi = affine_range_with_zero(lo, hi)
-            scale = torch.clamp((hi - lo) / maxq, min=1e-8)
+            # The strategy endpoints are finite too, so the same span overflow
+            # can hit this fallback grid; reuse the shared affine fit.
+            scale = torch.clamp(_affine_scale(lo, hi, maxq), min=1e-8)
             if self.qcfg.sym:
                 zero = torch.full_like(scale, (maxq + 1) // 2)
             else:

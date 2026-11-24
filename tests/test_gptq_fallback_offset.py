@@ -171,3 +171,50 @@ def test_sym_fallback_marlin_matches_torch_on_a_positive_only_group():
         marlin_out = marlin(x)
 
     torch.testing.assert_close(marlin_out, torch_out, rtol=2e-3, atol=2e-3)
+
+
+# ``+/-2**127`` is exactly representable in BF16, but the FP32 span
+# ``2**128`` is not. The strategy endpoints are finite, so the fallback must
+# fit the representable step instead of overflowing before the division.
+_BF16_EXTREME = 2.0**127
+_BF16_EXTREME_STEP = torch.tensor(2.0**128 / 15, dtype=torch.float64).float()
+
+
+@pytest.mark.parametrize("cls", [GPTQ, QQQ], ids=["gptq", "qqq"])
+@pytest.mark.parametrize(
+    "strategy",
+    [FallbackStrategy.MIDPOINT, FallbackStrategy.MEAN, FallbackStrategy.MEDIAN],
+    ids=lambda s: s.value,
+)
+@pytest.mark.parametrize("sym", [True, False])
+def test_fallback_affine_scale_stays_finite_at_bf16_extreme_endpoints(
+    cls, strategy, sym
+):
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=128,
+        sym=sym,
+        fallback=Fallback(strategy=strategy, threshold=False),
+    )
+    linear = nn.Linear(128, 2, bias=False, dtype=torch.bfloat16)
+    with torch.no_grad():
+        linear.weight.zero_()
+        linear.weight[0, 0] = _BF16_EXTREME
+        linear.weight[0, 2] = -_BF16_EXTREME
+        linear.weight[1] = torch.linspace(-1.0, 1.0, 128).to(torch.bfloat16)
+
+    quantizer = cls(linear, qcfg)
+    if cls is GPTQ:
+        result = quantizer._fallback_quantize(strategy, 128)
+    else:
+        result = quantizer._fallback_quantize(strategy)
+    dequant, scale, zero = result[0], result[1], result[2]
+
+    assert torch.isfinite(scale).all()
+    torch.testing.assert_close(
+        scale[0, 0].cpu(), _BF16_EXTREME_STEP, rtol=0, atol=0
+    )
+    assert torch.isfinite(zero).all()
+    assert torch.isfinite(dequant).all()
+    assert dequant[0, 0] > 0
+    assert dequant[0, 2] < 0

@@ -53,6 +53,7 @@ from .quantizer import (
     HF_OPTIMUM,
     SCALE_STORAGE_FLOOR,
     Quantizer,
+    _affine_scale,
     _finite_code_bounds,
     _floor_scale_for_storage,
     _neutralize_dead_columns,
@@ -2792,7 +2793,9 @@ class GPTQ:
             else:
                 lo, hi = affine_range_with_zero(lo, hi)
             scale = _floor_scale_for_storage(
-                _replace_zero_scale(torch.clamp((hi - lo) / maxq, min=1e-8)),
+                _replace_zero_scale(
+                    torch.clamp(_affine_scale(lo, hi, maxq), min=1e-8)
+                ),
                 scale_min,
             )
             if self.qcfg.sym:
