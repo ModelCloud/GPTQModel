@@ -18,6 +18,8 @@ from . import tt_blockfloat_cuda
 try:
     import triton
     import triton.language as tl
+
+    from .triton_jit import jit as triton_jit
 except ImportError:  # pragma: no cover - Triton is optional
     triton = None
     tl = None
@@ -25,7 +27,7 @@ except ImportError:  # pragma: no cover - Triton is optional
 
 if triton is not None:
 
-    @triton.jit
+    @triton_jit
     def _decode_tile(
         Codes,
         Exponents,
@@ -64,7 +66,7 @@ if triton is not None:
         unit = (code - (2 * levels - 1)).to(tl.float32) * (1.0 / levels)
         return tl.where(in_bounds, unit * scale, 0.0)
 
-    @triton.jit
+    @triton_jit
     def _gemv_partials(
         X,
         Codes,
@@ -90,7 +92,7 @@ if triton is not None:
             part = tl.sum(x[:, None] * w, axis=0)
             tl.store(Partial + (m * SPLITS + pid_k.to(tl.int64)) * N + n, part, n < N)
 
-    @triton.jit
+    @triton_jit
     def _split_k_epilogue(
         Partial,
         Bias,
@@ -113,7 +115,7 @@ if triton is not None:
             y += tl.load(Bias + n * stride_bias, n < N, other=0.0).to(tl.float32)
         tl.store(Out + m * N + n, y, n < N)
 
-    @triton.jit
+    @triton_jit
     def _gemm(
         X,
         Codes,

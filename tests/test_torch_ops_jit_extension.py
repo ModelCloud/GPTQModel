@@ -729,6 +729,9 @@ def test_cuda_cache_fingerprint_payload_includes_resolved_arch_flags(monkeypatch
 
     loader = _make_loader(tmp_path, requires_cuda=True)
 
+    # This asserts the CUDA branch: pin it so a ROCm host exercises the same
+    # payload instead of the HIP/gfx key added in #4815.
+    monkeypatch.setattr(cpp_module.torch.version, "hip", None, raising=False)
     monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
     monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(cpp_module.torch.cuda, "device_count", lambda: 1)
@@ -1128,11 +1131,24 @@ def test_exllamav3_import_does_not_set_arch_list_env():
     script = """
 import os
 import torch
+from types import SimpleNamespace
 
 torch.version.cuda = "13.0"
+torch.version.hip = None
 torch.cuda.device_count = lambda: 2
 torch.cuda.get_device_capability = lambda index=0: (12, 0) if index == 0 else (8, 9)
 torch.cuda.get_arch_list = lambda: ["sm_89", "sm_120"]
+# Torch's own device enumeration (torchao has_triton) must see a matching
+# two-device view; faking only device_count leaves it indexing a device that
+# the real host does not expose.
+torch.cuda.get_device_properties = lambda device=None: SimpleNamespace(
+    major=12 if device in (None, 0) else 8,
+    minor=0 if device in (None, 0) else 9,
+    name="fake-gpu",
+    total_memory=1 << 30,
+    gcnArchName="",
+)
+torch.cuda.current_device = lambda: 0
 
 import gptqmodel.exllamav3.ext as ext
 
@@ -1396,6 +1412,9 @@ def test_torch_ops_jit_extension_uses_original_compile_paths(monkeypatch, tmp_pa
     compile_calls = []
     runtime = type("RuntimeNamespace", (), {"kernel": object()})()
 
+    # HIP builds stage sources into the build cache (#4092/#4487); this test
+    # covers the non-HIP path that passes authoritative paths unchanged.
+    monkeypatch.setattr(cpp_module, "IS_ROCM", False)
     monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
 
     def fake_compile(**kwargs):
@@ -1540,6 +1559,9 @@ def test_torch_ops_jit_extension_cuda_fingerprint_tracks_visible_capabilities(mo
 
     loader = _make_loader(tmp_path, requires_cuda=True)
 
+    # CUDA-only cache-key test: pin the non-HIP branch so a ROCm host does not
+    # silently exercise the gfx-based key added in #4815.
+    monkeypatch.setattr(cpp_module.torch.version, "hip", None, raising=False)
     monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
     monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(cpp_module.torch.cuda, "device_count", lambda: 2)
@@ -1565,6 +1587,7 @@ def test_torch_ops_jit_extension_cuda_fingerprint_prefers_arch_override(monkeypa
 
     loader = _make_loader(tmp_path, requires_cuda=True)
 
+    monkeypatch.setattr(cpp_module.torch.version, "hip", None, raising=False)
     monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.0")
     first_build_root = loader.build_root()
 
@@ -1601,6 +1624,7 @@ def test_torch_ops_jit_extension_cuda_fingerprint_tracks_visible_capabilities_ev
 
     loader = _make_loader(tmp_path, requires_cuda=True)
 
+    monkeypatch.setattr(cpp_module.torch.version, "hip", None, raising=False)
     monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.0")
     monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(cpp_module.torch.cuda, "device_count", lambda: 1)
