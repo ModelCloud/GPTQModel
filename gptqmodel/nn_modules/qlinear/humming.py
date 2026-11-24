@@ -26,6 +26,7 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear, GPTQQuantLinear, WeightOnlyQuantLinear
+from ...nn_modules.qlinear._compile_support import COMPILE_LEVEL
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.humming import (
@@ -253,6 +254,15 @@ class HummingLinear(_HummingKernelMixin, GPTQQuantLinear):
     SUPPORTS_ADAPTERS = [Lora]
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
+    # Humming ships one JIT-compiled native GEMM per (shape, config) with no
+    # fake/meta implementation, so dynamo cannot trace the call and there is no
+    # compiled level to claim. The Stream-K path synchronises through the
+    # ``locks`` buffer across the launch, so an eager CUDA-graph capture is not
+    # claimed either. Re-measure with tests/kernels/compile_probe.py before
+    # raising either declaration.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
+
     REQUIRES_FORMAT_V2 = False
 
     # for transformers/optimum tests compat
@@ -447,6 +457,15 @@ class AwqHummingLinear(_HummingKernelMixin, AWQuantLinear):
     SUPPORTS_ADAPTERS = [Lora]
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
+    # Humming ships one JIT-compiled native GEMM per (shape, config) with no
+    # fake/meta implementation, so dynamo cannot trace the call and there is no
+    # compiled level to claim. The Stream-K path synchronises through the
+    # ``locks`` buffer across the launch, so an eager CUDA-graph capture is not
+    # claimed either. Re-measure with tests/kernels/compile_probe.py before
+    # raising either declaration.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
+
     REQUIRES_FORMAT_V2 = False
 
     # for transformers/optimum tests compat
@@ -609,6 +628,15 @@ class HummingFP8Linear(_HummingKernelMixin, WeightOnlyQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    # Humming ships one JIT-compiled native GEMM per (shape, config) with no
+    # fake/meta implementation, so dynamo cannot trace the call and there is no
+    # compiled level to claim. The Stream-K path synchronises through the
+    # ``locks`` buffer across the launch, so an eager CUDA-graph capture is not
+    # claimed either. Re-measure with tests/kernels/compile_probe.py before
+    # raising either declaration.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     # Same contract as the torch FP8 kernel: both buffers must be present or the
     # layer decodes to zeros.
@@ -839,6 +867,15 @@ class HummingMXFP4Linear(_HummingKernelMixin, WeightOnlyQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.uint8]
     SUPPORTS_ADAPTERS = [Lora]
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    # Humming ships one JIT-compiled native GEMM per (shape, config) with no
+    # fake/meta implementation, so dynamo cannot trace the call and there is no
+    # compiled level to claim. The Stream-K path synchronises through the
+    # ``locks`` buffer across the launch, so an eager CUDA-graph capture is not
+    # claimed either. Re-measure with tests/kernels/compile_probe.py before
+    # raising either declaration.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     CHECKPOINT_REQUIRED_BUFFERS = ("W_packed", "W_scales")
 

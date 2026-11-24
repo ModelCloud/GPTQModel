@@ -476,6 +476,40 @@ def dynamo_is_compiling() -> bool:
         return False
 
 
+_PROBE_UNSET = object()
+
+
+def dynamo_rejects_graph_breaks() -> bool:
+    """Return True when the active trace fails closed on a graph break.
+
+    A kernel sometimes has to choose between a traced fused path and a
+    one-time eager setup step that dynamo cannot trace (a lock, a buffer
+    rewrite, a ``torch.compiler.disable`` helper). Whether it may skip that
+    step depends on the calling contract: ``torch.compile(fullgraph=True)``
+    and export turn every graph break into an error, while the default
+    ``torch.compile`` and an eager call simply execute it. Reading the flag
+    lets a kernel stay on a traceable path under those strict traces and still
+    install its layout on an eager or partial-graph call.
+
+    Dynamo records the strict ("nopython") mode by starting its per-thread
+    ``dynamo_tls.skip_reasons`` list; it is ``None`` whenever strict tracing is
+    not active, including in eager code and under ``fullgraph=False``. The
+    same read is constant-folded inside a traced frame, so it never forces a
+    recompile, and export sets its own process-scoped flag. If a future torch
+    removes the attribute the conservative answer is ``True``: a kernel then
+    skips an untraceable setup step instead of failing the trace.
+    """
+
+    if _IS_EXPORT is not None and bool(_IS_EXPORT()):
+        return True
+    eval_frame = sys.modules.get("torch._dynamo.eval_frame")
+    tls = getattr(eval_frame, "dynamo_tls", None)
+    skip_reasons = getattr(tls, "skip_reasons", _PROBE_UNSET)
+    if skip_reasons is _PROBE_UNSET:
+        return True
+    return skip_reasons is not None
+
+
 def _call_with_dynamo_suppression(compiled: Callable, fullgraph: bool, args: tuple, kwargs: dict):
     """Invoke ``compiled`` with dynamo allowed to fall back for the failing frame.
 

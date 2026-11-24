@@ -686,3 +686,27 @@ def test_humming_float_formats_are_opt_in():
     assert BACKEND.HUMMING in support_map[METHOD.MACAQ][FORMAT.MXFP4]
     assert BACKEND.HUMMING not in auto_map[METHOD.FP8][FORMAT.FP8]
     assert BACKEND.HUMMING not in auto_map[METHOD.MACAQ][FORMAT.MXFP4]
+
+
+def test_humming_declares_neither_a_compiled_level_nor_graph_capture():
+    """The native GEMM has no fake impl and Stream-K syncs across the launch.
+
+    Declaring ``INDUCTOR``/``CUDAGRAPH`` made ``optimize()`` and the compile
+    matrix claim a level the kernel cannot serve, so a compiled forward failed
+    instead of running eagerly.
+    """
+
+    from gptqmodel.nn_modules.qlinear._compile_support import COMPILE_LEVEL
+    from gptqmodel.nn_modules.qlinear.humming import (
+        HummingFP8Linear,
+        HummingMXFP4Linear,
+    )
+
+    for cls in (
+        HummingLinear,
+        AwqHummingLinear,
+        HummingFP8Linear,
+        HummingMXFP4Linear,
+    ):
+        assert cls.SUPPORTS_COMPILE_LEVEL == COMPILE_LEVEL.EAGER, cls.__name__
+        assert cls.SUPPORTS_GRAPH_CAPTURE is False, cls.__name__

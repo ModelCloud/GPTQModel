@@ -32,7 +32,7 @@ from ...utils.paro import (
     validate_rotation_buffers,
 )
 from ...utils.rocm import IS_ROCM
-from ...utils.torch import dynamo_is_compiling
+from ...utils.torch import dynamo_is_compiling, dynamo_rejects_graph_breaks
 from . import detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
@@ -1274,10 +1274,18 @@ class ParoLinear(AwqTorchLinear):
 
         out = self._forward_cuda_awq_kernel(rotated)
         if out is None:
-            if dynamo_is_compiling() and self._live_cpu_layout() is None:
-                # A cold trace must not bake in the dense fallback: install the
-                # layout here (a graph break) and retrace into the fused
-                # branch (#5581).
+            if (
+                dynamo_is_compiling()
+                and self._live_cpu_layout() is None
+                and not dynamo_rejects_graph_breaks()
+            ):
+                # A cold partial-graph trace must not bake in the dense
+                # fallback: install the layout here (the ``torch.compiler
+                # .disable`` wrapper is a graph break) and retrace into the
+                # fused branch (#5581). A ``fullgraph=True`` trace rejects
+                # that break, so it stays on the traceable AVX512/ATen/dense
+                # paths below; ``optimize()`` installs the layout eagerly
+                # before compiling a model.
                 self._prepare_cpu_inference_layout(rotated.dtype)
             out = self._forward_cpu_avx512(
                 rotated,
