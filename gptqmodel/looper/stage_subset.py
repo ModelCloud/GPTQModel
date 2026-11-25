@@ -1043,6 +1043,11 @@ def _run_single_subset_pass(
                 registered_roots.add(id(root))
                 processor.register_moe_root_capture_hook(root, template, handle)
 
+    if execute_forward:
+        install_affinity_hooks = getattr(processor, "install_moe_affinity_hooks", None)
+        if callable(install_affinity_hooks):
+            install_affinity_hooks(module, subset, handle)
+
     shared_input_leaders: Dict[str, str] = {}
     if execute_forward:
         # Explicit `:in=<tag>` groups collect the Hessian once (leader) and copy it

@@ -16,6 +16,7 @@ from gptqmodel import (
     QuantizeConfig,
 )
 from gptqmodel.quantization import METHOD
+from gptqmodel.quantization.config import ExpertsRoutingBypass, MoEConfig
 
 
 pytestmark = [pytest.mark.cpu]
@@ -41,14 +42,11 @@ def test_ebss_defaults_and_validation():
         EBSSConfig(temperature=float("nan"))
 
 
-def test_moequant_requires_ebss():
-    config = MoEQuantConfig(ebss=EBSSConfig())
-    assert config.agq is False
-    assert config.ebss is not None
+def test_moequant_requires_one_mechanism():
+    assert MoEQuantConfig().agq is True
+    assert MoEQuantConfig(agq=False, ebss=EBSSConfig()).ebss is not None
     with pytest.raises(ValueError, match="enable"):
-        MoEQuantConfig()
-    with pytest.raises(NotImplementedError, match="AGQ"):
-        MoEQuantConfig(agq=True, ebss=EBSSConfig())
+        MoEQuantConfig(agq=False)
     with pytest.raises(TypeError, match="agq"):
         MoEQuantConfig(agq="yes")
 
@@ -63,7 +61,7 @@ def test_gptq_moequant_roundtrip_and_provenance():
     )
     payload = config.to_dict()
     assert payload["meta"]["moequant"] == {
-        "agq": False,
+        "agq": True,
         "ebss": {
             "num_sentences": 2,
             "seq_len": 8,
@@ -105,20 +103,33 @@ def test_awq_moequant_is_ebss_only():
     assert config.moequant.ebss is not None
     assert config.to_dict()["meta"]["moequant"]["agq"] is False
 
+    with pytest.raises(ValueError, match="AWQ"):
+        AWQConfig(bits=4, group_size=128, moequant=MoEQuantConfig())
+
 
 def test_moequant_rejects_conflicting_calibrators():
     with pytest.raises(ValueError, match="gptaq"):
-        GPTQConfig(bits=4, group_size=128, moequant=MoEQuantConfig(ebss=EBSSConfig()), gptaq=True)
+        GPTQConfig(bits=4, group_size=128, moequant=MoEQuantConfig(), gptaq=True)
     with pytest.raises(ValueError, match="foem"):
-        GPTQConfig(bits=4, group_size=128, moequant=MoEQuantConfig(ebss=EBSSConfig()), foem=True)
+        GPTQConfig(bits=4, group_size=128, moequant=MoEQuantConfig(), foem=True)
     with pytest.raises(ValueError, match="g2ptq"):
-        GPTQConfig(bits=4, group_size=128, moequant=MoEQuantConfig(ebss=EBSSConfig()), g2ptq=True)
+        GPTQConfig(bits=4, group_size=128, moequant=MoEQuantConfig(), g2ptq=True)
     with pytest.raises(ValueError, match="mock_quantization"):
         GPTQConfig(
             bits=4,
             group_size=128,
-            moequant=MoEQuantConfig(ebss=EBSSConfig()),
+            moequant=MoEQuantConfig(),
             mock_quantization=True,
+        )
+
+
+def test_moequant_rejects_w4a_activation():
+    with pytest.raises(ValueError, match="activation"):
+        GPTQConfig(
+            bits=4,
+            group_size=128,
+            activation="w4afp8",
+            moequant=MoEQuantConfig(),
         )
 
 
@@ -128,8 +139,26 @@ def test_moequant_is_rejected_for_other_methods():
             bits=4,
             group_size=128,
             method=METHOD.QQQ,
-            moequant=MoEQuantConfig(ebss=EBSSConfig()),
+            moequant=MoEQuantConfig(),
         )
+
+
+def test_agq_rejects_routing_bypass():
+    with pytest.raises(ValueError, match="native MoE routing"):
+        GPTQConfig(
+            bits=4,
+            group_size=128,
+            moequant=MoEQuantConfig(),
+            moe=MoEConfig(routing=ExpertsRoutingBypass()),
+        )
+    # EBSS is data-side only and remains valid with bypass routing.
+    config = GPTQConfig(
+        bits=4,
+        group_size=128,
+        moequant=MoEQuantConfig(agq=False, ebss=EBSSConfig()),
+        moe=MoEConfig(routing=ExpertsRoutingBypass()),
+    )
+    assert config.moequant.ebss is not None
 
 
 def test_moequant_is_run_level_only():
@@ -137,5 +166,5 @@ def test_moequant_is_run_level_only():
         GPTQConfig(
             bits=4,
             group_size=128,
-            dynamic={"model.layers.0": {"moequant": {"ebss": {"num_sentences": 1}}}},
+            dynamic={"model.layers.0": {"moequant": {"agq": True}}},
         )

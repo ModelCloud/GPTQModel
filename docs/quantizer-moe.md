@@ -354,12 +354,21 @@ reached packing without quantized zero points`. After: 265 quantized modules,
 the 123 `-:` entries in `dynamic`; the checkpoint saves, reloads and produces
 finite logits. Coverage: `tests/test_awq_moe_prune_uncovered_4456.py`.
 
-## 6. MoEQuant: EBSS
+## 6. MoEQuant: EBSS and AGQ
 
-[MoEQuant](moequant.md) adds Expert-Balanced Self-Sampling (EBSS) for MoE
-calibration. EBSS generates the calibration token sequences from the model
-itself, scoring each beam branch by cumulative likelihood and by the balance of
-routed-expert usage. It is opt-in through `GPTQConfig.moequant` /
-`AWQConfig.moequant`. The checkpoint format remains GPTQ or AWQ, and
-`meta.moequant` records the policy. See [MoEQuant](moequant.md) for the flow,
-configuration, failure contracts and citation.
+[MoEQuant](moequant.md) adds two calibration policies for MoE models:
+
+- **EBSS** generates the calibration token sequences from the model itself,
+  scoring each beam branch by cumulative likelihood and by the balance of
+  routed-expert usage.
+- **AGQ** weights each routed expert's Hessian rows by the router affinity that
+  the MoE block applies to that expert's output. GPTQ consumes
+  `H = X^T diag(c) X`; the block solve is unchanged.
+
+Both are opt-in through `GPTQConfig.moequant` / `AWQConfig.moequant`. The
+checkpoint format remains GPTQ or AWQ, and `meta.moequant` records the policy.
+AGQ captures the experts container's own `top_k_index`/`top_k_weights` instead
+of re-deriving a normalisation, and fails closed when that contract is not
+available. AWQ currently supports EBSS only; shared experts and dense
+projections are not affinity-weighted. See [MoEQuant](moequant.md) for the
+flow, configuration, failure contracts and citation.

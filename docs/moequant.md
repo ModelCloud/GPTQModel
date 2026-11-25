@@ -1,21 +1,23 @@
-# MoEQuant: expert-balanced self-sampling calibration
+# MoEQuant: expert-balanced sampling and affinity-guided quantization
 
 [Documentation index](README.md) · [Project overview](../README.md)
 
-MoEQuant (Chen et al., ICML 2025) introduces two calibration techniques for
-Mixture-of-Experts models: Expert-Balanced Self-Sampling (EBSS) and
-Affinity-Guided Quantization (AGQ). This change implements **EBSS** as a
-calibration variant of GPTQ and AWQ. AGQ is not implemented here.
+MoEQuant (Chen et al., ICML 2025) adds two calibration techniques for
+Mixture-of-Experts models:
 
-EBSS builds a calibration set from the model itself. It searches token
-sequences with a beam, scoring each branch by cumulative likelihood and by how
-evenly the branch uses the routed experts. The search is data-free and does not
-read WikiText or C4.
+- **Expert-Balanced Self-Sampling (EBSS)** builds a calibration set from the
+  model itself. It searches token sequences with a beam, scoring each branch by
+  cumulative likelihood and by how evenly the branch uses the routed experts.
+  The search is data-free and does not read WikiText or C4.
+- **Affinity-Guided Quantization (AGQ)** weights each routed token's
+  quantization error by the router affinity `c_i` that the MoE block applies to
+  that expert's output. For GPTQ this is exactly a row-weighted Hessian,
+  `H = X^T diag(c) X`; the block solve itself does not change.
 
-The checkpoint format and `quant_method` remain `gptq` or `awq`;
-`meta.moequant` records the calibration provenance. This is a clean-room
-implementation from the paper's Algorithm 1, not a port of the public
-repository.
+GPT-QModel implements both as a calibration variant of GPTQ and AWQ. The
+checkpoint format and `quant_method` remain `gptq` or `awq`; `meta.moequant`
+records the calibration provenance. This is a clean-room implementation from
+the paper's Algorithm 1 and Eqs. 18-19, not a port of either public release.
 
 ## Flow
 
@@ -27,18 +29,29 @@ flowchart TD
     C --> E["prepare calibration batches"]
     D --> E
     E --> F["native calibration forward"]
-    F --> G["GPTQ or AWQ block solve"]
-    G --> H["packed GPTQ or AWQ checkpoint"]
+    F --> G{"moequant.agq enabled"}
+    G -- yes --> H["experts container captures<br/>top-k indices and weights"]
+    H --> I["per-expert row weight c"]
+    I --> J["H equals X transpose diag(c) X"]
+    G -- no --> K["H equals X transpose X"]
+    J --> L["GPTQ block solve"]
+    K --> L
+    L --> M["packed GPTQ or AWQ checkpoint"]
     style C fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+    style J fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+    style H fill:#fff3cd,stroke:#997404,color:#664d03
 ```
 
 | Situation | Before | After |
 | --- | --- | --- |
 | MoE calibration data | Caller-provided text, often WikiText or C4 | EBSS self-samples token sequences from the model |
 | Starved experts | Rarely selected experts get few or no rows | EBSS rewards branches with balanced expert usage |
-| GPTQ/AWQ block solve | unchanged | unchanged; only the calibration data differs |
+| Routed expert Hessian | `H = X^T X`, every token equally weighted | `H = X^T diag(c) X`, weighted by router affinity |
+| Dense and shared experts | `H = X^T X` | unchanged; the paper defines affinity for routed experts |
+| GPTQ block solve | unchanged | unchanged; only the captured Hessian differs |
 | Checkpoint format | `gptq` / `awq` | unchanged; `meta.moequant` records the calibration policy |
-| Caller dataset plus EBSS | n/a | rejected instead of silently ignored |
+| Missing routing weights | n/a | AGQ fails closed instead of guessing a normalisation |
+| AWQ AGQ | n/a | not implemented; AWQ supports EBSS only in this release |
 
 ## EBSS search
 
@@ -70,9 +83,25 @@ forwarded, so evaluating the paper's `sigma(M, new candidate)` for every
 vocabulary item would require a forward per expansion. The final sentence
 score uses the complete sequence's routing.
 
+## AGQ capture
+
+The affinity `c_i` must be the weight the model actually applies, not a
+re-derived softmax. GPT-QModel therefore hooks the experts container and reads
+its `top_k_index` and `top_k_weights` arguments. The Defuser and native expert
+loops visit experts in ascending index and order each expert's rows by top-k
+slot and then token; the capture reproduces that order. For the first expert
+projection the captured rows are compared with the container's hidden states,
+so a different layout raises instead of silently weighting the wrong rows.
+`down_proj` consumes the expert's intermediate activation, so only its row
+count is checked.
+
+The captured row weights are `c_i`; GPTQ applies `sqrt(c_i)` to the input rows
+before `X^T X`. The existing sink-row cap and Hessian chunking compose with
+that scale.
+
 ## Configuration
 
-GPTQ with EBSS:
+GPTQ with both techniques:
 
 ```python
 from gptqmodel import EBSSConfig, GPTQModel, MoEQuantConfig, QuantizeConfig
@@ -84,6 +113,7 @@ qcfg = QuantizeConfig(
     # EBSS needs a materialized model; the lazy checkpoint shell is rejected.
     offload_to_disk=False,
     moequant=MoEQuantConfig(
+        agq=True,
         ebss=EBSSConfig(num_sentences=128, seq_len=512, width=4, temperature=1.2),
     ),
 )
@@ -104,6 +134,7 @@ qcfg = QuantizeConfig(
     format=FORMAT.GEMM,
     offload_to_disk=False,
     moequant=MoEQuantConfig(
+        agq=False,
         ebss=EBSSConfig(num_sentences=128, seq_len=512, width=4, temperature=1.2),
     ),
 )
@@ -113,7 +144,7 @@ The variant is also accepted as a plain dictionary, like the other calibration
 options:
 
 ```python
-moequant={"ebss": {"num_sentences": 64, "seq_len": 256}}
+moequant={"agq": True, "ebss": {"num_sentences": 64, "seq_len": 256}}
 ```
 
 ## Failure contracts
@@ -123,19 +154,33 @@ moequant={"ebss": {"num_sentences": 64, "seq_len": 256}}
 - EBSS requires materialized weights. A lazy checkpoint shell raises before the
   search; load with `QuantizeConfig(offload_to_disk=False)` or materialize the
   model first.
-- `moequant` is mutually exclusive with `gptaq`, `foem`, GSQ and mock
-  quantization. It is a run-level option and cannot be set in `dynamic`.
+- `agq=True` requires native MoE routing. `ExpertsRoutingBypass` is rejected
+  because the bypass feeds every expert all tokens, so the routed-token
+  affinity is not defined.
+- AGQ fails closed when the experts container does not expose
+  `top_k_index`/`top_k_weights`, when the captured row count disagrees with the
+  expert input, or when the row order cannot be validated.
+- AWQ currently supports EBSS only. `AWQConfig(moequant=MoEQuantConfig())`
+  raises and asks for `agq=False`.
+- `moequant` is mutually exclusive with `gptaq`, `foem`, `g2ptq`, GSQ, mock
+  quantization and the W4A `activation` stream. It is a run-level option and
+  cannot be set in `dynamic`.
 - `requantize()` cannot rerun EBSS; run it during `quantize()`.
-- AGQ is not implemented in this change. `MoEQuantConfig(agq=True)` raises
-  instead of silently skipping affinity weighting.
 
 ## Scope and limitations
 
-- The paper's `MoEQuant++` combines QuaRot, GPTQ, EBSS and AGQ. This change
-  adds EBSS to GPT-QModel's GPTQ and AWQ calibration paths; it does not add a
-  new rotation or AGQ.
-- Shared experts and dense projections are unaffected by EBSS. It changes the
-  calibration data, not the per-module weighting.
+- The paper's `MoEQuant++` combines QuaRot, GPTQ, EBSS and AGQ. This
+  implementation adds EBSS and AGQ to GPT-QModel's GPTQ path; it does not add a
+  new rotation. Existing rotation/smoothing options can be configured
+  separately and must be validated on the target model.
+- Shared experts and dense projections are not affinity-weighted. The paper
+  defines Eq. 18 for routed experts; it does not define a shared-expert
+  affinity.
+- AWQ AGQ is not implemented. AWQ's routed gate/up scale group spans several
+  experts and its replay scores the mixed MoE-block output, so applying one
+  per-expert affinity vector would either double-count the block's routing
+  weights or require a per-member replay. AWQ therefore keeps EBSS and plain
+  AWQ scaling in this release.
 
 ## Citation and credit
 
@@ -169,5 +214,6 @@ The paper's software link is the April 2025 release
 (`chenzx921020/MoEQuant`), which ships the GPTQ/AWQ evaluation code and
 pre-built EBSS calibration JSONL. `Strandding/MoEQuant` is a later release that
 adds the EBSS beam-search driver and the AGQ hooks, and it is the release
-consulted for behaviour here. The implementation in `gptqmodel/utils/ebss.py`
-is clean-room from the paper; no source code was copied from either release.
+consulted for behaviour here. The implementation in `gptqmodel/utils/ebss.py` and
+`gptqmodel/utils/moe_affinity.py` is clean-room from the paper; no source code
+was copied from either release.

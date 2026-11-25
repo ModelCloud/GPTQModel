@@ -285,6 +285,17 @@ class G2PTQ(GPTQ):
         self.activation_square = None
         self._g2ptq_trust_alpha = None
 
+    def add_batch(
+        self,
+        inp: torch.Tensor,
+        out: Optional[torch.Tensor],
+        batch_index: Optional[int] = None,
+        row_weights: Optional[torch.Tensor] = None,
+    ):
+        if row_weights is not None:
+            raise ValueError("MoEQuant AGQ cannot be combined with G2PTQ.")
+        super().add_batch(inp, out, batch_index=batch_index)
+
     # ------------------------------------------------------------------
     # quantization
     # ------------------------------------------------------------------

@@ -2764,20 +2764,15 @@ class MoEQuantConfig:
     model itself.  The checkpoint format and ``quant_method`` are unchanged.
     """
 
-    agq: bool = False
+    agq: bool = True
     ebss: Optional[EBSSConfig] = None
 
     def __post_init__(self):
         if not isinstance(self.agq, bool):
             raise TypeError("MoEQuantConfig: `agq` must be a bool.")
-        if self.agq:
-            raise NotImplementedError(
-                "MoEQuant AGQ is not implemented in this change; set `agq=False` "
-                "and use `ebss`."
-            )
         self.ebss = _normalize_ebss(self.ebss)
-        if self.ebss is None:
-            raise ValueError("MoEQuantConfig: enable `ebss`.")
+        if not self.agq and self.ebss is None:
+            raise ValueError("MoEQuantConfig: enable `agq`, `ebss`, or both.")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -8272,6 +8267,15 @@ class GPTQConfig(PreProcessorConfig):
             raise ValueError("GPTQConfig: `moequant` cannot be combined with GSQ.")
         if self.mock_quantization:
             raise ValueError("GPTQConfig: `moequant` cannot be combined with `mock_quantization`.")
+        if self.activation is not None:
+            raise ValueError(
+                "GPTQConfig: `moequant` is not supported with the W4A activation stream."
+            )
+        if self.moe is not None and self.moe.routing_bypass() and self.moequant.agq:
+            raise ValueError(
+                "GPTQConfig: `moequant.agq` requires native MoE routing; "
+                "disable `agq` or remove `ExpertsRoutingBypass`."
+            )
 
     def validate_gsq(self) -> None:
         if self.method == METHOD.QQQ:
@@ -8636,6 +8640,11 @@ class AWQConfig(PreProcessorConfig):
                 raise ValueError("AWQConfig: choose staged gsq_training or per-linear gsq")
         self.moequant = _normalize_moequant(self.moequant)
         if self.moequant is not None:
+            if self.moequant.agq:
+                raise ValueError(
+                    "AWQConfig: `moequant.agq` is not implemented for AWQ; "
+                    "set `agq=False` and use `ebss`."
+                )
             if (self.gsq is not None and self.gsq.enabled) or (
                 self.gsq_training is not None and self.gsq_training.enabled
             ):

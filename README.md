@@ -97,7 +97,7 @@ compatible deployment engine.
 | **[ADMM-Q](docs/admmq.md)** | Hessian-based weight quantization that replaces GPTQ's one-pass column sweep with an ADMM solve over the whole layer, then refines it with PairSwap. Exports standard GPTQ checkpoints. |
 | **[G²PTQ](docs/g2ptq.md)** | GPTQ-family solver with block-refresh first-order gradient compensation and a per-row trust region. Produces ordinary GPTQ checkpoints. |
 | **[AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ)** | Activation-aware weight quantization, including dense and MoE workflows. |
-| **[MoEQuant](docs/moequant.md)** | Expert-Balanced Self-Sampling (EBSS) for GPTQ/AWQ MoE calibration. It is not a checkpoint format. |
+| **[MoEQuant](docs/moequant.md)** | Expert-Balanced Self-Sampling (EBSS) and Affinity-Guided Quantization (AGQ) for GPTQ/AWQ MoE calibration. It is not a checkpoint format. |
 | **[RTN](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md#rtn-w4a16-without-calibration)** | Round-to-nearest weight quantization when a calibration-free baseline is useful. |
 | **[Paro](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant)** | Low-bit weight quantization with learned rotations for accuracy recovery. [Affine fitting and optimization controls](docs/paro-optimization.md). [Fused rotation backward](docs/paro.md#fused-rotation-backward). |
 | **[MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md)** | Calibrated MXFP4 weights and activations, with native W4A4 inference and a W4A16 option. |

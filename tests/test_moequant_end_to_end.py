@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # GPU=-1
 
-"""Tiny Qwen3-MoE end-to-end coverage for MoEQuant AWQ-EBSS."""
+"""Tiny Qwen3-MoE end-to-end coverage for MoEQuant GPTQ-AGQ and AWQ-EBSS."""
 
 from __future__ import annotations
 
@@ -94,6 +94,36 @@ def _assert_generates(model: GPTQModel) -> None:
 
 
 @pytest.mark.slow
+def test_gptq_agq_tiny_moe_roundtrip(tmp_path: Path):
+    model_dir = tmp_path / "native"
+    tokenizer = _build_tiny_fixture(model_dir)
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        device="cpu",
+        moequant=MoEQuantConfig(agq=True),
+    )
+    model = GPTQModel.load(str(model_dir), quantize_config=qcfg, backend=BACKEND.TORCH)
+    model.quantize(
+        CalibrationConfig(dataset=_calibration(tokenizer), batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
+    assert model.quantized
+    assert model.quantize_config.moequant.agq is True
+
+    rows = {str(row["module"]): row for row in model.quant_log}
+    assert "mlp.experts.0.gate_proj" in rows
+    assert "mlp.experts.0.down_proj" in rows
+
+    saved = tmp_path / "agq"
+    model.save(str(saved))
+    reloaded = GPTQModel.load(str(saved), backend=BACKEND.TORCH, device="cpu")
+    assert reloaded.quantize_config.moequant.agq is True
+    _assert_generates(reloaded)
+
+
+@pytest.mark.slow
 def test_awq_ebss_tiny_moe_roundtrip(tmp_path: Path):
     model_dir = tmp_path / "native"
     _build_tiny_fixture(model_dir)
@@ -174,3 +204,40 @@ def test_ebss_rejects_lazy_checkpoint_shell(tmp_path: Path):
             backend=BACKEND.TORCH,
         )
 
+
+@pytest.mark.slow
+def test_gptq_agq_changes_only_routed_expert_packing(tmp_path: Path):
+    model_dir = tmp_path / "native"
+    tokenizer = _build_tiny_fixture(model_dir)
+
+    def packed(agq: bool):
+        qcfg = QuantizeConfig(
+            bits=4,
+            group_size=32,
+            desc_act=False,
+            device="cpu",
+            moequant=MoEQuantConfig(agq=agq) if agq else None,
+        )
+        model = GPTQModel.load(
+            str(model_dir), quantize_config=qcfg, backend=BACKEND.TORCH
+        )
+        model.quantize(
+            CalibrationConfig(
+                dataset=_calibration(tokenizer), batch_size=1, min_length=1
+            ),
+            backend=BACKEND.TORCH,
+        )
+        expert = model.model.get_submodule(
+            "model.layers.0.mlp.experts.0.gate_proj"
+        )
+        dense = model.model.get_submodule("model.layers.0.self_attn.q_proj")
+        return (
+            expert.qweight.detach().clone(),
+            dense.qweight.detach().clone(),
+        )
+
+    agq_expert, agq_dense = packed(True)
+    plain_expert, plain_dense = packed(False)
+
+    assert not torch.equal(agq_expert, plain_expert)
+    assert torch.equal(agq_dense, plain_dense)
