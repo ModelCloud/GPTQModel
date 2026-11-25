@@ -8271,11 +8271,14 @@ class GPTQConfig(PreProcessorConfig):
 class ADMMQConfig(GPTQConfig):
     """Configuration for the ADMM-Q weight-only quantizer.
 
-    ADMM-Q optimizes the same Hessian-weighted reconstruction objective as
-    GPTQ, but replaces the greedy column sweep with an ADMM split between the
-    continuous Hessian update and the discrete grid projection. The exported
-    tensors are ordinary GPTQ-packed tensors: the checkpoint publishes
-    ``quant_method: gptq`` and records ``method: admmq`` for provenance.
+    ADMM-Q ("ADMM-Q: An Improved Hessian-based Weight Quantizer for
+    Post-Training Quantization of Large Language Models", COLM 2026,
+    arXiv:2605.11222) optimizes the same Hessian-weighted reconstruction
+    objective as GPTQ, but replaces the greedy column sweep with an ADMM split
+    between the continuous Hessian update and the discrete grid projection.
+    The exported tensors are ordinary GPTQ-packed tensors: the checkpoint
+    publishes ``quant_method: gptq`` and records ``method: admmq`` for
+    provenance.
 
     The solver schedule and the PairSwap local-search budget are calibration
     settings, so they are persisted under ``meta`` and do not change the
