@@ -117,6 +117,52 @@ Mixture-of-experts checkpoints are refused in this version: packing routed
 experts needs an architecture-specific fusion (per-expert tensors are merged and
 renamed differently per model family) that the writer does not implement.
 
+## Tokenizer, chat template and generation metadata
+
+llama.cpp keeps the vocabulary as flat arrays and the conversation template as
+one metadata string. Both are copied from the checkpoint's Hugging Face
+tokenizer, so the packaged file renders prompts the same way the checkpoint
+does:
+
+| GGUF key | Source |
+| --- | --- |
+| `tokenizer.ggml.model` | backend tokenizer type (`gpt2` for BPE, `llama` for Unigram, `bert` for WordPiece) |
+| `tokenizer.ggml.pre` | architecture registry (`qwen2`, `llama-bpe`, `default`), overridable with `tokenizer_pre=` |
+| `tokenizer.ggml.tokens` / `token_type` | one entry per embedding row; added tokens keep their id and become CONTROL or USER_DEFINED; unused rows become `[PAD<i>]`/UNUSED |
+| `tokenizer.ggml.merges` | the tokenizer's merge table, spaces encoded as llama.cpp expects |
+| `tokenizer.ggml.{bos,eos,unk,pad}_token_id`, `add_bos_token`/`add_eos_token` | the tokenizer's special-token ids and flags |
+| `tokenizer.chat_template` | `tokenizer.chat_template` verbatim, overridable with `chat_template=` |
+
+Generation defaults come from `generation_config.json` when the checkpoint has
+one, mapped onto llama.cpp's sampling keys:
+
+| HF field | GGUF key | Type |
+| --- | --- | --- |
+| `temperature` | `general.sampling.temp` | float |
+| `top_k` | `general.sampling.top_k` | int32 |
+| `top_p` | `general.sampling.top_p` | float |
+| `min_p` | `general.sampling.min_p` | float |
+| `repetition_penalty` | `general.sampling.penalty_repeat` | float |
+| `mirostat`, `mirostat_tau`, `mirostat_eta` | `general.sampling.mirostat*` | int32/float |
+
+Two deliberate choices:
+
+- `general.sampling.sequence` is **not** written. llama.cpp replaces its whole
+  sampler chain when that key is present, so writing a partial sequence would
+  silently drop samplers. The scalar keys change the defaults of the chain
+  llama.cpp already uses.
+- `do_sample: false` in `generation_config.json` means greedy decoding in
+  Transformers, where `temperature` is ignored; the faithful mapping is
+  `general.sampling.temp = 0`.
+
+llama.cpp's CLI tools read these keys through `common_params_sampling_from_model`.
+`llama-cpp-python` keeps its own Python-side defaults and does not read them, so
+a Python caller must still pass `temperature`/`top_k`/`top_p` explicitly; the
+packaged values are the ones a llama.cpp tool would start from.
+
+Any `metadata=` entry supplied by the caller is written last and wins over a
+generated key.
+
 ## Failure contract
 
 | Situation | Result |
@@ -154,3 +200,22 @@ renamed differently per model family) that the writer does not implement.
 | `test_failed_write_publishes_nothing` / `test_writer_failure_leaves_existing_output_and_cleans_temp_file` | failure removes the temporary file and preserves existing output |
 | `test_output_created_during_verification_is_preserved` | publication preserves a file created during verification |
 | `test_llamacpp_loads_the_packaged_file` | llama.cpp loads, tokenizes and evaluates local Qwen2, Qwen3 and Llama fixtures when `llama-cpp-python` is installed |
+| `test_chat_template_is_packaged` / `test_chat_template_override_wins` | the template is stored verbatim and a caller override wins |
+| `test_sampling_defaults_are_packaged` / `test_greedy_generation_maps_to_zero_temperature` | `generation_config.json` maps onto llama.cpp's sampling keys, without a sampler sequence |
+| `test_caller_metadata_wins_over_generation_config` | an explicit sampling value overrides a derived one |
+| `test_published_file_is_world_readable` | the published artifact is readable by serving processes |
+
+`tests/test_gguf_package_e2e.py` is the end-to-end proof that the file executes
+like its source checkpoint. It quantizes a real model, packages it, then decodes
+the same prompt greedily through llama.cpp and through GPT-QModel and compares
+the results:
+
+| Test | Invariant |
+| --- | --- |
+| `test_chat_template_round_trips_and_renders_identically` | llama.cpp's Jinja formatter renders the packaged template to the same prompt as `apply_chat_template` |
+| `test_tokenizer_matches` | llama.cpp tokenizes the rendered prompt to the same ids as the Hugging Face tokenizer |
+| `test_sampling_defaults_are_readable` | the packaged `general.sampling.*` values match `generation_config.json` |
+| `test_greedy_generation_and_logits_match` | 24 greedy tokens agree (at most one tie-break flip) and the next-token logits reach cosine >= 0.999 |
+
+The test needs a CUDA device, the `gguf` extra and a local model directory; it
+skips when any of them is unavailable.

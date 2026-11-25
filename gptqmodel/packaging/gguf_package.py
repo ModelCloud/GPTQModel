@@ -85,6 +85,20 @@ _MOE_CONFIG_KEYS = (
     "moe_intermediate_size",
 )
 
+#: Hugging Face generation settings that llama.cpp reads back from the file.
+#: ``general.sampling.sequence`` is deliberately not written: it would replace
+#: llama.cpp's default sampler chain instead of only changing its parameters.
+_SAMPLING_FIELDS = (
+    ("temperature", "general.sampling.temp", "float"),
+    ("top_k", "general.sampling.top_k", "int"),
+    ("top_p", "general.sampling.top_p", "float"),
+    ("min_p", "general.sampling.min_p", "float"),
+    ("repetition_penalty", "general.sampling.penalty_repeat", "float"),
+    ("mirostat", "general.sampling.mirostat", "int"),
+    ("mirostat_tau", "general.sampling.mirostat_tau", "float"),
+    ("mirostat_eta", "general.sampling.mirostat_eta", "float"),
+)
+
 _DENSE_ITEMSIZE = {"f16": 2, "bf16": 2, "f32": 4}
 _SAFETENSORS_DTYPE_TO_DENSE = {
     "BF16": "bf16",
@@ -237,6 +251,7 @@ def _package_gguf(config: GGUFPackageConfig) -> Path:
             n_blocks=n_blocks,
             name=_model_name(config, model_config, model_dir),
             file_type=_file_type(gguf, quantize_config, config.file_type),
+            generation_config=_load_generation_config(model_dir, model_config),
         )
     log.info("package: wrote %s (%d tensors)", out, len(plan))
     return Path(out)
@@ -288,6 +303,28 @@ def _load_quant_payload(model_dir: str, model_config: Mapping[str, Any]) -> Mapp
         f"package(): no `quantization_config` in config.json and no quantize_config.json in {model_dir!r}. "
         "Only a GPT-QModel GGUF checkpoint can be packed."
     )
+
+
+def _load_generation_config(model_dir: str, model_config: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return the checkpoint's generation settings, or an empty mapping.
+
+    ``generation_config.json`` is optional and is not part of the weight
+    checkpoint, so a missing or malformed file is not an error: the model then
+    simply carries no sampling defaults, exactly as llama.cpp behaves.
+    """
+
+    embedded = model_config.get("generation_config")
+    if isinstance(embedded, dict) and embedded:
+        return embedded
+    path = os.path.join(model_dir, "generation_config.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        payload = _load_json(path)
+    except (OSError, ValueError):
+        log.warn("package: ignoring unreadable generation_config.json at %s", path)
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _quantize_config(payload: Mapping[str, Any]) -> Any:
@@ -668,6 +705,7 @@ def _write_gguf(
     n_blocks: int,
     name: str,
     file_type: int,
+    generation_config: Mapping[str, Any],
 ) -> None:
     parent = os.path.dirname(out) or "."
     handle, temp_name = tempfile.mkstemp(prefix=".gguf-package-", suffix=".gguf", dir=parent)
@@ -685,6 +723,7 @@ def _write_gguf(
                 n_blocks=n_blocks,
                 name=name,
                 file_type=file_type,
+                generation_config=generation_config,
             )
             for tensor in plan:
                 _add_tensor_info(writer, gguf, tensor)
@@ -706,6 +745,9 @@ def _write_gguf(
         else:
             # Publish the complete file only if its destination is still free.
             os.link(temp_path, out)
+        # ``mkstemp`` creates the temporary file with 0600; a published
+        # checkpoint has to be readable by the processes that serve it.
+        os.chmod(out, 0o644)
     finally:
         try:
             temp_path.unlink(missing_ok=True)
@@ -723,6 +765,7 @@ def _add_metadata(
     n_blocks: int,
     name: str,
     file_type: int,
+    generation_config: Mapping[str, Any],
 ) -> None:
     writer.add_name(name)
     if file_type >= 0:
@@ -761,11 +804,56 @@ def _add_metadata(
     if tokenizer_meta.chat_template:
         writer.add_chat_template(tokenizer_meta.chat_template)
 
-    duplicates = config.metadata.keys() & writer.kv_data[0].keys()
+    _add_sampling_metadata(writer, generation_config, config.metadata)
+
+    # Sampling defaults are caller-tunable; every other generated key is not.
+    sampling_overrides = {
+        key: value for key, value in config.metadata.items() if key.startswith("general.sampling.")
+    }
+    structural = {key: value for key, value in config.metadata.items() if key not in sampling_overrides}
+    duplicates = structural.keys() & writer.kv_data[0].keys()
     if duplicates:
         raise PackageError(f"package(): metadata cannot replace generated keys: {sorted(duplicates)}.")
     for key, value in config.metadata.items():
         _add_scalar(writer, key, value)
+
+
+def _add_sampling_metadata(
+    writer: Any,
+    generation_config: Mapping[str, Any],
+    overrides: Mapping[str, Any],
+) -> None:
+    """Store Hugging Face generation settings under llama.cpp's keys.
+
+    llama.cpp reads these as *parameters* for its default sampler chain, so
+    they change defaults without replacing the chain. A caller-supplied
+    ``metadata`` entry for the same key wins.
+
+    ``do_sample: false`` means greedy decoding in Transformers, where
+    ``temperature`` is ignored; the faithful mapping is ``temp = 0``.
+    """
+
+    do_sample = generation_config.get("do_sample")
+    for source_key, gguf_key, kind in _SAMPLING_FIELDS:
+        if gguf_key in overrides:
+            continue
+        value = generation_config.get(source_key)
+        if source_key == "temperature" and do_sample is False:
+            value = 0.0
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise CheckpointFormatError(
+                f"package(): `generation_config.{source_key}` must be a number, got {value!r}."
+            )
+        if kind == "int":
+            if int(value) != value:
+                raise CheckpointFormatError(
+                    f"package(): `generation_config.{source_key}` must be an integer, got {value!r}."
+                )
+            writer.add_int32(gguf_key, int(value))
+        else:
+            writer.add_float32(gguf_key, float(value))
 
 
 def _maybe_uint32(writer: Any, method: str, value: Any) -> None:

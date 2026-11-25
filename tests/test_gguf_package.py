@@ -457,6 +457,19 @@ def test_quantize_config_json_is_accepted(tmp_path):
     assert _tensors(out)["blk.0.ffn_down.weight"].tensor_type.name == "Q4_K"
 
 
+def test_published_file_is_world_readable(tmp_path):
+    import os
+    import stat
+
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+    out = _run_package(root, tmp_path)
+
+    mode = stat.S_IMODE(os.stat(out).st_mode)
+    assert mode == 0o644
+
+
 def test_existing_output_requires_overwrite(tmp_path):
     root = tmp_path / "ckpt"
     root.mkdir()
@@ -911,3 +924,99 @@ def test_llamacpp_loads_the_packaged_file(tmp_path, model_type):
         assert np.any(logits != 0)
     finally:
         model.close()
+
+CHAT_TEMPLATE = (
+    "{% for message in messages %}"
+    "{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n' }}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+)
+
+
+def test_chat_template_is_packaged(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+    tokenizer = _tiny_tokenizer()
+    tokenizer.chat_template = CHAT_TEMPLATE
+    out = _run_package(root, tmp_path, tokenizer=tokenizer)
+
+    reader = gguf.GGUFReader(str(out))
+    assert reader.get_field("tokenizer.chat_template").contents() == CHAT_TEMPLATE
+
+
+def test_chat_template_override_wins(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+    tokenizer = _tiny_tokenizer()
+    tokenizer.chat_template = CHAT_TEMPLATE
+    override = CHAT_TEMPLATE + "{# packaged by caller #}"
+    out = _run_package(root, tmp_path, tokenizer=tokenizer, chat_template=override)
+
+    reader = gguf.GGUFReader(str(out))
+    assert reader.get_field("tokenizer.chat_template").contents() == override
+
+
+def test_sampling_defaults_are_packaged(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+    (root / "generation_config.json").write_text(
+        json.dumps(
+            {
+                "do_sample": True,
+                "temperature": 0.6,
+                "top_k": 20,
+                "top_p": 0.95,
+                "min_p": 0.0,
+                "repetition_penalty": 1.05,
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = _run_package(root, tmp_path)
+
+    reader = gguf.GGUFReader(str(out))
+    assert float(reader.get_field("general.sampling.temp").contents()) == pytest.approx(0.6)
+    assert int(reader.get_field("general.sampling.top_k").contents()) == 20
+    assert float(reader.get_field("general.sampling.top_p").contents()) == pytest.approx(0.95)
+    assert float(reader.get_field("general.sampling.min_p").contents()) == pytest.approx(0.0)
+    assert float(reader.get_field("general.sampling.penalty_repeat").contents()) == pytest.approx(1.05)
+    # llama.cpp would otherwise replace its default sampler chain.
+    assert reader.get_field("general.sampling.sequence") is None
+
+
+def test_greedy_generation_maps_to_zero_temperature(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+    (root / "generation_config.json").write_text(
+        json.dumps({"do_sample": False, "temperature": 0.9}), encoding="utf-8"
+    )
+    out = _run_package(root, tmp_path)
+
+    reader = gguf.GGUFReader(str(out))
+    assert float(reader.get_field("general.sampling.temp").contents()) == 0.0
+
+
+def test_caller_metadata_wins_over_generation_config(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+    (root / "generation_config.json").write_text(json.dumps({"temperature": 0.6}), encoding="utf-8")
+    out = _run_package(root, tmp_path, metadata={"general.sampling.temp": 0.0})
+
+    reader = gguf.GGUFReader(str(out))
+    assert float(reader.get_field("general.sampling.temp").contents()) == 0.0
+
+
+def test_malformed_generation_config_is_ignored(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+    (root / "generation_config.json").write_text("{not json", encoding="utf-8")
+    out = _run_package(root, tmp_path)
+
+    reader = gguf.GGUFReader(str(out))
+    assert reader.get_field("general.sampling.temp") is None
