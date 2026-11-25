@@ -29,8 +29,7 @@ from torch import nn
 
 from transformers import initialization as init
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache
-from transformers.generation import GenerationMixin
+from transformers.cache_utils import Cache
 from transformers.integrations import use_kernel_forward_from_hub, use_kernel_func_from_hub_with_fallback, use_kernelized_func
 from transformers.integrations.accelerate import force_accelerate_hooks
 from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
@@ -71,6 +70,12 @@ from transformers.vision_utils import (
 )
 from ..auto import AutoModel
 from .configuration_qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig, Qwen3_5VisionConfig
+from .....utils.leapquant import (
+    LeapQuantDynamicCache,
+    LeapQuantGenerationMixin,
+    make_leapquant_cache,
+    validate_leapquant_inputs,
+)
 
 
 class Qwen3_5VisionRotaryEmbedding(nn.Module):
@@ -556,6 +561,10 @@ class Qwen3_5GatedDeltaNet(nn.Module):
 
         # Set up dimensions for reshapes later
         batch_size, seq_len, _ = hidden_states.shape
+        quant_layer = cache_params.layers[self.layer_idx] if cache_params is not None else None
+        state_quant = getattr(quant_layer, "state_quant", None)
+        if state_quant is not None:
+            validate_leapquant_inputs(attention_mask, kwargs)
         # Retrieve conv and recurrent states if there is a cache. They may be None if the layer is not initialized.
         if cache_params is not None:
             conv_state = cache_params.get_conv_state(self.layer_idx, state_idx=0)
@@ -618,7 +627,42 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         # If the model is loaded in fp16, without the .float() here, A might be -inf
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
 
-        if recurrent_state is not None and seq_len == 1:
+        quantized_decode = state_quant is not None and seq_len == 1
+        if state_quant is not None:
+            quantizer = quant_layer.leapquant_state(
+                batch_size,
+                self.num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+                gate_dim=1,
+                device=query.device,
+            )
+            if quantized_decode:
+                core_attn_out = quantizer.gdn_step(
+                    query[:, 0],
+                    key[:, 0],
+                    value[:, 0],
+                    a[:, 0],
+                    b[:, 0],
+                    self.A_log,
+                    self.dt_bias,
+                ).unsqueeze(1)
+                last_recurrent_state = None
+            else:
+                core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
+                    query,
+                    key,
+                    value,
+                    g=g,
+                    beta=beta,
+                    initial_state=quantizer.materialize(),
+                    output_final_state=True,
+                    use_qk_l2norm_in_kernel=True,
+                    cu_seqlens=kwargs.pop("cu_seqlens", None),
+                    **kwargs,
+                )
+            core_attn_out = core_attn_out.to(query.dtype)
+        elif recurrent_state is not None and seq_len == 1:
             core_attn_out, last_recurrent_state = torch_recurrent_gated_delta_rule(
                 query,
                 key,
@@ -646,7 +690,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             )
 
         # Update cache
-        if cache_params is not None:
+        if cache_params is not None and not quantized_decode:
             cache_params.update_recurrent_state(last_recurrent_state, self.layer_idx)
 
         # reshape input data into 2D tensor
@@ -1205,6 +1249,9 @@ class Qwen3_5VisionModel(Qwen3_5PreTrainedModel):
 
 class Qwen3_5TextModel(Qwen3_5PreTrainedModel):
     config: Qwen3_5TextConfig
+    @property
+    def supports_state_quant(self) -> bool:
+        return "linear_attention" in self.config.layer_types
 
     def __init__(self, config: Qwen3_5TextConfig):
         super().__init__(config)
@@ -1238,7 +1285,12 @@ class Qwen3_5TextModel(Qwen3_5PreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache(config=self.config)
+            past_key_values = make_leapquant_cache(
+                self.config,
+                getattr(self, "_gptqmodel_state_quant", None),
+            )
+        if isinstance(past_key_values, LeapQuantDynamicCache) and past_key_values.state_quant is not None:
+            validate_leapquant_inputs(attention_mask, kwargs)
 
         # the hard coded `4` is for text, temporal, height and width.
         if position_ids is None:
@@ -1650,7 +1702,7 @@ class Qwen3_5Model(Qwen3_5PreTrainedModel):
 
 
 @auto_docstring
-class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, GenerationMixin):
+class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, LeapQuantGenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_gather_output"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
@@ -1729,7 +1781,7 @@ class Qwen3_5ForTokenClassification(GenericForTokenClassification, Qwen3_5PreTra
     config: Qwen3_5Config
 
 
-class Qwen3_5ForConditionalGeneration(Qwen3_5PreTrainedModel, GenerationMixin):
+class Qwen3_5ForConditionalGeneration(Qwen3_5PreTrainedModel, LeapQuantGenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.language_model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_gather_output"}
     # Reference: fix gemma3 grad acc #37208

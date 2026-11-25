@@ -29,7 +29,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import initialization as init
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicLayer, LinearAttentionLayer
+from transformers.cache_utils import Cache, DynamicLayer
 from transformers.generation import GenerationMixin
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -37,6 +37,12 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, can_return_tuple
 
+from ....utils.leapquant import (
+    LeapQuantCacheMixin,
+    LeapQuantConfig,
+    LeapQuantLinearAttentionLayer,
+    validate_leapquant_inputs,
+)
 from ..native.kimi_linear.modeling_kimi_linear import KimiLinearRMSNorm as KimiRMSNorm
 from ..native.kimi_linear.modeling_kimi_linear import eager_attention_forward
 from .checkpoint import ActiveKDAHeads, KimiCheckpointMixin
@@ -97,31 +103,42 @@ def pad_input(
     return out.view(batch_size, seq_len, *hidden_states.shape[1:])
 
 
-class KimiDeltaCacheLayer(LinearAttentionLayer):
+class KimiDeltaCacheLayer(LeapQuantLinearAttentionLayer):
     """KDA cache layer: q/k/v short-convolution states plus the delta-rule recurrent state.
 
-    The states are the eager FLA kernels' own final states, stored as-is. The layer also counts the sequence
-    positions it has consumed, because Kimi stacks may contain no attention layer to derive a length from.
+    The states are the eager FLA kernels' own final states, stored as-is when
+    LeapQuant is off. When it is on, the recurrent state lives in a packed
+    :class:`LeapQuantState` and the dense slot stays empty. The layer also
+    counts the sequence positions it has consumed, because Kimi stacks may
+    contain no attention layer to derive a length from.
     """
 
-    def __init__(self):
-        super().__init__(number_of_states=3)
+    def __init__(self, state_quant: LeapQuantConfig | None = None):
+        super().__init__(number_of_states=3, state_quant=state_quant)
         self.cumulative_length = 0
 
     def get_kda_states(self):
         """Return ``((conv_q, conv_k, conv_v), recurrent)`` or ``(None, None)`` before the first update."""
         if not self.has_previous_state[0]:
             return None, None
-        return (self.conv_states[0], self.conv_states[1], self.conv_states[2]), self.recurrent_states[0]
+        recurrent = None if self.state_quant is not None else self.recurrent_states[0]
+        return (self.conv_states[0], self.conv_states[1], self.conv_states[2]), recurrent
 
     def set_kda_states(self, conv_states, recurrent_state, num_tokens: int):
         for index, state in enumerate(conv_states):
             self.conv_states[index] = state
             self.is_conv_states_initialized[index] = state is not None
             self.has_previous_state[index] = True
-        self.recurrent_states[0] = recurrent_state
-        self.is_recurrent_states_initialized[0] = recurrent_state is not None
-        self.device = recurrent_state.device if recurrent_state is not None else self.device
+        if self.state_quant is None:
+            self.recurrent_states[0] = recurrent_state
+            self.is_recurrent_states_initialized[0] = recurrent_state is not None
+            if recurrent_state is not None:
+                self.device = recurrent_state.device
+        else:
+            self.recurrent_states[0] = None
+            self.is_recurrent_states_initialized[0] = False
+            if conv_states[0] is not None:
+                self.device = conv_states[0].device
         self.cumulative_length += num_tokens
 
     def get_seq_length(self) -> int:
@@ -132,18 +149,19 @@ class KimiDeltaCacheLayer(LinearAttentionLayer):
         self.cumulative_length = 0
 
 
-class KimiDynamicCache(Cache):
+class KimiDynamicCache(LeapQuantCacheMixin, Cache):
     """Hybrid K3 cache: ``DynamicLayer`` for MLA layers and ``KimiDeltaCacheLayer`` for KDA layers.
 
     It also carries the merged multimodal attention/input masks so cached continuations can extend them.
     """
 
-    def __init__(self, config: KimiLinearConfig):
+    def __init__(self, config: KimiLinearConfig, state_quant: LeapQuantConfig | None = None):
         layers = [
-            KimiDeltaCacheLayer() if config.is_kda_layer(index) else DynamicLayer()
+            KimiDeltaCacheLayer(state_quant=state_quant) if config.is_kda_layer(index) else DynamicLayer()
             for index in range(config.num_hidden_layers)
         ]
         super().__init__(layers=layers)
+        self.state_quant = state_quant
         self.multimodal_attention_mask = None
         self.multimodal_input_mask = None
 
@@ -156,6 +174,7 @@ class KimiDynamicCache(Cache):
         return self.get_seq_length(layer_idx) + query_length, 0
 
     def reorder_cache(self, beam_idx: torch.LongTensor):
+        self._check_leapquant_reorder(beam_idx)
         for name in ("multimodal_attention_mask", "multimodal_input_mask"):
             mask = getattr(self, name)
             if mask is not None:
@@ -448,6 +467,11 @@ class KimiDeltaAttention(nn.Module):
                 )
         use_cache = cache_params is not None
         batch_size, q_len, _ = hidden_states.shape
+        quant_layer = cache_params.layers[self.layer_idx] if cache_params is not None else None
+        state_quant = getattr(quant_layer, "state_quant", None)
+        if state_quant is not None:
+            validate_leapquant_inputs(attention_mask, kwargs)
+            attention_mask = None
         cu_seqlens = kwargs.get("cu_seqlens")
         indices = None
         if attention_mask is not None:
@@ -489,18 +513,56 @@ class KimiDeltaAttention(nn.Module):
         q, k = (x.unflatten(-1, (self.num_heads, self.head_k_dim)) for x in (q, k))
         v = v.unflatten(-1, (self.num_heads, self.head_dim))
 
-        o, recurrent_state = kda_forward(
-            q,
-            k,
-            v,
-            g,
-            beta,
-            self.A_log,
-            self.dt_bias,
-            initial_state=recurrent_state,
-            lower_bound=self.gate_lower_bound,
-            cu_seqlens=cu_seqlens,
-        )
+        if state_quant is not None:
+            quantizer = quant_layer.leapquant_state(
+                batch_size,
+                self.num_heads,
+                self.head_k_dim,
+                self.head_dim,
+                gate_dim=self.head_k_dim,
+                device=q.device,
+            )
+            if q_len == 1:
+                o = quantizer.kda_step(
+                    q[:, 0],
+                    k[:, 0],
+                    v[:, 0],
+                    g[:, 0],
+                    beta[:, 0],
+                    self.A_log,
+                    self.dt_bias,
+                    self.gate_lower_bound,
+                ).unsqueeze(1)
+                recurrent_state = None
+            else:
+                o, last_state = kda_forward(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    self.A_log,
+                    self.dt_bias,
+                    initial_state=quantizer.materialize(),
+                    lower_bound=self.gate_lower_bound,
+                    cu_seqlens=None,
+                )
+                quantizer.quantize_(last_state)
+                recurrent_state = None
+            o = o.to(v.dtype)
+        else:
+            o, recurrent_state = kda_forward(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                self.A_log,
+                self.dt_bias,
+                initial_state=recurrent_state,
+                lower_bound=self.gate_lower_bound,
+                cu_seqlens=cu_seqlens,
+            )
         if cache_params is not None:
             cache_params.layers[self.layer_idx].set_kda_states(
                 (conv_state_q, conv_state_k, conv_state_v), recurrent_state, q_len
@@ -940,6 +1002,10 @@ def _apply_attn_res(prefix_sum, block_residual, proj, norm):
 
 
 class KimiLinearModel(KimiPreTrainedModel):
+    @property
+    def supports_state_quant(self) -> bool:
+        return any(self.config.is_kda_layer(index) for index in range(self.config.num_hidden_layers))
+
     def __init__(self, config: KimiLinearConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
@@ -995,7 +1061,12 @@ class KimiLinearModel(KimiPreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if use_cache and past_key_values is None:
-            past_key_values = KimiDynamicCache(config=self.config)
+            past_key_values = KimiDynamicCache(
+                config=self.config,
+                state_quant=getattr(self, "_gptqmodel_state_quant", None),
+            )
+        if past_key_values is not None and past_key_values.state_quant is not None:
+            validate_leapquant_inputs(attention_mask, kwargs)
 
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
         if position_ids is None:
