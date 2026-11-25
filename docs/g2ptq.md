@@ -114,9 +114,10 @@ The replay runs outside `torch.inference_mode()`, because the quantization
 stage itself runs inside it and every tensor allocated there is an inference
 tensor that autograd refuses to save. `_differentiable_block` therefore owns a
 snapshot (a deep copy when the stage handed over the live module) and rebuilds
-every frozen parameter as a fresh grad leaf; the live modules are never
-modified. Each block derives its Fisher draws from the run seed and layer
-index. The continuation stores the run seed so checkpoint packing and
+each frozen floating-point weight as a gradient leaf. Projections that share
+a weight also share its leaf, so autograd sums both contributions. Integer
+index parameters retain their values and stay outside gradient tracking. Each
+block derives its Fisher draws from the run seed and layer index. The continuation stores the run seed so checkpoint packing and
 interruption leave the draws reproducible.
 
 ## Failure contracts
@@ -147,6 +148,7 @@ interruption leave the draws reproducible.
 | Calibration rows | Objectives included all replayed rows | Replay keep mask selects rows for the objectives |
 | Fisher sampling | Used the global RNG between packing operations | Each block uses a local stream derived from the saved run seed |
 | Zero Fisher diagonal | A group could erase a calibration-live weight | GPTQ input energy identifies dead columns, and a positive diagonal stabilizes the group factorization |
+| Dynamic grid refit | A refit spanning two compute blocks could read stale trailing columns | The solver flushes pending updates before fitting the next group across a block boundary |
 | Inverse allocation failure | The inverse could move to CPU while the column loop still allocated on the original device | The CPU retry carries the remaining solve and its scratch tensors |
 
 ## Measured effect

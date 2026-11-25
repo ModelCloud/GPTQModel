@@ -4,6 +4,7 @@
 """G2PTQ configuration, block statistics, and end-to-end lifecycle tests."""
 
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -854,3 +855,73 @@ def test_replayed_projection_accumulates_every_invocation():
     hessian = (5 * noise.square() * x.double().square()).sum().reshape(1, 1, 1)
     torch.testing.assert_close(stats["hessian"].double(), hessian, atol=1e-6, rtol=1e-6)
     torch.testing.assert_close(stats["activation_square"], torch.tensor([50.0]))
+
+
+@pytest.mark.parametrize("blocksize", [3, 6, 8])
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda:0", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="Accelerator required")),
+])
+def test_dynamic_grid_matches_columnwise_refit(blocksize, device):
+    generator = torch.Generator().manual_seed(47)
+    module = nn.Linear(12, 4, bias=False, device=device)
+    with torch.no_grad():
+        module.weight.copy_(torch.randn(4, 12, generator=generator))
+    x = torch.randn(32, 12, generator=generator).to(device)
+    gradient = torch.randn(4, 12, generator=generator).to(device)
+    config = GPTQConfig(
+        bits=2, group_size=4, act_group_aware=False,
+        g2ptq=G2PTQConfig(num_groups=1, alpha_mse=0.1),
+    )
+
+    def solve(size):
+        task = G2PTQ(module, qcfg=config)
+        task.quantizer.configure(perchannel=True)
+        task.add_batch(x, None)
+        task.set_block_statistics(group_hessians=(x.T @ x).unsqueeze(0), weight_gradient=gradient)
+        return task.quantize(blocksize=size)[:4]
+
+    expected_weight, expected_scale, expected_zero, expected_groups = solve(1)
+    weight, scale, zero, groups = solve(blocksize)
+    torch.testing.assert_close(groups, expected_groups)
+    torch.testing.assert_close(zero, expected_zero, atol=0, rtol=0)
+    torch.testing.assert_close(scale, expected_scale, atol=1e-6, rtol=1e-6)
+    expected_codes = (expected_weight / expected_scale[:, expected_groups.long()]).round()
+    actual_codes = (weight / scale[:, groups.long()]).round()
+    torch.testing.assert_close(actual_codes, expected_codes, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("integer_parameter", [False, True])
+def test_refresh_preserves_shared_weights_and_index_parameters(integer_parameter):
+    class SharedProjection(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.left = nn.Linear(2, 2, bias=False)
+            self.right = nn.Linear(2, 2, bias=False)
+            self.right.weight = self.left.weight
+            indices = torch.tensor([1, 0])
+            if integer_parameter:
+                self.indices = nn.Parameter(indices, requires_grad=False)
+            else:
+                self.register_buffer("indices", indices)
+
+        def forward(self, x):
+            return self.left(x) + self.right(x.index_select(-1, self.indices))
+
+    with torch.inference_mode():
+        block = SharedProjection()
+        block.left.weight.copy_(torch.eye(2))
+        pristine = deepcopy(block)
+    x = torch.tensor([[[1.0, 2.0]]])
+    processor = _processor(GPTQConfig(g2ptq=G2PTQConfig(num_groups=1)))
+    task = G2PTQ(block.left, qcfg=processor.qcfg)
+    processor.tasks["left"] = task
+    processor.receive_pristine_layer_module(layer_index=0, layer_module=pristine)
+    processor._g2ptq_layer_state[0] = {
+        "layer": block, "inputs": [[x]], "targets": [[torch.zeros_like(x)]],
+    }
+    processor._refresh_block(layer_index=0, names=["left"])
+    # Both uses contribute to the gradient of the same parameter.
+    assert task.weight_gradient is not None
+    torch.testing.assert_close(task.weight_gradient, torch.full((2, 2), 4.5))
+    assert block.left.weight is block.right.weight and block.left.weight.is_inference()

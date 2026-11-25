@@ -116,11 +116,13 @@ def g2ptq_compensate(
     *,
     blocksize: int,
     loss_terms: Optional[torch.Tensor] = None,
+    dynamic_group_size: int = -1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the G2PTQ column loop over a batch of channel groups.
 
     ``weight`` is mutated in place, exactly like GPTQ's block pass. Returns the
-    quantized weights ``Q`` and the per-column errors ``E``.
+    quantized weights ``Q`` and the per-column errors ``E``. A positive
+    ``dynamic_group_size`` gives the width read by a group grid refit.
     """
 
     if weight.ndim != 3:
@@ -147,8 +149,15 @@ def g2ptq_compensate(
     )
     lazy_diag = (blocksize - 1 - offsets).to(weight.dtype)
 
-    for block_start in range(0, columns, blocksize):
+    block_start = 0
+    while block_start < columns:
         block_end = min(block_start + blocksize, columns)
+        if dynamic_group_size > 0 and block_end < columns:
+            # A refit reads the whole group. Flush pending updates before
+            # starting a group whose tail would lie outside this block.
+            boundary = block_end - block_end % dynamic_group_size
+            if boundary > block_start:
+                block_end = boundary
         count = block_end - block_start
 
         for column in range(block_start, block_end):
@@ -185,9 +194,11 @@ def g2ptq_compensate(
             weight[:, :, block_end:] -= (
                 error[:, :, block_start:block_end] @ block_factor
                 + count * f[:, :, block_end:]
-                - (m[:, :, block_start:block_end] * lazy_diag[:count]) @ block_factor
+                - (m[:, :, block_start:block_end] * lazy_diag[-count:]) @ block_factor
             )
             f[:, :, block_end:] -= m[:, :, block_start:block_end] @ block_factor
+
+        block_start = block_end
 
     return q, error
 
@@ -532,14 +543,14 @@ class G2PTQ(GPTQ):
             _quantize_column,
             blocksize=blocksize,
             loss_terms=loss_terms,
+            dynamic_group_size=-1 if static_groups else self.qcfg.group_size,
         )
 
         # ``gradient`` and ``weight_groups`` are closure variables of
         # ``_invert_groups``/``_quantize_column``. Clearing the cells releases
         # the tensors at the same point as ``del`` would.
-        factor = None
+        del factor, beta, _error
         gradient = None
-        beta = None
         weight_groups = None
 
         torch_sync()

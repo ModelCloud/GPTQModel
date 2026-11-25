@@ -657,7 +657,9 @@ class G2PTQProcessor(GPTQProcessor):
         owns_block = block is not layer
         hooked = any(hasattr(module, "forward_hook") for module in block.modules())
         frozen = any(
-            parameter.is_inference() or not parameter.requires_grad
+            parameter.is_inference() or (
+                (parameter.is_floating_point() or parameter.is_complex()) and not parameter.requires_grad
+            )
             for parameter in block.parameters()
         )
         inference_buffers = any(buffer.is_inference() for buffer in block.buffers())
@@ -699,14 +701,20 @@ class G2PTQProcessor(GPTQProcessor):
         inference tensor, and autograd then refuses to save it for backward.
         """
 
+        replacements = {}
         for module in snapshot.modules():
             for name, parameter in list(module._parameters.items()):
                 if parameter is None:
                     continue
-                if parameter.is_inference() or not parameter.requires_grad:
-                    module._parameters[name] = torch.nn.Parameter(
-                        parameter.detach().clone(), requires_grad=True
-                    )
+                differentiable = parameter.is_floating_point() or parameter.is_complex()
+                if parameter.is_inference() or (differentiable and not parameter.requires_grad):
+                    # All registrations of a tied weight must use the same leaf.
+                    key = id(parameter)
+                    if key not in replacements:
+                        replacements[key] = torch.nn.Parameter(
+                            parameter.detach().clone(), requires_grad=differentiable
+                        )
+                    module._parameters[name] = replacements[key]
             for name, buffer in list(module._buffers.items()):
                 if buffer is None:
                     continue
