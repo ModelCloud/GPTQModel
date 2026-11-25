@@ -194,7 +194,7 @@ model.save("qwen-admmq-4bit")
 | `pairswap_batch` | `64` | Batches per round. |
 | `pairswap_seed` | `0` | Pair sampling seed. |
 | `pairswap_condition_threshold` | `5e4` | Condition number above which `"auto"` runs PairSwap. |
-| `mse` | `MSEConfig(norm=2.0)` | MSE shrink-grid search; the paper uses 100 points and 0.8 maximum shrink. |
+| `mse` | `0` (off) | MSE shrink-grid clipping search. The paper enables GPTQ's search; measured WikiText-2 perplexity is better with it off, so it is opt-in (`MSEConfig(norm=2.0)`). |
 
 `ADMMQConfig` rejects options that change the weight-only contract:
 `activation`, `mock_quantization`, `gptaq`, `foem`, enabled `gsq` or
@@ -202,6 +202,36 @@ model.save("qwen-admmq-4bit")
 non-zero `damp_auto_increment`: ADMM-Q damps the Hessian once with
 `damp_percent` and runs no incremental damp-recovery grid. The same
 restrictions apply to per-module `dynamic` rules.
+
+## Measured quality
+
+WikiText-2 perplexity, 4-bit, `group_size=128`, symmetric, no activation
+quantization. Calibration is 24 x 2048 tokens from the train split; evaluation
+is 32768 tokens from the test split. Both solvers see identical calibration and
+evaluation windows, and every quantized checkpoint is reloaded before scoring.
+
+| Model | FP16 | RTN | GPTQ | ADMM-Q (60 iters) | ADMM-Q (default) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen2.5-0.5B-Instruct | 13.770 | 18.503 | 14.990 | 15.062 | **14.834** |
+| SmolLM2-135M | 14.711 | 22.322 | 18.836 | 16.707 | **16.591** |
+
+Against GPTQ, the default solver is 1.0% lower on Qwen2.5-0.5B-Instruct and
+11.9% lower on SmolLM2-135M. The 60-iteration budget is not enough on the larger
+model, where it lands 0.5% above GPTQ, but it already beats GPTQ by 11.3% on the
+smaller one, so the default budget matters most for the wider model.
+
+Quantization cost on the same runs: GPTQ takes 15 s and 0.59 GiB peak on
+Qwen2.5-0.5B-Instruct, while ADMM-Q takes 81 s and 1.50 GiB. The extra time is
+the ADMM iterations; the extra memory is the float64 factor.
+
+Reproduce with:
+
+```bash
+python scripts/benchmark_admmq_ppl.py --model Qwen/Qwen2.5-0.5B-Instruct \
+    --configs dense,rtn,gptq,admmq-60,admmq \
+    --calibration-rows 24 --calibration-seq-len 2048 \
+    --eval-rows 16 --eval-seq-len 2048
+```
 
 ## Checkpoint contract
 

@@ -12,6 +12,7 @@ It runs only when a checkpoint is already available locally, through
 cache, so it never adds a download to CI.
 """
 
+import math
 import os
 from pathlib import Path
 
@@ -19,7 +20,7 @@ import pytest
 import torch
 
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
-from gptqmodel.quantization.config import METHOD, ADMMQConfig
+from gptqmodel.quantization.config import METHOD, ADMMQConfig, QuantizeConfig
 
 
 LOCAL_MODEL = Path("/monster/data/model/Qwen2.5-0.5B-Instruct")
@@ -156,3 +157,109 @@ def test_qwen_admmq_real_model_roundtrip(tmp_path):
     # the stable prefix still proves the reloaded model behaves the same.
     prefix = input_ids.shape[1] + 8
     assert torch.equal(second[:, :prefix], first[:, :prefix])
+
+
+def _wikitext_windows(tokenizer, split: str, rows: int, seq_len: int) -> torch.Tensor:
+    datasets = pytest.importorskip("datasets", reason="WikiText-2 needs `datasets`")
+    try:
+        dataset = datasets.load_dataset(
+            "Salesforce/wikitext", "wikitext-2-raw-v1", split=split
+        )
+    except Exception as exc:  # pragma: no cover - offline cache guard
+        pytest.skip(f"WikiText-2 is not available locally: {exc}")
+    text = "\n\n".join(row["text"] for row in dataset)
+    tokens = tokenizer(
+        text,
+        return_tensors="pt",
+        add_special_tokens=False,
+        truncation=True,
+        max_length=rows * seq_len,
+    ).input_ids
+    usable = (tokens.shape[1] // seq_len) * seq_len
+    assert usable >= seq_len
+    return tokens[:, :usable]
+
+
+@torch.inference_mode()
+def _perplexity(model, tokens: torch.Tensor, seq_len: int) -> float:
+    total_nll = 0.0
+    total_tokens = 0
+    for start in range(0, tokens.shape[1] - 1, seq_len):
+        batch = tokens[:, start : start + seq_len].to("cuda")
+        if batch.shape[1] < 2:
+            continue
+        logits = model(batch, use_cache=False).logits[:, :-1].float()
+        labels = batch[:, 1:]
+        loss = torch.nn.functional.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]), labels.reshape(-1), reduction="sum"
+        )
+        total_nll += float(loss)
+        total_tokens += labels.numel()
+    return math.exp(total_nll / total_tokens)
+
+
+def _quantized_perplexity(model_id, load_kwargs, qcfg, calibration, eval_tokens, seq_len):
+    model = GPTQModel.load(
+        model_id,
+        qcfg,
+        device="cuda",
+        dtype=torch.bfloat16,
+        **load_kwargs,
+    )
+    model.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1),
+        backend=BACKEND.GPTQ_TORCH,
+    )
+    model.model.to("cuda").eval()
+    ppl = _perplexity(model.model, eval_tokens, seq_len)
+    del model
+    torch.cuda.empty_cache()
+    return ppl
+
+
+def test_admmq_perplexity_beats_gptq_on_real_model():
+    """WikiText-2 perplexity: the ADMM solve must beat the greedy sweep.
+
+    Both methods see the same calibration windows, the same tokenizer and the
+    same evaluation tokens, so only the weight solver differs.
+    """
+
+    model_id = _resolve_model()
+    load_kwargs = {"local_files_only": True} if model_id == HF_MODEL_ID else {}
+    calibration_rows = 24
+    seq_len = 2048
+
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_id, **load_kwargs)
+    calibration_ids = _wikitext_windows(tokenizer, "train", calibration_rows, seq_len)
+    calibration = [
+        tokenizer.decode(row.tolist())
+        for row in calibration_ids.reshape(-1, seq_len)
+    ]
+    eval_tokens = _wikitext_windows(tokenizer, "test", 16, seq_len)
+
+    common = {
+        "bits": 4,
+        "group_size": 128,
+        "sym": True,
+        "desc_act": False,
+        "offload_to_disk": False,
+    }
+    gptq_ppl = _quantized_perplexity(
+        model_id,
+        load_kwargs,
+        QuantizeConfig(method=METHOD.GPTQ, **common),
+        calibration,
+        eval_tokens,
+        seq_len,
+    )
+    admmq_ppl = _quantized_perplexity(
+        model_id, load_kwargs, ADMMQConfig(**common), calibration, eval_tokens, seq_len
+    )
+
+    print({"gptq_ppl": gptq_ppl, "admmq_ppl": admmq_ppl})
+    assert admmq_ppl < gptq_ppl, (
+        f"ADMM-Q perplexity {admmq_ppl:.4f} must be below GPTQ {gptq_ppl:.4f} "
+        "on identical calibration and evaluation windows"
+    )
