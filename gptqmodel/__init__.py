@@ -466,6 +466,7 @@ from .quantization import (
     GGUFConfig,
     GPTAQConfig,
     GPTQConfig,
+    JointQConfig,
     MSEConfig,
     NormConfig,
     NormType,

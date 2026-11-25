@@ -184,6 +184,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [FP8 inverse-scale checkpoint loading](fp8-inverse-scale-checkpoint-loading.md)
 - [Stable hf_ packing API](hf_packing_api.md)
 - [Hugging Face interoperability](hf-interop.md)
+- [JointQ joint scale-and-integer refinement](jointq.md)
 - [Lazy checkpoint materialization](lazy-checkpoint-materialization.md)
 - [LeapQuant recurrent-state quantization](leapquant.md)
 - [Looper checkpoint/resume](looper-checkpoint-redesign.md)

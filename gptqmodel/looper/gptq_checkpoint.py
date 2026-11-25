@@ -309,6 +309,7 @@ def validate_checkpoint_support(model, *, embed_quant_config=None, adapter=None)
         or not config.true_sequential
         or getattr(config, "gptaq", None) is not None
         or getattr(config, "foem", None) is not None
+        or getattr(config, "jointq", None) is not None
         or (adapter is not None and type(adapter) is not Lora)
         or config.lm_head
         or embed_quant_config is not None
@@ -316,7 +317,7 @@ def validate_checkpoint_support(model, *, embed_quant_config=None, adapter=None)
         or (config.adapter is not None and type(config.adapter) is not Lora)
     ):
         raise NotImplementedError(
-            "checkpoint requires sequential quantization without GPTAQ/FOEM "
+            "checkpoint requires sequential quantization without GPTAQ/FOEM/JointQ "
             "or embedding/lm_head quantization"
         )
     model_type = model.model.config.model_type

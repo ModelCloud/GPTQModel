@@ -127,6 +127,7 @@ META_FIELD_FOEM_ENABLED = "foem"
 # G2PTQ is a GPTQ-family solver, so it is recorded in `meta` rather than
 # as a separate METHOD.
 META_FIELD_G2PTQ_ENABLED = "g2ptq"
+META_FIELD_JOINTQ_ENABLED = "jointq"
 
 # GPTQModel <= 5.4.x stored the GPTAQ switch as a bare boolean in `meta.gptaq`
 # and kept its coefficient/device in these sibling keys. 5.x replaced the
@@ -2719,6 +2720,137 @@ class G2PTQConfig:
 
 
 @dataclass
+class JointQConfig:
+    r"""Configuration of the JointQ scale-and-integer refinement.
+
+    JointQ (Kimura and Ichikawa, "JointQ: Joint Scale-and-Integer Quantization
+    for Large Language Models", arXiv:2611.20384) refines a GPTQ solution by
+    optimizing the group scales jointly with the integer assignments while
+    keeping the GPTQ checkpoint format. It is nested inside
+    :class:`GPTQConfig` the same way ``foem`` and ``gptaq`` are; it is not a
+    separate quantization method.
+
+    Args:
+        regularization: ``"paper"`` selects the layer-type-specific diagonal
+            Tikhonov strengths from Table 6 of the paper for the five settings
+            the authors tuned (W4G128, W4 per-channel, W3G128, W3 per-channel
+            and W2G32). Any other setting falls back to ``0``. A nonnegative
+            float applies that strength to every layer instead.
+        eta: exponent of the activation-energy regularizer (paper: ``0.5``).
+        adaptive_retry: ``None`` follows the paper: a layer assigned
+            ``lambda == 0`` is re-quantized with ``retry_regularization`` when
+            its relative weight error reaches ``retry_ratio``. The retry is
+            disabled for 2-bit settings. ``True`` or ``False`` overrides that.
+        retry_ratio: relative weight-error threshold that triggers the retry.
+        retry_regularization: regularization used by the retry.
+        tolerance: absolute tolerance of the integer search and of the scale
+            re-solve acceptance test.
+        inner_stall_fraction: fraction of rows without an improving move that
+            stops one group search.
+        outer_active_fraction: fraction of active rows below which the layer
+            search stops.
+        re_solve_low: lower row-selection threshold for the joint scale re-solve.
+        re_solve_high: upper row-selection threshold for the joint scale re-solve.
+        max_iterations_per_group: cap of one group search; ``None`` uses the
+            paper's ``10 * group size``.
+        max_passes: safety cap on the number of layer passes.
+        device: device of the refinement; ``"auto"`` follows the Hessian.
+        dtype: solver precision; ``"float64"`` matches the paper.
+    """
+
+    regularization: Union[str, float] = field(default="paper")
+    eta: float = field(default=0.5)
+    adaptive_retry: Optional[bool] = field(default=None)
+    retry_ratio: float = field(default=0.2)
+    retry_regularization: float = field(default=0.01)
+    tolerance: float = field(default=1e-12)
+    inner_stall_fraction: float = field(default=0.1)
+    outer_active_fraction: float = field(default=0.1)
+    re_solve_low: float = field(default=0.2)
+    re_solve_high: float = field(default=0.6)
+    max_iterations_per_group: Optional[int] = field(default=None)
+    max_passes: int = field(default=100)
+    device: Union[str, torch.device] = field(default="auto")
+    dtype: str = field(default="float64")
+
+    def meta_payload(self) -> Dict[str, Any]:
+        """Return the ``meta.jointq`` mapping written into checkpoints."""
+
+        device = self.device
+        return {
+            "regularization": self.regularization,
+            "eta": self.eta,
+            "adaptive_retry": self.adaptive_retry,
+            "retry_ratio": self.retry_ratio,
+            "retry_regularization": self.retry_regularization,
+            "tolerance": self.tolerance,
+            "inner_stall_fraction": self.inner_stall_fraction,
+            "outer_active_fraction": self.outer_active_fraction,
+            "re_solve_low": self.re_solve_low,
+            "re_solve_high": self.re_solve_high,
+            "max_iterations_per_group": self.max_iterations_per_group,
+            "max_passes": self.max_passes,
+            "device": device if isinstance(device, str) else str(device),
+            "dtype": self.dtype,
+        }
+
+    def __post_init__(self):
+        if isinstance(self.regularization, str):
+            if self.regularization.lower() != "paper":
+                raise ValueError(
+                    "JointQConfig: `regularization` must be `\"paper\"` or a nonnegative float."
+                )
+            self.regularization = "paper"
+        else:
+            self.regularization = _validate_finite_float(
+                "JointQConfig", "regularization", self.regularization, minimum=0.0
+            )
+        self.eta = _validate_finite_float("JointQConfig", "eta", self.eta, minimum=0.0)
+        if self.adaptive_retry is not None and not isinstance(self.adaptive_retry, bool):
+            raise ValueError("JointQConfig: `adaptive_retry` must be a boolean or None.")
+        self.retry_ratio = _validate_finite_float(
+            "JointQConfig", "retry_ratio", self.retry_ratio, minimum=0.0
+        )
+        self.retry_regularization = _validate_finite_float(
+            "JointQConfig", "retry_regularization", self.retry_regularization, minimum=0.0
+        )
+        self.tolerance = _validate_finite_float(
+            "JointQConfig", "tolerance", self.tolerance, minimum=0.0
+        )
+        if self.tolerance <= 0.0:
+            raise ValueError("JointQConfig: `tolerance` must be positive.")
+        for name in ("inner_stall_fraction", "outer_active_fraction"):
+            value = _validate_finite_float(
+                "JointQConfig", name, getattr(self, name), minimum=0.0
+            )
+            if not 0.0 < value <= 1.0:
+                raise ValueError(f"JointQConfig: `{name}` must be in (0, 1], got {value!r}.")
+            setattr(self, name, value)
+        for name in ("re_solve_low", "re_solve_high"):
+            value = _validate_finite_float(
+                "JointQConfig", name, getattr(self, name), minimum=0.0
+            )
+            if value > 1.0:
+                raise ValueError(f"JointQConfig: `{name}` must be in [0, 1], got {value!r}.")
+            setattr(self, name, value)
+        if self.re_solve_low >= self.re_solve_high:
+            raise ValueError("JointQConfig: `re_solve_low` must be smaller than `re_solve_high`.")
+        if self.max_iterations_per_group is not None:
+            value = self.max_iterations_per_group
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError("JointQConfig: `max_iterations_per_group` must be an integer >= 1 or None.")
+        if isinstance(self.max_passes, bool) or not isinstance(self.max_passes, int) or self.max_passes < 1:
+            raise ValueError("JointQConfig: `max_passes` must be an integer >= 1.")
+        if isinstance(self.device, str):
+            if not self.device:
+                raise ValueError("JointQConfig: `device` must be a non-empty string or torch.device.")
+        elif not isinstance(self.device, torch.device):
+            raise ValueError("JointQConfig: `device` must be a string or torch.device.")
+        if self.dtype not in ("float64", "float32"):
+            raise ValueError("JointQConfig: `dtype` must be `float64` or `float32`.")
+
+
+@dataclass
 class BaseMoERouting:
     pass
 
@@ -4739,6 +4871,7 @@ def apply_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: ResolvedM
         "fallback": _normalize_fallback,
         "foem": _normalize_foem,
         "g2ptq": _normalize_g2ptq,
+        "jointq": _normalize_jointq,
         "gptaq": _normalize_gptaq,
         "gsq": normalize_gsq_config,
         "hessian": _normalize_hessian,
@@ -4890,6 +5023,26 @@ def _normalize_g2ptq(
     if not isinstance(g2ptq, G2PTQConfig):
         raise ValueError("QuantizeConfig: `g2ptq` must be a G2PTQConfig, dict, boolean, or None.")
     return g2ptq
+
+
+def _normalize_jointq(
+    jointq: Optional[Union[JointQConfig, Dict[str, Any], bool]],
+) -> Optional[JointQConfig]:
+    """Normalize the nested ``jointq`` option.
+
+    ``True`` enables the paper defaults and ``False``/``None`` disable it, the
+    same on/off contract the sibling ``foem`` and ``gptaq`` options use.
+    """
+
+    if jointq is None:
+        return None
+    if isinstance(jointq, bool):
+        return JointQConfig() if jointq else None
+    if isinstance(jointq, dict):
+        return JointQConfig(**jointq)
+    if not isinstance(jointq, JointQConfig):
+        raise ValueError("QuantizeConfig: `jointq` must be a JointQConfig, dict, boolean, or None.")
+    return jointq
 
 
 def _normalize_dense_vram_strategy(value: Union[str, VramStrategy]) -> VramStrategy:
@@ -5361,6 +5514,7 @@ def _validate_dynamic_numeric_overrides(owner, layer_name: str, layer_dict: Mapp
         "gptaq": _normalize_gptaq,
         "foem": _normalize_foem,
         "g2ptq": _normalize_g2ptq,
+        "jointq": _normalize_jointq,
         "hessian": _normalize_hessian,
     }
     for key, value in layer_dict.items():
@@ -5825,6 +5979,7 @@ _SERIALIZED_META_FIELD_NAMES = (
     "gptaq",
     "foem",
     "g2ptq",
+    "jointq",
     "weight_only",
     "preprocessors",
     "gc_mode",
@@ -7731,6 +7886,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             normalized["foem"] = _normalize_foem(normalized["foem"])
         if isinstance(normalized.get("g2ptq"), bool):
             normalized["g2ptq"] = _normalize_g2ptq(normalized["g2ptq"])
+        if isinstance(normalized.get("jointq"), bool):
+            normalized["jointq"] = _normalize_jointq(normalized["jointq"])
 
         # `format` defaults to GPTQ above for legacy payloads. Weight-only
         # methods have their own defaults, and forcing FORMAT.GPTQ would make
@@ -8072,6 +8229,7 @@ class GPTQConfig(PreProcessorConfig):
     gptaq: Optional[GPTAQConfig] = field(default=None)
     foem: Optional[FOEMConfig] = field(default=None)
     g2ptq: Optional[G2PTQConfig] = field(default=None)
+    jointq: Optional[JointQConfig] = field(default=None)
     gsq: Optional[GSQConfig] = field(default=None)
     gsq_training: Optional[GSQTrainingConfig] = field(default=None)
     mock_quantization: bool = field(
@@ -8111,12 +8269,14 @@ class GPTQConfig(PreProcessorConfig):
         self.gptaq = _normalize_gptaq(self.gptaq)
         self.foem = _normalize_foem(self.foem)
         self.g2ptq = _normalize_g2ptq(self.g2ptq)
+        self.jointq = _normalize_jointq(self.jointq)
         self.gsq = normalize_gsq_config(self.gsq)
         if isinstance(self.gsq_training, dict):
             self.gsq_training = GSQTrainingConfig(**self.gsq_training)
         elif self.gsq_training is not None and not isinstance(self.gsq_training, GSQTrainingConfig):
             raise TypeError("GPTQConfig: gsq_training must be GSQTrainingConfig, a dictionary or None")
         self.validate_gsq()
+        self.validate_jointq()
 
         if act_group_aware_user_value is None:
             self.act_group_aware = self.method == METHOD.GPTQ
@@ -8130,11 +8290,47 @@ class GPTQConfig(PreProcessorConfig):
             raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
 
     def validate_g2ptq(self) -> None:
+        if self.g2ptq is not None and self.jointq is not None:
+            raise ValueError(
+                "QuantizeConfig: `g2ptq` and `jointq` are independent GPTQ refinements "
+                "and cannot be combined."
+            )
         if self.g2ptq is not None and (self.gptaq is not None or self.foem is not None):
             raise ValueError(
                 "QuantizeConfig: `g2ptq` computes its own first-order compensation and "
                 "cannot be combined with `gptaq` or `foem`."
             )
+
+    def validate_jointq(self) -> None:
+        """Reject configurations the JointQ refinement cannot honor.
+
+        JointQ keeps the GPTQ checkpoint layout, so it only needs the
+        symmetric fixed-zero-point grid and the integer codes GPTQ already
+        produces. Everything else is either unsupported by the paper's
+        formulation (asymmetric zero points, static groups) or owned by
+        another refinement (GPTAQ, FOEM, GSQ).
+        """
+
+        if self.jointq is None:
+            return
+        if self.method != METHOD.GPTQ:
+            raise ValueError("GPTQConfig: `jointq` requires method `gptq`.")
+        if self.gptaq is not None or self.foem is not None:
+            raise ValueError("GPTQConfig: `jointq` cannot be combined with `gptaq` or `foem`.")
+        if self.g2ptq is not None:
+            raise ValueError("GPTQConfig: `jointq` cannot be combined with `g2ptq`.")
+        if self.gsq is not None and self.gsq.enabled:
+            raise ValueError("GPTQConfig: `jointq` currently supports plain GPTQ only")
+        if self.gsq_training is not None and self.gsq_training.enabled:
+            raise ValueError("GPTQConfig: `jointq` cannot be combined with staged GSQ training.")
+        if self.mock_quantization:
+            raise ValueError("GPTQConfig: `jointq` is incompatible with mock quantization")
+        if not self.sym:
+            raise ValueError("GPTQConfig: `jointq` supports symmetric quantization only (`sym=True`).")
+        if self.static_groups:
+            raise ValueError("GPTQConfig: `jointq` does not support `static_groups=True`.")
+        if isinstance(self.bits, bool) or not isinstance(self.bits, int) or not 2 <= self.bits <= 8:
+            raise ValueError("GPTQConfig: `jointq` supports integer bit widths from 2 to 8.")
 
     def validate_gsq(self) -> None:
         if self.method == METHOD.QQQ:
@@ -8154,6 +8350,7 @@ class GPTQConfig(PreProcessorConfig):
                 or self.gptaq is not None
                 or self.foem is not None
                 or self.g2ptq is not None
+                or self.jointq is not None
             ):
                 raise ValueError("GPTQConfig: staged GSQ requires plain GPTQ")
             if self.format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
@@ -8161,7 +8358,12 @@ class GPTQConfig(PreProcessorConfig):
         if self.gsq is not None and self.gsq.enabled:
             if self.mock_quantization:
                 raise ValueError("GPTQConfig: GSQ is incompatible with mock quantization")
-            if self.gptaq is not None or self.foem is not None or self.g2ptq is not None:
+            if (
+                self.gptaq is not None
+                or self.foem is not None
+                or self.g2ptq is not None
+                or self.jointq is not None
+            ):
                 raise ValueError("GPTQConfig: GSQ currently supports plain GPTQ only")
             if self.format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GPTQ_P):
                 raise ValueError("GPTQConfig: GSQ requires a GPTQ scalar checkpoint format")
@@ -8237,6 +8439,8 @@ class GPTQConfig(PreProcessorConfig):
                 "num_groups": self.g2ptq.num_groups,
                 "kl_last_block": self.g2ptq.kl_last_block,
             }
+        if self.jointq is not None:
+            meta_payload["jointq"] = self.jointq.meta_payload()
 
         meta_payload["mse"] = self.mse.norm
         meta_payload["mock_quantization"] = self.mock_quantization

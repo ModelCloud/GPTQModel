@@ -246,7 +246,12 @@ def quantize_projections(wrapper, calibration, projections):
             resolved = clone_gptq_config_for_module(config, path)
             if resolved is None:
                 continue
-            if resolved.gptaq is not None or resolved.foem is not None or resolved.adapter:
+            if (
+                resolved.gptaq is not None
+                or resolved.foem is not None
+                or resolved.jointq is not None
+                or resolved.adapter
+            ):
                 raise ValueError("DeepSeek V4.1 projection quantization uses GPTQ")
         selected[path] = module, resolved
     if not selected:

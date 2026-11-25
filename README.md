@@ -96,6 +96,7 @@ compatible deployment engine.
 | **[GPTQ](https://github.com/ModelCloud/GPTQModel/wiki/GPTQ)** | Calibration-driven, low-bit weight quantization with mixed precision and broad checkpoint/runtime support. |
 | **[ADMM-Q](docs/admmq.md)** | Hessian-based weight quantization that replaces GPTQ's one-pass column sweep with an ADMM solve over the whole layer, then refines it with PairSwap. Exports standard GPTQ checkpoints. |
 | **[G²PTQ](docs/g2ptq.md)** | GPTQ-family solver with block-refresh first-order gradient compensation and a per-row trust region. Produces ordinary GPTQ checkpoints. |
+| **[JointQ](docs/jointq.md)** | Joint scale-and-integer refinement of a GPTQ solution. Keeps the GPTQ checkpoint layout and kernels; opt-in through `GPTQConfig(jointq=...)`. |
 | **[AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ)** | Activation-aware weight quantization, including dense and MoE workflows. |
 | **[RTN](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md#rtn-w4a16-without-calibration)** | Round-to-nearest weight quantization when a calibration-free baseline is useful. |
 | **[Paro](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant)** | Low-bit weight quantization with learned rotations for accuracy recovery. [Affine fitting and optimization controls](docs/paro-optimization.md). [Fused rotation backward](docs/paro.md#fused-rotation-backward). |
@@ -503,6 +504,7 @@ details are available in the [citation reference](https://github.com/ModelCloud/
 | GPT-QModel | ModelCloud.ai and contributors | [Project](https://github.com/ModelCloud/GPTQModel) |
 | [GPTQ](https://github.com/ModelCloud/GPTQModel/wiki/GPTQ) | Elias Frantar et al., IST-DASLab | [Paper](https://arxiv.org/abs/2210.17323) |
 | [ADMM-Q](docs/admmq.md) | Ryan Lucas et al., MIT | [Paper](https://arxiv.org/abs/2605.11222) · [Code](https://github.com/mazumder-lab/admm-q) |
+| [JointQ](docs/jointq.md) | Keiji Kimura and Yuma Ichikawa, Fujitsu Limited | [Paper](https://arxiv.org/abs/2611.20384) |
 | [AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ) | Ji Lin et al. | [Paper](https://arxiv.org/abs/2306.00978) |
 | [Paro](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant) | Yesheng Liang et al., Z-Lab | [Paper](https://openreview.net/forum?id=1USeVjsKau) · [Code](https://github.com/z-lab/paroquant) |
 | [MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md) | Lorenz K. Muller et al., Huawei CSL | [Paper](https://arxiv.org/abs/2611.10649) · [Code](https://github.com/huawei-csl/MACaQ) |

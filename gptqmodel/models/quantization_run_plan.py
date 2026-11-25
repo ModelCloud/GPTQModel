@@ -133,6 +133,7 @@ class QuantizationRunPlan:
         has_gptaq = getattr(config, "gptaq", None) is not None
         has_foem = getattr(config, "foem", None) is not None
         has_g2ptq = getattr(config, "g2ptq", None) is not None
+        has_jointq = getattr(config, "jointq", None) is not None
         weight_only = getattr(config, "uses_weight_only_lifecycle", lambda: False)()
 
         if weight_only:
@@ -146,6 +147,8 @@ class QuantizationRunPlan:
                 raise NotImplementedError(
                     "Weight-only quantization does not support G2PTQ block-wise gradient capture."
                 )
+            if has_jointq:
+                raise NotImplementedError("Weight-only quantization does not support JointQ/native activation capture.")
             steps = (ProcessorStep.WEIGHT_ONLY,)
         else:
             if config.method == METHOD.EXL3:
@@ -159,6 +162,8 @@ class QuantizationRunPlan:
                     raise NotImplementedError(
                         "EXL3 quantization does not support G2PTQ block-wise gradient capture."
                     )
+                if has_jointq:
+                    raise NotImplementedError("EXL3 quantization does not support JointQ/native activation capture.")
             try:
                 primary = _CALIBRATED_PRIMARY[config.method]
             except KeyError as exc:
