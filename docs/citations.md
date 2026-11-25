@@ -21,6 +21,7 @@
 * **YAQA** by Albert Tseng, Zhaofeng Sun, and Christopher De Sa introduced the Hessian sketches and two-sided adaptive rounding used in GPT-QModel's calibrated CPTC path. [Paper](https://arxiv.org/abs/2505.22988) · [Reference implementation](https://github.com/Cornell-RelaxML/yaqa-quantization) · [CPTC calibration](cptc.md#yaqa-calibration)
 * Norm Tweaking: Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu, [paper](https://arxiv.org/abs/2309.02784)
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
+* **MoEQuant** by Zhixuan Chen, Xing Hu, Dawei Yang, Zukang Xu, Xu Chen, Zhihang Yuan, Sifan Zhou, and Jiangyong Yu introduced Expert-Balanced Self-Sampling (EBSS). GPT-QModel implements the paper's Algorithm 1 clean-room in `gptqmodel/utils/ebss.py`. [Paper](https://arxiv.org/abs/2505.03804) · [PMLR](https://proceedings.mlr.press/v267/chen25aa.html) · [Official implementation](https://github.com/chenzx921020/MoEQuant) · [Later release](https://github.com/Strandding/MoEQuant) (behaviour reference only; no code copied) · [MoEQuant guide](moequant.md)
 * GSQ: [IST-DASLab's GSQ paper](https://arxiv.org/abs/2604.18556) and [reference implementation](https://github.com/IST-DASLab/GSQ), by Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, and Dan Alistarh. The optional local refinement and staged Llama training in GPT-QModel are adaptations of this work.
 * RCO: [IST-DASLab's RCO paper](https://arxiv.org/abs/2605.00649) and [reference implementation](https://github.com/IST-DASLab/RCO), by Michael Helcig and Dan Alistarh. `gptqmodel/quantization/rco.py` and the `scripts/gsq_paper/rco_*.py` drivers are a port of this work.
 * **LeapQuant** by Yi Pan, Haocheng Xi, Kan Zhu, Xingyang Li, Yibo Wu, Mayank Mishra, Hongtao Zhang, William X. Zheng, Baris Kasikci, Song Han, Kurt Keutzer, Rishabh Iyer, and Ion Stoica introduced per-window recurrent-state quantization and Compensator Tokens used by GPT-QModel's `gptqmodel/utils/leapquant.py`. [Paper](https://arxiv.org/abs/2609.38166) · [Official implementation](https://github.com/leapquant/LeapQuant) · [LeapQuant guide](leapquant.md)
@@ -159,6 +160,19 @@
   number={34},
   pages={28883--28891},
   year={2026}
+}
+
+# MoEQuant
+@InProceedings{pmlr-v267-chen25aa,
+  title     = {{M}o{EQ}uant: Enhancing Quantization for Mixture-of-Experts Large Language Models via Expert-Balanced Sampling and Affinity Guidance},
+  author    = {Chen, Zhixuan and Hu, Xing and Yang, Dawei and Xu, Zukang and Chen, Xu and Yuan, Zhihang and Zhou, Sifan and Yu, Jiangyong},
+  booktitle = {Proceedings of the 42nd International Conference on Machine Learning},
+  pages     = {8245--8260},
+  year      = {2025},
+  volume    = {267},
+  series    = {Proceedings of Machine Learning Research},
+  publisher = {PMLR},
+  url       = {https://proceedings.mlr.press/v267/chen25aa.html}
 }
 
 # QQQ

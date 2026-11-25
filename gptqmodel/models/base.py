@@ -3355,6 +3355,13 @@ class BaseQModel(nn.Module):
             raise NotImplementedError("checkpoint has no state adapter for this processor chain")
         self.quantization_run_plan = run_plan
 
+        # MoEQuant EBSS generates calibration data from the full-precision
+        # model.  It must run before rotation mutates the weights and before
+        # the dataset is prepared, and it replaces (never appends to) a
+        # caller-provided dataset.
+        if not run_plan.weight_only:
+            calibration = self._maybe_generate_ebss_calibration(calibration)
+
         # The rotation below mutates the model in place: it unties the
         # embeddings, fuses the layer norms and rotates the weights. Every
         # calibration-data error must be raised before that, or a refused run
@@ -3579,6 +3586,12 @@ class BaseQModel(nn.Module):
             raise TypeError(
                 "requantize(calibration=...) must be a CalibrationConfig, got "
                 f"{type(calibration).__name__}; pass `CalibrationConfig(dataset=...)`."
+            )
+        moequant = getattr(self.quantize_config, "moequant", None)
+        if moequant is not None and moequant.ebss is not None:
+            raise ValueError(
+                "MoEQuant EBSS generates calibration data during quantize(); "
+                "requantize() cannot rerun the self-sampling search."
             )
         calibration = _materialized_calibration_config(calibration)
         if not self.quantized:
@@ -3917,6 +3930,51 @@ class BaseQModel(nn.Module):
             self._model_free_weight_only_replacements_only = True
 
         return result
+
+    def _maybe_generate_ebss_calibration(self, calibration: CalibrationConfig) -> CalibrationConfig:
+        """Replace the calibration text with MoEQuant EBSS token sequences.
+
+        EBSS is data-free: it samples token sequences from the full-precision
+        model itself.  A caller-provided dataset is therefore rejected rather
+        than silently ignored, and a lazy/meta shell is rejected because the
+        search needs real forward passes.
+        """
+
+        from dataclasses import replace
+
+        moequant = getattr(self.quantize_config, "moequant", None)
+        if moequant is None or moequant.ebss is None:
+            return calibration
+        if calibration.dataset is not None:
+            raise ValueError(
+                "MoEQuant EBSS generates its own calibration data; do not pass "
+                "`CalibrationConfig.dataset` when `moequant.ebss` is enabled."
+            )
+        if getattr(self, "turtle_model", None) is not None:
+            raise ValueError(
+                "MoEQuant EBSS requires materialized model weights; this model is still a "
+                "lazy checkpoint shell. Load it with "
+                "`QuantizeConfig(offload_to_disk=False)` before calling quantize()."
+            )
+        if any(parameter.is_meta for parameter in self.model.parameters()):
+            raise ValueError(
+                "MoEQuant EBSS requires materialized model weights; the model still "
+                "contains meta parameters."
+            )
+
+        from ..utils.ebss import generate_ebss_calibration
+
+        ebss = moequant.ebss
+        log.info(
+            "MoEQuant EBSS: generating %d sentences x %d tokens (width=%d, temperature=%.3f, seed=%d).",
+            int(ebss.num_sentences),
+            int(ebss.seq_len),
+            int(ebss.width),
+            float(ebss.temperature),
+            int(ebss.seed),
+        )
+        tokens = generate_ebss_calibration(self.model, ebss)
+        return replace(calibration, dataset=tokens)
 
     def _prepare_calibration_before_rotation(
         self,

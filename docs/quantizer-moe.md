@@ -353,3 +353,13 @@ reached packing without quantized zero points`. After: 265 quantized modules,
 123 dense expert projections, all 123 bit-identical to the source and exactly
 the 123 `-:` entries in `dynamic`; the checkpoint saves, reloads and produces
 finite logits. Coverage: `tests/test_awq_moe_prune_uncovered_4456.py`.
+
+## 6. MoEQuant: EBSS
+
+[MoEQuant](moequant.md) adds Expert-Balanced Self-Sampling (EBSS) for MoE
+calibration. EBSS generates the calibration token sequences from the model
+itself, scoring each beam branch by cumulative likelihood and by the balance of
+routed-expert usage. It is opt-in through `GPTQConfig.moequant` /
+`AWQConfig.moequant`. The checkpoint format remains GPTQ or AWQ, and
+`meta.moequant` records the policy. See [MoEQuant](moequant.md) for the flow,
+configuration, failure contracts and citation.
