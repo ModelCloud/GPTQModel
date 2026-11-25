@@ -1463,6 +1463,7 @@ def _run_single_subset_pass(
                 layer_outputs=forward_outputs,
                 subset_index=subset_index,
                 subset_total=subset_total,
+                layer_module=module,
             )
 
         if execute_forward and plan.need_forward_outputs:

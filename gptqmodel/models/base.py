@@ -214,6 +214,7 @@ if TYPE_CHECKING:
 # faster hipBLASLt kernels. AWQ and weight-only (RTN) keep hipBLASLt.
 _DETERMINISTIC_BLAS_PROCESSOR_STEPS = frozenset({
     ProcessorStep.GPTQ,
+    ProcessorStep.G2PTQ,
     ProcessorStep.QQQ,
     ProcessorStep.VPTQ,
     ProcessorStep.MACAQ,
@@ -4066,9 +4067,8 @@ class BaseQModel(nn.Module):
         # widening decode with the subtraction instead of materializing an FP32
         # source copy. Other quantizers compute their diff in the source dtype,
         # so they keep the existing release-on-restore behavior.
-        self._needs_w_wq_diff = (
-            self._has_eora
-            and ProcessorStep.GPTQ in run_plan.processors
+        self._needs_w_wq_diff = self._has_eora and bool(
+            {ProcessorStep.GPTQ, ProcessorStep.G2PTQ} & set(run_plan.processors)
         )
 
         processors = []
@@ -4112,7 +4112,7 @@ class BaseQModel(nn.Module):
                     processors.append(factory(**args, backend=run_plan.loop_backend))
                 elif step is ProcessorStep.MACAQ:
                     processors.append(factory(**args, backend=run_plan.pack_backend))
-                elif step in (ProcessorStep.AWQ, ProcessorStep.PARO):
+                elif step in (ProcessorStep.AWQ, ProcessorStep.PARO, ProcessorStep.G2PTQ):
                     processors.append(factory(
                         **args, gptq_model=self, model=self.model,
                     ))

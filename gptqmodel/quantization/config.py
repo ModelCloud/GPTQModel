@@ -124,6 +124,10 @@ META_FIELD_GPTAQ_ENABLED = "gptaq"
 
 META_FIELD_FOEM_ENABLED = "foem"
 
+# G2PTQ is a GPTQ-family solver, so it is recorded in `meta` rather than
+# as a separate METHOD.
+META_FIELD_G2PTQ_ENABLED = "g2ptq"
+
 # GPTQModel <= 5.4.x stored the GPTAQ switch as a bare boolean in `meta.gptaq`
 # and kept its coefficient/device in these sibling keys. 5.x replaced the
 # boolean with the `GPTAQConfig` object, so readers must still understand the
@@ -2669,6 +2673,52 @@ class FOEMConfig:
 
 
 @dataclass
+class G2PTQConfig:
+    r"""Configuration for the G2PTQ GPTQ-family solver.
+
+    G2PTQ ("Improving LLM Post-Training Quantization with Generalized Gradient
+    Compensation", arXiv:2609.31009) keeps GPTQ's second-order compensation and
+    adds an exact first-order term under a block-wise objective. Before each
+    Transformer block (or each sequential subset) it refreshes a Fisher-style
+    Hessian and the weight gradient, then bounds the first-order step with a
+    trust region.
+
+    Args:
+        alpha_mse: Trust-region budget for block-wise MSE blocks.
+        alpha_kl: Trust-region budget for the final block, which uses KL.
+        num_groups: Output-channel groups that share one Hessian (GuidedQuant
+            style). ``1`` keeps one Hessian per linear layer.
+        kl_last_block: Use the KL objective on the final quantized block when
+            logits are reachable; otherwise the final block also uses MSE.
+
+    The paper autotunes the trust-region budget per block with a grid search
+    (Appendix C.2). This port takes the budget from the run configuration
+    instead; the paper reports that transferring one optimized threshold
+    across bit widths and model variants keeps the average absolute difference
+    across layers within 0.4.
+    """
+
+    alpha_mse: float = field(default=0.01)
+    alpha_kl: float = field(default=0.05)
+    num_groups: int = field(default=4)
+    kl_last_block: bool = field(default=True)
+
+    def __post_init__(self):
+        self.alpha_mse = _validate_finite_float(
+            "G2PTQConfig", "alpha_mse", self.alpha_mse, minimum=0.0
+        )
+        self.alpha_kl = _validate_finite_float(
+            "G2PTQConfig", "alpha_kl", self.alpha_kl, minimum=0.0
+        )
+        if isinstance(self.num_groups, bool) or not isinstance(self.num_groups, int):
+            raise ValueError("G2PTQConfig: `num_groups` must be a positive integer.")
+        if self.num_groups < 1:
+            raise ValueError("G2PTQConfig: `num_groups` must be a positive integer.")
+        if not isinstance(self.kl_last_block, bool):
+            raise ValueError("G2PTQConfig: `kl_last_block` must be a boolean.")
+
+
+@dataclass
 class BaseMoERouting:
     pass
 
@@ -4688,6 +4738,7 @@ def apply_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: ResolvedM
     normalizers: Dict[str, Callable[[Any], Any]] = {
         "fallback": _normalize_fallback,
         "foem": _normalize_foem,
+        "g2ptq": _normalize_g2ptq,
         "gptaq": _normalize_gptaq,
         "gsq": normalize_gsq_config,
         "hessian": _normalize_hessian,
@@ -4823,6 +4874,22 @@ def _normalize_foem(
     if not isinstance(foem, FOEMConfig):
         raise ValueError("QuantizeConfig: `foem` must be a FOEMConfig, dict, boolean, or None.")
     return foem
+
+
+def _normalize_g2ptq(
+    g2ptq: Optional[Union[G2PTQConfig, Dict[str, Any], bool]],
+) -> Optional[G2PTQConfig]:
+    """Normalize `g2ptq` from an object, a dict, or an on/off boolean."""
+
+    if g2ptq is None:
+        return None
+    if isinstance(g2ptq, bool):
+        return G2PTQConfig() if g2ptq else None
+    if isinstance(g2ptq, dict):
+        return G2PTQConfig(**g2ptq)
+    if not isinstance(g2ptq, G2PTQConfig):
+        raise ValueError("QuantizeConfig: `g2ptq` must be a G2PTQConfig, dict, boolean, or None.")
+    return g2ptq
 
 
 def _normalize_dense_vram_strategy(value: Union[str, VramStrategy]) -> VramStrategy:
@@ -5293,6 +5360,7 @@ def _validate_dynamic_numeric_overrides(owner, layer_name: str, layer_dict: Mapp
         "mse": _normalize_mse,
         "gptaq": _normalize_gptaq,
         "foem": _normalize_foem,
+        "g2ptq": _normalize_g2ptq,
         "hessian": _normalize_hessian,
     }
     for key, value in layer_dict.items():
@@ -5756,6 +5824,7 @@ _SERIALIZED_META_FIELD_NAMES = (
     "hessian",
     "gptaq",
     "foem",
+    "g2ptq",
     "weight_only",
     "preprocessors",
     "gc_mode",
@@ -7657,6 +7726,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             )
         if isinstance(normalized.get("foem"), bool):
             normalized["foem"] = _normalize_foem(normalized["foem"])
+        if isinstance(normalized.get("g2ptq"), bool):
+            normalized["g2ptq"] = _normalize_g2ptq(normalized["g2ptq"])
 
         # `format` defaults to GPTQ above for legacy payloads. Weight-only
         # methods have their own defaults, and forcing FORMAT.GPTQ would make
@@ -7997,6 +8068,7 @@ class GPTQConfig(PreProcessorConfig):
     static_groups: bool = field(default=False)
     gptaq: Optional[GPTAQConfig] = field(default=None)
     foem: Optional[FOEMConfig] = field(default=None)
+    g2ptq: Optional[G2PTQConfig] = field(default=None)
     gsq: Optional[GSQConfig] = field(default=None)
     gsq_training: Optional[GSQTrainingConfig] = field(default=None)
     mock_quantization: bool = field(
@@ -8035,6 +8107,7 @@ class GPTQConfig(PreProcessorConfig):
         self.hessian = _normalize_hessian(self.hessian)
         self.gptaq = _normalize_gptaq(self.gptaq)
         self.foem = _normalize_foem(self.foem)
+        self.g2ptq = _normalize_g2ptq(self.g2ptq)
         self.gsq = normalize_gsq_config(self.gsq)
         if isinstance(self.gsq_training, dict):
             self.gsq_training = GSQTrainingConfig(**self.gsq_training)
@@ -8047,9 +8120,18 @@ class GPTQConfig(PreProcessorConfig):
         elif not isinstance(act_group_aware_user_value, bool):
             self.act_group_aware = bool(act_group_aware_user_value)
 
+        self.validate_g2ptq()
+
         self._resolve_activation_ordering(desc_act_user_value, act_group_aware_user_value)
         if self.act_group_aware and self.desc_act:
             raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
+
+    def validate_g2ptq(self) -> None:
+        if self.g2ptq is not None and (self.gptaq is not None or self.foem is not None):
+            raise ValueError(
+                "QuantizeConfig: `g2ptq` computes its own first-order compensation and "
+                "cannot be combined with `gptaq` or `foem`."
+            )
 
     def validate_gsq(self) -> None:
         if self.method == METHOD.QQQ:
@@ -8064,14 +8146,19 @@ class GPTQConfig(PreProcessorConfig):
                 raise ValueError("GPTQConfig: staged GSQ requires a GPTQ or RTN initializer")
             if self.gsq is not None and self.gsq.enabled:
                 raise ValueError("GPTQConfig: choose staged gsq_training or per-linear gsq")
-            if self.mock_quantization or self.gptaq is not None or self.foem is not None:
+            if (
+                self.mock_quantization
+                or self.gptaq is not None
+                or self.foem is not None
+                or self.g2ptq is not None
+            ):
                 raise ValueError("GPTQConfig: staged GSQ requires plain GPTQ")
             if self.format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
                 raise ValueError("GPTQConfig: staged GSQ requires a GPTQ checkpoint format")
         if self.gsq is not None and self.gsq.enabled:
             if self.mock_quantization:
                 raise ValueError("GPTQConfig: GSQ is incompatible with mock quantization")
-            if self.gptaq is not None or self.foem is not None:
+            if self.gptaq is not None or self.foem is not None or self.g2ptq is not None:
                 raise ValueError("GPTQConfig: GSQ currently supports plain GPTQ only")
             if self.format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GPTQ_P):
                 raise ValueError("GPTQConfig: GSQ requires a GPTQ scalar checkpoint format")
@@ -8139,6 +8226,13 @@ class GPTQConfig(PreProcessorConfig):
                 "alpha": self.foem.alpha,
                 "beta": self.foem.beta,
                 "device": device if isinstance(device, str) else str(device),
+            }
+        if self.g2ptq is not None:
+            meta_payload["g2ptq"] = {
+                "alpha_mse": self.g2ptq.alpha_mse,
+                "alpha_kl": self.g2ptq.alpha_kl,
+                "num_groups": self.g2ptq.num_groups,
+                "kl_last_block": self.g2ptq.kl_last_block,
             }
 
         meta_payload["mse"] = self.mse.norm

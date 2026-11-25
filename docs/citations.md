@@ -25,6 +25,7 @@
 * RCO: [IST-DASLab's RCO paper](https://arxiv.org/abs/2605.00649) and [reference implementation](https://github.com/IST-DASLab/RCO), by Michael Helcig and Dan Alistarh. `gptqmodel/quantization/rco.py` and the `scripts/gsq_paper/rco_*.py` drivers are a port of this work.
 * **LeapQuant** by Yi Pan, Haocheng Xi, Kan Zhu, Xingyang Li, Yibo Wu, Mayank Mishra, Hongtao Zhang, William X. Zheng, Baris Kasikci, Song Han, Kurt Keutzer, Rishabh Iyer, and Ion Stoica introduced per-window recurrent-state quantization and Compensator Tokens used by GPT-QModel's `gptqmodel/utils/leapquant.py`. [Paper](https://arxiv.org/abs/2609.38166) · [Official implementation](https://github.com/leapquant/LeapQuant) · [LeapQuant guide](leapquant.md)
 * **ADMM-Q** by Ryan Lucas, Mehdi Makni, Xiang Meng, Adam Deng, and Rahul Mazumder introduced the Hessian-based ADMM weight quantizer with diagonal preconditioning, a growing penalty schedule, guarded grid refresh, and PairSwap local search. GPT-QModel's `gptqmodel/quantization/admmq.py` is a clean-room implementation from the paper's algorithm. [Paper](https://arxiv.org/abs/2605.11222) · [Official implementation](https://github.com/mazumder-lab/admm-q) · [ADMM-Q guide](admmq.md)
+* **G²PTQ** by Ruikang Liu, Haoli Bai, Yuxuan Sun, Qian Zhang, Wenzheng Cai, Yanqi Hao, Feiyu Wang, Weidong Zhong, Zhuang Wang, Tong Yang, and Xiangsheng Zhou introduced the block-refresh first-order gradient compensation with a per-row trust region used by GPT-QModel's `gptqmodel/quantization/g2ptq.py`. The implementation is clean-room from the paper. [Paper](https://arxiv.org/abs/2609.31009) · [G²PTQ guide](g2ptq.md)
 
 ## Citations
 
@@ -93,6 +94,16 @@
              Zhang, Hongtao and Zheng, William X. and Kasikci, Baris and Han, Song and Keutzer, Kurt and
              Iyer, Rishabh and Stoica, Ion},
   journal = {arXiv preprint arXiv:2609.38166},
+  year    = {2026}
+}
+
+# G2PTQ
+@article{liu2026g2ptq,
+  title   = {{G$^2$PTQ}: Improving {LLM} Post-Training Quantization with Generalized Gradient Compensation},
+  author  = {Liu, Ruikang and Bai, Haoli and Sun, Yuxuan and Zhang, Qian and Cai, Wenzheng and
+             Hao, Yanqi and Wang, Feiyu and Zhong, Weidong and Wang, Zhuang and Yang, Tong and
+             Zhou, Xiangsheng},
+  journal = {arXiv preprint arXiv:2609.31009},
   year    = {2026}
 }
 
