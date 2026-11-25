@@ -24,6 +24,7 @@ class ProcessorStep(str, Enum):
     NATIVE = "native"
     PREPROCESSOR = "preprocessor"
     GPTQ = "gptq"
+    G2PTQ = "g2ptq"
     QQQ = "qqq"
     VPTQ = "vptq"
     MACAQ = "macaq"
@@ -49,6 +50,7 @@ _CALIBRATED_PRIMARY = {
 # `looper.loop_processor`, so preflight and the adapter cannot disagree.
 _CHECKPOINT_ROLE_BY_STEP = {
     ProcessorStep.GPTQ: "primary",
+    ProcessorStep.G2PTQ: "primary",
     ProcessorStep.QQQ: "primary",
     ProcessorStep.AWQ: "primary",
     ProcessorStep.PARO: "primary",
@@ -61,6 +63,7 @@ _PROCESSOR_TYPES = {
     ProcessorStep.NATIVE: ("native_processor", "NativeProcessor"),
     ProcessorStep.PREPROCESSOR: ("module_preprocessor", "ModulePreProcessor"),
     ProcessorStep.GPTQ: ("gptq_processor", "GPTQProcessor"),
+    ProcessorStep.G2PTQ: ("g2ptq_processor", "G2PTQProcessor"),
     ProcessorStep.QQQ: ("qqq_processor", "QQQProcessor"),
     ProcessorStep.VPTQ: ("vptq_processor", "VPTQProcessor"),
     ProcessorStep.MACAQ: ("macaq_processor", "MacaqProcessor"),
@@ -126,6 +129,7 @@ class QuantizationRunPlan:
 
         has_gptaq = getattr(config, "gptaq", None) is not None
         has_foem = getattr(config, "foem", None) is not None
+        has_g2ptq = getattr(config, "g2ptq", None) is not None
         weight_only = getattr(config, "uses_weight_only_lifecycle", lambda: False)()
 
         if weight_only:
@@ -135,6 +139,10 @@ class QuantizationRunPlan:
                 raise NotImplementedError("Weight-only quantization does not support GPTAQ/native activation capture.")
             if has_foem:
                 raise NotImplementedError("Weight-only quantization does not support FOEM/native activation capture.")
+            if has_g2ptq:
+                raise NotImplementedError(
+                    "Weight-only quantization does not support G2PTQ block-wise gradient capture."
+                )
             steps = (ProcessorStep.WEIGHT_ONLY,)
         else:
             if config.method == METHOD.EXL3:
@@ -144,10 +152,20 @@ class QuantizationRunPlan:
                     raise NotImplementedError("EXL3 quantization does not support GPTAQ/native activation capture.")
                 if has_foem:
                     raise NotImplementedError("EXL3 quantization does not support FOEM/native activation capture.")
+                if has_g2ptq:
+                    raise NotImplementedError(
+                        "EXL3 quantization does not support G2PTQ block-wise gradient capture."
+                    )
             try:
                 primary = _CALIBRATED_PRIMARY[config.method]
             except KeyError as exc:
                 raise ValueError(f"No calibrated processor for {config.method}") from exc
+            if has_g2ptq:
+                if config.method is not METHOD.GPTQ:
+                    raise NotImplementedError(
+                        f"{config.method} quantization does not support G2PTQ block-wise gradient capture."
+                    )
+                primary = ProcessorStep.G2PTQ
 
             steps_list = []
             if native_correction_requested(config):

@@ -1550,6 +1550,9 @@ class LoopProcessor:
         layer_outputs: List[List[Tensor]],
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
+        layer_module: Optional[Module] = None,
+        position_ids: Optional[List[Tensor]] = None,
+        attention_masks: Optional[List[Tensor]] = None,
     ) -> None:
         """Override point for processors that need original layer IO snapshots."""
 
@@ -1560,6 +1563,9 @@ class LoopProcessor:
             layer_outputs,
             subset_index,
             subset_total,
+            layer_module,
+            position_ids,
+            attention_masks,
         )
 
     def clear_cache_data(self):

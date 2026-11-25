@@ -460,6 +460,7 @@ from .quantization import (
     CalibrationConfig,
     CPTCConfig,
     FOEMConfig,
+    G2PTQConfig,
     GGUFConfig,
     GPTAQConfig,
     GPTQConfig,

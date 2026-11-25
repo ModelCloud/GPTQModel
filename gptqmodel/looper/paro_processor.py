@@ -2926,9 +2926,12 @@ class ParoProcessor(LoopProcessor):
         layer_outputs: List[List[torch.Tensor]],
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
+        layer_module: Optional[torch.nn.Module] = None,
+        position_ids: Optional[List[torch.Tensor]] = None,
+        attention_masks: Optional[List[torch.Tensor]] = None,
     ) -> None:
         """Preserve noisy grouped inputs plus clean float layer targets."""
-        del subset_index
+        del subset_index, layer_module, position_ids, attention_masks
         state = self._get_layer_state(layer_index)
         replay_cache = getattr(self, "inputs_cache", None)
         branch_cache = self._branch_replay_cache(layer_index)
