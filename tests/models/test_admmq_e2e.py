@@ -17,7 +17,7 @@ from gptqmodel.quantization.config import METHOD, ADMMQConfig
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float32
+DTYPE = torch.bfloat16
 
 
 def _tokenizer():
