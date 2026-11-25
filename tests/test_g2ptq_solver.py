@@ -186,3 +186,15 @@ def test_trust_region_beta_clamps_c_to_boundary():
     fake = torch.full((groups, rows, columns), 1.0, dtype=torch.float64)
     beta = trust_region_beta(weight, inverse, gradient, fake, alpha=0.5)
     assert math.isclose(float(beta.item()), 1.0, abs_tol=1e-9)
+
+
+def test_trust_region_retains_small_fp32_budgets():
+    # For H^-1 = I, g = [1, 1] and a unit fake-quantization error,
+    # Eq. 14 gives c=1 and |dL|=1.5 for either column.
+    weight = torch.zeros(1, 1, 2)
+    inverse = torch.eye(2).unsqueeze(0)
+    gradient = torch.ones_like(weight)
+    alpha = 1e-9
+    expected = 1 - math.sqrt(1 - 3 * alpha)
+    actual = trust_region_beta(weight, inverse, gradient, weight + 1, alpha)
+    assert actual.item() == pytest.approx(expected, rel=1e-6, abs=0)

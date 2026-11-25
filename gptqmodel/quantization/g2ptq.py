@@ -34,7 +34,7 @@ from typing import Callable, Optional
 import torch
 import torch.nn as nn
 
-from ..utils.fallback import resolve_fallback_strategy, should_use_fallback
+from ..utils.fallback import should_use_fallback
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
 from ..utils.torch import torch_sync
@@ -46,7 +46,6 @@ from .gar import (
     invert_perm,
 )
 from .gptq import GPTQ, _move_static_groups, _static_group_of_column
-from .quantizer import _neutralize_dead_columns
 
 
 log = setup_logger()
@@ -100,12 +99,12 @@ def trust_region_beta(
 
     c = (gradient * ghinv).sum(dim=-1, keepdim=True) - ghinv.square() / safe_diag
     c = torch.where(diag.abs() > tiny, c, torch.zeros_like(c))
-    # ``c >= 2 * alpha * |dL_gptq|`` is exactly the paper's "no scaling
-    # needed" boundary, and it makes the ratio below non-negative.
-    c = c.clamp_min(2.0 * alpha * loss_gptq).clamp_min(tiny)
-    ratio = (1.0 - (2.0 * alpha * loss_gptq) / c).clamp_min(0.0)
-    beta = (1.0 - torch.sqrt(ratio)).mean(dim=-1)
-    return beta.unsqueeze(-1)
+    # Eq. 13 saturates at one when c <= 2 * alpha * |dL_gptq|.
+    budget = 2.0 * alpha * loss_gptq
+    fraction = budget / c.clamp_min(budget).clamp_min(tiny)
+    # Rationalize 1 - sqrt(1 - x) to retain small positive budgets in FP32.
+    beta = fraction / (1.0 + torch.sqrt(1.0 - fraction))
+    return beta.mean(dim=-1, keepdim=True)
 
 
 def g2ptq_compensate(
@@ -229,6 +228,8 @@ class G2PTQ(GPTQ):
         if group_hessians.ndim != 3:
             raise ValueError("G2PTQ: `group_hessians` must be [groups, columns, columns].")
         groups, columns, columns_again = group_hessians.shape
+        if groups == 0 or self.rows % groups:
+            raise ValueError("G2PTQ: Hessian groups must evenly divide the module's output rows.")
         if columns != columns_again:
             raise ValueError(
                 f"G2PTQ: Hessian is not square ({columns}x{columns_again})."
@@ -244,6 +245,8 @@ class G2PTQ(GPTQ):
             raise ValueError(
                 f"G2PTQ: Hessian has {columns} columns, module expects at most {self.columns}."
             )
+        if not torch.isfinite(group_hessians).all() or not torch.isfinite(weight_gradient).all():
+            raise ValueError("G2PTQ: Hessian and weight gradient must be finite.")
         if columns < self.columns:
             # Tensor-parallel runs pad the column axis. The padding is never
             # calibrated, so it enters with zero signal, exactly like GPTQ's
@@ -263,13 +266,13 @@ class G2PTQ(GPTQ):
             if activation_square is None
             else activation_square.detach().to(dtype=torch.float32)
         )
-        if trust_alpha is not None:
-            self._g2ptq_trust_alpha = float(trust_alpha)
+        self._g2ptq_trust_alpha = None if trust_alpha is None else float(trust_alpha)
 
     def clear_block_statistics(self) -> None:
         self.group_hessians = None
         self.weight_gradient = None
         self.activation_square = None
+        self._g2ptq_trust_alpha = None
 
     # ------------------------------------------------------------------
     # quantization
@@ -282,12 +285,20 @@ class G2PTQ(GPTQ):
 
     @torch.inference_mode()
     def quantize(self, blocksize: int = 128):
-        if self.group_hessians is None or self.weight_gradient is None:
-            # No refreshed statistics reached this module (for example a MoE
-            # expert that the gradient pass never touched). Plain GPTQ's
-            # capture is still present, so fall back to it unchanged.
-            return super().quantize(blocksize=blocksize)
-        return self._g2ptq_quantize(blocksize=blocksize)
+        try:
+            if (
+                self.group_hessians is None
+                or self.weight_gradient is None
+                or self.nsamples == 0
+                or self.qcfg.mock_quantization
+                or isinstance(self.module, nn.Embedding)
+                or should_use_fallback(self.fallback, float(self.nsamples), self.expected_nsamples)
+            ):
+                # Keep GPTQ's zero-sample and SmoothMSE fallback contracts.
+                return super().quantize(blocksize=blocksize)
+            return self._g2ptq_quantize(blocksize=blocksize)
+        finally:
+            self.clear_block_statistics()
 
     def _resolve_group_count(self) -> int:
         config = self._g2ptq_config()
@@ -311,23 +322,6 @@ class G2PTQ(GPTQ):
         start = time.time()
         result_device = torch.device(self.module.weight.data.device)
 
-        # Reuse GPTQ's fallback contract: a module that saw no calibration
-        # traffic must not be solved from a zero Hessian.
-        if should_use_fallback(
-            self.fallback, float(self.nsamples), self.expected_nsamples
-        ):
-            log.warn(
-                "Quantization: Module `%s` -> G2PTQ observed %s samples below the "
-                "fallback threshold; using `%s` fallback quantization.",
-                self.name,
-                self.nsamples,
-                resolve_fallback_strategy(self.fallback).value,
-            )
-            self.clear_block_statistics()
-            return self._fallback_quantize(
-                resolve_fallback_strategy(self.fallback), blocksize
-            )
-
         hessians = self.group_hessians
         gradient = self.weight_gradient
         activation_square = self.activation_square
@@ -341,7 +335,7 @@ class G2PTQ(GPTQ):
             # collapsing several groups keeps the same Fisher estimate.
             captured_groups = hessians.shape[0]
             if captured_groups == 1:
-                hessians = hessians.expand(num_groups, -1, -1, -1).clone()
+                hessians = hessians.expand(num_groups, -1, -1)
             elif num_groups == 1:
                 hessians = hessians.mean(dim=0, keepdim=True)
             else:
@@ -351,12 +345,7 @@ class G2PTQ(GPTQ):
                 )
         gradient = gradient.reshape(num_groups, rows_per_group, self.columns)
 
-        # The Hessian's device is the canonical quantization device, mirroring
-        # GPTQ. The grouped statistics live beside it.
-        if self.H is not None:
-            compute_device = self.H.device
-        else:
-            compute_device = hessians.device
+        compute_device = self._select_hessian_target_device(getattr(self.module, "target_device", None))
         hessians = safe_move_to(hessians, compute_device, dtype=torch.float32)
         gradient = safe_move_to(gradient, compute_device, dtype=torch.float32)
 
@@ -366,15 +355,36 @@ class G2PTQ(GPTQ):
             W = safe_move_to(self.module_copy, compute_device)
             self.module_copy = None
 
-        # Keep the plain GPTQ Hessian as the dead-column reference: the
-        # grouped Fisher can be exactly zero for a live channel whose output
-        # gradient vanished, and zeroing that weight would be wrong. When the
-        # capture was released (shared-input dedup) the grouped diagonal is
-        # the only signal left, and it is zero for the same dead channels.
-        plain_hessian = self.H
-        if plain_hessian is None:
-            plain_hessian = hessians.mean(dim=0)
-        _neutralize_dead_columns(plain_hessian, W)
+        # Capture is deferred into device-local GPTQ partials. Its diagonal
+        # distinguishes dead inputs from live columns with zero Fisher weight.
+        input_energy = self._captured_hessian_diagonal(compute_device)
+        if input_energy is None:
+            input_energy = activation_square
+            if input_energy is None:
+                input_energy = hessians.diagonal(dim1=-2, dim2=-1).mean(dim=0)
+            input_energy = safe_move_to(input_energy, compute_device)
+        self.release_hessian_state()
+
+        # Symmetrize before writes, since the grouped input may be a shared
+        # expansion or a tensor held by the processor.
+        hessians = 0.5 * (hessians + hessians.transpose(1, 2))
+        self.group_hessians = None
+        dead = input_energy == 0
+        W.masked_fill_(dead, 0)
+        gradient = gradient.masked_fill(dead, 0)
+        self.weight_gradient = None
+        hessians.masked_fill_(dead, 0)
+        hessians.masked_fill_(dead.unsqueeze(1), 0)
+
+        diagonal = hessians.diagonal(dim1=-2, dim2=-1)
+        live = diagonal > 0
+        live_count = live.sum(dim=-1, keepdim=True)
+        live_mean = diagonal.sum(dim=-1, keepdim=True) / live_count.clamp_min(1)
+        # A zero Fisher diagonal has no correlations. Give it a positive
+        # diagonal for Cholesky while keeping any calibration-live weight.
+        diagonal.copy_(torch.where(live, diagonal, torch.where(live_count > 0, live_mean, 1.0)))
+        gradient.masked_fill_(live_count.unsqueeze(-1) == 0, 0)
+        del diagonal
 
         if self.qcfg.group_size == -1:
             self._fit_weight_params(W)
@@ -383,7 +393,8 @@ class G2PTQ(GPTQ):
         zero = []
         now_idx = 1
         groups = []
-        if self.qcfg.static_groups:
+        static_groups = self.qcfg.static_groups and self.qcfg.group_size != -1
+        if static_groups:
             for i in range(0, self.columns, self.qcfg.group_size):
                 quantizer = copy.deepcopy(self.quantizer)
                 self._fit_weight_params(
@@ -398,18 +409,14 @@ class G2PTQ(GPTQ):
         final_perm = None
         global_perm = None
         if self.qcfg.desc_act:
-            ordering_source = activation_square
-            if ordering_source is None:
-                ordering_source = plain_hessian.diagonal()
+            ordering_source = input_energy
             perm = torch.argsort(ordering_source, descending=True)
             W = W[:, perm]
             hessians = hessians[:, perm][:, :, perm]
             gradient = gradient[:, :, perm]
             invperm = torch.argsort(perm)
         elif self.qcfg.act_group_aware:
-            ordering_source = activation_square
-            if ordering_source is None:
-                ordering_source = plain_hessian.diagonal()
+            ordering_source = input_energy
             local_perms, local_values = compute_local_perms(
                 ordering_source, self.qcfg.group_size, return_values=True
             )
@@ -428,32 +435,14 @@ class G2PTQ(GPTQ):
             gradient = gradient[:, :, final_perm]
 
         static_group_perm = None
-        if self.qcfg.static_groups:
+        if static_groups:
             static_group_perm = perm if self.qcfg.desc_act else final_perm
         static_group_of_column = _static_group_of_column(
             static_group_perm, self.qcfg.group_size
         )
 
-        # Per-group neutralization: a channel with no signal in one group must
-        # not set that group's scale, and its group's weight column is zeroed.
-        # ``reshape`` may copy after an activation permutation, so every later
-        # weight read must go through ``weight_groups``.
         weight_groups = W.reshape(num_groups, rows_per_group, self.columns)
-        for group_index in range(num_groups):
-            group_hessian = hessians[group_index]
-            if not torch.any(group_hessian):
-                hessians[group_index] = torch.eye(
-                    self.columns, dtype=torch.float32, device=compute_device
-                )
-                gradient[group_index].zero_()
-                continue
-            _neutralize_dead_columns(
-                group_hessian, weight_groups[group_index]
-            )
-
-        # Symmetrize after accumulation; the Fisher is a sum of symmetric
-        # outer products, so this only removes roundoff.
-        hessians = 0.5 * (hessians + hessians.transpose(1, 2))
+        del W
 
         def _invert_groups():
             factors, damps = [], []
@@ -466,17 +455,14 @@ class G2PTQ(GPTQ):
             return torch.stack(factors), max(damps)
 
         def _prepare_cpu(cpu_device):
-            nonlocal hessians, gradient, weight_groups
+            nonlocal hessians, gradient, weight_groups, scale, zero
             hessians = hessians.to(device=cpu_device)
             gradient = gradient.to(device=cpu_device)
-            # ``weight_groups`` already carries the dead-column zeroing and the
-            # activation permutation; never rebuild it from the natural-order
-            # clone.
+            # Keep the pre-inversion activation ordering and dead-column mask.
             weight_groups = weight_groups.to(device=cpu_device)
-            if self.qcfg.static_groups:
-                nonlocal scale, zero
+            if static_groups:
                 scale, zero = _move_static_groups(groups, cpu_device)
-            if not self.qcfg.static_groups:
+            elif self.qcfg.group_size == -1:
                 self._fit_weight_params(weight_groups.reshape(-1, self.columns))
 
         factor, damp = self._run_with_accelerator_oom_cpu_fallback(
@@ -486,7 +472,6 @@ class G2PTQ(GPTQ):
             prepare_cpu=_prepare_cpu,
         )[0]
         if factor is None:
-            self.clear_block_statistics()
             return self._rtn_fallback_after_hessian_failure(blocksize)
 
         alpha = (
@@ -495,11 +480,6 @@ class G2PTQ(GPTQ):
             else float(self._g2ptq_trust_alpha)
         )
 
-        beta = torch.zeros(
-            (num_groups, rows_per_group, 1),
-            dtype=torch.float32,
-            device=compute_device,
-        )
         if alpha > 0:
             fake = self._fake_quantize_groups(
                 weight_groups, groups, static_group_of_column
@@ -509,26 +489,21 @@ class G2PTQ(GPTQ):
                 weight_groups, inverse, gradient, fake, alpha
             )
             del fake, inverse
+        else:
+            beta = weight_groups.new_zeros((num_groups, rows_per_group, 1))
 
         # Release the full Hessian: only the factor and the gradient are read
         # from here on.
         # ``hessians`` is a closure variable of ``_invert_groups``; clear the
         # cell instead of deleting it so a stale reference cannot survive.
         hessians = None
-        plain_hessian = None
-        self.H = None
-
-        loss_terms = torch.empty(
-            (num_groups, rows_per_group, self.columns),
-            dtype=torch.float32,
-            device=compute_device,
-        )
+        loss_terms = torch.empty_like(weight_groups)
 
         def _quantize_column(column: int) -> torch.Tensor:
             nonlocal now_idx
             index = column
             if self.qcfg.group_size != -1:
-                if not self.qcfg.static_groups:
+                if not static_groups:
                     if index % self.qcfg.group_size == 0:
                         # Fit on the *current* stacked weights: the solver
                         # mutates them column by column, exactly like GPTQ.
@@ -578,7 +553,7 @@ class G2PTQ(GPTQ):
         Q = q.reshape(self.rows, self.columns)
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
-        if self.qcfg.static_groups and self.qcfg.desc_act:
+        if static_groups and self.qcfg.desc_act:
             g_idx = (perm // group_size).to(dtype=torch.int32, device=Q.device)
         else:
             g_idx = torch.arange(
@@ -592,7 +567,7 @@ class G2PTQ(GPTQ):
         elif self.qcfg.act_group_aware:
             inv_final = invert_perm(final_perm).to(device=Q.device)
             Q = Q[:, inv_final]
-            if not self.qcfg.static_groups:
+            if not static_groups:
                 inv_global = invert_perm(global_perm).tolist()
                 reordered = len(inv_global)
                 scale = [scale[i] for i in inv_global] + scale[reordered:]
@@ -620,7 +595,6 @@ class G2PTQ(GPTQ):
         scale, zero = self._sanitize_scale_and_log(scale, zero)
         Q = safe_move_to(Q, result_device)
 
-        self.clear_block_statistics()
         return (
             Q,
             scale,

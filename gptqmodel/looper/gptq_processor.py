@@ -56,11 +56,11 @@ from ..quantization.config import (
     METHOD,
     CalibrationConfig,
     FOEMConfig,
-    G2PTQConfig,
     GPTAQConfig,
     HessianConfig,
     QuantizeConfig,
     ResolvedModuleConfig,
+    _normalize_g2ptq,
     apply_scalar_module_overrides,
     normalize_gsq_config,
     resolve_quant_format,
@@ -189,13 +189,11 @@ def clone_gptq_config_for_module(
             else:
                 raise ValueError("QuantizeConfig: dynamic `foem` must be a FOEMConfig or dict.")
         if g2ptq_override is not None:
-            if isinstance(g2ptq_override, dict):
-                qcfg_clone.g2ptq = G2PTQConfig(**g2ptq_override)
-            elif isinstance(g2ptq_override, G2PTQConfig):
-                qcfg_clone.g2ptq = g2ptq_override
-            else:
-                raise ValueError("QuantizeConfig: dynamic `g2ptq` must be a G2PTQConfig or dict.")
+            qcfg_clone.g2ptq = _normalize_g2ptq(g2ptq_override)
+            if qcfg_clone.g2ptq is not None and qcfg.g2ptq is None:
+                raise ValueError("QuantizeConfig: dynamic `g2ptq` requires run-level `g2ptq`.")
 
+        qcfg_clone.validate_g2ptq()
         qcfg_clone.validate_gsq()
 
     return qcfg_clone

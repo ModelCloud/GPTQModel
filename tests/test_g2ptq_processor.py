@@ -114,6 +114,24 @@ def test_g2ptq_rejects_gsq_initializers():
         GPTQConfig(bits=4, g2ptq=G2PTQConfig(), gsq=GSQConfig(enabled=True))
 
 
+
+def test_g2ptq_dynamic_disable_and_solver_conflicts():
+    from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
+
+    config = GPTQConfig(
+        g2ptq=True,
+        dynamic={r"+:^plain$": {"g2ptq": False}, r"+:^conflict$": {"foem": FOEMConfig()}},
+    )
+    assert clone_gptq_config_for_module(config, "plain").g2ptq is None
+    assert clone_gptq_config_for_module(config, "other").g2ptq is not None
+    with pytest.raises(ValueError, match="cannot be combined"):
+        clone_gptq_config_for_module(config, "conflict")
+
+    no_run_setting = GPTQConfig(dynamic={r"+:^proj$": {"g2ptq": True}})
+    with pytest.raises(ValueError, match="requires run-level"):
+        clone_gptq_config_for_module(no_run_setting, "proj")
+
+
 def _build_plan(config, *, format_code=FORMAT.GPTQ, needs_lora=False):
     return QuantizationRunPlan.build(
         config,
@@ -217,13 +235,13 @@ def test_block_kl_objectives_match_the_paper():
     log_q = torch.log_softmax(quantized.float(), dim=-1)
     log_p = torch.log_softmax(target.float(), dim=-1)
     expected = torch.nn.functional.kl_div(
-        log_q, log_p.exp(), reduction="batchmean"
+        log_q, log_p.exp(), reduction="sum"
     )
     torch.testing.assert_close(loss_g, expected.to(loss_g.dtype))
 
     grad_g = torch.autograd.grad(loss_g, quantized, retain_graph=True)[0]
     torch.testing.assert_close(
-        grad_g, (log_q.exp() - log_p.exp()) / tokens, atol=1e-6, rtol=1e-5
+        grad_g, log_q.exp() - log_p.exp(), atol=1e-6, rtol=1e-5
     )
     assert torch.isfinite(loss_h)
     assert loss_h.item() > 0
@@ -257,7 +275,9 @@ def test_clean_stream_advances_only_through_pristine_replay():
 
     state = processor.continuation_state_dict()
     restored = _processor()
+    restored._g2ptq_seed = processor._g2ptq_seed + 1
     restored.load_continuation_state_dict(state)
+    assert restored._g2ptq_seed == processor._g2ptq_seed
     assert restored.clean_group_layer_inputs(layer_index=1, layer_inputs=noisy) is advanced
 
 
@@ -354,7 +374,8 @@ def test_replay_kwargs_drop_keys_the_replay_target_cannot_accept():
         position_ids=None,
         device=torch.device("cpu"),
     )
-    assert set(block_kwargs) == {"position_embeddings", "use_cache"}
+    assert set(block_kwargs) == {"position_embeddings", "attention_mask", "use_cache"}
+    assert block_kwargs["attention_mask"] is None
     assert block_kwargs["use_cache"] is False
 
 
@@ -639,3 +660,197 @@ def test_g2ptq_compensate_rejects_bad_shapes():
             lambda column: torch.zeros(2),
             blocksize=1,
         )
+
+
+@pytest.mark.parametrize(
+    "device", [
+        "cpu",
+        pytest.param("cuda:0", marks=pytest.mark.skipif(
+            not torch.cuda.is_available(), reason="Accelerator required"
+        )),
+    ],
+)
+def test_fp16_statistics_widen_before_reductions_and_squaring(device):
+    # The scalar loss exceeds FP16 capacity before division by the hidden size.
+    predicted = torch.full((256, 8), 8, dtype=torch.float16, device=device, requires_grad=True)
+    target = torch.zeros_like(predicted)
+    loss_g, loss_h = G2PTQProcessor._block_objectives(predicted, target, use_kl=False)
+    torch.testing.assert_close(loss_g.float(), torch.tensor(8192.0, device=device))
+    assert torch.isfinite(loss_h)
+
+    # These gradients are representable in FP16 but their squares are not.
+    activation = torch.ones((2, 1), dtype=torch.float16, device=device)
+    gradient = torch.full((2, 2), 2**-13, dtype=torch.float16, device=device)
+    rows, saliency = G2PTQProcessor._module_rows(activation, gradient)
+    hessian = G2PTQProcessor._accumulate_grouped_hessian(
+        None, rows, saliency, num_groups=2
+    )
+    torch.testing.assert_close(
+        hessian, torch.full((2, 1, 1), 2**-25, device=device), atol=0, rtol=0
+    )
+
+
+@pytest.mark.parametrize("static_groups", [False, True])
+def test_grouped_fisher_does_not_erase_a_live_input_channel(static_groups):
+    module = nn.Linear(4, 2, bias=False)
+    with torch.no_grad():
+        module.weight.copy_(torch.tensor([[1, 7, 1, 1], [1, 7, 1, 1]]))
+    config = GPTQConfig(
+        bits=4, group_size=4, static_groups=static_groups, act_group_aware=False,
+        g2ptq=G2PTQConfig(num_groups=2, alpha_mse=0),
+    )
+    task = G2PTQ(module, qcfg=config)
+    task.quantizer.configure(perchannel=True)
+    task.add_batch(torch.eye(4), None)
+    task.set_block_statistics(
+        group_hessians=torch.stack([torch.diag(torch.tensor([1.0, 0, 1, 1])), torch.eye(4)]),
+        weight_gradient=torch.zeros_like(module.weight),
+    )
+    weight, scale, zero, *_ = task.quantize()
+    codes = (weight / scale + zero).round().to(torch.int)
+    # With 4-bit symmetric quantization and max |w| = 7, zero point is 8,
+    # scale is 1, and the live outlier is exactly representable at code 15.
+    torch.testing.assert_close(codes, torch.tensor([[9, 15, 9, 9], [9, 15, 9, 9]], dtype=torch.int))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Accelerator required")
+@pytest.mark.parametrize("alpha", [0.0, 0.01])
+def test_grouped_inverse_oom_completes_the_solve_on_cpu(monkeypatch, alpha):
+    config = GPTQConfig(bits=4, group_size=4, g2ptq=G2PTQConfig(num_groups=2, alpha_mse=alpha))
+    weights = torch.tensor([[1.0, 2.0, -3.0, 4.0], [-2.0, 4.0, 1.0, -1.0]])
+
+    def solve(device, fail_inverse=False):
+        module = nn.Linear(4, 2, bias=False, device=device)
+        with torch.no_grad():
+            module.weight.copy_(weights)
+        task = G2PTQ(module, qcfg=config)
+        task.quantizer.configure(perchannel=True)
+        task.add_batch(torch.eye(4, device=device), None)
+        task.set_block_statistics(
+            group_hessians=torch.eye(4, device=device).repeat(2, 1, 1),
+            weight_gradient=torch.full_like(module.weight, 0.1),
+            activation_square=torch.tensor([2.0, 3.0, 4.0, 1.0], device=device),
+        )
+        if fail_inverse:
+            inverse = task.hessian_inverse
+
+            def fail_on_accelerator(hessian):
+                if hessian.device.type == "cuda":
+                    raise torch.OutOfMemoryError("forced allocation failure")
+                return inverse(hessian)
+
+            monkeypatch.setattr(task, "hessian_inverse", fail_on_accelerator)
+        return [tensor.cpu() for tensor in task.quantize()[:4]]
+
+    for actual, expected in zip(solve("cuda:0", fail_inverse=True), solve("cpu")):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+def test_refresh_uses_the_resolved_module_configuration():
+    from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
+
+    config = GPTQConfig(
+        bits=4, group_size=4, g2ptq=G2PTQConfig(num_groups=4),
+        dynamic={r"+:^proj$": {"g2ptq": {"num_groups": 2, "alpha_mse": 0.25}}},
+    )
+    processor = _processor(config)
+    block = nn.Sequential()
+    block.add_module("proj", nn.Linear(4, 4, bias=False))
+    task = G2PTQ(block.proj, qcfg=clone_gptq_config_for_module(config, "proj"))
+    processor.tasks["proj"] = task
+    activations = torch.eye(4).unsqueeze(0)
+    processor._g2ptq_layer_state[0] = {
+        "layer": block,
+        "inputs": [[activations]],
+        "targets": [[torch.zeros_like(activations)]],
+    }
+    processor._refresh_block(layer_index=0, names=["proj"])
+
+    assert task.group_hessians.shape == (2, 4, 4)
+    assert task._g2ptq_trust_alpha == 0.25
+
+
+
+def test_refresh_excludes_calibration_padding_from_statistics():
+    processor = _processor(GPTQConfig(g2ptq=G2PTQConfig(num_groups=1)))
+    layer = nn.Linear(2, 2, bias=False)
+    with torch.no_grad():
+        layer.weight.copy_(torch.eye(2))
+    task = G2PTQ(layer, qcfg=processor.qcfg)
+    inputs = torch.tensor([[[1.0, 2.0], [9.0, 11.0], [3.0, 4.0]]])
+    mask = torch.tensor([[True, False, True]])
+    processor.inputs_cache.attention_masks = [torch.ones_like(mask)]
+    state = {
+        "layer": layer,
+        "inputs": [[inputs]],
+        "targets": [[torch.zeros_like(inputs)]],
+        "attention_masks": [mask],
+    }
+
+    stats = processor._collect_block_statistics(
+        state, None, {"proj": task}, use_kl=False
+    )["proj"]
+    torch.testing.assert_close(stats["gradient"], torch.tensor([[5.0, 7.0], [7.0, 10.0]]))
+    torch.testing.assert_close(stats["activation_square"], torch.tensor([10.0, 20.0]))
+
+
+def test_pristine_head_replay_applies_the_same_preprocessing_as_live_replay(monkeypatch):
+    from gptqmodel.looper.stage_layer import _capture_pristine_group_context
+
+    clean = [[torch.tensor([[[1.0, 2.0]]])]]
+    noisy = [[torch.tensor([[[2.0, 3.0]]])]]
+    layer = nn.Identity()
+    processor = _processor()
+    processor.receive_input_cache(SimpleNamespace(layer_inputs=clean))
+    received = []
+
+    def prepare_head_inputs(batches):
+        for batch in batches:
+            batch[0] = batch[0] * 2 + 1
+        return batches
+
+    def replay_outputs(_looper, *, layer_inputs, **kwargs):
+        received.extend(layer_inputs)
+        return layer_inputs
+
+    monkeypatch.setattr("gptqmodel.looper.stage_layer._replay_layer_outputs", replay_outputs)
+    looper = SimpleNamespace(
+        gptq_model=SimpleNamespace(lm_head_pre_quantize_generate_hook=prepare_head_inputs)
+    )
+    _capture_pristine_group_context(
+        looper, processor=processor, module=layer, pristine_module=None,
+        subset_plans=[object()], layer_inputs=prepare_head_inputs(noisy),
+        layer_input_kwargs=[{}], position_ids=[], attention_masks=[],
+        cur_layer_device=torch.device("cpu"), is_lm_head_module=True,
+        shared_kv_cache_dict={}, layer_index=1, layer_descriptor="lm_head",
+        full={}, log=None, region_timer=None,
+    )
+    torch.testing.assert_close(received[0][0], torch.tensor([[[3.0, 5.0]]]))
+    torch.testing.assert_close(clean[0][0], torch.tensor([[[1.0, 2.0]]]))
+
+
+def test_replayed_projection_accumulates_every_invocation():
+    class ReusedProjection(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(1, 1, bias=False)
+
+        def forward(self, x):
+            return self.proj(x) + self.proj(x * 2)
+
+    seed = 19
+    torch.manual_seed(seed)
+    processor = _processor(GPTQConfig(g2ptq=G2PTQConfig(num_groups=1)))
+    block = ReusedProjection()
+    task = G2PTQ(block.proj, qcfg=processor.qcfg)
+    x = torch.tensor([[[1.0], [3.0]]])
+    state = {"layer": block, "inputs": [[x]], "targets": [[torch.zeros_like(x)]]}
+
+    stats = processor._collect_block_statistics(
+        state, None, {"proj": task}, use_kl=False
+    )["proj"]
+    # Avoid depending on float32 and float64 RNGs having the same sequence.
+    noise = torch.randn(x.shape, generator=torch.Generator().manual_seed(seed)).double()
+    hessian = (5 * noise.square() * x.double().square()).sum().reshape(1, 1, 1)
+    torch.testing.assert_close(stats["hessian"].double(), hessian, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(stats["activation_square"], torch.tensor([50.0]))

@@ -349,8 +349,12 @@ def test_subprocess_recovery(
         )
 
 
-@pytest.mark.parametrize("family", FAMILIES)
-def test_quantized_tensors_equal_after_resume(tmp_path, monkeypatch, family):
+@pytest.mark.parametrize(
+    ("family", "g2ptq"),
+    [pytest.param(family, None, id=family) for family in FAMILIES]
+    + [pytest.param("llama", True, id="llama-g2ptq")],
+)
+def test_quantized_tensors_equal_after_resume(tmp_path, monkeypatch, family, g2ptq):
     torch.manual_seed(1234)
     native = tmp_path / "native"
     config_args = {
@@ -374,6 +378,7 @@ def test_quantized_tensors_equal_after_resume(tmp_path, monkeypatch, family):
         config = QuantizeConfig(
             bits=4,
             group_size=32,
+            g2ptq=g2ptq,
             desc_act=False,
             device="cpu",
             offload_to_disk=True,

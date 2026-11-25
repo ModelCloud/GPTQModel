@@ -7964,15 +7964,18 @@ class GPTQConfig(PreProcessorConfig):
         elif not isinstance(act_group_aware_user_value, bool):
             self.act_group_aware = bool(act_group_aware_user_value)
 
+        self.validate_g2ptq()
+
+        self._resolve_activation_ordering(desc_act_user_value, act_group_aware_user_value)
+        if self.act_group_aware and self.desc_act:
+            raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
+
+    def validate_g2ptq(self) -> None:
         if self.g2ptq is not None and (self.gptaq is not None or self.foem is not None):
             raise ValueError(
                 "QuantizeConfig: `g2ptq` computes its own first-order compensation and "
                 "cannot be combined with `gptaq` or `foem`."
             )
-
-        self._resolve_activation_ordering(desc_act_user_value, act_group_aware_user_value)
-        if self.act_group_aware and self.desc_act:
-            raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
 
     def validate_gsq(self) -> None:
         if self.method == METHOD.QQQ:

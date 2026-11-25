@@ -12,8 +12,8 @@ The paper's block objective (Eq. 10) compares two streams:
 
 ``h``
     the full-precision block output, produced from the *clean* calibration
-    stream, i.e. the output of the already-quantized previous blocks applied
-    to the original activations;
+    stream, i.e. the output of the pristine previous blocks applied to the
+    original activations;
 ``h_hat``
     the output of the block being quantized, applied to the *noisy* stream
     that the live calibration cache carries.
@@ -46,7 +46,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
+from ..quantization.config import G2PTQConfig
 from ..quantization.g2ptq import G2PTQ
+from ..utils.attn_mask import normalize_seq_mask
 from ..utils.logger import setup_logger
 from .gptq_processor import GPTQProcessor
 from .loop_processor import (
@@ -208,6 +210,7 @@ class G2PTQProcessor(GPTQProcessor):
         # Clean calibration stream, advanced by the pristine replay of each
         # layer. ``None`` means "the live stream is still clean" (layer 0).
         self._g2ptq_clean_inputs: Optional[List[List[torch.Tensor]]] = None
+        self._g2ptq_seed = torch.initial_seed()
 
     def name(self) -> str:
         return "G2PTQ"
@@ -224,11 +227,13 @@ class G2PTQProcessor(GPTQProcessor):
     def continuation_state_dict(self):
         state = super().continuation_state_dict()
         state["g2ptq_clean_inputs"] = self._g2ptq_clean_inputs
+        state["g2ptq_seed"] = self._g2ptq_seed
         return state
 
     def load_continuation_state_dict(self, state):
         super().load_continuation_state_dict(state)
         self._g2ptq_clean_inputs = state.get("g2ptq_clean_inputs")
+        self._g2ptq_seed = state.get("g2ptq_seed", self._g2ptq_seed)
 
     def clean_group_layer_inputs(
         self,
@@ -321,6 +326,8 @@ class G2PTQProcessor(GPTQProcessor):
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
         layer_module: Optional[torch.nn.Module] = None,
+        position_ids: Optional[List[torch.Tensor]] = None,
+        attention_masks: Optional[List[torch.Tensor]] = None,
     ) -> None:
         """Remembers the clean reference, then refreshes statistics per subset."""
 
@@ -331,6 +338,8 @@ class G2PTQProcessor(GPTQProcessor):
                     "kwargs": layer_input_kwargs,
                     "targets": layer_outputs,
                     "layer": layer_module,
+                    "position_ids": position_ids,
+                    "attention_masks": attention_masks,
                 }
                 self._g2ptq_subset_names = []
             return
@@ -356,9 +365,6 @@ class G2PTQProcessor(GPTQProcessor):
     def _refresh_block(self, *, layer_index: int, names: List[str]) -> None:
         """Build and install one block's Fisher Hessians and weight gradients."""
 
-        config = getattr(self.qcfg, "g2ptq", None)
-        if config is None:
-            return
         with self._g2ptq_lock:
             state = self._g2ptq_layer_state.get(layer_index)
             block = self._g2ptq_pristine.get(layer_index)
@@ -369,38 +375,34 @@ class G2PTQProcessor(GPTQProcessor):
             with self._g2ptq_lock:
                 self._g2ptq_pristine[layer_index] = block
 
-        tasks: Dict[str, G2PTQ] = {}
+        tasks_by_objective: Dict[bool, Dict[str, G2PTQ]] = {}
         for name in names:
             task = self.tasks.get(name)
             if isinstance(task, G2PTQ):
-                tasks[name] = task
-        if not tasks:
-            return
+                use_kl = self._uses_kl_objective([name], config=task.qcfg.g2ptq)
+                tasks_by_objective.setdefault(use_kl, {})[name] = task
 
-        use_kl = self._uses_kl_objective(names)
-        alpha = float(config.alpha_kl) if use_kl else float(config.alpha_mse)
-        try:
-            statistics = self._collect_block_statistics(
-                state,
-                block,
-                tasks,
-                use_kl=use_kl,
-                num_groups=int(config.num_groups),
-            )
-        except Exception as exc:  # noqa: BLE001 - the refresh must never abort a run
-            self._report_unavailable(layer_index, exc)
-            return
-
-        for name, task in tasks.items():
-            record = statistics.get(name)
-            if record is None:
+        for use_kl, tasks in tasks_by_objective.items():
+            try:
+                statistics = self._collect_block_statistics(
+                    state, block, tasks, use_kl=use_kl, layer_index=layer_index,
+                )
+            except Exception as exc:  # noqa: BLE001 - replay can fail on unsupported blocks
+                self._report_unavailable(layer_index, exc)
                 continue
-            task.set_block_statistics(
-                group_hessians=record["hessian"],
-                weight_gradient=record["gradient"],
-                activation_square=record["activation_square"],
-                trust_alpha=alpha,
-            )
+
+            for name, record in statistics.items():
+                task = tasks[name]
+                config = task.qcfg.g2ptq
+                try:
+                    task.set_block_statistics(
+                        group_hessians=record["hessian"],
+                        weight_gradient=record["gradient"],
+                        activation_square=record["activation_square"],
+                        trust_alpha=config.alpha_kl if use_kl else config.alpha_mse,
+                    )
+                except ValueError as exc:
+                    self._report_unavailable(layer_index, exc)
 
     def _report_unavailable(self, layer_index: int, exc: BaseException) -> None:
         """Warn once per layer and let those tasks fall back to plain GPTQ."""
@@ -411,13 +413,15 @@ class G2PTQProcessor(GPTQProcessor):
             self._g2ptq_unavailable.add(layer_index)
         log.warn(
             "G2PTQ: block %s could not refresh its gradient statistics (%s: %s); "
-            "its modules fall back to GPTQ compensation.",
+            "affected modules fall back to GPTQ compensation.",
             layer_index,
             type(exc).__name__,
             exc,
         )
 
-    def _uses_kl_objective(self, names: Iterable[str]) -> bool:
+    def _uses_kl_objective(
+        self, names: Iterable[str], *, config: Optional[G2PTQConfig] = None,
+    ) -> bool:
         """Whether this subset is the output head, which Algorithm 2 trains with KL.
 
         The paper applies the KL/NLL pair to the last Transformer block by
@@ -427,7 +431,7 @@ class G2PTQProcessor(GPTQProcessor):
         assuming an architecture-specific norm attribute.
         """
 
-        config = getattr(self.qcfg, "g2ptq", None)
+        config = config if config is not None else self.qcfg.g2ptq
         if config is None or not config.kl_last_block:
             return False
         if self._g2ptq_is_lm_head:
@@ -447,7 +451,7 @@ class G2PTQProcessor(GPTQProcessor):
         tasks: Dict[str, G2PTQ],
         *,
         use_kl: bool,
-        num_groups: int,
+        layer_index: int = 0,
     ) -> Dict[str, Dict[str, torch.Tensor]]:
         """Run the differentiable block replay and fold it into statistics."""
 
@@ -473,13 +477,15 @@ class G2PTQProcessor(GPTQProcessor):
         inputs = state.get("inputs") or []
         targets = state.get("targets") or []
         kwargs_list = state.get("kwargs") or []
-        batch_count = min(len(inputs), len(targets))
-        if batch_count == 0:
-            raise RuntimeError("G2PTQ has no captured calibration batches for this block.")
+        if not inputs or len(inputs) != len(targets):
+            raise RuntimeError("G2PTQ requires matching input and target calibration batches.")
 
-        cache = getattr(self, "inputs_cache", None)
-        position_ids = list(getattr(cache, "position_ids", None) or [])
-        attention_masks = list(getattr(cache, "attention_masks", None) or [])
+        position_ids = state.get("position_ids") or []
+        attention_masks = state.get("attention_masks") or []
+        # Repeat the same Fisher draws for each subset of this block.
+        # Checkpoint packing can consume global RNG between subsets.
+        seed = (self._g2ptq_seed + layer_index) % (1 << 64)
+        generator = torch.Generator(device=device).manual_seed(seed)
 
         hessians: Dict[str, Optional[torch.Tensor]] = dict.fromkeys(names)
         gradients: Dict[str, Optional[torch.Tensor]] = dict.fromkeys(names)
@@ -487,25 +493,36 @@ class G2PTQProcessor(GPTQProcessor):
 
         self._g2ptq_suppress_capture = True
         try:
-            for batch_index in range(batch_count):
-                input_batch = inputs[batch_index]
+            for batch_index, input_batch in enumerate(inputs):
                 if not input_batch:
                     continue
                 reference = _first_tensor(targets[batch_index])
                 if reference is None:
                     continue
                 moved_inputs = [_move_value(item, device) for item in input_batch]
+                raw_mask = attention_masks[batch_index] if batch_index < len(attention_masks) else None
+                attention_mask = _move_value(raw_mask, device)
                 moved_kwargs = self._replay_kwargs(
                     block=block,
                     layer_input=moved_inputs,
                     captured=(kwargs_list[batch_index] if batch_index < len(kwargs_list) else {}),
-                    attention_mask=(
-                        attention_masks[batch_index] if batch_index < len(attention_masks) else None
-                    ),
+                    attention_mask=attention_mask,
                     position_ids=(
                         position_ids[batch_index] if batch_index < len(position_ids) else None
                     ),
                     device=device,
+                )
+
+                seq_len = moved_inputs[0].shape[1] if moved_inputs[0].ndim >= 3 else None
+                keep_mask = normalize_seq_mask(attention_mask, seq_len=seq_len)
+                prepare_keep_mask = getattr(self.gptq_model, "prepare_layer_replay_keep_mask", None)
+                if callable(prepare_keep_mask) and not self._g2ptq_is_lm_head:
+                    keep_mask = prepare_keep_mask(
+                        layer=block, layer_input=moved_inputs, additional_inputs=moved_kwargs,
+                        keep_mask=keep_mask, target_device=device,
+                    )
+                keep_mask = self.calibration_keep_mask(
+                    keep_mask, batch_index=batch_index, layer_input=moved_inputs,
                 )
 
                 with torch.inference_mode(False), torch.enable_grad():
@@ -515,7 +532,7 @@ class G2PTQProcessor(GPTQProcessor):
                     live_kwargs = {
                         key: _fresh_value(value) for key, value in moved_kwargs.items()
                     }
-                    captured: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
+                    captured: List[Tuple[str, torch.Tensor, torch.Tensor]] = []
                     handles = []
                     for name, module in modules.items():
                         handles.append(
@@ -530,50 +547,38 @@ class G2PTQProcessor(GPTQProcessor):
                             handle.remove()
 
                     produced = _first_tensor(output)
-                    if produced is None:
-                        raise RuntimeError("G2PTQ block replay produced no tensor output.")
-                    target = _fresh_value(reference).to(
-                        device=produced.device, dtype=produced.dtype
-                    )
+                    if produced is None or produced.shape != reference.shape:
+                        raise RuntimeError("G2PTQ block replay output does not match its reference.")
+                    target = _fresh_value(reference).to(device=produced.device)
+                    if keep_mask is not None:
+                        if keep_mask.numel() != produced.numel() // produced.shape[-1]:
+                            raise RuntimeError("G2PTQ replay mask does not match the block output.")
+                        keep_rows = _fresh_value(keep_mask).flatten()
+                        produced = produced.flatten(0, -2)[keep_rows]
+                        target = target.flatten(0, -2)[keep_rows]
+                    if produced.numel() == 0:
+                        continue
                     loss_g, loss_h = self._block_objectives(
-                        produced, target, use_kl=use_kl
+                        produced, target, use_kl=use_kl, generator=generator,
                     )
-
-                    weight_list = []
-                    weight_names = []
-                    for name in names:
-                        weight = getattr(modules[name], "weight", None)
-                        if not torch.is_tensor(weight):
-                            raise RuntimeError(
-                                f"G2PTQ requires a dense weight on `{name}`."
-                            )
-                        weight_list.append(weight)
-                        weight_names.append(name)
 
                     weight_grads = torch.autograd.grad(
                         loss_g,
-                        weight_list,
-                        retain_graph=True,
+                        [modules[name].weight for name in names],
+                        retain_graph=bool(captured),
                         allow_unused=True,
                         materialize_grads=True,
                     )
-
-                    activation_names = [name for name in names if name in captured]
-                    activation_grads = {}
-                    if activation_names:
-                        outputs = [captured[name][1] for name in activation_names]
-                        grads = torch.autograd.grad(
+                    activation_grads = ()
+                    if captured:
+                        activation_grads = torch.autograd.grad(
                             loss_h,
-                            outputs,
-                            retain_graph=False,
+                            [output for _, _, output in captured],
                             allow_unused=True,
                             materialize_grads=True,
                         )
-                        activation_grads = dict(zip(activation_names, grads))
 
-                for name, grad in zip(weight_names, weight_grads):
-                    if grad is None:
-                        continue
+                for name, grad in zip(names, weight_grads):
                     grad = self._orientation(modules[name], grad).detach().to(
                         dtype=torch.float32
                     )
@@ -581,20 +586,23 @@ class G2PTQProcessor(GPTQProcessor):
                         grad if gradients[name] is None else gradients[name] + grad
                     )
 
-                for name, grad in activation_grads.items():
-                    rows = self._module_rows(captured[name][0], grad)
+                for (name, activation, _), grad in zip(captured, activation_grads):
+                    rows = self._module_rows(activation, grad)
                     if rows is None:
                         continue
                     activations, saliency = rows
+                    if keep_mask is not None and activations.shape[0] == keep_mask.numel():
+                        activations = activations[keep_mask.flatten()]
+                        saliency = saliency[keep_mask.flatten()]
                     if activations.shape[0] == 0:
                         continue
                     hessians[name] = self._accumulate_grouped_hessian(
                         hessians[name],
                         activations,
                         saliency,
-                        num_groups=num_groups,
+                        num_groups=tasks[name].qcfg.g2ptq.num_groups,
                     )
-                    energy = activations.square().sum(dim=0)
+                    energy = activations.float().square().sum(dim=0)
                     activation_squares[name] = (
                         energy
                         if activation_squares[name] is None
@@ -652,7 +660,8 @@ class G2PTQProcessor(GPTQProcessor):
             parameter.is_inference() or not parameter.requires_grad
             for parameter in block.parameters()
         )
-        if owns_block and not hooked and not frozen and _module_device(block) == target:
+        inference_buffers = any(buffer.is_inference() for buffer in block.buffers())
+        if owns_block and not hooked and not frozen and not inference_buffers and _module_device(block) == target:
             return block
 
         with torch.inference_mode(False):
@@ -764,38 +773,27 @@ class G2PTQProcessor(GPTQProcessor):
     ) -> Dict[str, Any]:
         """Rebuild the per-batch forward kwargs the executor would pass."""
 
-        additional: Dict[str, Any] = {}
+        additional: Dict[str, Any] = {
+            "attention_mask": attention_mask if getattr(self.gptq_model, "support_batch_quantize", True) else None,
+            "use_cache": False,
+        }
         for key, value in (captured or {}).items():
             if key in _REPLAY_KWARG_BLOCKLIST or key in _REPLAY_MANAGED_KWARGS:
                 continue
-            if not _accepts_keyword(block, key):
-                # The captured kwargs belong to the module the executor
-                # forwarded, which is not always the module being replayed: the
-                # output head is one projection while its cache also carries
-                # the last decoder layer's rotary embeddings. Drop anything the
-                # replay target cannot accept instead of failing the refresh.
-                continue
             additional[key] = _move_value(value, device)
-        if attention_mask is not None and _accepts_keyword(block, "attention_mask"):
-            additional["attention_mask"] = _move_value(attention_mask, device)
-        if position_ids is not None and _accepts_keyword(block, "position_ids"):
+        if position_ids is not None:
             additional["position_ids"] = _move_value(position_ids, device)
-        if _accepts_keyword(block, "use_cache"):
-            additional["use_cache"] = False
 
         prepare = getattr(self.gptq_model, "prepare_layer_replay_kwargs", None)
-        if callable(prepare):
-            try:
-                additional = prepare(
-                    layer=block,
-                    layer_input=layer_input,
-                    additional_inputs=additional,
-                    target_device=device,
-                )
-            except TypeError:
-                # Older hook signatures take ``layer_input`` positionally.
-                pass
-        return additional
+        if callable(prepare) and not self._g2ptq_is_lm_head:
+            additional = prepare(
+                layer=block,
+                layer_input=layer_input,
+                additional_inputs=additional,
+                target_device=device,
+            )
+        # Model hooks consume private capture metadata before the forward.
+        return {key: value for key, value in additional.items() if _accepts_keyword(block, key)}
 
     @staticmethod
     def _orientation(module: torch.nn.Module, grad: torch.Tensor) -> torch.Tensor:
@@ -812,7 +810,7 @@ class G2PTQProcessor(GPTQProcessor):
     @staticmethod
     def _module_recorder(
         name: str,
-        captured: Dict[str, Tuple[torch.Tensor, torch.Tensor]],
+        captured: List[Tuple[str, torch.Tensor, torch.Tensor]],
     ):
         """Record one module's input activation and differentiable output."""
 
@@ -824,7 +822,7 @@ class G2PTQProcessor(GPTQProcessor):
             activation = _first_tensor(inp)
             if activation is None or not torch.is_tensor(activation):
                 return
-            captured[name] = (activation, output)
+            captured.append((name, activation, output))
 
         return record
 
@@ -848,7 +846,7 @@ class G2PTQProcessor(GPTQProcessor):
         grad_rows = output_grad.reshape(-1, output_grad.shape[-1])
         if rows.shape[0] != grad_rows.shape[0]:
             return None
-        return rows.detach(), grad_rows.detach().square()
+        return rows.detach(), grad_rows.detach().float().square()
 
     @staticmethod
     def _accumulate_grouped_hessian(
@@ -888,24 +886,24 @@ class G2PTQProcessor(GPTQProcessor):
         target: torch.Tensor,
         *,
         use_kl: bool,
+        generator: Optional[torch.Generator] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return ``(ell_G, ell_H)`` for one block replay batch."""
 
-        if use_kl and quantized.ndim >= 2 and quantized.shape == target.shape:
+        if quantized.dtype in (torch.float16, torch.bfloat16):
+            quantized = quantized.float()
+        target = target.to(dtype=quantized.dtype)
+        if use_kl:
             logits = quantized.reshape(-1, quantized.shape[-1])
             reference = target.reshape(-1, target.shape[-1])
-            log_reference = F.log_softmax(reference.float(), dim=-1)
-            reference_prob = log_reference.exp()
-            loss_g = F.kl_div(
-                F.log_softmax(logits.float(), dim=-1),
-                reference_prob,
-                reduction="batchmean",
-            ).to(quantized.dtype)
+            log_prob = F.log_softmax(logits, dim=-1)
+            reference_prob = F.softmax(reference, dim=-1)
+            loss_g = F.kl_div(log_prob, reference_prob, reduction="sum")
             with torch.no_grad():
                 labels = torch.multinomial(
-                    reference_prob, num_samples=1
+                    reference_prob, num_samples=1, generator=generator
                 ).squeeze(1)
-            loss_h = F.cross_entropy(logits, labels)
+            loss_h = F.nll_loss(log_prob, labels, reduction="sum")
             return loss_g, loss_h
 
         hidden = int(quantized.shape[-1])
@@ -916,7 +914,9 @@ class G2PTQProcessor(GPTQProcessor):
         # Theorem 1: the Fisher proxy adds Gaussian noise to the model output
         # and keeps it as a detached target, so the residual is exactly the
         # injected noise.
-        noise = torch.randn_like(quantized) * math.sqrt(hidden)
+        noise = torch.randn(
+            quantized.shape, device=quantized.device, dtype=quantized.dtype, generator=generator
+        ) * math.sqrt(hidden)
         residual = quantized - quantized.detach() - noise
         loss_h = 0.5 * residual.square().sum() / hidden
         return loss_g, loss_h

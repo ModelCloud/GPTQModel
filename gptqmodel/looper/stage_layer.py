@@ -484,6 +484,7 @@ def _capture_pristine_group_context(
     full,
     log,
     region_timer,
+    starts_branch: bool = False,
 ) -> None:
     """Capture clean grouped targets while the main layer cache keeps the noisy stream."""
     uses_grouped_optimization = getattr(processor, "uses_grouped_optimization", None)
@@ -491,10 +492,14 @@ def _capture_pristine_group_context(
         return
     clean_layer_inputs = layer_inputs
     resolve_clean_inputs = getattr(processor, "clean_group_layer_inputs", None)
-    if callable(resolve_clean_inputs):
+    if callable(resolve_clean_inputs) and not starts_branch:
         clean_layer_inputs = resolve_clean_inputs(
             layer_index=layer_index,
             layer_inputs=layer_inputs,
+        )
+    if is_lm_head_module and clean_layer_inputs is not layer_inputs:
+        clean_layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(
+            [list(batch) for batch in clean_layer_inputs]
         )
     capture_pristine_layer_module = getattr(processor, "receive_pristine_layer_module", None)
     if subset_plans and callable(capture_pristine_layer_module):
@@ -538,6 +543,8 @@ def _capture_pristine_group_context(
             subset_index=None,
             subset_total=len(subset_plans),
             layer_module=module,
+            position_ids=position_ids,
+            attention_masks=attention_masks,
         )
 
 
@@ -1137,6 +1144,7 @@ def run_layer_stage(
                 full=full,
                 log=log,
                 region_timer=region_timer,
+                starts_branch=starts_branch,
             )
             pristine_group_module = None
 

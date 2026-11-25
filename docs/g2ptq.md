@@ -58,17 +58,20 @@ flowchart TD
     A -->|"weight-only, EXL3, or another method"| X["NotImplementedError"]
     B --> C["G2PTQProcessor"]
     C --> D["stage captures the clean block output"]
-    D --> E["receive_layer_forward_context"]
+    D --> E["receive_layer_forward_context with replay masks"]
     E --> F["_refresh_block"]
     F --> G["_differentiable_block repairs inference tensors and hooked linears"]
     G --> H["_collect_block_statistics"]
-    H --> I["ell_G weight gradients and ell_H output gradients"]
+    H --> I["ell_G and ell_H over kept tokens"]
     I --> J["G2PTQ.set_block_statistics"]
     J --> K["G2PTQ.quantize"]
-    K -->|"statistics installed"| L["_g2ptq_quantize with trust region"]
-    K -->|"no statistics for this module"| M["GPTQ.quantize fallback"]
-    F -->|"refresh raises"| N["warn once per block, then GPTQ fallback"]
+    K -->|"usable statistics and sufficient samples"| L["_g2ptq_quantize with trust region"]
+    K -->|"missing statistics or standard fallback"| M["GPTQ.quantize"]
+    F -->|"refresh fails"| N["warn once per block"]
+    N --> M
+    L -->|"inverse allocation failure"| P["complete the grouped solve on CPU"]
     L --> O["packed GPTQ checkpoint"]
+    P --> O
     M --> O
 ```
 
@@ -79,7 +82,7 @@ block output, so the processor keeps two streams:
 
 | Stream | Symbol | Owner | Content |
 | --- | --- | --- | --- |
-| Clean | `Y` | `clean_group_layer_inputs` / `receive_clean_layer_inputs` | input produced by the already-quantized previous blocks applied to the original activations |
+| Clean | `Y` | `clean_group_layer_inputs` / `receive_clean_layer_inputs` | input produced by the pristine previous blocks applied to the original activations |
 | Noisy | `Y'` | the live calibration cache | input produced by the already-quantized previous blocks applied to their own quantized outputs |
 
 `Y` is produced by replaying the stage's pristine float block clone
@@ -87,7 +90,9 @@ block output, so the processor keeps two streams:
 advanced once per layer. `Y'` is the stream the block being quantized sees.
 `Y_hat` is the float block applied to `Y'`; the two streams differ only by the
 accumulated quantization error of the previous blocks, which is what makes the
-first-order term non-zero.
+first-order term non-zero. Each independent branch starts both streams from
+its captured inputs. At the output head, both streams pass through the
+model's head preprocessing before projection.
 
 ## Per-block refresh
 
@@ -95,11 +100,13 @@ first-order term non-zero.
 
 1. Build `ell_G` and `ell_H` from the block output (Algorithm 2, lines 9-13):
    block-wise MSE for body blocks, and KL / cross-entropy on the output head
-   when `kl_last_block` is set.
+   when `kl_last_block` is set. Both terms sum the per-token objectives in
+   FP32 for FP16 and BF16 models, using the active replay keep mask.
 2. Backpropagate `ell_G` for each projection's weight gradient `G` (line 16).
 3. Backpropagate `ell_H` and cache each projection's output-activation
    gradient; Eq. 8 squares it per token and channel, Eq. 9 averages channels
-   inside each output-channel group. The result is one `H` per group.
+   inside each output-channel group. The result is one `H` per group, summed
+   over every invocation of the projection.
 4. Install both on the task; `G2PTQ.quantize` then solves Eq. 6/15 with the
    trust region of Eq. 13.
 
@@ -108,7 +115,9 @@ stage itself runs inside it and every tensor allocated there is an inference
 tensor that autograd refuses to save. `_differentiable_block` therefore owns a
 snapshot (a deep copy when the stage handed over the live module) and rebuilds
 every frozen parameter as a fresh grad leaf; the live modules are never
-modified.
+modified. Each block derives its Fisher draws from the run seed and layer
+index. The continuation stores the run seed so checkpoint packing and
+interruption leave the draws reproducible.
 
 ## Failure contracts
 
@@ -116,7 +125,8 @@ modified.
   expert outside the captured subset) keeps GPTQ's captured Hessian and runs
   plain `GPTQ.quantize`. This is per module, not per run.
 - **Refresh failure.** The exception is logged once per block and that block's
-  modules fall back to GPTQ. A failed refresh never aborts the run.
+  affected modules fall back to GPTQ. The usual GPTQ sample thresholds and
+  smoothing also apply when a module has refreshed statistics.
 - **KV-cache reuse.** A block whose forward consumes a previous layer's KV
   cache cannot be replayed in isolation; the refresh refuses it and the block
   falls back.
@@ -131,9 +141,17 @@ modified.
   column axis exactly like GPTQ's padded Hessian, and the padding is removed
   from the result.
 
+| Replay or solve boundary | Initial implementation | Current behavior |
+| --- | --- | --- |
+| Output head | Head preprocessing on the noisy stream | Model head preprocessing on both streams |
+| Calibration rows | Objectives included all replayed rows | Replay keep mask selects rows for the objectives |
+| Fisher sampling | Used the global RNG between packing operations | Each block uses a local stream derived from the saved run seed |
+| Zero Fisher diagonal | A group could erase a calibration-live weight | GPTQ input energy identifies dead columns, and a positive diagonal stabilizes the group factorization |
+| Inverse allocation failure | The inverse could move to CPU while the column loop still allocated on the original device | The CPU retry carries the remaining solve and its scratch tensors |
+
 ## Measured effect
 
-WikiText-2 perplexity at 4 bits, `group_size=128`, fp16 weights and
+The measurements below are from the initial implementation. WikiText-2 perplexity at 4 bits, `group_size=128`, fp16 weights and
 activations, produced by `scripts/benchmark_g2ptq_ppl.py`. `alpha` is the
 trust-region budget (`alpha_mse`); the output head keeps the default
 `alpha_kl`.
@@ -173,6 +191,9 @@ for step size.
 | `alpha_kl` | `0.05` | Trust-region budget for the output-head KL block |
 | `num_groups` | `4` | Output-channel groups that share one Hessian |
 | `kl_last_block` | `True` | Use the KL objective on the output head |
+
+Once enabled for the run, a module's `dynamic.g2ptq` rule can select its own
+settings or use `false` to select plain GPTQ for that module.
 
 The paper autotunes `alpha` per block with a grid search (Appendix C.2). This
 port takes it from the run configuration instead; the paper reports that
