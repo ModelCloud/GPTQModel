@@ -453,6 +453,7 @@ from .models import (
     get_best_device,
 )
 from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
+from .packaging import GGUFPackageConfig, PackageConfig, package
 from .quantization import (
     AutoDtypeCast,
     AWQConfig,
