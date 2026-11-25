@@ -63,6 +63,11 @@ and replay stay on the GPTQ contract.
 7. Keep the RTN projection if the result is non-finite or has a higher
    reconstruction objective than the RTN initialization.
 
+With `pairswap_mode="auto"`, the condition number uses the full preconditioned
+spectrum. A zero eigenvalue gives an infinite condition number and enables
+PairSwap; a positive eigenvalue is used without a floor. This also covers
+rank-deficient calibration when a small damping increment rounds away.
+
 If activation ordering or the solve runs out of accelerator memory, retry the
 layer on CPU once using the original Hessian diagonal and source weights.
 The reconstruction returns to the source module device for replay.

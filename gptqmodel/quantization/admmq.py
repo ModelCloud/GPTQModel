@@ -345,10 +345,17 @@ class ADMMQ(GPTQ):
     # ------------------------------------------------------------------
 
     def _condition_number(self, eigenvalues: torch.Tensor) -> float:
-        positive = eigenvalues[eigenvalues > 0]
-        if positive.numel() == 0:
+        if eigenvalues.numel() == 0:
             return float("inf")
-        return float((positive[-1] / positive[0].clamp_min(1e-12)).item())
+        # eigh returns the complete spectrum in ascending order. Dropping
+        # null directions reports the condition of only the nonzero subspace
+        # and can make a rank-deficient Hessian look perfectly conditioned.
+        smallest = float(eigenvalues[0].item())
+        if smallest <= 0.0:
+            return float("inf")
+        # Divide as Python doubles so a small positive eigenvalue is neither
+        # floored nor subject to FP32 ratio overflow.
+        return float(eigenvalues[-1].item()) / smallest
 
     def _should_pairswap(self, condition_number: float) -> bool:
         mode = self.qcfg.pairswap_mode
@@ -356,7 +363,7 @@ class ADMMQ(GPTQ):
             return True
         if mode == "off":
             return False
-        return math.isfinite(condition_number) and condition_number > float(self.qcfg.pairswap_condition_threshold)
+        return condition_number > float(self.qcfg.pairswap_condition_threshold)
 
     def _admm_weight_solve(self, weight: torch.Tensor, hessian: torch.Tensor) -> Tuple[torch.Tensor, List[_Grid]]:
         """Run Algorithm 1 on one already-prepared ``[out, in]`` weight matrix."""

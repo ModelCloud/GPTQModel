@@ -538,7 +538,8 @@ def test_admmq_pairswap_auto_uses_the_condition_number_gate():
     assert off._should_pairswap(1e9) is False
     assert auto._should_pairswap(1e3) is False
     assert auto._should_pairswap(1e5) is True
-    assert auto._should_pairswap(float("inf")) is False
+    assert auto._should_pairswap(float("inf")) is True
+    assert auto._should_pairswap(float("nan")) is False
 
 
 def test_admmq_desc_act_round_trips_to_natural_column_order():
@@ -598,3 +599,50 @@ def test_admmq_retries_only_allocation_failures_from_pristine_state(monkeypatch,
         assert actual[5] == pytest.approx(expected[5], rel=1e-6)
     assert solver.H is None
     torch.testing.assert_close(solver.module.weight.cpu(), cpu_weight, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("spectrum", "expected"),
+    [
+        ([0.0, 0.0, 2.0, 2.0], math.inf),
+        ([0.0, 0.0], math.inf),
+        ([1e-20, 2.0], 2e20),
+        ([0.5, 2.0], 4.0),
+    ],
+)
+def test_admmq_condition_number_keeps_null_and_small_eigenvalues(spectrum, expected):
+    solver = ADMMQ(_make_layer(torch.ones(2, 4)), qcfg=_small_config())
+    actual = solver._condition_number(torch.tensor(spectrum, dtype=torch.float64))
+    assert actual == pytest.approx(expected, rel=1e-12)
+
+
+def test_admmq_auto_pairswap_refines_rank_deficient_calibration():
+    # Both column pairs are correlated, with no dead input columns. The
+    # positive damping is below FP32 resolution, leaving two null directions.
+    generator = torch.Generator().manual_seed(2)
+    weight = torch.rand(4, 4, generator=generator) - 0.5
+    x = torch.tensor([[1., 1., 0., 0.], [0., 0., 1., 1.]]).repeat(16, 1)
+    hessian = 2.0 * x.double().t() @ x.double() / x.shape[0]
+    assert torch.linalg.matrix_rank(hessian) == 2
+    assert (hessian.diagonal() > 0).all()
+    results = {}
+    for mode in ("off", "auto", "always"):
+        config = _small_config(
+            bits=2, group_size=2, sym=True, damp_percent=1e-10,
+            max_iter=1, pairswap_mode=mode, pairswap_rounds=2, pairswap_batch=8,
+        )
+        solver, result = _run_solver(ADMMQ, _make_layer(weight), config, x)
+        results[mode] = result
+        if mode != "off":
+            assert solver.admmq_diagnostics["pairswap_flips"] > 0
+            assert math.isinf(solver.admmq_diagnostics["condition_number"])
+        assert solver.H is None
+
+    # Compare actual returned weights against an independent FP64 objective,
+    # not the solver's recorded error. AUTO must take the same refinement as
+    # the explicit policy and retain its quantized weights and group metadata.
+    before = _reconstruction_error(weight.double(), results["off"][0].double(), hessian)
+    after = _reconstruction_error(weight.double(), results["auto"][0].double(), hessian)
+    assert after < before * 0.5
+    for actual, expected in zip(results["auto"][:4], results["always"][:4]):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
