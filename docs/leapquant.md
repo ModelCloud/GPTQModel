@@ -193,7 +193,31 @@ after offload and reorder, and retries after an invalid packed restore or a
 quantization failure.
 
 The portable Torch path is a correctness and memory baseline, not a
-throughput-optimized kernel. On a small synthetic decode fixture
-(`K=V=128`, 8 heads, 64 tokens) it was slower than the dense FP32 recurrence;
-the paper's speedups come from specialized kernels. A native kernel is a
+throughput-optimized kernel. Measure it with:
+
+```bash
+python scripts/benchmark_leapquant_state.py --device cuda
+```
+
+On one accelerator, with `K=V=128`, 8 heads, `window=16`, `rank=4`, 8-bit, and
+model-shaped inputs:
+
+| Step | Time |
+| --- | ---: |
+| Dense FP32 delta-rule step | 64-70 µs |
+| LeapQuant decode step | 724 µs |
+| Compensator fit (once per window) | 1175 µs |
+
+Decode is about 10x the dense step, and the fit dominates the per-token cost
+through its one-per-window amortization. Two costs remain structural:
+
+- The step is dispatch-bound. Roughly 40 small eager kernels per token, plus
+  one host synchronization for the finiteness check, cost more than the
+  arithmetic.
+- The fit is limited by the accelerator linear-algebra drivers. The current
+  form uses a Cholesky-factor orthonormalization and a Gram-matrix
+  eigendecomposition because a batched QR plus a wide SVD of the sketch cost
+  several times more on the same hardware.
+
+The paper's speedups come from specialized kernels. A native kernel is a
 separate follow-up and is not claimed here.
