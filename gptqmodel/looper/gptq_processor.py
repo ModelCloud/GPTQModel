@@ -43,7 +43,7 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..nn_modules.qlinear.w4a_boundary import layer_mlp_policy
-from ..quantization import FOEM, GPTAQ, GPTQ
+from ..quantization import ADMMQ, FOEM, GPTAQ, GPTQ
 from ..quantization.activation_floatx import (
     NVFP4ActivationHeadroom,
     fp8_token_qdq,
@@ -203,7 +203,7 @@ def _capture_payload(value: Any) -> Any:
 
 
 class GPTQProcessor(LoopProcessor):
-    """Captures activations and quantizes modules with GPTQ or GPTAQ/FOEM."""
+    """Captures activations and quantizes modules with GPTQ, GPTAQ, FOEM or ADMM-Q."""
 
     lifecycle = ProcessorLifecycleConfig(
         forward=ForwardConfig(
@@ -377,7 +377,7 @@ class GPTQProcessor(LoopProcessor):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
-        """Builds the per-module GPTQ/GPTAQ/FOEM task after applying dynamic overrides."""
+        """Builds the per-module GPTQ/GPTAQ/FOEM/ADMM-Q task after applying dynamic overrides."""
 
         resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
         qcfg_clone = clone_gptq_config_for_module(
@@ -399,6 +399,8 @@ class GPTQProcessor(LoopProcessor):
             tmp = GPTAQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
         elif qcfg_clone.foem is not None:
             tmp = FOEM(module=module, qcfg=qcfg_clone, region_timer=region_timer)
+        elif qcfg_clone.method == METHOD.ADMMQ:
+            tmp = ADMMQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
             tmp.fallback = qcfg_clone.fallback
@@ -1234,7 +1236,12 @@ class GPTQProcessor(LoopProcessor):
 
         # set quantized state
         model.quantized = True
-        model.quantize_config.method = METHOD.GPTQ
+        # GPTAQ and FOEM are GPTQ options, so their artifacts are plain
+        # GPTQ checkpoints. ADMM-Q is its own method whose tensors still
+        # use the GPTQ packing contract; keeping the method lets the
+        # checkpoint restore the solver settings it recorded in `meta`.
+        if model.quantize_config.method != METHOD.ADMMQ:
+            model.quantize_config.method = METHOD.GPTQ
 
         super().finalize(model=model, **kwargs)
 
@@ -1255,8 +1262,9 @@ class GPTQProcessor(LoopProcessor):
             return "gptaq"
         if qcfg.foem is not None:
             return "foem"
-        else:
-            return "gptq"
+        if qcfg.method == METHOD.ADMMQ:
+            return "admmq"
+        return "gptq"
 
     def _release_host_buffers(self, *tensors: torch.Tensor) -> None:
         """Retain the old cleanup hook for streaming tests and external callers.

@@ -3325,7 +3325,7 @@ class BaseQModel(nn.Module):
             # been rotated and fused.
             validate_rotation_dimensions(self.model.config, rotation)
 
-            backend = normalize_backend(backend, quant_method=self.quantize_config.method)
+            backend = normalize_backend(backend, quant_method=self.quantize_config.export_quant_method())
             if backend == BACKEND.AUTO:
                 backend = BACKEND.GPTQ_TORCH
             if backend not in (
@@ -8457,6 +8457,7 @@ class BaseQModel(nn.Module):
 
         if quant_method not in {
             METHOD.GPTQ,
+            METHOD.ADMMQ,
             METHOD.GGUF,
             METHOD.FP8,
             METHOD.BITSANDBYTES,
@@ -8469,7 +8470,7 @@ class BaseQModel(nn.Module):
         }:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "
-                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PARO/VPTQ/MACAQ/NF12/CPTC"
+                "only support GPTQ/ADMMQ/GGUF/FP8/BITSANDBYTES/EXL3/PARO/VPTQ/MACAQ/NF12/CPTC"
             )
             return None
 

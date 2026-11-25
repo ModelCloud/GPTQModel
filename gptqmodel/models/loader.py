@@ -457,7 +457,11 @@ def configure_native_floatx_source_quantization(
     """
 
     source_format = native_floatx_source_format(config, model_local_path=model_local_path)
-    if source_format is None or quantize_config.method not in (METHOD.GPTQ, METHOD.AWQ):
+    if source_format is None or quantize_config.method not in (
+        METHOD.GPTQ,
+        METHOD.ADMMQ,
+        METHOD.AWQ,
+    ):
         return None
 
     preprocessors = list(getattr(quantize_config, "preprocessors", None) or [])
@@ -3909,7 +3913,7 @@ def ModelLoader(cls):
                     raise NotImplementedError(
                         f"`rotation` is only supported for GPTQ/GPTQ_V2 checkpoints, got `{format_code}`."
                     )
-                backend = normalize_backend(backend, quant_method=qcfg.method)
+                backend = normalize_backend(backend, quant_method=qcfg.export_quant_method())
                 if backend == BACKEND.AUTO:
                     backend = BACKEND.GPTQ_TORCH
                 if backend not in (

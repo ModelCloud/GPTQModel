@@ -24,6 +24,7 @@
 * GSQ: [IST-DASLab's GSQ paper](https://arxiv.org/abs/2604.18556) and [reference implementation](https://github.com/IST-DASLab/GSQ), by Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, and Dan Alistarh. The optional local refinement and staged Llama training in GPT-QModel are adaptations of this work.
 * RCO: [IST-DASLab's RCO paper](https://arxiv.org/abs/2605.00649) and [reference implementation](https://github.com/IST-DASLab/RCO), by Michael Helcig and Dan Alistarh. `gptqmodel/quantization/rco.py` and the `scripts/gsq_paper/rco_*.py` drivers are a port of this work.
 * **LeapQuant** by Yi Pan, Haocheng Xi, Kan Zhu, Xingyang Li, Yibo Wu, Mayank Mishra, Hongtao Zhang, William X. Zheng, Baris Kasikci, Song Han, Kurt Keutzer, Rishabh Iyer, and Ion Stoica introduced per-window recurrent-state quantization and Compensator Tokens used by GPT-QModel's `gptqmodel/utils/leapquant.py`. [Paper](https://arxiv.org/abs/2609.38166) · [Official implementation](https://github.com/leapquant/LeapQuant) · [LeapQuant guide](leapquant.md)
+* **ADMM-Q** by Ryan Lucas, Mehdi Makni, Xiang Meng, Adam Deng, and Rahul Mazumder introduced the Hessian-based ADMM weight quantizer with diagonal preconditioning, a growing penalty schedule, guarded grid refresh, and PairSwap local search. GPT-QModel's `gptqmodel/quantization/admmq.py` is a clean-room implementation from the paper's algorithm. [Paper](https://arxiv.org/abs/2605.11222) · [Official implementation](https://github.com/mazumder-lab/admm-q) · [ADMM-Q guide](admmq.md)
 
 ## Citations
 
@@ -73,6 +74,16 @@
   author={Helcig, Michael and Alistarh, Dan},
   journal={arXiv preprint arXiv:2605.00649},
   year={2026}
+}
+
+# ADMM-Q
+@inproceedings{lucas2026admmq,
+  title     = {{ADMM-Q}: An Improved Hessian-based Weight Quantizer for Post-Training Quantization of Large Language Models},
+  author    = {Lucas, Ryan and Makni, Mehdi and Meng, Xiang and Deng, Adam and Mazumder, Rahul},
+  booktitle = {Conference on Language Modeling (COLM)},
+  year      = {2026},
+  eprint    = {2605.11222},
+  archivePrefix = {arXiv}
 }
 
 # LeapQuant

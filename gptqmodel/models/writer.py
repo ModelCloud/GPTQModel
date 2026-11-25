@@ -424,7 +424,7 @@ def _gptq_explicit_quantized_modules(
     keeps the historical payload for checkpoints without exclusions.
     """
 
-    if getattr(quantize_config, "method", None) != METHOD.GPTQ:
+    if getattr(quantize_config, "method", None) not in (METHOD.GPTQ, METHOD.ADMMQ):
         return None
     if not quantize_config.has_dynamic_exclusions():
         return None

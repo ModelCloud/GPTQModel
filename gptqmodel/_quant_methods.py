@@ -13,6 +13,14 @@ quantization package.
 # `quant_method: "gguf"` (plus `method: "gguf"`) keep loading in GPT-QModel.
 GGUF_EXPORT_QUANT_METHOD = "gptqmodel_gguf"
 
+#: Methods that reuse another method's checkpoint layout publish that layout's
+#: ``quant_method`` name instead of their own. ADMM-Q writes ordinary
+#: GPTQ-packed tensors, so plain transformers, vLLM and SGLang read the
+#: checkpoint as GPTQ; the internal method is preserved separately in ``meta``.
+EXPORTED_QUANT_METHOD_NAMES = {
+    "admmq": "gptq",
+}
+
 # Checkpoints written by GPT-QModel's removed FP8 exporter (between #5181 and
 # #5242) publish this method. It is accepted on load and normalized to
 # `METHOD.FP8` so those checkpoints keep working, but new checkpoints never

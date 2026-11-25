@@ -23,6 +23,7 @@ pages below document specific features, compatibility boundaries, and implementa
 
 ### Quantization and calibration
 
+- [ADMM-Q weight quantization](admmq.md)
 - [AWQ affine range and packed decode](awq-affine-range.md)
 - [AWQ calibration aggregation](awq-calibration-aggregation.md)
 - [AWQ GEMM dequantization tiling](awq-dequantize-tiling.md)

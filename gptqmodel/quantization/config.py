@@ -182,6 +182,9 @@ class METHOD(str, Enum):
     """Supported quantization algorithms exposed by config payloads."""
 
     GPTQ = "gptq"
+    # ADMM-Q: an ADMM split between the continuous Hessian-weighted update and
+    # the discrete grid projection. It exports the ordinary GPTQ packing.
+    ADMMQ = "admmq"
     GGUF = "gguf"
     FP8 = "fp8"
     BITSANDBYTES = "bitsandbytes"
@@ -234,6 +237,8 @@ def encoder_stages_on_host(qcfg: Any) -> bool:
 METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int | float, ...]] = {
     # GPTQ/RTN pack 2-8 bit weights (5/6/7 use the planar layout).
     METHOD.GPTQ: (2, 3, 4, 5, 6, 7, 8),
+    # ADMM-Q is a GPTQ-family solver: it shares the same grids and packing.
+    METHOD.ADMMQ: (2, 3, 4, 5, 6, 7, 8),
     # AWQ native GEMM/GEMV kernels require 4 bits.
     # RCO also allocates 2- and 3-bit modules, which only the portable torch
     # kernel (`AwqTorchLinear`, 2-8 bits) can pack and run. Request GEMM plus
@@ -2816,6 +2821,14 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.MARLIN,
         FORMAT.BITBLAS,
     },
+    # ADMM-Q writes ordinary GPTQ-packed tensors, so it shares that format set.
+    METHOD.ADMMQ: {
+        FORMAT.GPTQ,
+        FORMAT.GPTQ_V2,
+        FORMAT.GPTQ_P,
+        FORMAT.MARLIN,
+        FORMAT.BITBLAS,
+    },
     METHOD.FP8: {
         FORMAT.FP8,
     },
@@ -4602,6 +4615,30 @@ def apply_scalar_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: Re
     act_group_aware = resolved_cfg.get("act_group_aware", None)
     if act_group_aware is not None:
         config.act_group_aware = act_group_aware
+    # ADMM-Q owns its solver controls. They are validated by
+    # `_validate_dynamic_numeric_overrides` at construction, so copying the
+    # resolved value here cannot introduce an unchecked setting.
+    for field_name in (
+        "max_iter",
+        "rho",
+        "rho_update",
+        "update_iter",
+        "switch_iter",
+        "early_stop_tol",
+        "stagnation_window",
+        "stagnation_tol",
+        "refresh_on_stagnation",
+        "refresh_accept_rel",
+        "pairswap_mode",
+        "pairswap_rounds",
+        "pairswap_pairs",
+        "pairswap_batch",
+        "pairswap_seed",
+        "pairswap_condition_threshold",
+    ):
+        value = resolved_cfg.get(field_name, None)
+        if value is not None and hasattr(config, field_name):
+            setattr(config, field_name, value)
     config._resolve_activation_ordering(desc_act, act_group_aware)
 
 
@@ -5181,6 +5218,13 @@ _DYNAMIC_NUMERIC_BOUNDS: Dict[str, Tuple[float, Optional[float], bool, bool, str
     "opt_channel_scale_clamp_max": (0.0, None, False, True, "positive"),
     "ridge": (0.0, None, True, True, "non-negative"),
     "pre_alpha": (0.0, 1.0, True, True, "between 0 and 1"),
+    # ADMM-Q solver schedule.
+    "rho": (0.0, None, False, True, "positive"),
+    "rho_update": (1.0, None, False, True, "greater than 1"),
+    "early_stop_tol": (0.0, None, True, True, "non-negative"),
+    "stagnation_tol": (0.0, None, True, True, "non-negative"),
+    "refresh_accept_rel": (0.0, 1.0, True, False, "in the interval [0, 1)"),
+    "pairswap_condition_threshold": (0.0, None, False, True, "positive"),
 }
 
 # Integer per-module options whose top-level ``__post_init__`` coerces with
@@ -5194,7 +5238,20 @@ _DYNAMIC_INTEGER_BOUNDS: Dict[str, Tuple[int, Optional[int], bool, bool, str]] =
     "opt_validation_samples": (1, None, True, True, "a positive integer"),
     "opt_batch_size": (1, None, True, True, "a positive integer"),
     "n_flip_iters": (0, None, True, True, "a non-negative integer"),
+    # ADMM-Q solver schedule and PairSwap budget.
+    "max_iter": (1, None, True, True, "a positive integer"),
+    "update_iter": (1, None, True, True, "a positive integer"),
+    "switch_iter": (0, None, True, True, "a non-negative integer"),
+    "stagnation_window": (2, None, True, True, "an integer >= 2"),
+    "pairswap_rounds": (0, None, True, True, "a non-negative integer"),
+    "pairswap_pairs": (1, None, True, True, "a positive integer"),
+    "pairswap_batch": (1, None, True, True, "a positive integer"),
+    "pairswap_seed": (0, None, True, True, "a non-negative integer"),
 }
+
+
+#: PairSwap activation policy accepted by ``ADMMQConfig``.
+_ADMMQ_PAIRSWAP_MODES = ("always", "auto", "off")
 
 
 def _coerce_dynamic_integer(owner_name: str, label: str, value: Any, range_text: str) -> int:
@@ -5284,6 +5341,12 @@ def _validate_dynamic_numeric_overrides(owner, layer_name: str, layer_dict: Mapp
             if number not in (4, 8):
                 raise ValueError(f"{owner_name}: `{label}` must be 4 or 8, got {value!r}.")
             continue
+        if canonical == "pairswap_mode":
+            if not isinstance(value, str) or value not in _ADMMQ_PAIRSWAP_MODES:
+                raise ValueError(
+                    f"{owner_name}: `{label}` must be one of {list(_ADMMQ_PAIRSWAP_MODES)}, got {value!r}."
+                )
+            continue
         integer_bounds = _DYNAMIC_INTEGER_BOUNDS.get(canonical)
         if integer_bounds is not None:
             minimum, maximum, include_minimum, include_maximum, range_text = integer_bounds
@@ -5336,7 +5399,11 @@ def _default_damp_percent(method: METHOD) -> float:
     # at 0.05 (= reference GPTQ without AGA). Qwen2.5 is nearly unchanged
     # (20.99 -> 21.30), so this is the cheap correct default; the change is
     # called out in the issue #4074 PR.
-    del method
+    if method == METHOD.ADMMQ:
+        # The ADMM split is insensitive to the damping floor once the
+        # preconditioned spectrum is factorized, so the paper's tighter 1%
+        # default is used instead of GPTQ's 5%.
+        return 0.01
     return 0.05
 
 
@@ -5564,6 +5631,8 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         if normalized_format is not None and normalized_format != FORMAT.QQQ:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.QQQ
+    elif target_cls is ADMMQConfig:
+        expected_method = METHOD.ADMMQ
     elif target_cls is MacaqConfig:
         expected_method = METHOD.MACAQ
         # MACaQ checkpoints store their per-layer transform under
@@ -5722,6 +5791,24 @@ _SERIALIZED_META_FIELD_NAMES = (
     "opt_channel_scale_clamp_min",
     "opt_channel_scale_clamp_max",
     "scale_search_chunked_activations",
+    # ADMM-Q solver schedule and local-search controls. They are calibration
+    # settings, so they live in `meta` like the other method-specific knobs.
+    "max_iter",
+    "rho",
+    "rho_update",
+    "update_iter",
+    "switch_iter",
+    "early_stop_tol",
+    "stagnation_window",
+    "stagnation_tol",
+    "refresh_on_stagnation",
+    "refresh_accept_rel",
+    "pairswap_mode",
+    "pairswap_rounds",
+    "pairswap_pairs",
+    "pairswap_batch",
+    "pairswap_seed",
+    "pairswap_condition_threshold",
 )
 
 
@@ -5948,6 +6035,7 @@ def validate_rotation_format(
 _CALIBRATED_METHODS = frozenset(
     {
         METHOD.GPTQ,
+        METHOD.ADMMQ,
         METHOD.QQQ,
         METHOD.AWQ,
         METHOD.PARO,
@@ -5959,7 +6047,7 @@ _CALIBRATED_METHODS = frozenset(
 
 #: Calibrated methods whose fallback path does read a smoother. The others
 #: have no smoothing step anywhere, so pointing at `fallback` would be wrong.
-_FALLBACK_SMOOTHER_METHODS = frozenset({METHOD.GPTQ, METHOD.QQQ})
+_FALLBACK_SMOOTHER_METHODS = frozenset({METHOD.GPTQ, METHOD.ADMMQ, METHOD.QQQ})
 
 #: Weight-only methods whose packing path never applies a top-level `smooth`.
 #: NF12 is a lossless format and refuses one at pack time; the Tenstorrent
@@ -6114,6 +6202,7 @@ def validate_smoother_support(qcfg: Any) -> None:
 #: checkpoint (#5583, the #5302 class).
 _MSE_APPLIED_COMPONENTS: Dict[METHOD, frozenset] = {
     METHOD.GPTQ: frozenset({"norm", "grid_budget"}),
+    METHOD.ADMMQ: frozenset({"norm", "grid_budget"}),
     METHOD.QQQ: frozenset({"norm", "grid_budget"}),
     METHOD.AWQ: frozenset({"clip_grid_budget"}),
 }
@@ -7067,7 +7156,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                 if not layer.startswith('-')
             )
         if (
-            self.method == METHOD.GPTQ
+            self.method in (METHOD.GPTQ, METHOD.ADMMQ)
             and format_family in (FORMAT.GPTQ, FORMAT.GPTQ_V2)
             and planar_only_bits
         ):
@@ -8012,6 +8101,159 @@ class GPTQConfig(PreProcessorConfig):
             out["gsq"] = asdict(self.gsq)
         if self.gsq_training is not None:
             out["gsq_training"] = self.gsq_training.to_dict()
+
+
+@dataclass
+class ADMMQConfig(GPTQConfig):
+    """Configuration for the ADMM-Q weight-only quantizer.
+
+    ADMM-Q optimizes the same Hessian-weighted reconstruction objective as
+    GPTQ, but replaces the greedy column sweep with an ADMM split between the
+    continuous Hessian update and the discrete grid projection. The exported
+    tensors are ordinary GPTQ-packed tensors: the checkpoint publishes
+    ``quant_method: gptq`` and records ``method: admmq`` for provenance.
+
+    The solver schedule and the PairSwap local-search budget are calibration
+    settings, so they are persisted under ``meta`` and do not change the
+    inference contract.
+    """
+
+    method: METHOD = field(default=METHOD.ADMMQ)
+    format: FORMAT = field(default=FORMAT.GPTQ)
+    # The paper's default MSE exponent; GPTQ's default is 0 (search disabled).
+    mse: Union[MSEConfig, Dict[str, Any], int, float] = field(
+        default_factory=lambda: MSEConfig(norm=2.0),
+        metadata={"help": "MSE shrink-grid search config; ADMM-Q defaults to norm=2"},
+    )
+
+    # ADMM schedule: rho grows by `rho_update` every `update_iter` iterations,
+    # and early exit is allowed after `switch_iter` iterations.
+    max_iter: int = field(default=300)
+    rho: float = field(default=0.1)
+    rho_update: float = field(default=1.1)
+    update_iter: int = field(default=3)
+    switch_iter: int = field(default=30)
+    early_stop_tol: float = field(default=1e-6)
+
+    # One guarded grid refresh when reconstruction progress flattens.
+    stagnation_window: int = field(default=4)
+    stagnation_tol: float = field(default=1e-3)
+    refresh_on_stagnation: bool = field(default=True)
+    refresh_accept_rel: float = field(default=0.0)
+
+    # PairSwap local search over adjacent grid cells.
+    pairswap_mode: str = field(default="always")
+    pairswap_rounds: int = field(default=5)
+    pairswap_pairs: int = field(default=64)
+    pairswap_batch: int = field(default=64)
+    pairswap_seed: int = field(default=0)
+    pairswap_condition_threshold: float = field(default=5e4)
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.ADMMQ,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return GPTQ_EXPORT_FORMATS
+
+    def export_quant_method(self) -> METHOD:
+        # Every exported tensor uses the GPTQ packing contract, including
+        # `FORMAT.MARLIN`, whose generic resolver would otherwise fall back to
+        # this config's internal method.
+        return METHOD.GPTQ
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def __post_init__(self):
+        if self.activation is not None:
+            raise ValueError(
+                "ADMMQConfig: `activation` stream quantization is not supported by ADMM-Q."
+            )
+        super().__post_init__()
+
+        if self.mock_quantization:
+            raise ValueError("ADMMQConfig: `mock_quantization` is incompatible with ADMM-Q.")
+        if self.gptaq is not None:
+            raise ValueError("ADMMQConfig: `gptaq` is incompatible with ADMM-Q.")
+        if self.foem is not None:
+            raise ValueError("ADMMQConfig: `foem` is incompatible with ADMM-Q.")
+        if self.gsq is not None and self.gsq.enabled:
+            raise ValueError("ADMMQConfig: per-linear GSQ is incompatible with ADMM-Q.")
+        if self.gsq_training is not None and self.gsq_training.enabled:
+            raise ValueError("ADMMQConfig: staged GSQ is incompatible with ADMM-Q.")
+        if self.static_groups:
+            raise ValueError("ADMMQConfig: `static_groups` is not supported by ADMM-Q.")
+        if self.act_group_aware:
+            raise ValueError("ADMMQConfig: `act_group_aware` is not supported by ADMM-Q.")
+
+        self._validate_solver_options()
+
+    def _validate_solver_options(self) -> None:
+        owner = "ADMMQConfig"
+        for name, minimum in (
+            ("max_iter", 1),
+            ("update_iter", 1),
+            ("switch_iter", 0),
+            ("stagnation_window", 2),
+            ("pairswap_rounds", 0),
+            ("pairswap_pairs", 1),
+            ("pairswap_batch", 1),
+            ("pairswap_seed", 0),
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"{owner}: `{name}` must be an integer >= {minimum}, got {value!r}.")
+
+        for name, minimum, exclusive_minimum in (
+            ("rho", 0.0, True),
+            ("rho_update", 1.0, True),
+            ("early_stop_tol", 0.0, False),
+            ("stagnation_tol", 0.0, False),
+            ("pairswap_condition_threshold", 0.0, True),
+        ):
+            value = _validate_finite_float(owner, name, getattr(self, name), minimum=minimum)
+            if exclusive_minimum and value <= minimum:
+                raise ValueError(f"{owner}: `{name}` must be greater than {minimum}, got {value!r}.")
+
+        refresh_rel = _validate_finite_float(
+            owner, "refresh_accept_rel", self.refresh_accept_rel, minimum=0.0
+        )
+        if refresh_rel >= 1.0:
+            raise ValueError(
+                f"{owner}: `refresh_accept_rel` must be in the interval [0, 1), got {refresh_rel!r}."
+            )
+        if not isinstance(self.pairswap_mode, str) or self.pairswap_mode not in _ADMMQ_PAIRSWAP_MODES:
+            raise ValueError(
+                f"{owner}: `pairswap_mode` must be one of {list(_ADMMQ_PAIRSWAP_MODES)}, "
+                f"got {self.pairswap_mode!r}."
+            )
+
+    def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
+        super()._update_meta_payload(meta_payload)
+        meta_payload["mse"] = {
+            "norm": self.mse.norm,
+            "grid_budget": self.mse.grid_budget,
+            "clip_grid_budget": self.mse.clip_grid_budget,
+        }
+        for name in (
+            "max_iter",
+            "rho",
+            "rho_update",
+            "update_iter",
+            "switch_iter",
+            "early_stop_tol",
+            "stagnation_window",
+            "stagnation_tol",
+            "refresh_on_stagnation",
+            "refresh_accept_rel",
+            "pairswap_mode",
+            "pairswap_rounds",
+            "pairswap_pairs",
+            "pairswap_batch",
+            "pairswap_seed",
+            "pairswap_condition_threshold",
+        ):
+            meta_payload[name] = getattr(self, name)
 
 
 @dataclass
@@ -10206,6 +10448,8 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return TTBlockfloatConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
         return QQQConfig
+    if method == METHOD.ADMMQ:
+        return ADMMQConfig
     if method == METHOD.AWQ:
         return AWQConfig
     if format_value in {FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ}:
@@ -10222,6 +10466,7 @@ def _known_quantize_config_field_names() -> set[str]:
         PreProcessorConfig,
         QuantizeConfig,
         GPTQConfig,
+        ADMMQConfig,
         AWQConfig,
         ParoConfig,
         QQQConfig,

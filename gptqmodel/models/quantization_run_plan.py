@@ -36,6 +36,9 @@ class ProcessorStep(str, Enum):
 
 _CALIBRATED_PRIMARY = {
     METHOD.GPTQ: ProcessorStep.GPTQ,
+    # ADMM-Q shares the GPTQ calibration processor and swaps only the
+    # per-module weight solver.
+    METHOD.ADMMQ: ProcessorStep.GPTQ,
     METHOD.QQQ: ProcessorStep.QQQ,
     METHOD.VPTQ: ProcessorStep.VPTQ,
     METHOD.MACAQ: ProcessorStep.MACAQ,
