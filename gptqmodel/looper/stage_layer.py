@@ -537,6 +537,7 @@ def _capture_pristine_group_context(
             layer_outputs=pristine_outputs,
             subset_index=None,
             subset_total=len(subset_plans),
+            layer_module=module,
         )
 
 

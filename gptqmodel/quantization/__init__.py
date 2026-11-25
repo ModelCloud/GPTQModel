@@ -25,6 +25,7 @@ from .config import (
                      FallbackStrategy,
                      FOEMConfig,
                      FP8Config,
+                     G2PTQConfig,
                      GGUFBits,
                      GGUFConfig,
                      GPTAQConfig,
@@ -64,6 +65,7 @@ from .config import (
                      GSQConfig as GSQConfig,
 )
 from .foem import FOEM
+from .g2ptq import G2PTQ
 from .gptaq import GPTAQ
 from .gptq import GPTQ
 from .gsq_training_config import GSQTrainingConfig

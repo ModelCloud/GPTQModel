@@ -43,7 +43,7 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..nn_modules.qlinear.w4a_boundary import layer_mlp_policy
-from ..quantization import FOEM, GPTAQ, GPTQ
+from ..quantization import FOEM, G2PTQ, GPTAQ, GPTQ
 from ..quantization.activation_floatx import (
     NVFP4ActivationHeadroom,
     fp8_token_qdq,
@@ -56,6 +56,7 @@ from ..quantization.config import (
     METHOD,
     CalibrationConfig,
     FOEMConfig,
+    G2PTQConfig,
     GPTAQConfig,
     HessianConfig,
     QuantizeConfig,
@@ -171,6 +172,7 @@ def clone_gptq_config_for_module(
                 raise ValueError("QuantizeConfig: dynamic `hessian` must be a HessianConfig or dict.")
         gptaq_override = resolved_cfg.get("gptaq", None)
         foem_override = resolved_cfg.get("foem", None)
+        g2ptq_override = resolved_cfg.get("g2ptq", None)
         qcfg_clone.gsq = normalize_gsq_config(resolved_cfg.get("gsq", qcfg_clone.gsq))
         if gptaq_override is not None:
             if isinstance(gptaq_override, dict):
@@ -186,6 +188,13 @@ def clone_gptq_config_for_module(
                 qcfg_clone.foem = foem_override
             else:
                 raise ValueError("QuantizeConfig: dynamic `foem` must be a FOEMConfig or dict.")
+        if g2ptq_override is not None:
+            if isinstance(g2ptq_override, dict):
+                qcfg_clone.g2ptq = G2PTQConfig(**g2ptq_override)
+            elif isinstance(g2ptq_override, G2PTQConfig):
+                qcfg_clone.g2ptq = g2ptq_override
+            else:
+                raise ValueError("QuantizeConfig: dynamic `g2ptq` must be a G2PTQConfig or dict.")
 
         qcfg_clone.validate_gsq()
 
@@ -397,6 +406,8 @@ class GPTQProcessor(LoopProcessor):
 
         if qcfg_clone.gptaq is not None:
             tmp = GPTAQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
+        elif qcfg_clone.g2ptq is not None:
+            tmp = G2PTQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
         elif qcfg_clone.foem is not None:
             tmp = FOEM(module=module, qcfg=qcfg_clone, region_timer=region_timer)
         else:
