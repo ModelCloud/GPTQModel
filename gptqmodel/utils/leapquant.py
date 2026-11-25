@@ -97,6 +97,33 @@ def _fp32_context(device: torch.device):
     return nullcontext()
 
 
+def _orthonormal_columns(matrix: torch.Tensor) -> torch.Tensor:
+    """Orthonormalize the trailing columns through a Cholesky factor.
+
+    A batched QR of the sketch matrices costs milliseconds on the accelerator
+    linear-algebra drivers, while the two contractions below stay well under a
+    tenth of that for the narrow sketches used here. A relative jitter keeps the
+    Gram matrix positive definite when a sketch column is nearly dependent.
+    """
+
+    gram = matrix.transpose(-1, -2) @ matrix
+    scale = gram.diagonal(dim1=-2, dim2=-1).amax(dim=-1, keepdim=True).clamp_min(_EPS)
+    eye = torch.eye(gram.shape[-1], dtype=gram.dtype, device=gram.device)
+    factor = torch.linalg.cholesky(gram + eye * (scale * 1e-6)[..., None])
+    return torch.linalg.solve_triangular(factor, matrix.transpose(-1, -2), upper=False).transpose(-1, -2)
+
+
+def _thin_singular_pairs(matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the left singular vectors and values of a matrix with few rows.
+
+    ``matrix`` has fewer rows than columns, so its Gram matrix is the small
+    side and the decomposition costs a fraction of a wide SVD.
+    """
+
+    values, vectors = torch.linalg.eigh(matrix @ matrix.transpose(-1, -2))
+    return vectors.flip(-1), values.flip(-1).clamp_min(0.0).sqrt()
+
+
 def normalize_qk(query: torch.Tensor, key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply the delta-rule L2 normalization to query and key."""
 
@@ -362,15 +389,18 @@ class LeapQuantState:
         omega = torch.randn(
             (v, columns), generator=generator, device=generator.device, dtype=torch.float32,
         ).to(state.device)
-        q, _ = torch.linalg.qr(state @ omega)
+        q = _orthonormal_columns(state @ omega)
         for _ in range(self.config.lowrank_iters):
-            z, _ = torch.linalg.qr(state.transpose(-1, -2) @ q)
-            q, _ = torch.linalg.qr(state @ z)
+            z = _orthonormal_columns(state.transpose(-1, -2) @ q)
+            q = _orthonormal_columns(state @ z)
         reduced = q.transpose(-1, -2) @ state
-        u, s, vh = torch.linalg.svd(reduced, full_matrices=False)
-        root = s[..., :r].clamp_min(0.0).sqrt()
+        u, singular = _thin_singular_pairs(reduced)
+        root = singular[..., :r].clamp_min(0.0).sqrt()
+        # A degenerate direction must yield zero factors, never a division by
+        # zero; the floor is relative to the leading singular value.
+        root = root.clamp_min(root[..., :1].clamp_min(_EPS) * 1e-6)
         factors_key = q @ (u[..., :r] * root[..., None, :])
-        factors_value = vh[..., :r, :].transpose(-1, -2) * root[..., None, :]
+        factors_value = (reduced.transpose(-1, -2) @ u[..., :r]) / root[..., None, :]
         return factors_key, factors_value
 
     @torch.no_grad()
@@ -424,12 +454,7 @@ class LeapQuantState:
 
         state = self.dequantize()
         for index in range(self.window_count):
-            alpha = self.buffer_alpha[:, :, index]
-            decay = (
-                alpha[..., :, None]
-                if self.gate_dim == self.key_dim
-                else alpha[..., 0][..., None, None]
-            )
+            decay = self._decay_row_scale(self.buffer_alpha[:, :, index])
             state = (
                 state * decay
                 + self.buffer_keys[:, :, index].float()[..., :, None]
@@ -442,6 +467,27 @@ class LeapQuantState:
         """Return the current state including buffered updates (transient)."""
 
         return self._replay_window()
+
+    def _require_finite(self, *items: tuple[str, torch.Tensor]) -> None:
+        """Validate several tensors with a single device-to-host transfer."""
+
+        combined = None
+        for _, tensor in items:
+            ok = torch.isfinite(tensor).all()
+            combined = ok if combined is None else combined & ok
+        if combined is None or bool(combined):
+            return
+        for name, tensor in items:
+            if not bool(torch.isfinite(tensor).all()):
+                raise ValueError(f"LeapQuant {name} contains non-finite values")
+        raise ValueError("LeapQuant input contains non-finite values")
+
+    def _decay_row_scale(self, decay: torch.Tensor) -> torch.Tensor:
+        """Shape a per-head decay for broadcasting against a ``[B, H, K, V]`` state."""
+
+        if self.gate_dim == self.key_dim:
+            return decay[..., :, None]
+        return decay[..., 0][..., None, None]
 
     @torch.no_grad()
     def step(
@@ -461,33 +507,28 @@ class LeapQuantState:
         beta = self._check_beta(beta)
         if self.window_count >= self.config.window:
             raise RuntimeError("LeapQuant window is full; quantize before the next step")
-        _check_finite("query", query)
-        _check_finite("key", key)
-        _check_finite("value", value)
-        _check_finite("alpha", alpha)
-        _check_finite("beta", beta)
 
-        state = self._replay_window()
-        decay = (
-            alpha[..., :, None]
-            if self.gate_dim == self.key_dim
-            else alpha[..., 0][..., None, None]
-        )
-        decayed = state * decay
+        decayed = self._replay_window() * self._decay_row_scale(alpha)
         prediction = (decayed * key[..., :, None]).sum(dim=-2)
         update = beta[..., None] * (value - prediction)
         next_state = decayed + key[..., :, None] * update[..., None, :]
         output = (next_state * query[..., :, None]).sum(dim=-2)
 
-        _check_finite("output", output)
         index = self.window_count
+        buffered_key = key.to(self.config.buffer_dtype)
+        buffered_update = update.to(self.config.buffer_dtype)
+        # A non-finite input reaches ``output`` through the recurrence above, so
+        # this single check keeps the fail-closed contract without a host round
+        # trip per intermediate tensor.
+        self._require_finite(
+            ("output", output),
+            ("buffered key", buffered_key),
+            ("buffered update", buffered_update),
+        )
+
         if index + 1 == self.config.window:
             self.quantize_(next_state)
         else:
-            buffered_key = key.to(self.config.buffer_dtype)
-            buffered_update = update.to(self.config.buffer_dtype)
-            _check_finite("buffered key", buffered_key)
-            _check_finite("buffered update", buffered_update)
             self.buffer_keys[:, :, index].copy_(buffered_key)
             self.buffer_updates[:, :, index].copy_(buffered_update)
             self.buffer_alpha[:, :, index].copy_(alpha)
