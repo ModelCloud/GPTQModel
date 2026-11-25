@@ -760,6 +760,42 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError("concurrent MACaQ W4A4 inference changed output")
         return True
 
+    admm_thread = threading.local()
+    admm_device_lock = threading.Lock()
+    admm_worker_count = 0
+
+    def admm_eigensolve_and_rank_update() -> None:
+        """Check ADMM-Q's solver and PairSwap primitives with independent oracles."""
+        nonlocal admm_worker_count
+        if not hasattr(admm_thread, "device"):
+            with admm_device_lock:
+                worker_index = admm_worker_count
+                admm_worker_count += 1
+            admm_thread.device = worker_index % 2
+            admm_thread.seed = worker_index
+            admm_thread.stream = torch.cuda.Stream(device=admm_thread.device)
+
+        device = admm_thread.device
+        torch.cuda.set_device(device)
+        generator = torch.Generator(device="cpu").manual_seed(admm_thread.seed)
+        basis = torch.randn(128, 128, generator=generator, dtype=torch.float64)
+        hessian = basis @ basis.T + torch.eye(128, dtype=torch.float64)
+        shift = torch.arange(16, dtype=torch.float32) / 16
+        row = torch.arange(128, dtype=torch.float32) / 128
+        before = torch.ones((16, 128), dtype=torch.float32)
+        expected_update = before - shift[:, None] * row[None, :]
+
+        with torch.cuda.stream(admm_thread.stream), torch.inference_mode():
+            eigenvalues, eigenvectors = torch.linalg.eigh(hessian.to(device))
+            rebuilt = (eigenvectors * eigenvalues) @ eigenvectors.T
+            gradient = before.to(device)
+            gradient.addr_(shift.to(device), row.to(device), alpha=-1.0)
+            actual_hessian = rebuilt.cpu()
+            actual_update = gradient.cpu()
+
+        torch.testing.assert_close(actual_hessian, hessian, rtol=1e-9, atol=1e-9)
+        torch.testing.assert_close(actual_update, expected_update, rtol=0, atol=0)
+
     def awq_fp32_dequantize() -> bool:
         """Exercise the shared AWQ FP32 dense fallback on two worker devices."""
         from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
@@ -1108,6 +1144,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "gptqmodel_nf12.gate": nf12_gate,
         "Tensor cache revision metadata": tensor_cache_revision,
         "Tensor.index_select row gather": embedding_row_gather,
+        "ADMM-Q eigensolve and rank update": admm_eigensolve_and_rank_update,
         "AWQ FP32 dequantize_gemm": awq_fp32_dequantize,
         "AWQ tiled dequantize_gemm": awq_tiled_dequantize,
         "GPTQ FP16 scale storage guard": gptq_scale_storage_guard,
@@ -1214,6 +1251,7 @@ def _requires_two_gpus(name: str) -> bool:
                 "CPTC native ops",
                 "MACaQ Triton W4A4",
                 "MACaQ compiled flips ROCm",
+                "ADMM-Q eigensolve and rank update",
                 "AWQ FP32 dequantize_gemm",
                 "AWQ tiled dequantize_gemm",
                 "GPTQ FP16 scale storage guard",
@@ -1240,7 +1278,9 @@ def run_child(name: str) -> int:
     if name == "MACaQ compiled flips ROCm" and torch.version.hip is None:
         print(json.dumps({"status": "SKIP", "detail": "ROCm compiled flip probe is AMD-only"}))
         return 0
-    if name == "VPTQ deterministic segment sum" and getattr(sys, "_is_gil_enabled", lambda: True)():
+    if name in {"ADMM-Q eigensolve and rank update", "VPTQ deterministic segment sum"} and getattr(
+        sys, "_is_gil_enabled", lambda: True
+    )():
         print(json.dumps({"status": "SKIP", "detail": "needs PYTHON_GIL=0"}))
         return 0
     try:

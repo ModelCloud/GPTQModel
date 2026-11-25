@@ -15,6 +15,7 @@ import torch.nn as nn
 
 from gptqmodel.quantization.admmq import (
     ADMMQ,
+    _Grid,
     admm_rho_at,
     pairswap_delta,
     projection_objective,
@@ -201,6 +202,37 @@ def test_admmq_config_rejects_unsupported_options(kwargs):
         ADMMQConfig(**kwargs)
 
 
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("activation", "w4afp8"),
+        ("mock_quantization", True),
+        ("gptaq", {}),
+        ("foem", {}),
+        ("gsq", {"enabled": True}),
+        ("gsq_training", {"enabled": True}),
+        ("static_groups", True),
+        ("act_group_aware", True),
+    ],
+)
+def test_admmq_rejects_incompatible_dynamic_options(option, value):
+    with pytest.raises(ValueError, match=rf"dynamic.*{option}"):
+        ADMMQConfig(dynamic={"down_proj": {option: value}})
+
+
+def test_admmq_keeps_supported_dynamic_options():
+    from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
+
+    config = ADMMQConfig(dynamic={"down_proj": {
+        "desc_act": True, "max_iter": 17, "pairswap_mode": "off", "gsq": {"enabled": False},
+    }})
+    resolved = clone_gptq_config_for_module(config, "down_proj")
+    assert resolved.method is METHOD.ADMMQ
+    assert resolved.desc_act is True
+    assert resolved.max_iter == 17
+    assert resolved.pairswap_mode == "off"
+
+
 def test_admmq_config_rejects_activation_stream():
     with pytest.raises(ValueError, match="activation"):
         ADMMQConfig(bits=4, group_size=128, sym=True, activation="w4afp8")
@@ -229,6 +261,18 @@ def test_admm_rho_schedule_follows_growth_factor():
     assert admm_rho_at(30, 0.1, 1.1, 3) == pytest.approx(0.1 * 1.1**10)
     # The penalty is capped so a long run cannot overflow.
     assert admm_rho_at(10**6, 0.1, 1.1, 3) == pytest.approx(1e6)
+
+
+@pytest.mark.parametrize(
+    ("iteration", "rho", "growth", "expected"),
+    [
+        (10, 0.1, 1e100, 1e6),
+        (6000, 0.1, 1.0001, 0.1 * 1.0001**6000),
+        (2, 1e-308, 1e155, 100.0),
+    ],
+)
+def test_admm_rho_schedule_saturates_only_after_reaching_cap(iteration, rho, growth, expected):
+    assert admm_rho_at(iteration, rho, growth, 1) == pytest.approx(expected, rel=1e-12)
 
 
 def test_refresh_accepts_only_strict_improvement():
@@ -270,6 +314,23 @@ def test_pairswap_delta_matches_bruteforce_objective_change():
         moved[:, second] += sign2 * scale[:, 0]
         expected = _reconstruction_error_rows(weight, moved, hessian) - base
         assert torch.allclose(delta, expected, atol=1e-5, rtol=1e-4), (sign1, sign2)
+
+
+def test_pairswap_reconstructs_exact_grid_values_from_selected_codes():
+    scale = torch.tensor([[0.1], [0.1]])
+    weight = torch.tensor([[0.72, 0.72], [0.6, 0.6]])
+    hessian = torch.tensor([[1.0, 0.25], [0.25, 1.0]])
+    initial = torch.full((2, 2), 6.0) * scale
+    solver = ADMMQ(_make_layer(weight), qcfg=ADMMQConfig(
+        bits=3, group_size=-1, sym=False, pairswap_rounds=1, pairswap_batch=1,
+    ))
+    grid = _Grid(0, 2, scale, torch.zeros_like(scale), None, None, 7)
+
+    actual, flips = solver._pairswap(weight, initial.clone(), hessian, [grid])
+    expected = torch.tensor([[7.0, 7.0], [6.0, 6.0]]) * scale
+    assert flips == 1
+    assert _reconstruction_error(weight, actual, hessian) < _reconstruction_error(weight, initial, hessian)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_projection_objective_is_squared_frobenius_norm():
@@ -321,7 +382,6 @@ def test_admmq_projection_stays_exactly_on_the_fitted_grid():
 
     # The solver must not retain dense Hessian/workspace state after the solve.
     assert solver.H is None
-    assert getattr(solver, "_admm_workspace", None) is None
 
 
 def test_admmq_beats_rtn_and_is_competitive_with_gptq_on_ill_conditioned_fixture():
@@ -421,3 +481,46 @@ def test_admmq_desc_act_round_trips_to_natural_column_order():
     codes = torch.round(quantized / scale[:, g_idx]) + zero[:, g_idx]
     assert torch.allclose(quantized, scale[:, g_idx] * (codes - zero[:, g_idx]))
     assert solver.H is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an accelerator")
+@pytest.mark.parametrize("desc_act", [False, True])
+@pytest.mark.parametrize("error_type", [torch.OutOfMemoryError, RuntimeError])
+def test_admmq_retries_only_allocation_failures_from_pristine_state(monkeypatch, desc_act, error_type):
+    cpu_weight = torch.randn(OUT_FEATURES, IN_FEATURES, generator=torch.Generator().manual_seed(37))
+    x = _calibration().round()
+    x[:, 7] = 0
+    x[:, 2] += x[:, 1]
+    assert (x[:, 2] @ x[:, 1]).abs() > 0
+    config = _small_config(desc_act=desc_act, max_iter=8, refresh_on_stagnation=False)
+    device = torch.device("cuda", torch.cuda.current_device())
+    solver = ADMMQ(_make_layer(cpu_weight).to(device), qcfg=config)
+    solver.quantizer.configure(perchannel=True)
+    solver.add_batch(x.to(device), None)
+    _, expected = _run_solver(ADMMQ, _make_layer(cpu_weight), config, x)
+
+    project = solver._project
+    attempts = []
+
+    def project_with_failure(weight, grids):
+        attempts.append(weight.device.type)
+        if attempts == ["cuda"] * 4:
+            # RTN plus two completed ADMM iterations preceded the failure.
+            raise error_type("injected out of memory" if error_type is torch.OutOfMemoryError else "injected solver error")
+        return project(weight, grids)
+
+    monkeypatch.setattr(solver, "_project", project_with_failure)
+    if error_type is RuntimeError:
+        with pytest.raises(RuntimeError, match="injected solver error"):
+            solver.quantize()
+        assert attempts == ["cuda"] * 4
+    else:
+        actual = solver.quantize()
+        assert attempts[:4] == ["cuda"] * 4
+        assert set(attempts[4:]) == {"cpu"}
+        assert actual[0].device == device
+        for tensor, reference in zip(actual[:4], expected[:4]):
+            torch.testing.assert_close(tensor.cpu(), reference, rtol=0, atol=0)
+        assert actual[5] == pytest.approx(expected[5], rel=1e-6)
+    assert solver.H is None
+    torch.testing.assert_close(solver.module.weight.cpu(), cpu_weight, rtol=0, atol=0)

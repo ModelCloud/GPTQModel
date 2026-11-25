@@ -45,7 +45,7 @@ and replay stay on the GPTQ contract.
    projection.
 4. Repeat for `max_iter` iterations:
    - Solve the continuous subproblem in closed form:
-     `B' = Q (Lambda + rho I)^(-1) Q^T (H' W' + rho D - V)`.
+     `B' = (W' H' + rho D - V) Q (Lambda + rho I)^(-1) Q^T`.
    - Project the scaled target `B' + V / rho` onto the fitted grids.
    - Update the scaled dual: `V <- V + rho (B' - D)`.
    - Grow the penalty: `rho_t = rho * rho_update^(t // update_iter)`, capped at
@@ -56,13 +56,16 @@ and replay stay on the GPTQ contract.
    the current continuous iterate and accept the refresh only when it lowers the
    projection objective by `refresh_accept_rel`. The dual absorbs the accepted
    change, and at most one refresh is attempted per layer.
-6. Run the PairSwap local search: for disjoint column pairs, score the four
-   sign combinations of a one-cell move with the closed-form loss change,
-   apply the best improving pair per output channel, and maintain the gradient
-   with a rank-2 update instead of recomputing it.
-7. Project the final iterate once more so packing recovers integer codes, then
-   fall back to the RTN projection if the ADMM result is non-finite or worse
-   than its own initialization.
+6. Project the final iterate onto the fitted grid and run PairSwap. For each
+   sampled pair, score the four sign combinations of a one-cell move. Apply
+   the best improving pair using its updated integer codes and update the
+   gradient with the resulting rank-2 correction.
+7. Keep the RTN projection if the result is non-finite or has a higher
+   reconstruction objective than the RTN initialization.
+
+If activation ordering or the solve runs out of accelerator memory, retry the
+layer on CPU once using the original Hessian diagonal and source weights.
+The reconstruction returns to the source module device for replay.
 
 The solve returns the GPTQ eight-tuple `(quantized, scale, zero, g_idx,
 duration, avg_loss, damp, nsamples)`, so `GPTQProcessor` finalization, packing
@@ -94,14 +97,20 @@ flowchart TD
     B --> C["ProcessorStep.GPTQ"]
     C --> D["GPTQProcessor.preprocess"]
     D --> E{"method"}
-    E -->|admmq| F["ADMMQ._admm_weight_solve"]
+    E -->|admmq| P["ADMMQ._quantize_impl"]
     E -->|gptq| G["GPTQ column sweep"]
+    P -->|calibrated| F["Order Hessian and solve"]
+    P -->|insufficient calibration| T["GPTQ data-independent fallback"]
+    T --> M
+    F -->|accelerator allocation failure| R["Retry on CPU from original inputs"]
+    F -->|other error| X["Propagate error"]
     F --> H["ADMM iterations"]
+    R --> H
     H --> I{"stagnation"}
     I -->|yes| J["guarded grid refresh"]
     I -->|no| K["PairSwap local search"]
     J --> K
-    K --> L{"objective finite and better than RTN"}
+    K --> L{"objective finite and no worse than RTN"}
     L -->|yes| M["return GPTQ eight-tuple"]
     L -->|no| N["RTN projection"]
     N --> M
@@ -118,12 +127,11 @@ stateDiagram-v2
     Factorize --> Iterate: one float64 eigh
     Iterate --> Iterate: closed-form B, project D, dual update, grow rho
     Iterate --> Refresh: D stagnates
-    Refresh --> Iterate: refresh rejected
-    Refresh --> PairSwap: refresh accepted
-    Iterate --> PairSwap: max_iter or early stop
-    PairSwap --> FinalProject: best pair moves
-    FinalProject --> Done: objective finite and not worse than RTN
-    FinalProject --> RTN: non-finite or worse than RTN
+    Refresh --> Iterate: resume with selected grid
+    Iterate --> FinalProject: max_iter or early stop
+    FinalProject --> PairSwap: decode selected pairs on the grid
+    PairSwap --> Done: objective finite and within RTN baseline
+    PairSwap --> RTN: non-finite or worse than RTN
     RTN --> Done
     Done --> [*]
 ```
@@ -136,6 +144,7 @@ stateDiagram-v2
 | Grid fitting | Per group, before the sweep | Per group, plus at most one guarded refit per layer |
 | Local refinement | None | PairSwap over adjacent grid cells |
 | Failure exit | GPTQ RTN fallback for low sample counts | GPTQ RTN fallback for low sample counts, plus RTN when the ADMM objective is non-finite or worse |
+| Accelerator allocation failure in solve | GPTQ retries on CPU | ADMM-Q restarts the solve on CPU with the original inputs |
 | Checkpoint | GPTQ packing | Identical GPTQ packing; `method` stays `admmq` and solver settings live in `meta` |
 
 ## Configuration
@@ -189,8 +198,8 @@ model.save("qwen-admmq-4bit")
 
 `ADMMQConfig` rejects options that change the weight-only contract:
 `activation`, `mock_quantization`, `gptaq`, `foem`, enabled `gsq` or
-`gsq_training`, `static_groups`, and `act_group_aware`. Use a plain GPTQ config
-for those combinations.
+`gsq_training`, `static_groups`, and `act_group_aware`. The same restrictions
+apply to per-module `dynamic` rules.
 
 ## Checkpoint contract
 

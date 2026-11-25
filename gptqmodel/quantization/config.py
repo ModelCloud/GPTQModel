@@ -6375,6 +6375,25 @@ def _validate_dynamic_applied_options(owner, layer_name: str, layer_dict: Mappin
                 field_prefix=f"{label}.mse",
             )
 
+    if method is METHOD.ADMMQ:
+        incompatible = [
+            key for key in ("activation", "gptaq", "foem")
+            if layer_dict.get(key) is not None
+        ]
+        incompatible.extend(
+            key for key in ("mock_quantization", "static_groups", "act_group_aware")
+            if layer_dict.get(key) is True
+        )
+        for key in ("gsq", "gsq_training"):
+            option = layer_dict.get(key)
+            enabled = option.get("enabled", False) if isinstance(option, Mapping) else getattr(option, "enabled", False)
+            if enabled:
+                incompatible.append(key)
+        if incompatible:
+            options = ", ".join(f"`{label}.{key}`" for key in incompatible)
+            raise ValueError(f"{owner_name}: ADMM-Q does not support {options}.")
+        return
+
     if method is METHOD.QQQ:
         if layer_dict.get("gptaq") is not None:
             raise _unapplied_option_error(

@@ -63,9 +63,7 @@ def _resolve_model() -> str:
         return str(LOCAL_MODEL)
     if _cached(HF_MODEL_ID):
         return HF_MODEL_ID
-    pytest.skip(
-        f"set {MODEL_ENV}, provide {LOCAL_MODEL}, or cache {HF_MODEL_ID}"
-    )
+    raise pytest.skip.Exception(f"set {MODEL_ENV}, provide {LOCAL_MODEL}, or cache {HF_MODEL_ID}")
 
 
 def _packed_modules(model):

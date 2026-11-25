@@ -12,7 +12,7 @@ https://github.com/mazumder-lab/admm-q).  No reference code is copied.
 The layer objective is the same Hessian-weighted reconstruction error GPTQ
 minimizes::
 
-    1/2 * Tr((W - Wq)^T H (W - Wq)),   H = X^T X + damp * mean(diag(H)) * I
+    1/2 * Tr((W - Wq) H (W - Wq)^T),   H = X^T X + damp * mean(diag(X^T X)) * I
 
 ADMM-Q replaces GPTQ's greedy column sweep with an ADMM split between the
 continuous Hessian-weighted update and the discrete quantization projection.
@@ -61,9 +61,17 @@ def admm_rho_at(iteration: int, rho0: float, gamma: float, update_iter: int, cap
     if update_iter < 1:
         raise ValueError("update_iter must be positive")
     exponent = iteration // update_iter
-    if exponent > 4096:
+    if exponent == 0 or gamma == 1.0:
+        return min(rho0, cap)
+    log_rho = math.log(rho0)
+    log_gamma = math.log(gamma)
+    if log_gamma > 0.0 and exponent >= (math.log(cap) - log_rho) / log_gamma:
         return cap
-    return min(float(rho0) * float(gamma) ** exponent, cap)
+    try:
+        return min(rho0 * gamma**exponent, cap)
+    except OverflowError:
+        # The power can overflow even while its product with rho0 is finite.
+        return min(math.exp(log_rho + exponent * log_gamma), cap)
 
 
 def projection_objective(target: torch.Tensor, projected: torch.Tensor) -> torch.Tensor:
@@ -154,8 +162,6 @@ class ADMMQ(GPTQ):
                 f"got `{type(qcfg).__name__}`. Use `QuantizeConfig(method='admmq', ...)`."
             )
         super().__init__(module, qcfg=qcfg, region_timer=region_timer)
-        self._admm_workspace: Optional[dict] = None
-        self._recent_error: List[float] = []
         self.admmq_diagnostics: Optional[dict] = None
 
     # ------------------------------------------------------------------
@@ -315,15 +321,16 @@ class ADMMQ(GPTQ):
                 sign_second = torch.where((combo == 0) | (combo == 2), 1.0, -1.0)
                 first_column = int(first[chosen_pair].item())
                 second_column = int(second[chosen_pair].item())
-                step_first = column_scale[:, first_column]
-                step_second = column_scale[:, second_column]
-                shift_first = torch.where(improving, sign_first * step_first, torch.zeros_like(step_first))
-                shift_second = torch.where(improving, sign_second * step_second, torch.zeros_like(step_second))
-
-                quantized[:, first_column] += shift_first
-                quantized[:, second_column] += shift_second
-                code[:, first_column] += torch.where(improving, sign_first, torch.zeros_like(sign_first))
-                code[:, second_column] += torch.where(improving, sign_second, torch.zeros_like(sign_second))
+                # Decode the updated integer codes. Repeatedly adding the
+                # FP32 grid step would accumulate error in the replay weight.
+                code[:, first_column] += torch.where(improving, sign_first, 0.0)
+                code[:, second_column] += torch.where(improving, sign_second, 0.0)
+                new_first = column_scale[:, first_column] * (code[:, first_column] - column_zero[:, first_column])
+                new_second = column_scale[:, second_column] * (code[:, second_column] - column_zero[:, second_column])
+                shift_first = new_first - quantized[:, first_column]
+                shift_second = new_second - quantized[:, second_column]
+                quantized[:, first_column] = new_first
+                quantized[:, second_column] = new_second
                 gradient.addr_(shift_first, hessian[first_column], alpha=-1.0)
                 gradient.addr_(shift_second, hessian[second_column], alpha=-1.0)
                 flips += int(improving.sum().item())
@@ -386,7 +393,6 @@ class ADMMQ(GPTQ):
         rtn_grids = grids
         initial_objective = self._objective(weight, rtn, hessian)
 
-        continuous = weight_scaled.clone()
         discrete = rtn / column_sigma
         dual = torch.zeros_like(weight_scaled)
         previous = discrete.clone()
@@ -397,7 +403,6 @@ class ADMMQ(GPTQ):
         refresh_accepted = False
         refresh_improvement = 0.0
         iterations = 0
-        d_rel = float("inf")
         error_history: List[float] = []
         rho = float(cfg.rho)
 
@@ -460,7 +465,6 @@ class ADMMQ(GPTQ):
                         refreshed_discrete = refreshed_projection / column_sigma
                         dual = dual + rho * (discrete - refreshed_discrete)
                         discrete = refreshed_discrete
-                        projected = refreshed_projection
                         grids = refreshed
                         previous = discrete
 
@@ -534,28 +538,31 @@ class ADMMQ(GPTQ):
         if self.H is None:
             raise RuntimeError(f"ADMM-Q: module `{self.name}` has no captured Hessian.")
 
-        if self.module_copy is not None:
-            weight = safe_move_to(self.module_copy, self.H.device)
-            del self.module_copy
-        else:
-            weight = self.clone_module(device=self.H.device)
-
-        dead_columns = _neutralize_dead_columns(self.H, weight)
-        del dead_columns
-
-        permutation = None
+        source_device = self.H.device
+        module_copy = self.module_copy
+        self.module_copy = None
         inverse_permutation = None
-        if self.qcfg.desc_act:
-            permutation = torch.argsort(torch.diagonal(self.H), descending=True)
-            hessian = self.H[permutation][:, permutation]
-            weight = weight[:, permutation]
-            inverse_permutation = torch.argsort(permutation)
-        else:
-            hessian = self.H
+        original_diagonal = None
 
-        self._recent_error = []
-        self._admm_workspace = {"hessian": hessian, "weight": weight}
-        try:
+        def solve():
+            nonlocal inverse_permutation, original_diagonal
+            hessian = self.H
+            if hessian.device.type == "cuda":
+                # Only the diagonal is changed by dead-column handling and
+                # damping. Save it once so an allocation retry starts undamped.
+                original_diagonal = hessian.diagonal().clone()
+            weight = (
+                self.clone_module(device=hessian.device)
+                if module_copy is None
+                else safe_move_to(module_copy, hessian.device, copy=True)
+            )
+            _neutralize_dead_columns(hessian, weight)
+            if self.qcfg.desc_act:
+                permutation = torch.argsort(hessian.diagonal(), descending=True)
+                hessian = hessian[permutation[:, None], permutation]
+                weight = weight[:, permutation]
+                inverse_permutation = torch.argsort(permutation)
+
             quantized, grids = self._admm_weight_solve(weight, hessian)
             loss = self._objective(weight, quantized, hessian) / max(1, self.nsamples)
             if not bool(torch.isfinite(loss)):
@@ -563,10 +570,19 @@ class ADMMQ(GPTQ):
                     f"ADMM-Q: module `{self.name}` produced a non-finite reconstruction loss; "
                     "increase calibration data or raise `damp_percent`."
                 )
-            avg_loss = float(loss.item())
+            return quantized, grids, float(loss.item())
+
+        def prepare_cpu(device):
+            self.H = safe_move_to(self.H, device)
+            if original_diagonal is not None:
+                self.H.diagonal().copy_(original_diagonal)
+
+        self.admmq_diagnostics = None
+        try:
+            (quantized, grids, avg_loss), _ = self._run_with_accelerator_oom_cpu_fallback(
+                solve, source_device=source_device, stage="ADMM-Q solve", prepare_cpu=prepare_cpu
+            )
         finally:
-            self._admm_workspace = None
-            self._recent_error = []
             self.H = None
 
         if inverse_permutation is not None:
