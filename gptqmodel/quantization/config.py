@@ -5408,7 +5408,24 @@ def _default_damp_percent(method: METHOD) -> float:
 
 
 def _default_damp_auto_increment(method: METHOD) -> float:
+    if method == METHOD.ADMMQ:
+        # ADMM-Q damps the Hessian once with `damp_percent` and never runs
+        # GPTQ's incremental damp-recovery grid, so the shared GPTQ default
+        # would only be persisted in the checkpoint (#5583).
+        return 0.0
     return 0.001 if method == METHOD.QQQ else 0.01
+
+
+def _damp_auto_increment_requested(value: Any) -> bool:
+    """Whether a serialized value asks for GPTQ's damp-recovery grid."""
+
+    if value is None:
+        return False
+    try:
+        return float(value) != 0.0
+    except (TypeError, ValueError):
+        # Leave malformed values to the numeric validator, which reports them.
+        return False
 
 
 def _peek_weight_only_method(payload: Any) -> Optional[WeightOnlyMethod]:
@@ -6318,6 +6335,18 @@ def validate_applied_options(qcfg: Any) -> None:
             "(the default), or use a GPTQ config.",
         )
 
+    if method is METHOD.ADMMQ and _damp_auto_increment_requested(
+        getattr(qcfg, "damp_auto_increment", None)
+    ):
+        raise _unapplied_option_error(
+            owner,
+            method,
+            "damp_auto_increment",
+            "ADMM-Q damps the Hessian once with `damp_percent` and runs no "
+            "incremental damp-recovery grid; leave `damp_auto_increment=0` "
+            "(the default).",
+        )
+
     ignored_mse = _ignored_mse_components(method, getattr(qcfg, "mse", None))
     if ignored_mse:
         raise _unapplied_mse_error(owner, method, ignored_mse)
@@ -6392,6 +6421,15 @@ def _validate_dynamic_applied_options(owner, layer_name: str, layer_dict: Mappin
         if incompatible:
             options = ", ".join(f"`{label}.{key}`" for key in incompatible)
             raise ValueError(f"{owner_name}: ADMM-Q does not support {options}.")
+        if _damp_auto_increment_requested(layer_dict.get("damp_auto_increment")):
+            raise _unapplied_option_error(
+                owner_name,
+                method,
+                f"{label}.damp_auto_increment",
+                "ADMM-Q damps the Hessian once with `damp_percent` and runs no "
+                "incremental damp-recovery grid; leave `damp_auto_increment=0` "
+                "(the default).",
+            )
         return
 
     if method is METHOD.QQQ:
@@ -6460,6 +6498,12 @@ def _drop_unapplied_options(payload: Dict[str, Any], target_cls: type) -> Dict[s
         payload = _drop_option_key(payload, "desc_act")
         dropped.append("desc_act")
 
+    if method is METHOD.ADMMQ and _damp_auto_increment_requested(
+        payload.get("damp_auto_increment")
+    ):
+        payload = _drop_option_key(payload, "damp_auto_increment")
+        dropped.append("damp_auto_increment")
+
     if "mse" in payload:
         ignored_mse = _ignored_mse_components(method, _mse_config(payload.get("mse")))
         if ignored_mse:
@@ -6489,6 +6533,10 @@ def _drop_unapplied_options(payload: Dict[str, Any], target_cls: type) -> Dict[s
                     )
                     if ignored_mse:
                         blocked.append("mse")
+                if method is METHOD.ADMMQ and _damp_auto_increment_requested(
+                    override.get("damp_auto_increment")
+                ):
+                    blocked.append("damp_auto_increment")
                 if method is METHOD.QQQ:
                     if override.get("gptaq") is not None:
                         blocked.append("gptaq")

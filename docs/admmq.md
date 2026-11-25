@@ -198,8 +198,10 @@ model.save("qwen-admmq-4bit")
 
 `ADMMQConfig` rejects options that change the weight-only contract:
 `activation`, `mock_quantization`, `gptaq`, `foem`, enabled `gsq` or
-`gsq_training`, `static_groups`, and `act_group_aware`. The same restrictions
-apply to per-module `dynamic` rules.
+`gsq_training`, `static_groups`, and `act_group_aware`. It also rejects a
+non-zero `damp_auto_increment`: ADMM-Q damps the Hessian once with
+`damp_percent` and runs no incremental damp-recovery grid. The same
+restrictions apply to per-module `dynamic` rules.
 
 ## Checkpoint contract
 

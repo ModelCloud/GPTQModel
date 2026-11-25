@@ -167,6 +167,80 @@ def test_admmq_config_roundtrip_keeps_method_and_export_split():
     assert rebuilt.export_quant_method() == METHOD.GPTQ
 
 
+def test_admmq_applies_one_damp_pass_and_rejects_the_recovery_grid():
+    """`damp_auto_increment` drives GPTQ's damp-recovery grid, which ADMM-Q
+    never runs: the solver damps once with `damp_percent`. Accepting a
+    non-zero value would persist a setting that changed no weight (#5583).
+    """
+
+    assert ADMMQConfig().damp_auto_increment == 0.0
+    assert ADMMQConfig(bits=4, group_size=128, damp_auto_increment=0.0).damp_auto_increment == 0.0
+    # An explicit `None` resolves to the ADMM-Q default, not GPTQ's 0.01.
+    assert ADMMQConfig(bits=4, group_size=128, damp_auto_increment=None).damp_auto_increment == 0.0
+    for value in (0.01, 0.25, 1.0):
+        with pytest.raises(ValueError) as excinfo:
+            ADMMQConfig(bits=4, group_size=128, damp_auto_increment=value)
+        message = str(excinfo.value)
+        assert "`damp_auto_increment`" in message, message
+        assert "is not applied by the ADMMQ quantizer" in message, message
+
+    # The factory accepts checkpoint-shaped payloads, so it drops the stale
+    # claim (with a warning) like the other pre-fix options; the concrete
+    # class above is the construction-time rejection.
+    factory = QuantizeConfig(method="admmq", bits=4, group_size=128, damp_auto_increment=0.01)
+    assert isinstance(factory, ADMMQConfig)
+    assert factory.damp_auto_increment == 0.0
+
+
+def test_admmq_rejects_dynamic_damp_auto_increment():
+    with pytest.raises(ValueError) as excinfo:
+        ADMMQConfig(bits=4, group_size=128, dynamic={"down_proj": {"damp_auto_increment": 0.01}})
+    message = str(excinfo.value)
+    assert "dynamic['down_proj'].damp_auto_increment" in message, message
+    assert "is not applied by the" in message, message
+
+    # Zero is the value ADMM-Q actually applies, so a zero rule is harmless.
+    config = ADMMQConfig(bits=4, group_size=128, dynamic={"down_proj": {"damp_auto_increment": 0.0}})
+    assert config.dynamic["down_proj"]["damp_auto_increment"] == 0.0
+
+
+def test_pre_fix_admmq_checkpoint_drops_the_damp_recovery_grid():
+    """A checkpoint written before the rejection still loads with its weights.
+
+    The solver never read the field, so the stored tensors are unchanged; the
+    restored config must stop claiming the option and re-save without it.
+    """
+
+    payload = ADMMQConfig(bits=4, group_size=128).to_dict()
+    payload["damp_auto_increment"] = 0.01
+    payload["meta"]["damp_auto_increment"] = 0.01
+    payload["dynamic"] = {"down_proj": {"damp_auto_increment": 0.01}}
+
+    for restored in (
+        QuantizeConfig.from_quant_config(payload),
+        QuantizeConfig(**payload),
+    ):
+        assert isinstance(restored, ADMMQConfig)
+        assert restored.damp_auto_increment == 0.0
+        assert restored.dynamic == {"down_proj": {}}
+        resaved = restored.to_dict()
+        assert resaved["meta"].get("damp_auto_increment") == 0.0
+        assert "damp_auto_increment" not in resaved["dynamic"]["down_proj"]
+
+
+def test_gptq_keeps_the_damp_recovery_grid_it_applies():
+    """Control: GPTQ does run the recovery grid, so its value must survive."""
+
+    config = QuantizeConfig(bits=4, group_size=128, damp_auto_increment=0.25)
+    assert config.damp_auto_increment == pytest.approx(0.25)
+
+    payload = config.to_dict()
+    payload["damp_auto_increment"] = 0.25
+    payload["meta"]["damp_auto_increment"] = 0.25
+    restored = QuantizeConfig.from_quant_config(payload)
+    assert restored.damp_auto_increment == pytest.approx(0.25)
+
+
 def test_admmq_config_planar_bits_select_gptq_p():
     cfg = ADMMQConfig(bits=6)
     assert cfg.format == FORMAT.GPTQ_P
