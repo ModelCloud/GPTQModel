@@ -35,7 +35,10 @@ same scale and zero-point search GPTQ uses, including the MSE shrink search.
 
 `ADMMQ` subclasses `GPTQ` and overrides only the weight solve, so Hessian
 capture, dead-column neutralization, tensor-parallel padding, dtype narrowing
-and replay stay on the GPTQ contract.
+and replay stay on the GPTQ contract. With `hessian.dedup_shared_inputs`
+enabled, projections in the same subset share a capture when their inputs
+are explicitly shared and their capture settings match. Each solver receives
+its own Hessian for damping and activation ordering.
 
 1. Damp `H` once and precondition it by its diagonal:
    `Sigma = diag(H)^(-1/2)`, `H' = Sigma H Sigma`, `W' = W Sigma^(-1)`.
@@ -51,7 +54,7 @@ and replay stay on the GPTQ contract.
    - Grow the penalty: `rho_t = rho * rho_update^(t // update_iter)`, capped at
      `1e6`.
    - Stop after `switch_iter` iterations once the relative change of `D` falls
-     below `early_stop_tol`.
+     below `early_stop_tol`. Measure the change after any accepted grid refresh.
 5. When `D` stagnates over `stagnation_window` iterations, refit the grids on
    the current continuous iterate and accept the refresh only when it lowers the
    projection objective by `refresh_accept_rel`. The dual absorbs the accepted
@@ -201,12 +204,11 @@ model.save("qwen-admmq-4bit")
 | `pairswap_condition_threshold` | `5e4` | Condition number above which `"auto"` runs PairSwap. |
 | `mse` | `0` (off) | MSE shrink-grid clipping search. The paper enables GPTQ's search; measured WikiText-2 perplexity is better with it off, so it is opt-in (`MSEConfig(norm=2.0)`). |
 
-`ADMMQConfig` rejects options that change the weight-only contract:
-`activation`, `mock_quantization`, `gptaq`, `foem`, enabled `gsq` or
-`gsq_training`, `static_groups`, and `act_group_aware`. It also rejects a
-non-zero `damp_auto_increment`: ADMM-Q damps the Hessian once with
-`damp_percent` and runs no incremental damp-recovery grid. The same
-restrictions apply to per-module `dynamic` rules.
+`ADMMQConfig` rejects `activation`, `gptaq`, and `foem` configs. It also
+rejects enabled `mock_quantization`, `g2ptq`, `gsq`, `gsq_training`,
+`static_groups`, and `act_group_aware`. ADMM-Q damps the Hessian once with
+`damp_percent` and requires `damp_auto_increment=0`. The same restrictions
+apply to per-module `dynamic` rules.
 
 ## Measured quality
 

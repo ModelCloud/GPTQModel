@@ -8,6 +8,7 @@ weights, so it is independent of the solver's internal bookkeeping.
 """
 
 import math
+from dataclasses import replace
 
 import pytest
 import torch
@@ -68,7 +69,7 @@ def _run_solver(cls, layer, qcfg, x):
 
 def _damped_hessian(x: torch.Tensor, damp: float) -> torch.Tensor:
     h = x.t() @ x
-    return h + damp * torch.diagonal(h).mean() * torch.eye(h.shape[0])
+    return h + damp * torch.diagonal(h).mean() * torch.eye(h.shape[0], dtype=h.dtype, device=h.device)
 
 
 def _reconstruction_error(weight: torch.Tensor, quantized: torch.Tensor, hessian: torch.Tensor) -> float:
@@ -276,6 +277,12 @@ def test_admmq_config_rejects_unsupported_options(kwargs):
         ADMMQConfig(**kwargs)
 
 
+@pytest.mark.parametrize("g2ptq", [True, {}])
+def test_admmq_rejects_g2ptq(g2ptq):
+    with pytest.raises(ValueError, match="g2ptq"):
+        ADMMQConfig(g2ptq=g2ptq)
+
+
 @pytest.mark.parametrize(
     ("option", "value"),
     [
@@ -283,6 +290,8 @@ def test_admmq_config_rejects_unsupported_options(kwargs):
         ("mock_quantization", True),
         ("gptaq", {}),
         ("foem", {}),
+        ("g2ptq", True),
+        ("g2ptq", {}),
         ("gsq", {"enabled": True}),
         ("gsq_training", {"enabled": True}),
         ("static_groups", True),
@@ -297,14 +306,16 @@ def test_admmq_rejects_incompatible_dynamic_options(option, value):
 def test_admmq_keeps_supported_dynamic_options():
     from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
 
-    config = ADMMQConfig(dynamic={"down_proj": {
+    config = ADMMQConfig(g2ptq=False, dynamic={"down_proj": {
         "desc_act": True, "max_iter": 17, "pairswap_mode": "off", "gsq": {"enabled": False},
+        "g2ptq": False,
     }})
     resolved = clone_gptq_config_for_module(config, "down_proj")
     assert resolved.method is METHOD.ADMMQ
     assert resolved.desc_act is True
     assert resolved.max_iter == 17
     assert resolved.pairswap_mode == "off"
+    assert resolved.g2ptq is None
 
 
 def test_admmq_config_rejects_activation_stream():
@@ -429,6 +440,36 @@ def _small_config(**overrides):
     }
     base.update(overrides)
     return ADMMQConfig(**base)
+
+
+def test_admmq_early_stop_uses_refreshed_iterate():
+    generator = torch.Generator().manual_seed(4)
+    weight = torch.randn(3, 8, generator=generator)
+    x = torch.randn(24, 8, generator=generator)
+    x[:, 1] += 2 * x[:, 0]
+    x[:, 4] -= 2 * x[:, 2]
+    config = _small_config(
+        max_iter=10,
+        rho=2.0,
+        update_iter=1,
+        switch_iter=2,
+        stagnation_window=2,
+        stagnation_tol=1.0,
+        offload_to_disk=False,
+    )
+
+    control, _ = _run_solver(ADMMQ, _make_layer(weight), replace(config, refresh_on_stagnation=False), x)
+    capped, capped_result = _run_solver(ADMMQ, _make_layer(weight), replace(config, max_iter=2), x)
+    solver, result = _run_solver(ADMMQ, _make_layer(weight), config, x)
+
+    assert control.admmq_diagnostics["iterations"] == 2
+    assert capped.admmq_diagnostics["refresh_accepted"]
+    assert solver.admmq_diagnostics["refresh_accepted"]
+    assert solver.admmq_diagnostics["iterations"] > 2
+    hessian = _damped_hessian(x.double(), config.damp_percent)
+    capped_error = _reconstruction_error(weight.double(), capped_result[0].double(), hessian)
+    error = _reconstruction_error(weight.double(), result[0].double(), hessian)
+    assert error < 0.9 * capped_error
 
 
 def test_admmq_projection_stays_exactly_on_the_fitted_grid():

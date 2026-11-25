@@ -479,14 +479,14 @@ class GPTQProcessor(LoopProcessor):
     def _hessian_capture_signature(self, task: Any) -> Optional[Tuple[Any, ...]]:
         """Numerical capture contract; ``None`` excludes the task from sharing.
 
-        GPTQ, GPTAQ and FOEM each accumulate ``H`` differently, so a group may
-        only share within one quantizer kind.  GPTAQ/FOEM additionally require
-        the same native-delta mode because ``dXXT`` must be adopted together
-        with ``H``.  Every kind keys the effective sink-row cap because it
-        rescales the activations before both ``H`` and ``dXXT`` (#5855).
+        GPTQ and ADMM-Q accumulate the same Hessian. GPTAQ and FOEM each
+        require their own signature and the same native-delta mode within
+        the group because ``dXXT`` must be adopted together with ``H``. Every
+        signature includes the effective sink-row cap because it rescales
+        the activations before both ``H`` and ``dXXT`` (#5855).
         """
 
-        if type(task) is GPTQ:
+        if type(task) in (GPTQ, ADMMQ):
             return ("gptq", task.columns, *self._hessian_accumulation_settings(task))
         if type(task) is GPTAQ:
             return ("gptaq", task.columns, bool(task._use_native_delta), task.sink_row_cap_median_multiple())
@@ -502,10 +502,9 @@ class GPTQProcessor(LoopProcessor):
     ) -> Dict[str, str]:
         """Elects one Hessian capture leader per explicit shared-input group present in this subset.
 
-        Plain `GPTQ`, `GPTAQ` and `FOEM` tasks participate; a group only shares
-        within one quantizer kind (GPTAQ/FOEM also adopt ``dXXT``).  Groups that
-        are split across subsets dedup only among the members captured in this
-        pass.
+        GPTQ, ADMM-Q, GPTAQ and FOEM tasks share when their capture signatures
+        match. GPTAQ and FOEM also adopt ``dXXT``. Groups that are split across
+        subsets dedup only among the members captured in this pass.
         """
 
         with self.lock:

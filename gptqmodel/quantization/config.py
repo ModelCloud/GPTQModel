@@ -6478,6 +6478,9 @@ def _validate_dynamic_applied_options(owner, layer_name: str, layer_dict: Mappin
             key for key in ("activation", "gptaq", "foem")
             if layer_dict.get(key) is not None
         ]
+        g2ptq = layer_dict.get("g2ptq")
+        if g2ptq is not None and g2ptq is not False:
+            incompatible.append("g2ptq")
         incompatible.extend(
             key for key in ("mock_quantization", "static_groups", "act_group_aware")
             if layer_dict.get(key) is True
@@ -8341,6 +8344,8 @@ class ADMMQConfig(GPTQConfig):
             raise ValueError("ADMMQConfig: `gptaq` is incompatible with ADMM-Q.")
         if self.foem is not None:
             raise ValueError("ADMMQConfig: `foem` is incompatible with ADMM-Q.")
+        if self.g2ptq is not None:
+            raise ValueError("ADMMQConfig: `g2ptq` is incompatible with ADMM-Q. Use `GPTQConfig` to enable it.")
         if self.gsq is not None and self.gsq.enabled:
             raise ValueError("ADMMQConfig: per-linear GSQ is incompatible with ADMM-Q.")
         if self.gsq_training is not None and self.gsq_training.enabled:

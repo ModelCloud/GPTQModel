@@ -431,8 +431,6 @@ class ADMMQ(GPTQ):
             discrete = projected / column_sigma
             dual = dual + rho * (continuous - discrete)
 
-            d_rel = float(((discrete - previous).square().sum() / denominator).item())
-            previous = discrete
             iterations = step + 1
 
             # Stagnation is measured on the normalized reconstruction error,
@@ -473,8 +471,11 @@ class ADMMQ(GPTQ):
                         dual = dual + rho * (discrete - refreshed_discrete)
                         discrete = refreshed_discrete
                         grids = refreshed
-                        previous = discrete
 
+            # Measure convergence on the iterate that will carry into the
+            # next solve, including any accepted grid refresh.
+            d_rel = float(((discrete - previous).square().sum() / denominator).item())
+            previous = discrete
             if step + 1 >= int(cfg.switch_iter) and d_rel < float(cfg.early_stop_tol):
                 break
 
