@@ -8281,10 +8281,13 @@ class ADMMQConfig(GPTQConfig):
 
     method: METHOD = field(default=METHOD.ADMMQ)
     format: FORMAT = field(default=FORMAT.GPTQ)
-    # The paper's default MSE exponent; GPTQ's default is 0 (search disabled).
+    # The paper applies GPTQ's MSE clipping grid on top of the solver, but the
+    # measured WikiText-2 rows are better with the search off, so the default
+    # matches the rest of the GPTQ family. Set ``mse=MSEConfig(norm=2.0)`` to
+    # enable the shrink-grid search.
     mse: Union[MSEConfig, Dict[str, Any], int, float] = field(
-        default_factory=lambda: MSEConfig(norm=2.0),
-        metadata={"help": "MSE shrink-grid search config; ADMM-Q defaults to norm=2"},
+        default=0.0,
+        metadata={"help": "MSE shrink-grid search; 0 disables it (GPTQ's default)"},
     )
 
     # ADMM schedule: rho grows by `rho_update` every `update_iter` iterations,

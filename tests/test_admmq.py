@@ -119,7 +119,7 @@ def test_admmq_config_defaults():
     assert cfg.switch_iter == 30
     assert cfg.damp_percent == pytest.approx(0.01)
     assert isinstance(cfg.mse, MSEConfig)
-    assert cfg.mse.norm == pytest.approx(2.0)
+    assert cfg.mse.norm == pytest.approx(0.0)
     assert cfg.pairswap_mode == "always"
     assert cfg.static_groups is False
     assert cfg.act_group_aware is False
