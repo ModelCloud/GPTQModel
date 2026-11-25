@@ -1373,9 +1373,10 @@ class GPTQ:
             ):
                 raise
             self.log_cpu_fallback(stage, source_device)
-            cdu_device = torch.device("cpu")
-            prepare_cpu(cdu_device)
-            return compute(), True
+        # Leave the exception scope before retrying so the traceback releases
+        # allocations that belonged to the failed solve.
+        prepare_cpu(torch.device("cpu"))
+        return compute(), True
 
     def _sanitize_scale_and_log(self, scale: torch.Tensor, zero: torch.Tensor):
         """Bypass zero scales and report the unstable module once per pass."""

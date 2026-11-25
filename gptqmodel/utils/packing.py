@@ -79,7 +79,12 @@ def _normalize_enum(value, enum_cls, field: str):
 def _normalize_method(quant_method: Optional[Union[str, METHOD]]) -> METHOD:
     if quant_method is None:
         return METHOD.GPTQ
-    return _normalize_enum(quant_method, METHOD, "quant_method")
+    method = _normalize_enum(quant_method, METHOD, "quant_method")
+    # ADMM-Q publishes ordinary GPTQ-packed tensors, so the packing helpers
+    # read and write its artifacts with the GPTQ layout.
+    if method == METHOD.ADMMQ:
+        return METHOD.GPTQ
+    return method
 
 
 def _normalize_format(format_value: Optional[Union[str, FORMAT]]) -> FORMAT:

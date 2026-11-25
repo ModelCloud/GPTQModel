@@ -3,6 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+# `admmq` imports `config`, so it must load after the config block below;
+# importing it first re-enters a partially initialized config module.
+# ruff: noqa: I001
 from .config import (
                      FORMAT,
                      FORMAT_FIELD_CHECKPOINT,
@@ -11,6 +14,7 @@ from .config import (
                      METHOD_FIELD_CODE,
                      QUANT_CONFIG_FILENAME,
                      QUANT_METHOD_FIELD,
+                     ADMMQConfig,
                      AutoDtypeCast,
                      AutoModuleDecoderConfig,
                      AWQConfig,
@@ -64,6 +68,7 @@ from .config import (
 from .config import (
                      GSQConfig as GSQConfig,
 )
+from .admmq import ADMMQ
 from .foem import FOEM
 from .g2ptq import G2PTQ
 from .gptaq import GPTAQ

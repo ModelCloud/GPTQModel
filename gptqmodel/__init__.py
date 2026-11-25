@@ -455,6 +455,7 @@ from .models import (
 from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .packaging import GGUFPackageConfig, PackageConfig, package
 from .quantization import (
+    ADMMQConfig,
     AutoDtypeCast,
     AWQConfig,
     BaseQuantizeConfig,

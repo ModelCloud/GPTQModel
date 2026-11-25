@@ -513,6 +513,7 @@ def _is_supported_quantization_config(config: PreTrainedConfig) -> bool:
     quant_format = quantization_config.get("quant_format")
     if isinstance(quant_format, str) and quant_format.lower() in (
         METHOD.GPTQ,
+        METHOD.ADMMQ,
         METHOD.GGUF,
         METHOD.FP8,
         METHOD.BITSANDBYTES,
@@ -531,6 +532,7 @@ def _is_supported_quantization_config(config: PreTrainedConfig) -> bool:
     method = quantization_config.get("method", quantization_config.get("quant_method"))
     if isinstance(method, str) and method.lower() in (
         METHOD.GPTQ,
+        METHOD.ADMMQ,
         METHOD.GGUF,
         METHOD.FP8,
         METHOD.BITSANDBYTES,

@@ -43,7 +43,7 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..nn_modules.qlinear.w4a_boundary import layer_mlp_policy
-from ..quantization import FOEM, G2PTQ, GPTAQ, GPTQ
+from ..quantization import ADMMQ, FOEM, G2PTQ, GPTAQ, GPTQ
 from ..quantization.activation_floatx import (
     NVFP4ActivationHeadroom,
     fp8_token_qdq,
@@ -210,7 +210,7 @@ def _capture_payload(value: Any) -> Any:
 
 
 class GPTQProcessor(LoopProcessor):
-    """Captures activations and quantizes modules with GPTQ or GPTAQ/FOEM."""
+    """Captures activations and quantizes modules with GPTQ, GPTAQ, FOEM or ADMM-Q."""
 
     lifecycle = ProcessorLifecycleConfig(
         forward=ForwardConfig(
@@ -384,7 +384,7 @@ class GPTQProcessor(LoopProcessor):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
-        """Builds the per-module GPTQ/GPTAQ/FOEM task after applying dynamic overrides."""
+        """Builds the per-module GPTQ/GPTAQ/FOEM/ADMM-Q task after applying dynamic overrides."""
 
         resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
         qcfg_clone = clone_gptq_config_for_module(
@@ -408,6 +408,8 @@ class GPTQProcessor(LoopProcessor):
             tmp = G2PTQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
         elif qcfg_clone.foem is not None:
             tmp = FOEM(module=module, qcfg=qcfg_clone, region_timer=region_timer)
+        elif qcfg_clone.method == METHOD.ADMMQ:
+            tmp = ADMMQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
             tmp.fallback = qcfg_clone.fallback
@@ -477,14 +479,14 @@ class GPTQProcessor(LoopProcessor):
     def _hessian_capture_signature(self, task: Any) -> Optional[Tuple[Any, ...]]:
         """Numerical capture contract; ``None`` excludes the task from sharing.
 
-        GPTQ, GPTAQ and FOEM each accumulate ``H`` differently, so a group may
-        only share within one quantizer kind.  GPTAQ/FOEM additionally require
-        the same native-delta mode because ``dXXT`` must be adopted together
-        with ``H``.  Every kind keys the effective sink-row cap because it
-        rescales the activations before both ``H`` and ``dXXT`` (#5855).
+        GPTQ and ADMM-Q accumulate the same Hessian. GPTAQ and FOEM each
+        require their own signature and the same native-delta mode within
+        the group because ``dXXT`` must be adopted together with ``H``. Every
+        signature includes the effective sink-row cap because it rescales
+        the activations before both ``H`` and ``dXXT`` (#5855).
         """
 
-        if type(task) is GPTQ:
+        if type(task) in (GPTQ, ADMMQ):
             return ("gptq", task.columns, *self._hessian_accumulation_settings(task))
         if type(task) is GPTAQ:
             return ("gptaq", task.columns, bool(task._use_native_delta), task.sink_row_cap_median_multiple())
@@ -500,10 +502,9 @@ class GPTQProcessor(LoopProcessor):
     ) -> Dict[str, str]:
         """Elects one Hessian capture leader per explicit shared-input group present in this subset.
 
-        Plain `GPTQ`, `GPTAQ` and `FOEM` tasks participate; a group only shares
-        within one quantizer kind (GPTAQ/FOEM also adopt ``dXXT``).  Groups that
-        are split across subsets dedup only among the members captured in this
-        pass.
+        GPTQ, ADMM-Q, GPTAQ and FOEM tasks share when their capture signatures
+        match. GPTAQ and FOEM also adopt ``dXXT``. Groups that are split across
+        subsets dedup only among the members captured in this pass.
         """
 
         with self.lock:
@@ -1243,7 +1244,12 @@ class GPTQProcessor(LoopProcessor):
 
         # set quantized state
         model.quantized = True
-        model.quantize_config.method = METHOD.GPTQ
+        # GPTAQ and FOEM are GPTQ options, so their artifacts are plain
+        # GPTQ checkpoints. ADMM-Q is its own method whose tensors still
+        # use the GPTQ packing contract; keeping the method lets the
+        # checkpoint restore the solver settings it recorded in `meta`.
+        if model.quantize_config.method != METHOD.ADMMQ:
+            model.quantize_config.method = METHOD.GPTQ
 
         super().finalize(model=model, **kwargs)
 
@@ -1264,8 +1270,9 @@ class GPTQProcessor(LoopProcessor):
             return "gptaq"
         if qcfg.foem is not None:
             return "foem"
-        else:
-            return "gptq"
+        if qcfg.method == METHOD.ADMMQ:
+            return "admmq"
+        return "gptq"
 
     def _release_host_buffers(self, *tensors: torch.Tensor) -> None:
         """Retain the old cleanup hook for streaming tests and external callers.

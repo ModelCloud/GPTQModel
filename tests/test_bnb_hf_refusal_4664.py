@@ -47,6 +47,7 @@ def test_every_saveable_method_is_hf_readable_or_warned():
     from transformers.quantizers import auto as hf_auto
 
     from gptqmodel._quant_methods import (
+        EXPORTED_QUANT_METHOD_NAMES,
         GGUF_EXPORT_QUANT_METHOD,
         REFUSED_HF_QUANT_METHODS,
     )
@@ -56,7 +57,7 @@ def test_every_saveable_method_is_hf_readable_or_warned():
         # GGUF is published under a non-colliding alias; the plain `gguf`
         # name belongs to transformers' own loader. FP8 is load-only and keeps
         # the standard `fp8` name so transformers' `FineGrainedFP8` reads it.
-        names = [method.value]
+        names = [EXPORTED_QUANT_METHOD_NAMES.get(method.value, method.value)]
         if method is METHOD.GGUF:
             names.append(GGUF_EXPORT_QUANT_METHOD)
         for name in names:

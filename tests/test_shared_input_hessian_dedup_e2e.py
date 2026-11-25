@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""End-to-end CPU GPTQ quantization of a tiny Llama with shared-input Hessian dedup on vs off."""
+"""CPU quantization of a tiny Llama with shared-input Hessian dedup enabled and disabled."""
 
 import tempfile
 from typing import Dict, List, Tuple
@@ -16,7 +16,7 @@ from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.quantization import GPTQ
-from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
+from gptqmodel.quantization.config import METHOD, HessianConfig, QuantizeConfig
 
 
 @pytest.fixture(scope="module")
@@ -57,12 +57,12 @@ def _calibration() -> List[Dict[str, torch.Tensor]]:
     ]
 
 
-def _quantize(model_dir: str, dedup: bool, monkeypatch) -> Tuple[List[Tuple[Dict[str, str], List[str]]], Dict[str, torch.Tensor], Dict[str, int]]:
+def _quantize(model_dir: str, method: METHOD, dedup: bool, monkeypatch) -> Tuple[List[Tuple[Dict[str, str], List[str]]], Dict[str, torch.Tensor], Dict[str, int]]:
     with monkeypatch.context() as mp:
-        return _quantize_patched(model_dir, dedup, mp)
+        return _quantize_patched(model_dir, method, dedup, mp)
 
 
-def _quantize_patched(model_dir: str, dedup: bool, monkeypatch) -> Tuple[List[Tuple[Dict[str, str], List[str]]], Dict[str, torch.Tensor], Dict[str, int]]:
+def _quantize_patched(model_dir: str, method: METHOD, dedup: bool, monkeypatch) -> Tuple[List[Tuple[Dict[str, str], List[str]]], Dict[str, torch.Tensor], Dict[str, int]]:
     elections: List[Tuple[Dict[str, str], List[str]]] = []
     weights: Dict[str, torch.Tensor] = {}
     captured: Dict[str, int] = {}
@@ -88,6 +88,7 @@ def _quantize_patched(model_dir: str, dedup: bool, monkeypatch) -> Tuple[List[Tu
     monkeypatch.setattr(GPTQ, "quantize", spy_quantize)
 
     qcfg = QuantizeConfig(
+        method=method,
         bits=4,
         group_size=32,
         desc_act=False,
@@ -99,9 +100,10 @@ def _quantize_patched(model_dir: str, dedup: bool, monkeypatch) -> Tuple[List[Tu
     return elections, weights, captured
 
 
-def test_tiny_llama_dedup_matches_independent_hessians(tiny_llama_dir, monkeypatch):
-    elections_on, weights_on, captured_on = _quantize(tiny_llama_dir, True, monkeypatch)
-    elections_off, weights_off, captured_off = _quantize(tiny_llama_dir, False, monkeypatch)
+@pytest.mark.parametrize("method", [METHOD.GPTQ, METHOD.ADMMQ])
+def test_tiny_llama_dedup_matches_independent_hessians(tiny_llama_dir, monkeypatch, method):
+    elections_on, weights_on, captured_on = _quantize(tiny_llama_dir, method, True, monkeypatch)
+    elections_off, weights_off, captured_off = _quantize(tiny_llama_dir, method, False, monkeypatch)
 
     qkv = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
     gate_up = ["mlp.gate_proj", "mlp.up_proj"]
