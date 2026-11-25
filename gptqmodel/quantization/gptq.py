@@ -52,8 +52,9 @@ from .npu_linalg import npu_inverse_cholesky_factor
 from .quantizer import (
     HF_OPTIMUM,
     SCALE_STORAGE_FLOOR,
+    FitLimits,
     Quantizer,
-    ReplayBounds,
+    WeightGrid,
     _affine_scale,
     _finite_code_bounds,
     _floor_scale_for_storage,
@@ -113,16 +114,18 @@ def _is_memory_allocation_failure(exc: BaseException) -> bool:
 def _finite_value_limit(weight_dtype: torch.dtype) -> Optional[float]:
     """Largest magnitude a weight grid may reconstruct in ``weight_dtype``.
 
-    The rule now lives in :class:`ReplayBounds` (#6020); this wrapper keeps the
-    existing fallback-strategy call sites, which pass the limit to the affine
-    grid helpers rather than through ``Quantizer.fit_weight``.
+    The rule lives in :class:`FitLimits` (#6020); this wrapper keeps the
+    fallback-strategy call sites, which pass the limit to the affine grid
+    helpers rather than through ``Quantizer.fit_weight``.
     """
 
-    return ReplayBounds(replay_dtype=weight_dtype).value_limit
+    return FitLimits.for_dtype(weight_dtype).max_abs_value
 
 
 def _fused_code_bounds(
-    quantizer: Quantizer, device: torch.device
+    quantizer: Quantizer,
+    device: torch.device,
+    grid: Optional[WeightGrid] = None,
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     """Return one group's fused-kernel code bounds as flat ``[rows]`` tensors.
 
@@ -134,8 +137,10 @@ def _fused_code_bounds(
     activation fit) and the kernel keeps its natural ``[0, maxq]`` range.
     """
 
-    code_lo = quantizer.code_lo
-    code_hi = quantizer.code_hi
+    if grid is None:
+        grid = getattr(quantizer, "_last_grid", None)
+    code_lo = grid.code_lo if grid is not None else quantizer.code_lo
+    code_hi = grid.code_hi if grid is not None else quantizer.code_hi
     if code_lo is None or code_hi is None:
         return None, None
     return code_lo.flatten().to(device=device), code_hi.flatten().to(device=device)
@@ -1264,8 +1269,8 @@ class GPTQ:
         self,
         weight: torch.Tensor,
         quantizer: Optional[Quantizer] = None,
-        bounds: Optional[ReplayBounds] = None,
-    ):
+        limits: Optional[FitLimits] = None,
+    ) -> WeightGrid:
         """Fit a weight grid bounded by the dtype the reconstruction narrows to.
 
         Every weight fit in the GPTQ family goes through this entry: the block
@@ -1277,7 +1282,7 @@ class GPTQ:
         """
 
         target = self.quantizer if quantizer is None else quantizer
-        target.fit_weight(weight, bounds or ReplayBounds.for_module(self.module))
+        return target.fit_weight(weight, limits or FitLimits.for_module(self.module))
 
     def shape(self):
         if hasattr(self, "module"):
@@ -2843,10 +2848,10 @@ class GPTQ:
                 elif strategy == FallbackStrategy.RTN:
                     # ``scale_factor`` is restored after quantization, so the
                     # final-domain bound is expressed in the smoothed domain by
-                    # ReplayBounds instead of being divided by hand.
+                    # FitLimits instead of being divided by hand.
                     self.quantizer.fit_weight(
                         block_mod,
-                        ReplayBounds.for_module(self.module, restore_factor=scale_factor),
+                        FitLimits.for_module(self.module, restore_factor=scale_factor),
                     )
                     dequant = self.quantizer.quantize(block_mod)
                     scale, zero = _replace_zero_scale(

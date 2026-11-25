@@ -9,6 +9,7 @@ import math
 import platform
 import sys
 import time
+from functools import lru_cache
 
 import torch
 import transformers
@@ -24,27 +25,23 @@ from .fallback_smooth import (
     smooth_block,
 )
 from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
-from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, Quantizer, ReplayBounds, narrowing_loses_codes
+from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, FitLimits, Quantizer, narrowing_loses_codes
 
 
 def _finite_value_limit(weight_dtype: torch.dtype) -> float | None:
     """Largest magnitude the normalized grid may reconstruct in ``weight_dtype``.
 
-    RTN's MSE branch scores a shrink candidate by the codes it would select, so
-    it needs the same finite bound the plain branch gets from
-    :class:`~gptqmodel.quantization.quantizer.ReplayBounds`. Integer dtypes
-    express their range as counts, not magnitudes, and FP32 is the working
-    dtype, so RTN treats a float32 source as bounded by its own finite maximum.
+    RTN bounds FP32 by its own finite maximum (``bound_fp32=True``); the rule
+    itself lives in :class:`~gptqmodel.quantization.quantizer.FitLimits` (#6020).
     """
 
-    if not weight_dtype.is_floating_point:
-        return None
-    return float(torch.finfo(weight_dtype).max)
+    return FitLimits.for_dtype(weight_dtype, bound_fp32=True).max_abs_value
 
 
 _MLX_RTN_MIN_ELEMENTS = 256 * 1024
 
 
+@lru_cache(maxsize=1)
 def _mlx_rtn_quantization_available() -> bool:
     if sys.platform != "darwin" or platform.machine() != "arm64":
         return False
@@ -215,8 +212,9 @@ class RTN:
         start_time = time.time()
         target_device = self.module.weight.device
         # The grid is fitted on an FP32 copy and narrowed to this dtype for
-        # replay, so every fit below is bounded by it (#6020).
-        bounds = ReplayBounds.for_module(self.module)
+        # replay, so every fit below is bounded by it (#6020). RTN scores codes
+        # directly and has always bounded FP32 by its finite maximum.
+        limits = FitLimits.for_module(self.module, bound_fp32=True)
         weights = self.clone_module(device=target_device)
         if _should_use_mlx_rtn_quantization(weights, self.qcfg):
             quantized, scale, zero = _quantize_rtn_weight_mlx_to_torch(
@@ -248,7 +246,7 @@ class RTN:
                         weights=element_saliency_weights(block),
                         # The replay weight is narrowed to the source dtype,
                         # so score the codes that stay finite there.
-                        value_limit=bounds.value_limit,
+                        value_limit=limits.max_abs_value,
                     )
                 else:
                     block_mod, scale_factor = smooth_block(
@@ -259,14 +257,18 @@ class RTN:
                     # Row/column smoothing restores ``scale_factor`` after
                     # quantization: the fit runs on the normalized block, so the
                     # storage floor and the finite bound both carry that factor
-                    # into the working domain once, inside ReplayBounds.
-                    self.quantizer.fit_weight(
+                    # into the working domain once, inside FitLimits.
+                    grid = self.quantizer.fit_weight(
                         block_mod,
-                        ReplayBounds.for_module(self.module, restore_factor=scale_factor),
+                        FitLimits.for_module(
+                            self.module, restore_factor=scale_factor, bound_fp32=True
+                        ),
                     )
                     dequant = self.quantizer.quantize(block_mod)
-                    scale = self.quantizer.scale
-                    zero = self.quantizer.zero
+                    # Use the grid the fit returned: scale, zero and the code
+                    # range belong to the same fit.
+                    scale = grid.scale
+                    zero = grid.zero
 
                     if scale_factor is not None:
                         scale = scale * scale_factor
