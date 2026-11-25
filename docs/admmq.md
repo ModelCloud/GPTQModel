@@ -239,3 +239,5 @@ If you use ADMM-Q, cite the original paper:
   archivePrefix = {arXiv}
 }
 ```
+
+Introduced in [PR #6063](https://github.com/ModelCloud/GPTQModel/pull/6063).
