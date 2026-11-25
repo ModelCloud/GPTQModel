@@ -145,3 +145,78 @@ def test_the_fold_is_judged_in_the_dtype_the_module_runs_in(tmp_path, bind_dtype
     result = adapter.apply(x, base)
     assert torch.isfinite(result).all()
     assert result.item() == pytest.approx(expected, rel=1e-3)
+
+
+def test_a_float64_adapter_without_a_hint_does_not_lock_to_float32(tmp_path):
+    """Storage narrowing is not the activation dtype (review on #6019).
+
+    A float64 export is stored as float32, but a BF16 model must still be able
+    to run the first forward: the lock comes from the hint, not from the
+    storage rule.
+    """
+
+    _write_adapter(tmp_path, source_b=1.0, store=torch.float64)
+    adapter = Lora(rank=1, path=str(tmp_path))
+    adapter.post_init(MODULE_KEY, CPU)
+
+    assert adapter._forward_dtype is None
+    assert adapter.lora_A.dtype == torch.float32
+
+    adapter.apply(
+        torch.zeros((1, 1), dtype=torch.bfloat16),
+        torch.zeros((1, 1), dtype=torch.bfloat16),
+    )
+
+    assert adapter._forward_dtype == torch.bfloat16
+    assert adapter.lora_A.dtype == torch.bfloat16
+
+    with pytest.raises(RuntimeError, match="locked"):
+        adapter.apply(
+            torch.zeros((1, 1), dtype=torch.float16),
+            torch.zeros((1, 1), dtype=torch.float16),
+        )
+
+
+def test_a_manual_recast_of_the_projections_is_caught(tmp_path):
+    """The lock compares the projections too, not only the activation."""
+
+    _write_adapter(tmp_path, source_b=1.0, store=torch.float32)
+    adapter = Lora(rank=1, path=str(tmp_path))
+    adapter.post_init(MODULE_KEY, CPU, dtype=torch.bfloat16)
+    adapter.lora_A = adapter.lora_A.half()
+    adapter.lora_B = adapter.lora_B.half()
+
+    for activation in (torch.float16, torch.bfloat16):
+        with pytest.raises(RuntimeError, match="locked"):
+            adapter.apply(
+                torch.zeros((1, 1), dtype=activation),
+                torch.zeros((1, 1), dtype=activation),
+            )
+
+
+def test_another_threads_compile_session_does_not_block_the_lock(tmp_path, monkeypatch):
+    """`dynamo_is_compiling()` is per-thread; the raw global call leaked (#5427)."""
+
+    from gptqmodel.adapter import adapter as adapter_module
+
+    _write_adapter(tmp_path, source_b=1.0, store=torch.float32)
+    adapter = Lora(rank=1, path=str(tmp_path))
+    adapter.post_init(MODULE_KEY, CPU)
+    monkeypatch.setattr(adapter_module, "dynamo_is_compiling", lambda: True)
+
+    # Same dtype: the forward runs, but the lock must not be recorded while
+    # tracing, exactly like ForwardDtypeLockMixin.
+    adapter.apply(
+        torch.zeros((1, 1), dtype=torch.float32),
+        torch.zeros((1, 1), dtype=torch.float32),
+    )
+    assert adapter._forward_dtype is None
+
+    # Different dtype while tracing: refuse instead of mutating the projections.
+    projected = adapter.lora_A
+    with pytest.raises(RuntimeError, match="while tracing"):
+        adapter.apply(
+            torch.zeros((1, 1), dtype=torch.float16),
+            torch.zeros((1, 1), dtype=torch.float16),
+        )
+    assert adapter.lora_A is projected

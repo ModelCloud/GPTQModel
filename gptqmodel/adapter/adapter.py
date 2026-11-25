@@ -13,6 +13,7 @@ import safetensors
 import torch
 
 from ..utils.logger import setup_logger
+from ..utils.torch import dynamo_is_compiling
 from .peft import LoraConfig
 from .remote import resolve_checkpoint_adapter_path, resolve_path, validate_remote_pin
 from .targeting import module_matches_targets
@@ -394,19 +395,29 @@ class Lora(Adapter):
             self.lora_A = self.lora_A.to(device=x.device)
             self.lora_B = self.lora_B.to(device=x.device)
 
+        # Check the lock before the projection dtype: a manual `.half()` on the
+        # projections is a post-forward dtype change too, and comparing against
+        # `lora_A.dtype` would let it through.
+        if self._forward_dtype is not None:
+            if x.dtype == self._forward_dtype and self.lora_A.dtype == self._forward_dtype:
+                return
+            raise RuntimeError(
+                f"Adapter: LoRA projections are locked to `{self._forward_dtype}` after the "
+                f"first forward, but the activation is `{x.dtype}` and the projections are "
+                f"`{self.lora_A.dtype}`. Cast the model and its adapter before the first "
+                "forward instead of switching dtype later "
+                "(contracts/kernel/forward-dtype.md, K1/K2)."
+            )
+
         if x.dtype == self.lora_A.dtype:
-            if self._forward_dtype is None and not torch.compiler.is_compiling():
+            # `dynamo_is_compiling()` is per-thread: another thread's compile
+            # session must not stop this eager forward from recording the lock
+            # (#5427, the same helper ForwardDtypeLockMixin uses).
+            if not dynamo_is_compiling():
                 self._forward_dtype = x.dtype
             return
 
-        if self._forward_dtype is not None:
-            raise RuntimeError(
-                f"Adapter: LoRA projections are locked to `{self._forward_dtype}` after the "
-                f"first forward, but the activation is `{x.dtype}`. Cast the model and its "
-                "adapter before the first forward instead of switching dtype later "
-                "(contracts/kernel/forward-dtype.md, K1/K2)."
-            )
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             raise RuntimeError(
                 f"Adapter: cannot align LoRA projections to `{x.dtype}` while tracing. Cast "
                 "the adapter to the activation dtype before compiling."
@@ -561,9 +572,10 @@ class Lora(Adapter):
         self,
         weight_key: str,
         device: torch.device,
-        dtype: Optional[torch.dtype] = None,
         lora_A: torch.Tensor = None,
         lora_B: torch.Tensor = None,
+        *,
+        dtype: Optional[torch.dtype] = None,
     ):
         """Loads, caches, and materializes LoRA tensors for the target module.
 
@@ -653,13 +665,17 @@ class Lora(Adapter):
         # Align once, here, when the bind site knows the activation dtype; a
         # float64 export is still narrowed to float32 (never wider than the
         # model). Without a dtype the first eager forward aligns and locks.
-        target_dtype = dtype
-        if target_dtype is None and lora_A.dtype == torch.float64:
-            target_dtype = torch.float32
-        if target_dtype is not None:
-            lora_A = lora_A.to(dtype=target_dtype)
-            lora_B = lora_B.to(dtype=target_dtype)
-        self._forward_dtype = target_dtype
+        # A float64 export is narrowed to float32 storage, but that narrowing is
+        # a storage rule, not the activation dtype: without a hint the first
+        # eager forward still decides the lock (a float64 adapter loaded for a
+        # BF16 model must not lock itself to FP32).
+        if dtype is not None:
+            lora_A = lora_A.to(dtype=dtype)
+            lora_B = lora_B.to(dtype=dtype)
+        elif lora_A.dtype == torch.float64 or lora_B.dtype == torch.float64:
+            lora_A = lora_A.to(dtype=torch.float32)
+            lora_B = lora_B.to(dtype=torch.float32)
+        self._forward_dtype = dtype
         self.lora_A = lora_A.to(device=device)
         self.lora_B = lora_B.to(device=device)
         if self.rank <= 0:
@@ -675,7 +691,7 @@ class Lora(Adapter):
         # adapter cache. Fold the scale once here so every forward uses the
         # PEFT effective scale without adding another multiply, unless the fold
         # would not survive `lora_B`'s storage dtype (#5426).
-        self._lora_scale_folded = self._fold_scale_into_b(target_dtype)
+        self._lora_scale_folded = self._fold_scale_into_b(dtype)
 
         #print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
         #print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
