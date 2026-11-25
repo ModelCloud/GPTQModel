@@ -23,6 +23,7 @@
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
 * GSQ: [IST-DASLab's GSQ paper](https://arxiv.org/abs/2604.18556) and [reference implementation](https://github.com/IST-DASLab/GSQ), by Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, and Dan Alistarh. The optional local refinement and staged Llama training in GPT-QModel are adaptations of this work.
 * RCO: [IST-DASLab's RCO paper](https://arxiv.org/abs/2605.00649) and [reference implementation](https://github.com/IST-DASLab/RCO), by Michael Helcig and Dan Alistarh. `gptqmodel/quantization/rco.py` and the `scripts/gsq_paper/rco_*.py` drivers are a port of this work.
+* **LeapQuant** by Yi Pan, Haocheng Xi, Kan Zhu, Xingyang Li, Yibo Wu, Mayank Mishra, Hongtao Zhang, William X. Zheng, Baris Kasikci, Song Han, Kurt Keutzer, Rishabh Iyer, and Ion Stoica introduced per-window recurrent-state quantization and Compensator Tokens used by GPT-QModel's `gptqmodel/utils/leapquant.py`. [Paper](https://arxiv.org/abs/2609.38166) · [Official implementation](https://github.com/leapquant/LeapQuant) · [LeapQuant guide](leapquant.md)
 
 ## Citations
 
@@ -72,6 +73,16 @@
   author={Helcig, Michael and Alistarh, Dan},
   journal={arXiv preprint arXiv:2605.00649},
   year={2026}
+}
+
+# LeapQuant
+@article{pan2026leapquant,
+  title   = {LeapQuant: Efficient Linear Attention with Accurate Recurrent State Quantization},
+  author  = {Pan, Yi and Xi, Haocheng and Zhu, Kan and Li, Xingyang and Wu, Yibo and Mishra, Mayank and
+             Zhang, Hongtao and Zheng, William X. and Kasikci, Baris and Han, Song and Keutzer, Kurt and
+             Iyer, Rishabh and Stoica, Ion},
+  journal = {arXiv preprint arXiv:2609.38166},
+  year    = {2026}
 }
 
 # AWQ
