@@ -22,8 +22,8 @@ cases below and record the evidence in the PR. For landed fixes and the tests
 to extend, see the audits from [Nov 17](references/2026-11-17-regressions.md),
 [Nov 18](references/2026-11-18-regressions.md), [Nov 19](references/2026-11-19-regressions.md),
 [Nov 20](references/2026-11-20-regressions.md), [Nov 21](references/2026-11-21-regressions.md),
-[Nov 23](references/2026-11-23-regressions.md) and
-[Nov 24](references/2026-11-24-regressions.md).
+[Nov 23](references/2026-11-23-regressions.md), [Nov 24](references/2026-11-24-regressions.md)
+and [Nov 25](references/2026-11-25-regressions.md).
 
 ## 1. Write the invariant before the patch
 
@@ -65,6 +65,16 @@ Mocks may isolate an external dependency or inject a failure at its boundary.
 Do not mock away the mutation, conversion, replay, or dispatch under test.
 Call-count/source-text assertions are supporting evidence, not substitutes for
 observable tensor values, selected policy, restored state, or released owners.
+
+**Test what importing a fixture does to the next caller.** A module-level kernel
+double can enter discovery during pytest collection. Give stand-ins that declare
+kernel formats `SUPPORTS_BACKEND_SELECTION = False`. In a fresh interpreter,
+resolve a known backend/method/format triple, import the fixture, then resolve
+it again and assert the same concrete class. Check explicit lookup as well as
+the AUTO map when both consume discovery. For a CPU model oracle, set the
+device on load and reload. If an optional accelerator package can change a
+CPU forward, scope the existing eager reference fixture to that call and let
+the following caller see the original binding.
 
 **Prove the guard runs where it belongs.** When adding or moving a regression,
 check both the CI path filter and the job's pytest selection. Run the affected
@@ -311,6 +321,12 @@ processor actually packs it; a close replay tensor is not evidence.
   requires rejection, test the first invalid stored field and the last valid
   payload. For a scale that rounds to zero, include a genuinely zero row
   alongside a tiny nonzero row and inspect both scales and codes.
+- **Packed field coverage.** Inventory the fields the decoder reads for each
+  supported layout. Derive byte and bit positions from the wire format.
+  Corrupt one field in the second of two blocks and assert the field and block
+  reported. Cover trailing and split fields. For source-dependent repair, pack
+  a tiny nonzero block next to an ordinary one. Check the repaired decode and
+  compare the neighbour's bytes with its standalone packing.
 - **Candidate ranking.** For a search whose optimum should survive a common
   rescale, choose a row with a unique winner other than the first candidate.
   Rescale by powers of two within the encodable range, including any global
@@ -318,6 +334,11 @@ processor actually packs it; a close replay tensor is not evidence.
   independently in FP64. Check the selected index or local scale and the
   decoded payload. Test ties and format floors separately, where the expected
   decision can change.
+  Carry the same fixture into independently implemented paths. For replay
+  and a deployed packer, compare packed codes and stored scales for the same
+  recipe, then rank the candidates independently using the rounded inputs
+  each path actually received. For affine fitting, exercise the main fit,
+  shrink search and fallback wherever they compute their own span.
 - **Exact selections.** For nearest-centroid search, place the exact match
   second beside a one-storage-ULP neighbour, then reverse them. Check the
   index and residual against direct FP64 differences. For one-hot mixing,
