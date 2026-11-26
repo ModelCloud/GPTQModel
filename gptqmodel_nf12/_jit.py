@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,16 @@ class _MissingBuildTools(RuntimeError):
 
 _lock = threading.Lock()
 _directory: Path | None = None
+# A build that raised is remembered for the process: without this, a toolchain
+# that cannot build (an old CMake, a broken compiler) is retried on every NF12
+# call - once per module and subset during quantization. ``reset_runtime_cache``
+# forgets it after the environment is repaired (or in tests).
+_directory_failure: BaseException | None = None
+_target: tuple[Path, list[int], Path] | None = None
+_tools: tuple[str | None, str | None, str | None] | None = None
+
+#: The vendored CMakeLists requires this; ``_build_tools`` alone cannot tell.
+CMAKE_MIN_VERSION = (3, 26)
 
 
 def _lock_file(handle) -> None:
@@ -117,14 +128,61 @@ def _ready(directory: Path) -> bool:
 
 def _build_tools() -> tuple[str | None, str | None, str | None]:
     """Locate ``(cmake, ninja, nvcc)`` without building anything."""
-    # Import CUDA toolkit discovery only when the tools are actually needed.
-    from torch.utils.cpp_extension import CUDA_HOME
+    global _tools
+    if _tools is None:
+        # Import CUDA toolkit discovery only when the tools are actually needed.
+        from torch.utils.cpp_extension import CUDA_HOME
 
-    cmake, ninja = shutil.which("cmake"), shutil.which("ninja")
-    nvcc = os.environ.get("CUDACXX")
-    if not nvcc:
-        nvcc = str(Path(CUDA_HOME) / "bin" / "nvcc") if CUDA_HOME else "nvcc"
-    return cmake, ninja, shutil.which(nvcc)
+        cmake, ninja = shutil.which("cmake"), shutil.which("ninja")
+        nvcc = os.environ.get("CUDACXX")
+        if not nvcc:
+            nvcc = str(Path(CUDA_HOME) / "bin" / "nvcc") if CUDA_HOME else "nvcc"
+        _tools = (cmake, ninja, shutil.which(nvcc))
+    return _tools
+
+
+def _tool_version(tool: str) -> tuple[int, ...] | None:
+    """Best-effort ``(major, minor, ...)`` for a build tool.
+
+    ``None`` means "could not tell": a probe that fails for any other reason
+    must not turn into a "missing tools" skip, because the build attempt below
+    still reports the real error (a compiler failure is not a missing tool).
+    """
+
+    try:
+        completed = subprocess.run(
+            [tool, "--version"], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # ``subprocess.run`` always returns a CompletedProcess, but a test double may
+    # return something else; an unknown version must fall through to the build.
+    if getattr(completed, "returncode", 0) != 0:
+        return None
+    match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", getattr(completed, "stdout", None) or "")
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups() if part is not None)
+
+
+def _toolchain_problem() -> str | None:
+    """Why a source build cannot succeed here, or ``None``.
+
+    ``source_build_available`` promises callers a portable fallback instead of
+    a doomed build; existence alone is not enough, because the vendored
+    CMakeLists requires 3.26 and an older CMake fails at configure time.
+    """
+
+    cmake, ninja, nvcc = _build_tools()
+    missing = [name for name, path in (("cmake", cmake), ("ninja", ninja), ("nvcc", nvcc)) if not path]
+    if missing:
+        return "missing build tools: " + ", ".join(missing)
+    version = _tool_version(cmake)
+    if version is not None and version < CMAKE_MIN_VERSION:
+        found = ".".join(str(part) for part in version)
+        required = ".".join(str(part) for part in CMAKE_MIN_VERSION)
+        return f"cmake {found} is older than {required}"
+    return None
 
 
 def source_build_available() -> bool:
@@ -144,15 +202,17 @@ def source_build_available() -> bool:
         return False
     if not archs or min(archs) < 80:
         return False
-    return all(_build_tools())
+    return _toolchain_problem() is None
 
 
 def _build(source: Path, directory: Path, archs: list[int]) -> None:
     cmake, ninja, nvcc = _build_tools()
-    if not cmake or not ninja or not nvcc:
+    problem = _toolchain_problem()
+    if problem is not None:
         raise _MissingBuildTools(
             "nf12: JIT compilation requires CUDA toolkit 13.0+ (nvcc), CMake 3.26+, "
-            "Ninja, and a C++ compiler; set CUDA_HOME or CUDACXX to locate CUDA"
+            "Ninja, and a C++ compiler; set CUDA_HOME or CUDACXX to locate CUDA "
+            f"({problem})"
         )
 
     build = directory / "build"
@@ -182,11 +242,20 @@ def _build(source: Path, directory: Path, archs: list[int]) -> None:
 
 
 def _cache_target() -> tuple[Path, list[int], Path]:
-    source = _source_root()
-    archs = _architectures()
-    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    directory = cache.expanduser().resolve() / "gptqmodel" / "nf12" / _cache_key(source, archs)
-    return source, archs, directory
+    """Resolve the source, visible architectures and cache directory once.
+
+    ``_cache_key`` hashes every vendored source file; recomputing it per module
+    was paid on every retry of a failing build.
+    """
+
+    global _target
+    if _target is None:
+        source = _source_root()
+        archs = _architectures()
+        cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+        directory = cache.expanduser().resolve() / "gptqmodel" / "nf12" / _cache_key(source, archs)
+        _target = (source, archs, directory)
+    return _target
 
 
 def cache_directory() -> Path:
@@ -203,17 +272,39 @@ def cache_ready() -> bool:
 
 
 def library_directory() -> Path:
-    global _directory
+    global _directory, _directory_failure
     with _lock:
         if _directory is not None:
             return _directory
-        source, archs, directory = _cache_target()
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        # Keep the lock file: unlinking it lets waiters lock a different inode.
-        with (directory / "build.lock").open("a") as lock:
-            _lock_file(lock)
-            if not _ready(directory):
-                (directory / "complete").unlink(missing_ok=True)
-                _build(source, directory, archs)
-        _directory = directory / "build"
-        return _directory
+        if _directory_failure is not None:
+            raise _directory_failure
+        try:
+            source, archs, directory = _cache_target()
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # Keep the lock file: unlinking it lets waiters lock a different inode.
+            with (directory / "build.lock").open("a") as lock:
+                _lock_file(lock)
+                if not _ready(directory):
+                    (directory / "complete").unlink(missing_ok=True)
+                    _build(source, directory, archs)
+            _directory = directory / "build"
+            return _directory
+        except Exception as exc:
+            # A broken toolchain is a property of the process, not of one call.
+            _directory_failure = exc
+            raise
+
+
+def reset_runtime_cache() -> None:
+    """Forget the resolved cache directory, a failed build and tool probes.
+
+    Needed by tests, and by a caller that repairs the toolchain and wants the
+    next NF12 use to try again. Successful loads stay memoized elsewhere.
+    """
+
+    global _directory, _directory_failure, _target, _tools
+    with _lock:
+        _directory = None
+        _directory_failure = None
+        _target = None
+        _tools = None
