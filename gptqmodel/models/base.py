@@ -5776,6 +5776,53 @@ class BaseQModel(nn.Module):
             self.post_quantize(norm)
         return inputs
 
+    def last_block_objective_modules(self):
+        """Return the final norm and output head for the last-block KL objective.
+
+        G2PTQ's final Transformer block uses the KL/NLL pair between the
+        predictive distributions of the full-precision and quantized block
+        outputs. Reaching those distributions from a block output needs the
+        model's own final-norm and language-head path, plus the dotted names
+        the lazy loader uses to materialize them.
+
+        This base implementation supports the common path: the declared
+        ``pre_lm_head_norm_module`` (or no norm) followed by ``lm_head``. A
+        definition that preprocesses head inputs in
+        ``lm_head_pre_quantize_generate_hook`` (an extra projection, a stream
+        collapse, or a conditional norm) returns ``None`` so G2PTQ falls back
+        to block-wise MSE instead of scoring a different path.
+
+        Returns ``(norm, norm_name, head, head_name)``; ``norm`` and
+        ``norm_name`` are ``None`` for a model without a declared pre-head
+        norm.
+        """
+
+        if (
+            type(self).lm_head_pre_quantize_generate_hook
+            is not BaseQModel.lm_head_pre_quantize_generate_hook
+        ):
+            return None
+        if not isinstance(self.lm_head, str) or not self.lm_head:
+            return None
+        head = get_module(self.model, key=self.lm_head)
+        if head is None:
+            return None
+
+        from transformers.pytorch_utils import Conv1D
+
+        if not isinstance(head, (nn.Linear, nn.Embedding, Conv1D)):
+            return None
+        try:
+            resolved = self._resolved_pre_lm_head_norm_candidates()
+        except (TypeError, ValueError):
+            return None
+        norm, norm_name = resolved[0] if resolved else (None, None)
+        try:
+            head_name = _get_qualified_name(self.model, head)
+        except ValueError:
+            head_name = self.lm_head
+        return norm, norm_name, head, head_name
+
     def _pre_quantize_device(self) -> torch.device:
         """Concrete device on which `pre_quantize` stages one layer.
 

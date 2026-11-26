@@ -58,6 +58,57 @@ def _processor(qcfg=None, **attrs):
     return processor
 
 
+class _LastBlockHeadModel:
+    """Minimal model wrapper exposing the final norm and output head."""
+
+    def __init__(self, norm, head):
+        self.lm_head = "head"
+        self.model = nn.Module()
+        self.model.add_module("norm", norm)
+        self.model.add_module("head", head)
+        self._norm = norm
+        self._head = head
+
+    def last_block_objective_modules(self):
+        return self._norm, "norm", self._head, "head"
+
+
+class _TiedLazyHeadModel:
+    """Model whose tied head only materializes after the input embedding."""
+
+    def __init__(self):
+        self.lm_head = "head"
+        self.model = nn.Module()
+        self.norm = nn.LayerNorm(4)
+        self.embed = nn.Embedding(6, 4, device="meta")
+        self.head = nn.Linear(4, 6, bias=False, device="meta")
+        self.head.weight = self.embed.weight
+        self.model.add_module("norm", self.norm)
+        self.model.add_module("embed", self.embed)
+        self.model.add_module("head", self.head)
+        self.pre_quantize_calls = []
+        self.post_quantize_calls = []
+
+    def last_block_objective_modules(self):
+        return self.norm, "norm", self.head, "head"
+
+    def pre_quantize(self, module, module_path=None):
+        self.pre_quantize_calls.append(module_path)
+        if module is self.embed:
+            self.embed.weight = nn.Parameter(torch.randn(6, 4))
+            self.head.weight = self.embed.weight
+        return module
+
+    def post_quantize(self, module):
+        self.post_quantize_calls.append(module)
+
+    def get_input_embeddings(self):
+        return self.embed
+
+    def get_input_embeddings_name(self):
+        return "embed"
+
+
 # ----------------------------------------------------------------------
 # configuration
 # ----------------------------------------------------------------------
@@ -269,10 +320,17 @@ def test_block_kl_objectives_match_the_paper():
     assert loss_h.item() > 0
 
 
-def test_kl_objective_only_targets_the_output_head():
+def test_kl_objective_targets_the_last_block_and_the_output_head():
     processor = _processor(gptq_model=SimpleNamespace(lm_head="lm_head"))
+    processor.layer_count = 2
 
     assert processor._uses_kl_objective(["model.layers.0.self_attn.q_proj"]) is False
+    assert (
+        processor._uses_kl_objective(
+            ["model.layers.1.self_attn.q_proj"], layer_index=1
+        )
+        is True
+    )
     assert processor._uses_kl_objective(["lm_head"]) is True
     assert processor._uses_kl_objective(["model.lm_head"]) is True
 
@@ -281,6 +339,73 @@ def test_kl_objective_only_targets_the_output_head():
 
     processor.qcfg.g2ptq.kl_last_block = False
     assert processor._uses_kl_objective(["lm_head"]) is False
+
+
+def test_last_block_uses_the_composed_kl_objective():
+    torch.manual_seed(11)
+    norm = nn.LayerNorm(4)
+    head = nn.Linear(4, 6)
+    processor = _processor(
+        GPTQConfig(
+            bits=4,
+            group_size=4,
+            g2ptq=G2PTQConfig(num_groups=1, alpha_mse=0.0, alpha_kl=0.7),
+        ),
+        gptq_model=_LastBlockHeadModel(norm, head),
+    )
+    processor.layer_count = 1
+
+    block = nn.Sequential(nn.Linear(4, 4))
+    task = G2PTQ(block[0], qcfg=processor.qcfg)
+    processor.tasks["proj"] = task
+
+    inputs = torch.randn(1, 3, 4)
+    clean = torch.randn(1, 3, 4)
+    processor._g2ptq_layer_state[0] = {
+        "layer": block,
+        "inputs": [[inputs]],
+        "targets": [[clean]],
+    }
+
+    processor._refresh_block(layer_index=0, names=["proj"])
+
+    # The last block's trust region is the KL budget, and the weight gradient
+    # is the exact gradient of the composed norm + head KL objective.
+    assert task._g2ptq_trust_alpha == pytest.approx(0.7)
+
+    oracle_block = deepcopy(block)
+    oracle_norm = deepcopy(norm)
+    oracle_head = deepcopy(head)
+    quantized = oracle_head(oracle_norm(oracle_block(inputs)))
+    with torch.no_grad():
+        reference = oracle_head(oracle_norm(clean))
+    loss = torch.nn.functional.kl_div(
+        torch.log_softmax(quantized, dim=-1),
+        torch.softmax(reference, dim=-1),
+        reduction="sum",
+    )
+    expected = torch.autograd.grad(loss, oracle_block[0].weight)[0]
+    torch.testing.assert_close(task.weight_gradient, expected, atol=1e-6, rtol=1e-5)
+
+
+def test_last_block_head_path_materializes_a_tied_lazy_head():
+    model = _TiedLazyHeadModel()
+    processor = _processor(gptq_model=model)
+    processor.layer_count = 1
+
+    path = processor._last_block_head_path(0, torch.device("cpu"))
+
+    assert path is not None
+    # A tied head has no checkpoint tensor of its own, so the shared input
+    # embedding is materialized first and the head is retried afterwards.
+    assert model.pre_quantize_calls == ["norm", "head", "embed", "head"]
+    assert path.head is model.head
+    assert path.head.weight.device.type == "cpu"
+    assert path.logits(torch.randn(2, 4)).shape == (2, 6)
+
+    path.close()
+    assert path.head in model.post_quantize_calls
+    assert model.embed in model.post_quantize_calls
 
 
 def test_clean_stream_advances_only_through_pristine_replay():
@@ -591,6 +716,47 @@ def test_g2ptq_end_to_end_quantizes_and_runs(desc_act, act_group_aware):
         ).logits
     assert logits.shape == (1, 16, 256)
     assert torch.isfinite(logits.float()).all()
+
+
+def test_g2ptq_default_last_block_uses_the_kl_trust_alpha():
+    if not torch.cuda.is_available():
+        pytest.skip("G2PTQ end-to-end requires a CUDA device")
+
+    import tempfile
+
+    from gptqmodel import BACKEND as RUNTIME_BACKEND
+    from gptqmodel import CalibrationConfig, GPTQModel
+
+    directory = tempfile.mkdtemp(prefix="g2ptq-last-block-test-")
+    rows = _tiny_llama_fixture(directory)
+
+    alphas = []
+    original = G2PTQ.set_block_statistics
+
+    def recording(self, **kwargs):
+        alphas.append(kwargs.get("trust_alpha"))
+        return original(self, **kwargs)
+
+    G2PTQ.set_block_statistics = recording
+    try:
+        qcfg = QuantizeConfig(
+            bits=4,
+            group_size=16,
+            device="cuda:0",
+            g2ptq=G2PTQConfig(num_groups=2, alpha_mse=0.05, alpha_kl=0.1),
+        )
+        qm = GPTQModel.load(directory, qcfg, dtype=torch.bfloat16)
+        qm.quantize(
+            CalibrationConfig(dataset=rows, batch_size=1, min_length=1),
+            backend=RUNTIME_BACKEND.GPTQ_TORCH,
+        )
+    finally:
+        G2PTQ.set_block_statistics = original
+
+    assert alphas, "G2PTQ never installed block statistics"
+    # The one-layer fixture has only the final Transformer block, so the KL
+    # budget must reach its projections even though lm_head stays unquantized.
+    assert any(alpha == pytest.approx(0.1) for alpha in alphas), alphas
 
 
 def test_g2ptq_quantizes_the_output_head_with_the_kl_objective():
