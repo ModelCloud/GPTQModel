@@ -2690,6 +2690,10 @@ class G2PTQConfig:
             style). ``1`` keeps one Hessian per linear layer.
         kl_last_block: Use the KL objective on the final quantized block when
             logits are reachable; otherwise the final block also uses MSE.
+        seed: Seed for the block-refresh Fisher noise and KL label sampling.
+            The draws are derived from this seed and the layer index, so a
+            repeated run is reproducible without depending on the ambient
+            process RNG state.
 
     The paper autotunes the trust-region budget per block with a grid search
     (Appendix C.2). This port takes the budget from the run configuration
@@ -2702,6 +2706,7 @@ class G2PTQConfig:
     alpha_kl: float = field(default=0.05)
     num_groups: int = field(default=4)
     kl_last_block: bool = field(default=True)
+    seed: int = field(default=0)
 
     def __post_init__(self):
         self.alpha_mse = _validate_finite_float(
@@ -2716,6 +2721,10 @@ class G2PTQConfig:
             raise ValueError("G2PTQConfig: `num_groups` must be a positive integer.")
         if not isinstance(self.kl_last_block, bool):
             raise ValueError("G2PTQConfig: `kl_last_block` must be a boolean.")
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
+            raise ValueError("G2PTQConfig: `seed` must be a non-negative integer.")
+        if self.seed < 0:
+            raise ValueError("G2PTQConfig: `seed` must be a non-negative integer.")
 
 
 @dataclass
@@ -8236,6 +8245,7 @@ class GPTQConfig(PreProcessorConfig):
                 "alpha_kl": self.g2ptq.alpha_kl,
                 "num_groups": self.g2ptq.num_groups,
                 "kl_last_block": self.g2ptq.kl_last_block,
+                "seed": self.g2ptq.seed,
             }
 
         meta_payload["mse"] = self.mse.norm
