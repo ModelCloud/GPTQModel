@@ -106,6 +106,54 @@ def bench_exllamav2_handle(iters: int, repeat: int) -> float:
     return _bench(ensure, iters, repeat, sync=False)
 
 
+def bench_exllamav2_handle_module(iters: int, repeat: int) -> float:
+    """The same fast path on a real module, including buffer attribute access."""
+
+    import gptqmodel.nn_modules.qlinear.exllamav2 as exllamav2
+
+    layer = exllamav2.ExllamaV2Linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        register_buffers=True,
+    )
+    layer.qweight = torch.zeros((16, 128), dtype=torch.int32)
+    layer.qzeros = torch.zeros((1, 16), dtype=torch.int32)
+    layer.scales = torch.ones((1, 128), dtype=torch.float16)
+    layer.g_idx = torch.zeros(128, dtype=torch.int32)
+    layer.ext_make_q_matrix = lambda tensors, **kwargs: 1
+    ensure = lambda: exllamav2.ExllamaV2Linear._ensure_q_handle(layer)  # noqa: E731
+    ensure()
+    return _bench(ensure, iters, repeat, sync=False)
+
+
+def bench_exllamav2_handle_inference(iters: int, repeat: int) -> float:
+    """The fast path when the packed tensors are inference tensors."""
+
+    import gptqmodel.nn_modules.qlinear.exllamav2 as exllamav2
+
+    with torch.inference_mode():
+        layer = types.SimpleNamespace(
+            qweight=torch.zeros((2, 2), dtype=torch.int32),
+            qzeros=torch.zeros((1, 2), dtype=torch.int32),
+            scales=torch.ones((1, 2), dtype=torch.float16),
+            g_idx=torch.zeros(8, dtype=torch.int32),
+            q_handle=None,
+            q_tensors=None,
+            _q_handle_key=None,
+            _q_fast=None,
+        )
+    layer.ext_make_q_matrix = lambda tensors, **kwargs: 1
+    layer._release_q_handle = lambda: exllamav2.ExllamaV2Linear._release_q_handle(layer)
+    ensure = lambda: exllamav2.ExllamaV2Linear._ensure_q_handle(layer)  # noqa: E731
+    ensure()
+    return _bench(ensure, iters, repeat, sync=False)
+
+
 def bench_bitsandbytes(iters: int, repeat: int) -> tuple[float, float]:
     import sys
 
@@ -135,6 +183,39 @@ def bench_bitsandbytes(iters: int, repeat: int) -> tuple[float, float]:
         _bench(lambda: bnb.import_bitsandbytes(), iters, repeat, sync=False),
         _bench(refresh, iters, repeat, sync=False),
     )
+
+
+def bench_bitsandbytes_module(iters: int, repeat: int) -> float:
+    """The QuantState signature on a real module, including buffer access."""
+
+    import sys
+
+    import gptqmodel.nn_modules.qlinear.bitsandbytes as bnb
+
+    fake_bnb = types.SimpleNamespace(
+        __version__="0.49.0",
+        functional=types.SimpleNamespace(QuantState=types.SimpleNamespace(from_dict=lambda *a, **k: object())),
+    )
+    sys.modules["bitsandbytes"] = fake_bnb
+    bnb._clear_availability_state()
+
+    layer = bnb.BitsAndBytesLinear(
+        bits=4,
+        group_size=64,
+        sym=True,
+        desc_act=False,
+        in_features=64,
+        out_features=64,
+        register_buffers=False,
+    )
+    layer.register_buffer("weight", torch.zeros(16, 64, dtype=torch.uint8))
+    layer.register_buffer("weight_absmax", torch.zeros(1))
+    layer.register_buffer("weight_quant_map", torch.zeros(16))
+    layer.register_buffer("weight_quant_state", torch.zeros(3))
+    layer._quant_state_payload = lambda: {}
+    refresh = lambda: bnb.BitsAndBytesLinear._refresh_quant_state(layer)  # noqa: E731
+    refresh()
+    return _bench(refresh, iters, repeat, sync=False)
 
 
 def bench_bias_epilogue(iters: int, repeat: int, device: torch.device) -> dict[str, tuple[float, float]]:
@@ -215,9 +296,21 @@ def main() -> None:
         print(f"{name:22s} {value:8.3f} us")
 
     print(f"{'exllamav2 handle':22s} {bench_exllamav2_handle(args.iters, args.repeat):8.3f} us")
+    try:
+        print(f"{'exllamav2 handle module':22s} {bench_exllamav2_handle_module(args.iters, args.repeat):8.3f} us")
+    except Exception as exc:  # pragma: no cover - host dependent
+        print(f"skip exllamav2 handle module: {type(exc).__name__}: {exc}")
+    try:
+        print(f"{'exllamav2 handle inf':22s} {bench_exllamav2_handle_inference(args.iters, args.repeat):8.3f} us")
+    except Exception as exc:  # pragma: no cover - host dependent
+        print(f"skip exllamav2 handle inf: {type(exc).__name__}: {exc}")
     import_us, refresh_us = bench_bitsandbytes(args.iters, args.repeat)
     print(f"{'bnb version check':22s} {import_us:8.3f} us")
     print(f"{'bnb quant_state sig':22s} {refresh_us:8.3f} us")
+    try:
+        print(f"{'bnb quant_state sig module':22s} {bench_bitsandbytes_module(args.iters, args.repeat):8.3f} us")
+    except Exception as exc:  # pragma: no cover - host dependent
+        print(f"skip bnb quant_state sig module: {type(exc).__name__}: {exc}")
 
     for shape, (wide, single) in bench_bias_epilogue(args.iters, args.repeat, device).items():
         print(f"{'bias epilogue ' + shape:22s} wide={wide:7.3f} us  single={single:7.3f} us")
