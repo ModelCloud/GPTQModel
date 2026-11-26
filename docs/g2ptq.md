@@ -126,7 +126,9 @@ use the same draws without depending on the ambient process RNG state.
 
 - **No statistics.** A module the refresh never reached (for example a routed
   expert outside the captured subset) keeps GPTQ's captured Hessian and runs
-  plain `GPTQ.quantize`. This is per module, not per run.
+  plain `GPTQ.quantize`. This is per module, not per run. The first fallback
+  logs a warning naming the module, so a silent whole-model fallback (for
+  example a direct `hf_quantize` solve, which has no block refresh) is visible.
 - **Refresh failure.** The exception is logged once per block and that block's
   affected modules fall back to GPTQ. The usual GPTQ sample thresholds and
   smoothing also apply when a module has refreshed statistics.
