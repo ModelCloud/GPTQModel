@@ -45,19 +45,6 @@ log = setup_logger()
 _INTEGER_DTYPES = (torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8)
 
 
-def _router_key(name: str) -> str:
-    """Group one router's usage by its owning MoE block.
-
-    Router names are model-global paths.  Keying by the parent path keeps
-    models with several routers in one decoder layer independent, because
-    those routers may own different expert counts.  A model with one router
-    per layer still produces one balance term per layer.
-    """
-
-    parent = name.rsplit(".", 1)[0] if "." in name else ""
-    return parent or name
-
-
 def _router_top_k(router: nn.Module, indices: Optional[torch.Tensor]) -> int:
     for field_name in MOE_TOPK_FIELD_NAMES:
         value = getattr(router, field_name, None)
@@ -119,6 +106,9 @@ def _extract_router_indices(output: Any, router: nn.Module) -> torch.Tensor:
             logits = output
 
     if indices is None and logits is not None:
+        expert_count = _get_local_expert_count(router)
+        if logits.ndim == 0 or (expert_count is not None and logits.shape[-1] != expert_count):
+            raise ValueError(f"EBSS: expected logits with an expert axis of size {expert_count}, got {logits.shape}.")
         top_k = _router_top_k(router, None)
         indices = torch.topk(logits, min(top_k, int(logits.shape[-1])), dim=-1).indices
 
@@ -152,15 +142,25 @@ class _RoutingObserver:
         self._num_experts: Dict[str, int] = {}
 
     def __enter__(self) -> "_RoutingObserver":
-        routers = find_moe_routing_modules(self.model)
+        candidates = set(find_moe_routing_modules(self.model))
+        routers = {name: module for name, module in self.model.named_modules() if name and module in candidates}
+        # LM heads and MoE blocks can mirror their gates' top-k metadata.
+        # Their outputs are vocabulary logits or hidden states, not routes.
+        ancestors = set()
+        for name in routers:
+            parent = name.rpartition(".")[0]
+            while parent and parent not in ancestors:
+                ancestors.add(parent)
+                parent = parent.rpartition(".")[0]
         if not routers:
             raise ValueError(
                 "EBSS requires a MoE model with discoverable routing modules; "
                 "none were found."
             )
         try:
-            for router in routers:
-                name = self._module_name(router)
+            for name, router in routers.items():
+                if name in ancestors:
+                    continue
                 self._handles.append(router.register_forward_hook(self._make_hook(name, router)))
         except BaseException:
             for handle in self._handles:
@@ -176,15 +176,7 @@ class _RoutingObserver:
         self._current.clear()
         return False
 
-    def _module_name(self, target: nn.Module) -> str:
-        for name, module in self.model.named_modules():
-            if module is target:
-                return name
-        return type(target).__name__
-
-    def _make_hook(self, name: str, router: nn.Module):
-        key = _router_key(name)
-
+    def _make_hook(self, key: str, router: nn.Module):
         def hook(_module, _inputs, output):
             indices = _extract_router_indices(output, router)
             num_experts = _router_num_experts(router, indices)
@@ -210,6 +202,8 @@ class _RoutingObserver:
         self._current = {}
 
     def end_forward(self) -> Dict[str, torch.Tensor]:
+        if not self._current:
+            raise ValueError("EBSS: model forward produced no routing assignments.")
         result = {key: value.clone() for key, value in self._current.items()}
         self._current = {}
         return result
@@ -301,7 +295,7 @@ def generate_ebss_calibration(
 
     ``progress`` is an optional callable invoked as ``progress(sentence_index,
     total)`` after each sentence.  The model is temporarily switched to eval
-    mode; its training flag and every routing hook are restored in ``finally``.
+    mode; each module's training mode and every routing hook are restored in ``finally``.
     """
 
     if not isinstance(config, EBSSConfig):
@@ -321,14 +315,14 @@ def generate_ebss_calibration(
 
     device = _input_device(model)
     vocab_size = _vocab_size(model)
-    was_training = bool(getattr(model, "training", False))
+    training_modes = [(module, module.training) for module in model.modules()]
     generator = torch.Generator(device="cpu")
     generator.manual_seed(int(config.seed))
     sentences: List[List[int]] = []
 
     observer = _RoutingObserver(model)
-    model.eval()
     try:
+        model.eval()
         with observer:
             with torch.inference_mode():
                 for sentence_index in range(config.num_sentences):
@@ -419,7 +413,9 @@ def generate_ebss_calibration(
                     if progress is not None:
                         progress(sentence_index + 1, int(config.num_sentences))
     finally:
-        model.train(was_training)
+        for module, was_training in training_modes:
+            if module.training != was_training:
+                module.train(was_training)
 
     log.info(
         "MoEQuant EBSS: generated %d sentences of %d tokens (width=%d, temperature=%.3f, seed=%d).",

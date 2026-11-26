@@ -76,7 +76,10 @@ sigma_l = sqrt(sum_e (usage_e - 1 / E)^2 / (E - 1))
 
 The beam keeps the lowest costs and returns the completed sentence with the
 lowest cost, following the joint minimization in Eqs. 9–10. The balance term
-uses the sample standard deviation in Eq. 4.
+uses the sample standard deviation in Eq. 4. Each router has its own usage
+histogram. When a model or enclosing MoE block also exposes the gate's top-k
+settings, EBSS observes the nested router. A forward that never calls a
+discovered router raises before its output can enter the beam.
 
 The defaults are the paper's ablation values: `width=4`, `temperature=1.2`.
 `num_sentences` and `seq_len` default to 128 and 512 and remain configurable.

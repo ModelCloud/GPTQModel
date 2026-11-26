@@ -18,8 +18,8 @@ from gptqmodel.quantization.config import EBSSConfig
 from gptqmodel.utils.ebss import (
     _expert_balance,
     _extract_router_indices,
-    _router_key,
     _router_num_experts,
+    _RoutingObserver,
     generate_ebss_calibration,
 )
 
@@ -64,12 +64,6 @@ def test_extract_router_indices_derives_topk_from_logits():
     logits = torch.tensor([[0.0, 3.0, 1.0, 2.0]])
     found = _extract_router_indices(logits, _Router())
     assert found.tolist() == [[1, 3]]
-
-
-def test_router_key_keeps_multiple_routers_per_layer_independent():
-    assert _router_key("model.layers.0.mlp.gate") == "model.layers.0.mlp"
-    assert _router_key("model.layers.0.mlp2.gate") == "model.layers.0.mlp2"
-    assert _router_key("router") == "router"
 
 
 def test_router_num_experts_handles_v_experts_module_list():
@@ -183,3 +177,66 @@ def test_ebss_minimizes_likelihood_and_balance_cost(width, seq_len, temperature,
     config = EBSSConfig(num_sentences=1, seq_len=seq_len, width=width, temperature=temperature)
     [sentence] = generate_ebss_calibration(model, config)
     assert sentence[1:] == expected_tail
+
+
+@pytest.mark.parametrize("token_ids", [[3], [1, 3]])
+def test_observer_counts_only_dispatched_qwen_experts(token_ids):
+    model = _tiny_model()
+    tokens = torch.tensor([token_ids])
+    with torch.inference_mode(), _RoutingObserver(model) as observer:
+        output = model(input_ids=tokens, output_router_logits=True)
+        indices = torch.softmax(output.router_logits[0], -1).topk(2, dim=-1).indices
+        expected = torch.bincount(indices.flatten(), minlength=4)
+        usage = observer.end_forward()
+    assert len(usage) == 1
+    torch.testing.assert_close(next(iter(usage.values())), expected)
+
+
+def test_sibling_routers_have_independent_balance_terms():
+    block = torch.nn.ModuleDict({"first": _FixedRouter(), "second": _FixedRouter()})
+    model = torch.nn.ModuleDict({"block": block})
+    with _RoutingObserver(model) as observer:
+        block.first(torch.tensor([[0]]))
+        block.second(torch.tensor([[1]]))
+        usage = observer.end_forward()
+        assert _expert_balance(usage, observer.num_experts) == pytest.approx(stdev([0.0, 1.0]))
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_ebss_restores_mixed_training_modes(interrupt):
+    model = _FixedLogitMoE().train()
+    model.router.eval()
+    original = [module.training for module in model.modules()]
+    config = EBSSConfig(num_sentences=1, seq_len=2, width=1)
+
+    def stop(*_):
+        raise RuntimeError("stop sampling")
+
+    if interrupt:
+        with pytest.raises(RuntimeError, match="stop sampling"):
+            generate_ebss_calibration(model, config, progress=stop)
+    else:
+        generate_ebss_calibration(model, config)
+    assert [module.training for module in model.modules()] == original
+
+
+def test_ebss_rejects_logits_without_an_expert_axis():
+    class FeatureProjection(torch.nn.Module):
+        num_experts = 2
+        top_k = 1
+
+        def forward(self, inputs):
+            return torch.ones(inputs.numel(), 8)
+
+    model = _FixedLogitMoE()
+    model.router = FeatureProjection()
+    with pytest.raises(ValueError, match="expert axis"):
+        generate_ebss_calibration(model, EBSSConfig(num_sentences=1, seq_len=2))
+
+
+def test_ebss_requires_routes_during_sampling():
+    model = _FixedLogitMoE()
+    model.unused_router = model.router
+    model.router = torch.nn.Identity()
+    with pytest.raises(ValueError, match="no routing assignments"):
+        generate_ebss_calibration(model, EBSSConfig(num_sentences=1, seq_len=2))
