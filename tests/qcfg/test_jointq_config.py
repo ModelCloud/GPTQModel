@@ -9,11 +9,13 @@ combination the refinement cannot honor.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from gptqmodel.quantization.config import (
+    ADMMQConfig,
     FOEMConfig,
     GPTAQConfig,
     GPTQConfig,
@@ -185,8 +187,8 @@ def test_jointq_dynamic_override_is_normalized_by_the_processor():
     assert clone.jointq.dtype == "float32"
 
 
-@pytest.mark.parametrize("value", [True, False])
-def test_jointq_dynamic_override_accepts_booleans(value):
+@pytest.mark.parametrize("value", [True, False, None])
+def test_jointq_dynamic_override_accepts_switches(value):
     from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
 
     config = GPTQConfig(
@@ -244,3 +246,25 @@ def test_jointq_dynamic_override_serializes():
 
     assert payload["dynamic"] == {LAYER: {"jointq": {"regularization": 0.15}}}
     assert _json_round_trip(config).dynamic == payload["dynamic"]
+
+
+@pytest.mark.parametrize("value", [True, {}, False, None])
+def test_sequential_checkpoint_rejects_dynamic_jointq(value):
+    from gptqmodel.looper.gptq_checkpoint import validate_checkpoint_support
+
+    config = GPTQConfig(dynamic={LAYER: {"jointq": value}})
+    model = SimpleNamespace(
+        quantize_config=config,
+        model=SimpleNamespace(config=SimpleNamespace(model_type="llama")),
+    )
+
+    if value is False or value is None:
+        validate_checkpoint_support(model)
+    else:
+        with pytest.raises(NotImplementedError, match="without GPTAQ/FOEM/JointQ"):
+            validate_checkpoint_support(model)
+
+
+def test_admmq_rejects_enabled_jointq_in_a_dynamic_rule():
+    with pytest.raises(ValueError, match=r"dynamic.*jointq.*requires method"):
+        ADMMQConfig(dynamic={LAYER: {"jointq": True}})

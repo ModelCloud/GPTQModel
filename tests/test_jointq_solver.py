@@ -12,10 +12,12 @@ import copy
 
 import pytest
 import torch
+from transformers.pytorch_utils import Conv1D
 
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.qlinear import _scales_for_storage
-from gptqmodel.quantization.config import GPTQConfig, JointQConfig
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.quantization.config import FORMAT, GPTQConfig, JointQConfig
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.quantization.jointq import (
     JointQ,
@@ -261,7 +263,7 @@ def test_finalize_storage_pins_zero_scale_groups_and_keeps_fp16_representable():
     fallback_scales = torch.tensor([[0.5, 0.25]], dtype=torch.float32)
 
     out_codes, out_scales = JointQ._finalize_storage(
-        codes, scales, fallback_codes, fallback_scales, plan, 8.0, 15
+        codes, scales, fallback_codes, fallback_scales, plan, 8.0
     )
 
     assert out_scales[0, 0].item() == SCALE_STORAGE_FLOOR
@@ -329,3 +331,215 @@ def test_jointq_beats_gptq_on_the_calibration_objective_and_packs_consistently()
     scale_cols = plan.expand(scales.float())
     packer = torch.round((jointq_result[0].float() + 8.0 * scale_cols) / scale_cols).clamp_(0, 15)
     assert torch.equal(packer.to(torch.int64), codes)
+
+
+def test_jointq_regularization_uses_normalized_hessian_units():
+    samples = torch.tensor([[1.0, 0.0], [2.0, 2.0], [-1.0, 2.0], [0.0, 3.0]])
+    linear = torch.nn.Linear(2, 2, bias=False)
+    regularization = 0.125
+    config = GPTQConfig(jointq=JointQConfig(regularization=regularization, eta=0.5))
+    task = JointQ(NamedModule(linear, "proj", "proj", 0), config)
+    task.add_batch(samples, None)
+    hessian = task.finalize_hessian()
+    xtx = samples.double().T @ samples.double()
+    energy = xtx.diagonal()
+    expected = 2.0 * xtx / len(samples) + torch.diag(
+        2.0 * regularization * (energy / energy.mean()).sqrt()
+    )
+
+    actual = task._regularized_hessian(hessian, regularization, torch.float64)
+
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(hessian.double(), 2.0 * xtx / len(samples))
+
+
+def test_jointq_rectangular_conv1d_matches_linear_with_retry():
+    rng = torch.Generator().manual_seed(23)
+    linear = torch.nn.Linear(16, 8, bias=False)
+    conv = Conv1D(8, 16)
+    with torch.no_grad():
+        linear.weight.copy_(torch.randn((8, 16), generator=rng))
+        conv.weight.copy_(linear.weight.T)
+    samples = torch.randn((32, 16), generator=rng)
+    samples[:, 3] = 0.0
+    config = GPTQConfig(
+        bits=4,
+        group_size=8,
+        desc_act=True,
+        jointq=JointQConfig(regularization=0.0, retry_ratio=0.0),
+    )
+
+    _, linear_result = _run_quantizer(JointQ, linear, copy.deepcopy(config), [samples])
+    task, conv_result = _run_quantizer(JointQ, conv, copy.deepcopy(config), [samples])
+
+    assert task.jointq_diagnostics["retried"]
+    assert task.jointq_diagnostics["dead_columns"] == 1
+    assert conv_result[0].shape == conv.weight.shape
+    torch.testing.assert_close(conv_result[0].T, linear_result[0], atol=1e-6, rtol=1e-6)
+    for actual, expected in zip(conv_result[1:4], linear_result[1:4]):
+        torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+    residual = samples.double() @ (conv.weight.detach() - conv_result[0]).double()
+    assert conv_result[5] == pytest.approx(residual.square().sum().item() / len(samples), rel=1e-6)
+
+
+@pytest.mark.gpu
+def test_jointq_cpu_solver_retries_with_accelerator_hessian():
+    if not torch.cuda.is_available():
+        pytest.skip("requires an accelerator for the Hessian")
+    rng = torch.Generator().manual_seed(23)
+    device = torch.device("cuda", torch.cuda.current_device())
+    linear = torch.nn.Linear(16, 8, bias=False, device=device)
+    with torch.no_grad():
+        linear.weight.copy_(torch.randn((8, 16), generator=rng))
+    samples = torch.randn((32, 16), generator=rng).to(device)
+    config = GPTQConfig(
+        bits=4,
+        group_size=8,
+        desc_act=False,
+        jointq=JointQConfig(device="cpu", regularization=0.0, retry_ratio=0.0),
+    )
+
+    task, result = _run_quantizer(JointQ, linear, config, [samples])
+
+    assert task.jointq_diagnostics["retried"]
+    assert all(tensor.device == device for tensor in result[:4])
+    residual = samples.cpu().double() @ (linear.weight.detach() - result[0]).cpu().double().T
+    assert result[5] == pytest.approx(residual.square().sum().item() / len(samples), rel=1e-6)
+
+
+def test_jointq_falls_back_when_all_calibration_columns_are_dead():
+    linear = torch.nn.Linear(16, 8, bias=False)
+    with torch.no_grad():
+        linear.weight.copy_(torch.linspace(-1.0, 1.0, 128).reshape(8, 16))
+    config = GPTQConfig(bits=4, group_size=8, jointq=True)
+    samples = torch.zeros(8, 16)
+    _, expected = _run_quantizer(GPTQ, linear, copy.deepcopy(config), [])
+
+    _, result = _run_quantizer(JointQ, linear, config, [samples])
+
+    assert result[-1] == len(samples)
+    assert isinstance(result[5], str) and result[5].startswith("fallback(rtn)")
+    for actual, reference in zip(result[:4], expected[:4]):
+        torch.testing.assert_close(actual, reference, atol=0.0, rtol=0.0)
+
+
+def test_local_search_keeps_a_good_grid_when_curvature_is_below_tolerance():
+    hessian = torch.tensor([[2.0, 0.5], [0.5, 1.5]], dtype=torch.float64) * 1e-15
+    plan = _build_group_plan(torch.tensor([0, 0]), 1)
+    codes = torch.tensor([[15, 14]])
+    scales = torch.tensor([[2.0]], dtype=torch.float64)
+    weight = torch.tensor([[14.0, 12.0]], dtype=torch.float64)
+
+    new_codes, new_scales, phi, _ = _local_search(
+        weight,
+        hessian,
+        codes.clone(),
+        scales.clone(),
+        plan,
+        8.0,
+        15,
+        tolerance=1e-12,
+        stall_fraction=0.1,
+        active_fraction=0.1,
+        re_solve_low=0.2,
+        re_solve_high=0.6,
+        iteration_cap=20,
+        max_passes=2,
+        nsamples=16,
+        scale_bound=8190.0,
+    )
+
+    torch.testing.assert_close(new_codes, codes)
+    torch.testing.assert_close(new_scales, scales)
+    assert phi.item() == 0.0
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_jointq_replay_matches_decoded_packed_grid(dtype):
+    rng = torch.Generator().manual_seed(49)
+    linear = torch.nn.Linear(32, 8, bias=False, dtype=dtype)
+    with torch.no_grad():
+        weights = torch.randn((8, 32), generator=rng)
+        weights[0] *= 2**-22
+        linear.weight.copy_(weights)
+    samples = torch.randn((48, 32), generator=rng)
+    config = GPTQConfig(
+        bits=4,
+        group_size=16,
+        desc_act=False,
+        jointq=JointQConfig(regularization=0.0, adaptive_retry=False),
+    )
+
+    _, (replay, scales, zeros, g_idx, *_) = _run_quantizer(JointQ, linear, config, [samples])
+
+    with torch.no_grad():
+        linear.weight.copy_(replay)
+    packed = TorchLinear(
+        bits=4,
+        group_size=16,
+        sym=True,
+        desc_act=False,
+        in_features=32,
+        out_features=8,
+        bias=False,
+        format=FORMAT.GPTQ_V2,
+    )
+    packed.pack_original(linear, scales, zeros, g_idx)
+
+    shifts = 4 * torch.arange(8)
+    words = packed.qweight.to(torch.int64)
+    codes = ((words.unsqueeze(1) >> shifts.view(1, -1, 1)) & 15).reshape(32, 8).T
+    zero = (packed.qzeros.to(torch.int64) >> shifts) & 15
+    assert torch.equal(zero, torch.full_like(zero, 8))
+    assert codes[0].ne(8).any()
+    reconstructed = (codes - 8) * packed.scales.float().index_select(0, g_idx.long()).T
+    torch.testing.assert_close(replay, reconstructed.to(dtype), atol=0.0, rtol=0.0)
+
+
+def test_jointq_fp16_scale_rounding_keeps_the_largest_weight_finite():
+    linear = torch.nn.Linear(8, 1, bias=False, dtype=torch.float16)
+    with torch.no_grad():
+        linear.weight.zero_()
+        linear.weight[0, 0] = 65504.0
+    config = GPTQConfig(
+        bits=4,
+        group_size=-1,
+        jointq=JointQConfig(regularization=0.0, adaptive_retry=False),
+    )
+    # The clipping candidate uses code +7 and scale 65504 / 7. Rounding the
+    # scale to the nearest FP16 value (9360) reconstructs 65520, which overflows.
+    _, (replay, scales, _, _, *_) = _run_quantizer(JointQ, linear, config, [torch.eye(8)])
+
+    assert scales.item() == 9352.0
+    expected = torch.tensor([[7 * 9352.0] + [0.0] * 7], dtype=torch.float16)
+    torch.testing.assert_close(replay, expected, atol=0.0, rtol=0.0)
+
+
+def test_jointq_code_recovery_uses_fp32_at_the_packer_tie():
+    plan = _build_group_plan(torch.tensor([0, 0, 0]), 1)
+    scales = torch.tensor([[0.125 - 2**-29]], dtype=torch.float64)
+    reconstruction = torch.tensor([[0.3125 - 2**-23, 0.3125, 0.3125 + 2**-23]])
+
+    codes = _codes_from_reconstruction(reconstruction, scales, 8.0, plan, 15)
+
+    # The packer rounds the scale to 0.125 first, so the middle lane is
+    # exactly 10.5 in its operand domain and rounds to the even code.
+    assert codes.tolist() == [[10, 10, 11]]
+
+
+def test_solve_scales_propagates_operator_failure(monkeypatch):
+    def fail_solve(*args, **kwargs):
+        raise torch.OutOfMemoryError("solver workspace allocation failed")
+
+    monkeypatch.setattr(torch.linalg, "solve_ex", fail_solve)
+    with pytest.raises(torch.OutOfMemoryError, match="solver workspace"):
+        _solve_scales(torch.eye(2).unsqueeze(0), torch.ones((1, 2)), scale_bound=1.0)
+
+
+def test_jointq_fp64_probe_handles_unsupported_tensor_allocation(monkeypatch):
+    def reject_fp64(*args, **kwargs):
+        raise TypeError("float64 tensors are not supported")
+
+    monkeypatch.setattr(torch, "eye", reject_fp64)
+
+    assert JointQ._work_dtype(JointQConfig(), torch.device("cpu")) == torch.float32

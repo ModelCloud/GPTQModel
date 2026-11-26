@@ -7,7 +7,8 @@ Quantize a tiny Llama with ``jointq=JointQConfig()``, save it, and reload it
 from disk. The checkpoint must keep the GPTQ layout and ``meta.jointq``, the
 reloaded model must reproduce the in-memory quantized logits and greedy
 generation, and the refinement must change at least one packed tensor relative
-to a plain GPTQ run on the same fixture.
+to a plain GPTQ run on the same fixture. A dynamic rule opts one projection
+out of JointQ and preserves its plain GPTQ payload.
 """
 
 import json
@@ -72,7 +73,7 @@ def _calibration(tokenizer):
     return calibration
 
 
-def _quantize(model_dir: Path, output_dir: Path, jointq, calibration):
+def _quantize(model_dir: Path, output_dir: Path, jointq, calibration, *, dynamic=None):
     from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
     from gptqmodel.quantization.config import QuantizeConfig
 
@@ -81,9 +82,15 @@ def _quantize(model_dir: Path, output_dir: Path, jointq, calibration):
         group_size=32,
         desc_act=False,
         jointq=jointq,
+        dynamic=dynamic,
         device="cpu",
     )
-    model = GPTQModel.load(str(model_dir), quantize_config=quantize_config, backend=BACKEND.TORCH)
+    model = GPTQModel.load(
+        str(model_dir),
+        quantize_config=quantize_config,
+        backend=BACKEND.TORCH,
+        dtype=torch.bfloat16,
+    )
     model.quantize(
         CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
         backend=BACKEND.TORCH,
@@ -115,7 +122,9 @@ def test_jointq_model_quantize_save_reload_inference(tmp_path: Path):
     _quantize(model_dir, gptq_dir, None, calibration)
 
     jointq_config = JointQConfig()
-    model = _quantize(model_dir, jointq_dir, jointq_config, calibration)
+    gptq_projection = "model.layers.0.self_attn.q_proj"
+    dynamic = {gptq_projection: {"jointq": None}}
+    model = _quantize(model_dir, jointq_dir, jointq_config, calibration, dynamic=dynamic)
 
     encoded = tokenizer("tiny jointq calibration sample", return_tensors="pt")
     input_ids = encoded["input_ids"]
@@ -137,24 +146,29 @@ def test_jointq_model_quantize_save_reload_inference(tmp_path: Path):
     quantization_config = saved["quantization_config"]
     assert quantization_config["quant_method"] == "gptq"
     assert quantization_config["meta"]["jointq"] == jointq_config.meta_payload()
+    assert quantization_config["dynamic"] == dynamic
 
     gptq_tensors = _packed_tensors(gptq_dir)
     jointq_tensors = _packed_tensors(jointq_dir)
     assert set(gptq_tensors) == set(jointq_tensors)
+    for field in ("qweight", "qzeros", "scales", "g_idx"):
+        name = f"{gptq_projection}.{field}"
+        assert torch.equal(jointq_tensors[name], gptq_tensors[name])
     assert any(
         not torch.equal(gptq_tensors[key], jointq_tensors[key])
         for key in gptq_tensors
         if gptq_tensors[key].shape == jointq_tensors[key].shape
     ), "JointQ produced the same packed weights as plain GPTQ on the same fixture"
 
-    reloaded = GPTQModel.load(str(jointq_dir), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
+    reloaded = GPTQModel.load(str(jointq_dir), backend=BACKEND.TORCH, device="cpu", dtype=torch.bfloat16)
     assert isinstance(reloaded.quantize_config.jointq, JointQConfig)
     assert reloaded.quantize_config.jointq == jointq_config
+    assert reloaded.quantize_config.dynamic == dynamic
 
     reloaded.model.eval()
     with torch.inference_mode():
         reload_logits = reloaded.model(input_ids=input_ids, attention_mask=attention_mask).logits.float()
-    assert torch.allclose(reload_logits, ref_logits, atol=1e-2, rtol=0), (
+    assert torch.allclose(reload_logits, ref_logits, atol=2e-3, rtol=0), (
         "reloaded JointQ logits diverge from the in-memory quantized model "
         f"(max diff {(reload_logits - ref_logits).abs().max().item():.3e})"
     )

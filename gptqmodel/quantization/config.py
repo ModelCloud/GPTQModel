@@ -4884,10 +4884,10 @@ def apply_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: ResolvedM
             # the same way the numeric validators already read it. Applying it
             # overwrote the clone with `None` and the next `__post_init__` died
             # with a bare TypeError (#5659).
-            if canonical == "gsq":
-                # The one real `None` value: it disables GSQ for this module.
-                # An absent key is what inherits the run-level GSQ (#5689).
-                config.gsq = None
+            if canonical in ("gsq", "jointq"):
+                # These refinements use an explicit None to disable the
+                # run-level setting for the matched module.
+                setattr(config, canonical, None)
             continue
         if canonical in ("smoother", "smooth"):
             config.smoother = _normalize_smoother_config(value)
@@ -6609,6 +6609,9 @@ def _validate_dynamic_applied_options(owner, layer_name: str, layer_dict: Mappin
     owner_name = owner.__class__.__name__
     label = f"dynamic['{layer_name}']"
 
+    if method is not METHOD.GPTQ and layer_dict.get("jointq") not in (None, False):
+        raise ValueError(f"{owner_name}: `{label}.jointq` requires method `gptq`.")
+
     if method is METHOD.AWQ and layer_dict.get("desc_act") is True:
         raise _unapplied_option_error(
             owner_name,
@@ -7418,9 +7421,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         #
         # Validate the key names first: dropping the value must not hide a
         # typo, so `{"not_a_real_option": None}` still fails (#5689).
-        # `gsq` is the exception -- its `None` is the per-module disable that
-        # every method documented, so it survives and `apply_module_overrides`
-        # applies it (#5689).
+        # An explicit `None` disables GSQ or JointQ for the matched module.
         if self.dynamic is not None:
             for layer, layer_dict in self.dynamic.items():
                 if isinstance(layer_dict, Mapping):
@@ -7430,7 +7431,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                     {
                         key: value
                         for key, value in layer_dict.items()
-                        if value is not None or QUANT_CONFIG_ARG_SYNONYMS.get(key, key) == "gsq"
+                        if value is not None or QUANT_CONFIG_ARG_SYNONYMS.get(key, key) in ("gsq", "jointq")
                     }
                     if isinstance(layer_dict, dict)
                     else layer_dict

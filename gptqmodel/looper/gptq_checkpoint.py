@@ -310,6 +310,11 @@ def validate_checkpoint_support(model, *, embed_quant_config=None, adapter=None)
         or getattr(config, "gptaq", None) is not None
         or getattr(config, "foem", None) is not None
         or getattr(config, "jointq", None) is not None
+        or any(
+            isinstance(rule, Mapping) and rule.get("jointq") not in (None, False)
+            for pattern, rule in (config.dynamic or {}).items()
+            if not pattern.startswith("-")
+        )
         or (adapter is not None and type(adapter) is not Lora)
         or config.lm_head
         or embed_quant_config is not None

@@ -174,7 +174,6 @@ def clone_gptq_config_for_module(
         gptaq_override = resolved_cfg.get("gptaq", None)
         foem_override = resolved_cfg.get("foem", None)
         g2ptq_override = resolved_cfg.get("g2ptq", None)
-        jointq_override = resolved_cfg.get("jointq", None)
         qcfg_clone.gsq = normalize_gsq_config(resolved_cfg.get("gsq", qcfg_clone.gsq))
         if gptaq_override is not None:
             if isinstance(gptaq_override, dict):
@@ -194,8 +193,7 @@ def clone_gptq_config_for_module(
             qcfg_clone.g2ptq = _normalize_g2ptq(g2ptq_override)
             if qcfg_clone.g2ptq is not None and qcfg.g2ptq is None:
                 raise ValueError("QuantizeConfig: dynamic `g2ptq` requires run-level `g2ptq`.")
-        if jointq_override is not None:
-            qcfg_clone.jointq = _normalize_jointq(jointq_override)
+        qcfg_clone.jointq = _normalize_jointq(resolved_cfg.get("jointq", qcfg_clone.jointq))
 
         qcfg_clone.validate_g2ptq()
         qcfg_clone.validate_gsq()

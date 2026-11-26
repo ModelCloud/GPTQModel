@@ -35,8 +35,8 @@ from ..utils.fallback import resolve_fallback_strategy, should_use_fallback
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
 from .config import QuantizeConfig
-from .gptq import GPTQ
-from .quantizer import SCALE_STORAGE_FLOOR, _neutralize_dead_columns
+from .gptq import GPTQ, _is_memory_allocation_failure
+from .quantizer import SCALE_STORAGE_FLOOR
 
 
 log = setup_logger()
@@ -182,13 +182,11 @@ def _codes_from_reconstruction(
 ) -> torch.Tensor:
     """Recover the integer codes the packer will store.
 
-    The packer never sees the quantizer's integers: it rebuilds them from the
-    narrowed reconstruction with ``round(W / scale + zero)``. Recovering them
-    the same way, from the same stored scales, keeps the JointQ result and the
-    packed checkpoint consistent.
+    The packer recovers integers from the reconstruction with the affine
+    scale table in FP32. Use the same arithmetic to read the GPTQ warm start.
     """
 
-    scale_cols = plan.expand(scales)
+    scale_cols = plan.expand(scales.float())
     # A zero scale carries no information; pin its lane to the fixed zero
     # point so the reconstruction stays exactly zero.
     zero_scale = scale_cols == 0
@@ -345,37 +343,25 @@ def _solve_scales(
     """
 
     size = gram.shape[-1]
-    rows = gram.shape[0]
-    eye = torch.eye(size, dtype=gram.dtype, device=gram.device).unsqueeze(0)
-    failed_all = torch.zeros(rows, dtype=torch.bool, device=gram.device)
 
     def solve(matrix: torch.Tensor):
-        try:
-            solution, info = torch.linalg.solve_ex(matrix, rhs.unsqueeze(-1))
-            solution = solution.squeeze(-1)
-            ok = info == 0
-        except AttributeError:  # older torch without solve_ex
-            solution = torch.linalg.solve(matrix, rhs.unsqueeze(-1)).squeeze(-1)
-            ok = torch.ones(rows, dtype=torch.bool, device=gram.device)
-        except RuntimeError:
-            return None, failed_all
+        solution, info = torch.linalg.solve_ex(matrix, rhs.unsqueeze(-1))
+        solution = solution.squeeze(-1)
         ok = (
-            ok
+            (info == 0)
             & torch.isfinite(solution).all(dim=1)
             & (solution.abs() <= scale_bound).all(dim=1)
         )
         return solution, ok
 
     solution, solved = solve(gram)
-    if solution is None:
-        solution = torch.zeros_like(rhs)
     if not bool(solved.all()):
+        eye = torch.eye(size, dtype=gram.dtype, device=gram.device).unsqueeze(0)
         damping = (0.01 * gram.diagonal(dim1=1, dim2=2).amax(dim=1)).clamp_min(1e-6)
         damped = gram + damping.unsqueeze(1).unsqueeze(2) * eye
         damped_solution, damped_solved = solve(damped)
-        if damped_solution is not None:
-            solution = torch.where(solved.unsqueeze(1), solution, damped_solution)
-            solved = solved | damped_solved
+        solution = torch.where(solved.unsqueeze(1), solution, damped_solution)
+        solved = solved | damped_solved
     return solution, solved
 
 
@@ -533,28 +519,29 @@ def _local_search(
                 iteration_cap=iteration_cap,
             )
             current = codes.index_select(1, group_columns)
-            # Algorithm 1 installs the returned pair and counts the row when
-            # either member changes, so a scale-only update still contributes
-            # to the joint re-solve selection.
             changed = (group_codes != current).any(dim=1) | (
                 group_scale != scales[:, group_index]
             )
             if bool(changed.any()):
                 changed_rows = changed.nonzero(as_tuple=False).squeeze(1)
-                codes[changed_rows.unsqueeze(1), group_columns.unsqueeze(0)] = (
-                    group_codes.index_select(0, changed_rows)
+                updated = reconstruction.index_select(0, changed_rows)
+                updated[:, group_columns] = (
+                    (group_codes.index_select(0, changed_rows).to(weight.dtype) - zero)
+                    * group_scale.index_select(0, changed_rows).unsqueeze(1)
                 )
-                scales[changed_rows, group_index] = group_scale.index_select(0, changed_rows)
-                mu[changed_rows] += 1
-                updated = _dequantize(
-                    codes.index_select(0, changed_rows),
-                    scales.index_select(0, changed_rows),
-                    zero,
-                    plan,
-                )
-                phi[changed_rows] = _row_objectives(
+                updated_phi = _row_objectives(
                     weight.index_select(0, changed_rows), updated, hessian
                 )
+                # The curvature guard can return a zero scale for a
+                # nonzero group. Check the true objective before committing.
+                accept = updated_phi <= phi.index_select(0, changed_rows)
+                accepted_rows = changed_rows[accept]
+                codes[accepted_rows.unsqueeze(1), group_columns.unsqueeze(0)] = (
+                    group_codes.index_select(0, accepted_rows)
+                )
+                scales[accepted_rows, group_index] = group_scale.index_select(0, accepted_rows)
+                mu[accepted_rows] += 1
+                phi[accepted_rows] = updated_phi[accept]
         selected = active & (
             (mu > re_solve_high * num_groups) | (mu < re_solve_low * num_groups)
         )
@@ -639,10 +626,12 @@ class JointQ(GPTQ):
             return torch.float32
         # Allocation alone does not prove that the device implements FP64
         # linear algebra, so probe the operation the solver actually calls.
-        probe = torch.eye(2, dtype=torch.float64, device=device)
         try:
-            torch.linalg.solve(probe, probe)
-        except (RuntimeError, TypeError, NotImplementedError):
+            probe = torch.eye(2, dtype=torch.float64, device=device)
+            torch.linalg.solve_ex(probe, probe, check_errors=True)
+        except (RuntimeError, TypeError) as exc:
+            if _is_memory_allocation_failure(exc):
+                raise
             log.warn(
                 "Quantization: JointQ -> float64 linear algebra is unavailable on `%s`; using float32.",
                 device,
@@ -657,14 +646,16 @@ class JointQ(GPTQ):
     def quantize(self, blocksize: int = 128):
         config = self.qcfg.jointq
         start = time.time()
-        module_device = getattr(self.module, "target_device", None)
-        hessian = self.finalize_hessian(target_device=module_device)
-        below_threshold = should_use_fallback(
-            self.fallback,
-            float(self.nsamples),
-            self.expected_nsamples,
-        )
-        if self.nsamples == 0 or hessian is None or below_threshold:
+        self.jointq_diagnostics.clear()
+        if self.nsamples == 0 or should_use_fallback(
+            self.fallback, float(self.nsamples), self.expected_nsamples
+        ):
+            return super().quantize(blocksize=blocksize)
+
+        target_device = getattr(self.module, "target_device", None)
+        hessian = self.finalize_hessian(target_device=target_device)
+        dead_columns = hessian.diagonal() == 0 if hessian is not None else None
+        if dead_columns is None or bool(dead_columns.all()):
             strategy = resolve_fallback_strategy(self.fallback)
             log.warn(
                 "Quantization: Module `%s` -> JointQ has no usable Hessian; "
@@ -675,16 +666,9 @@ class JointQ(GPTQ):
             return self._fallback_quantize(strategy, blocksize)
 
         weight = self.clone_module(device=hessian.device)
-        dead_columns = _neutralize_dead_columns(hessian, weight)
+        weight.masked_fill_(dead_columns.unsqueeze(0), 0.0)
         regularization = self._resolve_regularization()
-        result = self._run(
-            weight,
-            hessian,
-            regularization,
-            blocksize,
-            start,
-            config,
-        )
+        result = self._run(weight, hessian, regularization, blocksize)
         if self._retry_enabled(regularization):
             relative_error = self._relative_weight_error(result[0], weight)
             self.jointq_diagnostics["relative_error"] = relative_error
@@ -696,26 +680,24 @@ class JointQ(GPTQ):
                     config.retry_regularization,
                     relative_error,
                 )
-                result = self._run(
-                    weight,
-                    hessian,
-                    float(config.retry_regularization),
-                    blocksize,
-                    start,
-                    config,
-                )
+                result = self._run(weight, hessian, config.retry_regularization, blocksize)
                 self.jointq_diagnostics["retried"] = True
-        self.jointq_diagnostics["dead_columns"] = int(dead_columns.sum())
 
-        quantized, scales, zeros, g_idx, duration, avg_loss, damp, nsamples = result
-        quantized = safe_move_to(quantized, torch.device(self.module.weight.data.device))
-        # Match GPTQ's return contract: the grid tensors live on the compute
-        # device, while the replay weight lives on the module device.
-        grid_device = hessian.device
-        scales = safe_move_to(scales, grid_device)
-        zeros = safe_move_to(zeros, grid_device)
-        g_idx = safe_move_to(g_idx, grid_device)
-        return quantized, scales, zeros, g_idx, duration, avg_loss, damp, nsamples
+        quantized, scales, zeros, g_idx, damp, nsamples = result
+        # The capture already holds 2 X^T X / n. Keep the reported loss in
+        # per-token squared output-error units.
+        phi = _row_objectives(weight, quantized.float(), hessian)
+        avg_loss = 0.5 * phi.sum().item()
+        self.jointq_diagnostics.update(dead_columns=int(dead_columns.sum()), avg_loss=avg_loss)
+
+        # Keep the canonical [out, in] layout through the solve and retry.
+        # Restore the source layout when handing weights back for replay.
+        quantized = self._narrow_reconstruction(quantized)
+        quantized = safe_move_to(quantized, self.module.weight.device)
+        scales = safe_move_to(scales, hessian.device)
+        zeros = safe_move_to(zeros, hessian.device)
+        g_idx = safe_move_to(g_idx, hessian.device)
+        return quantized, scales, zeros, g_idx, time.time() - start, avg_loss, damp, nsamples
 
     def _run(
         self,
@@ -723,74 +705,56 @@ class JointQ(GPTQ):
         hessian: torch.Tensor,
         regularization: float,
         blocksize: int,
-        start: float,
-        config,
     ):
-        module_device = hessian.device
-        requested = config.device
-        if isinstance(requested, str) and requested == "auto":
-            solver_device = module_device
-        else:
-            solver_device = torch.device(requested)
+        config = self.qcfg.jointq
+        solver_device = hessian.device if config.device == "auto" else torch.device(config.device)
 
-        # The GPTQ candidate consumes the regularized Hessian with its own
-        # damping. GPTQ mutates the matrix it is given, so it gets a private
-        # float32 copy on the module's device. The neutralized weight is
-        # handed over so the dead columns stay zero through the block pass.
-        gptq_hessian = self._regularized_hessian(hessian, regularization, torch.float32)
-        self.H = gptq_hessian
-        # GPTQ error-propagates into the weight it is given, so the warm start
-        # gets its own copy: the refinement and any adaptive retry must keep
-        # the pristine reference weight.
-        self.module_copy = weight.clone()
+        # GPTQ mutates its Hessian and weight during the warm start. Keep
+        # the captured Hessian and reference weight for the solve and retry.
         try:
+            self.H = self._regularized_hessian(hessian, regularization, torch.float32)
+            self.module_copy = weight.clone()
             candidate = super().quantize(blocksize=blocksize)
         finally:
             self.H = None
             self.module_copy = None
 
         work_dtype = self._work_dtype(config, solver_device)
-        solver_hessian = self._regularized_hessian(hessian, regularization, work_dtype)
-        if solver_device != solver_hessian.device:
-            solver_hessian = safe_move_to(solver_hessian, solver_device, copy=True)
-        solver_weight = weight.to(dtype=work_dtype, device=solver_device)
-        return self._refine(
-            solver_weight,
-            hessian,
-            solver_hessian,
-            candidate,
-            regularization,
-            start,
+        solver_hessian = self._regularized_hessian(hessian, regularization, work_dtype, device=solver_device)
+        # The paper's search and damping tolerances are in unnormalized
+        # Hessian units. The warm start above uses GPTQ's normalized units.
+        solver_hessian.mul_(self.nsamples / 2.0)
+        solver_weight = safe_move_to(weight, solver_device, dtype=work_dtype)
+        quantized, scales, zeros, g_idx, damp, nsamples = self._refine(
+            solver_weight, solver_hessian, candidate, regularization
         )
+        return safe_move_to(quantized, hessian.device), scales, zeros, g_idx, damp, nsamples
 
     def _regularized_hessian(
         self,
         hessian: torch.Tensor,
         regularization: float,
         dtype: torch.dtype,
+        *,
+        device: Optional[torch.device] = None,
     ) -> torch.Tensor:
-        config = self.qcfg.jointq
-        result = hessian.to(dtype=dtype)
-        if result.data_ptr() == hessian.data_ptr():
-            result = result.clone()
+        result = safe_move_to(hessian, device or hessian.device, dtype=dtype, copy=True)
         if regularization > 0.0:
-            diagonal = hessian.diagonal()
+            diagonal = result.diagonal()
             mean = diagonal.mean()
             if float(mean) > 0.0:
-                rho = (diagonal / mean).clamp_min(0.0).pow(config.eta)
-                result.diagonal().add_(
-                    rho.to(dtype) * (float(self.nsamples) * float(regularization))
-                )
+                rho = (diagonal / mean).clamp_min(0.0).pow(self.qcfg.jointq.eta)
+                # Converting H + n * lambda * R to GPTQ's 2/n units
+                # yields H_gptq + 2 * lambda * R.
+                diagonal.add_(rho, alpha=2.0 * regularization)
         return result
 
     def _refine(
         self,
         weight: torch.Tensor,
-        raw_hessian: torch.Tensor,
         hessian: torch.Tensor,
         candidate,
         regularization: float,
-        start: float,
     ):
         config = self.qcfg.jointq
         reconstruction_gptq, scales_gptq, zeros, g_idx, _, _, damp, nsamples = candidate
@@ -798,13 +762,14 @@ class JointQ(GPTQ):
         max_code = (1 << bits) - 1
         zero = float(1 << (bits - 1))
         device = weight.device
-        if not torch.allclose(
-            zeros.to(device=device),
-            torch.full_like(zeros.to(device=device), zero),
-        ):
+        zeros = safe_move_to(zeros, device)
+        if not torch.allclose(zeros, torch.full_like(zeros, zero)):
             raise ValueError("JointQ requires the symmetric fixed zero point.")
 
-        g_idx = g_idx.to(device=device)
+        if isinstance(self.module, transformers.Conv1D):
+            reconstruction_gptq = reconstruction_gptq.T
+        reconstruction_gptq = safe_move_to(reconstruction_gptq.reshape(weight.shape), device)
+        g_idx = safe_move_to(g_idx, device)
         num_groups = int(scales_gptq.shape[1])
         plan = _build_group_plan(g_idx, num_groups)
         work_dtype = hessian.dtype
@@ -813,7 +778,7 @@ class JointQ(GPTQ):
         # only then casts them to FP16 for the checkpoint, so the warm start
         # keeps GPTQ's computed scales and merely verifies that they can be
         # stored.
-        stored_gptq = scales_gptq.to(device=device).to(torch.float32)
+        stored_gptq = safe_move_to(scales_gptq, device, dtype=torch.float32)
         gptq_stored_fp16 = stored_gptq.to(torch.float16)
         if (
             not bool(torch.isfinite(stored_gptq).all())
@@ -825,7 +790,7 @@ class JointQ(GPTQ):
                 "stored in the FP16 checkpoint layout."
             )
         codes_gptq = _codes_from_reconstruction(
-            reconstruction_gptq.to(device=device), stored_gptq, zero, plan, max_code
+            reconstruction_gptq, stored_gptq, zero, plan, max_code
         )
 
         tolerance = float(config.tolerance)
@@ -899,56 +864,22 @@ class JointQ(GPTQ):
             stored_gptq,
             plan,
             zero,
-            max_code,
+            bound_for_fp16=self.module.weight.dtype == torch.float16,
         )
 
-        reconstruction = _dequantize(codes, final_scales, zero, plan)
-        quantized = reconstruction.to(dtype=self.module.weight.dtype)
+        quantized = _dequantize(codes, final_scales, zero, plan).to(self.module.weight.dtype)
         if not bool(torch.isfinite(quantized).all()):
             raise ValueError(
                 f"JointQ: module `{self.name}` produced a reconstruction that is not "
                 f"finite in `{self.module.weight.dtype}`."
             )
-        # Adopt exactly the codes the packer will recover from the stored
-        # weights so replay and the checkpoint cannot disagree.
-        recovered = _codes_from_reconstruction(quantized, final_scales, zero, plan, max_code)
-        if not torch.equal(recovered, codes):
-            codes = recovered
-            reconstruction = _dequantize(codes, final_scales, zero, plan)
-            quantized = reconstruction.to(dtype=self.module.weight.dtype)
-
-        if isinstance(self.module, transformers.Conv1D):
-            quantized = quantized.t()
-        if quantized.shape != self.module.weight.shape:
-            quantized = quantized.reshape(self.module.weight.shape)
-
-        raw_device = raw_hessian.device
-        phi_raw = _row_objectives(
-            weight.to(device=raw_device, dtype=torch.float32),
-            quantized.to(device=raw_device, dtype=torch.float32),
-            raw_hessian.to(torch.float32),
-        )
-        avg_loss = float(0.5 * phi_raw.sum().item() / max(int(nsamples), 1))
         self.jointq_diagnostics.update(
-            {
-                "regularization": float(regularization),
-                "passes": passes,
-                "candidate": "clip" if bool(choose_clip.any()) else "gptq",
-                "clip_rows": int(choose_clip.sum()),
-                "avg_loss": avg_loss,
-            }
+            regularization=float(regularization),
+            passes=passes,
+            candidate="clip" if bool(choose_clip.any()) else "gptq",
+            clip_rows=int(choose_clip.sum()),
         )
-        duration = time.time() - start
-        return (
-            quantized,
-            final_scales,
-            zeros.to(device=device),
-            g_idx,
-            duration,
-            avg_loss,
-            damp,
-            nsamples,
-        )
+        return quantized, final_scales, zeros, g_idx, damp, nsamples
 
     @staticmethod
     def _finalize_storage(
@@ -958,57 +889,36 @@ class JointQ(GPTQ):
         fallback_scales: torch.Tensor,
         plan: _GroupPlan,
         zero: float,
-        max_code: int,
+        *,
+        bound_for_fp16: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Install FP16-representable scales without desynchronizing codes.
+        """Use a single FP16 scale grid for replay and packing."""
 
-        A group whose scale is zero has no reconstruction; its codes are
-        pinned to the fixed zero point so the placeholder scale installed
-        below still decodes to exactly zero. A group whose refined scale
-        cannot be stored falls back to the GPTQ candidate for that row and
-        group, which is always representable because GPTQ wrote it.
-
-        The returned scales stay in their computed FP32 precision. The
-        packer recovers the integers from these values and only then casts
-        the scales to FP16 for the checkpoint, so rounding here would make
-        the solver optimize a different grid than the one that is stored.
-        """
-
-        codes = codes.clone()
+        stored = scales.float().half()
         zero_scale = scales == 0
-        if bool(zero_scale.any()):
-            for group_index, group_columns in enumerate(plan.columns):
-                rows = zero_scale[:, group_index].nonzero(as_tuple=False).squeeze(1)
-                if rows.numel() == 0:
-                    continue
-                codes[rows.unsqueeze(1), group_columns.unsqueeze(0)] = int(zero)
-            scales = scales.clone()
-            scales[zero_scale] = _STORAGE_FLOOR
-
-        def unstorable(values: torch.Tensor) -> torch.Tensor:
-            stored = values.to(torch.float16)
-            return (
-                ~torch.isfinite(values)
-                | ~torch.isfinite(stored)
-                | ((stored == 0) & (values != 0))
-            )
-
-        bad = unstorable(scales)
+        bad = ~torch.isfinite(stored) | ((stored == 0) & ~zero_scale)
         if bool(bad.any()):
+            stored = torch.where(bad, fallback_scales.half(), stored)
+            codes = torch.where(plan.expand(bad), fallback_codes, codes)
+        if bool(zero_scale.any()):
+            stored.masked_fill_(zero_scale, _STORAGE_FLOOR)
+            codes = codes.masked_fill(plan.expand(zero_scale), int(zero))
+
+        if bound_for_fp16 and bool((stored.abs() > _FP16_MAX / zero).any()):
             for group_index, group_columns in enumerate(plan.columns):
-                rows = bad[:, group_index].nonzero(as_tuple=False).squeeze(1)
-                if rows.numel() == 0:
-                    continue
-                scales[rows, group_index] = fallback_scales[rows, group_index]
-                codes[rows.unsqueeze(1), group_columns.unsqueeze(0)] = fallback_codes[
-                    rows.unsqueeze(1), group_columns.unsqueeze(0)
-                ]
-            if bool(unstorable(scales).any()):
-                raise ValueError(
-                    "JointQ: the refined and fallback scales cannot be stored in "
-                    "the FP16 checkpoint layout."
+                centered = codes.index_select(1, group_columns) - int(zero)
+                peak_code = centered.abs().amax(dim=1).clamp_min(1)
+                limit = _FP16_MAX / peak_code.float()
+                rounded_limit = limit.half()
+                # Round the bound down if the nearest stored scale would
+                # make a selected code exceed the source dtype's finite range.
+                bound = torch.where(
+                    rounded_limit.float() > limit,
+                    torch.nextafter(rounded_limit, torch.zeros_like(rounded_limit)),
+                    rounded_limit,
                 )
-        return codes, scales
+                stored[:, group_index].clamp_(min=-bound, max=bound)
+        return codes, stored.float()
 
     @staticmethod
     def _relative_weight_error(quantized: torch.Tensor, weight: torch.Tensor) -> float:
