@@ -6,12 +6,17 @@
 ``library_directory`` is reached from every NF12 call. It used to memoize only
 a successful build: a toolchain that cannot build (an old CMake, a broken
 compiler) was retried on every call - once per module and per capture subset
-during quantization. One 0.5B GPTQ run logged 672 doomed cmake configures.
+during quantization. One 0.5B GPTQ run logged 1008 doomed cmake configures.
 
 These tests pin: the cache target is resolved once, a failed build is attempted
-once, and ``reset_runtime_cache`` makes the next call try again.
+once, ``reset_runtime_cache`` makes the next call try again, and the state is
+safe for the free-threaded lane (``PYTHON_GIL=0``) - one lock, and a cached
+failure re-raised as a fresh instance so threads never share a traceback.
 """
 
+
+import threading
+import time
 
 import pytest
 
@@ -121,3 +126,77 @@ def test_a_toolchain_without_tools_is_reported():
     assert problem is not None
     for tool in ("cmake", "ninja", "nvcc"):
         assert tool in problem
+
+def _run_threads(work, count: int = 8):
+    """Run ``work`` on ``count`` threads through a barrier and collect errors."""
+
+    barrier = threading.Barrier(count)
+    errors = []
+
+    def runner(index):
+        try:
+            barrier.wait(timeout=30)
+            work(index)
+        except BaseException as exc:  # noqa: BLE001 - the assertions inspect these
+            errors.append(exc)
+
+    threads = [threading.Thread(target=runner, args=(index,)) for index in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not any(thread.is_alive() for thread in threads), "a worker hung"
+    return errors
+
+
+def test_concurrent_build_failure_is_attempted_once(monkeypatch):
+    """Eight threads racing a cold cache must not each start a build."""
+
+    attempts = []
+
+    def broken(source, directory, archs):
+        attempts.append(1)
+        time.sleep(0.05)
+        raise RuntimeError("nf12: JIT compilation failed")
+
+    monkeypatch.setattr(_jit, "_build", broken)
+
+    errors = _run_threads(lambda _index: _jit.library_directory())
+
+    assert len(errors) == 8
+    assert all(isinstance(exc, RuntimeError) for exc in errors)
+    assert len(attempts) == 1
+
+
+def test_a_cached_failure_is_raised_as_a_fresh_instance(monkeypatch):
+    """A shared exception instance would race on ``__traceback__`` under gil=0."""
+
+    monkeypatch.setattr(_jit, "_build", lambda *args: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    seen = []
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="boom") as info:
+            _jit.library_directory()
+        seen.append(info.value)
+
+    assert seen[0] is not seen[1]
+
+
+def test_concurrent_toolchain_probe_runs_once(monkeypatch):
+    """The ``cmake --version`` subprocess is shared, not run per thread."""
+
+    probes = []
+
+    def probe(tool):
+        probes.append(tool)
+        time.sleep(0.05)
+        return (3, 26)
+
+    monkeypatch.setattr(_jit, "_tool_version", probe)
+    monkeypatch.setattr(_jit, "_architectures", lambda: [89])
+
+    errors = _run_threads(lambda _index: _jit._toolchain_problem())
+
+    assert not errors
+    assert len(probes) == 1
+

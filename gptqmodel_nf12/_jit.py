@@ -37,15 +37,24 @@ class _MissingBuildTools(RuntimeError):
     """A source build is required but its compiler tools are unavailable."""
 
 
-_lock = threading.Lock()
+# All process-level state below is guarded by this lock. The repository tests
+# and ships a free-threaded lane (``PYTHON_GIL=0``), where check-then-set on a
+# module global is not implicitly atomic, and a shared exception instance must
+# not be re-raised from several threads at once. ``RLock`` because
+# ``library_directory`` holds it while resolving the target and probing tools.
+_lock = threading.RLock()
 _directory: Path | None = None
 # A build that raised is remembered for the process: without this, a toolchain
 # that cannot build (an old CMake, a broken compiler) is retried on every NF12
-# call - once per module and subset during quantization. ``reset_runtime_cache``
-# forgets it after the environment is repaired (or in tests).
-_directory_failure: BaseException | None = None
+# call - once per module and subset during quantization. Stored as
+# ``(type, args)`` so each caller raises a fresh instance: ``raise`` mutates the
+# instance's traceback, which is a data race when threads share one.
+# ``reset_runtime_cache`` forgets it after the environment is repaired.
+_directory_failure: tuple[type[BaseException], tuple] | None = None
 _target: tuple[Path, list[int], Path] | None = None
 _tools: tuple[str | None, str | None, str | None] | None = None
+_UNSET = object()
+_toolchain: object = _UNSET
 
 #: The vendored CMakeLists requires this; ``_build_tools`` alone cannot tell.
 CMAKE_MIN_VERSION = (3, 26)
@@ -127,18 +136,20 @@ def _ready(directory: Path) -> bool:
 
 
 def _build_tools() -> tuple[str | None, str | None, str | None]:
-    """Locate ``(cmake, ninja, nvcc)`` without building anything."""
-    global _tools
-    if _tools is None:
-        # Import CUDA toolkit discovery only when the tools are actually needed.
-        from torch.utils.cpp_extension import CUDA_HOME
+    """Locate ``(cmake, ninja, nvcc)`` once; call ``reset_runtime_cache`` to re-probe."""
 
-        cmake, ninja = shutil.which("cmake"), shutil.which("ninja")
-        nvcc = os.environ.get("CUDACXX")
-        if not nvcc:
-            nvcc = str(Path(CUDA_HOME) / "bin" / "nvcc") if CUDA_HOME else "nvcc"
-        _tools = (cmake, ninja, shutil.which(nvcc))
-    return _tools
+    global _tools
+    with _lock:
+        if _tools is None:
+            # Import CUDA toolkit discovery only when the tools are actually needed.
+            from torch.utils.cpp_extension import CUDA_HOME
+
+            cmake, ninja = shutil.which("cmake"), shutil.which("ninja")
+            nvcc = os.environ.get("CUDACXX")
+            if not nvcc:
+                nvcc = str(Path(CUDA_HOME) / "bin" / "nvcc") if CUDA_HOME else "nvcc"
+            _tools = (cmake, ninja, shutil.which(nvcc))
+        return _tools
 
 
 def _tool_version(tool: str) -> tuple[int, ...] | None:
@@ -165,13 +176,8 @@ def _tool_version(tool: str) -> tuple[int, ...] | None:
     return tuple(int(part) for part in match.groups() if part is not None)
 
 
-def _toolchain_problem() -> str | None:
-    """Why a source build cannot succeed here, or ``None``.
-
-    ``source_build_available`` promises callers a portable fallback instead of
-    a doomed build; existence alone is not enough, because the vendored
-    CMakeLists requires 3.26 and an older CMake fails at configure time.
-    """
+def _probe_toolchain_problem() -> str | None:
+    """Why a source build cannot succeed here, or ``None``."""
 
     cmake, ninja, nvcc = _build_tools()
     missing = [name for name, path in (("cmake", cmake), ("ninja", ninja), ("nvcc", nvcc)) if not path]
@@ -183,6 +189,22 @@ def _toolchain_problem() -> str | None:
         required = ".".join(str(part) for part in CMAKE_MIN_VERSION)
         return f"cmake {found} is older than {required}"
     return None
+
+
+def _toolchain_problem() -> str | None:
+    """Cached :func:`_probe_toolchain_problem`; one ``--version`` probe per process.
+
+    ``source_build_available`` promises callers a portable fallback instead of
+    a doomed build; existence alone is not enough, because the vendored
+    CMakeLists requires 3.26 and an older CMake fails at configure time. The
+    probe spawns a subprocess, so concurrent callers share one result.
+    """
+
+    global _toolchain
+    with _lock:
+        if _toolchain is _UNSET:
+            _toolchain = _probe_toolchain_problem()
+        return _toolchain
 
 
 def source_build_available() -> bool:
@@ -249,13 +271,14 @@ def _cache_target() -> tuple[Path, list[int], Path]:
     """
 
     global _target
-    if _target is None:
-        source = _source_root()
-        archs = _architectures()
-        cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-        directory = cache.expanduser().resolve() / "gptqmodel" / "nf12" / _cache_key(source, archs)
-        _target = (source, archs, directory)
-    return _target
+    with _lock:
+        if _target is None:
+            source = _source_root()
+            archs = _architectures()
+            cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+            directory = cache.expanduser().resolve() / "gptqmodel" / "nf12" / _cache_key(source, archs)
+            _target = (source, archs, directory)
+        return _target
 
 
 def cache_directory() -> Path:
@@ -277,7 +300,8 @@ def library_directory() -> Path:
         if _directory is not None:
             return _directory
         if _directory_failure is not None:
-            raise _directory_failure
+            exc_type, args = _directory_failure
+            raise exc_type(*args)
         try:
             source, archs, directory = _cache_target()
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -291,7 +315,7 @@ def library_directory() -> Path:
             return _directory
         except Exception as exc:
             # A broken toolchain is a property of the process, not of one call.
-            _directory_failure = exc
+            _directory_failure = (type(exc), exc.args)
             raise
 
 
@@ -302,9 +326,10 @@ def reset_runtime_cache() -> None:
     next NF12 use to try again. Successful loads stay memoized elsewhere.
     """
 
-    global _directory, _directory_failure, _target, _tools
+    global _directory, _directory_failure, _target, _tools, _toolchain
     with _lock:
         _directory = None
         _directory_failure = None
         _target = None
         _tools = None
+        _toolchain = _UNSET
