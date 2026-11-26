@@ -1043,11 +1043,6 @@ def _run_single_subset_pass(
                 registered_roots.add(id(root))
                 processor.register_moe_root_capture_hook(root, template, handle)
 
-    if execute_forward:
-        install_affinity_hooks = getattr(processor, "install_moe_affinity_hooks", None)
-        if callable(install_affinity_hooks):
-            install_affinity_hooks(module, subset, handle)
-
     shared_input_leaders: Dict[str, str] = {}
     if execute_forward:
         # Explicit `:in=<tag>` groups collect the Hessian once (leader) and copy it
@@ -1210,8 +1205,11 @@ def _run_single_subset_pass(
     fwd_start = None
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
     if execute_forward:
-        if subset_event_cb:
-            try:
+        try:
+            install_affinity_hooks = getattr(processor, "install_moe_affinity_hooks", None)
+            if callable(install_affinity_hooks):
+                install_affinity_hooks(module, subset, handle, model=looper.gptq_model)
+            if subset_event_cb:
                 subset_event_cb(
                     stage="forward_start",
                     layer_idx=layer_index,
@@ -1220,12 +1218,9 @@ def _run_single_subset_pass(
                     module_names=subset_names,
                     processor=getattr(processor, "name", type(processor).__name__),
                 )
-            except BaseException:
-                # The hooks are already installed, and this callback is how a
-                # caller cancels the run (StopMainLoop). Release them before the
-                # stop unwinds past the success-path cleanup (#4470).
-                _release_capture_hooks()
-                raise
+        except BaseException:
+            _release_capture_hooks()
+            raise
 
         fwd_start = time.perf_counter()
         reuse_kv = bool(getattr(module, "reuse_kv", False))

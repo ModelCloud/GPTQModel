@@ -2949,7 +2949,8 @@ class BaseQModel(nn.Module):
     ) -> Dict[str, List[Dict[str, str]]]:
         """Quantize the model with the calibration data and policy in ``calibration``.
 
-        ``calibration`` may be ``None`` only for a weight-only quantize config.
+        ``calibration`` may be ``None`` when EBSS generates the dataset or for
+        a weight-only quantize config.
         ``measure_weight_error`` requests the direct-pack weight-error MAE; it
         reconstructs each dense weight and never changes the packed payload.
         """

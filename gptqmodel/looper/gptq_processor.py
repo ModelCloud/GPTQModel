@@ -29,6 +29,7 @@ from ..looper.loop_processor import (
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
+from ..models.module_plan import _model_module_plan
 from ..models.shared_input import SharedInputPlan
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
@@ -441,46 +442,59 @@ class GPTQProcessor(LoopProcessor):
         )
         self.tasks[module.name] = tmp
 
-    def install_moe_affinity_hooks(self, layer_module, subset, handles) -> None:
-        """Capture each routed experts container's top-k weights for this subset."""
+    def install_moe_affinity_hooks(self, layer_module, subset, handles, *, model) -> None:
+        """Capture routes and observe the input projections of experts in this subset."""
 
         moe_affinity = getattr(self, "_moe_affinity", None)
         if moe_affinity is None:
-            return None
-        installed = set()
+            return
+        module_plan = _model_module_plan(model)
+        installed_containers = set()
+        installed_experts = set()
         for named_module in subset.values():
-            state = getattr(named_module, "state", None) or {}
+            state = named_module.state
             if not state.get("is_routed_expert"):
                 continue
-            container_name = state.get("moe_container")
-            if not container_name:
-                raise RuntimeError(
-                    f"MoEQuant AGQ: routed expert `{getattr(named_module, 'name', '?')}` "
-                    "has no experts container."
-                )
-            if container_name in installed:
+            container_name = state["moe_container"]
+            expert_index = state["moe_expert_index"]
+            expert_path = f"{container_name}.{expert_index}"
+            if expert_path in installed_experts:
                 continue
-            installed.add(container_name)
-            try:
-                container = layer_module.get_submodule(container_name)
-            except AttributeError as exc:
+            installed_experts.add(expert_path)
+
+            container = layer_module.get_submodule(container_name)
+            if container_name not in installed_containers:
+                installed_containers.add(container_name)
+                handles.append(
+                    container.register_forward_pre_hook(
+                        moe_affinity.make_pre_hook(container_name), with_kwargs=True
+                    )
+                )
+                handles.append(
+                    container.register_forward_hook(
+                        moe_affinity.make_post_hook(container_name), with_kwargs=True, always_call=True
+                    )
+                )
+
+            if module_plan is None:
+                raise RuntimeError("MoEQuant AGQ: routed experts require a module plan.")
+            expert = container.get_submodule(str(expert_index))
+            observed = False
+            for child_name, child in expert.named_children():
+                roles = module_plan.roles(f"{expert_path}.{child_name}")
+                if "gate" in roles or "up" in roles:
+                    # A down-only subset still executes the input projections.
+                    handles.append(
+                        child.register_forward_pre_hook(
+                            moe_affinity.make_expert_input_hook(container_name, expert_index),
+                            with_kwargs=True,
+                        )
+                    )
+                    observed = True
+            if not observed:
                 raise RuntimeError(
-                    f"MoEQuant AGQ: experts container `{container_name}` was not found "
-                    "on the decoder layer."
-                ) from exc
-            handles.append(
-                container.register_forward_pre_hook(
-                    moe_affinity.make_pre_hook(container_name),
-                    with_kwargs=True,
+                    f"MoEQuant AGQ: expert `{expert_path}` has no declared input projection."
                 )
-            )
-            handles.append(
-                container.register_forward_hook(
-                    moe_affinity.make_post_hook(container_name),
-                    with_kwargs=True,
-                )
-            )
-        return None
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Reports whether preprocessing omitted this module from GPTQ work."""
@@ -701,20 +715,25 @@ class GPTQProcessor(LoopProcessor):
                 out = None
             batch_idx = self.current_batch_index()
             inp_tensor = inp[0]
-            row_weights = None
+            mask_tls = getattr(self, "_mask_tls", None)
+            keep_mask = getattr(mask_tls, "value", None)
             moe_affinity = getattr(self, "_moe_affinity", None)
-            if (
-                moe_affinity is not None
-                and moe_affinity.has_expert(name)
-                and torch.is_tensor(inp_tensor)
-            ):
-                row_weights = moe_affinity.weights_for(name, inp_tensor)
+            if moe_affinity is not None and moe_affinity.has_expert(name):
+                # The padding flag can be false even when the calibration
+                # mask excludes real attention-sink tokens.
+                if (
+                    getattr(mask_tls, "padding_value", None) is keep_mask
+                    and getattr(mask_tls, "mask_has_padding", None) is False
+                ):
+                    keep_mask = None
+                rows, row_weights = moe_affinity.calibration_rows(name, inp_tensor, keep_mask)
+                g.add_batch(rows.data, None, batch_index=batch_idx, row_weights=row_weights)
+                return
             if capture_nvfp4:
                 self._record_activation_amax(name, inp_tensor, module)
                 if self._activation_headroom_probe:
                     del inp, out
                     return
-            keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
             # MLA attention feeds `kv_b_proj` a single-head 4-D latent, whose
             # `shape[:2]` never matches the `[B, S]` mask; drop the unit head
             # axis so the padding/sink branches below apply to it too (#5389).
@@ -749,10 +768,6 @@ class GPTQProcessor(LoopProcessor):
                 and keep_mask.ndim == 2
                 and keep_mask.shape[:2] == inp_tensor.shape[:2]
             ):
-                if row_weights is not None:
-                    raise RuntimeError(
-                        "MoEQuant AGQ does not support 3-D routed-expert captures."
-                    )
                 out_tensor = out if torch.is_tensor(out) else None
                 # Keep per-sample boundaries here so batched calibration
                 # accumulates GPTQ stats with the same semantics as batch_size=1.
@@ -816,14 +831,10 @@ class GPTQProcessor(LoopProcessor):
                         sample_out = out_rows[start:start + seq_len][sample_keep].contiguous()
                     else:
                         sample_out = out
-                    sample_weights = None
-                    if row_weights is not None:
-                        sample_weights = row_weights[start:start + seq_len][sample_keep].contiguous()
                     g.add_batch(
                         sample_inp.data,
                         _capture_payload(sample_out),
                         batch_index=batch_idx,
-                        row_weights=sample_weights,
                     )  # noqa: F821
             elif (
                 torch.is_tensor(inp_tensor)
@@ -847,7 +858,6 @@ class GPTQProcessor(LoopProcessor):
                 if padding_present:
                     keep_rows = (inp_tensor != 0).any(dim=-1)
                     kept_inp = inp_tensor[keep_rows].contiguous()
-                    kept_weights = row_weights[keep_rows] if row_weights is not None else None
                     if (
                         torch.is_tensor(out)
                         and out.dim() >= 2
@@ -860,21 +870,18 @@ class GPTQProcessor(LoopProcessor):
                         kept_inp.data,
                         _capture_payload(kept_out),
                         batch_index=batch_idx,
-                        row_weights=kept_weights,
                     )  # noqa: F821
                 else:
                     g.add_batch(
                         inp_tensor.data,
                         _capture_payload(out),
                         batch_index=batch_idx,
-                        row_weights=row_weights,
                     )  # noqa: F821
             else:
                 g.add_batch(
                     inp_tensor.data,
                     _capture_payload(out),
                     batch_index=batch_idx,
-                    row_weights=row_weights,
                 )  # noqa: F821
             del inp, out
         return tmp

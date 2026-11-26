@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-import math
+from statistics import stdev
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -33,7 +34,7 @@ def test_expert_balance_is_zero_for_uniform_usage():
 
 def test_expert_balance_matches_sample_std_formula():
     usage = {"layers.0": torch.tensor([10, 0, 0, 0], dtype=torch.int64)}
-    expected = math.sqrt(4.0 / 3.0 * ((1.0 - 0.25) ** 2 + 3 * (0.25**2)))
+    expected = stdev([1.0, 0.0, 0.0, 0.0])
     assert _expert_balance(usage, {"layers.0": 4}) == pytest.approx(expected)
 
 
@@ -42,7 +43,7 @@ def test_expert_balance_averages_layers_and_skips_single_expert():
         "layers.0": torch.tensor([10, 0, 0, 0], dtype=torch.int64),
         "layers.1": torch.tensor([3], dtype=torch.int64),
     }
-    expected = math.sqrt(4.0 / 3.0 * ((1.0 - 0.25) ** 2 + 3 * (0.25**2))) / 2.0
+    expected = stdev([1.0, 0.0, 0.0, 0.0]) / 2.0
     assert _expert_balance(usage, {"layers.0": 4, "layers.1": 1}) == pytest.approx(expected)
 
 
@@ -139,3 +140,46 @@ def test_ebss_greedy_width_one_runs():
     sentences = generate_ebss_calibration(model, config)
     assert len(sentences) == 1
     assert len(sentences[0]) == 3
+
+
+class _FixedRouter(torch.nn.Module):
+    num_experts = 2
+    top_k = 1
+
+    def forward(self, input_ids):
+        return (input_ids == 1).long()
+
+
+class _FixedLogitMoE(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(vocab_size=3)
+        self.embedding = torch.nn.Embedding(3, 1)
+        self.router = _FixedRouter()
+
+    def forward(self, input_ids, use_cache, past_key_values=None):
+        assert use_cache
+        # The uniform first token always uses expert 0. Tokens 0 and 1
+        # thereafter have similar likelihoods but route to different experts.
+        self.router(torch.zeros_like(input_ids) if past_key_values is None else input_ids)
+        return SimpleNamespace(
+            logits=torch.tensor([[[4.0, 3.95, -5.0]]]),
+            past_key_values=SimpleNamespace(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("width", "seq_len", "temperature", "expected_tail"),
+    [
+        (1, 2, 1.2, [0]),
+        (2, 2, 1.2, [1]),
+        (2, 2, 100.0, [0]),
+        (2, 3, 1.2, [1, 0]),
+    ],
+    ids=["prune-low-likelihood", "final-balance", "final-likelihood", "prune-imbalanced-prefix"],
+)
+def test_ebss_minimizes_likelihood_and_balance_cost(width, seq_len, temperature, expected_tail):
+    model = _FixedLogitMoE()
+    config = EBSSConfig(num_sentences=1, seq_len=seq_len, width=width, temperature=temperature)
+    [sentence] = generate_ebss_calibration(model, config)
+    assert sentence[1:] == expected_tail

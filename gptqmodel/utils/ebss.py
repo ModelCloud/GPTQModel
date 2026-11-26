@@ -25,7 +25,6 @@ distribution and is deliberately avoided.
 from __future__ import annotations
 
 import copy
-import inspect
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -257,22 +256,10 @@ def _expert_balance(usage: Dict[str, torch.Tensor], num_experts: Dict[str, int])
             sigmas.append(0.0)
             continue
         frequencies = counts.to(dtype=torch.float64) / float(total)
-        mean = 1.0 / float(expert_count)
-        variance = torch.sum((frequencies - mean) ** 2) * (
-            float(expert_count) / float(expert_count - 1)
-        )
-        sigmas.append(float(torch.sqrt(variance).item()))
+        sigmas.append(float(frequencies.std(correction=1).item()))
     if not sigmas:
         return 0.0
     return sum(sigmas) / float(len(sigmas))
-
-
-def _supports_cache_position(model: nn.Module) -> bool:
-    try:
-        parameters = inspect.signature(model.forward).parameters
-    except (TypeError, ValueError):
-        return False
-    return "cache_position" in parameters
 
 
 def _input_device(model: nn.Module) -> torch.device:
@@ -296,22 +283,6 @@ def _vocab_size(model: nn.Module) -> int:
     if embeddings is not None and getattr(embeddings, "weight", None) is not None:
         return int(embeddings.weight.shape[0])
     raise ValueError("EBSS cannot resolve the model vocabulary size.")
-
-
-def _forward_step(
-    model: nn.Module,
-    input_ids: torch.Tensor,
-    *,
-    cache: Any = None,
-    cache_position: Optional[torch.Tensor] = None,
-    use_cache_position: bool = False,
-) -> Any:
-    kwargs: Dict[str, Any] = {"input_ids": input_ids, "use_cache": True}
-    if cache is not None:
-        kwargs["past_key_values"] = cache
-    if use_cache_position and cache_position is not None:
-        kwargs["cache_position"] = cache_position
-    return model(**kwargs)
 
 
 def generate_ebss_calibration(
@@ -351,7 +322,6 @@ def generate_ebss_calibration(
     device = _input_device(model)
     vocab_size = _vocab_size(model)
     was_training = bool(getattr(model, "training", False))
-    use_cache_position = _supports_cache_position(model)
     generator = torch.Generator(device="cpu")
     generator.manual_seed(int(config.seed))
     sentences: List[List[int]] = []
@@ -364,10 +334,9 @@ def generate_ebss_calibration(
                 for sentence_index in range(config.num_sentences):
                     first = int(torch.randint(0, vocab_size, (1,), generator=generator).item())
                     observer.begin_forward()
-                    output = _forward_step(
-                        model,
-                        torch.tensor([[first]], dtype=torch.long, device=device),
-                        use_cache_position=use_cache_position,
+                    output = model(
+                        input_ids=torch.tensor([[first]], dtype=torch.long, device=device),
+                        use_cache=True,
                     )
                     cache = getattr(output, "past_key_values", None)
                     if cache is None:
@@ -402,11 +371,11 @@ def generate_ebss_calibration(
                                 + sigma / float(config.temperature)
                             )
                         scores = torch.cat(flat_scores)
-                        top_scores, top_indices = torch.topk(scores, width, largest=True, sorted=True)
+                        # Eqs. 9–10 minimize the joint perplexity and imbalance cost.
+                        top_indices = torch.topk(scores, width, largest=False).indices
 
                         next_candidates: List[_Candidate] = []
-                        for rank in range(width):
-                            flat_index = int(top_indices[rank].item())
+                        for flat_index in top_indices.tolist():
                             parent_index, token = divmod(flat_index, vocab_size)
                             parent = candidates[parent_index]
                             parent_log_probs = torch.log_softmax(parent.logits, dim=-1)
@@ -414,14 +383,10 @@ def generate_ebss_calibration(
 
                             child_cache = copy.deepcopy(parent.cache)
                             observer.begin_forward()
-                            output = _forward_step(
-                                model,
-                                torch.tensor([[token]], dtype=torch.long, device=device),
-                                cache=child_cache,
-                                cache_position=torch.tensor(
-                                    [len(parent.tokens)], dtype=torch.long, device=device
-                                ),
-                                use_cache_position=use_cache_position,
+                            output = model(
+                                input_ids=torch.tensor([[token]], dtype=torch.long, device=device),
+                                use_cache=True,
+                                past_key_values=child_cache,
                             )
                             child_cache = getattr(output, "past_key_values", None)
                             if child_cache is None:
@@ -449,7 +414,7 @@ def generate_ebss_calibration(
                             + sigma / float(config.temperature)
                         )
 
-                    best = max(candidates, key=final_score)
+                    best = min(candidates, key=final_score)
                     sentences.append(list(best.tokens))
                     if progress is not None:
                         progress(sentence_index + 1, int(config.num_sentences))

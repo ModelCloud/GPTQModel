@@ -30,16 +30,19 @@ flowchart TD
     D --> E
     E --> F["native calibration forward"]
     F --> G{"moequant.agq enabled"}
-    G -- yes --> H["experts container captures<br/>top-k indices and weights"]
-    H --> I["per-expert row weight c"]
+    G -- yes --> H["MoEAffinityCapture.record()<br/>top-k indices and weights"]
+    H --> R["observe_expert_input()<br/>validate routed row order"]
+    R --> I["calibration_rows()<br/>select rows and affinities by token mask"]
     I --> J["H equals X transpose diag(c) X"]
+    H -. missing routes .-> X["Raise before Hessian capture"]
+    R -. unsupported row order .-> X
     G -- no --> K["H equals X transpose X"]
     J --> L["GPTQ block solve"]
     K --> L
     L --> M["packed GPTQ or AWQ checkpoint"]
     style C fill:#d1e7dd,stroke:#0f5132,color:#0f5132
     style J fill:#d1e7dd,stroke:#0f5132,color:#0f5132
-    style H fill:#fff3cd,stroke:#997404,color:#664d03
+    style X fill:#f8d7da,stroke:#842029,color:#842029
 ```
 
 | Situation | Before | After |
@@ -50,7 +53,8 @@ flowchart TD
 | Dense and shared experts | `H = X^T X` | unchanged; the paper defines affinity for routed experts |
 | GPTQ block solve | unchanged | unchanged; only the captured Hessian differs |
 | Checkpoint format | `gptq` / `awq` | unchanged; `meta.moequant` records the calibration policy |
-| Missing routing weights | n/a | AGQ fails closed instead of guessing a normalisation |
+| Routed rows selected for calibration | Padding inferred from activations in natively routed GPTQ | AGQ maps the calibration keep mask through the validated token order |
+| Missing routing weights or unknown row order | n/a | AGQ raises before accumulating the Hessian |
 | AWQ AGQ | n/a | not implemented; AWQ supports EBSS only in this release |
 
 ## EBSS search
@@ -67,8 +71,12 @@ where `R_S` is the prefix log-likelihood and `sigma(M, S)` is the
 layer-averaged standard deviation of routed-expert usage over that prefix:
 
 ```text
-sigma_l = sqrt(E / (E - 1) * sum_e (usage_e - 1 / E)^2)
+sigma_l = sqrt(sum_e (usage_e - 1 / E)^2 / (E - 1))
 ```
+
+The beam keeps the lowest costs and returns the completed sentence with the
+lowest cost, following the joint minimization in Eqs. 9–10. The balance term
+uses the sample standard deviation in Eq. 4.
 
 The defaults are the paper's ablation values: `width=4`, `temperature=1.2`.
 `num_sentences` and `seq_len` default to 128 and 512 and remain configurable.
@@ -85,15 +93,14 @@ score uses the complete sequence's routing.
 
 ## AGQ capture
 
-The affinity `c_i` must be the weight the model actually applies, not a
-re-derived softmax. GPT-QModel therefore hooks the experts container and reads
-its `top_k_index` and `top_k_weights` arguments. The Defuser and native expert
-loops visit experts in ascending index and order each expert's rows by top-k
-slot and then token; the capture reproduces that order. For the first expert
-projection the captured rows are compared with the container's hidden states,
-so a different layout raises instead of silently weighting the wrong rows.
-`down_proj` consumes the expert's intermediate activation, so only its row
-count is checked.
+GPT-QModel reads each affinity `c_i` from the `top_k_weights` input of the
+experts container, paired with its corresponding `top_k_index`. A pre-hook on
+the expert's input projections validates its dispatch order against the
+container input. This also runs during a subset that captures only
+`down_proj`, which receives the same routed rows after the expert's activation
+function. Both slot-major and token-major dispatch are supported, including
+batched route tensors. The validated token indices select calibration rows
+and affinities together, excluding padding and masked attention sinks.
 
 The captured row weights are `c_i`; GPTQ applies `sqrt(c_i)` to the input rows
 before `X^T X`. The existing sink-row cap and Hessian chunking compose with
@@ -158,8 +165,8 @@ moequant={"agq": True, "ebss": {"num_sentences": 64, "seq_len": 256}}
   because the bypass feeds every expert all tokens, so the routed-token
   affinity is not defined.
 - AGQ fails closed when the experts container does not expose
-  `top_k_index`/`top_k_weights`, when the captured row count disagrees with the
-  expert input, or when the row order cannot be validated.
+  `top_k_index`/`top_k_weights` or the expert input disagrees with the
+  captured row order or count.
 - AWQ currently supports EBSS only. `AWQConfig(moequant=MoEQuantConfig())`
   raises and asks for `agq=False`.
 - `moequant` is mutually exclusive with `gptaq`, `foem`, `g2ptq`, GSQ, mock
