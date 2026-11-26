@@ -7380,3 +7380,95 @@ def test_rotation_autotune_disk_cache_writes_and_honours_kill_switch(tmp_path, m
     path.unlink()
     utils._persist_rotation_autotune_entry((0, torch.float32, 64, 896, 128, 8, True, -2, -2), (4, 0), 0)
     assert not path.exists()
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_paro_fp16_identity_fallback_keeps_the_reconstruction_finite(device):
+    """FP16 weights must not overflow the scale clamp or the negative endpoint.
+
+    ``scale.clamp(max=1e5)`` converts the bound to FP16 and raises before any
+    weight is quantized. With a representable bound, the symmetric grid's
+    ``qmin * scale`` endpoint can still exceed the FP16 maximum, so the codes
+    are bounded to the finite reconstruction range instead of clamping the
+    narrowed tensor afterwards.
+    """
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("The FP16 identity fallback regression requires an available Torch GPU runtime.")
+    group_size = 128
+    weight = torch.full((8, group_size), -65504.0, dtype=torch.float16, device=device)
+    weight[0, 0] = 65504.0
+    weight[1] = torch.linspace(-1.0, 1.0, group_size, dtype=torch.float16, device=device)
+
+    result = paro_optimization._identity_result(
+        weight=weight,
+        bias=None,
+        bits=4,
+        group_size=group_size,
+        quantizer_sym=True,
+        krot=8,
+    )
+
+    assert result.used_identity is True
+    assert result.pack_weight.dtype == torch.float16
+    assert torch.isfinite(result.pack_weight).all()
+    assert torch.isfinite(result.pseudo_weight).all()
+    assert torch.isfinite(result.q_scales).all()
+    assert result.pack_weight.abs().max() <= torch.finfo(torch.float16).max
+    recovered = (result.pack_weight / result.q_scales.reshape(-1, 1)).round()
+    assert recovered.abs().max() <= 8
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_paro_fp16_quantizer_entry_points_keep_finite_scales_and_codes(device):
+    """``pack_params`` and both pseudo-quantize branches accept FP16 tensors."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("The FP16 quantizer regression requires an available Torch GPU runtime.")
+    weight = torch.randn(8, 128, dtype=torch.float16, device=device) * 0.02
+    quantizer = GroupLinearQuantizer(weight, bits=4, group_size=128, sym=True)
+
+    scales, zeros = quantizer.pack_params(weight)
+    assert torch.isfinite(scales).all()
+    assert zeros.dtype == scales.dtype
+
+    for use_ste in (False, True):
+        output = pseudo_quantize_dequant(
+            weight,
+            bits=4,
+            group_size=128,
+            sym=True,
+            use_ste=use_ste,
+        )
+        assert output.dtype == torch.float16
+        assert torch.isfinite(output).all()
+
+    # A learned scale below ``amax / qmax`` selects code ``-8``. Its
+    # reconstruction is wider than the source maximum and must be bounded.
+    endpoint = torch.full((8, 128), -65504.0, dtype=torch.float16, device=device)
+    small_scale = torch.full((8, 1), 8192.0, dtype=torch.float16, device=device)
+    for use_ste in (False, True):
+        output = pseudo_quantize_dequant(
+            endpoint,
+            bits=4,
+            group_size=128,
+            sym=True,
+            scale=small_scale,
+            use_ste=use_ste,
+        )
+        assert torch.isfinite(output).all()
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_paro_fp16_affine_ste_accepts_an_fp16_scale(device):
+    """The affine STE node must clamp a FP16 scale in range, not raise."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("The FP16 affine STE regression requires an available Torch GPU runtime.")
+    weight = torch.randn(8, 128, dtype=torch.float16, device=device)
+    scale = torch.full((8, 1), 9360.0, dtype=torch.float16, device=device)
+    zero_point_float = torch.full((8, 1), 8.0, dtype=torch.float16, device=device)
+
+    output = paro_optimization._AffineQuantDequantSTE.apply(
+        weight, scale, zero_point_float, 0, 15, 128
+    )
+
+    assert output.dtype == torch.float16
+    assert torch.isfinite(output).all()
