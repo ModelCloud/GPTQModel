@@ -236,7 +236,7 @@ same code range as the eager path or replay and packing diverge.
 
 All of those fits now go through `GPTQ._fit_weight_params`, which passes
 `value_limit = _finite_value_limit(module.weight.dtype)`. Smoothed refits divide
-that limit by the restored smoothing factor with `_scaled_value_limit`. The
+that limit by the restored smoothing factor inside `FitLimits` (`max_abs_value`). The
 bounded range travels to the fused kernel as two optional
 `block_update(..., code_lo, code_hi, ...)` tensors on the same `[groups, rows]`
 layout as `scale`/`zero`; a null pair keeps the natural `[0, maxq]` grid, so an

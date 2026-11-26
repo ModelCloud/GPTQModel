@@ -25,6 +25,7 @@ pages below document specific features, compatibility boundaries, and implementa
 
 - [ADMM-Q weight quantization](admmq.md)
 - [AWQ affine range and packed decode](awq-affine-range.md)
+- [Weight-grid fit limits](quantization-grid-bounds.md)
 - [AWQ calibration aggregation](awq-calibration-aggregation.md)
 - [AWQ GEMM dequantization tiling](awq-dequantize-tiling.md)
 - [AWQ dynamic group-size resolution](awq-dynamic-group-size.md)
