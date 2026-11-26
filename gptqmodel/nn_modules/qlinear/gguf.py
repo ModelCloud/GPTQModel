@@ -441,7 +441,11 @@ def _gguf_quantize_iq4_nl(blocks: np.ndarray) -> np.ndarray:
 
 
 def _gguf_quantize_sign_only(blocks: np.ndarray, *, block_size: int) -> np.ndarray:
-    scales = np.mean(np.abs(blocks), axis=-1).astype(np.float16, copy=False)
+    # block_q1_0 = { fp16 d, uint8 qs[16] }; value = sign(bit) * d. The stored
+    # scale is the block's mean magnitude, so a nonzero block whose mean is
+    # below the smallest FP16 subnormal would publish d = 0 and decode to all
+    # zeros. Clamp before the cast so the signs stay readable.
+    scales = _clamp_fp16_scale(np.mean(np.abs(blocks), axis=-1)).astype(np.float16, copy=False)
     sign_bits = np.packbits((blocks >= 0).astype(np.uint8, copy=False), axis=-1, bitorder="little")
 
     packed = np.empty((blocks.shape[0], 2 + (block_size // 8)), dtype=np.uint8)
@@ -1012,9 +1016,12 @@ def _check_packed_fp16_fields(packed: np.ndarray | torch.Tensor, qtype: str) -> 
 
 
 # ``qtype -> (stored d byte offset, stored m byte offset or None)`` for the
-# simple blocks that store a bare FP16 scale. Q4_1/Q5_1 also store an FP16
-# offset ``m``; TQ1_0/TQ2_0 keep their scale at the end of the block.
+# simple blocks that store a bare FP16 scale. Q1_0/Q1_0_g128 use the block's
+# mean magnitude as a sign-only scale. Q4_1/Q5_1 also store an FP16 offset
+# ``m``; TQ1_0/TQ2_0 keep their scale at the end of the block.
 _SIMPLE_FP16_SCALE_FIELDS = {
+    "Q1_0": (0, None),
+    "Q1_0_g128": (0, None),
     "Q2_0": (0, None),
     "Q4_0": (0, None),
     "Q4_1": (0, 2),
@@ -1039,6 +1046,11 @@ def _simple_scale_underflow_error(qtype: str, index: int, blocks: int, peak: flo
 
 
 def _repack_simple_blocks(blocks: np.ndarray, qtype: str) -> np.ndarray:
+    if qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+        return _gguf_quantize_sign_only(
+            blocks,
+            block_size=_GGUF_SIGN_ONLY_TYPE_INFO[qtype]["block_size"],
+        )
     if qtype == "Q2_0":
         return _gguf_quantize_q2_0(blocks)
     if qtype == "Q4_0":
@@ -1073,9 +1085,11 @@ def _repair_simple_scale_underflow(
     FP32 block scale directly into a bare FP16 field. A nonzero scale below
     the smallest FP16 subnormal therefore publishes ``d = 0``, and the block
     decodes to all zeros even though its codes were built from the original
-    scale. The scale and codes must be rebuilt together, so this repairs only
-    the affected blocks against the source values and leaves every in-range
-    block byte-identical.
+    scale. Sign-only Q1_0/Q1_0_g128 blocks store the mean magnitude, so the
+    same cast erases a sparse block even when its largest element is
+    representable. The scale and codes must be rebuilt together, so this
+    repairs only the affected blocks against the source values and leaves
+    every in-range block byte-identical.
 
     A block that still has no nonzero code after clamping cannot be
     represented in the format and raises with its block index instead of
@@ -1159,6 +1173,10 @@ def _simple_zero_code_suspects(
     if qtype == "IQ4_NL":
         # Every codebook entry is nonzero, so a nonzero scale cannot erase the
         # block through a zero code.
+        return np.zeros_like(nonzero)
+    if qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+        # Every element decodes to +/-d, so a nonzero stored scale cannot
+        # erase a nonzero block through a zero code.
         return np.zeros_like(nonzero)
     return nonzero & (stored_d != 0) & (peak < half_scale)
 
