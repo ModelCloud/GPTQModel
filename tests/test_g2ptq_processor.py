@@ -11,6 +11,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+import gptqmodel.quantization.g2ptq as g2ptq_module
 from gptqmodel.looper.g2ptq_processor import G2PTQProcessor
 from gptqmodel.models.quantization_run_plan import ProcessorStep, QuantizationRunPlan
 from gptqmodel.quantization.config import (
@@ -24,6 +25,19 @@ from gptqmodel.quantization.config import (
 from gptqmodel.quantization.g2ptq import G2PTQ, g2ptq_compensate
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.backend import BACKEND
+
+
+class _WarningRecorder:
+    """Capture LogBar warnings without depending on the shared logger history."""
+
+    def __init__(self):
+        self.messages = []
+
+    def __call__(self, message, *args, **kwargs):
+        self.messages.append(message % args if args else message)
+
+    def once(self, message, *args, **kwargs):
+        self.messages.append(message % args if args else message)
 
 
 def _processor(qcfg=None, **attrs):
@@ -386,6 +400,9 @@ def test_replay_kwargs_drop_keys_the_replay_target_cannot_accept():
 def test_quantize_without_statistics_delegates_to_gptq(monkeypatch):
     qcfg = QuantizeConfig(bits=4, group_size=-1, g2ptq=G2PTQConfig())
     task = G2PTQ(module=nn.Linear(4, 4, bias=False), qcfg=qcfg)
+    task.nsamples = 32
+    warnings = _WarningRecorder()
+    monkeypatch.setattr(g2ptq_module.log, "warn", warnings)
     calls = {}
 
     def fake(self, blocksize=128):
@@ -395,6 +412,38 @@ def test_quantize_without_statistics_delegates_to_gptq(monkeypatch):
     monkeypatch.setattr(GPTQ, "quantize", fake)
     assert task.quantize(blocksize=64) == ("gptq",)
     assert calls["blocksize"] == 64
+    assert any("no block statistics" in message for message in warnings.messages)
+
+
+def test_hf_quantize_without_statistics_warns_and_delegates_to_gptq(monkeypatch):
+    torch.manual_seed(0)
+    module = nn.Linear(16, 8, bias=False)
+    qcfg = QuantizeConfig(bits=4, group_size=8, g2ptq=G2PTQConfig(num_groups=2))
+    task = G2PTQ(module=module, qcfg=qcfg)
+    task.quantizer.configure(perchannel=True)
+    task.add_batch(torch.randn(32, 16), None)
+    warnings = _WarningRecorder()
+    monkeypatch.setattr(g2ptq_module.log, "warn", warnings)
+
+    result = task.hf_quantize(blocksize=32)
+
+    assert len(result) == 6
+    assert any("no block statistics" in message for message in warnings.messages)
+    assert torch.isfinite(task.module.weight.data.float()).all()
+
+
+def test_zero_samples_does_not_claim_the_block_refresh_was_missing(monkeypatch):
+    qcfg = QuantizeConfig(bits=4, group_size=-1, g2ptq=G2PTQConfig())
+    task = G2PTQ(module=nn.Linear(4, 4, bias=False), qcfg=qcfg)
+    warnings = _WarningRecorder()
+    monkeypatch.setattr(g2ptq_module.log, "warn", warnings)
+
+    def fake(self, blocksize=128):
+        return ("gptq",)
+
+    monkeypatch.setattr(GPTQ, "quantize", fake)
+    assert task.quantize(blocksize=64) == ("gptq",)
+    assert not any("no block statistics" in message for message in warnings.messages)
 
 
 def test_block_statistics_reject_mismatched_shapes():

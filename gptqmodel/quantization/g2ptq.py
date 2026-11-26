@@ -294,17 +294,37 @@ class G2PTQ(GPTQ):
             raise ValueError("G2PTQ requires a `g2ptq` configuration.")
         return config
 
+    def _gptq_fallback_requested(self) -> bool:
+        """Whether GPTQ's standard zero-sample, mock or threshold fallback applies."""
+
+        return (
+            self.nsamples == 0
+            or getattr(self.qcfg, "mock_quantization", False)
+            or isinstance(self.module, nn.Embedding)
+            or should_use_fallback(
+                self.fallback,
+                float(self.nsamples),
+                self.expected_nsamples,
+            )
+        )
+
     @torch.inference_mode()
     def quantize(self, blocksize: int = 128):
         try:
-            if (
-                self.group_hessians is None
-                or self.weight_gradient is None
-                or self.nsamples == 0
-                or self.qcfg.mock_quantization
-                or isinstance(self.module, nn.Embedding)
-                or should_use_fallback(self.fallback, float(self.nsamples), self.expected_nsamples)
-            ):
+            standard_fallback = self._gptq_fallback_requested()
+            if self.group_hessians is None or self.weight_gradient is None:
+                if not standard_fallback:
+                    log.warn.once(
+                        "G2PTQ: Module `%s` has no block statistics; using plain "
+                        "GPTQ compensation. The G2PTQ block refresh did not provide "
+                        "statistics for this module (for example, a direct "
+                        "`hf_quantize` solve, a failed refresh, or a module outside "
+                        "the captured subset). Further modules with missing "
+                        "statistics also fall back.",
+                        self.name,
+                    )
+                return super().quantize(blocksize=blocksize)
+            if standard_fallback:
                 # Keep GPTQ's zero-sample and SmoothMSE fallback contracts.
                 return super().quantize(blocksize=blocksize)
             return self._g2ptq_quantize(blocksize=blocksize)
