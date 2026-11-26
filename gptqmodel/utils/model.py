@@ -2353,7 +2353,7 @@ def apply_dense_module_adapters(model, adapter: Optional[Adapter]) -> int:
         if not isinstance(weight, torch.Tensor) or weight.device.type == "meta":
             continue
         dense_adapter = copy.deepcopy(adapter)
-        dense_adapter.post_init(weight_key=name, device=weight.device)
+        dense_adapter.post_init(weight_key=name, device=weight.device, dtype=weight.dtype)
         module._gptqmodel_dense_adapter = dense_adapter
         module.register_forward_hook(_dense_adapter_forward_hook(dense_adapter))
         applied += 1
