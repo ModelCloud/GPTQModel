@@ -50,6 +50,7 @@ def main():
     parser.add_argument("--value-dim", type=int, default=128)
     parser.add_argument("--window", type=int, default=16)
     parser.add_argument("--rank", type=int, default=4)
+    parser.add_argument("--bits", type=int, choices=(4, 6, 8), default=8)
     parser.add_argument("--tokens", type=int, default=64)
     parser.add_argument("--repeats", type=int, default=10)
     args = parser.parse_args()
@@ -82,7 +83,7 @@ def main():
     def build():
         state = LeapQuantState(
             batch, heads, key_dim, value_dim,
-            LeapQuantConfig(bits=8, window=window, rank=args.rank),
+            LeapQuantConfig(bits=args.bits, window=window, rank=args.rank),
             gate_dim=1, device=device,
         )
         state.quantize_(torch.randn(batch, heads, key_dim, value_dim, device=device) * 0.05)
@@ -110,6 +111,7 @@ def main():
     print(f"leapquant_decode_us  {decode_us:9.1f}")
     print(f"compensator_fit_us   {fit_us:9.1f}")
     print(f"decode_overhead_x    {decode_us / dense_us:9.2f}")
+    print(f"checkpoint_bytes     {state.checkpoint_bytes():9d}")
 
 
 if __name__ == "__main__":

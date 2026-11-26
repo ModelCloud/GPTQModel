@@ -340,6 +340,32 @@ def test_qwen_quantized_cache_matches_fp32(device):
 
 
 @pytest.mark.parametrize("device", _devices())
+@pytest.mark.parametrize("bits", [4, 6])
+def test_qwen_packed_code_container_decodes_from_cache(device, bits):
+    torch.manual_seed(123)
+    model = Qwen3_5ForCausalLM(_qwen_config()).to(device).eval()
+    ids = torch.tensor([[1, 5, 7, 9, 11, 13]], device=device)
+    with eager_torch_ssm_kernels(), torch.no_grad():
+        baseline = model(ids[:, :5], use_cache=True)
+        baseline_logits = model(ids[:, 5:], past_key_values=baseline.past_key_values).logits
+
+    model.model._gptqmodel_state_quant = LeapQuantConfig(bits=bits, window=4, rank=2)
+    with eager_torch_ssm_kernels(), torch.no_grad():
+        quantized = model(ids[:, :5], use_cache=True)
+        quantized_logits = model(ids[:, 5:], past_key_values=quantized.past_key_values).logits
+
+    layer = quantized.past_key_values.layers[0]
+    assert layer._leapquant is not None
+    assert layer._leapquant.codes.dtype == torch.uint8
+    assert layer._leapquant.code_container == f"packed{bits}"
+    expected_width = 4 if bits == 4 else 6
+    assert layer._leapquant.codes.shape[-1] == expected_width
+    assert layer._leapquant.checkpoint_bytes() < 384
+    assert layer._leapquant.window_count == 1
+    assert (baseline_logits - quantized_logits).abs().max().item() < 1e-5
+
+
+@pytest.mark.parametrize("device", _devices())
 def test_qwen_grouped_key_heads_quantized_decode(device):
     torch.manual_seed(99)
     config = _qwen_config()
