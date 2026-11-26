@@ -76,6 +76,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Marlin thread-tile selection](marlin-tile-schedule.md)
 - [MoE AWQ scale folding and calibration row ownership](moe-awq-calibration.md)
 - [MoE padding ownership and calibration capture lifetimes](moe-padding-and-awq-dedup.md)
+- [MoEQuant: expert-balanced sampling and affinity-guided quantization](moequant.md)
 - [Multimodal calibration replay](multimodal-calibration.md)
 - [NumPy-free core: optional dependency, not a hard one](numpy-free-core.md)
 - [Paro](paro.md)

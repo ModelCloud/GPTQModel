@@ -1617,6 +1617,24 @@ class LoopProcessor:
         del moe_block, moe_block_name, handles
         return False
 
+    def install_moe_affinity_hooks(
+        self,
+        layer_module: Module,
+        subset: Dict[str, Any],
+        handles: List[Any],
+        *,
+        model: BaseQModel,
+    ) -> None:
+        """Optionally install MoEQuant affinity-capture hooks for this subset.
+
+        Processors that do not implement affinity weighting leave the default
+        no-op unchanged.  The subset executor owns the handle list and removes
+        every hook on exit, including cancellation and forward failures.
+        """
+
+        del layer_module, subset, handles, model
+        return None
+
     def prune_uncovered_module(self, module: NamedModule) -> None:
         """Forget a module the calibration-coverage policy removed from quantization.
 

@@ -554,6 +554,23 @@ class ModulePlan:
                 return f"{prefix}.{parts[0]}"
         return None
 
+    def expert_index(self, path: str) -> Optional[int]:
+        """Return the routed-expert index for a concrete expert leaf."""
+
+        root = self.expert_root(path)
+        if root is None:
+            return None
+        leaf = root.rsplit(".", 1)[-1]
+        return int(leaf) if leaf.isdigit() else None
+
+    def expert_container(self, path: str) -> Optional[str]:
+        """Return the concrete container that owns a routed-expert leaf."""
+
+        root = self.expert_root(path)
+        if root is None:
+            return None
+        return root.rsplit(".", 1)[0] if "." in root else None
+
     def same_moe_family(self, left: str, right: str) -> bool:
         """Return whether two expert leaves belong to the same expanded expert."""
         left_root, right_root = self.expert_root(left), self.expert_root(right)
