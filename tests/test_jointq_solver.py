@@ -543,3 +543,41 @@ def test_jointq_fp64_probe_handles_unsupported_tensor_allocation(monkeypatch):
     monkeypatch.setattr(torch, "eye", reject_fp64)
 
     assert JointQ._work_dtype(JointQConfig(), torch.device("cpu")) == torch.float32
+
+
+def test_scale_only_group_proposal_respects_joint_refit_threshold():
+    # Every integer move is non-improving. The fixed-code scale refit would
+    # only reduce the loss by 0.0001, below the 0.001 acceptance threshold.
+    weight = torch.tensor([[7.01, 0.0]], dtype=torch.float64)
+    codes = torch.tensor([[15, 8]])
+    scales = torch.ones(1, 1, dtype=torch.float64)
+    new_codes, new_scales, phi, _ = _local_search(
+        weight, torch.eye(2, dtype=torch.float64), codes.clone(), scales.clone(),
+        _build_group_plan(torch.tensor([0, 0]), 1), 8.0, 15,
+        tolerance=1e-5, stall_fraction=0.1, active_fraction=0.1,
+        re_solve_low=0.2, re_solve_high=0.6, iteration_cap=20, max_passes=2,
+        nsamples=100, scale_bound=8190.0,
+    )
+
+    torch.testing.assert_close(new_codes, codes)
+    torch.testing.assert_close(new_scales, scales)
+    assert phi.item() == pytest.approx(0.01**2)
+
+
+def test_adaptive_retry_uses_relative_error_for_small_weights():
+    linear = torch.nn.Linear(8, 1, bias=False)
+    with torch.no_grad():
+        linear.weight.copy_(torch.tensor([[1, 2, -3, 1, 2, -3, 1, 2]]) * 2.0**-25)
+    config = GPTQConfig(bits=4, group_size=-1, jointq=JointQConfig(regularization=0.0, adaptive_retry=False))
+    samples = torch.eye(8)
+    _, (first, *_) = _run_quantizer(JointQ, linear, config, [samples])
+    weight = linear.weight.detach().double()
+    error = (weight - first.double()).square().sum() / weight.square().sum()
+    assert 0 < error < 1
+    config.jointq.adaptive_retry = True
+    config.jointq.retry_ratio = error.item() / 2
+
+    task, _ = _run_quantizer(JointQ, linear, config, [samples])
+
+    assert task.jointq_diagnostics["relative_error"] == pytest.approx(error.item())
+    assert task.jointq_diagnostics["retried"]

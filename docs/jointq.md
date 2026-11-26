@@ -132,8 +132,10 @@ and `H~ = H + n * lambda * R`. GPTQ capture stores `H_gptq = 2 H / n`.
 4. **Candidate selection.** Both candidates are refit with step 3 and compared
    per output row on the exact row objective. The clipping candidate wins ties.
 5. **Local search (Algorithm 1).** Groups are visited in order. Each group runs
-   the best-response integer search. A changed pair is installed and counted
-   when it does not increase the row objective. Rows whose
+   the best-response integer search. If any row changes an integer, the group
+   installs and counts each changed pair that preserves or lowers its row
+   objective. With all integers fixed, scale updates go through the joint
+   refit and its acceptance threshold. Rows whose
    change count falls outside `[re_solve_low, re_solve_high] * T` are re-solved
    with the full joint system. A pass ends when fewer than
    `outer_active_fraction` of the rows improved.

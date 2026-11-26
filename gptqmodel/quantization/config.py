@@ -4122,6 +4122,8 @@ def _serialize_dynamic_override_value(value: Any) -> Any:
 
     if isinstance(value, torch.dtype):
         return str(value).split(".")[-1]
+    if isinstance(value, torch.device):
+        return str(value)
     if isinstance(value, Enum):
         return value.value
     if is_dataclass(value) and not isinstance(value, type):
@@ -6609,8 +6611,9 @@ def _validate_dynamic_applied_options(owner, layer_name: str, layer_dict: Mappin
     owner_name = owner.__class__.__name__
     label = f"dynamic['{layer_name}']"
 
-    if method is not METHOD.GPTQ and layer_dict.get("jointq") not in (None, False):
-        raise ValueError(f"{owner_name}: `{label}.jointq` requires method `gptq`.")
+    if layer_dict.get("jointq") not in (None, False):
+        if method is not METHOD.GPTQ or _is_weight_only_lifecycle(owner):
+            raise ValueError(f"{owner_name}: `{label}.jointq` requires method `gptq` with calibration.")
 
     if method is METHOD.AWQ and layer_dict.get("desc_act") is True:
         raise _unapplied_option_error(

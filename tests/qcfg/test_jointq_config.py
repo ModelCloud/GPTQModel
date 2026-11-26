@@ -22,6 +22,7 @@ from gptqmodel.quantization.config import (
     GSQConfig,
     JointQConfig,
     QuantizeConfig,
+    RTNConfig,
 )
 
 
@@ -268,3 +269,23 @@ def test_sequential_checkpoint_rejects_dynamic_jointq(value):
 def test_admmq_rejects_enabled_jointq_in_a_dynamic_rule():
     with pytest.raises(ValueError, match=r"dynamic.*jointq.*requires method"):
         ADMMQConfig(dynamic={LAYER: {"jointq": True}})
+
+
+@pytest.mark.parametrize("as_dict", [False, True])
+def test_dynamic_jointq_device_round_trips(as_dict):
+    from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
+
+    device = torch.device("cpu")
+    option = {"device": device} if as_dict else JointQConfig(device=device)
+    restored = _json_round_trip(GPTQConfig(dynamic={LAYER: {"jointq": option}}))
+
+    assert clone_gptq_config_for_module(restored, LAYER).jointq.device == "cpu"
+
+
+@pytest.mark.parametrize("value", [True, {}, False, None])
+def test_weight_only_dynamic_jointq(value):
+    if value is False or value is None:
+        assert RTNConfig(dynamic={LAYER: {"jointq": value}}).uses_weight_only_lifecycle()
+    else:
+        with pytest.raises(ValueError, match="jointq.*calibrat"):
+            RTNConfig(dynamic={LAYER: {"jointq": value}})

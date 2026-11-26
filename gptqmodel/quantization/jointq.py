@@ -519,10 +519,11 @@ def _local_search(
                 iteration_cap=iteration_cap,
             )
             current = codes.index_select(1, group_columns)
-            changed = (group_codes != current).any(dim=1) | (
-                group_scale != scales[:, group_index]
-            )
-            if bool(changed.any()):
+            moved = (group_codes != current).any(dim=1)
+            # Algorithm 1 installs group proposals only if an integer moved
+            # in at least one row. Otherwise the joint refit owns scale updates.
+            if bool(moved.any()):
+                changed = moved | (group_scale != scales[:, group_index])
                 changed_rows = changed.nonzero(as_tuple=False).squeeze(1)
                 updated = reconstruction.index_select(0, changed_rows)
                 updated[:, group_columns] = (
@@ -922,7 +923,13 @@ class JointQ(GPTQ):
 
     @staticmethod
     def _relative_weight_error(quantized: torch.Tensor, weight: torch.Tensor) -> float:
-        difference = quantized.to(torch.float32) - weight.to(torch.float32)
-        numerator = difference.square().sum()
-        denominator = weight.to(torch.float32).square().sum().clamp_min(1e-12)
+        # The ratio is invariant to a common scale. Normalize before squaring
+        # so small weights retain their relative error in FP32.
+        weight = weight.float()
+        peak = weight.abs().amax()
+        if peak.item() == 0:
+            return 0.0
+        difference = quantized.float() - weight
+        numerator = difference.div_(peak).square_().sum()
+        denominator = (weight / peak).square_().sum()
         return float((numerator / denominator).item())
