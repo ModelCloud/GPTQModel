@@ -16,6 +16,7 @@ from gptqmodel.looper.g2ptq_processor import G2PTQProcessor
 from gptqmodel.models.quantization_run_plan import ProcessorStep, QuantizationRunPlan
 from gptqmodel.quantization.config import (
     FORMAT,
+    Fallback,
     FOEMConfig,
     G2PTQConfig,
     GPTAQConfig,
@@ -799,6 +800,198 @@ def test_grouped_inverse_oom_completes_the_solve_on_cpu(monkeypatch, alpha):
 
     for actual, expected in zip(solve("cuda:0", fail_inverse=True), solve("cpu")):
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+def _block_retry_task(
+    device, *, static_groups=False, group_size=2, module_copy=False, ordering="natural"
+):
+    """Build a G2PTQ task whose block pass mutates several columns."""
+
+    config = GPTQConfig(
+        bits=4,
+        group_size=group_size,
+        static_groups=static_groups,
+        desc_act=ordering == "desc_act",
+        act_group_aware=ordering == "act_group_aware",
+        g2ptq=G2PTQConfig(num_groups=2, alpha_mse=0.01),
+    )
+    module = nn.Linear(4, 2, bias=False, device=device)
+    with torch.no_grad():
+        module.weight.copy_(
+            torch.tensor([[1.0, 2.0, -3.0, 4.0], [-2.0, 4.0, 1.0, -1.0]])
+        )
+    task = G2PTQ(module, qcfg=config)
+    task.quantizer.configure(perchannel=True)
+    task.add_batch(
+        torch.tensor(
+            [
+                [1.0, 0.5, 0.0, -1.0],
+                [0.5, 1.0, 0.0, 2.0],
+                [-1.0, 0.0, 1.0, 0.5],
+                [0.25, 2.0, 0.5, 1.0],
+                [1.0, 1.0, 1.0, 1.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+            device=device,
+        ),
+        None,
+    )
+    diagonal = torch.tensor([2.0, 3.0, 4.0, 1.0], device=device)
+    task.set_block_statistics(
+        group_hessians=torch.diag(diagonal).repeat(2, 1, 1),
+        weight_gradient=torch.full_like(module.weight, 0.1),
+        activation_square=diagonal,
+    )
+    if module_copy:
+        task.module_copy = module.weight.detach().clone()
+    return task
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Accelerator required")
+@pytest.mark.parametrize("ordering", ["natural", "desc_act", "act_group_aware"])
+@pytest.mark.parametrize(
+    "static_groups, group_size, module_copy",
+    [
+        (False, 2, False),
+        (True, 2, False),
+        (False, -1, False),
+        (False, 2, True),
+    ],
+)
+def test_grouped_block_oom_restarts_from_the_pre_pass_weights(
+    monkeypatch, static_groups, group_size, module_copy, ordering
+):
+    """A failed column pass must not reuse the columns it already mutated."""
+
+    def solve(device, fail_block=False):
+        task = _block_retry_task(
+            device,
+            static_groups=static_groups,
+            group_size=group_size,
+            module_copy=module_copy,
+            ordering=ordering,
+        )
+        state = {"calls": 0, "failed": False}
+        original = g2ptq_module.g2ptq_compensate
+        if fail_block:
+            def fail_once(weight, factor, gradient, beta, quantize_column, **kwargs):
+                state["calls"] += 1
+                if state["failed"]:
+                    return original(
+                        weight, factor, gradient, beta, quantize_column, **kwargs
+                    )
+                state["failed"] = True
+
+                def quantize_then_fail(column):
+                    if column == 1:
+                        raise torch.OutOfMemoryError(
+                            "forced allocation failure"
+                        )
+                    return quantize_column(column)
+
+                return original(
+                    weight, factor, gradient, beta, quantize_then_fail, **kwargs
+                )
+
+            monkeypatch.setattr(
+                g2ptq_module, "g2ptq_compensate", fail_once
+            )
+        try:
+            result = [tensor.cpu() for tensor in task.quantize(blocksize=2)[:4]]
+        finally:
+            if fail_block:
+                monkeypatch.setattr(
+                    g2ptq_module, "g2ptq_compensate", original
+                )
+        if fail_block:
+            assert state["calls"] == 2
+        return result
+
+    for actual, expected in zip(
+        solve("cuda:0", fail_block=True), solve("cpu")
+    ):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Accelerator required")
+def test_grouped_block_non_memory_error_is_not_retried(monkeypatch):
+    task = _block_retry_task("cuda:0")
+    calls = {"count": 0}
+
+    def fail(*args, **kwargs):
+        calls["count"] += 1
+        raise RuntimeError("not an allocation failure")
+
+    monkeypatch.setattr(g2ptq_module, "g2ptq_compensate", fail)
+    with pytest.raises(RuntimeError, match="not an allocation failure"):
+        task.quantize(blocksize=2)
+    assert calls["count"] == 1
+
+
+@pytest.mark.parametrize("fallback", [None, Fallback(threshold=1)])
+def test_grouped_nan_loss_uses_mock_retry_when_fallback_configured(
+    monkeypatch, fallback
+):
+    config = GPTQConfig(
+        bits=4,
+        group_size=2,
+        g2ptq=G2PTQConfig(num_groups=2, alpha_mse=0.01),
+        fallback=fallback,
+    )
+    module = nn.Linear(4, 2, bias=False)
+    task = G2PTQ(module, qcfg=config)
+    task.quantizer.configure(perchannel=True)
+    task.add_batch(torch.eye(4), None)
+    task.set_block_statistics(
+        group_hessians=torch.eye(4).repeat(2, 1, 1),
+        weight_gradient=torch.zeros_like(module.weight),
+        activation_square=torch.ones(4),
+    )
+    original = g2ptq_module.g2ptq_compensate
+
+    def nan_loss(*args, **kwargs):
+        quantized, error = original(*args, **kwargs)
+        kwargs["loss_terms"].fill_(float("nan"))
+        return quantized, error
+
+    monkeypatch.setattr(g2ptq_module, "g2ptq_compensate", nan_loss)
+    if fallback is None:
+        with pytest.raises(ValueError, match="NaN"):
+            task.quantize(blocksize=2)
+    else:
+        weight, *_ = task.quantize(blocksize=2)
+        assert task.qcfg.mock_quantization is True
+        assert torch.isfinite(weight.float()).all()
+
+
+def test_grouped_solve_releases_plain_capture_before_the_block_loop(monkeypatch):
+    """The capture diagonal is the only plain-Hessian input to the solve."""
+
+    config = GPTQConfig(
+        bits=4, group_size=2, g2ptq=G2PTQConfig(num_groups=2, alpha_mse=0.01)
+    )
+    module = nn.Linear(4, 2, bias=False)
+    task = G2PTQ(module, qcfg=config)
+    task.quantizer.configure(perchannel=True)
+    task.add_batch(torch.eye(4), None)
+    task.set_block_statistics(
+        group_hessians=torch.eye(4).repeat(2, 1, 1),
+        weight_gradient=torch.zeros_like(module.weight),
+        activation_square=torch.ones(4),
+    )
+    seen = {}
+    original = g2ptq_module.g2ptq_compensate
+
+    def record(*args, **kwargs):
+        seen["hessian"] = task.H
+        seen["partials"] = dict(task._device_hessian_partials)
+        seen["released"] = task._hessian_state_released
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(g2ptq_module, "g2ptq_compensate", record)
+    task.quantize(blocksize=2)
+
+    assert seen == {"hessian": None, "partials": {}, "released": True}
 
 
 def test_refresh_uses_the_resolved_module_configuration():
