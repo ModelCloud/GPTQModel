@@ -220,7 +220,7 @@ The following are currently unsupported with checkpointing:
 - `true_sequential=False`;
 - rotation;
 - `lm_head` or embedding quantization;
-- GPTAQ or FOEM;
+- GPTAQ, FOEM or JointQ;
 - quantization preprocessor chains;
 - adapters other than the supported EoRA `Lora` continuation;
 - source models without local safetensors weights.

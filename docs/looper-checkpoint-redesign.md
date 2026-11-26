@@ -29,7 +29,7 @@ checkpointing.
 Packed formats use explicit constructor schemas and the same kernel/config
 validation as ordinary quantization; checkpointing does not enable unavailable
 kernels or deprecated export formats. Other model families, rotation,
-embedding/lm_head quantization and GPTAQ/FOEM remain unsupported.
+embedding/lm_head quantization and GPTAQ/FOEM/JointQ remain unsupported.
 Per-module dynamic overrides and exclusions are supported: packed module
 schemas retain the effective packing settings, and the execution plan ends at
 the last layer containing quantized work. The checkpoint identity includes the

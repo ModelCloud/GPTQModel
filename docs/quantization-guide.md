@@ -438,7 +438,7 @@ and keep an engine's pinned dependencies in a separate environment.
 | Mix weight precisions or exclude modules | [`dynamic` rules and fused-module constraints](support-matrix.md#mixed-precision-and-fused-modules) |
 | Describe quantization as staged rules | [Quantization protocol](quantization_protocol.md) |
 | Requantize FP8/FP4 source modules or smooth weights | [Preprocessors](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#preprocessor-pipeline) |
-| Improve GPTQ error compensation | [GPTAQ](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#foem-and-gptaq-correction) and [FOEM](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#foem-and-gptaq-correction); these modify the solve, not activation precision |
+| Improve GPTQ error compensation | [GPTAQ](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#foem-and-gptaq-correction), [FOEM](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#foem-and-gptaq-correction) and [JointQ](jointq.md); these modify the solve, not activation precision |
 | Recover quality with adapters or train LoRA | [EoRA](eora/README.md) and [PEFT](peft.md) |
 | Handle sparse MoE calibration coverage | [MoE routing and fallback controls](https://github.com/ModelCloud/GPTQModel/wiki/Multimodal-and-MoE-Models#moe-configuration-and-examples) |
 | Tune normalization after quantization | [Norm tuning](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#post-quantization-norm-tuning) |

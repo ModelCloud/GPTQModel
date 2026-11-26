@@ -244,5 +244,7 @@ packer's own code-recovery arithmetic.
 ```
 
 The method was introduced by Keiji Kimura and Yuma Ichikawa at Fujitsu
-Limited. This repository's implementation is independent; the authors'
-reference implementation is published in the OneComp library.
+Limited. This repository's implementation is independent and was written from
+the paper; the authors' MIT-licensed reference implementation is the JointQ
+quantizer in the [OneComp library](https://github.com/FujitsuResearch/OneCompression).
+See [attributions and citations](citations.md) for the full credit list.

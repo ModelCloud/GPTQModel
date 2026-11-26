@@ -504,7 +504,7 @@ details are available in the [citation reference](https://github.com/ModelCloud/
 | GPT-QModel | ModelCloud.ai and contributors | [Project](https://github.com/ModelCloud/GPTQModel) |
 | [GPTQ](https://github.com/ModelCloud/GPTQModel/wiki/GPTQ) | Elias Frantar et al., IST-DASLab | [Paper](https://arxiv.org/abs/2210.17323) |
 | [ADMM-Q](docs/admmq.md) | Ryan Lucas et al., MIT | [Paper](https://arxiv.org/abs/2605.11222) · [Code](https://github.com/mazumder-lab/admm-q) |
-| [JointQ](docs/jointq.md) | Keiji Kimura and Yuma Ichikawa, Fujitsu Limited | [Paper](https://arxiv.org/abs/2611.20384) |
+| [JointQ](docs/jointq.md) | Keiji Kimura and Yuma Ichikawa, Fujitsu Limited | [Paper](https://arxiv.org/abs/2611.20384) · [Code](https://github.com/FujitsuResearch/OneCompression) |
 | [AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ) | Ji Lin et al. | [Paper](https://arxiv.org/abs/2306.00978) |
 | [Paro](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant) | Yesheng Liang et al., Z-Lab | [Paper](https://openreview.net/forum?id=1USeVjsKau) · [Code](https://github.com/z-lab/paroquant) |
 | [MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md) | Lorenz K. Muller et al., Huawei CSL | [Paper](https://arxiv.org/abs/2611.10649) · [Code](https://github.com/huawei-csl/MACaQ) |

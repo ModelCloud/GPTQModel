@@ -27,6 +27,7 @@ reference inventories, not a promise that every combination works on every devic
 | Rotation                  | ✅          | x | x | x | x             |
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
+| JointQ                    | ✅          | ✅ | ✅ | ✅ | ✅             |
 | GSQ (GPTQ, AWQ, RTN, QQQ, Paro) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
 | [LeapQuant](leapquant.md) (recurrent state) | ✅ | x | x | x | x |
 
@@ -41,6 +42,10 @@ GPTQ. See [ADMM-Q weight quantization](admmq.md).
 LeapQuant is not a checkpoint format: it quantizes the linear-attention
 recurrent state at inference time in supported GPT-QModel ports and leaves
 `quant_method` unchanged. See [LeapQuant](leapquant.md).
+
+JointQ is not a checkpoint format either: it refines a GPTQ solution in place,
+writes the standard GPTQ tensors, and leaves `quant_method` unchanged. See
+[JointQ](jointq.md).
 
 See [runtime loading](https://github.com/ModelCloud/GPTQModel/wiki/Loading-and-Inference),
 [prompt normalization](runtime-prompt-input-normalization.md), and
