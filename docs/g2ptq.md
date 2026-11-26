@@ -20,7 +20,7 @@ from gptqmodel.quantization.config import G2PTQConfig, QuantizeConfig
 config = QuantizeConfig(
     bits=4,
     group_size=128,
-    g2ptq=G2PTQConfig(alpha_mse=0.01, alpha_kl=0.05, num_groups=4),
+    g2ptq=G2PTQConfig(alpha_mse=0.01, alpha_kl=0.05, num_groups=4, seed=0),
 )
 model = GPTQModel.load("model-path", config)
 model.quantize(calibration)
@@ -117,8 +117,10 @@ snapshot (a deep copy when the stage handed over the live module) and rebuilds
 each frozen floating-point weight as a gradient leaf. Projections that share
 a weight also share its leaf, so autograd sums both contributions. Integer
 index parameters retain their values and stay outside gradient tracking. Each
-block derives its Fisher draws from the run seed and layer index. The continuation stores the run seed so checkpoint packing and
-interruption leave the draws reproducible.
+replay group derives its Fisher draws from the resolved `G2PTQConfig.seed` and
+the layer index; modules with different resolved seeds use separate replays.
+The seed is part of the serialized configuration, so repeated and resumed runs
+use the same draws without depending on the ambient process RNG state.
 
 ## Failure contracts
 
@@ -146,7 +148,7 @@ interruption leave the draws reproducible.
 | --- | --- | --- |
 | Output head | Head preprocessing on the noisy stream | Model head preprocessing on both streams |
 | Calibration rows | Objectives included all replayed rows | Replay keep mask selects rows for the objectives |
-| Fisher sampling | Used the global RNG between packing operations | Each block uses a local stream derived from the saved run seed |
+| Fisher sampling | Used the global RNG between packing operations | Each replay group uses a local stream derived from its configured seed and the layer index |
 | Zero Fisher diagonal | A group could erase a calibration-live weight | GPTQ input energy identifies dead columns, and a positive diagonal stabilizes the group factorization |
 | Dynamic grid refit | A refit spanning two compute blocks could read stale trailing columns | The solver flushes pending updates before fitting the next group across a block boundary |
 | Inverse allocation failure | The inverse could move to CPU while the column loop still allocated on the original device | The CPU retry carries the remaining solve and its scratch tensors |
@@ -193,9 +195,10 @@ for step size.
 | `alpha_kl` | `0.05` | Trust-region budget for the output-head KL block |
 | `num_groups` | `4` | Output-channel groups that share one Hessian |
 | `kl_last_block` | `True` | Use the KL objective on the output head |
+| `seed` | `0` | Seed for the Fisher noise and KL label sampling; the draws also depend on the layer index |
 
 Once enabled for the run, a module's `dynamic.g2ptq` rule can select its own
-settings or use `false` to select plain GPTQ for that module.
+settings (including `seed`) or use `false` to select plain GPTQ for that module.
 
 The paper autotunes `alpha` per block with a grid search (Appendix C.2). This
 port takes it from the run configuration instead; the paper reports that

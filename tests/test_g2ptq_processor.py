@@ -51,7 +51,9 @@ def test_g2ptq_config_serializes_and_reloads():
     config = GPTQConfig(
         bits=4,
         group_size=32,
-        g2ptq=G2PTQConfig(alpha_mse=0.25, alpha_kl=0.5, num_groups=2, kl_last_block=False),
+        g2ptq=G2PTQConfig(
+            alpha_mse=0.25, alpha_kl=0.5, num_groups=2, kl_last_block=False, seed=1234,
+        ),
     )
 
     payload = config.to_dict()
@@ -61,12 +63,14 @@ def test_g2ptq_config_serializes_and_reloads():
         "alpha_kl": pytest.approx(0.5),
         "num_groups": 2,
         "kl_last_block": False,
+        "seed": 1234,
     }
     restored = QuantizeConfig(**json.loads(json.dumps(config.to_dict())))
     assert restored.g2ptq is not None
     assert restored.g2ptq.alpha_mse == pytest.approx(0.25)
     assert restored.g2ptq.num_groups == 2
     assert restored.g2ptq.kl_last_block is False
+    assert restored.g2ptq.seed == 1234
 
 
 def test_g2ptq_config_accepts_booleans_and_dicts():
@@ -94,6 +98,9 @@ def test_g2ptq_config_accepts_booleans_and_dicts():
         {"num_groups": 0},
         {"num_groups": 2.5},
         {"kl_last_block": "yes"},
+        {"seed": -1},
+        {"seed": 1.5},
+        {"seed": True},
     ],
 )
 def test_g2ptq_config_rejects_invalid_values(kwargs):
@@ -276,9 +283,7 @@ def test_clean_stream_advances_only_through_pristine_replay():
 
     state = processor.continuation_state_dict()
     restored = _processor()
-    restored._g2ptq_seed = processor._g2ptq_seed + 1
     restored.load_continuation_state_dict(state)
-    assert restored._g2ptq_seed == processor._g2ptq_seed
     assert restored.clean_group_layer_inputs(layer_index=1, layer_inputs=noisy) is advanced
 
 
@@ -789,7 +794,7 @@ def test_refresh_excludes_calibration_padding_from_statistics():
     }
 
     stats = processor._collect_block_statistics(
-        state, None, {"proj": task}, use_kl=False
+        state, None, {"proj": task}, use_kl=False, seed=processor.qcfg.g2ptq.seed
     )["proj"]
     torch.testing.assert_close(stats["gradient"], torch.tensor([[5.0, 7.0], [7.0, 10.0]]))
     torch.testing.assert_close(stats["activation_square"], torch.tensor([10.0, 20.0]))
@@ -841,20 +846,141 @@ def test_replayed_projection_accumulates_every_invocation():
 
     seed = 19
     torch.manual_seed(seed)
-    processor = _processor(GPTQConfig(g2ptq=G2PTQConfig(num_groups=1)))
+    processor = _processor(GPTQConfig(g2ptq=G2PTQConfig(num_groups=1, seed=seed)))
     block = ReusedProjection()
     task = G2PTQ(block.proj, qcfg=processor.qcfg)
     x = torch.tensor([[[1.0], [3.0]]])
     state = {"layer": block, "inputs": [[x]], "targets": [[torch.zeros_like(x)]]}
 
     stats = processor._collect_block_statistics(
-        state, None, {"proj": task}, use_kl=False
+        state, None, {"proj": task}, use_kl=False, seed=seed
     )["proj"]
     # Avoid depending on float32 and float64 RNGs having the same sequence.
     noise = torch.randn(x.shape, generator=torch.Generator().manual_seed(seed)).double()
     hessian = (5 * noise.square() * x.double().square()).sum().reshape(1, 1, 1)
     torch.testing.assert_close(stats["hessian"].double(), hessian, atol=1e-6, rtol=1e-6)
     torch.testing.assert_close(stats["activation_square"], torch.tensor([50.0]))
+
+
+def _refresh_block_statistics(*, seeds=None, device="cpu"):
+    """Refresh one tiny block and return each projection's installed statistics."""
+
+    def make_config(seed):
+        kwargs = {"num_groups": 2}
+        if seed is not None:
+            kwargs["seed"] = seed
+        return GPTQConfig(bits=4, group_size=8, g2ptq=G2PTQConfig(**kwargs))
+
+    task_seeds = {"0": None, "2": None} if seeds is None else seeds
+    generator = torch.Generator(device="cpu").manual_seed(20261126)
+    block = nn.Sequential(
+        nn.Linear(16, 16, bias=False),
+        nn.GELU(),
+        nn.Linear(16, 8, bias=False),
+    ).to(device)
+    with torch.no_grad():
+        for linear in (block[0], block[2]):
+            linear.weight.copy_(
+                torch.randn(linear.weight.shape, generator=generator).to(device)
+            )
+    inputs = torch.randn(4, 8, 16, generator=generator).to(device)
+    with torch.no_grad():
+        targets = block(inputs)
+
+    tasks = {}
+    for name, module in (("0", block[0]), ("2", block[2])):
+        tasks[name] = G2PTQ(module, qcfg=make_config(task_seeds[name]))
+
+    processor = _processor(tasks["0"].qcfg)
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor.tasks.update(tasks)
+    processor._g2ptq_layer_state[0] = {
+        "layer": block,
+        "inputs": [[inputs]],
+        "targets": [[targets]],
+        "kwargs": [{}],
+        "attention_masks": [],
+        "position_ids": [],
+    }
+    processor._refresh_block(layer_index=0, names=list(tasks))
+    return {
+        name: {
+            "hessian": task.group_hessians.detach().clone(),
+            "gradient": task.weight_gradient.detach().clone(),
+        }
+        for name, task in tasks.items()
+    }
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda:0", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="Accelerator required"
+    )),
+])
+def test_g2ptq_refresh_is_independent_of_ambient_rng(device):
+    torch.manual_seed(11)
+    first = _refresh_block_statistics(device=device)
+    torch.manual_seed(22)
+    second = _refresh_block_statistics(device=device)
+
+    assert set(first) == set(second)
+    for name in first:
+        torch.testing.assert_close(
+            first[name]["hessian"], second[name]["hessian"], atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            first[name]["gradient"], second[name]["gradient"], atol=0, rtol=0
+        )
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda:0", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="Accelerator required"
+    )),
+])
+def test_g2ptq_seed_controls_the_fisher_draw(device):
+    torch.manual_seed(1)
+    first = _refresh_block_statistics(seeds={"0": 5, "2": 5}, device=device)
+    torch.manual_seed(2)
+    repeat = _refresh_block_statistics(seeds={"0": 5, "2": 5}, device=device)
+    other = _refresh_block_statistics(seeds={"0": 6, "2": 6}, device=device)
+
+    for name in first:
+        torch.testing.assert_close(
+            first[name]["hessian"], repeat[name]["hessian"], atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            first[name]["gradient"], repeat[name]["gradient"], atol=0, rtol=0
+        )
+    assert any(
+        not torch.equal(first[name]["hessian"], other[name]["hessian"])
+        for name in first
+    )
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda:0", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="Accelerator required"
+    )),
+])
+def test_g2ptq_refresh_honors_per_module_seeds(device):
+    torch.manual_seed(1)
+    both_five = _refresh_block_statistics(seeds={"0": 5, "2": 5}, device=device)
+    mixed = _refresh_block_statistics(seeds={"0": 5, "2": 6}, device=device)
+    both_six = _refresh_block_statistics(seeds={"0": 6, "2": 6}, device=device)
+
+    torch.testing.assert_close(
+        mixed["0"]["hessian"], both_five["0"]["hessian"], atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        mixed["2"]["hessian"], both_six["2"]["hessian"], atol=0, rtol=0
+    )
+    assert not torch.equal(
+        both_five["2"]["hessian"], both_six["2"]["hessian"]
+    )
 
 
 @pytest.mark.parametrize("blocksize", [3, 6, 8])
