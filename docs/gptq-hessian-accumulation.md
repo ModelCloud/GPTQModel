@@ -145,7 +145,9 @@ regression is `tests/test_descact_cap_sync_4950.py`; the quality contract stays
 activation (`:in=<tag>`). `GPTQProcessor` turned that plan into a leader/
 follower capture; `SharedInputCaptureMixin` gives QQQ, VPTQ, MACaQ and EXL3 the
 same election, and GPTAQ/FOEM now participate in `GPTQProcessor`'s election
-instead of being excluded.
+instead of being excluded. JointQ participates too, but in a cohort of its own:
+it adopts the leader's `H` only, never `dXXT`, and never shares a capture with a
+plain GPTQ task.
 
 ```mermaid
 flowchart TD
@@ -182,6 +184,7 @@ already deduplicated by `share_hessian_state_from`.
 | QQQ / VPTQ / MACaQ election | no plan; every sibling accumulated `H` | `SharedInputCaptureMixin.begin_shared_input_capture` (`gptqmodel/looper/shared_input.py:153`) |
 | EXL3 election | plain `GPTQ` capture per projection | same mixin over `tasks[name]["capture"]` |
 | GPTAQ / FOEM election | excluded by `type(task) is GPTQ` | `_hessian_capture_signature` (`gptqmodel/looper/gptq_processor.py:435`) admits them with `dXXT` |
+| JointQ election | n/a | own `("jointq", columns, accumulation settings)` signature (`gptqmodel/looper/gptq_processor.py:508`); shares `H` only, so a group mixing JointQ with plain GPTQ warns and captures independently |
 | QQQ GSQ | n/a | excluded: its moments, not `H`, drive quantization |
 | Follower capture | one `add_batch`/`addmm_` per sibling | hook is a no-op; leader copy is bitwise equal |
 

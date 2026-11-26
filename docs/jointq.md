@@ -152,7 +152,7 @@ match the same dequantized reference as with a positive scale.
 
 ## Flow
 
-The processor selects JointQ after GPTAQ, G²PTQ and FOEM, and before plain GPTQ:
+The processor selects JointQ after GPTAQ, G²PTQ, FOEM and ADMM-Q, and before plain GPTQ:
 
 ```mermaid
 flowchart TD
@@ -162,7 +162,9 @@ flowchart TD
     D -->|yes| E["G²PTQ"]
     D -->|no| F{"foem set?"}
     F -->|yes| G["FOEM"]
-    F -->|no| H{"jointq set?"}
+    F -->|no| K{"method == ADMMQ?"}
+    K -->|yes| L["ADMM-Q"]
+    K -->|no| H{"jointq set?"}
     H -->|yes| I["JointQ"]
     H -->|no| J["GPTQ"]
 ```
@@ -192,8 +194,8 @@ flowchart TD
 
 | Area | Before | After (JointQ enabled) |
 | --- | --- | --- |
-| Processor selection | `gptaq -> g2ptq -> foem -> gptq` | `gptaq -> g2ptq -> foem -> jointq -> gptq` |
-| Hessian capture cohort | GPTAQ, FOEM or GPTQ signature | Adds `("jointq", columns, accumulation settings)` |
+| Processor selection | `gptaq -> g2ptq -> foem -> admmq -> gptq` | `gptaq -> g2ptq -> foem -> admmq -> jointq -> gptq` |
+| Hessian capture cohort | GPTAQ, FOEM or GPTQ signature | Adds `("jointq", columns, accumulation settings)`; the cohort shares `H` only and never joins a plain GPTQ group |
 | Group scales | fixed from the pre-quantization range | re-solved jointly with the integers |
 | Integer assignment | one greedy column pass | warm start plus best-improvement `+-1` search |
 | Reported layer loss | diagonal approximation | exact row quadratic form on the raw Hessian |

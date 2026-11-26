@@ -58,10 +58,10 @@ from ..quantization.config import (
     FOEMConfig,
     GPTAQConfig,
     HessianConfig,
-    JointQConfig,
     QuantizeConfig,
     ResolvedModuleConfig,
     _normalize_g2ptq,
+    _normalize_jointq,
     apply_scalar_module_overrides,
     normalize_gsq_config,
     resolve_quant_format,
@@ -195,12 +195,7 @@ def clone_gptq_config_for_module(
             if qcfg_clone.g2ptq is not None and qcfg.g2ptq is None:
                 raise ValueError("QuantizeConfig: dynamic `g2ptq` requires run-level `g2ptq`.")
         if jointq_override is not None:
-            if isinstance(jointq_override, dict):
-                qcfg_clone.jointq = JointQConfig(**jointq_override)
-            elif isinstance(jointq_override, JointQConfig):
-                qcfg_clone.jointq = jointq_override
-            else:
-                raise ValueError("QuantizeConfig: dynamic `jointq` must be a JointQConfig or dict.")
+            qcfg_clone.jointq = _normalize_jointq(jointq_override)
 
         qcfg_clone.validate_g2ptq()
         qcfg_clone.validate_gsq()
@@ -493,7 +488,9 @@ class GPTQProcessor(LoopProcessor):
 
         GPTQ and ADMM-Q accumulate the same Hessian. GPTAQ and FOEM each
         require their own signature and the same native-delta mode within
-        the group because ``dXXT`` must be adopted together with ``H``. Every
+        the group because ``dXXT`` must be adopted together with ``H``. JointQ
+        gets its own signature because it keeps the finalized Hessian across
+        its warm start and refinement, and it adopts ``H`` only. Every
         signature includes the effective sink-row cap because it rescales
         the activations before both ``H`` and ``dXXT`` (#5855).
         """
@@ -519,9 +516,10 @@ class GPTQProcessor(LoopProcessor):
     ) -> Dict[str, str]:
         """Elects one Hessian capture leader per explicit shared-input group present in this subset.
 
-        GPTQ, ADMM-Q, GPTAQ and FOEM tasks share when their capture signatures
-        match. GPTAQ and FOEM also adopt ``dXXT``. Groups that are split across
-        subsets dedup only among the members captured in this pass.
+        GPTQ, ADMM-Q, GPTAQ, FOEM and JointQ tasks share when their capture
+        signatures match. GPTAQ and FOEM also adopt ``dXXT``; JointQ adopts
+        ``H`` only and never joins a plain GPTQ cohort. Groups that are split
+        across subsets dedup only among the members captured in this pass.
         """
 
         with self.lock:

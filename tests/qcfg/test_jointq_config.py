@@ -185,6 +185,39 @@ def test_jointq_dynamic_override_is_normalized_by_the_processor():
     assert clone.jointq.dtype == "float32"
 
 
+@pytest.mark.parametrize("value", [True, False])
+def test_jointq_dynamic_override_accepts_booleans(value):
+    from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
+
+    config = GPTQConfig(
+        bits=4,
+        group_size=128,
+        jointq=JointQConfig(),
+        dynamic={LAYER: {"jointq": value}},
+    )
+
+    clone = clone_gptq_config_for_module(config, LAYER)
+
+    if value:
+        assert isinstance(clone.jointq, JointQConfig)
+    else:
+        assert clone.jointq is None
+
+
+def test_jointq_dynamic_override_enables_one_module_only():
+    from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
+
+    config = GPTQConfig(
+        bits=4,
+        group_size=128,
+        dynamic={LAYER: {"jointq": True}},
+    )
+
+    assert config.jointq is None
+    assert isinstance(clone_gptq_config_for_module(config, LAYER).jointq, JointQConfig)
+    assert clone_gptq_config_for_module(config, "model.layers.0.mlp.down_proj").jointq is None
+
+
 def test_jointq_dynamic_override_is_revalidated():
     from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
 
