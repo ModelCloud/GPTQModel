@@ -54,7 +54,8 @@ prefix processed twice even when the retry succeeds.
   group size 4, nonzero gradient and correlated updates. Compare block sizes
   3, 6 and 8 with block size 1, which applies each update before the next
   column. Assert the group indices and zero points, scale agreement and exact
-  codes. A block ending inside a group exposes a refit reading a stale tail.
+  codes. Before the fix, block sizes 3 and 6 disagreed with the columnwise
+  scales, while the aligned block size 8 passed.
   [Fix](https://github.com/ModelCloud/GPTQModel/commit/d1e42b3401e6a37dc5a0f8ae736d28697fe1e08d) ·
   [columnwise control](../../../../tests/test_g2ptq_processor.py)
 - **ADMM-Q.** Make iteration two both eligible for early stop and able to

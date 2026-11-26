@@ -146,8 +146,8 @@ Follow [checkpoint serialization](../gptqmodel-checkpoint-serialization/SKILL.md
 
 ### Failure, cancellation, and retry after partial progress
 
-For a stateful sequence API, test the entire public call. Shorten and lengthen
-one aligned input at a time. Separately, start one token before a window flush,
+For a retryable prefill, test the entire public call. Shorten and lengthen
+one aligned input at a time. For windowed state, start one token before a flush,
 let the first token cross it, and fail a later token with valid input shapes.
 Compare the packed checkpoint, pending records and counters with their pre-call
 values, then retry the whole prompt against an uninterrupted reference.
@@ -333,7 +333,7 @@ processor actually packs it; a close replay tensor is not evidence.
   payload. For a scale that rounds to zero, include a genuinely zero row
   alongside a tiny nonzero row and inspect both scales and codes.
 - **Grid refresh order.** When a refit reads weights with deferred updates,
-  put a group boundary inside a processing block and compare grid parameters
+  split a quantization group across two processing blocks. Compare grid parameters
   and discrete codes with a one-column-at-a-time solve. When convergence and
   an accepted refresh can coincide, force that iteration and compare the
   continued solve with a control capped there. Measure reconstruction error
