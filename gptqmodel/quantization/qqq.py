@@ -21,7 +21,9 @@ from ..looper.named_module import NamedModule
 from ..quantization.config import FallbackStrategy, MSEConfig, SmoothMSE
 from ..quantization.quantizer import (
     HF_OPTIMUM,
+    FitLimits,
     _affine_scale,
+    _finite_code_bounds,
     _mse_shrink_grid,
     _neutralize_dead_columns,
 )
@@ -40,6 +42,7 @@ from .fallback_smooth import (
     symmetric_range_from_bounds,
 )
 from .gptq import (
+    _fused_code_bounds,
     _is_memory_allocation_failure,
     _move_static_groups,
     _propagate_block_error,
@@ -122,14 +125,22 @@ def _should_use_mlx_qqq_quantization(
     )
 
 
-def quantize(x, scale, zero, maxq, sym, groupsize):
+def quantize(x, scale, zero, maxq, sym, groupsize, *, code_lo=None, code_hi=None):
     if maxq < 0:
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
     if groupsize != -1 or not sym:
-        q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
+        q = torch.clamp(
+            torch.round(x / scale) + zero,
+            0 if code_lo is None else code_lo,
+            maxq if code_hi is None else code_hi,
+        )
         return scale * (q - zero)
     else:
-        q = torch.clamp(torch.round(x / scale), -maxq, maxq)
+        q = torch.clamp(
+            torch.round(x / scale),
+            -maxq if code_lo is None else code_lo,
+            maxq if code_hi is None else code_hi,
+        )
         return scale * q
 
 
@@ -143,6 +154,12 @@ class Quantizer(nn.Module):
         self._maxq_value = 0
         self.register_buffer("scale", torch.zeros(shape))
         self.register_buffer("zero", torch.zeros(shape))
+        # Inclusive code range whose affine reconstruction stays inside the
+        # source weight dtype's finite range. ``None`` means the grid's natural
+        # range. Non-persistent so the bounds follow ``scale``/``zero`` through
+        # device moves without becoming checkpoint state.
+        self.register_buffer("code_lo", None, persistent=False)
+        self.register_buffer("code_hi", None, persistent=False)
         # Host mirror of ``ready()``. ``find_params`` is the only writer of the
         # scale buffer, so callers in the quantization loop can avoid a
         # device-to-host reduction before every quantize call.
@@ -175,7 +192,16 @@ class Quantizer(nn.Module):
             self.maxq = torch.tensor(-1)
         self._maxq_value = int(self.maxq)
 
-    def find_params(self, x, weight=False):
+    def find_params(self, x, weight=False, *, value_limit=None):
+        """Fit the grid; ``value_limit`` bounds codes to a finite dtype range.
+
+        A symmetric INT4 group with ``scale = 2 * amax / 15`` reconstructs its
+        negative endpoint as ``-16 * amax / 15``. At ``amax = 61440`` that is
+        ``-65536``, outside FP16's finite range, so narrowing the replay weight
+        stores ``-inf`` even though every source value is finite. ``value_limit``
+        is the finite magnitude the reconstruction is narrowed to; the fitted
+        ``code_lo``/``code_hi`` exclude the codes that would leave it.
+        """
         dev = x.device
         if self.maxq.device != dev:
             self.maxq = self.maxq.to(dev)
@@ -272,12 +298,20 @@ class Quantizer(nn.Module):
                     guard_zero_scale=False,
                     scale=self.scale,
                     zero=self.zero,
+                    value_limit=value_limit,
                     grid_budget=(
                         self.qcfg.mse.grid_budget
                         if isinstance(getattr(self.qcfg, "mse", None), MSEConfig)
                         else None
                     ),
                 )
+        self.code_lo, self.code_hi = _finite_code_bounds(
+            self.scale,
+            self.zero,
+            self._maxq_value,
+            self.groupsize == -1 and self.sym,
+            value_limit,
+        )
         if not self.perchannel:
             if weight:
                 tmp = shape[0]
@@ -285,6 +319,9 @@ class Quantizer(nn.Module):
                 tmp = shape[1] if len(shape) != 3 else shape[2]
             self.scale = self.scale.repeat(tmp)
             self.zero = self.zero.repeat(tmp)
+            if self.code_lo is not None:
+                self.code_lo = self.code_lo.repeat(tmp)
+                self.code_hi = self.code_hi.repeat(tmp)
 
         self._params_ready = True
 
@@ -292,21 +329,40 @@ class Quantizer(nn.Module):
             shape = [-1] + [1] * (len(shape) - 1)
             self.scale = self.scale.reshape(shape)
             self.zero = self.zero.reshape(shape)
+            if self.code_lo is not None:
+                self.code_lo = self.code_lo.reshape(shape)
+                self.code_hi = self.code_hi.reshape(shape)
             return
         if len(shape) == 4:
             self.scale = self.scale.reshape((1, -1, 1, 1))
             self.zero = self.zero.reshape((1, -1, 1, 1))
+            if self.code_lo is not None:
+                self.code_lo = self.code_lo.reshape((1, -1, 1, 1))
+                self.code_hi = self.code_hi.reshape((1, -1, 1, 1))
         if len(shape) == 3:
             self.scale = self.scale.reshape((1, 1, -1))
             self.zero = self.zero.reshape((1, 1, -1))
+            if self.code_lo is not None:
+                self.code_lo = self.code_lo.reshape((1, 1, -1))
+                self.code_hi = self.code_hi.reshape((1, 1, -1))
         if len(shape) == 2:
             self.scale = self.scale.unsqueeze(0)
             self.zero = self.zero.unsqueeze(0)
+            if self.code_lo is not None:
+                self.code_lo = self.code_lo.unsqueeze(0)
+                self.code_hi = self.code_hi.unsqueeze(0)
 
     def quantize(self, x):
         if self.ready():
             return quantize(
-                x, self.scale, self.zero, self._maxq_value, self.sym, self.groupsize
+                x,
+                self.scale,
+                self.zero,
+                self._maxq_value,
+                self.sym,
+                self.groupsize,
+                code_lo=self.code_lo,
+                code_hi=self.code_hi,
             )
         return x
 
@@ -448,6 +504,10 @@ class QQQ:
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
         W = W.float()
+        # ``Q`` is narrowed back to the module's weight dtype below. The grid
+        # is fitted on this FP32 copy, so bound the codes it may select by the
+        # finite range of that destination dtype.
+        limits = FitLimits.for_module(self.layer)
 
         if self._tp_pad_cols:
             pad = torch.zeros(
@@ -473,13 +533,15 @@ class QQQ:
         scale_chunks = []
         zero_chunks = []
 
-        def _affine_quantize(block_mod, lo, hi):
+        def _affine_quantize(block_mod, lo, hi, value_limit):
             """Quantize one group against a range that includes zero.
 
             ``lo``/``hi`` are the strategy's desired endpoints. Extending them
             to include zero keeps the derived integer zero point inside
             ``[0, maxq]`` instead of clamping a positive-only group to zero and
-            shifting every value by roughly the group minimum.
+            shifting every value by roughly the group minimum. ``value_limit``
+            is the finite magnitude the reconstruction is narrowed to; it
+            excludes the endpoint codes whose reconstruction would overflow.
             """
 
             if self.qcfg.sym:
@@ -497,7 +559,14 @@ class QQQ:
                 zero = torch.full_like(scale, (maxq + 1) // 2)
             else:
                 zero = torch.clamp(torch.round(-lo / scale), 0, maxq)
-            q = torch.clamp(torch.round(block_mod / scale + zero), 0, maxq)
+            code_lo, code_hi = _finite_code_bounds(
+                scale, zero, maxq, False, value_limit
+            )
+            q = torch.clamp(
+                torch.round(block_mod / scale + zero),
+                0 if code_lo is None else code_lo,
+                maxq if code_hi is None else code_hi,
+            )
             return (q - zero) * scale, scale, zero
 
         for start in range(0, self.columns, group_size):
@@ -513,6 +582,7 @@ class QQQ:
                     steps=mse_steps,
                     maxshrink=mse_maxshrink,
                     weights=weights,
+                    value_limit=limits.max_abs_value,
                 )
             else:
                 block_mod, scale_factor = smooth_block(
@@ -520,23 +590,34 @@ class QQQ:
                     self.fallback,
                     group_size=self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns,
                 )
+                block_limits = FitLimits.for_module(
+                    self.layer, restore_factor=scale_factor
+                )
                 if strategy == FallbackStrategy.MIDPOINT:
                     w_min = block_mod.min(dim=1, keepdim=True).values
                     w_max = block_mod.max(dim=1, keepdim=True).values
-                    dequant, scale, zero = _affine_quantize(block_mod, w_min, w_max)
+                    dequant, scale, zero = _affine_quantize(
+                        block_mod, w_min, w_max, block_limits.max_abs_value
+                    )
                 elif strategy == FallbackStrategy.MEAN:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     max_dev = torch.max((block_mod - mean).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
                     dequant, scale, zero = _affine_quantize(
-                        block_mod, mean - max_dev, mean + max_dev
+                        block_mod,
+                        mean - max_dev,
+                        mean + max_dev,
+                        block_limits.max_abs_value,
                     )
                 elif strategy == FallbackStrategy.MEDIAN:
                     median = block_mod.median(dim=1, keepdim=True).values
                     max_dev = torch.max((block_mod - median).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
                     dequant, scale, zero = _affine_quantize(
-                        block_mod, median - max_dev, median + max_dev
+                        block_mod,
+                        median - max_dev,
+                        median + max_dev,
+                        block_limits.max_abs_value,
                     )
                 elif strategy == FallbackStrategy.STDCLIP:
                     mean = block_mod.mean(dim=1, keepdim=True)
@@ -544,9 +625,15 @@ class QQQ:
                     std = torch.clamp(std, min=1e-8)
                     lo = mean - sigma * std
                     hi = mean + sigma * std
-                    dequant, scale, zero = _affine_quantize(block_mod, lo, hi)
+                    dequant, scale, zero = _affine_quantize(
+                        block_mod, lo, hi, block_limits.max_abs_value
+                    )
                 elif strategy == FallbackStrategy.RTN:
-                    self.quantizer.find_params(block_mod, weight=True)
+                    self.quantizer.find_params(
+                        block_mod,
+                        weight=True,
+                        value_limit=block_limits.max_abs_value,
+                    )
                     dequant = self.quantizer.quantize(block_mod)
                     scale = self.quantizer.scale
                     zero = self.quantizer.zero
@@ -959,6 +1046,10 @@ class QQQ:
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
         W = W.float()
+        # ``Q`` is narrowed back to the module's weight dtype, so every weight
+        # fit below must exclude codes whose reconstruction leaves that dtype's
+        # finite range. FP32 weights keep the unconstrained grid.
+        value_limit = FitLimits.for_module(self.layer).max_abs_value
 
         if self._tp_pad_cols:
             pad = torch.zeros(
@@ -982,7 +1073,7 @@ class QQQ:
         # not set the per-channel scale that every live column is quantized
         # with (#5611).
         if not self.quantizer.ready():
-            self.quantizer.find_params(W, weight=True)
+            self.quantizer.find_params(W, weight=True, value_limit=value_limit)
 
         g_idx = []
         scale = []
@@ -994,7 +1085,11 @@ class QQQ:
             groups = []
             for i in range(0, self.columns, groupsize):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i: (i + groupsize)], weight=True)
+                quantizer.find_params(
+                    W[:, i: (i + groupsize)],
+                    weight=True,
+                    value_limit=value_limit,
+                )
                 scale.append(quantizer.scale)
                 zero.append(quantizer.zero)
                 groups.append(quantizer)
@@ -1061,7 +1156,7 @@ class QQQ:
                 # CUDA index tensor (issue #4538).
                 perm = perm.to(device=cpu_device)
                 invperm = invperm.to(device=cpu_device)
-            self.quantizer.find_params(W, weight=True)
+            self.quantizer.find_params(W, weight=True, value_limit=value_limit)
             if static_groups:
                 scale, zero = _move_static_groups(groups, cpu_device)
             Hinv, used_damp = _recover_factor(H)
@@ -1161,6 +1256,8 @@ class QQQ:
                     uniform_group = i1 // groupsize == (i2 - 1) // groupsize and (
                         not static_groups or not actorder
                     )
+                    block_code_lo = None
+                    block_code_hi = None
                     if uniform_group:
                         # Every column of this block resolves to the same
                         # quantizer group, so the per-column bookkeeping
@@ -1168,7 +1265,9 @@ class QQQ:
                         if not static_groups:
                             if i1 % groupsize == 0:
                                 self.quantizer.find_params(
-                                    W[:, i1: i1 + groupsize], weight=True
+                                    W[:, i1: i1 + groupsize],
+                                    weight=True,
+                                    value_limit=value_limit,
                                 )
 
                             if (i1 // groupsize) - now_idx == -1:
@@ -1180,10 +1279,18 @@ class QQQ:
 
                         block_scale = self.quantizer.scale.flatten().unsqueeze(0)
                         block_zero = self.quantizer.zero.flatten().unsqueeze(0)
+                        block_code_lo, block_code_hi = _fused_code_bounds(
+                            self.quantizer, W.device
+                        )
+                        if block_code_lo is not None:
+                            block_code_lo = block_code_lo.unsqueeze(0)
+                            block_code_hi = block_code_hi.unsqueeze(0)
                         column_group = _uniform_column_group(count, W.device)
                     else:
                         block_scales = []
                         block_zeros = []
+                        block_code_los = []
+                        block_code_his = []
                         column_groups = []
                         parameter_indices = {}
                         for i in range(count):
@@ -1191,7 +1298,9 @@ class QQQ:
                             if not static_groups:
                                 if column % groupsize == 0:
                                     self.quantizer.find_params(
-                                        W[:, column: column + groupsize], weight=True
+                                        W[:, column: column + groupsize],
+                                        weight=True,
+                                        value_limit=value_limit,
                                     )
 
                                 if (column // groupsize) - now_idx == -1:
@@ -1211,23 +1320,38 @@ class QQQ:
                                 parameter_indices[key] = group_index
                                 block_scales.append(self.quantizer.scale.flatten())
                                 block_zeros.append(self.quantizer.zero.flatten())
+                                bound_lo, bound_hi = _fused_code_bounds(
+                                    self.quantizer, W.device
+                                )
+                                block_code_los.append(bound_lo)
+                                block_code_his.append(bound_hi)
                             column_groups.append(group_index)
 
                         block_scale = torch.stack(block_scales)
                         block_zero = torch.stack(block_zeros)
+                        # One module has one weight dtype, so every group either
+                        # has a code bound or none does. Refuse a mix instead of
+                        # silently dropping the bound.
+                        bounded = [value is not None for value in block_code_los]
+                        if any(bounded):
+                            if not all(bounded):
+                                raise RuntimeError(
+                                    "QQQ fused block update mixed bounded and "
+                                    "unbounded code ranges"
+                                )
+                            block_code_lo = torch.stack(block_code_los)
+                            block_code_hi = torch.stack(block_code_his)
                         column_group = torch.tensor(
                             column_groups, device=W.device, dtype=torch.int32
                         )
-                    # QQQ's own quantizer has no code-bound state; keep the
-                    # natural ``[0, maxq]`` grid bitwise unchanged.
                     fused_block_update(
                         W1,
                         Hinv1,
                         block_scale,
                         block_zero,
                         column_group,
-                        None,
-                        None,
+                        block_code_lo,
+                        block_code_hi,
                         Q1,
                         Err1,
                         Losses1,
@@ -1242,7 +1366,9 @@ class QQQ:
                             if not static_groups:
                                 if (i1 + i) % groupsize == 0:
                                     self.quantizer.find_params(
-                                        W[:, (i1 + i): (i1 + i + groupsize)], weight=True
+                                        W[:, (i1 + i): (i1 + i + groupsize)],
+                                        weight=True,
+                                        value_limit=value_limit,
                                     )
 
                                 if ((i1 + i) // groupsize) - now_idx == -1:
@@ -1262,6 +1388,8 @@ class QQQ:
                             self.quantizer._maxq_value,
                             self.quantizer.sym,
                             self.quantizer.groupsize,
+                            code_lo=self.quantizer.code_lo,
+                            code_hi=self.quantizer.code_hi,
                         ).flatten()
                         Q1[:, i] = q
                         Losses1[:, i] = (w - q) ** 2 / d ** 2
