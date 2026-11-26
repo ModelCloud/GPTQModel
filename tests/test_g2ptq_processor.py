@@ -20,6 +20,7 @@ from gptqmodel.quantization.config import (
     GPTAQConfig,
     GPTQConfig,
     QuantizeConfig,
+    QuantizeEmbed,
 )
 from gptqmodel.quantization.g2ptq import G2PTQ, g2ptq_compensate
 from gptqmodel.quantization.gptq import GPTQ
@@ -577,6 +578,69 @@ def test_g2ptq_quantizes_the_output_head_with_the_kl_objective():
 
     # The head is a hooked ``HookedLinear`` root, and its replay must build the
     # KL/cross-entropy pair instead of falling back to GPTQ.
+    assert any("lm_head" in name for name in solver_names), solver_names
+
+    qm.model.to("cuda:0")
+    with torch.inference_mode():
+        logits = qm.model(
+            input_ids=torch.tensor([rows[0]["input_ids"]], device="cuda:0"),
+            use_cache=False,
+        ).logits
+    assert logits.shape == (1, 16, 256)
+    assert torch.isfinite(logits.float()).all()
+
+
+def test_g2ptq_requantizes_both_embedding_endpoints(tmp_path):
+    """Requantize the token-id input embedding and the linear output head.
+
+    The grouped pristine replay used to forward the embedding endpoint with
+    the decoder kwargs (``position_ids``), which ``AutoNF12Embedding`` rejects.
+    The input embedding consumes token ids and has no float activation, so
+    G2PTQ leaves it to GPTQ; the linear output head still uses the KL refresh.
+    """
+
+    if not torch.cuda.is_available():
+        pytest.skip("G2PTQ end-to-end requires a CUDA device")
+
+    from gptqmodel import BACKEND as RUNTIME_BACKEND
+    from gptqmodel import CalibrationConfig, GPTQModel
+    from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
+    source = tmp_path / "source"
+    source.mkdir()
+    rows = _tiny_llama_fixture(str(source))
+
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=16,
+        device="cuda:0",
+        g2ptq=G2PTQConfig(num_groups=2, alpha_mse=0.05, alpha_kl=0.1),
+    )
+    qm = GPTQModel.load(str(source), qcfg, dtype=torch.bfloat16)
+    calibration = CalibrationConfig(dataset=rows, batch_size=1, min_length=1)
+    qm.quantize(calibration, backend=RUNTIME_BACKEND.GPTQ_TORCH)
+
+    solver_names = []
+    original = G2PTQ._g2ptq_quantize
+
+    def counting(self, blocksize=128):
+        solver_names.append(getattr(self, "name", ""))
+        return original(self, blocksize=blocksize)
+
+    G2PTQ._g2ptq_quantize = counting
+    try:
+        qm.requantize(
+            calibration,
+            embed_quant_mode=QuantizeEmbed.BOTH,
+            backend=RUNTIME_BACKEND.GPTQ_TORCH,
+        )
+    finally:
+        G2PTQ._g2ptq_quantize = original
+
+    assert isinstance(qm.get_input_embeddings(), BaseQuantLinear)
+    assert isinstance(qm.get_output_embeddings(), BaseQuantLinear)
+    # The output head is a float block and keeps the G2PTQ KL refresh; the
+    # input embedding consumes token ids and falls back to GPTQ.
     assert any("lm_head" in name for name in solver_names), solver_names
 
     qm.model.to("cuda:0")

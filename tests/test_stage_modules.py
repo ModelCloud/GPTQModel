@@ -3377,6 +3377,113 @@ def test_capture_pristine_group_context_preserves_untouched_layer_io(monkeypatch
     assert observed["receive_kwargs"]["subset_total"] == 1
 
 
+def test_capture_pristine_group_context_skips_token_embedding_tables(monkeypatch):
+    """A token-id lookup has no float block, so grouped capture must not replay it."""
+
+    replay_calls = []
+    monkeypatch.setattr(
+        "gptqmodel.looper.stage_layer._replay_layer_outputs",
+        lambda *args, **kwargs: replay_calls.append(kwargs) or [],
+    )
+
+    class DummyProcessor:
+        def uses_grouped_optimization(self):
+            return True
+
+        def receive_layer_forward_context(self, **kwargs):
+            raise AssertionError("token-id embeddings must not install grouped targets")
+
+    _capture_pristine_group_context(
+        looper=types.SimpleNamespace(),
+        processor=DummyProcessor(),
+        module=torch.nn.Embedding(8, 4),
+        pristine_module=None,
+        subset_plans=[object()],
+        layer_inputs=[[torch.tensor([[1, 2]])]],
+        layer_input_kwargs=[{}],
+        position_ids=[torch.tensor([[0, 1]])],
+        attention_masks=[None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        is_embeddings_module=True,
+        is_input_embeddings_module=True,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        layer_descriptor="model.embed_tokens",
+        full={},
+        log=None,
+        region_timer=None,
+    )
+
+    assert replay_calls == []
+
+
+def test_capture_pristine_group_context_replays_output_head_without_decoder_kwargs(
+    monkeypatch,
+):
+    """The linear output head keeps the clean replay but never sees decoder kwargs."""
+
+    observed = {}
+
+    def fake_replay_layer_outputs(*_args, **kwargs):
+        observed["replay_kwargs"] = kwargs
+        return [[torch.zeros(1, 1, 2)]]
+
+    monkeypatch.setattr(
+        "gptqmodel.looper.stage_layer._replay_layer_outputs",
+        fake_replay_layer_outputs,
+    )
+
+    class DummyProcessor:
+        def uses_grouped_optimization(self):
+            return True
+
+        def clean_group_layer_inputs(self, *, layer_index, layer_inputs):
+            del layer_index, layer_inputs
+            return [[torch.full((1, 1, 2), 3.0)]]
+
+        def receive_clean_layer_inputs(self, **kwargs):
+            observed["clean_kwargs"] = kwargs
+
+        def receive_layer_forward_context(self, **kwargs):
+            observed["receive_kwargs"] = kwargs
+
+    def prepare_head_inputs(batches):
+        return [[batch[0] * 2 + 1] for batch in batches]
+
+    _capture_pristine_group_context(
+        looper=types.SimpleNamespace(
+            gptq_model=types.SimpleNamespace(
+                lm_head_pre_quantize_generate_hook=prepare_head_inputs
+            )
+        ),
+        processor=DummyProcessor(),
+        module=torch.nn.Linear(2, 2),
+        pristine_module=None,
+        subset_plans=[object()],
+        layer_inputs=[[torch.zeros(1, 1, 2)]],
+        layer_input_kwargs=[{}],
+        position_ids=[torch.tensor([[0]])],
+        attention_masks=[None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        is_embeddings_module=True,
+        is_input_embeddings_module=False,
+        shared_kv_cache_dict={},
+        layer_index=1,
+        layer_descriptor="lm_head",
+        full={},
+        log=None,
+        region_timer=None,
+    )
+
+    replay_kwargs = observed["replay_kwargs"]
+    assert replay_kwargs["is_lm_head_module"] is True
+    torch.testing.assert_close(
+        replay_kwargs["layer_inputs"][0][0], torch.full((1, 1, 2), 7.0)
+    )
+
+
 def test_run_layer_stage_catches_up_packed_layer_with_original_forward_topology(
     monkeypatch,
 ):
