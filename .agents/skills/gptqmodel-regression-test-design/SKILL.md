@@ -22,8 +22,8 @@ cases below and record the evidence in the PR. For landed fixes and the tests
 to extend, see the audits from [Nov 17](references/2026-11-17-regressions.md),
 [Nov 18](references/2026-11-18-regressions.md), [Nov 19](references/2026-11-19-regressions.md),
 [Nov 20](references/2026-11-20-regressions.md), [Nov 21](references/2026-11-21-regressions.md),
-[Nov 23](references/2026-11-23-regressions.md), [Nov 24](references/2026-11-24-regressions.md)
-and [Nov 25](references/2026-11-25-regressions.md).
+[Nov 23](references/2026-11-23-regressions.md), [Nov 24](references/2026-11-24-regressions.md),
+[Nov 25](references/2026-11-25-regressions.md) and [Nov 26](references/2026-11-26-regressions.md).
 
 ## 1. Write the invariant before the patch
 
@@ -134,12 +134,23 @@ the existing buffers reject an in-place copy.
   single-file ↔ sharded layout. Compare what a normal reader loads with a
   clean export. Assert obsolete *owned* files disappear, an unrelated file
   survives, and an unchanged compatible export still reuses its shards.
+- For export to another runtime, vary a source-valid option whose meaning
+  differs between target architectures. Check the accepted artifact with the
+  target loader and a forward. For an unrepresentable option, assert that
+  the public exporter identifies it and preserves the destination. A header
+  check against the writer's own tensor plan can pass with a wrong plan.
 
 Follow [checkpoint serialization](../gptqmodel-checkpoint-serialization/SKILL.md),
 [model plans](../gptqmodel-model-plan-tests/SKILL.md), and
 [lazy loading](../gptqmodel-lazy-load-smoke-testing/SKILL.md) as applicable.
 
 ### Failure, cancellation, and retry after partial progress
+
+For a stateful sequence API, test the entire public call. Shorten and lengthen
+one aligned input at a time. Separately, start one token before a window flush,
+let the first token cross it, and fail a later token with valid input shapes.
+Compare the packed checkpoint, pending records and counters with their pre-call
+values, then retry the whole prompt against an uninterrupted reference.
 
 Inject failures before mutation, **after a completed mutating block**, and at
 publication/cleanup boundaries relevant to the change. Assert the injection
@@ -321,6 +332,12 @@ processor actually packs it; a close replay tensor is not evidence.
   requires rejection, test the first invalid stored field and the last valid
   payload. For a scale that rounds to zero, include a genuinely zero row
   alongside a tiny nonzero row and inspect both scales and codes.
+- **Grid refresh order.** When a refit reads weights with deferred updates,
+  put a group boundary inside a processing block and compare grid parameters
+  and discrete codes with a one-column-at-a-time solve. When convergence and
+  an accepted refresh can coincide, force that iteration and compare the
+  continued solve with a control capped there. Measure reconstruction error
+  independently on both results.
 - **Packed field coverage.** Inventory the fields the decoder reads for each
   supported layout. Derive byte and bit positions from the wire format.
   Corrupt one field in the second of two blocks and assert the field and block
