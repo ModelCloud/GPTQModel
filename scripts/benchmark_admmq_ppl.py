@@ -40,6 +40,7 @@ from gptqmodel.quantization.config import (
     FORMAT,
     METHOD,
     ADMMQConfig,
+    MSEConfig,
     QuantizeConfig,
     RTNConfig,
 )
@@ -95,6 +96,8 @@ def _build_config(name: str, args: argparse.Namespace):
         overrides = {}
         if name != "admmq":
             overrides["max_iter"] = int(name.removeprefix("admmq-"))
+        if args.mse_norm is not None:
+            overrides["mse"] = MSEConfig(norm=args.mse_norm)
         return ADMMQConfig(**common, offload_to_disk=False, **overrides)
     raise ValueError(f"Unsupported config: {name}")
 
@@ -157,6 +160,12 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--backend", choices=tuple(BACKENDS), default="auto")
     parser.add_argument("--bits", type=int, default=4)
+    parser.add_argument(
+        "--mse-norm",
+        type=float,
+        default=None,
+        help="Override ADMM-Q's MSE shrink-grid exponent; 0 disables the search",
+    )
     parser.add_argument("--group-size", type=int, default=128)
     parser.add_argument("--calibration-rows", type=int, default=128)
     parser.add_argument("--calibration-seq-len", type=int, default=512)

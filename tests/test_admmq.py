@@ -147,6 +147,70 @@ def test_admmq_config_defaults():
     assert cfg.act_group_aware is False
 
 
+@pytest.mark.parametrize(
+    ("bits", "expected"),
+    [(2, 2.0), (3, 2.0), (4, 0.0), (5, 0.0), (6, 0.0), (7, 0.0), (8, 0.0)],
+)
+def test_admmq_mse_default_follows_bit_width(bits, expected):
+    cfg = ADMMQConfig(bits=bits)
+    assert cfg.mse.norm == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("value", [0, 0.0, {"norm": 0.0}, MSEConfig(), MSEConfig(norm=0.0)])
+def test_admmq_explicit_mse_disable_wins_at_low_bits(value):
+    assert ADMMQConfig(bits=3, mse=value).mse.norm == pytest.approx(0.0)
+
+
+def test_admmq_explicit_mse_enable_wins_at_four_bits():
+    assert ADMMQConfig(bits=4, mse=MSEConfig(norm=1.5)).mse.norm == pytest.approx(1.5)
+    assert ADMMQConfig(bits=4, mse=2.0).mse.norm == pytest.approx(2.0)
+
+
+def test_admmq_bit_adaptive_mse_survives_factory_and_roundtrip():
+    factory = QuantizeConfig(method="admmq", bits=3, group_size=128)
+    assert isinstance(factory, ADMMQConfig)
+    assert factory.mse.norm == pytest.approx(2.0)
+
+    payload = ADMMQConfig(bits=3, group_size=128).to_dict()
+    assert payload["meta"]["mse"]["norm"] == pytest.approx(2.0)
+    restored = QuantizeConfig(**payload)
+    assert isinstance(restored, ADMMQConfig)
+    assert restored.mse.norm == pytest.approx(2.0)
+
+    off_payload = ADMMQConfig(bits=3, group_size=128, mse=0.0).to_dict()
+    assert off_payload["meta"]["mse"]["norm"] == pytest.approx(0.0)
+    restored_off = QuantizeConfig(**off_payload)
+    assert restored_off.mse.norm == pytest.approx(0.0)
+
+
+def test_admmq_three_bit_default_uses_the_mse_grid():
+    torch.manual_seed(0)
+    weight = torch.randn(OUT_FEATURES, IN_FEATURES) * 0.2
+    x = _calibration()
+
+    def solve(mse):
+        layer = _make_layer(weight)
+        cfg = ADMMQConfig(
+            bits=3,
+            group_size=-1,
+            sym=True,
+            max_iter=40,
+            pairswap_mode="off",
+            offload_to_disk=False,
+            mse=mse,
+        )
+        _, result = _run_solver(ADMMQ, layer, cfg, x)
+        return result
+
+    default = solve(None)
+    disabled = solve(0.0)
+    enabled = solve(MSEConfig(norm=2.0))
+
+    assert torch.equal(default[0], enabled[0])
+    assert torch.equal(default[1], enabled[1])
+    assert not torch.equal(default[0], disabled[0])
+
+
 def test_admmq_config_roundtrip_keeps_method_and_export_split():
     cfg = ADMMQConfig(
         bits=3,
@@ -458,6 +522,9 @@ def _small_config(**overrides):
         "max_iter": 40,
         "switch_iter": 10,
         "pairswap_mode": "off",
+        # Solver-mechanics fixtures are tuned without the shrink grid; the
+        # bit-adaptive default is covered separately.
+        "mse": 0.0,
     }
     base.update(overrides)
     return ADMMQConfig(**base)

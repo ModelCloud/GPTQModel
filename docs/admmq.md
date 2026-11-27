@@ -29,7 +29,9 @@ H = X^T X + damp_percent * mean(diag(X^T X)) * I
 ```
 
 `H` is the layer Hessian up to a constant. The grid is fitted per group with the
-same scale and zero-point search GPTQ uses, including the MSE shrink search.
+same scale and zero-point search GPTQ uses, including the MSE shrink search
+when it is enabled. The search is on by default for 2-3 bit models and off for
+4-8 bit models; an explicit `mse` setting overrides that.
 
 ## Algorithm
 
@@ -228,7 +230,7 @@ model.save("qwen-admmq-4bit")
 | `pairswap_batch` | `64` | Batches per round. |
 | `pairswap_seed` | `0` | Pair sampling seed. |
 | `pairswap_condition_threshold` | `5e4` | Condition number above which `"auto"` runs PairSwap. |
-| `mse` | `0` (off) | MSE shrink-grid clipping search. The paper enables GPTQ's search; measured WikiText-2 perplexity is better with it off, so it is opt-in (`MSEConfig(norm=2.0)`). |
+| `mse` | `None` (bit-adaptive) | MSE shrink-grid clipping search. `None` enables `MSEConfig(norm=2.0)` at 2-3 bits and disables it at 4-8 bits. The 4-bit WikiText-2 rows below were measured with the search off. At 3 bits the search is a model-dependent trade-off: it lowers SmolLM2-135M but raises Qwen2.5-0.5B-Instruct (see the low-bit table below). Set `0` or `MSEConfig(norm=0)` to force it off, or `MSEConfig(norm=2.0)` to force it on. The automatic choice follows the run-level `bits`; a `dynamic` rule that changes `bits` should set `mse` explicitly. |
 
 `ADMMQConfig` rejects `activation`, `gptaq`, and `foem` configs. It also
 rejects enabled `mock_quantization`, `g2ptq`, `gsq`, `gsq_training`,
@@ -257,11 +259,33 @@ Quantization cost on the same runs: GPTQ takes 15 s and 0.59 GiB peak on
 Qwen2.5-0.5B-Instruct, while ADMM-Q takes 81 s and 1.50 GiB. The extra time is
 the ADMM iterations; the extra memory is the float64 factor.
 
+### Low-bit MSE default
+
+The 4-bit table above was measured with the MSE search off. At 3 bits the search
+is not uniformly better. With the same 24 x 2048 calibration and 32768-token
+evaluation:
+
+| Model (3-bit) | MSE off | MSE `norm=2.0` | Change |
+| --- | ---: | ---: | ---: |
+| SmolLM2-135M | 29.140 | **24.887** | -14.6% |
+| Qwen2.5-0.5B-Instruct | **20.826** | 22.460 | +7.8% |
+
+The bit-adaptive default follows the paper and the SmolLM2-135M result. A model
+that regresses can restore the previous behavior with `mse=0` or
+`MSEConfig(norm=0)`.
+
 Reproduce with:
 
 ```bash
 python scripts/benchmark_admmq_ppl.py --model Qwen/Qwen2.5-0.5B-Instruct \
     --configs dense,rtn,gptq,admmq-60,admmq \
+    --calibration-rows 24 --calibration-seq-len 2048 \
+    --eval-rows 16 --eval-seq-len 2048
+
+# 3-bit MSE comparison; repeat with `--mse-norm 0` for the off row and with
+# `--model HuggingFaceTB/SmolLM2-135M` for the smaller model.
+python scripts/benchmark_admmq_ppl.py --model Qwen/Qwen2.5-0.5B-Instruct \
+    --bits 3 --configs admmq --mse-norm 2 \
     --calibration-rows 24 --calibration-seq-len 2048 \
     --eval-rows 16 --eval-seq-len 2048
 ```
