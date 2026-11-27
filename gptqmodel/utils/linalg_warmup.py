@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import threading
+import time
 from typing import TYPE_CHECKING, Dict, Optional, Set, Tuple, Union
 
 import torch
@@ -33,6 +35,9 @@ _LINEAR_PREWARM_DEVICE_TYPES = ("cuda", "xpu", "npu")
 # A prewarm is a one-time library init that takes seconds; the bound only exists
 # so that a wedged init can never stall the caller indefinitely.
 _LINEAR_PREWARM_JOIN_TIMEOUT = 120.0
+# Interpreter shutdown must not wait on a wedged accelerator init either. This
+# is a total bound across every in-flight prewarm thread.
+_PREWARM_EXIT_JOIN_TIMEOUT = 30.0
 
 # Prewarm payloads.  Each name keys its own one-per-process registry, so the
 # payloads dedupe independently while sharing the join machinery.
@@ -413,6 +418,46 @@ def _kick_prewarm(
             return None
 
     return thread
+
+
+def _join_prewarm_threads(timeout: Optional[float] = None) -> None:
+    """
+    Join in-flight prewarm threads before the interpreter tears the runtime down.
+
+    The workers are daemons because a prewarm is best-effort and must never
+    keep a caller alive. That leaves them running while CPython finalizes,
+    though, and a daemon thread inside the accelerator runtime at that point
+    can abort the process (``terminate called without an active exception``,
+    SIGABRT) instead of returning the caller's status. Joining here runs before
+    interpreter finalization, so the worker can finish normally.
+
+    Best-effort by construction: dead, unstarted and already-joined threads are
+    skipped, and a wedged prewarm is abandoned after a bounded total timeout so
+    process exit cannot hang.
+    """
+    if timeout is None:
+        timeout = _PREWARM_EXIT_JOIN_TIMEOUT
+
+    deadline = time.monotonic() + timeout
+    current = threading.current_thread()
+    with _LINEAR_PREWARM_LOCK:
+        threads = [thread for thread in _LINEAR_PREWARM_THREADS.values() if thread is not current]
+
+    for thread in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            # A thread is registered before `start()`; if that call failed the
+            # entry is removed, but a concurrent snapshot can still observe a
+            # thread that was never started, and joining one raises.
+            if thread.ident is not None and thread.is_alive():
+                thread.join(remaining)
+        except Exception as exc:
+            log.debug(f"prewarm exit join skipped for {thread.name}: {exc}")
+
+
+atexit.register(_join_prewarm_threads)
 
 
 def kick_torch_linear_prewarm(
