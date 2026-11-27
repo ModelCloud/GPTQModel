@@ -55,6 +55,10 @@ its own Hessian for damping and activation ordering.
    - Update the scaled dual: `V <- V + rho (B' - D)`.
    - Grow the penalty: `rho_t = rho * rho_update^(t // update_iter)`, capped at
      `1e6`.
+   - On an ill-conditioned layer, replace the configured penalty with the
+     paper's adaptive schedule before the first iteration: `rho = 0.05` above
+     a preconditioned condition number of `5e4` (`0.01` above `3e5`) and
+     `rho_update = 1.05`.
    - Stop after `switch_iter` iterations once the relative change of `D` falls
      below `early_stop_tol`. Measure the change after any accepted grid refresh.
 5. When `D` stagnates over `stagnation_window` iterations, refit the grids on
@@ -77,6 +81,10 @@ With `pairswap_mode="auto"`, the condition number uses the full preconditioned
 spectrum. A zero eigenvalue gives an infinite condition number and enables
 PairSwap; a positive eigenvalue is used without a floor. This also covers
 rank-deficient calibration when a small damping increment rounds away.
+
+The adaptive penalty schedule is enabled by default and applies independently
+of `pairswap_mode`. Set `adaptive_penalty=False` to keep the configured
+`rho`/`rho_update` schedule on every layer, for example for an ablation.
 
 The solve factorizes the preconditioned Hessian with a float64
 `torch.linalg.eigh`. CPU and CUDA/HIP provide that op; device families that do
@@ -177,6 +185,27 @@ initialization and as its "did not improve" result.
 | Non-finite reconstruction loss | after the solve | keep the RTN projection |
 | The RTN projection is also non-finite | after the RTN fallback | raise; do not publish a corrupt checkpoint |
 
+### Penalty schedule selection
+
+Before this change the solver always used the configured `rho`/`rho_update`.
+The adaptive schedule now replaces that choice per layer before the first
+iteration:
+
+```mermaid
+flowchart TD
+    A["Preconditioned condition number"] --> B{"> 3e5?"}
+    B -->|yes| C["rho = 0.01, rho_update = 1.05"]
+    B -->|no| D{"> 5e4?"}
+    D -->|yes| E["rho = 0.05, rho_update = 1.05"]
+    D -->|no| F["configured rho / rho_update"]
+    C --> G["ADMM iterations"]
+    E --> G
+    F --> G
+```
+
+`adaptive_penalty=False` bypasses the two override branches and keeps the
+configured schedule on every layer.
+
 | Situation | Before (GPTQ family) | After (ADMM-Q) |
 | --- | --- | --- |
 | Method dispatch | `METHOD.GPTQ` only | `METHOD.ADMMQ` joins the run-plan and calibrated-method sets, and reuses `ProcessorStep.GPTQ` |
@@ -184,6 +213,7 @@ initialization and as its "did not improve" result.
 | Weight update | One forward column sweep, decisions final | Many ADMM iterations over the whole matrix, decisions revisable |
 | Grid fitting | Per group, before the sweep | Per group, plus at most one guarded refit per layer |
 | Local refinement | None | PairSwap over adjacent grid cells |
+| Penalty schedule | Configured `rho`/`rho_update` on every layer | Ill-conditioned layers use the paper's smaller penalty and slower growth; `adaptive_penalty=False` keeps the configured schedule |
 | Hessian factorization failure | GPTQ retries its damp grid, then uses RTN | ADMM-Q keeps the RTN projection for that layer |
 | Non-finite ADMM iterate or reconstruction loss | Not applicable (GPTQ has no ADMM iterate) | ADMM-Q stops the solve and keeps the RTN projection for that layer |
 | Failure exit | GPTQ RTN fallback for low sample counts | GPTQ RTN fallback for low sample counts, plus RTN when the ADMM objective is non-finite or worse |
@@ -225,6 +255,7 @@ model.save("qwen-admmq-4bit")
 | `max_iter` | `300` | Maximum ADMM iterations. |
 | `rho` | `0.1` | Initial penalty. |
 | `rho_update` | `1.1` | Multiplicative penalty growth, greater than 1. |
+| `adaptive_penalty` | `True` | Use the paper's smaller penalty and slower growth on ill-conditioned layers. |
 | `update_iter` | `3` | Iterations between penalty updates. |
 | `switch_iter` | `30` | Earliest iteration that may trigger the early exit. |
 | `early_stop_tol` | `1e-6` | Relative `D` change that triggers the early exit. |
@@ -263,6 +294,35 @@ Against GPTQ, the default solver is 1.0% lower on Qwen2.5-0.5B-Instruct and
 model, where it lands 0.5% above GPTQ, but it already beats GPTQ by 11.3% on the
 smaller one, so the default budget matters most for the wider model.
 
+### Adaptive penalty ablation
+
+The 4-bit table above was measured with the MSE search off. The rows below
+isolate the schedule on the current solver with the same 24 x 2048 calibration
+and 32768-token evaluation windows.
+
+SmolLM2-135M, `group_size=128`, symmetric, weight-only:
+
+| Bits | MSE search | `adaptive_penalty=False` | `adaptive_penalty=True` | Change |
+| ---: | --- | ---: | ---: | ---: |
+| 3 | off | 29.140 | **27.982** | -4.0% |
+| 3 | on (3-bit default) | **24.887** | 25.359 | +1.9% |
+| 4 | off (4-bit default) | 16.666 | **16.636** | -0.2% |
+
+Qwen2.5-0.5B-Instruct, 3-bit, MSE search on:
+
+| `adaptive_penalty=False` | `adaptive_penalty=True` | Change |
+| ---: | ---: | ---: |
+| **22.460** | 23.042 | +2.6% |
+
+The schedule is not uniformly better on this fixture. It helps when the grid is
+fitted without the MSE search and hurts at 3 bits once the MSE search is on, on
+both models. Quantization time grows slightly (3-bit 77.3 s -> 80.5 s, 4-bit
+72.5 s -> 75.2 s) and peak device memory stays at 0.22-0.24 GiB.
+
+`adaptive_penalty=True` stays the default because it is the paper's component
+and the 4-bit default path is neutral, but a run that regresses can restore the
+configured schedule with `adaptive_penalty=False`.
+
 Quantization cost on the same runs: GPTQ takes 15 s and 0.59 GiB peak on
 Qwen2.5-0.5B-Instruct, while ADMM-Q takes 81 s and 1.50 GiB. The extra time is
 the ADMM iterations; the extra memory is the float64 factor.
@@ -297,6 +357,8 @@ python scripts/benchmark_admmq_ppl.py --model Qwen/Qwen2.5-0.5B-Instruct \
     --calibration-rows 24 --calibration-seq-len 2048 \
     --eval-rows 16 --eval-seq-len 2048
 ```
+
+Add `--admmq-adaptive-penalty off` to reproduce the adaptive-penalty control.
 
 ## Checkpoint contract
 

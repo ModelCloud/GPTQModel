@@ -93,7 +93,7 @@ def _build_config(name: str, args: argparse.Namespace):
     if name == "gptq":
         return QuantizeConfig(method=METHOD.GPTQ, **common)
     if name == "admmq" or name.startswith("admmq-"):
-        overrides = {}
+        overrides = {"adaptive_penalty": args.admmq_adaptive_penalty == "on"}
         if name != "admmq":
             overrides["max_iter"] = int(name.removeprefix("admmq-"))
         if args.mse_norm is not None:
@@ -172,6 +172,12 @@ def main() -> None:
     parser.add_argument("--eval-rows", type=int, default=16)
     parser.add_argument("--eval-seq-len", type=int, default=2048)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--admmq-adaptive-penalty",
+        choices=("on", "off"),
+        default="on",
+        help="Use the paper's ill-conditioned penalty schedule for ADMM-Q configs.",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/admmq_ppl"))
     parser.add_argument("--local-files-only", action="store_true")
     args = parser.parse_args()

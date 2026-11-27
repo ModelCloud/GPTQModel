@@ -61,6 +61,17 @@ class _AdmmNumericalFailure(Exception):
 #: Penalty growth is capped so a very long run cannot overflow the schedule.
 RHO_CAP = 1e6
 
+#: Preconditioned condition-number thresholds for the paper's adaptive
+#: penalty schedule. The reference implementation uses the same 5e4 gate for
+#: PairSwap.
+ILL_CONDITIONED_THRESHOLD = 5e4
+ILL_CONDITIONED_SEVERE_THRESHOLD = 3e5
+
+#: Penalty settings used for ill-conditioned layers.
+ILL_CONDITIONED_RHO = 0.05
+ILL_CONDITIONED_SEVERE_RHO = 0.01
+ILL_CONDITIONED_RHO_UPDATE = 1.05
+
 #: Row chunk used for the float64-scaled update; bounds the transient buffer.
 _WORK_CHUNK_BYTES = 64 << 20
 
@@ -93,6 +104,32 @@ def admm_rho_at(iteration: int, rho0: float, gamma: float, update_iter: int, cap
     except OverflowError:
         # The power can overflow even while its product with rho0 is finite.
         return min(math.exp(log_rho + exponent * log_gamma), cap)
+
+
+def admm_penalty_schedule(
+    condition_number: float,
+    rho: float,
+    rho_update: float,
+    *,
+    enabled: bool = True,
+) -> Tuple[float, float]:
+    """Return the initial penalty and growth for one layer.
+
+    ADMM-Q's adaptive schedule replaces the configured values when the
+    preconditioned Hessian is ill-conditioned: above ``5e4`` it starts at
+    ``0.05`` and above ``3e5`` at ``0.01``, both growing by ``1.05``. The
+    reference implementation applies this unconditionally; ``enabled=False``
+    keeps the configured schedule for an ablation.
+    """
+
+    if not enabled or not condition_number > ILL_CONDITIONED_THRESHOLD:
+        return float(rho), float(rho_update)
+    initial = (
+        ILL_CONDITIONED_SEVERE_RHO
+        if condition_number > ILL_CONDITIONED_SEVERE_THRESHOLD
+        else ILL_CONDITIONED_RHO
+    )
+    return float(initial), ILL_CONDITIONED_RHO_UPDATE
 
 
 def projection_objective(target: torch.Tensor, projected: torch.Tensor) -> torch.Tensor:
@@ -420,6 +457,12 @@ class ADMMQ(GPTQ):
         eigenvectors = eigenvectors64.to(dtype)
         del eigenvalues64, eigenvectors64
         condition_number = self._condition_number(eigenvalues)
+        rho_initial, rho_update = admm_penalty_schedule(
+            condition_number,
+            float(cfg.rho),
+            float(cfg.rho_update),
+            enabled=bool(cfg.adaptive_penalty),
+        )
 
         grids = self._fit_grids(weight)
         rtn = self._project(weight, grids)
@@ -442,10 +485,10 @@ class ADMMQ(GPTQ):
         refresh_improvement = 0.0
         iterations = 0
         error_history: List[float] = []
-        rho = float(cfg.rho)
+        rho = rho_initial
 
         for step in range(int(cfg.max_iter)):
-            rho = admm_rho_at(step, float(cfg.rho), float(cfg.rho_update), int(cfg.update_iter))
+            rho = admm_rho_at(step, rho_initial, rho_update, int(cfg.update_iter))
             right_hand_side = hessian_weight + rho * discrete - dual
             continuous = torch.empty_like(weight_scaled)
             check_iterate = step == 0 or (step + 1) % check_every == 0
@@ -552,6 +595,9 @@ class ADMMQ(GPTQ):
         self.admmq_diagnostics = {
             "iterations": iterations,
             "condition_number": condition_number,
+            "ill_conditioned": condition_number > ILL_CONDITIONED_THRESHOLD,
+            "rho_initial": rho_initial,
+            "rho_update": rho_update,
             "rho_final": rho,
             "refresh_attempts": 1 if refresh_attempted else 0,
             "refresh_accepted": refresh_accepted,
@@ -745,6 +791,12 @@ class ADMMQ(GPTQ):
 
 __all__ = [
     "ADMMQ",
+    "ILL_CONDITIONED_RHO",
+    "ILL_CONDITIONED_RHO_UPDATE",
+    "ILL_CONDITIONED_SEVERE_RHO",
+    "ILL_CONDITIONED_SEVERE_THRESHOLD",
+    "ILL_CONDITIONED_THRESHOLD",
+    "admm_penalty_schedule",
     "admm_rho_at",
     "pairswap_delta",
     "projection_objective",
