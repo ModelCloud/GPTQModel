@@ -49,6 +49,12 @@ class ChatGLMConfig(PretrainedConfig):
                 "Original ChatGLM1 transformer.layers / 2D-position checkpoints are unsupported; "
                 "this local port owns the ChatGLM2/3 and GLM4 transformer.encoder layouts."
             )
+        if kwargs.get("vision_config"):
+            raise ValueError(
+                "GLM-4V checkpoints (vision_config) are unsupported by this local chatglm port: "
+                "the vision tower would be dropped from the quantized checkpoint. "
+                "Load a text-only ChatGLM2/3 or GLM4 checkpoint instead."
+            )
         # Legacy vocab_size can count only unpadded tokens. Explicit padded
         # rows remain authoritative when reading checkpoint metadata; the
         # alias above keeps subsequent HF resize mutations synchronized.

@@ -1,0 +1,70 @@
+{
+  "repository": "THUDM/glm-4v-9b",
+  "revision": "3376fea6e54db68587a89bf1ac27a6889bafb867",
+  "config": {
+    "_name_or_path": "THUDM/glm-4v-9b",
+    "model_type": "chatglm",
+    "architectures": [
+      "ChatGLMModel"
+    ],
+    "auto_map": {
+      "AutoConfig": "configuration_chatglm.ChatGLMConfig",
+      "AutoModel": "modeling_chatglm.ChatGLMForConditionalGeneration",
+      "AutoModelForCausalLM": "modeling_chatglm.ChatGLMForConditionalGeneration",
+      "AutoModelForSeq2SeqLM": "modeling_chatglm.ChatGLMForConditionalGeneration",
+      "AutoModelForSequenceClassification": "modeling_chatglm.ChatGLMForSequenceClassification"
+    },
+    "vision_config": {
+      "dropout_prob": 0.0,
+      "hidden_act": "gelu",
+      "in_channels": 3,
+      "num_hidden_layers": 63,
+      "hidden_size": 1792,
+      "patch_size": 14,
+      "num_heads": 16,
+      "intermediate_size": 15360,
+      "layer_norm_eps": 1e-06,
+      "num_positions": 6401,
+      "image_size": 1120,
+      "scaling_factor": 8
+    },
+    "add_bias_linear": false,
+    "add_qkv_bias": true,
+    "apply_query_key_layer_scaling": true,
+    "apply_residual_connection_post_layernorm": false,
+    "attention_dropout": 0.0,
+    "attention_softmax_in_fp32": true,
+    "attn_implementation": "sdpa",
+    "bias_dropout_fusion": true,
+    "ffn_hidden_size": 13696,
+    "fp32_residual_connection": false,
+    "hidden_dropout": 0.0,
+    "hidden_size": 4096,
+    "kv_channels": 128,
+    "layernorm_epsilon": 1.5625e-07,
+    "multi_query_attention": true,
+    "multi_query_group_num": 2,
+    "num_attention_heads": 32,
+    "num_layers": 40,
+    "original_rope": true,
+    "padded_vocab_size": 151552,
+    "post_layer_norm": true,
+    "rmsnorm": true,
+    "seq_length": 8192,
+    "use_cache": true,
+    "torch_dtype": "bfloat16",
+    "transformers_version": "4.44.0",
+    "tie_word_embeddings": false,
+    "eos_token_id": [
+      151329,
+      151336,
+      151338
+    ],
+    "pad_token_id": 151329,
+    "boi_token_id": 151339,
+    "eoi_token_id": 151340
+  },
+  "tensor_count": 1054,
+  "vision_tensor_count": 770,
+  "keys_sha256": "a5bb762c71e36b478e4febb150428f3903de3b6365d510dcb3f77de3dad1bf00"
+}
