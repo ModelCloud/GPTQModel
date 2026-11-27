@@ -799,16 +799,41 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             self._ensure_unpacked()
 
         bnb = import_bitsandbytes()
-        # One attribute lookup per tensor instead of four, and no string
-        # formatting: ``torch.Size`` and ``torch.device`` compare by value.
-        signature = tuple(
-            (tensor.shape, tensor.device, tensor.dtype)
-            for tensor in (
+        # Read registered buffers from ``_buffers``: the module attribute path
+        # is a per-tensor dictionary-chain lookup and this signature runs on
+        # every forward. ``torch.Size`` and ``torch.device`` compare by value,
+        # so the cached-state guard is unchanged. Test doubles that are not
+        # modules keep the attribute fallback.
+        buffers = getattr(self, "_buffers", None)
+        if buffers is not None:
+            weight = buffers.get("weight")
+            absmax = buffers.get("weight_absmax")
+            quant_map = buffers.get("weight_quant_map")
+            quant_state_tensor = buffers.get("weight_quant_state")
+            if (
+                weight is not None
+                and absmax is not None
+                and quant_map is not None
+                and quant_state_tensor is not None
+            ):
+                tensors = (weight, absmax, quant_map, quant_state_tensor)
+            else:
+                tensors = (
+                    self.weight,
+                    self.weight_absmax,
+                    self.weight_quant_map,
+                    self.weight_quant_state,
+                )
+        else:
+            tensors = (
                 self.weight,
                 self.weight_absmax,
                 self.weight_quant_map,
                 self.weight_quant_state,
             )
+        signature = tuple(
+            (tensor.shape, tensor.device, tensor.dtype)
+            for tensor in tensors
         )
         if not force and self.quant_state is not None and signature == self._quant_state_signature:
             return self.quant_state
