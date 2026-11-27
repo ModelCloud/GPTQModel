@@ -82,9 +82,12 @@ class _PaddingProcessor:
             )
         width = max(lengths)
         input_ids = torch.ones((len(conversations), width), dtype=torch.long)
+        attention_mask = torch.zeros_like(input_ids)
+        for row, length in enumerate(lengths):
+            attention_mask[row, :length] = 1
         return {
             "input_ids": input_ids,
-            "attention_mask": torch.ones_like(input_ids),
+            "attention_mask": attention_mask,
         }
 
 
@@ -182,6 +185,7 @@ def test_conversation_path_rejects_concat_size(cls):
         definitions.CohereCompassQModel,
         definitions.InklingMMQModel,
         definitions.Inkling2LoopQModel,
+        definitions.InternS1QModel,
     ],
     ids=lambda cls: cls.__name__,
 )
@@ -197,10 +201,15 @@ def test_batch_size_two_pads_unequal_conversations(cls, monkeypatch):
 
     batches = model.prepare_dataset(conversations, batch_size=2)
 
-    expected_width = max(len(str(row)) for row in conversations)
+    lengths = [len(str(row)) for row in conversations]
+    expected_width = max(lengths)
     assert len(batches) == 1
     assert batches[0]["input_ids"].shape == (2, expected_width)
     assert processor.calls[0]["padding"] is True
+    # Right padding: every row keeps its own tokens and the tail is masked out.
+    assert batches[0]["attention_mask"].tolist() == [
+        [1] * length + [0] * (expected_width - length) for length in lengths
+    ]
 
 
 @pytest.mark.parametrize(
