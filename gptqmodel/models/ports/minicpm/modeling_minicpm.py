@@ -52,22 +52,37 @@ class MiniCPMRotaryEmbedding(nn.Module):
         # Dynamic NTK keys on cached + current length, which the model passes; uncached callers use the window.
         seq_len = position_ids.shape[-1] if seq_len is None else seq_len
         config = self.config
-        base = config.rope_parameters["rope_theta"]
+        params = config.rope_parameters
+        base = params["rope_theta"]
         positions = position_ids.float()
-        kind = config.rope_parameters["rope_type"]
-        if kind != "default":
-            factor = config.rope_parameters["factor"]
-            if kind == "linear":
-                positions = positions / factor
-            elif seq_len > config.max_position_embeddings:
+        kind = params["rope_type"]
+        ext_factors = None
+        attention_factor = 1.0
+        if kind == "linear":
+            positions = positions / params["factor"]
+        elif kind == "dynamic":
+            if seq_len > config.max_position_embeddings:
+                factor = params["factor"]
                 base *= (factor * seq_len / config.max_position_embeddings - (factor - 1)) ** (
                     config.head_dim / (config.head_dim - 2)
                 )
+        elif kind == "longrope":
+            # MiniCPM4/4.1 select factors by the full context length, exactly
+            # like the source `MiniCPMLongRoPE` cache fill.
+            ext_factors = params[
+                "long_factor" if seq_len > params["original_max_position_embeddings"] else "short_factor"
+            ]
+            attention_factor = params["attention_factor"]
         with torch.autocast(device_type=x.device.type, enabled=False):
             inv_freq = 1.0 / (base ** (torch.arange(0, config.head_dim, 2, device=x.device).float() / config.head_dim))
+            if ext_factors is not None:
+                inv_freq = inv_freq / torch.tensor(ext_factors, device=x.device, dtype=torch.float32)
             angles = positions.unsqueeze(-1) * inv_freq
             angles = torch.cat((angles, angles), dim=-1)
-            return angles.cos().to(x.dtype).unsqueeze(1), angles.sin().to(x.dtype).unsqueeze(1)
+            return (
+                (angles.cos() * attention_factor).to(x.dtype).unsqueeze(1),
+                (angles.sin() * attention_factor).to(x.dtype).unsqueeze(1),
+            )
 
 
 def _rotate(x, cos, sin):
@@ -289,8 +304,14 @@ class MiniCPMModel(MiniCPMPreTrainedModel):
             past_key_values=past_key_values, position_ids=position_ids,
         )
         hidden_states = inputs_embeds
-        # Source eager attention keeps FP32 RoPE trig; SDPA uses the activation dtype.
-        trig_like = hidden_states.float() if self.config._attn_implementation == "eager" else hidden_states
+        # Source eager attention keeps FP32 RoPE trig; SDPA uses the activation
+        # dtype. MiniCPM4's longrope rotary is FP32 regardless of attention.
+        trig_like = (
+            hidden_states.float()
+            if self.config._attn_implementation == "eager"
+            or self.config.rope_parameters["rope_type"] == "longrope"
+            else hidden_states
+        )
         position_embeddings = self.rotary_emb(trig_like, position_ids, past_seen_tokens + inputs_embeds.shape[1])
         for layer in self.layers:
             hidden_states = layer(

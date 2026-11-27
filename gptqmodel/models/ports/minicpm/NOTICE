@@ -10,7 +10,12 @@ ModelCloud.ai adapted the inspected implementation for Transformers 5 in 2026.
 Sources (Hugging Face): openbmb/MiniCPM-2B-dpo-bf16@9d6de77274c9f364037bf8506b4a831d3520ae79
 (dense; same modeling_minicpm.py as the 1B/2B sft/dpo releases),
 openbmb/MiniCPM-2B-128k@6011acb51acf3e8c0cb10c428d7064dc39431720 and
-openbmb/MiniCPM-MoE-8x2B@7495286593bc56a524a42e26eeaee5e185cb7f9c. OpenBMB's
+openbmb/MiniCPM-MoE-8x2B@7495286593bc56a524a42e26eeaee5e185cb7f9c.
+MiniCPM4/4.1 longrope (`MiniCPMLongRoPE`) and `head_dim` support come from
+openbmb/MiniCPM4-0.5B@5253c7fcc5e29e1cf3eacb59a58adf1ba4df8630,
+openbmb/MiniCPM4-8B@bb2ae14cf59d4ca769c4e42ece54cc3b82a58ef7,
+openbmb/MiniCPM4.1-8B@3a8dfed9c79a45e07dbff95bcd49d792343fa1a3 and
+openbmb/MiniCPM4.1-8B-GPTQ@36f81959ee46f444996a5c46ffab833d92c85c38. OpenBMB's
 Apache-2.0 text (OpenBMB/MiniCPM@f4293a1, LICENSE) is identical to the LICENSE
 at the root of this repository.
 The model cards separately require the OpenBMB General Model License for
@@ -19,4 +24,5 @@ trained weights. No trained weights or tokenizer assets are redistributed here.
 Changes include Transformers 5 model/config/cache/generation integration,
 definition-owned loading, stateless FP32 rotary construction, portable
 eager/SDPA attention and expert dispatch, safetensors lifecycle tests, live
-module ownership and a conservative plain-quantization-only AWQ policy.
+module ownership, MiniCPM4 longrope/head_dim loading and a conservative
+plain-quantization-only AWQ policy.
