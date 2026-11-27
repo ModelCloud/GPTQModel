@@ -36,7 +36,7 @@ from gptqmodel.quantization.config import (
     resolve_quant_format,
 )
 from gptqmodel.quantization.gptq import GPTQ
-from gptqmodel.quantization.quantizer import Quantizer
+from gptqmodel.quantization.quantizer import FitLimits, Quantizer
 
 
 IN_FEATURES = 16
@@ -87,6 +87,27 @@ def _rtn_baseline(weight: torch.Tensor, qcfg) -> torch.Tensor:
     quantizer.configure(perchannel=True)
     quantizer.find_params(weight, weight=True)
     return quantizer.quantize(weight)
+
+
+def _rtn_grid_projection(weight: torch.Tensor, qcfg, module: nn.Module) -> torch.Tensor:
+    """Independent per-group RTN projection for the solver's fallback path."""
+
+    quantizer = Quantizer(qcfg=qcfg)
+    quantizer.configure(perchannel=True)
+    group_size = qcfg.group_size
+    if group_size is None or int(group_size) <= 0:
+        ranges = [(0, weight.shape[1])]
+    else:
+        ranges = [
+            (start, min(start + int(group_size), weight.shape[1]))
+            for start in range(0, weight.shape[1], int(group_size))
+        ]
+    limits = FitLimits.for_module(module)
+    projected = torch.empty_like(weight)
+    for start, end in ranges:
+        quantizer.fit_weight(weight[:, start:end], limits)
+        projected[:, start:end] = quantizer.quantize(weight[:, start:end])
+    return projected
 
 
 # ---------------------------------------------------------------------------
@@ -563,7 +584,135 @@ def test_admmq_reports_diagnostics_and_runs_pairswap_only_when_enabled():
     assert diagnostics["pairswap_flips"] >= 0
     assert math.isfinite(diagnostics["final_objective"])
     assert diagnostics["final_objective"] <= diagnostics["initial_objective"] * 1.001
+    assert diagnostics["fallback_reason"] is None
     assert off_result[0].shape == weight.shape
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_admmq_eigh_failure_falls_back_to_rtn(monkeypatch, device):
+    """A failed float64 eigendecomposition must not abort the model.
+
+    The layer keeps the same per-group RTN projection the solver uses for its
+    "did not improve" exit, so packing and replay see a normal grid.
+    """
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("requires an accelerator")
+    torch.manual_seed(11)
+    weight = torch.randn(OUT_FEATURES, IN_FEATURES) * 0.2
+    x = _calibration().to(device)
+    config = _small_config()
+    attempts = []
+
+    def fail_eigh(matrix):
+        attempts.append(tuple(matrix.shape))
+        raise torch._C._LinAlgError("injected eigendecomposition failure")
+
+    monkeypatch.setattr(torch.linalg, "eigh", fail_eigh)
+    solver, result = _run_solver(ADMMQ, _make_layer(weight).to(device), config, x)
+
+    assert attempts, "the eigendecomposition was not attempted"
+    diagnostics = solver.admmq_diagnostics
+    assert diagnostics["fallback_to_rtn"] is True
+    assert diagnostics["fallback_reason"] == "eigh_failure"
+    assert diagnostics["iterations"] == 0
+
+    quantized, scale, zero, g_idx, duration, avg_loss, damp, samples = result
+    assert bool(torch.isfinite(quantized).all())
+    assert samples == x.shape[0]
+    assert damp == 0.0
+    torch.testing.assert_close(
+        quantized,
+        _rtn_grid_projection(weight.to(device), config, solver.module),
+        rtol=0,
+        atol=0,
+    )
+    assert solver.H is None
+
+
+@pytest.mark.parametrize(
+    ("corruption", "reason", "iterations"),
+    [
+        ("eigenvalues", "non_finite_eigenvalues", 0),
+        ("eigenvectors", "non_finite_iterate", 1),
+    ],
+)
+def test_admmq_non_finite_factorization_falls_back_to_rtn(
+    monkeypatch, corruption, reason, iterations
+):
+    """A solver that returns NaN instead of raising must also recover."""
+
+    torch.manual_seed(12)
+    weight = torch.randn(OUT_FEATURES, IN_FEATURES) * 0.2
+    x = _calibration()
+    config = _small_config()
+    real_eigh = torch.linalg.eigh
+    attempts = []
+
+    def corrupt_eigh(matrix):
+        values, vectors = real_eigh(matrix)
+        attempts.append(1)
+        values = values.clone()
+        vectors = vectors.clone()
+        if corruption == "eigenvalues":
+            values[0] = float("nan")
+        else:
+            vectors[0, 0] = float("nan")
+        return values, vectors
+
+    monkeypatch.setattr(torch.linalg, "eigh", corrupt_eigh)
+    solver, result = _run_solver(ADMMQ, _make_layer(weight), config, x)
+
+    assert attempts
+    diagnostics = solver.admmq_diagnostics
+    assert diagnostics["fallback_to_rtn"] is True
+    assert diagnostics["fallback_reason"] == reason
+    assert diagnostics["iterations"] == iterations
+    quantized = result[0]
+    assert bool(torch.isfinite(quantized).all())
+    torch.testing.assert_close(
+        quantized,
+        _rtn_grid_projection(weight, config, solver.module),
+        rtol=0,
+        atol=0,
+    )
+    assert solver.H is None
+
+
+def test_admmq_non_finite_loss_falls_back_to_rtn():
+    """A finite but extreme weight/Hessian scale can overflow the objective."""
+
+    torch.manual_seed(13)
+    weight = torch.randn(OUT_FEATURES, IN_FEATURES) * 1e19
+    x = torch.randn(CALIBRATION_SAMPLES, IN_FEATURES) * 1e18
+    config = _small_config(bits=4, group_size=8, sym=True, max_iter=4, switch_iter=2)
+    solver, result = _run_solver(ADMMQ, _make_layer(weight), config, x)
+
+    diagnostics = solver.admmq_diagnostics
+    assert diagnostics["fallback_to_rtn"] is True
+    assert diagnostics["fallback_reason"] == "non_finite_loss"
+    quantized = result[0]
+    assert bool(torch.isfinite(quantized).all())
+    torch.testing.assert_close(
+        quantized,
+        _rtn_grid_projection(weight, config, solver.module),
+        rtol=0,
+        atol=0,
+    )
+    assert solver.H is None
+
+
+def test_admmq_rtn_fallback_raises_when_it_is_also_non_finite():
+    """A corrupt source weight must not be published as a finite checkpoint."""
+
+    torch.manual_seed(14)
+    weight = torch.randn(OUT_FEATURES, IN_FEATURES) * 0.2
+    weight[0, 0] = float("inf")
+    x = _calibration()
+    config = _small_config(bits=4, group_size=8, sym=True, max_iter=4, switch_iter=2)
+
+    with pytest.raises(ValueError, match="RTN fallback also produced non-finite"):
+        _run_solver(ADMMQ, _make_layer(weight), config, x)
 
 
 def test_admmq_pairswap_auto_uses_the_condition_number_gate():

@@ -65,6 +65,11 @@ its own Hessian for damping and activation ordering.
    gradient with the resulting rank-2 correction.
 7. Keep the RTN projection if the result is non-finite or has a higher
    reconstruction objective than the RTN initialization.
+8. If the float64 eigendecomposition raises `LinAlgError`, returns a
+   non-finite spectrum, produces a non-finite continuous iterate, or leaves a
+   non-finite reconstruction loss, stop the layer solve and keep the GPTQ
+   family's RTN quantization for that layer. The run continues; only a
+   non-finite RTN fallback is an error.
 
 With `pairswap_mode="auto"`, the condition number uses the full preconditioned
 spectrum. A zero eigenvalue gives an infinite condition number and enables
@@ -111,8 +116,11 @@ flowchart TD
     P -->|insufficient calibration| T["GPTQ data-independent fallback"]
     T --> M
     F -->|accelerator allocation failure| R["Retry on CPU from original inputs"]
+    F -->|eigh failure| Y["RTN fallback for this layer"]
     F -->|other error| X["Propagate error"]
+    Y --> M
     F --> H["ADMM iterations"]
+    H -->|non-finite iterate| Y
     R --> H
     H --> I{"stagnation"}
     I -->|yes| J["guarded grid refresh"]
@@ -133,16 +141,32 @@ stateDiagram-v2
     [*] --> Precondition
     Precondition --> Factorize: damp and scale by diag(H)^-1/2
     Factorize --> Iterate: one float64 eigh
+    Factorize --> RTN: eigh raises or non-finite spectrum
     Iterate --> Iterate: closed-form B, project D, dual update, grow rho
     Iterate --> Refresh: D stagnates
     Refresh --> Iterate: resume with selected grid
+    Iterate --> RTN: non-finite iterate
     Iterate --> FinalProject: max_iter or early stop
     FinalProject --> PairSwap: decode selected pairs on the grid
-    PairSwap --> Done: objective finite and within RTN baseline
+    PairSwap --> LossCheck: objective finite and within RTN baseline
     PairSwap --> RTN: non-finite or worse than RTN
+    LossCheck --> Done: finite reconstruction loss
+    LossCheck --> RTN: non-finite reconstruction loss
     RTN --> Done
     Done --> [*]
 ```
+
+The failure exits keep one layer's numerical failure from aborting the model.
+The RTN projection is the same per-group grid the solver already uses as its
+initialization and as its "did not improve" result.
+
+| Failure | Detection point | Result |
+| --- | --- | --- |
+| `eigh` raises `LinAlgError` | factorization | keep the RTN projection |
+| Non-finite eigenvalues | factorization | keep the RTN projection |
+| Non-finite continuous iterate (including corrupted eigenvectors) | first affected chunk | stop the iterations, keep the RTN projection |
+| Non-finite reconstruction loss | after the solve | keep the RTN projection |
+| The RTN projection is also non-finite | after the RTN fallback | raise; do not publish a corrupt checkpoint |
 
 | Situation | Before (GPTQ family) | After (ADMM-Q) |
 | --- | --- | --- |
@@ -151,6 +175,8 @@ stateDiagram-v2
 | Weight update | One forward column sweep, decisions final | Many ADMM iterations over the whole matrix, decisions revisable |
 | Grid fitting | Per group, before the sweep | Per group, plus at most one guarded refit per layer |
 | Local refinement | None | PairSwap over adjacent grid cells |
+| Hessian factorization failure | GPTQ retries its damp grid, then uses RTN | ADMM-Q keeps the RTN projection for that layer |
+| Non-finite ADMM iterate or reconstruction loss | Not applicable (GPTQ has no ADMM iterate) | ADMM-Q stops the solve and keeps the RTN projection for that layer |
 | Failure exit | GPTQ RTN fallback for low sample counts | GPTQ RTN fallback for low sample counts, plus RTN when the ADMM objective is non-finite or worse |
 | Accelerator allocation failure in solve | GPTQ retries on CPU | ADMM-Q restarts the solve on CPU with the original inputs |
 | Checkpoint | GPTQ packing | Identical GPTQ packing; `method` stays `admmq` and solver settings live in `meta` |
