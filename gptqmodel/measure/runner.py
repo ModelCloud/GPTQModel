@@ -10,6 +10,7 @@ adding a weight-space metric later does not require rewriting the loop.
 """
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Union
 
@@ -45,6 +46,12 @@ _DEFAULT_WINDOW = 512
 
 #: Positions kept per batch when a metric needs distributions rather than a scalar.
 _DEFAULT_POSITIONS = 64
+
+#: Row forms accepted by :func:`build_token_rows`.
+_ROW_FORMATS = (
+    "a text string, a token-id list/tuple, a token-id tensor, or a mapping "
+    "with `input_ids` (tensor/list) or `text` (string)"
+)
 
 
 class MeasurementError(RuntimeError):
@@ -142,6 +149,35 @@ def _windows_of_row(encoded: torch.Tensor, window: int, stride: int) -> List[Tok
     return windows
 
 
+def _encoded_mapping_row(tokenizer: Any, sample: Mapping) -> torch.Tensor:
+    """Encode one HF dataset or calibration-style mapping row."""
+
+    if "input_ids" in sample:
+        input_ids = sample["input_ids"]
+        if torch.is_tensor(input_ids):
+            return input_ids.reshape(1, -1)
+        if isinstance(input_ids, (list, tuple)):
+            return torch.tensor([int(token) for token in input_ids], dtype=torch.long).reshape(1, -1)
+        raise ValueError(
+            "measurement dataset mapping row `input_ids` must be a tensor or "
+            f"list of token ids, got {type(input_ids).__name__}"
+        )
+    if "text" in sample:
+        text = sample["text"]
+        if not isinstance(text, str):
+            raise ValueError(
+                "measurement dataset mapping row `text` must be a string, "
+                f"got {type(text).__name__}"
+            )
+        if tokenizer is None:
+            raise ValueError("measurement got text but no tokenizer is available")
+        return tokenizer(text, return_tensors="pt")["input_ids"]
+    raise ValueError(
+        "measurement dataset mapping rows must contain `input_ids` (tensor/list) "
+        f"or `text` (string), got keys {list(sample)}"
+    )
+
+
 def build_token_rows(
     tokenizer: Any,
     dataset: Sequence[Any],
@@ -150,15 +186,19 @@ def build_token_rows(
     stride: int = 0,
     max_rows: int = 4,
 ) -> List[TokenWindow]:
-    """Turn texts (or token-id rows) into windows with target-scoring masks.
+    """Turn text, token-id, or mapping rows into windows with scoring masks.
 
     Windows overlap when ``stride < window`` and always retain one token of
     context at a seam, so the masks partition every transition in a row exactly
-    once. Pass the result straight to :func:`measure_models`.
+    once. Mapping rows carry either ``input_ids`` (a tensor or token-id list) or
+    ``text`` (a string), which is the shape of HF dataset and calibration rows.
+    Pass the result straight to :func:`measure_models`.
     """
 
     if dataset is None:
-        raise ValueError("measurement needs `dataset` (texts or token-id rows)")
+        raise ValueError(
+            "measurement needs `dataset` (texts, token-id rows, or mapping rows)"
+        )
     if window < 2:
         raise ValueError(f"measurement window must be >= 2, got {window}")
     rows: List[TokenWindow] = []
@@ -169,10 +209,14 @@ def build_token_rows(
             encoded = tokenizer(sample, return_tensors="pt")["input_ids"]
         elif torch.is_tensor(sample):
             encoded = sample.reshape(1, -1)
+        elif isinstance(sample, Mapping):
+            encoded = _encoded_mapping_row(tokenizer, sample)
         elif isinstance(sample, (list, tuple)):
             encoded = torch.tensor([int(token) for token in sample], dtype=torch.long).reshape(1, -1)
         else:
-            encoded = torch.as_tensor(sample, dtype=torch.long).reshape(1, -1)
+            raise ValueError(
+                f"measurement dataset rows must be {_ROW_FORMATS}, got {type(sample).__name__}"
+            )
         if encoded.shape[1] < 2:
             continue
 

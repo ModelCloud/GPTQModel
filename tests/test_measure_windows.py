@@ -142,3 +142,69 @@ def test_token_window_rejects_a_mismatched_mask():
 def test_build_token_rows_rejects_a_degenerate_window():
     with pytest.raises(ValueError, match="window"):
         build_token_rows(None, [ROW], window=1)
+
+
+class _WordTokenizer:
+    """A tiny tokenizer that maps whitespace-separated words to ids."""
+
+    def __init__(self, vocabulary):
+        self.vocabulary = vocabulary
+        self.texts = []
+
+    def __call__(self, text, return_tensors="pt"):
+        assert return_tensors == "pt"
+        self.texts.append(text)
+        ids = [self.vocabulary[word] for word in text.split()]
+        return {"input_ids": torch.tensor([ids], dtype=torch.long)}
+
+
+def _row_ids(windows):
+    return [window.input_ids.reshape(-1).tolist() for window in windows]
+
+
+def test_build_token_rows_accepts_text_strings():
+    tokenizer = _WordTokenizer({"hello": 11, "world": 12})
+
+    windows = build_token_rows(tokenizer, ["hello world"], window=8)
+
+    assert _row_ids(windows) == [[11, 12]]
+    assert tokenizer.texts == ["hello world"]
+
+
+def test_build_token_rows_accepts_mapping_text_rows():
+    tokenizer = _WordTokenizer({"hello": 11, "world": 12, "foo": 13, "bar": 14})
+
+    windows = build_token_rows(tokenizer, [{"text": "hello world foo bar"}], window=8)
+
+    assert _row_ids(windows) == [[11, 12, 13, 14]]
+    assert tokenizer.texts == ["hello world foo bar"]
+
+
+def test_build_token_rows_accepts_mapping_id_rows():
+    class _NoTokenizer:
+        def __call__(self, *args, **kwargs):
+            raise AssertionError("mapping `input_ids` rows must not be tokenized")
+
+    windows = build_token_rows(
+        _NoTokenizer(),
+        [{"input_ids": [1, 2, 3, 4], "attention_mask": [1, 1, 1, 1]}],
+        window=8,
+    )
+
+    assert _row_ids(windows) == [[1, 2, 3, 4]]
+
+
+def test_build_token_rows_accepts_hf_dataset_rows():
+    datasets = pytest.importorskip("datasets")
+    tokenizer = _WordTokenizer({"hello": 11, "world": 12, "foo": 13, "bar": 14, "baz": 15})
+    dataset = datasets.Dataset.from_dict({"text": ["hello world", "foo bar baz"]})
+
+    windows = build_token_rows(tokenizer, dataset, window=8, max_rows=8)
+
+    assert _row_ids(windows) == [[11, 12], [13, 14, 15]]
+    assert tokenizer.texts == ["hello world", "foo bar baz"]
+
+
+def test_build_token_rows_rejects_unknown_mapping_rows():
+    with pytest.raises(ValueError, match="`input_ids`.*`text`"):
+        build_token_rows(None, [{"foo": "bar"}], window=8)

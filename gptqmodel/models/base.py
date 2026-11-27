@@ -2887,7 +2887,9 @@ class BaseQModel(nn.Module):
         from ..measure.runner import build_token_rows, measure_models
 
         if config.dataset is None:
-            raise ValueError("measure() needs `dataset` (texts or token-id rows)")
+            raise ValueError(
+                "measure() needs `dataset` (texts, token-id rows, or mapping rows)"
+            )
 
         reference = self._measurement_reference(config)
         ppl_config = config.config_for(Metric.PPL)
