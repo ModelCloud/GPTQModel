@@ -33,6 +33,7 @@ from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.looped_capture import LoopedLayerCaptureMixin
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
 
@@ -68,30 +69,32 @@ def _inkling2_modules():
     return configuration, modeling
 
 
-def _tiny_config(configuration):
+def _tiny_config(configuration, **overrides):
     hidden = 32
+    text_config = {
+        "hidden_size": hidden,
+        # 12 layers with the default `layer_types` schedule (full attention
+        # every 6th layer) and a 6..12 loop core, so one layer of each of
+        # the four decoder classes exists.
+        "num_hidden_layers": 12,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 8,
+        "intermediate_size": 16,
+        "n_routed_experts": 2,
+        "num_experts_per_tok": 1,
+        "moe_intermediate_size": 8,
+        "vocab_size": 64,
+        "unpadded_vocab_size": 64,
+        "n_layers_per_attn_res_block": 3,
+        "d_rel": 2,
+        "rel_extent": 4,
+        "sliding_window_size": 4,
+        "loop_config": {"core_start": 6, "core_end": 12, "num_passes": 2, "gate_rank": 4},
+    }
+    text_config.update(overrides)
     return configuration.Inkling2LoopConfig(
-        text_config={
-            "hidden_size": hidden,
-            # 12 layers with the default `layer_types` schedule (full attention
-            # every 6th layer) and a 6..12 loop core, so one layer of each of
-            # the four decoder classes exists.
-            "num_hidden_layers": 12,
-            "num_attention_heads": 2,
-            "num_key_value_heads": 1,
-            "head_dim": 8,
-            "intermediate_size": 16,
-            "n_routed_experts": 2,
-            "num_experts_per_tok": 1,
-            "moe_intermediate_size": 8,
-            "vocab_size": 64,
-            "unpadded_vocab_size": 64,
-            "n_layers_per_attn_res_block": 3,
-            "d_rel": 2,
-            "rel_extent": 4,
-            "sliding_window_size": 4,
-            "loop_config": {"core_start": 6, "core_end": 12, "num_passes": 2, "gate_rank": 4},
-        },
+        text_config=text_config,
         vision_config={
             "hidden_size": 16,
             "num_hidden_layers": 1,
@@ -710,6 +713,258 @@ def test_inkling2_loop_replay_rebuilds_block_states_and_masks():
         with torch.no_grad():
             output = layer(record["args"][0], block_states=block_states, **additional_inputs)
         assert torch.allclose(output, record["output"], atol=1e-6, rtol=0), position
+
+
+def test_inkling2_loop_replay_serves_every_loop_invocation():
+    """#6106: post-loop layers must replay on the final-pass output.
+
+    The model runs the loop core ``loop_num_passes`` times, resets to the
+    pre-loop state before passes 2..N, injects the message gates, and only the
+    final pass feeds layers after ``core_end``. The default first-layer capture
+    replays one 0..N chain, so a post-loop layer would see the pass-1 output and
+    a loop-core layer only one of its three input distributions. The looped
+    full-forward capture must record every invocation with its own residual
+    bank and messages.
+    """
+
+    configuration, modeling = _inkling2_modules()
+    definition = MODEL_MAP["inkling2_loop"]
+    assert issubclass(definition, LoopedLayerCaptureMixin), (
+        "inkling2_loop must opt into LoopedLayerCaptureMixin; the default "
+        "first-layer capture can only replay the pass-1 chain"
+    )
+    config = _tiny_config(
+        configuration,
+        num_hidden_layers=15,
+        loop_config={"core_start": 6, "core_end": 12, "num_passes": 3, "gate_rank": 4},
+    )
+    torch.manual_seed(0)
+    model = modeling.Inkling2LoopForConditionalGeneration(config).float().eval()
+    assert _convert_model_with_defuser(definition, model, cleanup_original=False)
+    layers, layer_names = get_layers_with_prefixes(model, definition.extract_layers_node())
+
+    records = {id(layer): [] for layer in layers}
+
+    def capture(module, args, kwargs):
+        records[id(module)].append(
+            {
+                "hidden": args[0].detach().clone(),
+                "bank": args[1].detach().clone()
+                if len(args) > 1 and torch.is_tensor(args[1])
+                else None,
+                "messages": args[2].detach().clone()
+                if len(args) > 2 and torch.is_tensor(args[2])
+                else None,
+                "output": None,
+            }
+        )
+
+    def capture_output(module, args, kwargs, output):
+        records[id(module)][-1]["output"] = output.detach().clone()
+
+    handles = [layer.register_forward_pre_hook(capture, with_kwargs=True) for layer in layers]
+    handles += [layer.register_forward_hook(capture_output, with_kwargs=True) for layer in layers]
+    example = {
+        "input_ids": torch.randint(0, 64, (1, 12)),
+        "attention_mask": torch.ones(1, 12, dtype=torch.long),
+    }
+    try:
+        with torch.no_grad():
+            model(**example, use_cache=False)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    expected_invocations = [1] * 6 + [3] * 6 + [1] * 3
+    assert [len(records[id(layer)]) for layer in layers] == expected_invocations
+
+    previous = definition.require_load_processor
+    definition.require_load_processor = False
+    try:
+        wrapper = definition(model=model, quantized=False, quantize_config=None)
+    finally:
+        definition.require_load_processor = previous
+    wrapper.quantize_config = SimpleNamespace(
+        device=torch.device("cpu"),
+        activation_mode=None,
+        activation_recipe=None,
+        offload_to_disk=False,
+        compute_device_filter=None,
+    )
+
+    cache = wrapper.build_quantization_input_cache(
+        layers=layers,
+        calibration_data=[example],
+        use_cache=False,
+        layer_names=layer_names,
+    )
+    per_layer = wrapper._looped_per_layer
+    assert [len(per_layer[id(layer)]["layer_inputs"]) for layer in layers] == expected_invocations
+    assert cache.captured_batch_count == 3
+
+    # The first post-loop layer consumes the pass-3 output of layer 11, not the
+    # pass-1 output the old single-chain replay fed it.
+    first_post_loop = 12
+    final_input = per_layer[id(layers[first_post_loop])]["layer_inputs"][0][0]
+    torch.testing.assert_close(final_input, records[id(layers[first_post_loop])][0]["hidden"])
+    pass1_output = records[id(layers[first_post_loop - 1])][0]["output"]
+    relative = (final_input - pass1_output).norm() / pass1_output.norm()
+    assert relative > 1e-3, "the post-loop input must differ from the pass-1 chain"
+
+    for layer in layers:
+        bucket = per_layer[id(layer)]
+        for invocation, (layer_input, replay_kwargs, attention_mask, position_ids) in enumerate(
+            zip(
+                bucket["layer_inputs"],
+                bucket["layer_input_kwargs"],
+                bucket["attention_masks"],
+                bucket["position_ids"],
+            )
+        ):
+            record = records[id(layer)][invocation]
+            additional_inputs = dict(replay_kwargs)
+            additional_inputs["attention_mask"] = attention_mask
+            additional_inputs["position_ids"] = position_ids
+            additional_inputs["use_cache"] = False
+            additional_inputs = wrapper.prepare_layer_replay_kwargs(
+                layer=layer,
+                layer_input=list(layer_input),
+                additional_inputs=additional_inputs,
+                target_device=torch.device("cpu"),
+            )
+            torch.testing.assert_close(additional_inputs["block_states"], record["bank"])
+            if record["messages"] is None:
+                assert "messages" not in additional_inputs
+            else:
+                torch.testing.assert_close(
+                    additional_inputs["messages"], record["messages"]
+                )
+            with torch.no_grad():
+                output = layer(layer_input[0], **additional_inputs)
+            torch.testing.assert_close(output, record["output"], atol=1e-6, rtol=0)
+
+
+def test_inkling2_loop_looped_capture_populates_lm_head_banks():
+    """#6106 must not regress the #6107 head path.
+
+    The looped full-forward capture supplies each layer invocation's own
+    ``block_states``. ``prepare_layer_replay_kwargs`` must still record the
+    final post-layer bank so ``lm_head_pre_quantize_generate_hook`` can apply
+    ``final_input`` before the norm instead of falling back to ``norm(h_last)``.
+    """
+
+    configuration, modeling = _inkling2_modules()
+    definition = MODEL_MAP["inkling2_loop"]
+    config = _tiny_config(
+        configuration,
+        num_hidden_layers=15,
+        loop_config={"core_start": 6, "core_end": 12, "num_passes": 3, "gate_rank": 4},
+    )
+    torch.manual_seed(0)
+    model = modeling.Inkling2LoopForConditionalGeneration(config).float().eval()
+    assert _convert_model_with_defuser(definition, model, cleanup_original=False)
+    layers, layer_names = get_layers_with_prefixes(model, definition.extract_layers_node())
+    language_model = model.model.language_model
+
+    records = {id(layer): [] for layer in layers}
+    final_args = []
+
+    def capture(module, args, kwargs):
+        records[id(module)].append(
+            {
+                "hidden": args[0].detach().clone(),
+                "bank": args[1].detach().clone()
+                if len(args) > 1 and torch.is_tensor(args[1])
+                else None,
+                "output": None,
+            }
+        )
+
+    def capture_output(module, args, kwargs, output):
+        records[id(module)][-1]["output"] = output.detach().clone()
+
+    def capture_final_input(module, args):
+        final_args.append(
+            {
+                "bank": args[0].detach().clone(),
+                "hidden": args[1].detach().clone(),
+            }
+        )
+
+    handles = [layer.register_forward_pre_hook(capture, with_kwargs=True) for layer in layers]
+    handles += [layer.register_forward_hook(capture_output, with_kwargs=True) for layer in layers]
+    handles.append(language_model.final_input.register_forward_pre_hook(capture_final_input))
+    examples = [
+        {
+            "input_ids": torch.randint(0, 64, (1, 12)),
+            "attention_mask": torch.ones(1, 12, dtype=torch.long),
+        },
+        {
+            "input_ids": torch.randint(0, 64, (1, 9)),
+            "attention_mask": torch.ones(1, 9, dtype=torch.long),
+        },
+    ]
+    try:
+        with torch.no_grad():
+            for example in examples:
+                model(**example, use_cache=False)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    previous = definition.require_load_processor
+    definition.require_load_processor = False
+    try:
+        wrapper = definition(model=model, quantized=False, quantize_config=None)
+    finally:
+        definition.require_load_processor = previous
+    wrapper.quantize_config = SimpleNamespace(
+        device=torch.device("cpu"),
+        activation_mode=None,
+        activation_recipe=None,
+        offload_to_disk=False,
+        compute_device_filter=None,
+    )
+
+    wrapper.build_quantization_input_cache(
+        layers=layers,
+        calibration_data=examples,
+        use_cache=False,
+        layer_names=layer_names,
+    )
+    final_layer = layers[-1]
+    bucket = wrapper._looped_per_layer[id(final_layer)]
+    assert len(bucket["layer_inputs"]) == len(examples)
+    for batch_index in range(len(examples)):
+        additional_inputs = dict(bucket["layer_input_kwargs"][batch_index])
+        additional_inputs["attention_mask"] = bucket["attention_masks"][batch_index]
+        additional_inputs["position_ids"] = bucket["position_ids"][batch_index]
+        additional_inputs["use_cache"] = False
+        wrapper.prepare_layer_replay_kwargs(
+            layer=final_layer,
+            layer_input=list(bucket["layer_inputs"][batch_index]),
+            additional_inputs=additional_inputs,
+            target_device=torch.device("cpu"),
+        )
+
+    banks = wrapper._inkling2_loop_final_block_banks
+    assert sorted(banks) == list(range(len(examples)))
+    for batch_index, batch_final in enumerate(final_args):
+        torch.testing.assert_close(banks[batch_index], batch_final["bank"])
+
+    replayed = wrapper.lm_head_pre_quantize_generate_hook(
+        [
+            [records[id(final_layer)][batch_index]["output"]]
+            for batch_index in range(len(examples))
+        ]
+    )
+    for batch_index, batch_final in enumerate(final_args):
+        expected = language_model.norm(
+            language_model.final_input(batch_final["bank"], batch_final["hidden"])[0]
+        )
+        torch.testing.assert_close(
+            replayed[batch_index][0], expected, atol=1e-6, rtol=0
+        )
 
 
 @pytest.fixture(scope="module")

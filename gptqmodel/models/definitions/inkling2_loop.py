@@ -15,6 +15,7 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..local import LocalModelLoader
+from ..looped_capture import LoopedLayerCaptureMixin
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from ..ports.inkling2_loop.experts import (
     Inkling2LoopPackedExpertLinear,
@@ -88,7 +89,7 @@ class _BlockStatesCarry:
         self.index = 0
 
 
-class Inkling2LoopQModel(BaseQModel):
+class Inkling2LoopQModel(LoopedLayerCaptureMixin, BaseQModel):
     """Inkling 2 Mini (fixed-loop, hybrid sliding/full attention, routed MoE).
 
     Checkpoint layout notes:
@@ -195,6 +196,7 @@ class Inkling2LoopQModel(BaseQModel):
         # The head stage is the last consumer of the per-batch banks; do not
         # retain calibration activations after the run.
         self._inkling2_loop_final_block_banks = {}
+        self._inkling2_loop_final_block_bank_index = 0
 
     @classmethod
     def after_defuser_conversion(cls, model):
@@ -308,6 +310,7 @@ class Inkling2LoopQModel(BaseQModel):
         # drop the previous run's final banks.
         self._inkling2_loop_capture_index = 0
         self._inkling2_loop_final_block_banks = {}
+        self._inkling2_loop_final_block_bank_index = 0
         core_model = self.model.model
         language_model = core_model.language_model
         self.shell_module_materialize(language_model.embed_tokens, self.quantize_config.device)
@@ -454,16 +457,79 @@ class Inkling2LoopQModel(BaseQModel):
         layer_input_kwargs[_BLOCK_STATES_CARRY_KEY] = carry
         return layer_input_kwargs
 
+    def capture_looped_layer_invocation_inputs(self, module, args, kwargs):
+        """Record the residual bank and loop messages passed positionally.
+
+        Every decoder layer takes ``block_states`` as its second positional
+        argument and loop-core passes 2..N take the q/k/v/mlp ``messages`` as
+        the third. The looped full-forward capture replays each invocation, so
+        it must keep the exact bank and messages of that invocation instead of
+        rebuilding a single pass-1 chain.
+        """
+
+        del module, kwargs
+        captured: Dict[str, Any] = {}
+        if len(args) > 1 and torch.is_tensor(args[1]):
+            captured["block_states"] = args[1].detach()
+        if len(args) > 2 and torch.is_tensor(args[2]):
+            captured["messages"] = args[2].detach()
+        return captured
+
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
+        captured_block_states = additional_inputs.pop("block_states", None)
+        captured_messages = additional_inputs.pop("messages", None)
         additional_inputs = super().prepare_layer_replay_kwargs(
             layer,
             layer_input,
             additional_inputs,
             target_device,
         )
-        carry = additional_inputs.pop(_BLOCK_STATES_CARRY_KEY, None)
         if not layer_input or not torch.is_tensor(layer_input[0]):
             return additional_inputs
+
+        if captured_block_states is not None:
+            # The looped full-forward capture recorded this invocation's own
+            # bank and messages, so replay is exact: post-loop layers see the
+            # final-pass output and loop-core layers see every pass.
+            self_attn = getattr(layer, "self_attn", None)
+            layer_idx = getattr(self_attn, "layer_idx", None)
+            if layer_idx == 0:
+                # A new replay pass starts here; do not keep banks from the
+                # previous processor or quantization run.
+                self._inkling2_loop_final_block_banks = {}
+                self._inkling2_loop_final_block_bank_index = 0
+            additional_inputs["block_states"] = move_to(
+                captured_block_states, device=target_device
+            )
+            if captured_messages is not None:
+                additional_inputs["messages"] = move_to(
+                    captured_messages, device=target_device
+                )
+            if layer_idx == len(self.model.model.language_model.layers) - 1:
+                # ``final_input`` consumes the bank after the final decoder
+                # layer appends its input. Record it here because the lm_head
+                # stage runs after every layer replay.
+                bank = captured_block_states
+                if getattr(layer, "is_block_boundary", False):
+                    bank = torch.cat(
+                        [
+                            bank,
+                            move_to(layer_input[0].detach(), device=CPU).unsqueeze(-2),
+                        ],
+                        dim=-2,
+                    )
+                banks = getattr(self, "_inkling2_loop_final_block_banks", None)
+                if banks is None:
+                    banks = {}
+                    self._inkling2_loop_final_block_banks = banks
+                index = getattr(
+                    self, "_inkling2_loop_final_block_bank_index", 0
+                )
+                banks[index] = bank
+                self._inkling2_loop_final_block_bank_index = index + 1
+            return additional_inputs
+
+        carry = additional_inputs.pop(_BLOCK_STATES_CARRY_KEY, None)
 
         self_attn = getattr(layer, "self_attn", None)
         layer_config = getattr(self_attn, "config", None)
@@ -494,6 +560,7 @@ class Inkling2LoopQModel(BaseQModel):
             # A new replay pass starts here; do not keep banks from the previous
             # processor or quantization run.
             self._inkling2_loop_final_block_banks = {}
+            self._inkling2_loop_final_block_bank_index = 0
         block_states = carry.states
         if carry.layer is not layer:
             if getattr(layer, "is_block_boundary", False):
