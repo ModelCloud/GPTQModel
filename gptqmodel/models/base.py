@@ -3976,7 +3976,16 @@ class BaseQModel(nn.Module):
             float(ebss.temperature),
             int(ebss.seed),
         )
-        tokens = generate_ebss_calibration(self.model, ebss)
+        # The materialized model is still on the host here; the looper stages
+        # one layer at a time only after this search. Run the search on the
+        # requested quantization device (and restore the host placement), or
+        # stage layers individually when the full model does not fit (#6110).
+        tokens = generate_ebss_calibration(
+            self.model,
+            ebss,
+            device=self._pre_quantize_device(),
+            layer_prefixes=self.extract_layers_node(),
+        )
         return replace(calibration, dataset=tokens)
 
     def _prepare_calibration_before_rotation(

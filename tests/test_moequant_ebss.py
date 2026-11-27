@@ -12,9 +12,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import gptqmodel.utils.ebss as ebss_module
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.ports.native.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from gptqmodel.models.ports.native.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
-from gptqmodel.quantization.config import EBSSConfig
+from gptqmodel.quantization.config import CalibrationConfig, EBSSConfig, MoEQuantConfig
 from gptqmodel.utils.ebss import (
     _expert_balance,
     _extract_router_indices,
@@ -240,3 +242,37 @@ def test_ebss_requires_routes_during_sampling():
     model.router = torch.nn.Identity()
     with pytest.raises(ValueError, match="no routing assignments"):
         generate_ebss_calibration(model, EBSSConfig(num_sentences=1, seq_len=2))
+
+
+def test_maybe_generate_ebss_passes_quantize_device_and_layer_prefixes(monkeypatch):
+    model = _tiny_model()
+    wrapper = BaseQModel.__new__(BaseQModel)
+    torch.nn.Module.__init__(wrapper)
+    wrapper.model = model
+    wrapper.turtle_model = None
+    wrapper.quantize_config = SimpleNamespace(
+        moequant=MoEQuantConfig(
+            agq=False,
+            ebss=EBSSConfig(num_sentences=1, seq_len=2),
+        ),
+        device="cpu",
+    )
+    wrapper._pre_quantize_device = lambda: torch.device("cpu")
+    wrapper.extract_layers_node = lambda: ["model.layers"]
+
+    calls = {}
+
+    def fake_generate(inner_model, config, **kwargs):
+        calls["model"] = inner_model
+        calls["config"] = config
+        calls.update(kwargs)
+        return [[1, 2]]
+
+    monkeypatch.setattr(ebss_module, "generate_ebss_calibration", fake_generate)
+
+    calibration = wrapper._maybe_generate_ebss_calibration(CalibrationConfig())
+
+    assert calls["model"] is model
+    assert calls["device"] == torch.device("cpu")
+    assert calls["layer_prefixes"] == ["model.layers"]
+    assert calibration.dataset == [[1, 2]]
