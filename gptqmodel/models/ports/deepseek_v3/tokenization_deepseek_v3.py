@@ -59,6 +59,16 @@ class DeepseekV3Tokenizer:
         config = DeepseekV3Config.from_dict(payload)
         metadata = _tokenizer_metadata(model_id_or_path, kwargs)
         declared_class = metadata.get("tokenizer_class") or getattr(config, "tokenizer_class", None)
+        if declared_class == "TikTokenTokenizer" and cached_file(
+            model_id_or_path, "tiktoken.model", _raise_exceptions_for_missing_entries=False,
+            **_download_kwargs(kwargs),
+        ) is not None:
+            # Moonlight and Kimi-K2 ship the same byte-identical tiktoken.model
+            # and pretokenizer regex; the package-owned class reads each
+            # checkpoint's own added_tokens_decoder mapping.
+            from .tokenization_kimi import TikTokenTokenizer
+
+            return TikTokenTokenizer.from_pretrained(model_id_or_path, **kwargs)
         tokenizer_class = TokenizersBackend
         if declared_class not in _FRAMEWORK_BACKENDS:
             tokenizer_class = _vendored_tokenizer_class(declared_class)

@@ -362,9 +362,18 @@ TOKENIZER_ASSETS = {
             "tokenizer_config.json": "637bcd1a08cf7c772ce6a383196b22930921c79c3c73223c5afc0c7f41545546",
         },
     ),
+    # Moonlight ships the same byte-identical tiktoken vocabulary and pretokenizer
+    # regex as Kimi-K2, but declares its own checkpoint class name.
+    "moonlight": (
+        "moonshotai/Moonlight-16B-A3B", "476b36a473d4467f94469414bef6cee75c9c8172", {
+            "tiktoken.model": "b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103",
+            "tokenizer_config.json": "566eff6d3b862587c620edb402dc76417c582605c79e2c9a4bca333a73f44fcb",
+        },
+    ),
 }
 TOKENIZER_TEXT = "Hello, world! 你好，世界！"
 KIMI_IDS = [19180, 11, 2695, 0, 220, 33845, 378, 2243, 856]
+MOONLIGHT_IDS = KIMI_IDS
 NATIVE_IDS = [19923, 14, 2058, 3, 223, 30594, 303, 3427, 1175]
 KIMI_CHAT = (
     "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n"
@@ -482,6 +491,45 @@ def test_native_tokenizer_class_name_is_not_kimi_selector(tmp_path, monkeypatch,
     tokenizer_file.write_text(json.dumps(payload))
     tokenizer = load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=True, local_files_only=True)
     assert tokenizer.encode(TOKENIZER_TEXT) == NATIVE_IDS
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [False, True])
+def test_real_moonlight_tokenizer_uses_vendored_kimi_family(
+    tmp_path, monkeypatch, real_tokenizer_assets, trust, bypass,
+):
+    """Moonlight declares ``TikTokenTokenizer`` without ``model_type=kimi_k2``.
+
+    Its tiktoken vocabulary and pretokenizer regex are the Kimi-K2 family, so
+    the package-owned tokenizer must load it without checkpoint Python.
+    """
+
+    from gptqmodel.models.ports.deepseek_v3.tokenization_kimi import TikTokenTokenizer
+
+    for source in real_tokenizer_assets["moonlight"].iterdir():
+        shutil.copyfile(source, tmp_path / source.name)
+    payload = tiny_payload(
+        "deepseek_v3", vocab_size=163840, bos_token_id=163584, eos_token_id=163585, pad_token_id=None,
+    )
+    marker = poison_checkpoint(tmp_path, payload)
+    monkeypatch.delenv(BYPASS_ENV, raising=False)
+    if bypass:
+        monkeypatch.setenv(BYPASS_ENV, "1")
+    monkeypatch.setattr(AutoConfig, "from_pretrained", reject_checkpoint_auto)
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", reject_checkpoint_auto)
+    config = load_model_config(tmp_path, trust_remote_code=trust)
+    tokenizer = load_hf_tokenizer(
+        tmp_path, model_config=config, trust_remote_code=trust,
+        code_revision="never-import", local_files_only=True,
+    )
+    assert type(tokenizer) is TikTokenTokenizer
+    assert tokenizer.encode(TOKENIZER_TEXT) == MOONLIGHT_IDS
+    assert tokenizer.decode(MOONLIGHT_IDS) == TOKENIZER_TEXT
+    assert tokenizer.bos_token_id == 163584 and tokenizer.eos_token_id == 163585
+    # Moonlight's added_tokens_decoder swaps Kimi-K2's [PAD]/[UNK] ids.
+    assert tokenizer.pad_token_id == config.pad_token_id == 163838
+    assert tokenizer.unk_token_id == 163839
     assert not marker.exists()
 
 

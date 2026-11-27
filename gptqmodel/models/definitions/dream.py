@@ -12,6 +12,8 @@ class DreamQModel(LlamaQModel):
     loader = LocalModelLoader(
         config_class="gptqmodel.models.ports.dream.configuration_dream.DreamConfig",
         model_class="gptqmodel.models.ports.dream.modeling_dream.DreamModel",
+        # Dream-v0 ships DreamTokenizer only as checkpoint Python.
+        remote_tokenizer_model_types=("dream",),
     )
 
     # TODO: fix dream attention mask tensor size/dtype issues due to batching/padding

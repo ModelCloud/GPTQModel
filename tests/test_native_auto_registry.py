@@ -44,6 +44,18 @@ def test_declared_framework_tokenizer_resolves_to_framework_class(tmp_path):
     assert cls.__module__.startswith("transformers.") and not cls.__module__.startswith("transformers.models.")
 
 
+def test_declared_pretrainedtokenizer_alias_resolves_like_transformers(tmp_path):
+    """Transformers maps the resolved ``PythonBackend`` name to ``TokenizersBackend``."""
+
+    from transformers.models.auto.tokenization_auto import tokenizer_class_from_name
+
+    assert tokenizer_class_from_name("PreTrainedTokenizer").__name__ == "PythonBackend"
+    cls = auto.NativeTokenizer.tokenizer_class(
+        str(_checkpoint(tmp_path, "bailing_moe", tokenizer_class="PreTrainedTokenizer"))
+    )
+    assert cls.__name__ == "TokenizersBackend"
+
+
 def test_unknown_or_model_family_tokenizer_name_never_resolves_to_transformers_models(tmp_path):
     # An unknown name falls back to the model_type default; a non-vendored model-family
     # name is never imported from transformers.models.
