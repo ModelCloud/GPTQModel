@@ -5055,6 +5055,22 @@ class BaseQModel(nn.Module):
 
         configure_default_lookahead(self.model)
 
+    def _align_adapters_for_compile(self, dtype: torch.dtype) -> None:
+        """Align every attached adapter before the compiled first forward.
+
+        A quantized linear does not know its activation dtype when the adapter is
+        bound, so ``Lora`` normally aligns on the first eager forward. Under
+        ``optimize()`` that first forward is traced by dynamo, where the adapter
+        refuses to cast (#6109). The model dtype is known here, so align once
+        before tracing; this is still before any forward, so K1/K2 hold.
+        """
+
+        for module in self.model.modules():
+            for attribute in ("adapter", "_gptqmodel_dense_adapter"):
+                adapter = getattr(module, attribute, None)
+                if isinstance(adapter, Adapter):
+                    adapter.align_forward_dtype(dtype)
+
     def compile(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         log.warn("Deprecation: `model.compile()` is deprecated. Please use `model.optimize()` instead.")
         return self.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
@@ -5103,6 +5119,9 @@ class BaseQModel(nn.Module):
             # the model dtype on its unquantized parameters (norms, embeddings).
             model_dtype = next((param.dtype for param in self.model.parameters()), None)
         if isinstance(model_dtype, torch.dtype):
+            # The first forward is traced here, so an adapter that still stores
+            # another dtype would raise inside dynamo instead of aligning (#6109).
+            self._align_adapters_for_compile(model_dtype)
             for module in modules.values():
                 if (
                     getattr(module, "linear_mode", "unsupported") is not None

@@ -10,13 +10,23 @@ every forward of the layer that owns it, so it follows the same rule.
 | bind site | dtype source | when the projections are aligned |
 | --- | --- | --- |
 | dense `nn.Linear` (`utils/model.py`) | `weight.dtype` | `post_init` |
-| quantized linear (`BaseQuantLinear.post_init`) | unknown until the first forward | first eager forward |
+| quantized linear (`BaseQuantLinear.post_init`) | model dtype at `optimize()`; otherwise the first activation | `optimize()` before tracing, else the first eager forward |
 
 `Lora.post_init(..., dtype=...)` casts `lora_A`/`lora_B` once and records
 `_forward_dtype`. A float64 export is still narrowed to float32. Without a dtype
 hint the first eager forward aligns the projections and records the lock; while
 `torch.compile` is tracing, the lock is checked but not recorded, matching
 `ForwardDtypeLockMixin`.
+
+A quantized linear does not know its activation dtype when the adapter is
+bound, and the first eager forward is where it used to align. Under
+`optimize()` that first forward is traced by dynamo, where the adapter refuses
+to cast (#6109). `BaseQModel.optimize()` therefore resolves the model dtype and
+calls `Lora.align_forward_dtype()` for every attached adapter before it
+installs the compiled forward. That is still before any forward, so the cast is
+allowed by K1/K2 and the traced graph only consumes matching projections. An
+adapter already locked to another dtype raises there instead of changing dtype
+after a forward.
 
 After the lock, a forward whose activation dtype differs raises instead of
 re-casting:
