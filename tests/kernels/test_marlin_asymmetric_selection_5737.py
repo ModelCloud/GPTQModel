@@ -15,19 +15,23 @@ from __future__ import annotations
 
 import pytest
 import torch
+from torch import nn
 
 import gptqmodel.models._const as model_const
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import (
     clear_validation_cache,
+    hf_select_quant_linear_v2,
     select_quant_linear,
     validate_quant_linear,
 )
 from gptqmodel.utils.marlin_scalar_type import scalar_types
+from gptqmodel.utils.model import create_quant_layer
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +119,52 @@ def test_validate_rejects_asymmetric_activation_order(group_size):
     assert "activation-order" in str(error)
 
 
+def test_validate_rejects_asymmetric_activation_order_without_shapes():
+    """Class-level selection has no shapes and must stay conservative (#6131)."""
+
+    ok, error = validate_quant_linear(
+        MarlinLinear,
+        bits=4,
+        group_size=128,
+        desc_act=True,
+        sym=False,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+        device=DEVICE.CUDA,
+    )
+
+    assert not ok
+    assert isinstance(error, NotImplementedError)
+    assert "activation-order" in str(error)
+
+
+def test_hf_select_quant_linear_v2_skips_marlin_for_asymmetric_act_order():
+    """The HF bridge gets one class, so it must not pick a rejected contract."""
+
+    kwargs = {
+        "bits": 4,
+        "group_size": 128,
+        "format": "gptq",
+        "quant_method": "gptq",
+        "device_map": {"": "cuda:0"},
+        "backend": "auto",
+        "pack": False,
+    }
+
+    assert (
+        hf_select_quant_linear_v2(desc_act=True, sym=False, **kwargs)
+        is not MarlinLinear
+    )
+    assert (
+        hf_select_quant_linear_v2(desc_act=False, sym=False, **kwargs)
+        is MarlinLinear
+    )
+    assert (
+        hf_select_quant_linear_v2(desc_act=True, sym=True, **kwargs)
+        is MarlinLinear
+    )
+
+
 def test_validate_keeps_asymmetric_channelwise_desc_act():
     """One channelwise group makes ``desc_act`` a no-op, so zeros still fit."""
 
@@ -144,6 +194,29 @@ def test_asymmetric_construction_rejects_activation_order_for_fallback():
             out_features=128,
             backend=BACKEND.AUTO,
         )
+
+
+def test_create_quant_layer_falls_through_marlin_for_asymmetric_act_order():
+    """``create_quant_layer`` keeps its per-module fallback for AUTO loads."""
+
+    module = nn.Sequential(nn.Linear(256, 128, bias=False))
+    selected = create_quant_layer(
+        linear_candidates=[MarlinLinear, TorchLinear],
+        bits=4,
+        desc_act=True,
+        dynamic=None,
+        group_size=128,
+        quant_result={"0": {}},
+        module=module,
+        sym=False,
+        device=DEVICE.CUDA,
+        lm_head_name="lm_head",
+        pack_dtype=torch.int32,
+        backend=BACKEND.AUTO,
+    )
+
+    assert selected is TorchLinear
+    assert isinstance(module[0], TorchLinear)
 
 
 @pytest.mark.parametrize("sym", [True, False])
