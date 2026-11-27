@@ -8628,6 +8628,18 @@ class GPTQConfig(PreProcessorConfig):
             out["gsq_training"] = self.gsq_training.to_dict()
 
 
+def _admmq_default_mse(bits: Union[int, str, GGUFBits]) -> MSEConfig:
+    """Return ADMM-Q's bit-adaptive MSE shrink-grid default.
+
+    The 4-bit default was tuned with the search off. The paper enables the
+    search, and the 3-bit low-bit measurement improves with it, so it is the
+    default at 2-3 bits and off at 4-8 bits. An explicit ``mse`` value always
+    wins.
+    """
+
+    return MSEConfig(norm=2.0 if quant_bits_width(bits) <= 3 else 0.0)
+
+
 @dataclass
 class ADMMQConfig(GPTQConfig):
     """Configuration for the ADMM-Q weight-only quantizer.
@@ -8648,13 +8660,16 @@ class ADMMQConfig(GPTQConfig):
 
     method: METHOD = field(default=METHOD.ADMMQ)
     format: FORMAT = field(default=FORMAT.GPTQ)
-    # The paper applies GPTQ's MSE clipping grid on top of the solver, but the
-    # measured WikiText-2 rows are better with the search off, so the default
-    # matches the rest of the GPTQ family. Set ``mse=MSEConfig(norm=2.0)`` to
-    # enable the shrink-grid search.
-    mse: Union[MSEConfig, Dict[str, Any], int, float] = field(
-        default=0.0,
-        metadata={"help": "MSE shrink-grid search; 0 disables it (GPTQ's default)"},
+    # The paper applies GPTQ's MSE clipping grid on top of the solver. The
+    # measured 4-bit WikiText-2 rows are better with the search off, while the
+    # paper and the low-bit measurement favor it. ``None`` therefore selects
+    # the bit-adaptive default: on for 2-3 bits, off for 4-8 bits. Any explicit
+    # value, including 0, overrides it.
+    mse: Optional[Union[MSEConfig, Dict[str, Any], int, float]] = field(
+        default=None,
+        metadata={
+            "help": "MSE shrink-grid search; None enables it for 2-3 bit and disables it for 4-8 bit; 0 disables it"
+        },
     )
 
     # ADMM schedule: rho grows by `rho_update` every `update_iter` iterations,
@@ -8696,6 +8711,8 @@ class ADMMQConfig(GPTQConfig):
         return False
 
     def __post_init__(self):
+        if self.mse is None:
+            self.mse = _admmq_default_mse(self.bits)
         if self.activation is not None:
             raise ValueError(
                 "ADMMQConfig: `activation` stream quantization is not supported by ADMM-Q."
