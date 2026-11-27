@@ -19,9 +19,11 @@ from gptqmodel.quantization.admmq import (
     _Grid,
     admm_penalty_schedule,
     admm_rho_at,
+    admmq_diagnostics_alert,
     pairswap_delta,
     projection_objective,
     refresh_accepts,
+    summarize_admmq_diagnostics,
 )
 from gptqmodel.quantization.config import (
     FORMAT,
@@ -730,7 +732,12 @@ def test_admmq_eigh_failure_falls_back_to_rtn(monkeypatch, device):
     diagnostics = solver.admmq_diagnostics
     assert diagnostics["fallback_to_rtn"] is True
     assert diagnostics["fallback_reason"] == "eigh_failure"
+    assert diagnostics["status"] == "solved"
+    assert diagnostics["converged"] is False
+    assert diagnostics["stop_reason"] == "fallback"
     assert diagnostics["iterations"] == 0
+    assert diagnostics["max_iter"] == config.max_iter
+    assert diagnostics["pairswap_ran"] is False
 
     quantized, scale, zero, g_idx, duration, avg_loss, damp, samples = result
     assert bool(torch.isfinite(quantized).all())
@@ -828,6 +835,205 @@ def test_admmq_rtn_fallback_raises_when_it_is_also_non_finite():
 
     with pytest.raises(ValueError, match="RTN fallback also produced non-finite"):
         _run_solver(ADMMQ, _make_layer(weight), config, x)
+def test_admmq_reports_convergence_and_stop_reason():
+    torch.manual_seed(0)
+    weight = torch.randn(OUT_FEATURES, IN_FEATURES) * 0.2
+    x = _calibration()
+
+    capped, _ = _run_solver(
+        ADMMQ,
+        _make_layer(weight),
+        _small_config(max_iter=3, switch_iter=1, early_stop_tol=0.0),
+        x,
+    )
+    capped_diagnostics = capped.admmq_diagnostics
+    assert capped_diagnostics.get("status") == "solved"
+    assert capped_diagnostics.get("iterations") == 3
+    assert capped_diagnostics.get("max_iter") == 3
+    assert capped_diagnostics.get("converged") is False
+    assert capped_diagnostics.get("stop_reason") == "max_iter"
+
+    early, _ = _run_solver(
+        ADMMQ,
+        _make_layer(weight),
+        _small_config(max_iter=10, switch_iter=1, early_stop_tol=1e9),
+        x,
+    )
+    early_diagnostics = early.admmq_diagnostics
+    assert early_diagnostics.get("iterations") == 1
+    assert early_diagnostics.get("max_iter") == 10
+    assert early_diagnostics.get("converged") is True
+    assert early_diagnostics.get("stop_reason") == "early_stop"
+
+
+@pytest.mark.parametrize(
+    ("replacement", "reason"),
+    [
+        (lambda quantized: quantized + 1.0, "worse_than_rtn"),
+        (lambda quantized: torch.full_like(quantized, float("nan")), "non_finite_objective"),
+    ],
+)
+def test_admmq_records_rtn_fallback_reason(monkeypatch, replacement, reason):
+    torch.manual_seed(0)
+    weight = torch.randn(OUT_FEATURES, IN_FEATURES) * 0.2
+    x = _calibration()
+    solver = ADMMQ(
+        _make_layer(weight),
+        qcfg=_small_config(
+            max_iter=2,
+            switch_iter=1,
+            early_stop_tol=0.0,
+            pairswap_mode="always",
+        ),
+    )
+    solver.quantizer.configure(perchannel=True)
+    solver.add_batch(x, None)
+
+    def replace_pairswap(weight, quantized, hessian, grids):
+        return replacement(quantized), 0
+
+    monkeypatch.setattr(solver, "_pairswap", replace_pairswap)
+    solver.quantize()
+    diagnostics = solver.admmq_diagnostics
+    assert diagnostics.get("fallback_to_rtn") is True
+    assert diagnostics.get("fallback_reason") == reason
+    assert diagnostics.get("stop_reason") == "max_iter"
+    assert diagnostics.get("pairswap_ran") is True
+    assert diagnostics.get("pairswap_flips") == 0
+
+
+def test_admmq_records_skipped_calibration_fallback():
+    torch.manual_seed(0)
+    weight = torch.randn(OUT_FEATURES, IN_FEATURES) * 0.2
+    solver = ADMMQ(_make_layer(weight), qcfg=_small_config())
+    solver.quantizer.configure(perchannel=True)
+    solver.quantize()
+
+    diagnostics = getattr(solver, "admmq_diagnostics", None) or {}
+    assert diagnostics.get("status") == "skipped"
+    assert diagnostics.get("reason") == "insufficient_calibration"
+    assert diagnostics.get("stop_reason") == "skipped"
+    assert diagnostics.get("iterations") == 0
+    assert diagnostics.get("fallback_to_rtn") is True
+    assert diagnostics.get("fallback_reason") == "insufficient_calibration"
+
+
+def test_admmq_embedding_diagnostics_are_skipped():
+    embedding = nn.Embedding(8, 16, dtype=torch.float32).eval()
+    solver = ADMMQ(embedding, qcfg=_small_config(group_size=4))
+    solver.quantizer.configure(perchannel=True)
+    solver.add_batch(torch.randint(0, 8, (4, 5)), None)
+    solver.quantize()
+
+    diagnostics = getattr(solver, "admmq_diagnostics", None) or {}
+    assert diagnostics.get("status") == "skipped"
+    assert diagnostics.get("reason") == "embedding"
+    assert diagnostics.get("stop_reason") == "skipped"
+    assert diagnostics.get("fallback_to_rtn") is False
+    assert diagnostics.get("fallback_reason") is None
+
+
+def test_admmq_diagnostics_summary_names_stop_reasons_and_distributions():
+    layers = {
+        "a": {
+            "status": "solved",
+            "converged": True,
+            "stop_reason": "early_stop",
+            "iterations": 5,
+            "max_iter": 10,
+            "condition_number": 10.0,
+            "refresh_attempts": 1,
+            "refresh_accepted": True,
+            "pairswap_ran": True,
+            "pairswap_flips": 3,
+            "fallback_to_rtn": False,
+            "fallback_reason": None,
+        },
+        "b": {
+            "status": "solved",
+            "converged": False,
+            "stop_reason": "max_iter",
+            "iterations": 10,
+            "max_iter": 10,
+            "condition_number": float("inf"),
+            "refresh_attempts": 0,
+            "refresh_accepted": False,
+            "pairswap_ran": False,
+            "pairswap_flips": 0,
+            "fallback_to_rtn": False,
+            "fallback_reason": None,
+        },
+        "c": {
+            "status": "solved",
+            "converged": False,
+            "stop_reason": "max_iter",
+            "iterations": 10,
+            "max_iter": 10,
+            "condition_number": 30.0,
+            "refresh_attempts": 0,
+            "refresh_accepted": False,
+            "pairswap_ran": False,
+            "pairswap_flips": 0,
+            "fallback_to_rtn": True,
+            "fallback_reason": "worse_than_rtn",
+        },
+        "d": {
+            "status": "skipped",
+            "converged": False,
+            "stop_reason": "skipped",
+            "iterations": 0,
+            "max_iter": 10,
+            "condition_number": None,
+            "refresh_attempts": 0,
+            "refresh_accepted": False,
+            "pairswap_ran": False,
+            "pairswap_flips": 0,
+            "fallback_to_rtn": True,
+            "fallback_reason": "insufficient_calibration",
+        },
+    }
+
+    summary = summarize_admmq_diagnostics(layers)
+    assert summary["layers"] == 4
+    assert summary["solved"] == 3
+    assert summary["skipped"] == 1
+    assert summary["early_stop_layers"] == ["a"]
+    assert summary["max_iter_layers"] == ["b", "c"]
+    assert summary["rtn_fallback_layers"] == ["c", "d"]
+    assert summary["rtn_fallback_reasons"] == {
+        "insufficient_calibration": 1,
+        "worse_than_rtn": 1,
+    }
+    assert summary["refresh_attempted"] == 1
+    assert summary["refresh_accepted"] == 1
+    assert summary["refresh_accepted_layers"] == ["a"]
+    assert summary["pairswap_layers"] == 1
+    assert summary["pairswap_flips"] == 3
+    assert summary["pairswap_layers_with_flips"] == ["a"]
+    assert summary["condition_number"] == {"min": 10.0, "median": 20.0, "max": 30.0}
+    assert summary["condition_number_nonfinite"] == 1
+    assert summary["iterations"] == {"min": 5.0, "median": 10.0, "max": 10.0}
+
+    alert = admmq_diagnostics_alert(summary)
+    assert alert is not None
+    assert "skipped=1" in alert
+    assert "rtn_fallback=2" in alert
+    assert "condition_number_nonfinite=1" in alert
+    assert "insufficient_calibration:1" in alert
+    assert "worse_than_rtn:1" in alert
+
+
+def test_admmq_diagnostics_alert_is_silent_for_a_clean_run():
+    summary = {
+        "layers": 2,
+        "solved": 2,
+        "skipped": 0,
+        "rtn_fallback": 0,
+        "rtn_fallback_reasons": {},
+        "condition_number_nonfinite": 0,
+    }
+
+    assert admmq_diagnostics_alert(summary) is None
 
 
 def test_admmq_pairswap_auto_uses_the_condition_number_gate():
