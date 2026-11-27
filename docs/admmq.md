@@ -339,6 +339,8 @@ print(summary["condition_number"])    # finite min/median/max
 `pairswap_layers`, `pairswap_flips` and the finite min/median/max
 `iterations`. Non-finite condition numbers are counted under
 `summary["condition_number_nonfinite"]` instead of poisoning the statistics.
+If an iteration fails, the summary includes the condition number measured before
+the failure and any grid refresh already performed.
 The full per-module records stay in `model.admmq_diagnostics["layers"]` for the
 live session.
 

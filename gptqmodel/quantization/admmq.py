@@ -53,9 +53,12 @@ class _AdmmNumericalFailure(Exception):
     a layer where the ADMM iterate simply did not beat its RTN baseline.
     """
 
-    def __init__(self, reason: str, detail: str = "", *, iterations: Optional[int] = None):
+    def __init__(
+        self, reason: str, detail: str = "", *, iterations: Optional[int] = None, diagnostics: Optional[dict] = None
+    ):
         self.reason = reason
         self.iterations = iterations
+        self.diagnostics = diagnostics
         super().__init__(f"{reason}: {detail}" if detail else reason)
 
 
@@ -638,6 +641,18 @@ class ADMMQ(GPTQ):
                         "non_finite_iterate",
                         f"iteration {step + 1}",
                         iterations=step + 1,
+                        diagnostics={
+                            "condition_number": condition_number,
+                            "ill_conditioned": condition_number > ILL_CONDITIONED_THRESHOLD,
+                            "rho_initial": rho_initial,
+                            "rho_update": rho_update,
+                            "rho_final": rho,
+                            "refresh_attempts": int(refresh_attempted),
+                            "refresh_attempted": refresh_attempted,
+                            "refresh_accepted": refresh_accepted,
+                            "refresh_improvement": refresh_improvement,
+                            "initial_objective": float(initial_objective.item()),
+                        },
                     )
                 continuous[start:end] = block
             del right_hand_side
@@ -922,8 +937,9 @@ class ADMMQ(GPTQ):
                         "max_iter": int(self.qcfg.max_iter),
                         "condition_number": None,
                         "rho_final": None,
-                        "refresh_attempts": None,
-                        "refresh_accepted": None,
+                        "refresh_attempts": 0,
+                        "refresh_attempted": False,
+                        "refresh_accepted": False,
                         "refresh_improvement": None,
                         "pairswap_ran": False,
                         "pairswap_flips": 0,
@@ -931,6 +947,8 @@ class ADMMQ(GPTQ):
                         "initial_objective": None,
                         "final_objective": None,
                     }
+                    if isinstance(exc, _AdmmNumericalFailure) and exc.diagnostics is not None:
+                        self.admmq_diagnostics.update(exc.diagnostics)
                 else:
                     self.admmq_diagnostics["fallback_reason"] = reason
                     self.admmq_diagnostics["converged"] = False

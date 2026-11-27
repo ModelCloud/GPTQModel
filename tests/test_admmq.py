@@ -580,7 +580,7 @@ def _small_config(**overrides):
     return ADMMQConfig(**base)
 
 
-def test_admmq_early_stop_uses_refreshed_iterate():
+def _refresh_fixture():
     generator = torch.Generator().manual_seed(4)
     weight = torch.randn(3, 8, generator=generator)
     x = torch.randn(24, 8, generator=generator)
@@ -596,6 +596,11 @@ def test_admmq_early_stop_uses_refreshed_iterate():
         offload_to_disk=False,
     )
 
+    return weight, x, config
+
+
+def test_admmq_early_stop_uses_refreshed_iterate():
+    weight, x, config = _refresh_fixture()
     control, _ = _run_solver(ADMMQ, _make_layer(weight), replace(config, refresh_on_stagnation=False), x)
     capped, capped_result = _run_solver(ADMMQ, _make_layer(weight), replace(config, max_iter=2), x)
     solver, result = _run_solver(ADMMQ, _make_layer(weight), config, x)
@@ -811,6 +816,28 @@ def test_admmq_non_finite_factorization_falls_back_to_rtn(
         atol=0,
     )
     assert solver.H is None
+
+
+def test_admmq_iterate_failure_preserves_completed_refresh(monkeypatch):
+    weight, x, config = _refresh_fixture()
+    control, _ = _run_solver(ADMMQ, _make_layer(weight), replace(config, max_iter=2), x)
+    assert control.admmq_diagnostics["refresh_accepted"]
+
+    def fail_third_step(step, *args):
+        return float("nan") if step == 2 else admm_rho_at(step, *args)
+
+    monkeypatch.setattr("gptqmodel.quantization.admmq.admm_rho_at", fail_third_step)
+    solver, result = _run_solver(ADMMQ, _make_layer(weight), config, x)
+    record = solver.admmq_diagnostics
+    assert record["iterations"] == 3
+    assert record["fallback_reason"] == "non_finite_iterate"
+    assert record["condition_number"] == control.admmq_diagnostics["condition_number"]
+    assert record["refresh_improvement"] == control.admmq_diagnostics["refresh_improvement"]
+    summary = summarize_admmq_diagnostics({"proj": record})
+    assert summary["refresh_attempted"] == 1
+    assert summary["refresh_accepted_layers"] == ["proj"]
+    assert summary["rtn_fallback_layers"] == ["proj"]
+    torch.testing.assert_close(result[0], _rtn_grid_projection(weight, config, solver.module), rtol=0, atol=0)
 
 
 def test_admmq_non_finite_loss_falls_back_to_rtn():
