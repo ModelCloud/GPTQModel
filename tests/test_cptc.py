@@ -16,10 +16,12 @@ from gptqmodel.nn_modules.qlinear.cptc import CPTCLinear
 from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.quantization.cptc import (
     CPTCSpec,
+    _resolve_storage_device,
     decode_e2m5,
     decode_weight,
     gaussian_table,
     pack_states,
+    quantize_weight,
     snap_e2m5,
     state_indices,
     unpack_states,
@@ -89,6 +91,13 @@ def cptc_gpu():
     ops = cptc.native_ops(device)
     assert ops is not None, cptc._EXTENSION.last_error_message()
     return device, ops
+
+
+@pytest.fixture(scope="module")
+def cptc_two_accelerators():
+    if torch.cuda.device_count() < 2:
+        pytest.skip("CPTC cross-device storage needs two accelerator devices")
+    return torch.device("cuda", 0), torch.device("cuda", 1)
 
 
 def test_e2m5_bytes_and_rounding_boundaries():
@@ -268,6 +277,71 @@ def test_native_linear_matches_fp64_and_keeps_packed_state(cptc_gpu, dtype, rows
     assert sum(t.nbytes for t in layer.list_buffers()) == sum(t.nbytes for t in before.values())
     assert not list(layer.iter_runtime_weight_tensors())
     assert not any(isinstance(value, torch.Tensor) for value in vars(layer).values())
+
+
+def test_cptc_storage_device_resolution_is_explicit():
+    cpu = torch.device("cpu")
+    cuda0 = torch.device("cuda:0")
+    cuda1 = torch.device("cuda:1")
+    assert _resolve_storage_device(cpu, cuda0, None) == cpu
+    assert _resolve_storage_device(cuda1, cuda1, None) == cuda1
+    assert _resolve_storage_device(cuda1, cuda0, cuda0) == cuda0
+    with pytest.raises(ValueError, match="storage_device"):
+        _resolve_storage_device(cuda1, cuda0, None)
+
+
+def test_quantize_weight_requires_storage_device_between_accelerators(cptc_two_accelerators):
+    source, compute = cptc_two_accelerators
+    spec = CPTCSpec(bits=4, trellis_depth=8, block_size=128)
+    weight = torch.randn((8, 128), generator=torch.Generator().manual_seed(17)).to(source)
+    with pytest.raises(ValueError, match="storage_device"):
+        quantize_weight(weight, spec, device=compute)
+
+
+@pytest.mark.parametrize("storage", ("compute", "weight", "cpu"))
+def test_quantize_weight_storage_device_owns_returned_payload(cptc_two_accelerators, storage):
+    source, compute = cptc_two_accelerators
+    spec = CPTCSpec(bits=4, trellis_depth=8, block_size=128)
+    weight = torch.randn((8, 128), generator=torch.Generator().manual_seed(29)).to(source)
+    target = {"compute": compute, "weight": source, "cpu": torch.device("cpu")}[storage]
+
+    actual = quantize_weight(weight, spec, device=compute, storage_device=target)
+    assert all(tensor.device == target for tensor in actual)
+
+    reference = quantize_weight(weight.to(compute), spec, device=compute)
+    for actual_tensor, expected_tensor in zip(actual, reference):
+        assert torch.equal(actual_tensor.to(compute), expected_tensor)
+
+
+def test_quantize_weight_keeps_cpu_storage_for_gpu_compute(cptc_gpu):
+    device, _ = cptc_gpu
+    spec = CPTCSpec(bits=4, trellis_depth=8, block_size=128)
+    weight = torch.randn((8, 128), generator=torch.Generator().manual_seed(31))
+
+    actual = quantize_weight(weight, spec, device=device)
+    assert all(tensor.device.type == "cpu" for tensor in actual)
+
+    reference = quantize_weight(weight, spec, device=device, storage_device=device)
+    for actual_tensor, expected_tensor in zip(actual, reference):
+        assert torch.equal(actual_tensor, expected_tensor.cpu())
+
+
+def test_cptc_linear_pack_uses_its_storage_target(cptc_two_accelerators):
+    source_device, compute_device = cptc_two_accelerators
+    source = torch.nn.Linear(128, 8, bias=False, dtype=torch.float32)
+    layer = CPTCLinear(4, 128, 8, trellis_depth=8).to(source_device)
+    layer.pack_original(source, device=compute_device)
+
+    assert all(
+        getattr(layer, name).device == source_device
+        for name in layer.CHECKPOINT_REQUIRED_BUFFERS
+    )
+    layer.post_init()
+    inputs = torch.randn((2, 128), generator=torch.Generator().manual_seed(37)).to(source_device)
+    with torch.inference_mode():
+        output = layer(inputs)
+    assert output.device == source_device
+    assert torch.isfinite(output).all()
 
 
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16, torch.float32))

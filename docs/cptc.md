@@ -130,6 +130,65 @@ bits per weight with 128-value blocks and 0.125 with 256-value blocks, before
 padding and per-layer metadata. See the [forward dtype contract](../contracts/kernel/forward-dtype.md)
 for the module's activation dtype policy.
 
+## Storage device contract
+
+`quantize_weight` separates the device that runs the trellis search from the
+device that owns the returned checkpoint payload. `device` selects the
+encoder; `storage_device` selects the returned packed blocks, table,
+coefficients and scales. The default is `weight.device`, which keeps the model
+path's CPU checkpoint storage while the encoder runs on an accelerator.
+
+Before this contract, `quantize_weight` allocated `coeffs`, `packed` and
+`scales` on `weight.device` and returned `table` there, even when `device`
+was another accelerator. Each row batch was copied to `device` for encoding
+and then copied back, so a cross-accelerator call silently paid a
+device-to-device copy per batch and returned the payload on the weight's
+device.
+
+```mermaid
+flowchart TD
+    A["quantize_weight(weight, spec, device)"] --> B["Allocate coeffs, packed, scales on weight.device"]
+    B --> C["Copy each row batch to device"]
+    C --> D["Encode and pack on device"]
+    D --> E["Copy packed and scales back to weight.device"]
+    E --> F["Return table on weight.device"]
+    G["weight.device != device"] -.->|"implicit per-batch copy"| C
+    classDef removed fill:#ffdddd,color:#411,stroke:#a22
+    class B,E,G removed
+```
+
+The shipped flow resolves the storage device before allocation and fails
+closed on an ambiguous cross-accelerator request:
+
+```mermaid
+flowchart TD
+    A["quantize_weight(weight, spec, device, storage_device)"] --> B["as_torch_device normalizes device"]
+    B --> C{"storage_device given?"}
+    C -->|Yes| D["Resolve storage_device"]
+    C -->|No| E{"weight.device and device are distinct accelerators?"}
+    E -->|Yes| F["Raise ValueError"]
+    E -->|No| G["storage_device = weight.device"]
+    D --> H["Allocate coeffs, packed, scales on storage_device"]
+    G --> H
+    H --> I["Copy each row batch to device"]
+    I --> J["Encode and pack on device"]
+    J --> K["Copy packed and scales to storage_device"]
+    K --> L["Return table on storage_device"]
+    classDef error fill:#ffdddd,color:#411,stroke:#a22
+    class F error
+```
+
+| Caller | Before | After |
+| --- | --- | --- |
+| CPU weight, accelerator encoder | Payload stayed on CPU | Payload stays on CPU by default; `storage_device=device` can place it on the encoder |
+| Accelerator weight, same encoder device | Payload stayed on that accelerator | Unchanged |
+| Accelerator weight, different encoder device | Payload returned on the weight's accelerator after implicit copies | `ValueError` unless `storage_device` is explicit |
+| `CPTCLinear.pack_original` | Payload allocated on `weight.device`, then copied to the layer target | Passes the layer target as `storage_device`, so allocation and registration share one device |
+
+The model path in `CPTCLinear.pack_original` keeps the checkpoint on CPU and
+passes its resolved target explicitly. `GPTQModel` checkpoints therefore keep
+the same tensors and serialization; only the staging device is explicit.
+
 ## Inference dispatch
 
 ```mermaid

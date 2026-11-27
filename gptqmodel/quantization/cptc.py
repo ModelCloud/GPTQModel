@@ -309,16 +309,56 @@ def _encode_scaled_blocks(blocks, scales, decoded, spec, native):
     return viterbi_encode(targets, decoded, spec, native=native)
 
 
+def _resolve_storage_device(weight_device, device, storage_device):
+    """Resolve where the encoded CPTC payload is stored."""
+    if storage_device is not None:
+        target = torch.device(storage_device)
+        if target.type == "cuda" and target.index is None:
+            target = torch.device("cuda", torch.cuda.current_device())
+        return target
+    if weight_device.type == "cuda" and device.type == "cuda" and weight_device != device:
+        raise ValueError(
+            "CPTC requires an explicit `storage_device` when `weight` and `device` "
+            f"are different accelerator devices (weight={weight_device}, device={device}); "
+            "pass `storage_device=device` to keep the payload on the encoding device or "
+            "`storage_device=weight.device` to accept the cross-device staging copies"
+        )
+    return weight_device
+
+
 @torch.no_grad()
-def quantize_weight(weight: torch.Tensor, spec: CPTCSpec, *, device: torch.device, table=None):
-    """Encode a weight matrix and return row-major packed blocks and FP32 scales."""
+def quantize_weight(
+    weight: torch.Tensor,
+    spec: CPTCSpec,
+    *,
+    device: torch.device,
+    storage_device: torch.device | str | None = None,
+    table=None,
+):
+    """Encode a weight matrix and return row-major packed blocks and FP32 scales.
+
+    ``device`` runs the trellis search. The returned packed blocks, table,
+    coefficients and scales live on ``storage_device``, which defaults to
+    ``weight.device`` so a CPU-resident checkpoint can be encoded on an
+    accelerator. When ``weight`` and ``device`` are different accelerator
+    devices, ``storage_device`` must be explicit.
+    """
     from ..utils.cptc import native_ops
+    from ..utils.torch import as_torch_device
 
     if weight.ndim != 2 or not weight.is_floating_point() or min(weight.shape) < 1:
         raise ValueError("CPTC requires a nonempty floating-point weight matrix")
+    device = as_torch_device(device)
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    storage_device = _resolve_storage_device(
+        weight.device,
+        device,
+        None if storage_device is None else as_torch_device(storage_device),
+    )
     out_features, in_features = weight.shape
     blocks_per_row = spec.blocks(in_features)
-    coeffs = torch.tensor(spec.coefficients(), dtype=torch.int32, device=weight.device)
+    coeffs = torch.tensor(spec.coefficients(), dtype=torch.int32, device=storage_device)
     table = gaussian_table(spec, device) if table is None else table.to(device)
     if table.dtype != torch.uint8 or table.shape != (spec.table_size,) or bool(((table & 127) == 127).any()):
         raise ValueError("CPTC requires a finite E2M5 table with 2**table_q entries")
@@ -327,8 +367,8 @@ def quantize_weight(weight: torch.Tensor, spec: CPTCSpec, *, device: torch.devic
     native = native_ops(device)
     if native is not None and spec.trellis_depth == 16:
         decoded = decoded.half()  # Exact E2M5 values for the register-cached GPU encoder.
-    packed = torch.empty((out_features, blocks_per_row, spec.block_bytes), dtype=torch.uint8, device=weight.device)
-    scales = torch.empty((out_features, blocks_per_row), dtype=torch.float32, device=weight.device)
+    packed = torch.empty((out_features, blocks_per_row, spec.block_bytes), dtype=torch.uint8, device=storage_device)
+    scales = torch.empty((out_features, blocks_per_row), dtype=torch.float32, device=storage_device)
     batch_size = _encode_batch_size(spec)
     padding = blocks_per_row * spec.block_size - in_features
     counts = torch.full((blocks_per_row,), spec.block_size, device=device, dtype=torch.float32)
@@ -348,4 +388,4 @@ def quantize_weight(weight: torch.Tensor, spec: CPTCSpec, *, device: torch.devic
         scales[start:end].copy_(scale)
     if bool(invalid):
         raise ValueError("CPTC cannot encode non-finite weights")
-    return packed, table.to(weight.device).contiguous(), coeffs, scales
+    return packed, table.to(storage_device).contiguous(), coeffs, scales

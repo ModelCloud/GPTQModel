@@ -145,7 +145,9 @@ class CPTCLinear(WeightOnlyQuantLinear):
                 weight, self.spec, sketch, device=device, seed=self.yaqa_seed, name=self.name or "",
             )
         else:
-            packed, table, coeffs, scale = quantize_weight(weight, self.spec, device=device)
+            packed, table, coeffs, scale = quantize_weight(
+                weight, self.spec, device=device, storage_device=target
+            )
             signs = ()
         # Direct-pack may be called inside the looper's inference_mode scope.
         # Keep checkpoint buffers usable by ordinary state_dict and move APIs.
