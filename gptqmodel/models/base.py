@@ -3161,6 +3161,7 @@ class BaseQModel(nn.Module):
                         device_type=quant_device_type,
                         is_rocm=IS_ROCM,
                         weight_only=self.quantize_config.uses_weight_only_lifecycle(),
+                        bits=self.quantize_config.runtime_bits,
                     )
                 elif format_code == FORMAT.BITBLAS:
                     preferred_backend = BACKEND.AWQ_BITBLAS

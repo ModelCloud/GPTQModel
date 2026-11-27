@@ -275,13 +275,17 @@ def awq_gemm_pack_backend(
     device_type: str,
     is_rocm: bool,
     weight_only: bool,
+    bits: int,
 ) -> BACKEND:
     """Return the AWQ GEMM backend used to pack quantized weights.
 
     The native AWQ GEMM extension is CUDA-only: its sources include
     ``cusparse.h`` and CUDA-specific inline asm, so it cannot be built on
-    ROCm/XPU/NPU/CPU hosts.  Those hosts pack with the portable torch kernel
-    instead, which emits the identical AWQ GEMM layout for in-range codes.
+    ROCm/XPU/NPU/CPU hosts.  It also packs only the 4-bit layout; 2/3/8-bit
+    GEMM checkpoints use the portable torch kernel, which emits the identical
+    AWQ GEMM layout for in-range codes.  Selecting ``AWQ_GEMM`` for another
+    global width would fail the model-wide ``select_quant_linear(..., pack=True)``
+    gate before calibration (#6135).
 
     Every ROCm host -- CDNA (gfx950/gfx942) as well as RDNA4 (gfx1200/gfx1201/
     gfx1250) -- takes ``AWQ_TORCH``.  RDNA4's hipBLASLt Tensile libraries exist
@@ -294,9 +298,11 @@ def awq_gemm_pack_backend(
         is_rocm: Whether the CUDA namespace is backed by the HIP runtime.
         weight_only: Whether the quantization lifecycle is weight-only
             (RTN->AWQ export), which always stays on the portable kernel.
+        bits: Global quantization width. Only 4-bit runs use the native
+            extension; every other supported width packs with ``AWQ_TORCH``.
     """
 
-    if weight_only or is_rocm or device_type != "cuda":
+    if bits != 4 or weight_only or is_rocm or device_type != "cuda":
         return BACKEND.AWQ_TORCH
     return BACKEND.AWQ_GEMM
 
