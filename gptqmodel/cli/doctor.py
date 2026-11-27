@@ -13,6 +13,8 @@ import os
 import platform
 import sys
 from dataclasses import asdict, dataclass
+from importlib import metadata as importlib_metadata
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
@@ -46,12 +48,33 @@ class Check:
     detail: str
 
 
-def _module_version(module: str) -> Optional[str]:
+def _normalized(name: str) -> str:
+    return name.strip().lower().replace("_", "-")
+
+
+def _installed_version(distribution: str) -> Optional[str]:
+    """Installed version from metadata, without importing the module.
+
+    ``tokenicer`` (and some optional backends) set no ``__version__``, and
+    importing a backend only to read a version can initialize it. Metadata is
+    the only source; an importable module without metadata reports "unknown"
+    through :func:`_module_installed`.
+    """
+
     try:
-        package = __import__(module)
-    except Exception:  # noqa: BLE001 - a broken install reports as a version of None
+        return importlib_metadata.version(distribution)
+    except importlib_metadata.PackageNotFoundError:
         return None
-    return getattr(package, "__version__", "unknown")
+    except Exception:  # noqa: BLE001 - a broken metadata entry is "not installed"
+        return None
+
+
+def _module_installed(module: str) -> bool:
+    return _installed_version(module) is not None or _has_module(module)
+
+
+def _module_version(module: str) -> Optional[str]:
+    return _installed_version(module)
 
 
 def _has_module(module: str) -> bool:
@@ -59,6 +82,71 @@ def _has_module(module: str) -> bool:
         return importlib.util.find_spec(module) is not None
     except (ImportError, ValueError):
         return False
+
+
+def _requirements_file() -> Optional[Path]:
+    """The supported-range source: the checkout's ``requirements.txt`` if present.
+
+    Wheels cannot ship the file reliably, so the installed metadata is the
+    fallback; a source checkout (where this command is most useful) always has
+    the authoritative list.
+    """
+
+    for candidate in (
+        Path(__file__).resolve().parents[2] / "requirements.txt",
+        Path(__file__).resolve().parents[1] / "requirements.txt",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _supported_specs() -> Dict[str, List[Any]]:
+    """Supported requirement specifiers, by normalized package name."""
+
+    from packaging.requirements import Requirement
+
+    specs: Dict[str, List[Any]] = {}
+    path = _requirements_file()
+    lines: List[str] = []
+    if path is not None:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    else:
+        try:
+            lines = list(importlib_metadata.requires("gptqmodel") or [])
+        except importlib_metadata.PackageNotFoundError:
+            lines = []
+
+    for line in lines:
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        try:
+            requirement = Requirement(line)
+        except Exception:  # noqa: BLE001 - a comment/URL line is not a version pin
+            continue
+        if requirement.marker is not None and not requirement.marker.evaluate({"extra": ""}):
+            continue
+        specs.setdefault(_normalized(requirement.name), []).append(requirement)
+    return specs
+
+
+def _out_of_range(module: str, version: str, specs: Dict[str, List[Any]]) -> Optional[str]:
+    """The requirement violated by ``version``, or ``None`` when it is supported."""
+
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        parsed = Version(version)
+    except InvalidVersion:
+        return None
+    for requirement in specs.get(_normalized(module), []):
+        try:
+            if parsed not in requirement.specifier:
+                return str(requirement)
+        except Exception:  # noqa: BLE001 - an unparsable spec is not a verdict
+            continue
+    return None
 
 
 def _runtime_checks() -> List[Check]:
@@ -92,22 +180,26 @@ def _torch_checks() -> List[Check]:
         from .._torch_safety import (  # noqa: PLC0415 - keeps the import optional
             matching_torch_advisories,
             safety_checks_bypassed,
-            torch_version_is_vulnerable,
         )
 
         advisories = matching_torch_advisories()
-        if advisories:
+        if not advisories:
+            checks.append(Check("torch", "safety advisories", OK, "none"))
+        else:
             ids = ", ".join(
                 advisory.cve_id or advisory.advisory_id for advisory in advisories
             )
-            if safety_checks_bypassed():
-                # The user opted out, so this is information, not a warning.
-                checks.append(Check("torch", "safety advisories", INFO, f"{ids} (checks bypassed)"))
-            else:
-                status = WARN if torch_version_is_vulnerable() else INFO
-                checks.append(Check("torch", "safety advisories", status, ids))
-        else:
-            checks.append(Check("torch", "safety advisories", OK, "none"))
+            # ``gptqmodel/__init__`` refuses an affected runtime before this
+            # command can run, so the only reachable state is the bypassed one.
+            bypassed = safety_checks_bypassed()
+            checks.append(
+                Check(
+                    "torch",
+                    "safety advisories",
+                    INFO,
+                    f"{ids} (checks bypassed)" if bypassed else ids,
+                )
+            )
     except Exception as exc:  # noqa: BLE001 - advisory data must never break the report
         checks.append(Check("torch", "safety advisories", INFO, f"unavailable: {exc}"))
     return checks
@@ -122,66 +214,125 @@ def _gpu_checks() -> List[Check]:
     if not torch.cuda.is_available():
         return [Check("gpu", "devices", INFO, "none available (CPU execution)")]
 
+    is_hip = getattr(torch.version, "hip", None) is not None
+    prefix = "hip" if is_hip else "cuda"
     checks = []
     for index in range(torch.cuda.device_count()):
         try:
             name = torch.cuda.get_device_name(index)
-            major, minor = torch.cuda.get_device_capability(index)
             free, total = torch.cuda.mem_get_info(index)
-            detail = f"{name} sm_{major}{minor}, {free / 2**30:.1f}/{total / 2**30:.1f} GiB free"
-            checks.append(Check("gpu", f"cuda:{index}", OK, detail))
+            if is_hip:
+                # ``get_device_capability`` reports a CUDA-shaped tuple even on
+                # ROCm; the architecture string is what AMD tooling names.
+                arch = getattr(torch.cuda.get_device_properties(index), "gcnArchName", "unknown")
+            else:
+                major, minor = torch.cuda.get_device_capability(index)
+                arch = f"sm_{major}{minor}"
+            detail = f"{name} {arch}, {free / 2**30:.1f}/{total / 2**30:.1f} GiB free"
+            checks.append(Check("gpu", f"{prefix}:{index}", OK, detail))
         except Exception as exc:  # noqa: BLE001 - one bad device must not hide the others
-            checks.append(Check("gpu", f"cuda:{index}", WARN, f"{type(exc).__name__}: {exc}"))
+            checks.append(Check("gpu", f"{prefix}:{index}", WARN, f"{type(exc).__name__}: {exc}"))
     return checks
 
 
 def _dependency_checks() -> List[Check]:
+    specs = _supported_specs()
     checks = []
-    for module in _REQUIRED:
+    for module in (*_REQUIRED, "torch"):
         version = _module_version(module)
-        checks.append(
-            Check("deps", module, OK if version else FAIL, "not importable" if not version else str(version))
-        )
-    for module in _OPTIONAL:
-        version = _module_version(module)
-        checks.append(
-            Check("deps", module, INFO if not version else OK, "not installed" if not version else str(version))
-        )
-
-    # transformers 5.24 moved Ernie-VL tokenizer support into `tokenicer`; without
-    # it the import of `transformers` succeeds and the first model load fails.
-    transformers = _module_version("transformers")
-    if transformers and transformers >= "5.24":
-        if _has_module("tokenicer.ernie_vl"):
-            checks.append(Check("deps", "tokenicer.ernie_vl", OK, "present"))
+        if not version:
+            status = FAIL if not _module_installed(module) else WARN
+            checks.append(
+                Check("deps", module, status, "not installed" if status == FAIL else "version unknown")
+            )
+            continue
+        violated = _out_of_range(module, version, specs)
+        if violated is None:
+            checks.append(Check("deps", module, OK, str(version)))
         else:
             checks.append(
                 Check(
                     "deps",
-                    "tokenicer.ernie_vl",
+                    module,
                     WARN,
-                    "transformers >= 5.24 expects it; `pip install -U tokenicer`",
+                    f"{version} (requires {violated.specifier if hasattr(violated, 'specifier') else violated})",
                 )
             )
+    for module in _OPTIONAL:
+        version = _module_version(module)
+        if version:
+            checks.append(Check("deps", module, OK, str(version)))
+        elif _module_installed(module):
+            checks.append(Check("deps", module, OK, "version unknown"))
+        else:
+            checks.append(Check("deps", module, INFO, "not installed"))
     return checks
 
 
-def _extension_checks() -> List[Check]:
-    """Report the compiled kernels shipped next to the package."""
+def _torch_extension_artifacts() -> List[Path]:
+    torch_extensions = Path(
+        os.environ.get("TORCH_EXTENSIONS_DIR") or Path.home() / ".cache" / "torch_extensions"
+    )
+    try:
+        return sorted(torch_extensions.glob("**/*.so"))
+    except OSError:
+        return []
 
-    from pathlib import Path
+
+def _extension_checks() -> List[Check]:
+    """Report compiled kernels wherever this install actually puts them.
+
+    Kernels are either shipped next to the package, installed under
+    ``gptqmodel_ext``, JIT-built into torch's extension cache, or built into the
+    NF12 source-keyed cache. Globbing only the package directory reported "none"
+    on every JIT install.
+    """
 
     package_dir = Path(__file__).resolve().parent.parent
-    artifacts = sorted(path.name for path in package_dir.glob("*.so"))
-    if artifacts:
-        listed = ", ".join(artifacts[:4]) + (" ..." if len(artifacts) > 4 else "")
-        return [Check("extension", "native kernels", OK, f"{len(artifacts)} built ({listed})")]
+    bundled = sorted(path.name for path in package_dir.glob("*.so"))
+
+    ext_spec = importlib.util.find_spec("gptqmodel_ext")
+    ext_dir = None
+    if ext_spec is not None and ext_spec.origin:
+        ext_dir = Path(ext_spec.origin).parent
+    ext_built = sorted(path.name for path in ext_dir.glob("*.so")) if ext_dir is not None else []
+
+    torch_built = _torch_extension_artifacts()
+
+    nf12_ready = False
+    nf12_dir = None
+    try:
+        from gptqmodel_nf12 import _jit  # noqa: PLC0415 - optional native package
+
+        nf12_dir = _jit.cache_directory()
+        nf12_ready = _jit.cache_ready()
+    except Exception:  # noqa: BLE001 - no CUDA/tools is not an extension failure
+        pass
+
+    if bundled or ext_built:
+        listed = bundled + ext_built
+        shown = ", ".join(listed[:4]) + (" ..." if len(listed) > 4 else "")
+        return [Check("extension", "native kernels", OK, f"{len(listed)} built ({shown})")]
+    if torch_built:
+        shown = ", ".join(path.parent.name for path in torch_built[:4])
+        more = " ..." if len(torch_built) > 4 else ""
+        return [
+            Check(
+                "extension",
+                "native kernels",
+                OK,
+                f"{len(torch_built)} JIT artifact(s) in the torch extension cache ({shown}{more})",
+            )
+        ]
+    if nf12_ready and nf12_dir is not None:
+        return [Check("extension", "native kernels", OK, f"NF12 JIT cache ready ({nf12_dir})")]
     return [
         Check(
             "extension",
             "native kernels",
             INFO,
-            "none built next to the package; torch/triton kernels still work",
+            "none built yet; torch/triton kernels still work and JIT builds on first use"
+            + (f" (NF12 cache: {nf12_dir}, not built)" if nf12_dir is not None else ""),
         )
     ]
 
@@ -194,13 +345,34 @@ def _env_checks() -> List[Check]:
     return checks
 
 
-def _model_checks(model_path: str) -> List[Check]:
+def _model_checks(model_path: str, trust_remote_code: bool = False) -> List[Check]:
+    from ..utils.security import (  # noqa: PLC0415 - keeps the CLI import light
+        RemoteCodeSecurityError,
+        require_remote_code_permission,
+    )
+
+    try:
+        require_remote_code_permission(trust_remote_code)
+    except RemoteCodeSecurityError as exc:
+        return [
+            Check("model", "remote code", FAIL, str(exc)),
+        ]
+    except Exception as exc:  # noqa: BLE001 - the security gate must not crash the report
+        return [Check("model", "remote code", WARN, f"{type(exc).__name__}: {exc}")]
+
     try:
         from transformers import AutoConfig
 
-        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
     except Exception as exc:  # noqa: BLE001 - a bad path is a FAIL the user can act on
-        return [Check("model", "config", FAIL, f"{type(exc).__name__}: {exc}")]
+        message = str(exc)
+        hint = ""
+        if "trust_remote_code" in message.lower() or "auto_map" in message.lower():
+            hint = (
+                "; this checkpoint ships custom Python. Re-run with --trust-remote-code "
+                "and GPTQ_BYPASS_SAFETY_CHECKS=1 after reviewing that code"
+            )
+        return [Check("model", "config", FAIL, f"{type(exc).__name__}: {message}{hint}")]
 
     checks = [
         Check("model", "architectures", INFO, ", ".join(getattr(config, "architectures", []) or ["(unknown)"])),
@@ -237,7 +409,7 @@ def _model_checks(model_path: str) -> List[Check]:
     return checks
 
 
-def collect(model_path: Optional[str] = None) -> List[Check]:
+def collect(model_path: Optional[str] = None, *, trust_remote_code: bool = False) -> List[Check]:
     """Run every check this machine can answer."""
 
     checks = []
@@ -247,7 +419,7 @@ def collect(model_path: Optional[str] = None) -> List[Check]:
         except Exception as exc:  # noqa: BLE001 - one broken area must not hide the rest
             checks.append(Check("report", part.__name__, WARN, f"{type(exc).__name__}: {exc}"))
     if model_path:
-        checks.extend(_model_checks(model_path))
+        checks.extend(_model_checks(model_path, trust_remote_code=trust_remote_code))
     return checks
 
 

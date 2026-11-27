@@ -32,10 +32,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="also inspect the config of a local checkpoint (no weights are loaded)",
     )
     doctor.add_argument(
-        "--json",
+        "--trust-remote-code",
         action="store_true",
-        help="machine-readable report on stdout (the startup banner may precede it; "
-        "use --json-out for a clean file)",
+        help="allowed only with GPTQ_BYPASS_SAFETY_CHECKS=1: let the checkpoint config "
+        "execute its own Python",
     )
     doctor.add_argument(
         "--json-out",
@@ -60,14 +60,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "doctor":
         from .doctor import collect, exit_code, render, to_json  # noqa: PLC0415 - lazy
 
-        checks = collect(args.model)
+        checks = collect(args.model, trust_remote_code=args.trust_remote_code)
         if args.json_out:
             from pathlib import Path
 
             Path(args.json_out).write_text(json.dumps(to_json(checks), indent=2) + "\n")
             print(render(checks))
-        elif args.json:
-            print(json.dumps(to_json(checks), indent=2))
         else:
             print(render(checks))
         return exit_code(checks, args.fail_on)
