@@ -16,6 +16,7 @@ The synthetic fixtures are CPU-only and use an independent dense oracle for the
 AWQ case; the GPTQ cases compare logits before and after the round trip.
 """
 
+import json
 import os
 import shutil
 import types
@@ -289,6 +290,179 @@ def test_save_pretrained_emits_checkpoint_qzeros(tmp_path):
     assert torch.equal(saved_qzeros, state["model.layers.0.self_attn.q_proj.qzeros"])
 
     reloaded = _load(str(target))
+    assert _relative_error(reference, _logits(reloaded.model)) < 1e-5
+
+
+def _hf_bridge_checkpoint(path, *, backend=None):
+    """A tiny GPTQ checkpoint the Transformers GPTQ bridge can load."""
+
+    _build_gptq_v1_checkpoint(path)
+    config_path = os.path.join(path, "config.json")
+    with open(config_path, encoding="utf-8") as handle:
+        config = json.load(handle)
+    quantization_config = {
+        "quant_method": "gptq",
+        "bits": BITS,
+        "group_size": GROUP,
+        "desc_act": False,
+        "sym": True,
+        "checkpoint_format": "gptq",
+    }
+    if backend is not None:
+        quantization_config["backend"] = backend
+    config["quantization_config"] = quantization_config
+    with open(config_path, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
+    return str(path)
+
+
+def _hf_bridge_load(path, device):
+    from transformers import AutoModelForCausalLM
+
+    return AutoModelForCausalLM.from_pretrained(
+        str(path),
+        device_map=device,
+        dtype=torch.float16,
+        local_files_only=True,
+    )
+
+
+def _quant_module(model):
+    from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
+    modules = [module for module in model.modules() if isinstance(module, BaseQuantLinear)]
+    assert modules, "the bridge did not install a GPT-QModel kernel"
+    return modules[0]
+
+
+def test_hf_bridge_save_pretrained_writes_reloadable_checkpoint(tmp_path):
+    """Issue #6137: the bridge writer must emit an ordinary checkpoint payload.
+
+    A checkpoint-layout kernel can rebuild the on-disk words, so the bridge's
+    instance guard only changes the writer's scope: the payload keeps the
+    source qweight/qzeros shapes and drops the runtime ``qzeros_format`` marker
+    (#4155). Both loaders must then read it back.
+    """
+
+    from gptqmodel.utils.checkpoint_state import is_checkpoint_serialization
+
+    source = _hf_bridge_checkpoint(tmp_path / "source", backend="torch")
+    model = _hf_bridge_load(source, "cpu")
+    module = _quant_module(model)
+    assert type(module).__name__ == "TorchLinear", (
+        f"expected the checkpoint-layout Torch kernel, got {type(module).__name__}"
+    )
+    reference = _logits(model)
+
+    target = tmp_path / "saved"
+    model.save_pretrained(str(target))
+    assert is_checkpoint_serialization() is False
+
+    source_state = load_file(os.path.join(source, "model.safetensors"))
+    saved_state = load_file(str(target / "model.safetensors"))
+    for key, tensor in source_state.items():
+        if "layers.0.self_attn.q_proj." not in key or key.endswith("qzeros_format"):
+            continue
+        assert key in saved_state, f"save_pretrained dropped {key}"
+        assert torch.equal(saved_state[key], tensor), (
+            f"save_pretrained rewrote {key}: {tuple(saved_state[key].shape)} "
+            f"!= {tuple(tensor.shape)}"
+        )
+    assert not any(key.endswith("qzeros_format") for key in saved_state), (
+        "save_pretrained wrote the runtime qzeros_format marker"
+    )
+    # The read-only collection PEFT performs must still see the marker.
+    assert any(key.endswith("qzeros_format") for key in model.state_dict())
+
+    # The HF writer does not copy tokenizer/quantize files; add them so the
+    # native loader can read the same tensor payload.
+    shutil.copy(source + "/quantize_config.json", target / "quantize_config.json")
+    _save_tokenizer(str(target))
+    reloaded = _load(str(target))
+    assert _relative_error(reference, _logits(reloaded.model)) < 1e-5
+
+    hf_reloaded = _hf_bridge_load(target, "cpu")
+    assert _relative_error(reference, _logits(hf_reloaded)) < 1e-5
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    ("backend", "kernel"),
+    [("marlin", "MarlinLinear"), ("exllama_v2", "ExllamaV2Linear")],
+)
+def test_hf_bridge_save_pretrained_refuses_runtime_layout(tmp_path, backend, kernel):
+    """Issue #6137: an irreversible runtime layout must refuse the HF writer.
+
+    Before #4620 removed the class-wide guard, ``save_pretrained`` ran inside
+    ``checkpoint_serialization()`` and these kernels raised. The bridge now
+    marks only the loaded instance, leaving Transformers untouched.
+    """
+
+    if not torch.cuda.is_available():
+        pytest.skip("a Marlin/ExLlamaV2 runtime needs a CUDA device")
+
+    from gptqmodel.utils.checkpoint_state import is_checkpoint_serialization
+
+    source = _hf_bridge_checkpoint(tmp_path / "source", backend=backend)
+    model = _hf_bridge_load(source, "cuda:0")
+    module = _quant_module(model)
+    assert type(module).__name__ == kernel, (
+        f"expected {kernel}, got {type(module).__name__}"
+    )
+    assert getattr(module, "_marlin_repacked", False) or getattr(
+        module, "_native_shuffled", False
+    )
+
+    target = tmp_path / "saved"
+    with pytest.raises(RuntimeError, match="cannot be reconstructed"):
+        model.save_pretrained(str(target))
+    assert is_checkpoint_serialization() is False
+    assert not (target / "model.safetensors").exists(), (
+        "the refused save still published a checkpoint payload"
+    )
+
+    # PEFT's read-only state_dict() keeps working, and it marks the payload so
+    # a copy cannot be mistaken for a checkpoint.
+    state = model.state_dict()
+    assert state["model.layers.0.self_attn.q_proj.qzeros_format"].item() == 0
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "backend",
+    [BACKEND.MARLIN, BACKEND.EXLLAMA_V2],
+    ids=["marlin", "exllama_v2"],
+)
+def test_native_writer_still_saves_runtime_layout_kernel(tmp_path, backend):
+    """Issue #6137: the guard must not reach ``GPTQModel.save()``.
+
+    The writer builds an export shell from the source checkpoint, so the live
+    kernel may keep its runtime layout while the published payload stays
+    loadable.
+    """
+
+    if not torch.cuda.is_available():
+        pytest.skip("a Marlin/ExLlamaV2 runtime needs a CUDA device")
+
+    source = _hf_bridge_checkpoint(tmp_path / "source")
+    model = GPTQModel.load(
+        source,
+        backend=backend,
+        device="cuda:0",
+        dtype=torch.float16,
+        local_files_only=True,
+    )
+    reference = _logits(model.model)
+
+    target = tmp_path / "native"
+    model.save(str(target))
+    reloaded = GPTQModel.load(
+        str(target),
+        backend=backend,
+        device="cuda:0",
+        dtype=torch.float16,
+        local_files_only=True,
+    )
     assert _relative_error(reference, _logits(reloaded.model)) < 1e-5
 
 

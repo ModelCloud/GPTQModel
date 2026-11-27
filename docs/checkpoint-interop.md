@@ -98,8 +98,9 @@ weight layout and is refused with an actionable error.
 
 `transformers`' `save_pretrained()` calls `state_dict()`, which serializes the
 live module buffers. Some kernels keep a converted runtime layout. "Checkpoint
-write" below means a GPT-QModel writer (`GPTQModel.save()` / `save_quantized()`),
-which runs inside `checkpoint_serialization()`:
+write" below means a GPT-QModel writer (`GPTQModel.save()` / `save_quantized()`)
+or the `save_pretrained()` of a model loaded through the Transformers bridge;
+both run inside `checkpoint_serialization()`:
 
 | Kernel | Runtime state | Save behaviour |
 | --- | --- | --- |
@@ -164,12 +165,13 @@ returns the runtime tensors. This is required because PEFT's
 `set_peft_model_state_dict` calls `model.state_dict()`, so an unconditional
 raise made *loading* an adapter fail on the default CUDA kernel.
 
-GPT-QModel never patches Transformers, so `PreTrainedModel.save_pretrained()`
-is not wrapped and runs outside that scope: it collects `state_dict()` on the
-read-only side. On a Marlin/ExLlamaV2 (or other runtime-layout) model it writes
-the runtime tensors without an error, and AUTO picks those kernels by default
-on CUDA. Save GPT-QModel models with `GPTQModel.save()` / `save_quantized()`,
-which never publish a runtime layout.
+GPT-QModel never patches Transformers. Instead, the bridge that Transformers'
+GPTQ and AWQ quantizers already call (`hf_gptqmodel_post_init`) wraps
+`save_pretrained` on that loaded model instance only. A bridge-loaded model
+therefore collects `state_dict()` on the refusing side, while PEFT's read-only
+collection and models loaded by `GPTQModel.load` keep the live tensors. Save
+GPT-QModel models with `GPTQModel.save()` / `save_quantized()`, which never
+publish a runtime layout.
 
 ```mermaid
 flowchart TD
@@ -181,9 +183,11 @@ flowchart TD
     B --> G["Marlin / ExLlamaV2 hook"]
     G --> H{"runtime layout applied<br/>AND checkpoint_serialization() active"}
     H -- yes --> I["raise: checkpoint layout<br/>cannot be reconstructed"]
-    H -- "no (read-only, e.g. PEFT, HF save_pretrained)" --> E
+    H -- "no (read-only, e.g. PEFT)" --> E
     S["GPTQModel.save / module-replacement writer"] --> T["checkpoint_serialization()"]
     T --> B
+    P["HF bridge hf_gptqmodel_post_init"] --> Q["instance save_pretrained wrapper"]
+    Q --> T
 ```
 
 GPT-QModel's own writers enter that scope before they collect tensors: the
@@ -191,8 +195,8 @@ module-replacement path in `models/writer.py` wraps `module.state_dict()`.
 `save_quantized()` builds a separate export shell that owns the raw checkpoint
 tensors, so it never serializes a runtime layout in the first place.
 
-A caller that bypasses GPT-QModel's writers — `torch.save(model.state_dict())`
-or HF `save_pretrained()` — cannot
+A caller that bypasses GPT-QModel's writers — `torch.save(model.state_dict())`,
+or `save_pretrained` on a model that did not come through the bridge — cannot
 be intercepted at save time, so the payload marks itself instead: the
 `qzeros_format` buffer is written as `0` for a runtime layout, and
 `_load_from_state_dict` raises `RuntimeError` when that value reaches a module
@@ -205,13 +209,13 @@ That marker is deliberately **not** persisted in a checkpoint.
 `PackedGroupedQuantLinear._write_state_dict_layout_marker` removes the
 persistent buffer from the destination while `checkpoint_serialization()` is
 active, so a GPT-QModel checkpoint write carries no `*.qzeros_format` key per
-quantized layer. HF `save_pretrained()` runs outside that scope and keeps it. The
-tensor is still emitted for read-only `state_dict()` transports — a plain dict
-copy or a safetensors round trip within a live process — which is what keeps
-the v1/v2 label attached when `_metadata` is dropped (#4125 item 3). A
-checkpoint reload resolves its layout from `config.json`'s `checkpoint_format`,
-so the persisted marker is redundant and was only publishing a key that the
-GPTQ/AWQ format does not describe.
+quantized layer, including the bridge's `save_pretrained()` scope. The tensor
+is still emitted for read-only `state_dict()` transports — a plain dict copy or
+a safetensors round trip within a live process — which is what keeps the v1/v2
+label attached when `_metadata` is dropped (#4125 item 3). A checkpoint reload
+resolves its layout from `config.json`'s `checkpoint_format`, so the persisted
+marker is redundant and was only publishing a key that the GPTQ/AWQ format does
+not describe.
 
 ```mermaid
 flowchart TD
@@ -752,7 +756,7 @@ Notes for extension:
 | Missing `qweight` on an AWQ module | no validation, zero placeholder | clear `Missing required quantized weights` |
 | Format changed to another qzero layout | stale words copied under the new label | exact v1/v2 conversion |
 | Format changed to a different packing | stale words copied, silent garbage | `ValueError` before writing |
-| `GPTQModel.save()` on a Marlin/ExLlamaV2 model | runtime layout written as v1 | `RuntimeError` naming the kernel; read-only `state_dict()` (including HF `save_pretrained()`) still returns the runtime tensors |
+| `GPTQModel.save()` on a Marlin/ExLlamaV2 model | runtime layout written as v1 | `RuntimeError` naming the kernel; read-only `state_dict()` (e.g. PEFT) still returns the runtime tensors |
 
 ### State-dict round-trips, HF methods, and pickling (items 9-11)
 
