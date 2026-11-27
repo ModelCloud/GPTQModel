@@ -78,9 +78,13 @@ spectrum. A zero eigenvalue gives an infinite condition number and enables
 PairSwap; a positive eigenvalue is used without a floor. This also covers
 rank-deficient calibration when a small damping increment rounds away.
 
+The solve factorizes the preconditioned Hessian with a float64
+`torch.linalg.eigh`. CPU and CUDA/HIP provide that op; device families that do
+not (MPS, XPU and NPU) run the solve on the host instead. The reconstruction
+returns to the source module device for replay.
+
 If activation ordering or the solve runs out of accelerator memory, retry the
 layer on CPU once using the original Hessian diagonal and source weights.
-The reconstruction returns to the source module device for replay.
 
 The solve returns the GPTQ eight-tuple `(quantized, scale, zero, g_idx,
 duration, avg_loss, damp, nsamples)`, so `GPTQProcessor` finalization, packing
@@ -114,9 +118,12 @@ flowchart TD
     D --> E{"method"}
     E -->|admmq| P["ADMMQ._quantize_impl"]
     E -->|gptq| G["GPTQ column sweep"]
-    P -->|calibrated| F["Order Hessian and solve"]
+    P -->|calibrated| V{"source device cpu or cuda?"}
     P -->|insufficient calibration| T["GPTQ data-independent fallback"]
     T --> M
+    V -->|yes| F["Order Hessian and solve"]
+    V -->|no| S["Move Hessian to host"]
+    S --> F
     F -->|accelerator allocation failure| R["Retry on CPU from original inputs"]
     F -->|eigh failure| Y["RTN fallback for this layer"]
     F -->|other error| X["Propagate error"]
@@ -180,6 +187,7 @@ initialization and as its "did not improve" result.
 | Hessian factorization failure | GPTQ retries its damp grid, then uses RTN | ADMM-Q keeps the RTN projection for that layer |
 | Non-finite ADMM iterate or reconstruction loss | Not applicable (GPTQ has no ADMM iterate) | ADMM-Q stops the solve and keeps the RTN projection for that layer |
 | Failure exit | GPTQ RTN fallback for low sample counts | GPTQ RTN fallback for low sample counts, plus RTN when the ADMM objective is non-finite or worse |
+| Solve device | CUDA/HIP solve, with a CPU retry only after an allocation failure | CPU and CUDA/HIP solve on the source device; MPS, XPU and NPU move the Hessian to the host first |
 | Accelerator allocation failure in solve | GPTQ retries on CPU | ADMM-Q restarts the solve on CPU with the original inputs |
 | Checkpoint | GPTQ packing | Identical GPTQ packing; `method` stays `admmq` and solver settings live in `meta` |
 
@@ -315,6 +323,8 @@ by Transformers, vLLM and SGLang as a standard GPTQ artifact.
 - Each iteration is two dense matrix products per chunked row block. The default
   `max_iter=300` trades time for quality; lower it for large models or quick
   experiments.
+- On MPS, XPU and NPU the float64 factorization and the solve run on the host,
+  so quantization is much slower than on a qualified accelerator.
 - PairSwap evaluates four sign combinations per sampled pair; `pairswap_mode`
   and the pair/batch budgets bound that work.
 - ADMM-Q is a weight-only method. It does not quantize activations or the KV

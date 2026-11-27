@@ -858,6 +858,65 @@ def test_admmq_retries_only_allocation_failures_from_pristine_state(monkeypatch,
     torch.testing.assert_close(solver.module.weight.cpu(), cpu_weight, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("device_type", ["mps", "xpu", "xla"])
+def test_admmq_solve_device_keeps_qualified_families_and_hosts_the_rest(device_type):
+    solver = ADMMQ(_make_layer(torch.ones(2, 4)), qcfg=_small_config())
+
+    assert solver._solve_device(torch.device("cpu")) == torch.device("cpu")
+    assert solver._solve_device(torch.device("cuda", 1)) == torch.device("cuda", 1)
+    assert solver._solve_device(torch.device(device_type)) == torch.device("cpu")
+
+
+def test_admmq_solve_device_hosts_npu():
+    try:
+        device = torch.device("npu")
+    except (RuntimeError, ValueError):
+        pytest.skip("this Torch build has no NPU device type")
+
+    solver = ADMMQ(_make_layer(torch.ones(2, 4)), qcfg=_small_config())
+    assert solver._solve_device(device) == torch.device("cpu")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an accelerator")
+@pytest.mark.parametrize("desc_act", [False, True])
+def test_admmq_unqualified_device_restarts_the_solve_on_the_host(monkeypatch, desc_act):
+    cpu_weight = torch.randn(OUT_FEATURES, IN_FEATURES, generator=torch.Generator().manual_seed(41))
+    x = _calibration().round()
+    x[:, 7] = 0
+    x[:, 2] += x[:, 1]
+    config = _small_config(desc_act=desc_act, max_iter=8, refresh_on_stagnation=False)
+    _, expected = _run_solver(ADMMQ, _make_layer(cpu_weight), config, x)
+
+    class HostSolveADMMQ(ADMMQ):
+        def _solve_device(self, source_device):
+            # Stand in for a device family that cannot run the float64
+            # factorization, without requiring that family in CI.
+            return torch.device("cpu")
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    solver = HostSolveADMMQ(_make_layer(cpu_weight).to(device), qcfg=config)
+    solver.quantizer.configure(perchannel=True)
+    solver.add_batch(x.to(device), None)
+
+    solve = solver._admm_weight_solve
+    seen = []
+
+    def record_solve(weight, hessian):
+        seen.append((weight.device.type, hessian.device.type))
+        return solve(weight, hessian)
+
+    monkeypatch.setattr(solver, "_admm_weight_solve", record_solve)
+    actual = solver.quantize()
+
+    assert seen == [("cpu", "cpu")]
+    assert actual[0].device == device
+    for tensor, reference in zip(actual[:4], expected[:4]):
+        torch.testing.assert_close(tensor.cpu(), reference, rtol=0, atol=0)
+    assert actual[5] == pytest.approx(expected[5], rel=1e-6)
+    assert solver.H is None
+    torch.testing.assert_close(solver.module.weight.cpu(), cpu_weight, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     ("spectrum", "expected"),
     [
