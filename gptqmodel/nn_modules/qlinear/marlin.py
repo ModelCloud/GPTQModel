@@ -337,10 +337,17 @@ class MarlinLinear(GPTQQuantLinear):
         desc_act = args.get("desc_act", False)
         group_size = args.get("group_size", -1)
         sym = args.get("sym", True)
-        if in_features is None or out_features is None:
-            return True, None
 
-        effective_desc_act = desc_act and group_size not in (-1, in_features)
+        # Activation order is a no-op when the whole input is one group, but
+        # class-level selection (the HF bridge) passes no shapes, so it cannot
+        # prove ``group_size == in_features``. Treat unknown shapes as
+        # activation-order and reject the contract before the shape
+        # early-return; otherwise the bridge selects a kernel whose constructor
+        # raises and has no per-layer fallback (#6131).
+        unknown_shapes = in_features is None or out_features is None
+        effective_desc_act = desc_act and group_size != -1 and (
+            unknown_shapes or group_size != in_features
+        )
         if not sym and effective_desc_act:
             # ``generate_kernels.py`` instantiates the integer zero-point types
             # only for ``group_blocks`` in ``-1/2/4/8``; ``0`` is the
@@ -352,6 +359,9 @@ class MarlinLinear(GPTQQuantLinear):
                 f"activation-order layers (desc_act=True, group_size={group_size}); "
                 "load with ExLlamaV2/Triton or re-quantize with desc_act=False."
             )
+
+        if unknown_shapes:
+            return True, None
 
         pack_factor = 32 // bits
         # Tile padding cannot repair a partially packed int32 row or column.

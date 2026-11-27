@@ -388,6 +388,33 @@ def test_mhc_cache_matches_full_forward_and_keeps_visits_separate():
         assert beam.shape == (1, 11)
 
 
+def test_visit_cache_routes_state_quant_and_cached_generate():
+    from gptqmodel.models.ports.sensenova_loop.modeling_sensenova_loop import _VisitCache
+    from gptqmodel.utils.leapquant import LeapQuantConfig, make_leapquant_cache
+
+    model = tiny_model()
+    plan = model.model.language_model.loop_plan
+    physical = 2
+    visit = max(index for index, layer in enumerate(plan) if layer == physical)
+    cache = make_leapquant_cache(
+        model.config.text_config, LeapQuantConfig(bits=8, window=4, rank=2)
+    )
+    view = _VisitCache(cache, physical, visit)
+    # The shared Qwen3.5 forward probes ``cache_params.layers[layer_idx]`` for
+    # LeapQuant state, so a visit must expose its slot under the physical index.
+    assert view.layers[physical] is cache.layers[visit]
+    assert view.layers[physical].state_quant is not None
+
+    ids = torch.tensor([[1, 7, 11]])
+    with torch.inference_mode():
+        cached = model(ids, use_cache=True)
+        generated = model.generate(
+            ids, max_new_tokens=1, do_sample=False, eos_token_id=None, pad_token_id=0
+        )
+    assert cached.past_key_values is not None
+    assert generated.shape == (1, ids.shape[1] + 1)
+
+
 def test_foreign_caches_are_replaced_only_when_empty():
     model = tiny_model()
     ids = torch.tensor([[1, 2, 3]])

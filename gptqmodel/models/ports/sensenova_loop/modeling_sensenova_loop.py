@@ -189,6 +189,16 @@ class _VisitCache:
         self.physical = physical
         self.visit = visit
 
+    @property
+    def layers(self):
+        """Expose this visit's cache layer under the physical layer index.
+
+        Shared Qwen3.5 layers probe ``cache_params.layers[layer_idx]`` for
+        LeapQuant ``state_quant`` before they touch the routed state calls.
+        """
+
+        return {self.physical: self.cache.layers[self.visit]}
+
     def _slot(self, layer_idx):
         if layer_idx != self.physical:
             raise IndexError("A physical layer may only access its own visit cache slot")
