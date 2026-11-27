@@ -143,6 +143,7 @@ class InternS1QModel(BaseQModel):
             conversations,
             tokenize=True,
             add_generation_prompt=True,
+            padding=True,
             return_dict=True,
             return_tensors="pt",
         )

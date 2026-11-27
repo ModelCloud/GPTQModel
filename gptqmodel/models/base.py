@@ -5563,7 +5563,10 @@ class BaseQModel(nn.Module):
         if layer_types is None:
             return None
         source = object.__getattribute__(self, "__dict__").get("_layer_type_replay_source")
-        if not isinstance(source, dict):
+        # Processor-based definitions return `transformers.BatchFeature`
+        # (`UserDict`) batches; the captured source must be read through any
+        # Mapping so their per-layer-type masks are rebuilt too (issue #6138).
+        if not isinstance(source, Mapping):
             return None
 
         hidden_states = kwargs.get("hidden_states")
