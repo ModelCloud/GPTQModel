@@ -25,8 +25,9 @@ distribution and is deliberately avoided.
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch import nn
@@ -38,6 +39,7 @@ from .model import (
     _get_local_expert_count,
     find_moe_routing_modules,
 )
+from .p2p import safe_module_to, safe_move_to
 
 
 log = setup_logger()
@@ -268,6 +270,282 @@ def _input_device(model: nn.Module) -> torch.device:
     raise ValueError("EBSS requires materialized model weights; the model is still on meta.")
 
 
+def _model_tensor_bytes(model: nn.Module) -> int:
+    """Bytes held by the model's distinct parameters and buffers."""
+
+    seen = set()
+    total = 0
+    for tensor in list(model.parameters()) + list(model.buffers()):
+        if id(tensor) in seen or tensor.is_meta:
+            continue
+        seen.add(id(tensor))
+        total += tensor.numel() * tensor.element_size()
+    return total
+
+
+def _model_fits_on_device(model: nn.Module, device: torch.device) -> bool:
+    """Whether a full-model staging copy has room beside the EBSS workspace.
+
+    A CUDA device is the only runtime here that reports free memory cheaply.
+    Other runtimes keep the previous best-effort attempt and fall back if the
+    allocation raises.
+    """
+
+    if device.type != "cuda":
+        return True
+
+    from .resource_budget import device_memory_bytes
+
+    free_bytes, _ = device_memory_bytes(device.index)
+    if free_bytes is None:
+        return True
+
+    weights = _model_tensor_bytes(model)
+    # The search holds up to ``width`` KV caches and a batch of one-token
+    # activations. Reserve 10% of the weights (at least 256 MiB) so a
+    # full-model move does not leave the search itself without headroom.
+    reserve = max(256 * 1024 * 1024, weights // 10)
+    return weights + reserve <= free_bytes
+
+
+def _snapshot_tensor_placements(
+    model: nn.Module,
+) -> List[Tuple[nn.Module, str, str, torch.device]]:
+    """Record every module-owned tensor's device before a staging move."""
+
+    placements: List[Tuple[nn.Module, str, str, torch.device]] = []
+    for module in model.modules():
+        for name, parameter in module.named_parameters(recurse=False):
+            placements.append((module, "_parameters", name, parameter.device))
+        for name, buffer in module.named_buffers(recurse=False):
+            placements.append((module, "_buffers", name, buffer.device))
+    return placements
+
+
+def _restore_tensor_placements(
+    placements: List[Tuple[nn.Module, str, str, torch.device]],
+) -> None:
+    """Move every recorded tensor back to its original device.
+
+    Tensors are updated through ``.data`` so their identity (and tied
+    embedding/head relationships) survives the round trip. That also covers
+    non-persistent buffers such as rotary tables.
+    """
+
+    with torch.no_grad():
+        for module, attribute, name, device in placements:
+            holder = getattr(module, attribute, None)
+            if holder is None:
+                continue
+            tensor = holder.get(name)
+            if tensor is None or tensor.is_meta or tensor.device == device:
+                continue
+            tensor.data = safe_move_to(tensor.data, device)
+
+
+def _move_module_direct_tensors(module: nn.Module, device: torch.device) -> None:
+    """Move only ``module``'s own tensors, never its children."""
+
+    with torch.no_grad():
+        for _, parameter in list(module.named_parameters(recurse=False)):
+            if parameter.is_meta or parameter.device == device:
+                continue
+            parameter.data = safe_move_to(parameter.data, device)
+        for _, buffer in list(module.named_buffers(recurse=False)):
+            if buffer.is_meta or buffer.device == device:
+                continue
+            buffer.data = safe_move_to(buffer.data, device)
+
+
+def _resolve_decoder_layers(
+    model: nn.Module,
+    layer_prefixes: Optional[Sequence[str]],
+) -> List[nn.Module]:
+    """Resolve the decoder-layer modules named by ``extract_layers_node()``."""
+
+    if isinstance(layer_prefixes, str):
+        layer_prefixes = (layer_prefixes,)
+    modules = dict(model.named_modules())
+    layers: List[nn.Module] = []
+    seen = set()
+    for prefix in layer_prefixes or ():
+        if not isinstance(prefix, str) or not prefix:
+            continue
+        container = modules.get(prefix)
+        if container is None:
+            continue
+        children = list(container.children())
+        if not children and any(True for _ in container.parameters()):
+            children = [container]
+        for child in children:
+            if id(child) in seen or not any(True for _ in child.parameters()):
+                continue
+            seen.add(id(child))
+            layers.append(child)
+    return layers
+
+
+def _is_out_of_memory(error: BaseException) -> bool:
+    oom_type = getattr(torch, "OutOfMemoryError", None)
+    if oom_type is not None and isinstance(error, oom_type):
+        return True
+    return isinstance(error, RuntimeError) and "out of memory" in str(error).lower()
+
+
+def _empty_device_cache(device: torch.device) -> None:
+    if device.type != "cuda":
+        return
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+@contextmanager
+def _layerwise_model_execution(
+    model: nn.Module,
+    device: torch.device,
+    layer_prefixes: Optional[Sequence[str]],
+):
+    """Run forwards with one decoder layer resident at a time.
+
+    Accelerate's ``CpuOffload`` hook moves a layer to the execution device for
+    its forward and the chain offloads the previous layer before loading the
+    next one. Everything outside the decoder layers (embeddings, rotary
+    buffers, final norm and head) is small enough to stay resident.
+    """
+
+    from accelerate import cpu_offload_with_hook
+
+    layers = _resolve_decoder_layers(model, layer_prefixes)
+    if not layers:
+        raise ValueError("EBSS layer-wise staging requires at least one decoder layer.")
+
+    placements = _snapshot_tensor_placements(model)
+    hooks: List[Any] = []
+    previous = None
+    try:
+        for layer in layers:
+            _, hook = cpu_offload_with_hook(
+                layer,
+                execution_device=device,
+                prev_module_hook=previous,
+            )
+            hooks.append(hook)
+            previous = hook
+
+        layer_modules = {id(module) for layer in layers for module in layer.modules()}
+        for module in model.modules():
+            if id(module) in layer_modules:
+                continue
+            _move_module_direct_tensors(module, device)
+
+        yield
+    finally:
+        for hook in reversed(hooks):
+            try:
+                hook.offload()
+            except Exception as error:
+                log.warn("MoEQuant EBSS: could not offload a staged layer: %s", error)
+        for hook in hooks:
+            try:
+                hook.remove()
+            except Exception as error:
+                log.warn("MoEQuant EBSS: could not remove a staging hook: %s", error)
+        _restore_tensor_placements(placements)
+
+
+def _generate_with_staged_device(
+    model: nn.Module,
+    config: EBSSConfig,
+    *,
+    progress: Optional[Any],
+    target_device: torch.device,
+    layer_prefixes: Optional[Sequence[str]],
+) -> List[List[int]]:
+    """Run the search on ``target_device``, restoring the model afterwards."""
+
+    placements = _snapshot_tensor_placements(model)
+
+    if _model_fits_on_device(model, target_device):
+        log.info(
+            "MoEQuant EBSS: staging the full model on %s for the search.",
+            target_device,
+        )
+        try:
+            safe_module_to(model, target_device)
+        except BaseException as error:
+            _restore_tensor_placements(placements)
+            if not _is_out_of_memory(error) or torch.device("cpu") == target_device:
+                raise
+            _empty_device_cache(target_device)
+            log.warn(
+                "MoEQuant EBSS: the full model did not fit on %s (%s); "
+                "switching to layer-wise staging.",
+                target_device,
+                error,
+            )
+        else:
+            try:
+                sentences = _sample_ebss_sequences(
+                    model,
+                    config,
+                    progress=progress,
+                    device=target_device,
+                )
+            except BaseException as error:
+                _restore_tensor_placements(placements)
+                if not _is_out_of_memory(error):
+                    raise
+                _empty_device_cache(target_device)
+                log.warn(
+                    "MoEQuant EBSS: the full-model search ran out of memory on %s; "
+                    "switching to layer-wise staging.",
+                    target_device,
+                )
+            else:
+                _restore_tensor_placements(placements)
+                return sentences
+    else:
+        log.warn(
+            "MoEQuant EBSS: model weights need %.1f MiB but %s does not have "
+            "enough free memory; using layer-wise staging.",
+            _model_tensor_bytes(model) / (1024 * 1024),
+            target_device,
+        )
+
+    if _resolve_decoder_layers(model, layer_prefixes):
+        try:
+            with _layerwise_model_execution(model, target_device, layer_prefixes):
+                return _sample_ebss_sequences(
+                    model,
+                    config,
+                    progress=progress,
+                    device=target_device,
+                )
+        except BaseException as error:
+            if not _is_out_of_memory(error):
+                raise
+            _empty_device_cache(target_device)
+            log.warn(
+                "MoEQuant EBSS: layer-wise staging also ran out of memory on %s; "
+                "falling back to the model's existing placement.",
+                target_device,
+            )
+    else:
+        log.warn(
+            "MoEQuant EBSS: no decoder layers were provided for layer-wise "
+            "staging; falling back to the model's existing placement."
+        )
+
+    return _sample_ebss_sequences(
+        model,
+        config,
+        progress=progress,
+        device=_input_device(model),
+    )
+
+
 def _vocab_size(model: nn.Module) -> int:
     config = getattr(model, "config", None)
     value = getattr(config, "vocab_size", None)
@@ -284,6 +562,8 @@ def generate_ebss_calibration(
     config: EBSSConfig,
     *,
     progress: Optional[Any] = None,
+    device: Optional[Any] = None,
+    layer_prefixes: Optional[Sequence[str]] = None,
 ) -> List[List[int]]:
     """Generate ``config.num_sentences`` token sequences with Algorithm 1.
 
@@ -296,6 +576,12 @@ def generate_ebss_calibration(
     ``progress`` is an optional callable invoked as ``progress(sentence_index,
     total)`` after each sentence.  The model is temporarily switched to eval
     mode; each module's training mode and every routing hook are restored in ``finally``.
+
+    ``device`` requests the device the search must execute on.  When it differs
+    from the model's current input-embedding device the model is staged there
+    for the search and its previous placement is restored afterwards.  A model
+    that does not fit is run one decoder layer at a time using the layer paths
+    in ``layer_prefixes`` (normally ``BaseQModel.extract_layers_node()``).
     """
 
     if not isinstance(config, EBSSConfig):
@@ -313,7 +599,33 @@ def generate_ebss_calibration(
             f"max_position_embeddings={max_positions}."
         )
 
-    device = _input_device(model)
+    from .torch import as_torch_device
+
+    current_device = _input_device(model)
+    target_device = None if device is None else as_torch_device(device)
+    if target_device is None or target_device == current_device:
+        return _sample_ebss_sequences(
+            model,
+            config,
+            progress=progress,
+            device=current_device,
+        )
+    return _generate_with_staged_device(
+        model,
+        config,
+        progress=progress,
+        target_device=target_device,
+        layer_prefixes=layer_prefixes,
+    )
+
+
+def _sample_ebss_sequences(
+    model: nn.Module,
+    config: EBSSConfig,
+    *,
+    progress: Optional[Any],
+    device: torch.device,
+) -> List[List[int]]:
     vocab_size = _vocab_size(model)
     training_modes = [(module, module.training) for module in model.modules()]
     generator = torch.Generator(device="cpu")

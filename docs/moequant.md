@@ -164,6 +164,11 @@ moequant={"agq": True, "ebss": {"num_sentences": 64, "seq_len": 256}}
 - EBSS requires materialized weights. A lazy checkpoint shell raises before the
   search; load with `QuantizeConfig(offload_to_disk=False)` or materialize the
   model first.
+- The search runs on the quantization device (`device=` or
+  `QuantizeConfig.device`). The full model is staged there when it fits and
+  its previous placement is restored afterwards; otherwise decoder layers are
+  staged one at a time. See
+  [multi-GPU quantization](multi_gpu_quantization.md#ebss-search-placement).
 - `agq=True` requires native MoE routing. `ExpertsRoutingBypass` is rejected
   because the bypass feeds every expert all tokens, so the routed-token
   affinity is not defined.

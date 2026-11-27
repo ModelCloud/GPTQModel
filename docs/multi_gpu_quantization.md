@@ -111,6 +111,47 @@ regression report and rationale.
 | `device=("cuda:1", "cuda")` | Both used all four | `ValueError` for the ambiguous mix |
 | `device=("cuda:1", "cuda:1")` | Quantization used `cuda:1`; loader map used all four | Both use only `cuda:1` |
 
+## EBSS search placement
+
+MoEQuant EBSS samples its calibration tokens from the full-precision model
+before the looper stages any decoder layer. `BaseQModel.quantize()` now passes
+the resolved quantization device (`_pre_quantize_device()`, which honors
+`device=` and `compute_device_filter`) and the declared layer paths to
+`generate_ebss_calibration()`. The search therefore executes where the
+quantization runs instead of inheriting the materialized model's host
+placement.
+
+The search restores every parameter and buffer to its previous device on both
+the success and failure paths. A model that does not fit is run with one
+decoder layer resident at a time; when no layer paths are available, the search
+keeps the model's existing placement as the low-memory fallback. Calling the
+utility directly without `device=` keeps the previous in-place behavior.
+
+```mermaid
+flowchart TD
+    A["BaseQModel.quantize"] --> B["_maybe_generate_ebss_calibration"]
+    B --> C["_pre_quantize_device and extract_layers_node"]
+    C --> D{"Target equals embedding device?"}
+    D -- Yes --> E["Run search in place"]
+    D -- No --> F{"Full model fits on target?"}
+    F -- Yes --> G["Stage full model, search, restore placement"]
+    F -- No --> H{"Decoder layer paths available?"}
+    H -- Yes --> I["CpuOffload one layer at a time, search, remove hooks, restore"]
+    H -- No --> J["Search in existing placement"]
+    E --> K["Calibration token rows"]
+    G --> K
+    I --> K
+    J --> K
+    classDef fallback fill:#fff3cd,stroke:#8a6d00,color:#111;
+    class J fallback;
+```
+
+| Situation | Before | After |
+| --- | --- | --- |
+| Model fits on the quantization device | Full search ran on the host | Full model staged on the target, then restored |
+| Model does not fit | Full search ran on the host | Decoder layers staged one at a time; search runs on the target |
+| No decoder layer paths | Full search ran on the host | Existing placement (host) remains the low-memory fallback |
+
 ## Fused-expert conversion device scope
 
 Fused-expert MoE checkpoints (OLMoE, PhiMoE, Granite MoE, ...) are rebuilt by
