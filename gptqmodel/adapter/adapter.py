@@ -274,6 +274,18 @@ class Adapter():
 
         pass
 
+    # override me
+    def align_forward_dtype(self, dtype: Optional[torch.dtype]) -> None:
+        """Aligns adapter tensors to the activation dtype before the first forward.
+
+        A bind site that knows the module dtype calls this through
+        ``post_init(dtype=...)``. A quantized linear only learns its activation
+        dtype from the model, so ``BaseQModel.optimize`` calls it before tracing
+        the compiled first forward (contracts/kernel/forward-dtype.md K1/K2).
+        """
+
+        pass
+
     def targets_module(self, module_name: str) -> bool:
         """Whether this adapter applies to ``module_name``.
 
@@ -426,6 +438,41 @@ class Lora(Adapter):
         self.lora_A = self.lora_A.to(dtype=x.dtype)
         self.lora_B = self.lora_B.to(dtype=x.dtype)
         self._forward_dtype = x.dtype
+
+    def align_forward_dtype(self, dtype: Optional[torch.dtype]) -> None:
+        """Align and lock the projections before the first forward.
+
+        A quantized linear has no activation dtype at bind time, so its adapter
+        normally aligns on the first eager forward. ``optimize()`` traces that
+        first forward, where the cast is refused (#6109), so the model dtype is
+        applied here instead - still before any forward, which keeps K1/K2.
+        Repeated calls with the locked dtype are no-ops; a different dtype after
+        the lock raises instead of re-casting.
+        """
+
+        if not isinstance(dtype, torch.dtype) or not dtype.is_floating_point:
+            return
+        if self.lora_A is None or self.lora_B is None:
+            return
+
+        if self._forward_dtype is not None:
+            if (
+                dtype == self._forward_dtype
+                and self.lora_A.dtype == dtype
+                and self.lora_B.dtype == dtype
+            ):
+                return
+            raise RuntimeError(
+                f"Adapter: LoRA projections are locked to `{self._forward_dtype}` after the "
+                f"first forward, but the requested activation dtype is `{dtype}` and the "
+                f"projections are `[{self.lora_A.dtype}, {self.lora_B.dtype}]`. Cast the "
+                "model and its adapter before the first forward instead of switching dtype "
+                "later (contracts/kernel/forward-dtype.md, K1/K2)."
+            )
+
+        self.lora_A = self.lora_A.to(dtype=dtype)
+        self.lora_B = self.lora_B.to(dtype=dtype)
+        self._forward_dtype = dtype
 
     def _resolve_source(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """Resolve the adapter source path and its explicit remote pin."""
