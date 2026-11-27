@@ -1,3 +1,4 @@
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -39,29 +40,106 @@ def test_awq_gemm_pack_backend_stays_portable_off_cuda():
     # The native AWQ GEMM extension only builds for CUDA, so every other host
     # (and the weight-only export lifecycle) packs with the portable kernel.
     assert (
-        awq_gemm_pack_backend(device_type="cuda", is_rocm=False, weight_only=False)
+        awq_gemm_pack_backend(device_type="cuda", is_rocm=False, weight_only=False, bits=4)
         == BACKEND.AWQ_GEMM
     )
     assert (
-        awq_gemm_pack_backend(device_type="cuda", is_rocm=True, weight_only=False)
+        awq_gemm_pack_backend(device_type="cuda", is_rocm=True, weight_only=False, bits=4)
         == BACKEND.AWQ_TORCH
     )
     assert (
-        awq_gemm_pack_backend(device_type="xpu", is_rocm=False, weight_only=False)
+        awq_gemm_pack_backend(device_type="xpu", is_rocm=False, weight_only=False, bits=4)
         == BACKEND.AWQ_TORCH
     )
     assert (
-        awq_gemm_pack_backend(device_type="npu", is_rocm=False, weight_only=False)
+        awq_gemm_pack_backend(device_type="npu", is_rocm=False, weight_only=False, bits=4)
         == BACKEND.AWQ_TORCH
     )
     assert (
-        awq_gemm_pack_backend(device_type="cpu", is_rocm=False, weight_only=False)
+        awq_gemm_pack_backend(device_type="cpu", is_rocm=False, weight_only=False, bits=4)
         == BACKEND.AWQ_TORCH
     )
     assert (
-        awq_gemm_pack_backend(device_type="cuda", is_rocm=False, weight_only=True)
+        awq_gemm_pack_backend(device_type="cuda", is_rocm=False, weight_only=True, bits=4)
         == BACKEND.AWQ_TORCH
     )
+
+
+@pytest.mark.parametrize("bits", [2, 3, 8])
+def test_awq_gemm_pack_backend_uses_torch_for_non_4bit_widths(bits):
+    from gptqmodel.utils.backend import BACKEND, awq_gemm_pack_backend
+
+    # ``AwqGEMMLinear`` only supports 4 bits; the portable packer emits the
+    # identical GEMM layout for the other advertised widths (#6135).
+    assert (
+        awq_gemm_pack_backend(
+            device_type="cuda", is_rocm=False, weight_only=False, bits=bits
+        )
+        == BACKEND.AWQ_TORCH
+    )
+
+
+def _tiny_awq_model_dir():
+    from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+    from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+
+    torch.manual_seed(0)
+    path = tempfile.mkdtemp(prefix="awq_gemm_gate_6135_")
+    LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=128,
+            hidden_size=64,
+            intermediate_size=96,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=128,
+        )
+    ).save_pretrained(path)
+
+    specials = ["<s>", "</s>", "<unk>", "<pad>"]
+    tokenizer = Tokenizer(models.WordLevel(unk_token="<unk>"))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer.add_special_tokens(specials)
+    tokenizer.train_from_iterator(
+        ["the quick brown fox jumps over the lazy dog"] * 20,
+        trainer=trainers.WordLevelTrainer(special_tokens=specials, vocab_size=128),
+    )
+    PreTrainedTokenizerFast(tokenizer_object=tokenizer, pad_token="<pad>").save_pretrained(path)
+    return path
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="AWQ GEMM packing is CUDA-only")
+@pytest.mark.parametrize("bits", [8, 3])
+def test_awq_gemm_non_4bit_global_width_quantizes_with_default_backend(bits):
+    """The AUTO pack backend must validate the kernel it will actually use."""
+
+    from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+    from gptqmodel.quantization.config import AWQConfig
+
+    source = _tiny_awq_model_dir()
+    model = GPTQModel.load(
+        source,
+        quantize_config=AWQConfig(bits=bits, group_size=32, sym=False),
+        dtype=torch.bfloat16,
+        device="cuda:0",
+    )
+    texts = [
+        " ".join(["the quick brown fox jumps over the lazy dog"] * (1 + index % 3))
+        for index in range(8)
+    ]
+
+    model.quantize(CalibrationConfig(dataset=texts, batch_size=2))
+
+    assert model.quantize_backend == BACKEND.AWQ_TORCH
+    packed = [
+        module
+        for name, module in model.model.named_modules()
+        if name.endswith("q_proj")
+    ]
+    assert packed and all(isinstance(module, AwqTorchLinear) for module in packed)
 
 
 def test_awq_gemm_kernel_is_cuda_only():

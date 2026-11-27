@@ -46,6 +46,38 @@ def _forward_dtype(model: torch.nn.Module) -> Optional[torch.dtype]:
         return None
 
 
+def _dispatch_execution_device(module: torch.nn.Module) -> Optional[torch.device]:
+    """Execution device of a resident accelerate dispatch hook on ``module``.
+
+    Input capture runs through the loaded model, so a module owned by an
+    accelerate hook must stay on that hook's execution device. Moving its
+    weight to the capture device while the hook moves the inputs to the
+    execution device splits the forward across two devices (#6132). Offload
+    hooks are left alone: their weight map owns the placement.
+    """
+
+    from accelerate.hooks import AlignDevicesHook, SequentialHook
+
+    pending = [getattr(module, "_hf_hook", None)]
+    while pending:
+        hook = pending.pop()
+        if hook is None:
+            continue
+        if isinstance(hook, SequentialHook):
+            pending.extend(hook.hooks)
+            continue
+        if isinstance(hook, AlignDevicesHook) and not hook.offload:
+            execution_device = hook.execution_device
+            if execution_device is not None:
+                try:
+                    execution_device = torch.device(execution_device)
+                except (TypeError, RuntimeError):
+                    continue
+                if execution_device.type != "meta":
+                    return execution_device
+    return None
+
+
 def _branch_first_layer_indices(layer_names: Optional[Sequence[str]]) -> List[int]:
     """Return the flat index of each concurrent module-tree branch's first layer.
 
@@ -232,6 +264,7 @@ class StageInputsCapture:
         # Use calibration_data_device to specify device for calibration data (or "balanced" for round-robin across GPUs)
         def _materialize_capture_layer(index: int, path: Optional[str]) -> torch.nn.Module:
             layer = layers[index]
+            layer_device = _dispatch_execution_device(layer) or CPU
             if index == 0 and self._first_layer_has_deferred_floatx_source(layer, module_path=path):
                 self.logger.info(
                     "Floatx input capture: keeping first decoder layer lazy; its pre-hook runs before packed weights are used."
@@ -239,9 +272,9 @@ class StageInputsCapture:
                 return layer
             prepare_capture_layer = getattr(self.gptq_model, "prepare_input_capture_layer", None)
             if callable(prepare_capture_layer) and index == 0:
-                return prepare_capture_layer(layer, module_path=path, device=CPU)
+                return prepare_capture_layer(layer, module_path=path, device=layer_device)
             return self.gptq_model.shell_module_materialize(
-                target_submodule=layer, module_path=path, device=CPU,
+                target_submodule=layer, module_path=path, device=layer_device,
             )
 
         if multi_branch:
@@ -416,10 +449,11 @@ class StageInputsCapture:
 
             resolved_name = _resolve_module_name(module)
             m_device = get_device(module)
+            module_device = _dispatch_execution_device(module) or cur_layer_device
             ori_outside_layer_module_devices[module_name] = CPU if m_device == META else m_device
             self.gptq_model.shell_module_materialize(
                 target_submodule=module,
-                device=cur_layer_device,
+                device=module_device,
                 module_path=resolved_name,
             )
 
