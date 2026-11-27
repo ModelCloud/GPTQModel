@@ -524,7 +524,7 @@ def smollm2_path():
         from huggingface_hub import snapshot_download
         from huggingface_hub.errors import LocalEntryNotFoundError
     except ImportError as exc:  # pragma: no cover - dependency is pinned
-        pytest.skip(f"huggingface_hub is unavailable: {exc}")
+        raise pytest.skip.Exception(f"huggingface_hub is unavailable: {exc}")
 
     try:
         return snapshot_download(
@@ -533,7 +533,9 @@ def smollm2_path():
             allow_patterns=["*.json", "*.safetensors", "tokenizer*", "*.model"],
         )
     except (LocalEntryNotFoundError, OSError) as exc:
-        pytest.skip(f"{_MODEL_ID} is not available in the local HF cache: {exc}")
+        raise pytest.skip.Exception(
+            f"{_MODEL_ID} is not available in the local HF cache: {exc}"
+        )
 
 
 _EXIT_SCRIPT = """
