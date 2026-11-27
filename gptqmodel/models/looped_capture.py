@@ -33,6 +33,24 @@ class LoopedLayerCaptureMixin:
     _looped_per_layer: Optional[Dict[int, Dict[str, List[Any]]]] = None
     _looped_input_caches: Optional[List[InputCache]] = None
 
+    def capture_looped_layer_invocation_inputs(
+        self,
+        module: torch.nn.Module,
+        args: tuple,
+        kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return model-specific positional inputs to replay for one invocation.
+
+        The generic capture records ``hidden_states`` and keyword arguments. A
+        decoder that also passes tensors positionally (for example a residual
+        bank or per-loop messages) returns them here under the keyword names
+        its layer forward accepts. They are stored with the invocation and
+        handed back through ``prepare_layer_replay_kwargs``.
+        """
+
+        del module, args, kwargs
+        return {}
+
     def _materialize_looped_capture_model(self, layers, layer_names, device):
         """Materialize the complete recurrent model for one calibration pass.
 
@@ -137,6 +155,11 @@ class LoopedLayerCaptureMixin:
                         continue
                     if key in ("past_key_values", "past_key_value"):
                         continue
+                    replay_kwargs[key] = nested_move_to(value, device=CPU)
+                extra_inputs = self.capture_looped_layer_invocation_inputs(
+                    module, args, kwargs
+                )
+                for key, value in extra_inputs.items():
                     replay_kwargs[key] = nested_move_to(value, device=CPU)
                 bucket["layer_input_kwargs"].append(replay_kwargs)
 
