@@ -349,6 +349,9 @@ class HunYuanMoEV1PreTrainedModel(NativePreTrainedModel):
     config: HunYuanMoEV1Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
+    # The router builds ``mlp.gate.wg`` in fp32 and its forward has an fp32
+    # fast path; keep it fp32 under every half dtype (issue #6136).
+    _keep_in_fp32_modules_strict = ["mlp.gate.wg"]
     _no_split_modules = ["HunYuanMoEV1DecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_flash_attn = True

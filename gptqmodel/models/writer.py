@@ -61,6 +61,7 @@ from ..utils.exl3_error_ledger import write_exl3_error_ledger
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
     get_hf_config_dtype,
+    is_transformers_native_config_type,
     load_model_config,
     resolve_trust_remote_code,
     sanitize_generation_config_file,
@@ -432,6 +433,50 @@ def _gptq_explicit_quantized_modules(
     return [sorted(find_modules(model, layers=[BaseQuantLinear]))]
 
 
+def _preserve_remote_code_config(
+        saved_config: Dict[str, Any],
+        source_config: Optional[Dict[str, Any]],
+        model: torch.nn.Module,
+        *,
+        trust_remote_code: bool,
+) -> bool:
+    """Apply the remote-code export rule to a serialized config.
+
+    A natively registered model type loads from installed Transformers, so an
+    inherited ``auto_map`` would point at checkpoint Python that the writer does
+    not copy. A package-owned port may serve a type Transformers does not
+    register; its export must keep the released ``auto_map`` and architecture
+    name (the runtime class can be an internal subclass such as MiniCPMO26).
+
+    Returns whether checkpoint Python must be copied for this export.
+    """
+
+    saved_model_type = saved_config.get("model_type")
+    if saved_model_type is None and source_config is not None:
+        saved_model_type = source_config.get("model_type")
+    native_config_type = is_transformers_native_config_type(saved_model_type)
+    preserve_remote_code = bool(trust_remote_code) or not native_config_type
+
+    if preserve_remote_code:
+        if source_config is not None:
+            source_auto_map = source_config.get("auto_map")
+            if isinstance(source_auto_map, dict) and source_auto_map:
+                saved_config["auto_map"] = source_auto_map
+            source_architectures = source_config.get("architectures")
+            if (
+                not native_config_type
+                and model.__class__.__module__.startswith("gptqmodel.models.ports.")
+                and isinstance(source_architectures, list)
+                and source_architectures
+                and all(isinstance(name, str) for name in source_architectures)
+            ):
+                saved_config["architectures"] = source_architectures
+    else:
+        saved_config.pop("auto_map", None)
+
+    return preserve_remote_code
+
+
 def _save_model_configs_without_weights(
         model: torch.nn.Module,
         save_dir: str,
@@ -488,22 +533,29 @@ def _save_model_configs_without_weights(
             raise ValueError("Model config.json must contain a JSON object.")
         _merge_missing_config_fields(saved_config, source_config)
 
-    # A natively supported model loaded with the `trust_remote_code` override is
-    # saved without its `.py` files. Keeping the source `auto_map` would then
-    # point at files that are not in the export and make
-    # `AutoConfig.from_pretrained(out, trust_remote_code=True)` fail with a
-    # missing `configuration_*.py`. Drop it whenever remote code is not copied.
-    if not trust_remote_code:
-        if saved_config is None:
-            with open(saved_config_path, "r", encoding="utf-8") as handle:
-                saved_config = json.load(handle)
-            if not isinstance(saved_config, dict):
-                raise ValueError("Model config.json must contain a JSON object.")
-        saved_config.pop("auto_map", None)
+    if saved_config is None:
+        with open(saved_config_path, "r", encoding="utf-8") as handle:
+            saved_config = json.load(handle)
+        if not isinstance(saved_config, dict):
+            raise ValueError("Model config.json must contain a JSON object.")
 
-    if saved_config is not None:
-        with open(saved_config_path, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(saved_config, indent=2, sort_keys=True) + "\n")
+    preserve_remote_code = _preserve_remote_code_config(
+        saved_config,
+        source_config,
+        model,
+        trust_remote_code=trust_remote_code,
+    )
+
+    with open(saved_config_path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(saved_config, indent=2, sort_keys=True) + "\n")
+
+    if (
+        preserve_remote_code
+        and source_model_dir is not None
+        and "auto_map" in saved_config
+        and os.path.realpath(source_model_dir) != os.path.realpath(save_dir)
+    ):
+        copy_py_files(save_dir, model_id_or_path=source_model_dir)
 
     can_generate = getattr(model, "can_generate", None)
     generation_config = getattr(model, "generation_config", None)
@@ -2217,10 +2269,23 @@ def ModelWriter(cls):
         runtime_config = getattr(self.model, "config", None)
         if runtime_config is not None and hasattr(runtime_config, "tie_word_embeddings"):
             model_config["tie_word_embeddings"] = bool(runtime_config.tie_word_embeddings)
-        if not getattr(self, "trust_remote_code", False):
-            # The `.py` files are not copied below, so an inherited `auto_map`
-            # would point at missing files and break AutoConfig loading.
-            model_config.pop("auto_map", None)
+        source_model_dir = getattr(checkpoint_source, "model_local_path", None)
+        source_config = None
+        if source_model_dir is not None:
+            source_config_path = os.path.join(source_model_dir, "config.json")
+            if os.path.isfile(source_config_path):
+                with open(source_config_path, "r", encoding="utf-8") as handle:
+                    source_config = json.load(handle)
+                if not isinstance(source_config, dict):
+                    raise ValueError("Model config.json must contain a JSON object.")
+        # `_copy_missing_checkpoint_files` already copied the source checkpoint
+        # `.py` files as data, so a ported type can keep its `auto_map`.
+        _preserve_remote_code_config(
+            model_config,
+            source_config,
+            self.model,
+            trust_remote_code=bool(getattr(self, "trust_remote_code", False)),
+        )
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(model_config, indent=2) + "\n")
 

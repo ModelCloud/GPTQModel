@@ -680,6 +680,63 @@ def test_definition_selects_local_omni_without_global_cache_mutation():
     assert cache_utils.DynamicCache is dynamic
 
 
+def test_public_save_keeps_released_remote_code_metadata(tmp_path):
+    """A ported VLM export must stay self-describing (issue #6134).
+
+    The runtime class for MiniCPM-o 2.6 is the package-internal ``MiniCPMO26``
+    subclass, but the released checkpoint names ``MiniCPMO``. The writer must
+    keep the source ``auto_map`` and checkpoint ``.py`` files, and must write
+    the released architecture name so ``AutoConfig`` can still resolve it.
+    """
+
+    from transformers import AutoConfig
+
+    from gptqmodel import BACKEND
+    from gptqmodel.quantization import RTNConfig
+
+    released = json.loads(
+        (Path(__file__).parent / "fixtures/ports/minicpm_o/checkpoint-2_6-config.json").read_text()
+    )
+    source = tmp_path / "source"
+    out = tmp_path / "out"
+    tiny_model(version="2.6").save_pretrained(source)
+    tiny_processor("2.6").save_pretrained(source)
+
+    # save_pretrained writes the runtime class name; restore the released
+    # metadata the checkpoint actually ships.
+    source_config = json.loads((source / "config.json").read_text())
+    source_config["architectures"] = released["architectures"]
+    source_config["auto_map"] = released["auto_map"]
+    (source / "config.json").write_text(json.dumps(source_config))
+    (source / "configuration_minicpm.py").write_text(
+        "from transformers import PretrainedConfig\n\n"
+        "class MiniCPMOConfig(PretrainedConfig):\n"
+        "    model_type = 'minicpmo'\n"
+    )
+
+    wrapper = GPTQModel.load(
+        str(source),
+        quantize_config=RTNConfig(
+            bits=4,
+            group_size=16,
+            offload_to_disk=False,
+            device="cpu",
+        ),
+        backend=BACKEND.TORCH,
+    )
+    wrapper.quantize(backend=BACKEND.TORCH)
+    wrapper.save(str(out))
+
+    saved = json.loads((out / "config.json").read_text())
+    assert saved["auto_map"] == released["auto_map"]
+    assert saved["architectures"] == ["MiniCPMO"]
+    assert (out / "configuration_minicpm.py").is_file()
+
+    loaded = AutoConfig.from_pretrained(str(out), trust_remote_code=True)
+    assert type(loaded).__name__ == "MiniCPMOConfig"
+    assert loaded.model_type == "minicpmo"
+
+
 def test_streaming_whisper_encoder_and_cache_edits_use_transformers_cache_layers():
     from transformers.cache_utils import DynamicCache, EncoderDecoderCache
 
