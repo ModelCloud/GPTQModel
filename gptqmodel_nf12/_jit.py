@@ -44,12 +44,14 @@ class _MissingBuildTools(RuntimeError):
 # ``library_directory`` holds it while resolving the target and probing tools.
 _lock = threading.RLock()
 _directory: Path | None = None
-# A build that raised is remembered for the process: without this, a toolchain
-# that cannot build (an old CMake, a broken compiler) is retried on every NF12
-# call - once per module and subset during quantization. Stored as
-# ``(type, args)`` so each caller raises a fresh instance: ``raise`` mutates the
-# instance's traceback, which is a data race when threads share one.
-# ``reset_runtime_cache`` forgets it after the environment is repaired.
+# A *build* that raised is remembered for the process: without this, a
+# toolchain that cannot build (an old CMake, a broken compiler) is retried on
+# every NF12 call - once per module and subset during quantization. Only the
+# ``_build`` call is cached: a transient ``mkdir``/lock-file/``_ready`` failure
+# (a temporarily unwritable cache, say) must be retried on the next call.
+# Stored as ``(type, args)`` so each caller raises a fresh instance: ``raise``
+# mutates the instance's traceback, which is a data race when threads share
+# one. ``reset_runtime_cache`` forgets it after the environment is repaired.
 _directory_failure: tuple[type[BaseException], tuple] | None = None
 _target: tuple[Path, list[int], Path] | None = None
 _tools: tuple[str | None, str | None, str | None] | None = None
@@ -302,21 +304,23 @@ def library_directory() -> Path:
         if _directory_failure is not None:
             exc_type, args = _directory_failure
             raise exc_type(*args)
-        try:
-            source, archs, directory = _cache_target()
-            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-            # Keep the lock file: unlinking it lets waiters lock a different inode.
-            with (directory / "build.lock").open("a") as lock:
-                _lock_file(lock)
-                if not _ready(directory):
-                    (directory / "complete").unlink(missing_ok=True)
+        source, archs, directory = _cache_target()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Keep the lock file: unlinking it lets waiters lock a different inode.
+        with (directory / "build.lock").open("a") as lock:
+            _lock_file(lock)
+            if not _ready(directory):
+                (directory / "complete").unlink(missing_ok=True)
+                try:
                     _build(source, directory, archs)
-            _directory = directory / "build"
-            return _directory
-        except Exception as exc:
-            # A broken toolchain is a property of the process, not of one call.
-            _directory_failure = (type(exc), exc.args)
-            raise
+                except Exception as exc:
+                    # A broken toolchain is a property of the process, not of
+                    # one call - unlike a filesystem error above, which is not
+                    # cached and is retried by the next caller.
+                    _directory_failure = (type(exc), exc.args)
+                    raise
+        _directory = directory / "build"
+        return _directory
 
 
 def reset_runtime_cache() -> None:

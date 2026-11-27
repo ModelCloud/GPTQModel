@@ -544,13 +544,19 @@ def test_source_build_available_reports_missing_tools(monkeypatch):
     from gptqmodel_nf12 import _jit
 
     monkeypatch.setattr(_jit, "_architectures", lambda: [89])
+    # Tool probing and the version check are process-level answers; each
+    # toolchain mutation below must forget them explicitly.
+    monkeypatch.setattr(_jit, "_tool_version", lambda _tool: (3, 26))
     monkeypatch.setattr(_jit.shutil, "which", lambda _name: None)
+    _jit.reset_runtime_cache()
     assert not _jit.source_build_available()
 
     monkeypatch.setattr(_jit.shutil, "which", lambda name: f"/usr/bin/{name}")
+    _jit.reset_runtime_cache()
     assert _jit.source_build_available()
 
     monkeypatch.setattr(_jit, "_architectures", lambda: [70])
+    _jit.reset_runtime_cache()
     assert not _jit.source_build_available()
 
 

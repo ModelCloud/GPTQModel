@@ -200,3 +200,30 @@ def test_concurrent_toolchain_probe_runs_once(monkeypatch):
     assert not errors
     assert len(probes) == 1
 
+def test_a_transient_filesystem_error_is_not_cached(monkeypatch):
+    """Only ``_build`` failures are remembered; a bad cache dir can recover.
+
+    The reviewer reproduced a ``PermissionError`` from the cache directory: the
+    first call must raise it, and a later call whose directory is writable must
+    be retried rather than re-raise a process-wide failure.
+    """
+
+    ready_calls = []
+
+    def flaky_ready(directory):
+        ready_calls.append(directory)
+        if len(ready_calls) == 1:
+            raise PermissionError("cache directory is not writable")
+        return True
+
+    monkeypatch.setattr(_jit, "_ready", flaky_ready)
+    monkeypatch.setattr(_jit, "_build", lambda *args: (_ for _ in ()).throw(
+        AssertionError("a ready cache must not build")
+    ))
+
+    with pytest.raises(PermissionError):
+        _jit.library_directory()
+
+    assert _jit.library_directory() == _jit.cache_directory() / "build"
+    assert len(ready_calls) == 2
+
