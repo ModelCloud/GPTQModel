@@ -44,7 +44,7 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..nn_modules.qlinear.w4a_boundary import layer_mlp_policy
-from ..quantization import ADMMQ, FOEM, G2PTQ, GPTAQ, GPTQ
+from ..quantization import ADMMQ, FOEM, G2PTQ, GPTAQ, GPTQ, JointQ
 from ..quantization.activation_floatx import (
     NVFP4ActivationHeadroom,
     fp8_token_qdq,
@@ -62,6 +62,7 @@ from ..quantization.config import (
     QuantizeConfig,
     ResolvedModuleConfig,
     _normalize_g2ptq,
+    _normalize_jointq,
     apply_scalar_module_overrides,
     normalize_gsq_config,
     resolve_quant_format,
@@ -193,9 +194,11 @@ def clone_gptq_config_for_module(
             qcfg_clone.g2ptq = _normalize_g2ptq(g2ptq_override)
             if qcfg_clone.g2ptq is not None and qcfg.g2ptq is None:
                 raise ValueError("QuantizeConfig: dynamic `g2ptq` requires run-level `g2ptq`.")
+        qcfg_clone.jointq = _normalize_jointq(resolved_cfg.get("jointq", qcfg_clone.jointq))
 
         qcfg_clone.validate_g2ptq()
         qcfg_clone.validate_gsq()
+        qcfg_clone.validate_jointq()
 
     return qcfg_clone
 
@@ -427,6 +430,8 @@ class GPTQProcessor(LoopProcessor):
             tmp = FOEM(module=module, qcfg=qcfg_clone, region_timer=region_timer)
         elif qcfg_clone.method == METHOD.ADMMQ:
             tmp = ADMMQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
+        elif qcfg_clone.jointq is not None:
+            tmp = JointQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
             tmp.fallback = qcfg_clone.fallback
@@ -552,7 +557,9 @@ class GPTQProcessor(LoopProcessor):
 
         GPTQ and ADMM-Q accumulate the same Hessian. GPTAQ and FOEM each
         require their own signature and the same native-delta mode within
-        the group because ``dXXT`` must be adopted together with ``H``. Every
+        the group because ``dXXT`` must be adopted together with ``H``. JointQ
+        gets its own signature because it keeps the finalized Hessian across
+        its warm start and refinement, and it adopts ``H`` only. Every
         signature includes the effective sink-row cap because it rescales
         the activations before both ``H`` and ``dXXT`` (#5855).
         """
@@ -563,6 +570,11 @@ class GPTQProcessor(LoopProcessor):
             return ("gptaq", task.columns, bool(task._use_native_delta), task.sink_row_cap_median_multiple())
         if type(task) is FOEM:
             return ("foem", task.columns, bool(task.gptaq), task.sink_row_cap_median_multiple())
+        if type(task) is JointQ:
+            # JointQ accumulates the same ``X^T X`` as GPTQ, but it keeps the
+            # finalized Hessian across its warm start and refinement. Give it
+            # its own cohort so a shared capture never spans the two kinds.
+            return ("jointq", task.columns, *self._hessian_accumulation_settings(task))
         return None
 
     def begin_shared_input_capture(
@@ -573,9 +585,10 @@ class GPTQProcessor(LoopProcessor):
     ) -> Dict[str, str]:
         """Elects one Hessian capture leader per explicit shared-input group present in this subset.
 
-        GPTQ, ADMM-Q, GPTAQ and FOEM tasks share when their capture signatures
-        match. GPTAQ and FOEM also adopt ``dXXT``. Groups that are split across
-        subsets dedup only among the members captured in this pass.
+        GPTQ, ADMM-Q, GPTAQ, FOEM and JointQ tasks share when their capture
+        signatures match. GPTAQ and FOEM also adopt ``dXXT``; JointQ adopts
+        ``H`` only and never joins a plain GPTQ cohort. Groups that are split
+        across subsets dedup only among the members captured in this pass.
         """
 
         with self.lock:
@@ -1035,6 +1048,9 @@ class GPTQProcessor(LoopProcessor):
         gsq_diagnostics = getattr(g, "gsq_diagnostics", None)
         if gsq_diagnostics is not None:
             module.state["gsq_diagnostics"] = gsq_diagnostics
+        jointq_diagnostics = getattr(g, "jointq_diagnostics", None)
+        if jointq_diagnostics:
+            module.state["jointq_diagnostics"] = jointq_diagnostics
 
         workspace_summary = getattr(g, "_borrow_workspace_last_summary", None)
         workspace_totals = getattr(g, "_borrow_workspace_totals", None)
@@ -1364,6 +1380,8 @@ class GPTQProcessor(LoopProcessor):
             return "foem"
         if qcfg.method == METHOD.ADMMQ:
             return "admmq"
+        if qcfg.jointq is not None:
+            return "jointq"
         return "gptq"
 
     def _release_host_buffers(self, *tensors: torch.Tensor) -> None:

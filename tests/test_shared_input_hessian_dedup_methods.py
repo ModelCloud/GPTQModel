@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared-input Hessian dedup for QQQ, VPTQ, MACaQ, EXL3, GPTAQ and FOEM.
+"""Shared-input Hessian dedup for QQQ, VPTQ, MACaQ, EXL3, GPTAQ, FOEM and JointQ.
 
 Each quantizer keeps its own statistics layout, so every method proves two
 things independently: the follower's capture is skipped (``add_batch`` count
@@ -38,6 +38,7 @@ from gptqmodel.quantization.config import (
     FOEMConfig,
     GPTAQConfig,
     GPTQConfig,
+    JointQConfig,
     MacaqConfig,
     QQQConfig,
     QuantizeConfig,
@@ -46,6 +47,7 @@ from gptqmodel.quantization.config import (
 from gptqmodel.quantization.foem import FOEM
 from gptqmodel.quantization.gptaq import GPTAQ
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.quantization.jointq import JointQ
 from gptqmodel.quantization.macaq import Macaq
 from gptqmodel.quantization.qqq import QQQ
 from gptqmodel.quantization.vptq import VPTQ
@@ -319,6 +321,8 @@ def test_exl3_processor_adopts_one_hessian_per_group():
 def _gptq_processor_qcfg(kind: str) -> QuantizeConfig:
     if kind == "gptaq":
         return QuantizeConfig(bits=4, group_size=8, gptaq=GPTAQConfig())
+    if kind == "jointq":
+        return QuantizeConfig(bits=4, group_size=8, jointq=JointQConfig())
     return QuantizeConfig(bits=4, group_size=8, foem=FOEMConfig(alpha=0.25))
 
 
@@ -412,6 +416,92 @@ def test_gptaq_foem_quantize_after_adopt_matches_independent(kind: str):
     reference_weight, *_ = reference.quantize()
     follower_weight, *_ = follower.quantize()
     assert torch.equal(follower_weight, reference_weight)
+
+
+# ---------------------------------------------------------------------------
+# JointQ
+# ---------------------------------------------------------------------------
+
+
+def _jointq_tasks(batches, qcfg: QuantizeConfig, seed_offset: int = 0):
+    processor = GPTQProcessor(tokenizer=None, qcfg=qcfg, calibration=CalibrationConfig())
+    model = _fake_model(_plan(), qcfg)
+    modules = {}
+    for index, name in enumerate(_QKV):
+        named = _named_linear(name, in_features=16, seed=seed_offset + index)
+        named.state[NATIVE_INPUTS_STATE_KEY] = [
+            (batch_index, x) for batch_index, x in enumerate(batches)
+        ]
+        processor.preprocess(named)
+        modules[name] = named
+    return processor, model, modules
+
+
+def test_jointq_processor_adopts_h_without_dxxt():
+    batches = _batches(in_features=16, n=3, tokens=4)
+    qcfg = _gptq_processor_qcfg("jointq")
+    processor, model, modules = _jointq_tasks(batches, qcfg)
+
+    leaders = processor.begin_shared_input_capture(model, _QKV)
+    assert leaders == {"self_attn.k": "self_attn.q", "self_attn.v": "self_attn.q"}
+    _feed(processor, modules, _QKV, batches)
+
+    tasks = {name: processor.tasks[name] for name in _QKV}
+    assert all(type(task) is JointQ for task in tasks.values())
+    assert tasks["self_attn.q"].fwd_counter == len(batches)
+    assert tasks["self_attn.k"].fwd_counter == 0
+    assert tasks["self_attn.v"].fwd_counter == 0
+
+    processor.end_shared_input_capture(_QKV)
+    follower = tasks["self_attn.k"]
+    leader = tasks["self_attn.q"]
+    assert follower.fwd_counter == len(batches)
+    assert processor.shared_input_dedup_count == 2
+
+    reference_named = _named_linear("ref", in_features=16, seed=1)
+    reference_named.state[NATIVE_INPUTS_STATE_KEY] = [
+        (batch_index, x) for batch_index, x in enumerate(batches)
+    ]
+    reference = JointQ(reference_named, copy.deepcopy(qcfg))
+    reference.quantizer.configure(perchannel=True)
+    for batch_index, x in enumerate(batches):
+        reference.add_batch(x, None, batch_index=batch_index)
+    reference.finalize_hessian(target_device=leader.H.device)
+
+    assert torch.equal(follower.H, reference.H)
+    assert follower.H.data_ptr() != leader.H.data_ptr()
+    assert follower.nsamples == reference.nsamples == leader.nsamples
+    # JointQ carries no first-order statistic, so nothing beyond ``H`` moves.
+    assert getattr(follower, "dXXT", None) is None
+
+
+def test_jointq_does_not_share_a_capture_with_plain_gptq():
+    batches = _batches(in_features=16, n=2, tokens=4)
+    # Enable JointQ for one sibling only, so the group mixes both kinds.
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=8,
+        dynamic={"model.layers.0.self_attn.k": {"jointq": True}},
+    )
+    processor, model, modules = _jointq_tasks(batches, qcfg)
+
+    tasks = {name: processor.tasks[name] for name in _QKV}
+    assert type(tasks["self_attn.q"]) is GPTQ
+    assert type(tasks["self_attn.k"]) is JointQ
+    assert type(tasks["self_attn.v"]) is GPTQ
+
+    # A shared capture must never span the two kinds: the two plain GPTQ
+    # siblings elect each other and the JointQ task keeps its own capture.
+    leaders = processor.begin_shared_input_capture(model, _QKV)
+    assert "self_attn.k" not in leaders.values()
+    assert leaders == {"self_attn.v": "self_attn.q"}
+
+    _feed(processor, modules, _QKV, batches)
+    assert tasks["self_attn.q"].fwd_counter == len(batches)
+    assert tasks["self_attn.k"].fwd_counter == len(batches)
+    assert tasks["self_attn.v"].fwd_counter == 0
+    processor.end_shared_input_capture(_QKV)
+    assert processor.shared_input_dedup_count == 1
 
 
 # ---------------------------------------------------------------------------

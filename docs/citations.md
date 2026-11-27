@@ -21,6 +21,7 @@
 * **YAQA** by Albert Tseng, Zhaofeng Sun, and Christopher De Sa introduced the Hessian sketches and two-sided adaptive rounding used in GPT-QModel's calibrated CPTC path. [Paper](https://arxiv.org/abs/2505.22988) · [Reference implementation](https://github.com/Cornell-RelaxML/yaqa-quantization) · [CPTC calibration](cptc.md#yaqa-calibration)
 * Norm Tweaking: Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu, [paper](https://arxiv.org/abs/2309.02784)
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
+* **JointQ** by Keiji Kimura and Yuma Ichikawa (Fujitsu Limited) introduced the coupled group-scale and integer refinement used by GPT-QModel's `gptqmodel/quantization/jointq.py`. The implementation is clean-room from the paper; no code was copied from the authors' MIT-licensed OneComp library. [Paper](https://arxiv.org/abs/2611.20384) · [Reference implementation](https://github.com/FujitsuResearch/OneCompression) · [JointQ guide](jointq.md)
 * **MoEQuant** by Zhixuan Chen, Xing Hu, Dawei Yang, Zukang Xu, Xu Chen, Zhihang Yuan, Sifan Zhou, and Jiangyong Yu introduced Expert-Balanced Self-Sampling (EBSS) and Affinity-Guided Quantization (AGQ). GPT-QModel implements the paper's EBSS search (Algorithm 1, Eqs. 3-4 and 13) and AGQ (Eqs. 18-19) clean-room in `gptqmodel/utils/ebss.py` and `gptqmodel/utils/moe_affinity.py`. [Paper](https://arxiv.org/abs/2505.03804) · [PMLR](https://proceedings.mlr.press/v267/chen25aa.html) · [Official implementation](https://github.com/chenzx921020/MoEQuant) · [Later release](https://github.com/Strandding/MoEQuant) (behaviour reference only; no code copied) · [MoEQuant guide](moequant.md)
 * GSQ: [IST-DASLab's GSQ paper](https://arxiv.org/abs/2604.18556) and [reference implementation](https://github.com/IST-DASLab/GSQ), by Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, and Dan Alistarh. The optional local refinement and staged Llama training in GPT-QModel are adaptations of this work.
 * RCO: [IST-DASLab's RCO paper](https://arxiv.org/abs/2605.00649) and [reference implementation](https://github.com/IST-DASLab/RCO), by Michael Helcig and Dan Alistarh. `gptqmodel/quantization/rco.py` and the `scripts/gsq_paper/rco_*.py` drivers are a port of this work.
@@ -151,6 +152,12 @@
   year={2026}
 }
 
+# JointQ
+@article{kimura2026jointq,
+  title={JointQ: Joint Scale-and-Integer Quantization for Large Language Models},
+  author={Kimura, Keiji and Ichikawa, Yuma},
+  journal={arXiv preprint arXiv:2611.20384},
+  year={2026}
 # MoEQuant
 @InProceedings{pmlr-v267-chen25aa,
   title     = {{M}o{EQ}uant: Enhancing Quantization for Mixture-of-Experts Large Language Models via Expert-Balanced Sampling and Affinity Guidance},

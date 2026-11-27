@@ -36,6 +36,7 @@ from .config import (
                      GPTAQConfig,
                      GPTQConfig,
                      HessianConfig,
+                     JointQConfig,
                      MacaqConfig,
                      MoEQuantConfig,
                      MSEConfig,
@@ -76,6 +77,7 @@ from .g2ptq import G2PTQ
 from .gptaq import GPTAQ
 from .gptq import GPTQ
 from .gsq_training_config import GSQTrainingConfig
+from .jointq import JointQ
 from .protocol import (
                      ACTION_REGISTRY,
                      ActionReport,

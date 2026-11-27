@@ -69,6 +69,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [W4A accuracy campaign notes (appendix)](gptq-w4a-accuracy-notes.md)
 - [GPTQ INT4 weights with FP8 or NVFP4 activations on GB10](gptq-w4a-gb10.md)
 - [G²PTQ block-refresh gradient compensation](g2ptq.md)
+- [JointQ joint scale-and-integer refinement](jointq.md)
 - [Layer-type replay masks](layer-type-replay-masks.md)
 - [Quantized-checkpoint redirect](loader-quantized-redirect.md)
 - [MACaQ (MXFP4 W4A4)](macaq.md)

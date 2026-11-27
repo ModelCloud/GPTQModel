@@ -37,6 +37,7 @@ from ..quantization.config import (
     META_FIELD_DAMP_PERCENT,
     META_FIELD_FOEM_ENABLED,
     META_FIELD_GPTAQ_ENABLED,
+    META_FIELD_JOINTQ_ENABLED,
     META_FIELD_MSE,
     META_FIELD_QUANTIZER,
     META_FIELD_STATIC_GROUPS,
@@ -2362,6 +2363,8 @@ def ModelWriter(cls):
 
         foem_cfg = getattr(self.quantize_config, "foem", None)
 
+        jointq_cfg = getattr(self.quantize_config, "jointq", None)
+
         self.quantize_config.meta_set(
             key=META_FIELD_DAMP_PERCENT,
             value=getattr(self.quantize_config, "damp_percent", None)
@@ -2410,6 +2413,11 @@ def ModelWriter(cls):
                     else str(foem_cfg.device)
                 ),
             }
+        )
+
+        self.quantize_config.meta_set(
+            key=META_FIELD_JOINTQ_ENABLED,
+            value=None if jointq_cfg is None else jointq_cfg.meta_payload(),
         )
 
         self.quantize_config.meta_set(
