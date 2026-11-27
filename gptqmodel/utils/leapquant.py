@@ -863,7 +863,7 @@ class LeapQuantLinearAttentionLayer(LinearAttentionLayer):
     ) -> LeapQuantState:
         shape = (int(num_sequences), int(num_heads), int(key_dim), int(value_dim), int(gate_dim))
         device = torch.device(device)
-        if self._leapquant_shape != shape or self._leapquant is None or self._leapquant.device != device:
+        if self._leapquant is None:
             if self.state_quant is None:
                 raise RuntimeError("LeapQuant cache layer has no state_quant config")
             self._leapquant = LeapQuantState(
@@ -876,6 +876,14 @@ class LeapQuantLinearAttentionLayer(LinearAttentionLayer):
                 device=device,
             )
             self._leapquant_shape = shape
+        elif self._leapquant_shape != shape:
+            raise ValueError(
+                f"LeapQuant cache state was created with shape {self._leapquant_shape} "
+                f"and cannot be reused with {shape}; a live cache cannot change its batch "
+                "size or state geometry"
+            )
+        elif self._leapquant.device != device:
+            self._leapquant.to(device)
         return self._leapquant
 
     def update_recurrent_state(self, recurrent_states: torch.Tensor, state_idx: int = 0, **kwargs) -> None:

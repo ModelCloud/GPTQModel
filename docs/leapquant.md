@@ -123,7 +123,7 @@ flowchart TD
 | Decode state | `KimiDeltaAttention`, `Qwen3_5GatedDeltaNet`, and `Glm5NextTextLinearAttention` read and rewrite a dense recurrent tensor through the cache layer. | The cache layer owns a `LeapQuantState`; decode replays the packed checkpoint and buffered records, then re-quantizes at the window boundary. |
 | Cache ownership | A Transformers `LinearAttentionLayer` or `KimiDeltaCacheLayer` stores the dense recurrent tensor. | `LeapQuantLinearAttentionLayer` or `KimiDeltaCacheLayer(state_quant=...)` stores packed codes, scales, Compensator factors, and the window buffer; the dense slot stays empty. |
 | Prefill | The port kernel writes the final dense state. | The same dense kernel runs, then `LeapQuantState.quantize_` checkpoints the final state and clears the window. |
-| Invalid cache inputs | Ports process input masks and cache operations for their dense recurrence. | The packed path rejects padding, packed sequence boundaries, crop, and live batch expansion before updating the cache. |
+| Invalid cache inputs | Ports process input masks and cache operations for their dense recurrence. | The packed path rejects padding, packed sequence boundaries, crop, live batch expansion, and a changed state shape before updating the cache. |
 | Default | Dense FP32 recurrent state. | Unchanged: `state_quant=None` returns the original cache and kernel path. |
 
 Prefill uses the port's existing FP32 delta-rule kernel: the packed checkpoint
@@ -211,7 +211,10 @@ The implementation fails closed instead of silently degrading:
   before masking or changing the cache, including during single-token decode.
 - The packed path rejects `cu_seqlens` and other packed sequence boundaries.
 - Use the default dynamic cache for generation with LeapQuant. A cache can
-  reorder live sequences at the same batch size and rejects live expansion.
+  reorder live sequences at the same batch size. A live cache rejects
+  expansion: `batch_repeat_interleave` raises, and a forward whose batch size
+  or state geometry differs from the existing packed state raises instead of
+  rebuilding it. Device moves keep the packed state.
 - The packed cache supports ordinary generation and cached continuation.
   Operations that require recurrent-state rollback raise.
 - Training and autograd are not supported.

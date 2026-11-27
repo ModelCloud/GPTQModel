@@ -249,6 +249,45 @@ def test_unsupported_cache_operation_preserves_attention_prefix(operation):
     torch.testing.assert_close(cache.layers[0].keys, before, rtol=0, atol=0)
 
 
+def test_live_packed_state_rejects_shape_change():
+    layer = LeapQuantLinearAttentionLayer(
+        number_of_states=1,
+        state_quant=LeapQuantConfig(bits=8, window=4, rank=2),
+    )
+    state = layer.leapquant_state(1, 2, 8, 8, gate_dim=1, device="cpu")
+    torch.manual_seed(29)
+    state.quantize_(torch.randn(1, 2, 8, 8))
+    before = state.materialize().clone()
+
+    for shape in ((2, 2, 8, 8, 1), (1, 3, 8, 8, 1), (1, 2, 8, 4, 1)):
+        with pytest.raises(ValueError, match="cannot be reused"):
+            layer.leapquant_state(*shape[:4], gate_dim=shape[4], device="cpu")
+        assert layer._leapquant is state
+        torch.testing.assert_close(state.materialize(), before, rtol=0, atol=0)
+
+    assert layer.leapquant_state(1, 2, 8, 8, gate_dim=1, device="cpu") is state
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="accelerator required for cache device move")
+def test_packed_state_follows_device_change():
+    layer = LeapQuantLinearAttentionLayer(
+        number_of_states=1,
+        state_quant=LeapQuantConfig(bits=8, window=4, rank=2),
+    )
+    state = layer.leapquant_state(1, 2, 8, 8, gate_dim=1, device="cuda")
+    torch.manual_seed(37)
+    state.quantize_(torch.randn(1, 2, 8, 8, device="cuda"))
+    expected = state.materialize().cpu().clone()
+
+    assert layer.leapquant_state(1, 2, 8, 8, gate_dim=1, device="cpu") is state
+    assert state.device.type == "cpu"
+    torch.testing.assert_close(state.materialize(), expected, rtol=1e-5, atol=1e-6)
+
+    assert layer.leapquant_state(1, 2, 8, 8, gate_dim=1, device="cuda") is state
+    assert state.device.type == "cuda"
+    torch.testing.assert_close(state.materialize().cpu(), expected, rtol=1e-5, atol=1e-6)
+
+
 def test_generate_validates_new_cache_policy_and_honors_caller_cache():
     model = Qwen3_5ForCausalLM(_qwen_config()).eval()
     model.model._gptqmodel_state_quant = LeapQuantConfig(rank=2)
