@@ -129,15 +129,24 @@ def _quantized_checkpoint() -> str:
 
 
 def _requantize_input(model, *, device):
-    dynamic = dict(model.quantize_config.dynamic or {})
-    for name in (model.get_input_embeddings_name(), model.get_output_embeddings_name() or model.lm_head):
-        dynamic[name] = {"bits": 4, "group_size": 32, "sym": True, "desc_act": False}
-    model.quantize_config.dynamic = dynamic
+    _set_endpoint_dynamic(model)
     model.requantize(
         CalibrationConfig(dataset=_calibration_texts(), batch_size=2),
         embed_quant_mode=QuantizeEmbed.INPUT,
     )
     return torch.tensor([[4, 5, 6, 7]], device=device)
+
+
+def _set_endpoint_dynamic(model):
+    dynamic = dict(model.quantize_config.dynamic or {})
+    for name in (model.get_input_embeddings_name(), model.get_output_embeddings_name() or model.lm_head):
+        dynamic[name] = {"bits": 4, "group_size": 32, "sym": True, "desc_act": False}
+    model.quantize_config.dynamic = dynamic
+
+
+def _prompt_on_model_device(model):
+    device = next(iter(model.get_input_embeddings().state_dict().values())).device
+    return model.tokenizer("The capital of France is", return_tensors="pt").to(device)
 
 
 def test_requantize_input_embedding_keeps_bf16_and_runs_in_session():
@@ -165,6 +174,95 @@ def test_requantize_input_embedding_keeps_bf16_and_runs_in_session():
         reloaded_logits = reloaded.model(input_ids=ids).logits
     assert reloaded_logits.dtype == torch.bfloat16
     assert torch.isfinite(reloaded_logits).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="default checkpoint dispatch requires CUDA")
+@pytest.mark.parametrize(
+    "mode",
+    [QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH],
+    ids=["output", "both"],
+)
+def test_requantize_default_loaded_checkpoint_runs_in_session(tmp_path, mode):
+    """A default ``GPTQModel.load(path)`` must rehome the real packed payload.
+
+    The CPU-only ``qzeros_format`` marker is the first buffer, so the old
+    ``get_device(module)`` snapshot recorded CPU for a CUDA-resident kernel and
+    the post-run rehome left every decoder layer on CPU (#6132).
+    """
+
+    checkpoint = _quantized_checkpoint()
+    model = GPTQModel.load(checkpoint)
+    q_proj = model.model.model.layers[0].self_attn.q_proj
+
+    assert q_proj.qweight.device.type == "cuda"
+    marker = q_proj._buffers.get("qzeros_format")
+    if marker is not None and marker.device.type == "cpu":
+        assert get_device(q_proj).type == "cpu"
+
+    _set_endpoint_dynamic(model)
+    model.requantize(
+        CalibrationConfig(dataset=_calibration_texts(), batch_size=2),
+        embed_quant_mode=mode,
+    )
+
+    q_proj = model.model.model.layers[0].self_attn.q_proj
+    assert all(buffer.device.type == "cuda" for buffer in q_proj.buffers())
+    prompt = _prompt_on_model_device(model)
+    generated = model.generate(prompt, max_new_tokens=4, do_sample=False)
+    assert generated.shape[0] == 1
+    assert generated.shape[-1] > prompt["input_ids"].shape[-1]
+
+    output = tmp_path / f"requantized_{mode.value}"
+    model.save(str(output))
+    del model
+    torch.cuda.empty_cache()
+
+    reloaded = GPTQModel.load(str(output), device="cuda:0")
+    prompt = _prompt_on_model_device(reloaded)
+    generated = reloaded.generate(prompt, max_new_tokens=4, do_sample=False)
+    assert generated.shape[0] == 1
+    assert generated.shape[-1] > prompt["input_ids"].shape[-1]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="default checkpoint dispatch requires CUDA")
+def test_requantize_keeps_a_resident_dispatch_hook_module_in_place():
+    """Input capture must not move a hooked module off its execution device.
+
+    With a layer-wise device map the embedding carries an accelerate hook that
+    moves inputs to its execution device. Materializing the embedding on CPU
+    split that forward across two devices (#6132).
+    """
+
+    from accelerate.hooks import add_hook_to_module, remove_hook_from_module
+
+    from gptqmodel.utils.offload_hooks import GPTQModelAlignDevicesHook
+
+    checkpoint = _quantized_checkpoint()
+    model = GPTQModel.load(checkpoint)
+    embedding = model.get_input_embeddings()
+    execution_device = embedding.weight.device
+    add_hook_to_module(
+        embedding,
+        GPTQModelAlignDevicesHook(
+            execution_device,
+            io_same_device=True,
+            place_submodules=False,
+        ),
+    )
+    try:
+        _set_endpoint_dynamic(model)
+        model.requantize(
+            CalibrationConfig(dataset=_calibration_texts(), batch_size=2),
+            embed_quant_mode=QuantizeEmbed.OUTPUT,
+        )
+
+        assert embedding.weight.device == execution_device
+        prompt = _prompt_on_model_device(model)
+        generated = model.generate(prompt, max_new_tokens=4, do_sample=False)
+        assert generated.shape[0] == 1
+        assert generated.shape[-1] > prompt["input_ids"].shape[-1]
+    finally:
+        remove_hook_from_module(embedding, recurse=False)
 
 
 @pytest.mark.parametrize(

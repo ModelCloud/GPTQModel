@@ -37,7 +37,10 @@ from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear._compile_support import supports_compiled_generation
-from ..nn_modules.qlinear._fused_train_state import ensure_cpu_inference_layout
+from ..nn_modules.qlinear._fused_train_state import (
+    QZEROS_FORMAT_BUFFER,
+    ensure_cpu_inference_layout,
+)
 from ..nn_modules.qlinear.fp4 import TorchFP4Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
@@ -3784,6 +3787,26 @@ class BaseQModel(nn.Module):
         return stats
 
     @staticmethod
+    def _module_payload_device(module: torch.nn.Module) -> torch.device:
+        """Device of the tensors a checkpoint actually stores.
+
+        Every ``BaseQuantLinear`` registers the persistent ``qzeros_format``
+        layout marker as its first buffer. It is created on CPU, is absent from
+        every saved checkpoint, and the single-resident-device dispatch
+        shortcut only places buffers that no checkpoint entry covers, so it
+        can stay on CPU while the packed payload is on the accelerator.
+        ``get_device()`` then reports CPU for a CUDA-resident kernel (#6132).
+        """
+
+        for parameter in module.parameters(recurse=False):
+            return parameter.device
+        for name, buffer in module.named_buffers(recurse=False):
+            if name == QZEROS_FORMAT_BUFFER:
+                continue
+            return buffer.device
+        return get_device(module)
+
+    @staticmethod
     def _embedding_endpoint_state(module) -> Tuple[Optional[torch.device], Optional[torch.dtype]]:
         """The device and floating dtype a replaced embedding endpoint occupied."""
 
@@ -3791,7 +3814,7 @@ class BaseQModel(nn.Module):
         dtype = None
         if isinstance(weight, torch.Tensor) and weight.is_floating_point():
             dtype = weight.dtype
-        return get_device(module), dtype
+        return BaseQModel._module_payload_device(module), dtype
 
     def _snapshot_module_placement(self) -> Dict[str, torch.device]:
         """Record the device of every leaf module that owns tensors."""
@@ -3808,7 +3831,7 @@ class BaseQModel(nn.Module):
             ) or any(True for _ in module.buffers(recurse=False))
             if not owns_tensors:
                 continue
-            placement[name] = get_device(module)
+            placement[name] = self._module_payload_device(module)
         return placement
 
     def _rehome_requantized_endpoints(
@@ -3844,7 +3867,7 @@ class BaseQModel(nn.Module):
             module = get_module(live_model, key=name)
             if module is None:
                 continue
-            if get_device(module) != device:
+            if self._module_payload_device(module) != device:
                 safe_module_to(module, device)
 
         for name, (device, dtype) in endpoint_state.items():
@@ -3857,7 +3880,7 @@ class BaseQModel(nn.Module):
                 setter(target_dtype)
             if device is None or device.type == "meta":
                 continue
-            if get_device(module) != device:
+            if self._module_payload_device(module) != device:
                 safe_module_to(module, device)
 
     def _requantize_embeddings(
