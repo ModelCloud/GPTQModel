@@ -70,8 +70,12 @@ flowchart TD
     F -->|"refresh fails"| N["warn once per block"]
     N --> M
     L -->|"inverse allocation failure"| P["complete the grouped solve on CPU"]
+    L -->|"block allocation failure"| Q["restart the block pass on CPU from pre-pass weights"]
+    L -->|"NaN loss and fallback configured"| R["GPTQ mock-quantization retry"]
     L --> O["packed GPTQ checkpoint"]
     P --> O
+    Q --> O
+    R --> O
     M --> O
 ```
 
@@ -167,6 +171,14 @@ use the same draws without depending on the ambient process RNG state.
 - **Refresh failure.** The exception is logged once per block and that block's
   affected modules fall back to GPTQ. The usual GPTQ sample thresholds and
   smoothing also apply when a module has refreshed statistics.
+- **Block-pass allocation failure.** The column pass is retried once on the
+  host from the pre-pass weights. Columns already mutated by the failed pass
+  are discarded, and the host retry carries the grouped factors, gradient,
+  static-group quantizers and activation ordering with it. A non-allocation
+  error propagates unchanged.
+- **NaN loss.** When a fallback is configured, the solver restores the captured
+  Hessian diagonal and retries through GPTQ's mock-quantization path. Without a
+  configured fallback it raises the same `ValueError` as GPTQ.
 - **KV-cache reuse.** A block whose forward consumes a previous layer's KV
   cache cannot be replayed in isolation; the refresh refuses it and the block
   falls back.
@@ -193,6 +205,23 @@ use the same draws without depending on the ambient process RNG state.
 | Zero Fisher diagonal | A group could erase a calibration-live weight | GPTQ input energy identifies dead columns, and a positive diagonal stabilizes the group factorization |
 | Dynamic grid refit | A refit spanning two compute blocks could read stale trailing columns | The solver flushes pending updates before fitting the next group across a block boundary |
 | Inverse allocation failure | The inverse could move to CPU while the column loop still allocated on the original device | The CPU retry carries the remaining solve and its scratch tensors |
+| Block allocation failure | The partially updated column pass aborted the module | The pass restarts on the host from the pre-pass weights and discards partial columns |
+| NaN loss | Always raised `ValueError` | A configured fallback retries through GPTQ's mock-quantization path; otherwise the error is unchanged |
+
+The plain GPTQ Hessian is only read as a diagonal for the dead-column
+reference. Its accumulator is released before the grouped block pass, so the
+solver never materializes a second full `columns x columns` matrix.
+
+```mermaid
+stateDiagram-v2
+    [*] --> GroupedSolve
+    GroupedSolve --> CpuBlockRetry: block allocation failure
+    CpuBlockRetry --> GroupedSolve: restart from pre-pass weights
+    GroupedSolve --> MockRetry: NaN loss and fallback configured
+    MockRetry --> [*]: GPTQ mock quantization
+    GroupedSolve --> [*]: success
+    GroupedSolve --> [*]: NaN loss without fallback
+```
 
 ## Measured effect
 
