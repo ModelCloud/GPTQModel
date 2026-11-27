@@ -4915,6 +4915,7 @@ def apply_scalar_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: Re
         "update_iter",
         "switch_iter",
         "early_stop_tol",
+        "adaptive_penalty",
         "stagnation_window",
         "stagnation_tol",
         "refresh_on_stagnation",
@@ -6154,6 +6155,7 @@ _SERIALIZED_META_FIELD_NAMES = (
     "update_iter",
     "switch_iter",
     "early_stop_tol",
+    "adaptive_penalty",
     "stagnation_window",
     "stagnation_tol",
     "refresh_on_stagnation",
@@ -8680,6 +8682,9 @@ class ADMMQConfig(GPTQConfig):
     update_iter: int = field(default=3)
     switch_iter: int = field(default=30)
     early_stop_tol: float = field(default=1e-6)
+    # Ill-conditioned layers take the paper's smaller initial penalty and
+    # slower growth instead of the configured schedule.
+    adaptive_penalty: bool = field(default=True)
 
     # One guarded grid refresh when reconstruction progress flattens.
     stagnation_window: int = field(default=4)
@@ -8792,6 +8797,7 @@ class ADMMQConfig(GPTQConfig):
             "update_iter",
             "switch_iter",
             "early_stop_tol",
+            "adaptive_penalty",
             "stagnation_window",
             "stagnation_tol",
             "refresh_on_stagnation",

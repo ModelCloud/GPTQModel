@@ -17,6 +17,7 @@ import torch.nn as nn
 from gptqmodel.quantization.admmq import (
     ADMMQ,
     _Grid,
+    admm_penalty_schedule,
     admm_rho_at,
     pairswap_delta,
     projection_objective,
@@ -137,6 +138,7 @@ def test_admmq_config_defaults():
     assert cfg.max_iter == 300
     assert cfg.rho == pytest.approx(0.1)
     assert cfg.rho_update == pytest.approx(1.1)
+    assert cfg.adaptive_penalty is True
     assert cfg.update_iter == 3
     assert cfg.switch_iter == 30
     assert cfg.damp_percent == pytest.approx(0.01)
@@ -219,6 +221,7 @@ def test_admmq_config_roundtrip_keeps_method_and_export_split():
         max_iter=77,
         rho=0.05,
         rho_update=1.2,
+        adaptive_penalty=False,
         update_iter=5,
         switch_iter=11,
         pairswap_mode="off",
@@ -232,6 +235,7 @@ def test_admmq_config_roundtrip_keeps_method_and_export_split():
     assert payload["format"] == "gptq"
     assert payload["meta"]["max_iter"] == 77
     assert payload["meta"]["pairswap_mode"] == "off"
+    assert payload["meta"]["adaptive_penalty"] is False
 
     rebuilt = QuantizeConfig(**payload)
     assert isinstance(rebuilt, ADMMQConfig)
@@ -242,6 +246,7 @@ def test_admmq_config_roundtrip_keeps_method_and_export_split():
         "max_iter",
         "rho",
         "rho_update",
+        "adaptive_penalty",
         "update_iter",
         "switch_iter",
         "pairswap_mode",
@@ -314,6 +319,16 @@ def test_pre_fix_admmq_checkpoint_drops_the_damp_recovery_grid():
         assert "damp_auto_increment" not in resaved["dynamic"]["down_proj"]
 
 
+def test_pre_fix_admmq_checkpoint_defaults_adaptive_penalty_on():
+    payload = ADMMQConfig(bits=4, group_size=128).to_dict()
+    payload["meta"].pop("adaptive_penalty")
+    payload.pop("adaptive_penalty", None)
+
+    restored = QuantizeConfig.from_quant_config(payload)
+    assert isinstance(restored, ADMMQConfig)
+    assert restored.adaptive_penalty is True
+
+
 def test_gptq_keeps_the_damp_recovery_grid_it_applies():
     """Control: GPTQ does run the recovery grid, so its value must survive."""
 
@@ -346,6 +361,7 @@ def test_admmq_config_planar_bits_select_gptq_p():
         {"max_iter": 0},
         {"rho": 0.0},
         {"rho_update": 1.0},
+        {"adaptive_penalty": "yes"},
         {"update_iter": 0},
         {"switch_iter": -1},
         {"stagnation_window": 1},
@@ -388,18 +404,24 @@ def test_admmq_rejects_incompatible_dynamic_options(option, value):
         ADMMQConfig(dynamic={"down_proj": {option: value}})
 
 
+def test_admmq_rejects_a_non_boolean_dynamic_adaptive_penalty():
+    with pytest.raises(TypeError, match=r"dynamic\['down_proj'\]\.adaptive_penalty.*bool"):
+        ADMMQConfig(dynamic={"down_proj": {"adaptive_penalty": "off"}})
+
+
 def test_admmq_keeps_supported_dynamic_options():
     from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
 
     config = ADMMQConfig(g2ptq=False, dynamic={"down_proj": {
         "desc_act": True, "max_iter": 17, "pairswap_mode": "off", "gsq": {"enabled": False},
-        "g2ptq": False,
+        "g2ptq": False, "adaptive_penalty": False,
     }})
     resolved = clone_gptq_config_for_module(config, "down_proj")
     assert resolved.method is METHOD.ADMMQ
     assert resolved.desc_act is True
     assert resolved.max_iter == 17
     assert resolved.pairswap_mode == "off"
+    assert resolved.adaptive_penalty is False
     assert resolved.g2ptq is None
 
 
@@ -443,6 +465,15 @@ def test_admm_rho_schedule_follows_growth_factor():
 )
 def test_admm_rho_schedule_saturates_only_after_reaching_cap(iteration, rho, growth, expected):
     assert admm_rho_at(iteration, rho, growth, 1) == pytest.approx(expected, rel=1e-12)
+
+
+def test_admm_penalty_schedule_uses_the_paper_thresholds():
+    assert admm_penalty_schedule(5e4, 0.1, 1.1) == (0.1, 1.1)
+    assert admm_penalty_schedule(math.nextafter(5e4, math.inf), 0.1, 1.1) == (0.05, 1.05)
+    assert admm_penalty_schedule(3e5, 0.1, 1.1) == (0.05, 1.05)
+    assert admm_penalty_schedule(math.nextafter(3e5, math.inf), 0.1, 1.1) == (0.01, 1.05)
+    assert admm_penalty_schedule(math.inf, 0.1, 1.1) == (0.01, 1.05)
+    assert admm_penalty_schedule(1e9, 0.1, 1.1, enabled=False) == (0.1, 1.1)
 
 
 def test_refresh_accepts_only_strict_improvement():
@@ -930,6 +961,81 @@ def test_admmq_condition_number_keeps_null_and_small_eigenvalues(spectrum, expec
     solver = ADMMQ(_make_layer(torch.ones(2, 4)), qcfg=_small_config())
     actual = solver._condition_number(torch.tensor(spectrum, dtype=torch.float64))
     assert actual == pytest.approx(expected, rel=1e-12)
+
+
+def _penalty_schedule_fixture(correlation: float, **overrides):
+    hessian = torch.tensor(
+        [[1.0, correlation], [correlation, 1.0]], dtype=torch.float64
+    )
+    weight = torch.tensor(
+        [[0.7, -0.2], [0.1, 0.4], [-0.3, 0.8], [0.2, -0.6]], dtype=torch.float64
+    )
+    config = ADMMQConfig(
+        bits=3,
+        group_size=-1,
+        sym=True,
+        damp_percent=1e-12,
+        max_iter=3,
+        update_iter=1,
+        switch_iter=2,
+        pairswap_mode="off",
+        # The penalty schedule is independent of the MSE search, so pin it off
+        # instead of inheriting the bit-adaptive default at 3 bits.
+        mse=0,
+        rho=0.1,
+        rho_update=1.1,
+        **overrides,
+    )
+    solver = ADMMQ(_make_layer(weight), qcfg=config)
+    solver.quantizer.configure(perchannel=True)
+    solver._admm_weight_solve(weight, hessian)
+    return solver.admmq_diagnostics
+
+
+def test_admmq_ill_conditioned_layers_use_the_adaptive_penalty_schedule():
+    healthy = _penalty_schedule_fixture(0.0)
+    moderate = _penalty_schedule_fixture(0.999993)
+    severe = _penalty_schedule_fixture(0.999999)
+
+    assert healthy["condition_number"] == pytest.approx(1.0)
+    assert 5e4 < moderate["condition_number"] <= 3e5
+    assert severe["condition_number"] > 3e5
+
+    # The configured 0.1 / 1.1 schedule must survive on a well-conditioned
+    # layer. Ill-conditioned layers take the paper's 0.05 (or 0.01 above
+    # 3e5) initial penalty with the slower 1.05 growth.
+    assert healthy["ill_conditioned"] is False
+    assert moderate["ill_conditioned"] is True
+    assert severe["ill_conditioned"] is True
+    assert healthy["rho_initial"] == pytest.approx(0.1)
+    assert moderate["rho_initial"] == pytest.approx(0.05)
+    assert severe["rho_initial"] == pytest.approx(0.01)
+    assert moderate["rho_update"] == pytest.approx(1.05)
+    assert severe["rho_update"] == pytest.approx(1.05)
+
+    # The recorded final penalty must be the selected schedule evaluated at the
+    # last iteration the solver actually ran. Deriving it keeps the assertion
+    # valid when convergence, not the schedule, changes.
+    for diagnostics, rho_initial, rho_update in (
+        (healthy, 0.1, 1.1),
+        (moderate, 0.05, 1.05),
+        (severe, 0.01, 1.05),
+    ):
+        expected = admm_rho_at(diagnostics["iterations"] - 1, rho_initial, rho_update, 1)
+        assert diagnostics["rho_final"] == pytest.approx(expected)
+    # Growth must be exercised, not only the first-iteration penalty.
+    assert healthy["iterations"] >= 2
+    assert moderate["iterations"] >= 2
+    assert severe["iterations"] >= 2
+
+
+def test_admmq_adaptive_penalty_can_be_disabled_for_an_ablation():
+    diagnostics = _penalty_schedule_fixture(0.999999, adaptive_penalty=False)
+    assert diagnostics["ill_conditioned"] is True
+    assert diagnostics["rho_initial"] == pytest.approx(0.1)
+    assert diagnostics["rho_update"] == pytest.approx(1.1)
+    expected = admm_rho_at(diagnostics["iterations"] - 1, 0.1, 1.1, 1)
+    assert diagnostics["rho_final"] == pytest.approx(expected)
 
 
 def test_admmq_auto_pairswap_refines_rank_deficient_calibration():
