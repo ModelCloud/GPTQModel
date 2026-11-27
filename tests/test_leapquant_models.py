@@ -22,8 +22,23 @@ from gptqmodel.models.ports.native.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5ForCausalLM,
     Qwen3_5ForConditionalGeneration,
 )
+from gptqmodel.models.ports.native.qwen3_5_moe.configuration_qwen3_5_moe import (
+    Qwen3_5MoeConfig,
+    Qwen3_5MoeTextConfig,
+)
+from gptqmodel.models.ports.native.qwen3_5_moe.modeling_qwen3_5_moe import (
+    Qwen3_5MoeForCausalLM,
+    Qwen3_5MoeForConditionalGeneration,
+    Qwen3_5MoeGatedDeltaNet,
+)
+from gptqmodel.models.ports.native.qwen3_next.configuration_qwen3_next import Qwen3NextConfig
+from gptqmodel.models.ports.native.qwen3_next.modeling_qwen3_next import (
+    Qwen3NextForCausalLM,
+    Qwen3NextGatedDeltaNet,
+)
 from gptqmodel.utils.leapquant import (
     LeapQuantConfig,
+    LeapQuantDynamicCache,
     LeapQuantLinearAttentionLayer,
     make_leapquant_cache,
 )
@@ -95,6 +110,52 @@ def _qwen_config():
     )
 
 
+def _qwen3_5_moe_config():
+    return Qwen3_5MoeTextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=8,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        linear_key_head_dim=8,
+        linear_value_head_dim=8,
+        linear_conv_kernel_dim=4,
+        layer_types=["linear_attention", "full_attention"],
+        moe_intermediate_size=16,
+        shared_expert_intermediate_size=16,
+        num_experts=2,
+        num_experts_per_tok=2,
+        max_position_embeddings=128,
+        pad_token_id=0,
+    )
+
+
+def _qwen3_next_config():
+    return Qwen3NextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=8,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        linear_key_head_dim=8,
+        linear_value_head_dim=8,
+        linear_conv_kernel_dim=4,
+        layer_types=["linear_attention", "full_attention"],
+        moe_intermediate_size=16,
+        shared_expert_intermediate_size=16,
+        num_experts=2,
+        num_experts_per_tok=2,
+        max_position_embeddings=128,
+        pad_token_id=0,
+    )
+
+
 def _glm_config():
     return Glm5NextTextConfig(
         hidden_size=32,
@@ -160,7 +221,18 @@ def _glm_model_config():
 
 
 @pytest.mark.parametrize("device", _devices())
-@pytest.mark.parametrize("family", ["kimi", "qwen", "qwen-multimodal", "glm"])
+@pytest.mark.parametrize(
+    "family",
+    [
+        "kimi",
+        "qwen",
+        "qwen-multimodal",
+        "qwen3_5_moe",
+        "qwen3_5_moe-multimodal",
+        "qwen3_next",
+        "glm",
+    ],
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_generate_uses_packed_recurrent_state(device, family, dtype):
     torch.manual_seed(42)
@@ -171,6 +243,14 @@ def test_generate_uses_packed_recurrent_state(device, family, dtype):
         model = Qwen3_5ForCausalLM(_qwen_config())
     elif family == "qwen-multimodal":
         model = Qwen3_5ForConditionalGeneration(Qwen3_5Config(text_config=_qwen_config(), vision_config=vision))
+    elif family == "qwen3_5_moe":
+        model = Qwen3_5MoeForCausalLM(_qwen3_5_moe_config())
+    elif family == "qwen3_5_moe-multimodal":
+        model = Qwen3_5MoeForConditionalGeneration(
+            Qwen3_5MoeConfig(text_config=_qwen3_5_moe_config(), vision_config=vision)
+        )
+    elif family == "qwen3_next":
+        model = Qwen3NextForCausalLM(_qwen3_next_config())
     else:
         model = Glm5NextForConditionalGeneration(
             Glm5NextConfig(text_config=_glm_model_config(), vision_config={**vision, "projection_intermediate_size": 32}),
@@ -182,7 +262,7 @@ def test_generate_uses_packed_recurrent_state(device, family, dtype):
 
     ids = torch.tensor([[1, 5, 7, 9]], device=device)
     kwargs = {"max_new_tokens": 3, "min_new_tokens": 3, "return_dict_in_generate": True}
-    if family == "qwen":
+    if family in ("qwen", "qwen3_5_moe", "qwen3_5_moe-multimodal", "qwen3_next"):
         kwargs["cache_implementation"] = "dynamic"
     config = LeapQuantConfig(bits=8, window=4, rank=2)
     with eager_torch_ssm_kernels():
@@ -200,12 +280,18 @@ def test_generate_uses_packed_recurrent_state(device, family, dtype):
 
 
 @pytest.mark.parametrize("device", _devices())
-@pytest.mark.parametrize("family", ["qwen", "glm"])
+@pytest.mark.parametrize("family", ["qwen", "qwen3_5_moe", "qwen3_next", "glm"])
 def test_padded_decode_fails_before_cache_updates(device, family):
     torch.manual_seed(53)
-    model = (
-        Qwen3_5ForCausalLM(_qwen_config()) if family == "qwen" else Glm5NextTextModel(_glm_model_config())
-    ).to(device).eval()
+    if family == "qwen":
+        model = Qwen3_5ForCausalLM(_qwen_config())
+    elif family == "qwen3_5_moe":
+        model = Qwen3_5MoeForCausalLM(_qwen3_5_moe_config())
+    elif family == "qwen3_next":
+        model = Qwen3NextForCausalLM(_qwen3_next_config())
+    else:
+        model = Glm5NextTextModel(_glm_model_config())
+    model = model.to(device).eval()
     wrapper = BaseQModel.__new__(BaseQModel)
     nn.Module.__init__(wrapper)
     wrapper.model = model
@@ -430,6 +516,81 @@ def test_qwen_grouped_key_heads_quantized_decode(device):
 
 
 @pytest.mark.parametrize("device", _devices())
+@pytest.mark.parametrize("family", ["qwen3_5_moe", "qwen3_next"])
+def test_qwen_gdn_family_quantized_cache_matches_fp32(device, family):
+    torch.manual_seed(123)
+    if family == "qwen3_5_moe":
+        model = Qwen3_5MoeForCausalLM(_qwen3_5_moe_config())
+    else:
+        model = Qwen3NextForCausalLM(_qwen3_next_config())
+    model = model.to(device).eval()
+    ids = torch.tensor([[1, 5, 7, 9, 11, 13]], device=device)
+    with eager_torch_ssm_kernels(), torch.no_grad():
+        baseline = model(ids[:, :4], use_cache=True)
+        baseline_logits = model(ids[:, 4:], past_key_values=baseline.past_key_values).logits
+
+    model.model._gptqmodel_state_quant = LeapQuantConfig(bits=8, window=4, rank=2)
+    with eager_torch_ssm_kernels(), torch.no_grad():
+        quantized = model(ids[:, :4], use_cache=True)
+        quantized_logits = model(ids[:, 4:], past_key_values=quantized.past_key_values).logits
+
+    assert isinstance(quantized.past_key_values, LeapQuantDynamicCache)
+    layer = quantized.past_key_values.layers[0]
+    assert layer._leapquant is not None
+    assert layer.recurrent_states[0] is None
+    assert quantized.past_key_values.get_seq_length() == ids.shape[1]
+    assert (baseline_logits - quantized_logits).abs().max().item() < 1e-3
+
+
+@pytest.mark.parametrize("device", _devices())
+@pytest.mark.parametrize("family", ["qwen3_5_moe", "qwen3_next"])
+def test_qwen_gdn_family_grouped_key_heads_quantized_decode(device, family):
+    torch.manual_seed(99)
+    if family == "qwen3_5_moe":
+        config = _qwen3_5_moe_config()
+        module_cls = Qwen3_5MoeGatedDeltaNet
+    else:
+        config = _qwen3_next_config()
+        module_cls = Qwen3NextGatedDeltaNet
+    config.linear_num_key_heads = 1
+    config.linear_num_value_heads = 2
+    module = module_cls(config, 0).to(device).eval()
+    prefill = torch.randn(1, 4, config.hidden_size, device=device)
+    decode = torch.randn(1, 1, config.hidden_size, device=device)
+    with eager_torch_ssm_kernels(), torch.no_grad():
+        baseline_cache = DynamicCache(config=config)
+        baseline_prefill = module(prefill, cache_params=baseline_cache)
+        baseline_decode = module(decode, cache_params=baseline_cache)
+
+    with eager_torch_ssm_kernels(), torch.no_grad():
+        quantized_cache = make_leapquant_cache(config, LeapQuantConfig(bits=8, window=4, rank=2))
+        quantized_prefill = module(prefill, cache_params=quantized_cache)
+        quantized_decode = module(decode, cache_params=quantized_cache)
+
+    layer = quantized_cache.layers[0]
+    assert layer._leapquant.num_heads == 2
+    assert (baseline_prefill - quantized_prefill).abs().max().item() == 0
+    assert (baseline_decode - quantized_decode).abs().max().item() < 1e-2
+
+
+@pytest.mark.parametrize("device", _devices())
+def test_qwen3_next_quantized_prefill_handles_rank_deficient_state(device):
+    # This state is numerically rank one in one head, so the Compensator Gram
+    # underflows to subnormals. CUDA eigh returned NaN for it.
+    torch.manual_seed(53)
+    model = Qwen3NextForCausalLM(_qwen3_next_config()).to(device).eval()
+    model.model._gptqmodel_state_quant = LeapQuantConfig(bits=8, window=4, rank=2)
+    ids = torch.tensor([[1, 5, 7]], device=device)
+    with eager_torch_ssm_kernels(), torch.no_grad():
+        cache = model(ids, use_cache=True).past_key_values
+
+    state = cache.layers[0]._leapquant
+    assert torch.isfinite(state.key_scale).all()
+    assert torch.isfinite(state.value_scale).all()
+    assert torch.isfinite(state.materialize()).all()
+
+
+@pytest.mark.parametrize("device", _devices())
 def test_glm_quantized_attention_matches_fp32(device):
     torch.manual_seed(321)
     config = _glm_config()
@@ -528,7 +689,7 @@ def test_enable_state_quant_wrapper_validation():
         BaseQModel.enable_state_quant(stub, config)
 
 
-@pytest.mark.parametrize("family", ["kimi", "qwen", "glm"])
+@pytest.mark.parametrize("family", ["kimi", "qwen", "qwen3_5_moe", "qwen3_next", "glm"])
 def test_enable_state_quant_requires_a_recurrent_layer(family):
     if family == "kimi":
         config = _kimi_config()
@@ -538,6 +699,14 @@ def test_enable_state_quant_requires_a_recurrent_layer(family):
         config = _qwen_config()
         config.layer_types = ["full_attention"] * config.num_hidden_layers
         model = Qwen3_5ForCausalLM(config)
+    elif family == "qwen3_5_moe":
+        config = _qwen3_5_moe_config()
+        config.layer_types = ["full_attention"] * config.num_hidden_layers
+        model = Qwen3_5MoeForCausalLM(config)
+    elif family == "qwen3_next":
+        config = _qwen3_next_config()
+        config.layer_types = ["full_attention"] * config.num_hidden_layers
+        model = Qwen3NextForCausalLM(config)
     else:
         config = _glm_model_config()
         config.layer_types = ["deepseek_sparse_attention"] * config.num_hidden_layers

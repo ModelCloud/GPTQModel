@@ -28,8 +28,7 @@ from torch import nn
 
 from transformers import initialization as init
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache
-from transformers.generation import GenerationMixin
+from transformers.cache_utils import Cache
 from transformers.integrations import (
     use_experts_implementation,
     use_kernel_forward_from_hub,
@@ -54,6 +53,12 @@ from transformers.utils import TransformersKwargs, auto_docstring, can_return_tu
 from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 from .configuration_qwen3_next import Qwen3NextConfig
+from .....utils.leapquant import (
+    LeapQuantDynamicCache,
+    LeapQuantGenerationMixin,
+    make_leapquant_cache,
+    validate_leapquant_inputs,
+)
 
 
 # NOTE: the FLA package does not re-cast to `input_dtype` in its implementation, maybe we should do the same
@@ -669,6 +674,10 @@ class Qwen3NextGatedDeltaNet(nn.Module):
 
         # Set up dimensions for reshapes later
         seq_len = hidden_states.shape[1]
+        quant_layer = cache_params.layers[self.layer_idx] if cache_params is not None else None
+        state_quant = getattr(quant_layer, "state_quant", None)
+        if state_quant is not None:
+            validate_leapquant_inputs(attention_mask, kwargs)
         # Retrieve conv and recurrent states if there is a cache. They may be None if the layer is not initialized.
         if cache_params is not None:
             conv_state = cache_params.get_conv_state(self.layer_idx, state_idx=0)
@@ -729,7 +738,42 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         # If the model is loaded in fp16, without the .float() here, A might be -inf
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
 
-        if recurrent_state is not None and seq_len == 1:
+        quantized_decode = state_quant is not None and seq_len == 1
+        if state_quant is not None:
+            quantizer = quant_layer.leapquant_state(
+                query.shape[0],
+                self.num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+                gate_dim=1,
+                device=query.device,
+            )
+            if quantized_decode:
+                core_attn_out = quantizer.gdn_step(
+                    query[:, 0],
+                    key[:, 0],
+                    value[:, 0],
+                    a[:, 0],
+                    b[:, 0],
+                    self.A_log,
+                    self.dt_bias,
+                ).unsqueeze(1)
+                last_recurrent_state = None
+            else:
+                core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
+                    query,
+                    key,
+                    value,
+                    g=g,
+                    beta=beta,
+                    initial_state=quantizer.materialize(),
+                    output_final_state=True,
+                    use_qk_l2norm_in_kernel=True,
+                    cu_seqlens=kwargs.pop("cu_seqlens", None),
+                    **kwargs,
+                )
+            core_attn_out = core_attn_out.to(query.dtype)
+        elif recurrent_state is not None and seq_len == 1:
             core_attn_out, last_recurrent_state = torch_recurrent_gated_delta_rule(
                 query,
                 key,
@@ -757,7 +801,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             )
 
         # Update cache
-        if cache_params is not None:
+        if cache_params is not None and not quantized_decode:
             cache_params.update_recurrent_state(last_recurrent_state, self.layer_idx)
 
         z_shape_og = z.shape
@@ -977,6 +1021,10 @@ class Qwen3NextPreTrainedModel(NativePreTrainedModel):
 
 
 class Qwen3NextModel(Qwen3NextPreTrainedModel):
+    @property
+    def supports_state_quant(self) -> bool:
+        return "linear_attention" in self.config.layer_types
+
     def __init__(self, config: Qwen3NextConfig):
         super().__init__(config)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
@@ -1009,7 +1057,12 @@ class Qwen3NextModel(Qwen3NextPreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache(config=self.config)
+            past_key_values = make_leapquant_cache(
+                self.config,
+                getattr(self, "_gptqmodel_state_quant", None),
+            )
+        if isinstance(past_key_values, LeapQuantDynamicCache) and past_key_values.state_quant is not None:
+            validate_leapquant_inputs(attention_mask, kwargs)
 
         if position_ids is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -1126,7 +1179,7 @@ def load_balancing_loss_func(
 
 
 @auto_docstring
-class Qwen3NextForCausalLM(Qwen3NextPreTrainedModel, GenerationMixin):
+class Qwen3NextForCausalLM(Qwen3NextPreTrainedModel, LeapQuantGenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_gather_output"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}

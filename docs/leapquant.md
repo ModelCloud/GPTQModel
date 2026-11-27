@@ -67,6 +67,8 @@ model.enable_state_quant(None)  # use the unquantized path for new caches
 | --- | --- | --- |
 | Kimi K3 with KDA layers | `models/ports/kimi_k3` | Supported |
 | Qwen3.5 dense (GDN) | `models/ports/native/qwen3_5` | Supported |
+| Qwen3.5-MoE (GDN) | `models/ports/native/qwen3_5_moe` | Supported |
+| Qwen3-Next (GDN) | `models/ports/native/qwen3_next` | Supported |
 | GLM-5.3 (KDA) | `models/ports/native/glm5_next` | Supported |
 
 The quantizer applies to the delta-rule family whose update is a diagonal decay
@@ -79,10 +81,11 @@ kernel, and each value head keeps an independent packed state.
 
 ## Flow
 
-`generate()` prepares the cache before the first forward. Qwen3.5 and GLM-5.3
-resolve the decoder policy in `LeapQuantGenerationMixin`. The Kimi K3 port
-creates its own cache in `KimiLinearModel.forward`. A caller-provided cache
-retains the policy selected when it was created.
+`generate()` prepares the cache before the first forward. Qwen3.5, Qwen3.5-MoE,
+Qwen3-Next and GLM-5.3 resolve the decoder policy in
+`LeapQuantGenerationMixin`. The Kimi K3 port creates its own cache in
+`KimiLinearModel.forward`. A caller-provided cache retains the policy selected
+when it was created.
 
 ```mermaid
 flowchart TD
@@ -119,8 +122,8 @@ flowchart TD
 
 | Area | Before | After (LeapQuant enabled) |
 | --- | --- | --- |
-| Generation cache | The generation framework creates the default dense cache for Qwen3.5 and GLM-5.3. | The decoder's LeapQuant policy selects a packed recurrent cache before the first forward. |
-| Decode state | `KimiDeltaAttention`, `Qwen3_5GatedDeltaNet`, and `Glm5NextTextLinearAttention` read and rewrite a dense recurrent tensor through the cache layer. | The cache layer owns a `LeapQuantState`; decode replays the packed checkpoint and buffered records, then re-quantizes at the window boundary. |
+| Generation cache | The generation framework creates the default dense cache for Qwen3.5, Qwen3.5-MoE, Qwen3-Next and GLM-5.3. | The decoder's LeapQuant policy selects a packed recurrent cache before the first forward. |
+| Decode state | `KimiDeltaAttention`, `Qwen3_5GatedDeltaNet`, `Qwen3_5MoeGatedDeltaNet`, `Qwen3NextGatedDeltaNet`, and `Glm5NextTextLinearAttention` read and rewrite a dense recurrent tensor through the cache layer. | The cache layer owns a `LeapQuantState`; decode replays the packed checkpoint and buffered records, then re-quantizes at the window boundary. |
 | Cache ownership | A Transformers `LinearAttentionLayer` or `KimiDeltaCacheLayer` stores the dense recurrent tensor. | `LeapQuantLinearAttentionLayer` or `KimiDeltaCacheLayer(state_quant=...)` stores packed codes, scales, Compensator factors, and the window buffer; the dense slot stays empty. |
 | Prefill | The port kernel writes the final dense state. | The same dense kernel runs, then `LeapQuantState.quantize_` checkpoints the final state and clears the window. |
 | Invalid cache inputs | Ports process input masks and cache operations for their dense recurrence. | The packed path rejects padding, packed sequence boundaries, crop, live batch expansion, and a changed state shape before updating the cache. |
@@ -233,11 +236,11 @@ python -m pytest tests/test_leapquant_state.py tests/test_leapquant_models.py -q
 delta-rule recurrence, covers 4/6/8-bit, window boundaries, Compensator rank,
 smoothing, packed-container bit layout, every representable code, partial rows,
 storage accounting, reorder, and non-finite rejection. `test_leapquant_models.py`
-checks Kimi K3, Qwen3.5, and GLM-5.3 prefill/decode parity, packed-code cache
-ownership, cache-layer selection, padded-mask and `cu_seqlens` rejection, and
-the public toggle. The regressions also cover `generate()`, cache continuation
-after offload and reorder, and retries after an invalid packed restore or a
-quantization failure.
+checks Kimi K3, Qwen3.5, Qwen3.5-MoE, Qwen3-Next, and GLM-5.3 prefill/decode
+parity, packed-code cache ownership, cache-layer selection, padded-mask and
+`cu_seqlens` rejection, and the public toggle. The regressions also cover
+`generate()`, cache continuation after offload and reorder, and retries after an
+invalid packed restore or a quantization failure.
 
 The portable Torch path is a correctness and memory baseline, not a
 throughput-optimized kernel. Measure it with:

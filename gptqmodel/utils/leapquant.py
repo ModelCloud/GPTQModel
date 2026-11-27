@@ -193,8 +193,14 @@ def _thin_singular_pairs(matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
     side and the decomposition costs a fraction of a wide SVD.
     """
 
-    values, vectors = torch.linalg.eigh(matrix @ matrix.transpose(-1, -2))
-    return vectors.flip(-1), values.flip(-1).clamp_min(0.0).sqrt()
+    gram = matrix @ matrix.transpose(-1, -2)
+    # A near-rank-deficient state produces Gram entries that underflow to
+    # subnormals; CUDA ``eigh`` returns NaN for that matrix. Normalize by the
+    # largest diagonal entry so the decomposition sees O(1) values, then
+    # rescale the singular values.
+    scale = gram.diagonal(dim1=-2, dim2=-1).amax(dim=-1, keepdim=True).clamp_min(_EPS)
+    values, vectors = torch.linalg.eigh(gram / scale.unsqueeze(-1))
+    return vectors.flip(-1), (values.flip(-1).clamp_min(0.0) * scale).sqrt()
 
 
 def normalize_qk(query: torch.Tensor, key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
