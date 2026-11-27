@@ -414,3 +414,32 @@ def test_capture_then_measure_matches_the_one_shot_api(tiny_model):
     assert split.values == one_shot.values
     assert split.reference == one_shot.reference
     assert split.batches == one_shot.batches
+
+def test_measure_against_rejects_a_capture_missing_the_requested_metric(tiny_model):
+    model, _source = tiny_model
+    reference = _perturbed(model.model)
+    rows = [torch.tensor(row).unsqueeze(0) for row in ROWS]
+
+    ppl_only = MeasureConfig(
+        metrics=(PPLConfig(window=8, stride=4),),
+        dataset=ROWS, reference=reference, batch=2, max_batches=2,
+    )
+    ppl_capture = capture_reference(reference, rows, ppl_only)
+    with pytest.raises(ValueError, match="KLD"):
+        measure_against(model.model, ppl_capture, _config(reference=reference))
+
+    kld_only = MeasureConfig(
+        metrics=(KLDConfig(positions=2),),
+        dataset=ROWS, reference=reference, batch=2, max_batches=2,
+    )
+    kld_capture = capture_reference(reference, rows, kld_only)
+    with pytest.raises(ValueError, match="PPL"):
+        measure_against(
+            model.model,
+            kld_capture,
+            MeasureConfig(
+                metrics=(PPLConfig(window=8, stride=4),),
+                dataset=ROWS, reference=reference, batch=2, max_batches=2,
+            ),
+        )
+

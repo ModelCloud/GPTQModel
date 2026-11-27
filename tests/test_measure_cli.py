@@ -12,7 +12,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel.measure.__main__ import build_parser, main
+from gptqmodel.measure.__main__ import _metrics, build_parser, main
 
 
 TEXT = " ".join(f"token{i}" for i in range(64))
@@ -115,7 +115,11 @@ def test_parser_rejects_bad_numbers_and_bounds():
         assert raised.value.code == 2
 
 
-def test_bad_device_is_rejected_before_any_model_load(tmp_path, capsys):
+def test_bad_device_is_rejected_before_any_model_load(tmp_path, capsys, monkeypatch):
+    # The check is about the parsed index, not about this host having a GPU, so
+    # the test pins CUDA as available with one device to run in every lane.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
     missing = tmp_path / "missing"
 
     code = main(["--model", str(missing), "--reference", str(missing), "--device", "cuda:999"])
@@ -125,6 +129,67 @@ def test_bad_device_is_rejected_before_any_model_load(tmp_path, capsys):
     assert "asks for GPU 999" in err
     # The error names the flag, so it is actionable without reading the source.
     assert "--device" in err
+
+
+def test_a_cuda_device_without_cuda_is_rejected(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    missing = tmp_path / "missing"
+
+    code = main(["--model", str(missing), "--reference", str(missing), "--device", "cuda:0"])
+
+    assert code == 2
+    assert "needs CUDA" in capsys.readouterr().err
+
+
+def test_a_pass_flag_selects_its_metric():
+    args = build_parser().parse_args([
+        "--model", "a", "--reference", "b", "--ppl", "--kld-pass", "<0.3",
+    ])
+
+    metrics = _metrics(args)
+    names = [type(member).__name__ for member in metrics]
+
+    assert names == ["PPLConfig", "KLDConfig"]
+    assert metrics[1].threshold is not None
+
+
+def test_a_pass_flag_alone_keeps_the_all_metrics_default_and_grades_its_metric():
+    args = build_parser().parse_args(["--model", "a", "--reference", "b", "--topk-pass", "<0.5"])
+
+    metrics = _metrics(args)
+
+    # No metric flag means "run everything"; the threshold must still attach to
+    # TOP_K rather than being dropped.
+    topk = next(member for member in metrics if type(member).__name__ == "TOPKConfig")
+    assert topk.k == (1,)
+    assert topk.threshold is not None
+
+
+def test_a_dropped_threshold_now_changes_the_exit_code(checkpoint, capsys):
+    """`--ppl --kld-pass "<0"` used to run PPL only and exit 0."""
+
+    root, text_file = checkpoint
+
+    code = main([
+        "--model", str(root), "--reference", str(root), "--text", str(text_file),
+        "--ppl", "--kld-pass", "<0",
+    ])
+
+    out = capsys.readouterr().out
+    assert "KLD" in out
+    assert code == 1
+
+
+def test_an_unwritable_json_out_reports_exit_2(checkpoint, capsys):
+    root, text_file = checkpoint
+
+    code = main([
+        "--model", str(root), "--reference", str(root), "--text", str(text_file),
+        "--json-out", str(root / "missing" / "report.json"),
+    ])
+
+    assert code == 2
+    assert "cannot write the report" in capsys.readouterr().err
 
 
 def test_conflicting_json_flags_are_rejected(checkpoint, capsys):

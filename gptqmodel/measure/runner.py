@@ -358,11 +358,14 @@ def _capture(
 
 @dataclass
 class ReferenceCapture:
-    """Reference-side artifacts, kept so the candidate can be measured later.
+    """Reference-side artifacts, kept so several candidates share one pass.
 
-    Quantization usually has the fp16 weights in memory only until the first
-    module is replaced. Capturing here means `quantize(measure=...)` never needs
-    a second model, which at 7B is the difference between 14 GB and a report.
+    Capturing is worthwhile when more than one candidate is measured against
+    the same reference: the fp16 forward runs once, and the artifacts outlive
+    the reference model instead of keeping a second copy resident. A capture
+    only contains the signals its metrics asked for, so ``measure_against``
+    rejects a request outside ``needs`` rather than measuring against an empty
+    sample.
     """
 
     batches: List[_Batch]
@@ -371,6 +374,7 @@ class ReferenceCapture:
     positions: int
     logits: List[torch.Tensor]
     positions_wanted: int
+    needs: frozenset = frozenset()
 
 
 def _plan(config: MeasureConfig) -> tuple:
@@ -419,6 +423,7 @@ def capture_reference(
         positions=captures.positions,
         logits=captures.logits,
         positions_wanted=positions_wanted,
+        needs=needs,
     )
 
 
@@ -430,6 +435,17 @@ def measure_against(
     """Measure ``candidate`` against artifacts captured earlier."""
 
     needs, _positions_wanted = _plan(config)
+    missing = []
+    if CAPTURE_NLL in needs and CAPTURE_NLL not in capture.needs:
+        missing.append("PPL (the reference capture has no NLL totals)")
+    if CAPTURE_SAMPLED_LOGITS in needs and CAPTURE_SAMPLED_LOGITS not in capture.needs:
+        missing.append("KLD/TOP_K/RMSE (the reference capture has no sampled logits)")
+    if missing:
+        raise ValueError(
+            "reference capture does not cover the requested metric(s): "
+            + "; ".join(missing)
+            + ". Capture the reference again with those metrics enabled."
+        )
     candidate_captures = _capture(
         candidate,
         capture.batches,

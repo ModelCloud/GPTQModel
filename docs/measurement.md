@@ -223,6 +223,31 @@ so `cuda:999` would otherwise be accepted.
 moves each batch to whichever device each model lives on, so the reference can
 run on the host while the quantized model stays on the GPU.
 
+## Capturing a reference once
+
+`capture_reference()` runs the reference forward once and returns a
+`ReferenceCapture`; `measure_against()` then measures any number of candidates
+against those artifacts:
+
+```python
+from gptqmodel.measure import KLDConfig, MeasureConfig, PPLConfig
+from gptqmodel.measure.runner import build_token_rows, capture_reference, measure_against
+
+config = MeasureConfig(
+    metrics=(PPLConfig(window=2048, stride=512), KLDConfig(positions=128)),
+    dataset=texts, reference=reference_model, batch=4, max_batches=16,
+)
+rows = build_token_rows(tokenizer, texts, window=2048, stride=512)
+capture = capture_reference(reference_model, rows, config)
+
+report_a = measure_against(candidate_a, capture, config)
+report_b = measure_against(candidate_b, capture, config)
+```
+
+A capture only holds the signals its metrics asked for: asking `measure_against`
+for KLD when the capture was built for PPL raises instead of comparing against
+an empty sample.
+
 ## Not in this version
 
 - `quantize(measure=...)`. It is not implementable as designed: a model loaded for

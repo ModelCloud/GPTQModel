@@ -170,16 +170,19 @@ def build_parser() -> argparse.ArgumentParser:
 def _metrics(args: argparse.Namespace) -> tuple:
     widths = tuple(int(width) for width in args.topk.split(",")) if args.topk else (1,)
     all_metrics = not any((args.ppl, args.kld, args.rmse, args.topk))
+    # A threshold is a request for its metric: `--ppl --kld-pass "<0"` used to
+    # run PPL only and report "no thresholds configured", silently dropping the
+    # KLD grade.
     selected = []
-    if args.ppl or all_metrics:
+    if args.ppl or all_metrics or args.ppl_pass is not None:
         selected.append(PPLConfig(window=args.window, stride=args.stride, threshold=_grade(args.ppl_pass)))
-    if args.kld or all_metrics:
+    if args.kld or all_metrics or args.kld_pass is not None:
         selected.append(
             KLDConfig(positions=args.positions, threshold=_grade(args.kld_pass))
         )
-    if args.rmse or all_metrics:
+    if args.rmse or all_metrics or args.rmse_pass is not None:
         selected.append(RMSEConfig(threshold=_grade(args.rmse_pass)))
-    if args.topk or all_metrics:
+    if args.topk or all_metrics or args.topk_pass is not None:
         selected.append(TOPKConfig(k=widths, threshold=_grade(args.topk_pass)))
     return tuple(selected)
 
@@ -237,14 +240,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"measurement failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
-    if args.json_out:
-        Path(args.json_out).write_text(json.dumps(report.to_json(), indent=2) + "\n")
+    try:
+        if args.json_out:
+            Path(args.json_out).write_text(json.dumps(report.to_json(), indent=2) + "\n")
         # `render()` is the LogBar column printer, so values line up in a terminal.
         print(report.render())
-    elif args.json:
-        print(json.dumps(report.to_json(), indent=2))
-    else:
-        print(report.render())
+    except OSError as exc:
+        print(f"cannot write the report: {exc}", file=sys.stderr)
+        return 2
 
     if report.overall is MetricGrades.FAIL:
         return 1
