@@ -10,6 +10,7 @@ import pytest
 
 from gptqmodel.quantization.config import (
     METHOD,
+    ADMMQConfig,
     AWQConfig,
     BitsAndBytesConfig,
     EXL3Config,
@@ -29,6 +30,7 @@ from gptqmodel.quantization.config import (
 SUPPORTED_BITS = {
     GPTQConfig: (2, 3, 4, 5, 6, 7, 8),
     RTNConfig: (2, 3, 4, 5, 6, 7, 8),
+    ADMMQConfig: (3, 4, 5, 6, 7, 8),
     AWQConfig: (2, 3, 4, 8),
     QQQConfig: (4,),
     ParoConfig: (4,),

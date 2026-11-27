@@ -30,8 +30,31 @@ H = X^T X + damp_percent * mean(diag(X^T X)) * I
 
 `H` is the layer Hessian up to a constant. The grid is fitted per group with the
 same scale and zero-point search GPTQ uses, including the MSE shrink search
-when it is enabled. The search is on by default for 2-3 bit models and off for
+when it is enabled. The search is on by default for 3-bit models and off for
 4-8 bit models; an explicit `mse` setting overrides that.
+
+## Bit-width support
+
+`ADMMQConfig` accepts 3–8 bits. Pure weight-only 2-bit is not supported: it is
+below the usable range for the GPTQ family, so `ADMMQConfig(bits=2)` and a
+`dynamic` rule that selects 2 bits are rejected at construction.
+
+The paper's 2-bit results use SpinQuant W2A4KV4, which combines rotation with
+activation and KV-cache quantization. `ADMMQConfig` rejects `activation`, and
+this repository's ADMM-Q path is weight-only, so that pipeline is not
+reproducible here. On a WikiText-2 spot check (SmolLM2-135M,
+`group_size=128`, symmetric, MSE shrink search off, 24 x 2048 calibration
+tokens and 32768 evaluation tokens), pure weight-only 2-bit measured 72,934
+perplexity for GPTQ and 9,455 for ADMM-Q; neither is usable. 3 bits is the
+lowest supported width.
+
+Checkpoints saved with 2-bit ADMM-Q before this change are rejected on load;
+re-quantize them at 3 bits or higher.
+
+ADMM-Q already accepts the GPTQ model-wide `rotation` option, but the
+repository's `activation` stream is a GPTQ INT4 W4A feature: it requires
+4-bit weights and FP8 or NVFP4 activations, and it does not quantize the KV
+cache. It is therefore not the paper's W2A4KV4 pipeline.
 
 ## Algorithm
 
@@ -247,7 +270,7 @@ model.save("qwen-admmq-4bit")
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `bits` | `4` | 2–8 bits; 5/6/7 bits use the planar `FORMAT.GPTQ_P` layout. |
+| `bits` | `4` | 3–8 bits; 2-bit weight-only is not supported (see [Bit-width support](#bit-width-support)); 5/6/7 bits use the planar `FORMAT.GPTQ_P` layout. |
 | `group_size` | `128` | Group width; `-1` fits one grid for the whole row. |
 | `sym` | `True` | Symmetric grid when true, affine grid otherwise. |
 | `desc_act` | `False` | Act-order permutation by Hessian diagonal before the solve. |
@@ -269,7 +292,7 @@ model.save("qwen-admmq-4bit")
 | `pairswap_batch` | `64` | Batches per round. |
 | `pairswap_seed` | `0` | Pair sampling seed. |
 | `pairswap_condition_threshold` | `5e4` | Condition number above which `"auto"` runs PairSwap. |
-| `mse` | `None` (bit-adaptive) | MSE shrink-grid clipping search. `None` enables `MSEConfig(norm=2.0)` at 2-3 bits and disables it at 4-8 bits. The 4-bit WikiText-2 rows below were measured with the search off. At 3 bits the search is a model-dependent trade-off: it lowers SmolLM2-135M but raises Qwen2.5-0.5B-Instruct (see the low-bit table below). Set `0` or `MSEConfig(norm=0)` to force it off, or `MSEConfig(norm=2.0)` to force it on. The automatic choice follows the run-level `bits`; a `dynamic` rule that changes `bits` should set `mse` explicitly. |
+| `mse` | `None` (bit-adaptive) | MSE shrink-grid clipping search. `None` enables `MSEConfig(norm=2.0)` at 3 bits and disables it at 4-8 bits. The 4-bit WikiText-2 rows below were measured with the search off. At 3 bits the search is a model-dependent trade-off: it lowers SmolLM2-135M but raises Qwen2.5-0.5B-Instruct (see the low-bit table below). Set `0` or `MSEConfig(norm=0)` to force it off, or `MSEConfig(norm=2.0)` to force it on. The automatic choice follows the run-level `bits`; a `dynamic` rule that changes `bits` should set `mse` explicitly. |
 
 `ADMMQConfig` rejects `activation`, `gptaq`, and `foem` configs. It also
 rejects enabled `mock_quantization`, `g2ptq`, `gsq`, `gsq_training`,
@@ -391,7 +414,9 @@ by Transformers, vLLM and SGLang as a standard GPTQ artifact.
   and the pair/batch budgets bound that work.
 - ADMM-Q is a weight-only method. It does not quantize activations or the KV
   cache, and the quantization-protocol compiler accepts only `gptq`, `awq` and
-  `gguf` weight targets.
+  `gguf` weight targets. The paper's 2-bit results depend on the missing
+  rotation plus activation/KV pipeline, so pure weight-only 2-bit is not
+  accepted (see [Bit-width support](#bit-width-support)).
 - Definitions with their own projection quantizer (for example DeepSeek V4.1
   Flash) keep their existing GPTQ/EXL3 gate.
 

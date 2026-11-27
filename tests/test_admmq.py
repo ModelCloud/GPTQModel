@@ -118,7 +118,7 @@ def _rtn_grid_projection(weight: torch.Tensor, qcfg, module: nn.Module) -> torch
 
 def test_admmq_method_metadata_and_export():
     assert METHOD.ADMMQ.value == "admmq"
-    assert METHOD_SUPPORTED_BITS[METHOD.ADMMQ] == (2, 3, 4, 5, 6, 7, 8)
+    assert METHOD_SUPPORTED_BITS[METHOD.ADMMQ] == (3, 4, 5, 6, 7, 8)
     assert QUANT_METHOD_FORMAT_MAPPING[METHOD.ADMMQ] == {
         FORMAT.GPTQ,
         FORMAT.GPTQ_V2,
@@ -128,6 +128,23 @@ def test_admmq_method_metadata_and_export():
     }
     assert resolve_quant_format(FORMAT.GPTQ, METHOD.ADMMQ) == FORMAT.GPTQ
     assert resolve_quant_format(FORMAT.GPTQ_P, METHOD.ADMMQ) == FORMAT.GPTQ_P
+
+
+def test_admmq_two_bit_is_rejected():
+    with pytest.raises(ValueError, match="supported bit widths"):
+        ADMMQConfig(bits=2, group_size=128)
+
+    with pytest.raises(ValueError, match="supported bit widths"):
+        QuantizeConfig(method="admmq", bits=2, group_size=128)
+
+
+def test_admmq_dynamic_two_bit_is_rejected():
+    with pytest.raises(ValueError, match="supported bit widths"):
+        ADMMQConfig(bits=4, group_size=128, dynamic={"down_proj": {"bits": 2}})
+
+
+def test_admmq_three_bit_is_accepted():
+    assert ADMMQConfig(bits=3, group_size=128).bits == 3
 
 
 def test_admmq_config_defaults():
@@ -151,7 +168,7 @@ def test_admmq_config_defaults():
 
 @pytest.mark.parametrize(
     ("bits", "expected"),
-    [(2, 2.0), (3, 2.0), (4, 0.0), (5, 0.0), (6, 0.0), (7, 0.0), (8, 0.0)],
+    [(3, 2.0), (4, 0.0), (5, 0.0), (6, 0.0), (7, 0.0), (8, 0.0)],
 )
 def test_admmq_mse_default_follows_bit_width(bits, expected):
     cfg = ADMMQConfig(bits=bits)
@@ -1050,7 +1067,7 @@ def test_admmq_auto_pairswap_refines_rank_deficient_calibration():
     results = {}
     for mode in ("off", "auto", "always"):
         config = _small_config(
-            bits=2, group_size=2, sym=True, damp_percent=1e-10,
+            bits=3, group_size=2, sym=True, damp_percent=1e-10,
             max_iter=1, pairswap_mode=mode, pairswap_rounds=2, pairswap_batch=8,
         )
         solver, result = _run_solver(ADMMQ, _make_layer(weight), config, x)
@@ -1065,6 +1082,9 @@ def test_admmq_auto_pairswap_refines_rank_deficient_calibration():
     # the explicit policy and retain its quantized weights and group metadata.
     before = _reconstruction_error(weight.double(), results["off"][0].double(), hessian)
     after = _reconstruction_error(weight.double(), results["auto"][0].double(), hessian)
-    assert after < before * 0.5
+    # PairSwap's gain is bit-width dependent; at 3 bits the measured
+    # reconstruction error drops by about 20%, so require a clear improvement
+    # rather than the 2-bit-specific 50% threshold.
+    assert after < before * 0.9
     for actual, expected in zip(results["auto"][:4], results["always"][:4]):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)

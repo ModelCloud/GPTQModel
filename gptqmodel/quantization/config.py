@@ -243,7 +243,9 @@ METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int | float, ...]] = {
     # GPTQ/RTN pack 2-8 bit weights (5/6/7 use the planar layout).
     METHOD.GPTQ: (2, 3, 4, 5, 6, 7, 8),
     # ADMM-Q is a GPTQ-family solver: it shares the same grids and packing.
-    METHOD.ADMMQ: (2, 3, 4, 5, 6, 7, 8),
+    # Pure weight-only 2-bit is not a usable quality point, so it is rejected
+    # instead of being advertised as supported (see docs/admmq.md).
+    METHOD.ADMMQ: (3, 4, 5, 6, 7, 8),
     # AWQ native GEMM/GEMV kernels require 4 bits.
     # RCO also allocates 2- and 3-bit modules, which only the portable torch
     # kernel (`AwqTorchLinear`, 2-8 bits) can pack and run. Request GEMM plus
@@ -8635,11 +8637,11 @@ def _admmq_default_mse(bits: Union[int, str, GGUFBits]) -> MSEConfig:
 
     The 4-bit default was tuned with the search off. The paper enables the
     search, and the 3-bit low-bit measurement improves with it, so it is the
-    default at 2-3 bits and off at 4-8 bits. An explicit ``mse`` value always
+    default at 3 bits and off at 4-8 bits. An explicit ``mse`` value always
     wins.
     """
 
-    return MSEConfig(norm=2.0 if quant_bits_width(bits) <= 3 else 0.0)
+    return MSEConfig(norm=2.0 if quant_bits_width(bits) == 3 else 0.0)
 
 
 @dataclass
@@ -8655,6 +8657,11 @@ class ADMMQConfig(GPTQConfig):
     publishes ``quant_method: gptq`` and records ``method: admmq`` for
     provenance.
 
+    The supported weight width is 3-8 bits. Pure weight-only 2-bit is
+    rejected: it is below the usable quality range, and the paper's 2-bit
+    results use SpinQuant W2A4KV4 (rotation plus activation/KV quantization),
+    which this weight-only solver does not implement.
+
     The solver schedule and the PairSwap local-search budget are calibration
     settings, so they are persisted under ``meta`` and do not change the
     inference contract.
@@ -8665,12 +8672,12 @@ class ADMMQConfig(GPTQConfig):
     # The paper applies GPTQ's MSE clipping grid on top of the solver. The
     # measured 4-bit WikiText-2 rows are better with the search off, while the
     # paper and the low-bit measurement favor it. ``None`` therefore selects
-    # the bit-adaptive default: on for 2-3 bits, off for 4-8 bits. Any explicit
+    # the bit-adaptive default: on for 3 bits, off for 4-8 bits. Any explicit
     # value, including 0, overrides it.
     mse: Optional[Union[MSEConfig, Dict[str, Any], int, float]] = field(
         default=None,
         metadata={
-            "help": "MSE shrink-grid search; None enables it for 2-3 bit and disables it for 4-8 bit; 0 disables it"
+            "help": "MSE shrink-grid search; None enables it for 3 bit and disables it for 4-8 bit; 0 disables it"
         },
     )
 

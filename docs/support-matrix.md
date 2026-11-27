@@ -38,7 +38,9 @@ reference inventories, not a promise that every combination works on every devic
 
 ADMM-Q exports an ordinary GPTQ checkpoint (`quant_method: gptq`) with
 `method: admmq` recorded for provenance, so external runtimes consume it as
-GPTQ. See [ADMM-Q weight quantization](admmq.md).
+GPTQ. ADMM-Q accepts 3–8 bits; pure weight-only 2-bit is not supported. See
+[bit-width support](admmq.md#bit-width-support).
+See [ADMM-Q weight quantization](admmq.md).
 
 LeapQuant is not a checkpoint format: it quantizes the linear-attention
 recurrent state at inference time in supported GPT-QModel ports and leaves
