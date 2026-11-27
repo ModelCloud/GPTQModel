@@ -178,7 +178,11 @@ def test_conversation_path_rejects_concat_size(cls):
 
 @pytest.mark.parametrize(
     "cls",
-    [definitions.CohereCompassQModel, definitions.InklingMMQModel],
+    [
+        definitions.CohereCompassQModel,
+        definitions.InklingMMQModel,
+        definitions.Inkling2LoopQModel,
+    ],
     ids=lambda cls: cls.__name__,
 )
 def test_batch_size_two_pads_unequal_conversations(cls, monkeypatch):

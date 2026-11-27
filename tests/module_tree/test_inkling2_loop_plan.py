@@ -819,3 +819,183 @@ def test_inkling2_loop_awq_dropped_attention_folds_are_not_neutral(
             lambda: layer(*args, **kwargs),
             scaling_provider=generic,
         )
+
+
+def _capture_inkling2_forward(model, layers, input_ids):
+    """Capture one calibration batch's layer inputs and the real lm_head input."""
+
+    records = {}
+    head_input = {}
+
+    def capture(module, args, kwargs):
+        records.setdefault(
+            module,
+            {
+                "args": [arg.detach().clone() for arg in args if torch.is_tensor(arg)],
+                "kwargs": {
+                    key: value.detach().clone() if torch.is_tensor(value) else value
+                    for key, value in kwargs.items()
+                },
+            },
+        )
+
+    def capture_output(module, args, kwargs, output):
+        # Looped layers run more than once. Keep the first pass, which is the
+        # pass the quantizer replays, instead of overwriting it.
+        records[module].setdefault("output", output.detach().clone())
+
+    def capture_head(module, args):
+        head_input["input"] = args[0].detach().clone()
+
+    handles = [layer.register_forward_pre_hook(capture, with_kwargs=True) for layer in layers]
+    handles += [layer.register_forward_hook(capture_output, with_kwargs=True) for layer in layers]
+    handles.append(model.lm_head.register_forward_pre_hook(capture_head))
+    try:
+        with torch.no_grad():
+            model(
+                input_ids=input_ids,
+                attention_mask=torch.ones_like(input_ids),
+                use_cache=False,
+            )
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert set(records) == set(layers)
+    return records, head_input["input"]
+
+
+@pytest.fixture(scope="module")
+def inkling2_lm_head_case():
+    configuration, modeling = _inkling2_modules()
+    definition = MODEL_MAP["inkling2_loop"]
+    torch.manual_seed(0)
+    model = modeling.Inkling2LoopForConditionalGeneration(
+        _tiny_config(configuration)
+    ).float().eval()
+    assert _convert_model_with_defuser(definition, model, cleanup_original=False)
+    layers, _ = get_layers_with_prefixes(model, definition.extract_layers_node())
+
+    previous = definition.require_load_processor
+    definition.require_load_processor = False
+    try:
+        wrapper = definition(model=model, quantized=False, quantize_config=None)
+    finally:
+        definition.require_load_processor = previous
+    wrapper.quantize_config = SimpleNamespace(
+        device=torch.device("cpu"),
+        activation_mode=None,
+        activation_recipe=None,
+        offload_to_disk=False,
+        compute_device_filter=None,
+    )
+    return SimpleNamespace(model=model, wrapper=wrapper, layers=layers)
+
+
+def test_inkling2_loop_lm_head_replay_uses_final_input_and_per_batch_bank(
+    inkling2_lm_head_case,
+):
+    """The head must be calibrated on ``norm(final_input(bank, h_last))``.
+
+    The generic hook applies only ``norm`` to the last decoder output. Inkling 2
+    first retrieves the final hidden state from the attention-residual bank, so
+    the buggy path feeds the head a different tensor (measured cosine ~0.44 on
+    this fixture). Two batches with different sequence lengths also prove the
+    bank is selected per batch rather than shared.
+    """
+
+    model = inkling2_lm_head_case.model
+    wrapper = inkling2_lm_head_case.wrapper
+    layers = inkling2_lm_head_case.layers
+    wrapper.pre_quantize_generate_hook_start()
+
+    batches = []
+    for input_ids in (
+        torch.tensor([[7, 11, 13, 17, 19, 23, 29, 31]]),
+        torch.tensor([[2, 3, 5, 37, 41]]),
+    ):
+        records, head_input = _capture_inkling2_forward(model, layers, input_ids)
+        first = records[layers[0]]
+        replay_kwargs = {
+            key: value.detach().clone() if torch.is_tensor(value) else value
+            for key, value in first["kwargs"].items()
+            if key not in ("hidden_states", "attention_mask", "position_ids")
+        }
+        replay_kwargs = wrapper.capture_first_layer_input_kwargs(
+            args=tuple(first["args"]),
+            kwargs=first["kwargs"],
+            batch_device=torch.device("cpu"),
+            layer_input_kwargs=replay_kwargs,
+        )
+        batches.append(
+            {
+                "records": records,
+                "head_input": head_input,
+                "replay_kwargs": replay_kwargs,
+            }
+        )
+
+    # The layer stage replays every layer for every batch before advancing, so
+    # build the banks layer-major and batch-minor.
+    for layer in layers:
+        for batch in batches:
+            records = batch["records"]
+            first = records[layers[0]]
+            additional_inputs = dict(batch["replay_kwargs"])
+            additional_inputs["attention_mask"] = first["kwargs"]["attention_mask"]
+            additional_inputs["position_ids"] = first["kwargs"]["position_ids"]
+            additional_inputs["use_cache"] = False
+            wrapper.prepare_layer_replay_kwargs(
+                layer=layer,
+                layer_input=[records[layer]["args"][0]],
+                additional_inputs=additional_inputs,
+                target_device=torch.device("cpu"),
+            )
+
+    language_model = model.model.language_model
+    head_inputs = []
+    expected = []
+    for batch in batches:
+        h_last = batch["records"][layers[-1]]["output"]
+        bank = batch["replay_kwargs"]["_inkling2_loop_block_states_carry"].states
+        expected.append(
+            language_model.norm(language_model.final_input(bank, h_last)[0]).to(
+                h_last.dtype
+            )
+        )
+        head_inputs.append(h_last.clone())
+
+    replayed = wrapper.lm_head_pre_quantize_generate_hook(
+        [[value] for value in head_inputs]
+    )
+
+    assert len(replayed) == len(expected)
+    for batch_index, (output, want) in enumerate(zip(replayed, expected)):
+        torch.testing.assert_close(
+            output[0],
+            want,
+            atol=1e-6,
+            rtol=0,
+            msg=f"lm_head calibration batch {batch_index}",
+        )
+
+    # The regression is the missing ``final_input`` hop, not the exact values.
+    for batch, output in zip(batches, replayed):
+        norm_only = language_model.norm(batch["records"][layers[-1]]["output"])
+        assert not torch.allclose(output[0], norm_only, atol=1e-5), (
+            "lm_head calibration input skipped final_input"
+        )
+        # The replay bank is the first loop pass, while a real forward's head
+        # input comes from the last pass. The head path must still match.
+        cosine = F.cosine_similarity(
+            output[0].flatten(), batch["head_input"].flatten(), dim=0
+        )
+        assert cosine > 0.999, cosine
+
+
+def test_inkling2_loop_lm_head_objective_falls_back_to_block_mse(
+    inkling2_lm_head_case,
+):
+    """G2PTQ must not score ``norm -> lm_head`` for this model."""
+
+    assert inkling2_lm_head_case.wrapper.last_block_objective_modules() is None

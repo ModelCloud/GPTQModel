@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 from transformers import ProcessorMixin
@@ -77,11 +77,15 @@ def _layer_index_from_name(name: str) -> Optional[int]:
 class _BlockStatesCarry:
     """Running attention-residual bank for one calibration batch."""
 
-    __slots__ = ("states", "layer")
+    __slots__ = ("states", "layer", "index")
 
     def __init__(self):
         self.states = None
         self.layer = None
+        # Position of this calibration batch in the captured inputs. The
+        # lm_head stage receives the cached batches in the same order, so the
+        # final bank of each batch can be selected without a global bank.
+        self.index = 0
 
 
 class Inkling2LoopQModel(BaseQModel):
@@ -188,6 +192,9 @@ class Inkling2LoopQModel(BaseQModel):
 
         super().after_quantize()
         declare_expert_storage(self.model)
+        # The head stage is the last consumer of the per-batch banks; do not
+        # retain calibration activations after the run.
+        self._inkling2_loop_final_block_banks = {}
 
     @classmethod
     def after_defuser_conversion(cls, model):
@@ -297,6 +304,10 @@ class Inkling2LoopQModel(BaseQModel):
     ]
 
     def pre_quantize_generate_hook_start(self):
+        # Capture starts a new batch set: give its carries fresh indices and
+        # drop the previous run's final banks.
+        self._inkling2_loop_capture_index = 0
+        self._inkling2_loop_final_block_banks = {}
         core_model = self.model.model
         language_model = core_model.language_model
         self.shell_module_materialize(language_model.embed_tokens, self.quantize_config.device)
@@ -347,7 +358,59 @@ class Inkling2LoopQModel(BaseQModel):
             add_generation_prompt=True,
             return_dict=True,
             return_tensors="pt",
+            padding=True,
         )
+
+    def lm_head_pre_quantize_generate_hook(
+        self, inputs: List[List[torch.Tensor]]
+    ) -> List[List[torch.Tensor]]:
+        """Feed the head its real input: ``norm(final_input(block_states, h))``.
+
+        The generic hook applies only the final norm to the last decoder layer's
+        output. Inkling 2 first retrieves the final hidden state from the bank of
+        block-boundary inputs with ``language_model.final_input``, so calibrating
+        the head on ``norm(h)`` uses activations the model never feeds it.
+
+        The per-batch bank is recorded by :meth:`prepare_layer_replay_kwargs`
+        when the final decoder layer is replayed. Overriding this hook also makes
+        :meth:`BaseQModel.last_block_objective_modules` return ``None`` so G2PTQ
+        falls back to block MSE instead of scoring a different head path.
+        """
+
+        if not inputs:
+            return inputs
+
+        language_model = self.model.model.language_model
+        banks = getattr(self, "_inkling2_loop_final_block_banks", None) or {}
+        final_input = self.pre_quantize(language_model.final_input)
+        resolved = self._resolved_pre_lm_head_norm_candidates()
+        if not resolved:
+            raise ValueError(
+                f"{type(self).__name__}: cannot resolve `pre_lm_head_norm_module`."
+            )
+        norm = self.pre_quantize(resolved[0][0])
+        try:
+            for batch_index, element in enumerate(inputs):
+                bank = banks.get(batch_index)
+                if bank is None:
+                    raise RuntimeError(
+                        "Inkling2Loop lm_head calibration is missing the "
+                        f"attention-residual bank for batch {batch_index}; replay "
+                        "the final decoder layer before preparing the lm_head inputs."
+                    )
+                for index, tensor in enumerate(element):
+                    if not torch.is_tensor(tensor):
+                        continue
+                    element[index] = norm(
+                        final_input(
+                            move_to(bank, device=tensor.device, dtype=tensor.dtype),
+                            tensor,
+                        )[0]
+                    ).to(tensor.dtype)
+        finally:
+            self.post_quantize(final_input)
+            self.post_quantize(norm)
+        return inputs
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         # Route through the shared #4228/#4308 contract: pre-tokenized rows and
@@ -385,7 +448,10 @@ class Inkling2LoopQModel(BaseQModel):
             batch_device,
             layer_input_kwargs,
         )
-        layer_input_kwargs[_BLOCK_STATES_CARRY_KEY] = _BlockStatesCarry()
+        carry = _BlockStatesCarry()
+        carry.index = getattr(self, "_inkling2_loop_capture_index", 0)
+        self._inkling2_loop_capture_index = carry.index + 1
+        layer_input_kwargs[_BLOCK_STATES_CARRY_KEY] = carry
         return layer_input_kwargs
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
@@ -424,6 +490,10 @@ class Inkling2LoopQModel(BaseQModel):
             carry.states = hidden_states.new_zeros(
                 *hidden_states.shape[:-1], 0, hidden_states.shape[-1]
             ).to(device=CPU)
+        if layer_idx == 0:
+            # A new replay pass starts here; do not keep banks from the previous
+            # processor or quantization run.
+            self._inkling2_loop_final_block_banks = {}
         block_states = carry.states
         if carry.layer is not layer:
             if getattr(layer, "is_block_boundary", False):
@@ -435,6 +505,15 @@ class Inkling2LoopQModel(BaseQModel):
                     dim=-2,
                 )
             carry.layer = layer
+        if layer_idx == len(self.model.model.language_model.layers) - 1:
+            # ``final_input`` consumes the bank after the final decoder layer.
+            # The lm_head stage runs once per batch set, so keep one bank per
+            # captured batch.
+            banks = getattr(self, "_inkling2_loop_final_block_banks", None)
+            if banks is None:
+                banks = {}
+                self._inkling2_loop_final_block_banks = banks
+            banks[carry.index] = carry.states
         additional_inputs["block_states"] = move_to(block_states, device=target_device)
 
         # The first captured layer provides the sliding-window mask. Rebuild the
