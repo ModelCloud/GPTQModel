@@ -339,6 +339,11 @@ def _tokenizer_by_name(name):
     for candidate in dict.fromkeys((name, name.removesuffix("Fast"), name + "Fast")):
         found = _by_name(candidate)
         if isinstance(found, type) and issubclass(found, PreTrainedTokenizerBase):
+            if found.__name__ == "PythonBackend":
+                # Transformers 5.23 maps the resolved abstract Python backend to
+                # the serialized backend; the declared alias ``PreTrainedTokenizer``
+                # resolves here without carrying the ``PythonBackend`` spelling.
+                return TokenizersBackend
             return found
     return None
 

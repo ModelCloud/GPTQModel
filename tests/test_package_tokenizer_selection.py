@@ -102,6 +102,9 @@ def test_released_tokenizers_match_auto_tokenizer(name):
         ("mixtral", {"tokenizer_class": "GPT2Tokenizer"}, True),
         ("qwen2", {"tokenizer_class": "Qwen2Tokenizer"}, True),
         ("falcon", {}, False),
+        # Transformers 5.23 resolves the ``PreTrainedTokenizer`` alias to the
+        # abstract PythonBackend and then to TokenizersBackend.
+        ("bailing_moe", {"tokenizer_class": "PreTrainedTokenizer"}, False),
     ],
 )
 def test_synthetic_tokenizers_match_auto_tokenizer(tmp_path, model_type, tokenizer_config, byte_level):

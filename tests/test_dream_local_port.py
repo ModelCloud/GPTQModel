@@ -13,8 +13,8 @@ from gptqmodel.models.definitions.dream import DreamQModel
 from gptqmodel.models.ports.dream.configuration_dream import DreamConfig
 from gptqmodel.models.ports.dream.generation_utils import DreamGenerationConfig, sample_tokens
 from gptqmodel.models.ports.dream.modeling_dream import DreamModel
-from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
-from gptqmodel.utils.security import BYPASS_ENV
+from gptqmodel.utils.hf import load_hf_tokenizer, load_model_config, resolve_trust_remote_code
+from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
 
 
 @pytest.mark.parametrize("model_type", ["dream", "Dream"])
@@ -40,6 +40,50 @@ def test_packaged_selection_over_malicious_auto_map(tmp_path, monkeypatch, model
     assert type(model).__module__ == "gptqmodel.models.ports.dream.modeling_dream"
     assert next(model.parameters()).device.type == "meta"
     assert not marker.exists()
+
+
+def _write_remote_tokenizer_checkpoint(path):
+    """A Dream checkpoint whose tokenizer exists only as checkpoint Python."""
+
+    from tokenizers import Tokenizer, models, pre_tokenizers
+
+    payload = {"model_type": "Dream", "vocab_size": 31, "hidden_size": 16, "intermediate_size": 24,
+               "num_hidden_layers": 2, "num_attention_heads": 4, "num_key_value_heads": 2,
+               "pad_token_id": 0, "mask_token_id": 30, "max_position_embeddings": 32}
+    (path / "config.json").write_text(json.dumps(payload))
+    vocab = {"<pad>": 0, "<s>": 1, "</s>": 2, "[UNK]": 3, "a": 4, "b": 5, "Ġa": 6, "Ġb": 7}
+    backend = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    backend.save(str(path / "tokenizer.json"))
+    (path / "tokenization_dream.py").write_text(
+        "from transformers import PreTrainedTokenizerFast\n"
+        "class DreamTokenizer(PreTrainedTokenizerFast):\n"
+        "    pass\n"
+    )
+    (path / "tokenizer_config.json").write_text(json.dumps({
+        "tokenizer_class": "DreamTokenizer",
+        "auto_map": {"AutoTokenizer": ["tokenization_dream.DreamTokenizer", None]},
+        "pad_token": "<pad>",
+    }))
+    return load_model_config(path)
+
+
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [False, True])
+def test_remote_dream_tokenizer_requires_both_flags(tmp_path, monkeypatch, trust, bypass):
+    """Dream's tokenizer is checkpoint Python; the documented opt-in must reach it."""
+
+    config = _write_remote_tokenizer_checkpoint(tmp_path)
+    monkeypatch.delenv(BYPASS_ENV, raising=False)
+    if bypass:
+        monkeypatch.setenv(BYPASS_ENV, "1")
+    if not (trust and bypass):
+        with pytest.raises(RemoteCodeSecurityError):
+            load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=trust)
+        return
+    tokenizer = load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=trust)
+    assert type(tokenizer).__name__ == "DreamTokenizer"
+    assert tokenizer("a b", add_special_tokens=False).input_ids == [4, 7]
 
 
 def tiny_config(**kwargs):
