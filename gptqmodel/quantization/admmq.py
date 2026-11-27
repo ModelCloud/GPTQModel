@@ -64,6 +64,11 @@ RHO_CAP = 1e6
 #: Row chunk used for the float64-scaled update; bounds the transient buffer.
 _WORK_CHUNK_BYTES = 64 << 20
 
+#: Runtime device types that provide the float64 ``torch.linalg.eigh`` used by
+#: the ADMM-Q factorization: the host and the CUDA namespace (NVIDIA CUDA and
+#: HIP). Every other family runs the solve on the host.
+_SOLVE_DEVICE_TYPES = frozenset({"cpu", "cuda"})
+
 
 def admm_rho_at(iteration: int, rho0: float, gamma: float, update_iter: int, cap: float = RHO_CAP) -> float:
     """Return the penalty used by ADMM iteration ``iteration`` (0-based).
@@ -559,6 +564,20 @@ class ADMMQ(GPTQ):
         }
         return quantized, grids
 
+    def _solve_device(self, source_device: torch.device) -> torch.device:
+        """Return the device that runs one layer's ADMM-Q solve.
+
+        The solve factorizes the preconditioned Hessian with
+        ``torch.linalg.eigh`` in float64. The host and the CUDA namespace
+        (NVIDIA CUDA and HIP) provide it; MPS has neither float64 nor ``eigh``,
+        and XPU/NPU are not qualified for that factorization, so those layers
+        run the solve on the host.
+        """
+
+        if source_device.type in _SOLVE_DEVICE_TYPES:
+            return source_device
+        return torch.device("cpu")
+
     # ------------------------------------------------------------------
     # GPTQ entry point
     # ------------------------------------------------------------------
@@ -588,6 +607,7 @@ class ADMMQ(GPTQ):
             raise RuntimeError(f"ADMM-Q: module `{self.name}` has no captured Hessian.")
 
         source_device = self.H.device
+        solve_device = self._solve_device(source_device)
         module_copy = self.module_copy
         self.module_copy = None
         inverse_permutation = None
@@ -634,6 +654,17 @@ class ADMMQ(GPTQ):
 
         self.admmq_diagnostics = None
         try:
+            if solve_device != source_device:
+                log.warn(
+                    "Quantization: Module `%s` -> ADMM-Q factorizes the Hessian with a "
+                    "float64 eigendecomposition that is not qualified on `%s`; running "
+                    "the solve on CPU. Due to this fallback, the calculation may take "
+                    "much longer than normal.",
+                    self.name,
+                    source_device,
+                )
+                self.H = safe_move_to(self.H, solve_device)
+                source_device = solve_device
             try:
                 (quantized, grids, avg_loss), _ = self._run_with_accelerator_oom_cpu_fallback(
                     solve, source_device=source_device, stage="ADMM-Q solve", prepare_cpu=prepare_cpu
