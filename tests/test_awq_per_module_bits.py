@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import transformers
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.named_module import NamedModule
@@ -242,6 +243,74 @@ def test_apply_pack_reload_and_forward_at_module_width(device, bits, sym, dtype)
             assert torch.equal(tensor, buffers_before[name])
         # No unregistered dense or expanded weights may be retained either.
         assert not any(isinstance(value, torch.Tensor) for value in vars(reloaded).values())
+
+
+def _affine_narrowing_weight() -> torch.Tensor:
+    """A skewed affine group whose maximum is quantized to code 255.
+
+    ``255 * scale`` narrows to a BF16 value whose packer recovery is 254, so a
+    packer reading the replay copy alone stores a code the quantizer did not
+    choose. The minimum and maximum are exact BF16 values.
+    """
+
+    weight = torch.zeros(8, 32, dtype=torch.bfloat16)
+    weight[:, 0] = -0.134765625
+    weight[:, 1] = 1.7109375
+    return weight
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("source_kind", ["linear", "conv1d"])
+@pytest.mark.parametrize("group_size", [-1, 16])
+@torch.inference_mode()
+def test_affine_eight_bit_pack_preserves_codes_across_narrowing(dtype, source_kind, group_size):
+    weight = _affine_narrowing_weight().to(dtype)
+    if source_kind == "linear":
+        source = torch.nn.Linear(32, 8, bias=False, dtype=dtype)
+        source.weight.copy_(weight)
+    else:
+        # Conv1D stores [in, out]; the processor and packer transpose it back.
+        source = transformers.Conv1D(nx=32, nf=8).to(dtype=dtype)
+        source.weight.copy_(weight.t())
+        source.bias.zero_()
+    model = torch.nn.Sequential(source)
+    processor = _processor(
+        model, bits=8, group_size=group_size, sym=False, format=FORMAT.GEMM,
+    )
+    named = NamedModule(source, name="0", full_name="0", layer_index=0)
+    _, scales, zeros, codes = _oracle(weight, 8, False, group_size)
+    assert codes[0, 1].item() == 255
+
+    processor.apply_quant({"0": named}, [])
+    replay = named.weight.data.clone()
+    assert replay.dtype == dtype
+    replay_out_in = replay.t() if source_kind == "conv1d" else replay
+    group_index = (
+        torch.arange(32) // group_size
+        if group_size > 0
+        else torch.zeros(32, dtype=torch.long)
+    )
+    scale_per_input = scales.index_select(1, group_index)
+    zero_per_input = zeros.index_select(1, group_index)
+    recovered = torch.round(
+        (replay_out_in.float() + zero_per_input.float() * scale_per_input.float())
+        / scale_per_input.float()
+    ).clamp_(0, 255)
+    has_pack_wq = "pack_wq" in named.state
+    if dtype == torch.bfloat16:
+        # The replay copy alone loses the quantizer's code; the processor must
+        # stage the exact FP32 reconstruction for the packer.
+        assert recovered[0, 1].item() == 254
+    else:
+        assert recovered[0, 1].item() == 255
+        assert not has_pack_wq
+
+    processor.pack_module(named)
+    packed = model[0]
+    assert isinstance(packed, AwqTorchLinear)
+    assert torch.equal(packed.qweight, _pack_oracle(codes.T, 8))
+    if dtype == torch.bfloat16:
+        assert has_pack_wq
 
 
 @pytest.mark.parametrize("sym", [True, False])

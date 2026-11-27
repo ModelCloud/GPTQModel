@@ -6,6 +6,8 @@
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
 import math
+from dataclasses import dataclass
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -22,6 +24,135 @@ HF_OPTIMUM = "hf_optimum"
 # codes so near-dead groups survive packing. This bounds the scale, not the
 # weight range: a low-bit group can span several of these steps.
 SCALE_STORAGE_FLOOR = 2.0**-24
+
+
+def _positive(value, name: str, *, finite: bool) -> None:
+    """Reject a limit that cannot bound anything.
+
+    A magnitude cap may overflow to ``inf`` when a very small restoring factor
+    divides the dtype maximum; that is the old behaviour too (an infinite cap
+    does not clamp), so ``inf`` is allowed for ``max_abs_value``. The storage
+    floor must stay finite: an infinite floor would replace every scale.
+    """
+
+    if isinstance(value, torch.Tensor):
+        bad = bool(torch.isnan(value).any()) or bool((value <= 0).any())
+        if bad or (finite and not bool(torch.isfinite(value).all())):
+            what = "finite and positive" if finite else "positive"
+            raise ValueError(f"FitLimits.{name} must be {what}.")
+    else:
+        number = float(value) if isinstance(value, (int, float)) else float("nan")
+        if not (number > 0) or (finite and number == float("inf")):
+            what = "finite and positive" if finite else "positive"
+            raise ValueError(f"FitLimits.{name} must be {what}, got {value!r}.")
+
+
+@dataclass(frozen=True)
+class FitLimits:
+    """What one weight fit may select: a magnitude cap and a scale floor (#6020).
+
+    A weight grid is fitted on an FP32 working copy and narrowed back to the
+    dtype the module replays in. The negative end of a symmetric grid
+    reconstructs ``2**bits * amax / (2**bits - 1)``, strictly wider than
+    ``amax``; at the dtype maximum that becomes ``inf`` and the replay weight
+    loses both the value and the codes the packers recover from it. Both
+    numbers are derived here, once, in the working domain:
+
+    - ``max_abs_value`` - the finite magnitude the reconstruction may reach, or
+      ``None`` when the dtype imposes none (FP32 as a working dtype, and integer
+      weights, whose range is a count);
+    - ``scale_floor`` - the storage floor for the fitted scale.
+
+    A ``restore_factor`` for smoothed rows divides both: the fit runs on
+    ``weight / factor`` and the caller multiplies the scale and the
+    reconstruction back afterwards. Keeping that division here is what stops
+    the two halves from drifting apart, and per-row factors are normalized to
+    the fitted lane axis so they cannot broadcast into a ``[rows, rows]`` floor.
+
+    RTN scores codes directly rather than through ``find_params`` and bounds
+    FP32 by its own finite maximum; ``bound_fp32`` keeps that solver rule
+    explicit instead of hiding it in a per-solver helper.
+    """
+
+    dtype: torch.dtype
+    max_abs_value: Optional[Union[float, torch.Tensor]]
+    scale_floor: Union[float, torch.Tensor]
+
+    def __post_init__(self):
+        if not isinstance(self.dtype, torch.dtype):
+            raise TypeError(
+                "FitLimits.dtype must be a torch.dtype, got "
+                f"`{type(self.dtype).__name__}`."
+            )
+        _positive(self.scale_floor, "scale_floor", finite=True)
+        if self.max_abs_value is not None:
+            _positive(self.max_abs_value, "max_abs_value", finite=False)
+
+    @classmethod
+    def for_dtype(
+        cls,
+        dtype: torch.dtype,
+        *,
+        storage_floor: Union[float, torch.Tensor] = SCALE_STORAGE_FLOOR,
+        restore_factor: Optional[Union[float, torch.Tensor]] = None,
+        bound_fp32: bool = False,
+    ) -> "FitLimits":
+        """Derive the limits for a replay dtype and an optional smoothing factor."""
+
+        if not isinstance(dtype, torch.dtype):
+            raise TypeError(
+                "FitLimits.for_dtype expects a torch.dtype, got "
+                f"`{type(dtype).__name__}`."
+            )
+        if restore_factor is not None:
+            _positive(restore_factor, "restore_factor", finite=True)
+        max_abs = None
+        if dtype.is_floating_point and (dtype != torch.float32 or bound_fp32):
+            max_abs = float(torch.finfo(dtype).max)
+        floor: Union[float, torch.Tensor] = storage_floor
+        if restore_factor is not None:
+            if max_abs is not None:
+                max_abs = max_abs / restore_factor
+            floor = storage_floor / restore_factor
+        return cls(dtype=dtype, max_abs_value=max_abs, scale_floor=floor)
+
+    @classmethod
+    def for_module(
+        cls,
+        module: torch.nn.Module,
+        *,
+        storage_floor: Union[float, torch.Tensor] = SCALE_STORAGE_FLOOR,
+        restore_factor: Optional[Union[float, torch.Tensor]] = None,
+        bound_fp32: bool = False,
+    ) -> "FitLimits":
+        """Derive the limits from a module's weight dtype."""
+
+        weight = getattr(module, "weight", None)
+        dtype = getattr(weight, "dtype", None)
+        if not isinstance(dtype, torch.dtype):
+            raise TypeError(
+                "FitLimits.for_module needs a module weight with a dtype, got "
+                f"`{type(module).__name__}`; use FitLimits.for_dtype(dtype) instead."
+            )
+        return cls.for_dtype(
+            dtype,
+            storage_floor=storage_floor,
+            restore_factor=restore_factor,
+            bound_fp32=bound_fp32,
+        )
+
+
+def _lane_aligned(value):
+    """Flatten a per-row limit onto the fitted lane axis.
+
+    A smoother returns ``[rows, 1]``; ``find_params`` fits ``[rows]`` and
+    broadcasts the floor against it, so an unflattened limit becomes
+    ``[rows, rows]``. The old call sites flattened explicitly.
+    """
+
+    if isinstance(value, torch.Tensor) and value.dim() > 1:
+        return value.flatten()
+    return value
 
 
 def _floor_scale_for_storage(
@@ -482,6 +613,26 @@ def _mse_shrink_grid(
     return scale, zero
 
 
+@dataclass(frozen=True)
+class WeightGrid:
+    """One group's fitted grid: scale, zero and the inclusive code range.
+
+    A fit owns all four together. Consumers of the codes - the fused kernel
+    through ``_fused_code_bounds`` and the packers through the replay weight -
+    must use the range selected with *this* scale and zero, not one recomputed
+    from a quantizer that may have advanced since.
+    """
+
+    scale: torch.Tensor
+    zero: torch.Tensor
+    code_lo: Optional[torch.Tensor]
+    code_hi: Optional[torch.Tensor]
+
+    @property
+    def bounded(self) -> bool:
+        return self.code_lo is not None and self.code_hi is not None
+
+
 class Quantizer(nn.Module):
     def __init__(self, qcfg: BaseQuantizeConfig, shape=1, name: str=None):
         super(Quantizer, self).__init__()
@@ -558,6 +709,42 @@ class Quantizer(nn.Module):
         if trits:
             self.maxq = torch.tensor(-1)
         self._maxq_value = int(self.maxq)
+
+    def fit_weight(self, x: torch.Tensor, limits: "FitLimits") -> "WeightGrid":
+        """Fit a weight grid inside ``limits``; the only weight-fit entry.
+
+        A caller that cannot name the dtype its reconstruction narrows to
+        cannot know the admissible code range, and the unconstrained grid can
+        narrow to ``inf`` (#6001, #6012, #6020). Activation fits keep using
+        ``find_params(weight=False)``.
+
+        ``scale_floor`` and ``max_abs_value`` are normalized to the fitted lane
+        axis here, so a per-row smoothing factor cannot broadcast the floor
+        against every row.
+        """
+
+        if not isinstance(limits, FitLimits):
+            raise TypeError(
+                "Quantizer.fit_weight() requires FitLimits, got "
+                f"`{type(limits).__name__}`; use FitLimits.for_module(module) or "
+                "FitLimits.for_dtype(dtype) so the grid cannot exceed the replay dtype."
+            )
+        self.find_params(
+            x,
+            weight=True,
+            scale_min=_lane_aligned(limits.scale_floor),
+            value_limit=_lane_aligned(limits.max_abs_value),
+        )
+        grid = WeightGrid(
+            scale=self.scale,
+            zero=self.zero,
+            code_lo=self.code_lo,
+            code_hi=self.code_hi,
+        )
+        # The fused consumer reads the bounds of the group it just fitted; keep
+        # them with the quantizer that produced them instead of re-deriving them.
+        self._last_grid = grid
+        return grid
 
     def find_params(
         self,

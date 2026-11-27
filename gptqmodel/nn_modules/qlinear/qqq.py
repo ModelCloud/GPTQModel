@@ -16,6 +16,7 @@ from ...models._const import CPU, DEVICE, PLATFORM
 from ...nn_modules.qlinear import GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...quantization.qqq_activation import QQQ_ACTIVATION_DTYPES, qqq_activation_quantize
+from ...utils.arch import tuning_family
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
@@ -50,6 +51,17 @@ def _qqq_gpu_quantizer():
     except ImportError:
         return None
     return dynamic_quant
+
+
+@lru_cache(maxsize=1)
+def _qqq_gpu_gemm():
+    """Return the fused W4A8 GEMM launcher, or ``None`` without Triton."""
+
+    try:
+        from .qqq_gemm_triton import qqq_gemm
+    except ImportError:
+        return None
+    return qqq_gemm
 
 
 # ``qqq_gemm`` uses its ``C`` argument only as the INT32 global-reduce scratch
@@ -830,6 +842,12 @@ class QQQTorchLinear(QQQLinear):
     _torch_packed_cache = None
     _torch_packed_cache_key = None
     _torch_dropped_checkpoint = None
+    #: Packed logical INT4 layout and unpermuted scales for the fused GPU
+    #: GEMM.  This is the same 4-bits-per-weight storage as ``B``, not an
+    #: expanded INT8/FP32 plane.
+    _torch_gpu_packed_cache = None
+    _torch_gpu_packed_key = None
+    _torch_gpu_packed_ready = None
     #: Resolved packed-CPU kernel handle, published by the eager warmup so a
     #: traced forward never calls ``_qqq_cpu_kernel()`` (importlib is skipped by
     #: dynamo). ``None`` means the AVX512 kernel is unavailable.
@@ -858,6 +876,9 @@ class QQQTorchLinear(QQQLinear):
         module._torch_packed_cache = None
         module._torch_packed_cache_key = None
         module._torch_dropped_checkpoint = None
+        module._torch_gpu_packed_cache = None
+        module._torch_gpu_packed_key = None
+        module._torch_gpu_packed_ready = None
         module._torch_cpu_kernel = None
         module._torch_int_mm_failed_shapes = set()
 
@@ -889,6 +910,9 @@ class QQQTorchLinear(QQQLinear):
         self._materialize_dropped_checkpoint()
         self._torch_packed_cache = None
         self._torch_packed_cache_key = None
+        self._torch_gpu_packed_cache = None
+        self._torch_gpu_packed_key = None
+        self._torch_gpu_packed_ready = None
         self._failed_int_mm_shapes().clear()
 
     @classmethod
@@ -924,6 +948,201 @@ class QQQTorchLinear(QQQLinear):
     def _unpermute_scales(self, scales: torch.Tensor, inverse_perm: torch.Tensor) -> torch.Tensor:
         inverse_perm = inverse_perm.to(device=scales.device)
         return scales.reshape(-1, inverse_perm.numel())[:, inverse_perm].reshape(scales.shape)
+
+    def _gpu_weight_state_key(self):
+        """Identity of the checkpoint weight and scales the GPU cache mirrors."""
+
+        return (
+            tensor_cache_key(self.B),
+            tensor_cache_key(self.s_channel),
+            tensor_cache_key(self.s_group),
+            self.group_size,
+            self.in_features,
+            self.out_features,
+        )
+
+    def _publish_gpu_packed_weight(self, tensors) -> None:
+        """Order the lazy cache build against later forwards on other streams.
+
+        ``_gpu_packed_weight`` only enqueues the re-layout kernels; another
+        stream that starts a forward after the cache is published would read
+        the packed words before they are written.  Record the building stream
+        and an event so that consumer can wait for exactly that work.
+        """
+
+        try:
+            stream = torch.cuda.current_stream(self.B.device)
+            event = torch.cuda.Event()
+            event.record(stream)
+        except Exception:
+            self._torch_gpu_packed_ready = None
+            return
+        self._torch_gpu_packed_ready = (event, stream, tuple(tensors))
+
+    def _wait_for_gpu_packed_weight(self, device: torch.device) -> None:
+        """Wait for a pending cache build when the caller is on another stream."""
+
+        ready = getattr(self, "_torch_gpu_packed_ready", None)
+        if ready is None:
+            return
+        event, builder, tensors = ready
+        try:
+            capturing = torch.cuda.is_current_stream_capturing()
+        except Exception:
+            capturing = False
+        if capturing or event.query():
+            # A capture cannot wait on an event recorded outside it; graph
+            # capture synchronizes first, so the build is already complete.
+            self._torch_gpu_packed_ready = None
+            return
+        current = torch.cuda.current_stream(device)
+        if current.cuda_stream == builder.cuda_stream:
+            # Same stream: the build is ordered before this forward.
+            return
+        current.wait_event(event)
+        for tensor in tensors:
+            tensor.record_stream(current)
+
+    @torch.inference_mode(False)
+    @torch.no_grad()
+    def _gpu_packed_weight(self):
+        """Build (or return) the packed logical INT4 layout for the fused GEMM.
+
+        ``packed[k // 8, n]`` stores the code for ``k = 8 * (k // 8) + lane``
+        in nibble ``lane``.  This is the checkpoint's 4-bits-per-weight
+        storage in a decode-friendly order, not an INT8 or FP32 expansion, and
+        the scales are the checkpoint scales unpermuted once.  The layout is
+        keyed on the live tensors so a load, move, repack or in-place rewrite
+        rebuilds it.
+        """
+
+        with self._cpu_transform_lock:
+            key = self._gpu_weight_state_key()
+            cached = getattr(self, "_torch_gpu_packed_cache", None)
+            if cached is not None and self._torch_gpu_packed_key == key:
+                return cached
+
+            codes = self._unpack_weight_codes()
+            in_features, out_features = codes.shape
+            packed = torch.zeros(
+                (in_features // 8, out_features),
+                dtype=torch.int32,
+                device=codes.device,
+            )
+            for lane in range(8):
+                packed.bitwise_or_(
+                    codes[lane::8].to(torch.int32) << (4 * lane)
+                )
+            if self.group_size == self.in_features:
+                s_group = torch.empty(
+                    0, dtype=self.s_group.dtype, device=codes.device
+                )
+            else:
+                s_group = self._unpermute_scales(
+                    self._checkpoint_scale("s_group"), self._scale_perm_i
+                ).contiguous()
+            s_channel = (
+                self._unpermute_scales(
+                    self._checkpoint_scale("s_channel"),
+                    self._scale_perm_single_i,
+                )
+                .to(torch.float32)
+                .reshape(-1)
+                .contiguous()
+            )
+            cached = (packed, s_group, s_channel)
+            self._torch_gpu_packed_cache = cached
+            self._torch_gpu_packed_key = key
+            self._publish_gpu_packed_weight(cached)
+            return cached
+
+    def _can_use_gpu_qqq_gemm(
+        self,
+        activation: torch.Tensor,
+        quant_a: torch.Tensor,
+        s1: torch.Tensor,
+    ) -> bool:
+        """Whether the fused W4A8 GEMM serves this call.
+
+        The kernel is enabled on the measured tuning families (Ada/Blackwell
+        CUDA and RDNA4 ROCm).  Other families keep the portable Torch path
+        until their launch is measured.  Compilation keeps the traceable Torch
+        path because the Triton launch is not a Dynamo-traced op.
+        """
+
+        if activation.device.type != "cuda":
+            return False
+        if activation.dtype not in (torch.float16, torch.bfloat16):
+            return False
+        if dynamo_is_compiling():
+            return False
+        if _qqq_gpu_gemm() is None:
+            return False
+        if tuning_family(activation.device) not in (
+            "ada",
+            "blackwell",
+            "rdna4",
+        ):
+            return False
+        if getattr(self, "B", None) is None or self.B.device != activation.device:
+            return False
+        if (
+            quant_a.dtype is not torch.int8
+            or not quant_a.is_contiguous()
+            or quant_a.shape != (activation.shape[0], self.in_features)
+        ):
+            return False
+        if (
+            s1.dtype is not torch.float32
+            or s1.device != activation.device
+            or s1.numel() != quant_a.shape[0]
+            or not s1.is_contiguous()
+        ):
+            return False
+        # INT32 accumulation is exact only while the reduction cannot wrap.
+        if (
+            self.in_features % 8
+            or self.in_features > INT8_INT32_MAX_REDUCTION
+        ):
+            return False
+        group_size = self.group_size
+        if group_size == self.in_features:
+            return True
+        return group_size == 128 and self.in_features % 128 == 0
+
+    def _gpu_qqq_forward(
+        self,
+        quant_a: torch.Tensor,
+        s1: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        packed, s_group, s_channel = self._gpu_packed_weight()
+        self._wait_for_gpu_packed_weight(quant_a.device)
+        out = torch.empty(
+            (quant_a.shape[0], self.out_features),
+            dtype=out_dtype,
+            device=quant_a.device,
+        )
+        bias = self.bias
+        if bias is not None:
+            if bias.device != quant_a.device:
+                bias = bias.to(quant_a.device)
+            if bias.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                bias = bias.to(torch.float32)
+            if not bias.is_contiguous():
+                bias = bias.contiguous()
+        group_size = 0 if self.group_size == self.in_features else self.group_size
+        gemm = _qqq_gpu_gemm()
+        return gemm(
+            quant_a,
+            packed,
+            s_group,
+            s_channel,
+            s1,
+            bias,
+            out,
+            group_size=group_size,
+        )
 
     def _dequantize_weight_for_torch(self) -> tuple[torch.Tensor, torch.Tensor]:
         codes = self._unpack_weight_codes()
@@ -1112,6 +1331,7 @@ class QQQTorchLinear(QQQLinear):
         """
 
         yield from self._torch_packed_cache or ()
+        yield from self._torch_gpu_packed_cache or ()
 
     def materialize_checkpoint_layout_for_export(self) -> bool:
         """Publish the dropped checkpoint buffers so an export can see them.
@@ -1347,6 +1567,12 @@ class QQQTorchLinear(QQQLinear):
         out_shape = A.shape[:-1] + (self.out_features,)
         A_flat = A.reshape(-1, A.shape[-1])
         quant_A, s1 = self.dynamic_quant(A_flat)
+        if self._can_use_gpu_qqq_gemm(A_flat, quant_A, s1):
+            D = self._gpu_qqq_forward(quant_A, s1, A_dtype).reshape(out_shape)
+            if self.adapter:
+                D = self.adapter.apply(x=A_flat, out=D)
+            return D
+
         packed_result = self._packed_cpu_matmul(quant_A)
         if packed_result is not None:
             accum, s_channel = packed_result

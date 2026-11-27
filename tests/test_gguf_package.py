@@ -268,6 +268,22 @@ def test_metadata_and_tokenizer_arrays(tmp_path):
     assert reader.get_field("tokenizer.ggml.eos_token_id").contents() == 1
 
 
+def test_loads_the_tokenizer_from_the_checkpoint_directory(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+    _tiny_tokenizer().save_pretrained(root)
+
+    out = package(GGUFPackageConfig(model_path=str(root), out_path=str(tmp_path / "model.gguf")))
+
+    reader = gguf.GGUFReader(str(out))
+    assert reader.get_field("tokenizer.ggml.model").contents() == "gpt2"
+    assert reader.get_field("tokenizer.ggml.pre").contents() == "qwen2"
+    assert len(reader.get_field("tokenizer.ggml.tokens").contents()) == VOCAB
+    assert reader.get_field("tokenizer.ggml.bos_token_id").contents() == 0
+    assert reader.get_field("tokenizer.ggml.eos_token_id").contents() == 1
+
+
 def test_native_reader_agrees_with_the_oracle(tmp_path):
     from gptqmodel.utils.internal_gguf import GGUFReader as NativeReader
 

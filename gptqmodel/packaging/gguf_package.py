@@ -426,11 +426,17 @@ def _refuse_moe(model_config: Mapping[str, Any], weight_map: Mapping[str, str], 
 def _load_tokenizer(config: GGUFPackageConfig, model_dir: str) -> Any:
     if config.tokenizer is not None:
         return config.tokenizer
-    from transformers import AutoTokenizer
+
+    # The packaging writer only needs the checkpoint's vocabulary, but class
+    # selection and normalization stay owned by the package tokenizer loader:
+    # importing ``transformers.AutoTokenizer`` here would pull a
+    # ``transformers.models`` family into the packaging path, which the model
+    # port policy forbids.
+    from ..utils.hf import load_hf_tokenizer
 
     source = config.tokenizer_path or model_dir
     try:
-        return AutoTokenizer.from_pretrained(source, local_files_only=True, trust_remote_code=False)
+        return load_hf_tokenizer(source, local_files_only=True, trust_remote_code=False)
     except Exception as exc:
         raise CheckpointFormatError(
             f"package(): could not load a tokenizer from {source!r}: {exc}. Pass `tokenizer_path=` or a "

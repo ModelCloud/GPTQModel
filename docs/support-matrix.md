@@ -30,6 +30,7 @@ reference inventories, not a promise that every combination works on every devic
 | JointQ                    | ✅          | ✅ | ✅ | ✅ | ✅             |
 | GSQ (GPTQ, AWQ, RTN, QQQ, Paro) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
 | [LeapQuant](leapquant.md) (recurrent state) | ✅ | x | x | x | x |
+| MoEQuant (GPTQ/AWQ calibration) | ✅ | ✅ | ✅ | ✅ | x |
 
 `GGUF`, `EXL3`, `Paro`, `VPTQ`, `MACaQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. FP8 is load-only: GPT-QModel reads production FP8 checkpoints (transformers `FineGrainedFP8`, DeepSeek/Qwen block scales, NVIDIA ModelOpt, MXFP8, NVFP8) and no longer writes its own FP8 layout, so new checkpoints never publish a `gptqmodel_fp8` alias; legacy checkpoints that carry it remain readable and normalize to `fp8`. The MLX backend does not implement FP8: its invented Metal FP8 kernels and loader were removed, so an FP8 load with `backend="mlx"` raises a `ValueError` pointing at the Torch backend. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
 

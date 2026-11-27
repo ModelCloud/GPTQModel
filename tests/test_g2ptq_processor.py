@@ -11,19 +11,35 @@ import pytest
 import torch
 import torch.nn as nn
 
+import gptqmodel.quantization.g2ptq as g2ptq_module
 from gptqmodel.looper.g2ptq_processor import G2PTQProcessor
 from gptqmodel.models.quantization_run_plan import ProcessorStep, QuantizationRunPlan
 from gptqmodel.quantization.config import (
     FORMAT,
+    Fallback,
     FOEMConfig,
     G2PTQConfig,
     GPTAQConfig,
     GPTQConfig,
     QuantizeConfig,
+    QuantizeEmbed,
 )
 from gptqmodel.quantization.g2ptq import G2PTQ, g2ptq_compensate
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.backend import BACKEND
+
+
+class _WarningRecorder:
+    """Capture LogBar warnings without depending on the shared logger history."""
+
+    def __init__(self):
+        self.messages = []
+
+    def __call__(self, message, *args, **kwargs):
+        self.messages.append(message % args if args else message)
+
+    def once(self, message, *args, **kwargs):
+        self.messages.append(message % args if args else message)
 
 
 def _processor(qcfg=None, **attrs):
@@ -51,7 +67,9 @@ def test_g2ptq_config_serializes_and_reloads():
     config = GPTQConfig(
         bits=4,
         group_size=32,
-        g2ptq=G2PTQConfig(alpha_mse=0.25, alpha_kl=0.5, num_groups=2, kl_last_block=False),
+        g2ptq=G2PTQConfig(
+            alpha_mse=0.25, alpha_kl=0.5, num_groups=2, kl_last_block=False, seed=1234,
+        ),
     )
 
     payload = config.to_dict()
@@ -61,12 +79,14 @@ def test_g2ptq_config_serializes_and_reloads():
         "alpha_kl": pytest.approx(0.5),
         "num_groups": 2,
         "kl_last_block": False,
+        "seed": 1234,
     }
     restored = QuantizeConfig(**json.loads(json.dumps(config.to_dict())))
     assert restored.g2ptq is not None
     assert restored.g2ptq.alpha_mse == pytest.approx(0.25)
     assert restored.g2ptq.num_groups == 2
     assert restored.g2ptq.kl_last_block is False
+    assert restored.g2ptq.seed == 1234
 
 
 def test_g2ptq_config_accepts_booleans_and_dicts():
@@ -94,6 +114,9 @@ def test_g2ptq_config_accepts_booleans_and_dicts():
         {"num_groups": 0},
         {"num_groups": 2.5},
         {"kl_last_block": "yes"},
+        {"seed": -1},
+        {"seed": 1.5},
+        {"seed": True},
     ],
 )
 def test_g2ptq_config_rejects_invalid_values(kwargs):
@@ -276,9 +299,7 @@ def test_clean_stream_advances_only_through_pristine_replay():
 
     state = processor.continuation_state_dict()
     restored = _processor()
-    restored._g2ptq_seed = processor._g2ptq_seed + 1
     restored.load_continuation_state_dict(state)
-    assert restored._g2ptq_seed == processor._g2ptq_seed
     assert restored.clean_group_layer_inputs(layer_index=1, layer_inputs=noisy) is advanced
 
 
@@ -386,6 +407,9 @@ def test_replay_kwargs_drop_keys_the_replay_target_cannot_accept():
 def test_quantize_without_statistics_delegates_to_gptq(monkeypatch):
     qcfg = QuantizeConfig(bits=4, group_size=-1, g2ptq=G2PTQConfig())
     task = G2PTQ(module=nn.Linear(4, 4, bias=False), qcfg=qcfg)
+    task.nsamples = 32
+    warnings = _WarningRecorder()
+    monkeypatch.setattr(g2ptq_module.log, "warn", warnings)
     calls = {}
 
     def fake(self, blocksize=128):
@@ -395,6 +419,38 @@ def test_quantize_without_statistics_delegates_to_gptq(monkeypatch):
     monkeypatch.setattr(GPTQ, "quantize", fake)
     assert task.quantize(blocksize=64) == ("gptq",)
     assert calls["blocksize"] == 64
+    assert any("no block statistics" in message for message in warnings.messages)
+
+
+def test_hf_quantize_without_statistics_warns_and_delegates_to_gptq(monkeypatch):
+    torch.manual_seed(0)
+    module = nn.Linear(16, 8, bias=False)
+    qcfg = QuantizeConfig(bits=4, group_size=8, g2ptq=G2PTQConfig(num_groups=2))
+    task = G2PTQ(module=module, qcfg=qcfg)
+    task.quantizer.configure(perchannel=True)
+    task.add_batch(torch.randn(32, 16), None)
+    warnings = _WarningRecorder()
+    monkeypatch.setattr(g2ptq_module.log, "warn", warnings)
+
+    result = task.hf_quantize(blocksize=32)
+
+    assert len(result) == 6
+    assert any("no block statistics" in message for message in warnings.messages)
+    assert torch.isfinite(task.module.weight.data.float()).all()
+
+
+def test_zero_samples_does_not_claim_the_block_refresh_was_missing(monkeypatch):
+    qcfg = QuantizeConfig(bits=4, group_size=-1, g2ptq=G2PTQConfig())
+    task = G2PTQ(module=nn.Linear(4, 4, bias=False), qcfg=qcfg)
+    warnings = _WarningRecorder()
+    monkeypatch.setattr(g2ptq_module.log, "warn", warnings)
+
+    def fake(self, blocksize=128):
+        return ("gptq",)
+
+    monkeypatch.setattr(GPTQ, "quantize", fake)
+    assert task.quantize(blocksize=64) == ("gptq",)
+    assert not any("no block statistics" in message for message in warnings.messages)
 
 
 def test_block_statistics_reject_mismatched_shapes():
@@ -589,6 +645,69 @@ def test_g2ptq_quantizes_the_output_head_with_the_kl_objective():
     assert torch.isfinite(logits.float()).all()
 
 
+def test_g2ptq_requantizes_both_embedding_endpoints(tmp_path):
+    """Requantize the token-id input embedding and the linear output head.
+
+    The grouped pristine replay used to forward the embedding endpoint with
+    the decoder kwargs (``position_ids``), which ``AutoNF12Embedding`` rejects.
+    The input embedding consumes token ids and has no float activation, so
+    G2PTQ leaves it to GPTQ; the linear output head still uses the KL refresh.
+    """
+
+    if not torch.cuda.is_available():
+        pytest.skip("G2PTQ end-to-end requires a CUDA device")
+
+    from gptqmodel import BACKEND as RUNTIME_BACKEND
+    from gptqmodel import CalibrationConfig, GPTQModel
+    from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
+    source = tmp_path / "source"
+    source.mkdir()
+    rows = _tiny_llama_fixture(str(source))
+
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=16,
+        device="cuda:0",
+        g2ptq=G2PTQConfig(num_groups=2, alpha_mse=0.05, alpha_kl=0.1),
+    )
+    qm = GPTQModel.load(str(source), qcfg, dtype=torch.bfloat16)
+    calibration = CalibrationConfig(dataset=rows, batch_size=1, min_length=1)
+    qm.quantize(calibration, backend=RUNTIME_BACKEND.GPTQ_TORCH)
+
+    solver_names = []
+    original = G2PTQ._g2ptq_quantize
+
+    def counting(self, blocksize=128):
+        solver_names.append(getattr(self, "name", ""))
+        return original(self, blocksize=blocksize)
+
+    G2PTQ._g2ptq_quantize = counting
+    try:
+        qm.requantize(
+            calibration,
+            embed_quant_mode=QuantizeEmbed.BOTH,
+            backend=RUNTIME_BACKEND.GPTQ_TORCH,
+        )
+    finally:
+        G2PTQ._g2ptq_quantize = original
+
+    assert isinstance(qm.get_input_embeddings(), BaseQuantLinear)
+    assert isinstance(qm.get_output_embeddings(), BaseQuantLinear)
+    # The output head is a float block and keeps the G2PTQ KL refresh; the
+    # input embedding consumes token ids and falls back to GPTQ.
+    assert any("lm_head" in name for name in solver_names), solver_names
+
+    qm.model.to("cuda:0")
+    with torch.inference_mode():
+        logits = qm.model(
+            input_ids=torch.tensor([rows[0]["input_ids"]], device="cuda:0"),
+            use_cache=False,
+        ).logits
+    assert logits.shape == (1, 16, 256)
+    assert torch.isfinite(logits.float()).all()
+
+
 def test_g2ptq_checkpoint_round_trips_through_save_and_reload(tmp_path):
     """Quantize, write a checkpoint, reload it, and compare inference output."""
 
@@ -747,6 +866,198 @@ def test_grouped_inverse_oom_completes_the_solve_on_cpu(monkeypatch, alpha):
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
+def _block_retry_task(
+    device, *, static_groups=False, group_size=2, module_copy=False, ordering="natural"
+):
+    """Build a G2PTQ task whose block pass mutates several columns."""
+
+    config = GPTQConfig(
+        bits=4,
+        group_size=group_size,
+        static_groups=static_groups,
+        desc_act=ordering == "desc_act",
+        act_group_aware=ordering == "act_group_aware",
+        g2ptq=G2PTQConfig(num_groups=2, alpha_mse=0.01),
+    )
+    module = nn.Linear(4, 2, bias=False, device=device)
+    with torch.no_grad():
+        module.weight.copy_(
+            torch.tensor([[1.0, 2.0, -3.0, 4.0], [-2.0, 4.0, 1.0, -1.0]])
+        )
+    task = G2PTQ(module, qcfg=config)
+    task.quantizer.configure(perchannel=True)
+    task.add_batch(
+        torch.tensor(
+            [
+                [1.0, 0.5, 0.0, -1.0],
+                [0.5, 1.0, 0.0, 2.0],
+                [-1.0, 0.0, 1.0, 0.5],
+                [0.25, 2.0, 0.5, 1.0],
+                [1.0, 1.0, 1.0, 1.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+            device=device,
+        ),
+        None,
+    )
+    diagonal = torch.tensor([2.0, 3.0, 4.0, 1.0], device=device)
+    task.set_block_statistics(
+        group_hessians=torch.diag(diagonal).repeat(2, 1, 1),
+        weight_gradient=torch.full_like(module.weight, 0.1),
+        activation_square=diagonal,
+    )
+    if module_copy:
+        task.module_copy = module.weight.detach().clone()
+    return task
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Accelerator required")
+@pytest.mark.parametrize("ordering", ["natural", "desc_act", "act_group_aware"])
+@pytest.mark.parametrize(
+    "static_groups, group_size, module_copy",
+    [
+        (False, 2, False),
+        (True, 2, False),
+        (False, -1, False),
+        (False, 2, True),
+    ],
+)
+def test_grouped_block_oom_restarts_from_the_pre_pass_weights(
+    monkeypatch, static_groups, group_size, module_copy, ordering
+):
+    """A failed column pass must not reuse the columns it already mutated."""
+
+    def solve(device, fail_block=False):
+        task = _block_retry_task(
+            device,
+            static_groups=static_groups,
+            group_size=group_size,
+            module_copy=module_copy,
+            ordering=ordering,
+        )
+        state = {"calls": 0, "failed": False}
+        original = g2ptq_module.g2ptq_compensate
+        if fail_block:
+            def fail_once(weight, factor, gradient, beta, quantize_column, **kwargs):
+                state["calls"] += 1
+                if state["failed"]:
+                    return original(
+                        weight, factor, gradient, beta, quantize_column, **kwargs
+                    )
+                state["failed"] = True
+
+                def quantize_then_fail(column):
+                    if column == 1:
+                        raise torch.OutOfMemoryError(
+                            "forced allocation failure"
+                        )
+                    return quantize_column(column)
+
+                return original(
+                    weight, factor, gradient, beta, quantize_then_fail, **kwargs
+                )
+
+            monkeypatch.setattr(
+                g2ptq_module, "g2ptq_compensate", fail_once
+            )
+        try:
+            result = [tensor.cpu() for tensor in task.quantize(blocksize=2)[:4]]
+        finally:
+            if fail_block:
+                monkeypatch.setattr(
+                    g2ptq_module, "g2ptq_compensate", original
+                )
+        if fail_block:
+            assert state["calls"] == 2
+        return result
+
+    for actual, expected in zip(
+        solve("cuda:0", fail_block=True), solve("cpu")
+    ):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Accelerator required")
+def test_grouped_block_non_memory_error_is_not_retried(monkeypatch):
+    task = _block_retry_task("cuda:0")
+    calls = {"count": 0}
+
+    def fail(*args, **kwargs):
+        calls["count"] += 1
+        raise RuntimeError("not an allocation failure")
+
+    monkeypatch.setattr(g2ptq_module, "g2ptq_compensate", fail)
+    with pytest.raises(RuntimeError, match="not an allocation failure"):
+        task.quantize(blocksize=2)
+    assert calls["count"] == 1
+
+
+@pytest.mark.parametrize("fallback", [None, Fallback(threshold=1)])
+def test_grouped_nan_loss_uses_mock_retry_when_fallback_configured(
+    monkeypatch, fallback
+):
+    config = GPTQConfig(
+        bits=4,
+        group_size=2,
+        g2ptq=G2PTQConfig(num_groups=2, alpha_mse=0.01),
+        fallback=fallback,
+    )
+    module = nn.Linear(4, 2, bias=False)
+    task = G2PTQ(module, qcfg=config)
+    task.quantizer.configure(perchannel=True)
+    task.add_batch(torch.eye(4), None)
+    task.set_block_statistics(
+        group_hessians=torch.eye(4).repeat(2, 1, 1),
+        weight_gradient=torch.zeros_like(module.weight),
+        activation_square=torch.ones(4),
+    )
+    original = g2ptq_module.g2ptq_compensate
+
+    def nan_loss(*args, **kwargs):
+        quantized, error = original(*args, **kwargs)
+        kwargs["loss_terms"].fill_(float("nan"))
+        return quantized, error
+
+    monkeypatch.setattr(g2ptq_module, "g2ptq_compensate", nan_loss)
+    if fallback is None:
+        with pytest.raises(ValueError, match="NaN"):
+            task.quantize(blocksize=2)
+    else:
+        weight, *_ = task.quantize(blocksize=2)
+        assert task.qcfg.mock_quantization is True
+        assert torch.isfinite(weight.float()).all()
+
+
+def test_grouped_solve_releases_plain_capture_before_the_block_loop(monkeypatch):
+    """The capture diagonal is the only plain-Hessian input to the solve."""
+
+    config = GPTQConfig(
+        bits=4, group_size=2, g2ptq=G2PTQConfig(num_groups=2, alpha_mse=0.01)
+    )
+    module = nn.Linear(4, 2, bias=False)
+    task = G2PTQ(module, qcfg=config)
+    task.quantizer.configure(perchannel=True)
+    task.add_batch(torch.eye(4), None)
+    task.set_block_statistics(
+        group_hessians=torch.eye(4).repeat(2, 1, 1),
+        weight_gradient=torch.zeros_like(module.weight),
+        activation_square=torch.ones(4),
+    )
+    seen = {}
+    original = g2ptq_module.g2ptq_compensate
+
+    def record(*args, **kwargs):
+        seen["hessian"] = task.H
+        seen["partials"] = dict(task._device_hessian_partials)
+        seen["released"] = task._hessian_state_released
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(g2ptq_module, "g2ptq_compensate", record)
+    task.quantize(blocksize=2)
+
+    assert seen == {"hessian": None, "partials": {}, "released": True}
+
+
 def test_refresh_uses_the_resolved_module_configuration():
     from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module
 
@@ -789,7 +1100,7 @@ def test_refresh_excludes_calibration_padding_from_statistics():
     }
 
     stats = processor._collect_block_statistics(
-        state, None, {"proj": task}, use_kl=False
+        state, None, {"proj": task}, use_kl=False, seed=processor.qcfg.g2ptq.seed
     )["proj"]
     torch.testing.assert_close(stats["gradient"], torch.tensor([[5.0, 7.0], [7.0, 10.0]]))
     torch.testing.assert_close(stats["activation_square"], torch.tensor([10.0, 20.0]))
@@ -841,20 +1152,141 @@ def test_replayed_projection_accumulates_every_invocation():
 
     seed = 19
     torch.manual_seed(seed)
-    processor = _processor(GPTQConfig(g2ptq=G2PTQConfig(num_groups=1)))
+    processor = _processor(GPTQConfig(g2ptq=G2PTQConfig(num_groups=1, seed=seed)))
     block = ReusedProjection()
     task = G2PTQ(block.proj, qcfg=processor.qcfg)
     x = torch.tensor([[[1.0], [3.0]]])
     state = {"layer": block, "inputs": [[x]], "targets": [[torch.zeros_like(x)]]}
 
     stats = processor._collect_block_statistics(
-        state, None, {"proj": task}, use_kl=False
+        state, None, {"proj": task}, use_kl=False, seed=seed
     )["proj"]
     # Avoid depending on float32 and float64 RNGs having the same sequence.
     noise = torch.randn(x.shape, generator=torch.Generator().manual_seed(seed)).double()
     hessian = (5 * noise.square() * x.double().square()).sum().reshape(1, 1, 1)
     torch.testing.assert_close(stats["hessian"].double(), hessian, atol=1e-6, rtol=1e-6)
     torch.testing.assert_close(stats["activation_square"], torch.tensor([50.0]))
+
+
+def _refresh_block_statistics(*, seeds=None, device="cpu"):
+    """Refresh one tiny block and return each projection's installed statistics."""
+
+    def make_config(seed):
+        kwargs = {"num_groups": 2}
+        if seed is not None:
+            kwargs["seed"] = seed
+        return GPTQConfig(bits=4, group_size=8, g2ptq=G2PTQConfig(**kwargs))
+
+    task_seeds = {"0": None, "2": None} if seeds is None else seeds
+    generator = torch.Generator(device="cpu").manual_seed(20261126)
+    block = nn.Sequential(
+        nn.Linear(16, 16, bias=False),
+        nn.GELU(),
+        nn.Linear(16, 8, bias=False),
+    ).to(device)
+    with torch.no_grad():
+        for linear in (block[0], block[2]):
+            linear.weight.copy_(
+                torch.randn(linear.weight.shape, generator=generator).to(device)
+            )
+    inputs = torch.randn(4, 8, 16, generator=generator).to(device)
+    with torch.no_grad():
+        targets = block(inputs)
+
+    tasks = {}
+    for name, module in (("0", block[0]), ("2", block[2])):
+        tasks[name] = G2PTQ(module, qcfg=make_config(task_seeds[name]))
+
+    processor = _processor(tasks["0"].qcfg)
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor.tasks.update(tasks)
+    processor._g2ptq_layer_state[0] = {
+        "layer": block,
+        "inputs": [[inputs]],
+        "targets": [[targets]],
+        "kwargs": [{}],
+        "attention_masks": [],
+        "position_ids": [],
+    }
+    processor._refresh_block(layer_index=0, names=list(tasks))
+    return {
+        name: {
+            "hessian": task.group_hessians.detach().clone(),
+            "gradient": task.weight_gradient.detach().clone(),
+        }
+        for name, task in tasks.items()
+    }
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda:0", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="Accelerator required"
+    )),
+])
+def test_g2ptq_refresh_is_independent_of_ambient_rng(device):
+    torch.manual_seed(11)
+    first = _refresh_block_statistics(device=device)
+    torch.manual_seed(22)
+    second = _refresh_block_statistics(device=device)
+
+    assert set(first) == set(second)
+    for name in first:
+        torch.testing.assert_close(
+            first[name]["hessian"], second[name]["hessian"], atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            first[name]["gradient"], second[name]["gradient"], atol=0, rtol=0
+        )
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda:0", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="Accelerator required"
+    )),
+])
+def test_g2ptq_seed_controls_the_fisher_draw(device):
+    torch.manual_seed(1)
+    first = _refresh_block_statistics(seeds={"0": 5, "2": 5}, device=device)
+    torch.manual_seed(2)
+    repeat = _refresh_block_statistics(seeds={"0": 5, "2": 5}, device=device)
+    other = _refresh_block_statistics(seeds={"0": 6, "2": 6}, device=device)
+
+    for name in first:
+        torch.testing.assert_close(
+            first[name]["hessian"], repeat[name]["hessian"], atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            first[name]["gradient"], repeat[name]["gradient"], atol=0, rtol=0
+        )
+    assert any(
+        not torch.equal(first[name]["hessian"], other[name]["hessian"])
+        for name in first
+    )
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda:0", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="Accelerator required"
+    )),
+])
+def test_g2ptq_refresh_honors_per_module_seeds(device):
+    torch.manual_seed(1)
+    both_five = _refresh_block_statistics(seeds={"0": 5, "2": 5}, device=device)
+    mixed = _refresh_block_statistics(seeds={"0": 5, "2": 6}, device=device)
+    both_six = _refresh_block_statistics(seeds={"0": 6, "2": 6}, device=device)
+
+    torch.testing.assert_close(
+        mixed["0"]["hessian"], both_five["0"]["hessian"], atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        mixed["2"]["hessian"], both_six["2"]["hessian"], atol=0, rtol=0
+    )
+    assert not torch.equal(
+        both_five["2"]["hessian"], both_six["2"]["hessian"]
+    )
 
 
 @pytest.mark.parametrize("blocksize", [3, 6, 8])

@@ -25,6 +25,7 @@ pages below document specific features, compatibility boundaries, and implementa
 
 - [ADMM-Q weight quantization](admmq.md)
 - [AWQ affine range and packed decode](awq-affine-range.md)
+- [Weight-grid fit limits](quantization-grid-bounds.md)
 - [AWQ calibration aggregation](awq-calibration-aggregation.md)
 - [AWQ GEMM dequantization tiling](awq-dequantize-tiling.md)
 - [AWQ dynamic group-size resolution](awq-dynamic-group-size.md)
@@ -76,6 +77,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Marlin thread-tile selection](marlin-tile-schedule.md)
 - [MoE AWQ scale folding and calibration row ownership](moe-awq-calibration.md)
 - [MoE padding ownership and calibration capture lifetimes](moe-padding-and-awq-dedup.md)
+- [MoEQuant: expert-balanced sampling and affinity-guided quantization](moequant.md)
 - [Multimodal calibration replay](multimodal-calibration.md)
 - [NumPy-free core: optional dependency, not a hard one](numpy-free-core.md)
 - [Paro](paro.md)

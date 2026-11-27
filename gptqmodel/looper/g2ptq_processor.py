@@ -139,6 +139,23 @@ def _accepts_keyword(module: torch.nn.Module, keyword: str) -> bool:
     )
 
 
+def _is_embedding_lookup(module: Optional[torch.nn.Module]) -> bool:
+    """Whether ``module`` gathers rows by token id instead of projecting floats.
+
+    G2PTQ's block objective differentiates a float activation. A token-id
+    lookup has no such activation, and its integer indices cannot be used as
+    Hessian columns, so the refresh has to leave those endpoints to GPTQ.
+    ``AUTO_NF12`` storage keeps the table metadata, so check it as well as the
+    plain ``nn.Embedding`` type.
+    """
+
+    if module is None:
+        return False
+    if isinstance(module, torch.nn.Embedding):
+        return True
+    return getattr(module, "num_embeddings", None) is not None
+
+
 def _relative_path(root: torch.nn.Module, target: torch.nn.Module) -> Optional[str]:
     """Return ``target``'s dotted path under ``root``, or ``None``."""
 
@@ -207,10 +224,10 @@ class G2PTQProcessor(GPTQProcessor):
         self._g2ptq_suppress_capture = False
         self._g2ptq_is_lm_head = False
         self._g2ptq_unavailable: set = set()
+        self._g2ptq_embedding_notice = False
         # Clean calibration stream, advanced by the pristine replay of each
         # layer. ``None`` means "the live stream is still clean" (layer 0).
         self._g2ptq_clean_inputs: Optional[List[List[torch.Tensor]]] = None
-        self._g2ptq_seed = torch.initial_seed()
 
     def name(self) -> str:
         return "G2PTQ"
@@ -227,13 +244,11 @@ class G2PTQProcessor(GPTQProcessor):
     def continuation_state_dict(self):
         state = super().continuation_state_dict()
         state["g2ptq_clean_inputs"] = self._g2ptq_clean_inputs
-        state["g2ptq_seed"] = self._g2ptq_seed
         return state
 
     def load_continuation_state_dict(self, state):
         super().load_continuation_state_dict(state)
         self._g2ptq_clean_inputs = state.get("g2ptq_clean_inputs")
-        self._g2ptq_seed = state.get("g2ptq_seed", self._g2ptq_seed)
 
     def clean_group_layer_inputs(
         self,
@@ -331,6 +346,22 @@ class G2PTQProcessor(GPTQProcessor):
     ) -> None:
         """Remembers the clean reference, then refreshes statistics per subset."""
 
+        if _is_embedding_lookup(layer_module):
+            # Token-id lookups have no float activation to differentiate. Keep
+            # the clean stream moving, but do not install statistics: the
+            # ``G2PTQ`` task falls back to plain GPTQ for these endpoints.
+            with self._g2ptq_lock:
+                self._g2ptq_subset_names = []
+                self._g2ptq_layer_state.pop(layer_index, None)
+                announce = not self._g2ptq_embedding_notice
+                self._g2ptq_embedding_notice = True
+            if announce:
+                log.info(
+                    "G2PTQ: embedding endpoints consume token ids, so they are "
+                    "quantized with GPTQ instead of the gradient refresh."
+                )
+            return
+
         if subset_index is None:
             with self._g2ptq_lock:
                 self._g2ptq_layer_state[layer_index] = {
@@ -375,17 +406,26 @@ class G2PTQProcessor(GPTQProcessor):
             with self._g2ptq_lock:
                 self._g2ptq_pristine[layer_index] = block
 
-        tasks_by_objective: Dict[bool, Dict[str, G2PTQ]] = {}
+        # Modules with different seeds need different Fisher draws, so the
+        # replay groups by both objective and seed. The default run-level seed
+        # keeps the common case at one replay per subset.
+        tasks_by_objective: Dict[Tuple[bool, int], Dict[str, G2PTQ]] = {}
         for name in names:
             task = self.tasks.get(name)
             if isinstance(task, G2PTQ):
-                use_kl = self._uses_kl_objective([name], config=task.qcfg.g2ptq)
-                tasks_by_objective.setdefault(use_kl, {})[name] = task
+                config = task.qcfg.g2ptq
+                use_kl = self._uses_kl_objective([name], config=config)
+                tasks_by_objective.setdefault((use_kl, config.seed), {})[name] = task
 
-        for use_kl, tasks in tasks_by_objective.items():
+        for (use_kl, seed), tasks in tasks_by_objective.items():
             try:
                 statistics = self._collect_block_statistics(
-                    state, block, tasks, use_kl=use_kl, layer_index=layer_index,
+                    state,
+                    block,
+                    tasks,
+                    use_kl=use_kl,
+                    seed=seed,
+                    layer_index=layer_index,
                 )
             except Exception as exc:  # noqa: BLE001 - replay can fail on unsupported blocks
                 self._report_unavailable(layer_index, exc)
@@ -451,6 +491,7 @@ class G2PTQProcessor(GPTQProcessor):
         tasks: Dict[str, G2PTQ],
         *,
         use_kl: bool,
+        seed: int = 0,
         layer_index: int = 0,
     ) -> Dict[str, Dict[str, torch.Tensor]]:
         """Run the differentiable block replay and fold it into statistics."""
@@ -482,10 +523,11 @@ class G2PTQProcessor(GPTQProcessor):
 
         position_ids = state.get("position_ids") or []
         attention_masks = state.get("attention_masks") or []
-        # Repeat the same Fisher draws for each subset of this block.
-        # Checkpoint packing can consume global RNG between subsets.
-        seed = (self._g2ptq_seed + layer_index) % (1 << 64)
-        generator = torch.Generator(device=device).manual_seed(seed)
+        # Repeat the same Fisher draws for each subset of this block. Derive
+        # them from the configured seed and layer index, never from the
+        # ambient process RNG state, so repeated runs match.
+        draw_seed = (int(seed) + layer_index) % (1 << 64)
+        generator = torch.Generator(device=device).manual_seed(draw_seed)
 
         hessians: Dict[str, Optional[torch.Tensor]] = dict.fromkeys(names)
         gradients: Dict[str, Optional[torch.Tensor]] = dict.fromkeys(names)
@@ -847,6 +889,10 @@ class G2PTQProcessor(GPTQProcessor):
         """
 
         if not torch.is_tensor(activation) or not torch.is_tensor(output_grad):
+            return None
+        if not activation.is_floating_point():
+            # Token ids (or any other integer index) are not activations; a
+            # Hessian over them would be meaningless.
             return None
         if activation.ndim < 2 or output_grad.ndim < 2:
             return None

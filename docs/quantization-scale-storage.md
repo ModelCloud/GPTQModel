@@ -236,7 +236,7 @@ same code range as the eager path or replay and packing diverge.
 
 All of those fits now go through `GPTQ._fit_weight_params`, which passes
 `value_limit = _finite_value_limit(module.weight.dtype)`. Smoothed refits divide
-that limit by the restored smoothing factor with `_scaled_value_limit`. The
+that limit by the restored smoothing factor inside `FitLimits` (`max_abs_value`). The
 bounded range travels to the fused kernel as two optional
 `block_update(..., code_lo, code_hi, ...)` tensors on the same `[groups, rows]`
 layout as `scale`/`zero`; a null pair keeps the natural `[0, maxq]` grid, so an
@@ -294,6 +294,55 @@ flowchart TD
     E --> O
     style O fill:#d1e7dd,stroke:#0f5132,color:#0f5132
 ```
+
+### The QQQ solvers
+
+QQQ carries its own `Quantizer` and its own strategy fallback, so the finite
+range contract has to be wired into both. The main path fits each group on the
+FP32 copy and narrows `Q` back to the module's weight dtype; the fallback
+`_affine_quantize` fits the strategy's range directly. The symmetric INT4 grid
+uses `maxq = 15`, `zero = 8` and `scale = 2 * amax / 15`, so code zero
+reconstructs `-16 * amax / 15`. At `amax = 61440` that is `-65536`, which
+narrows to `-inf` in FP16.
+
+`QQQ.Quantizer.find_params(..., value_limit=...)` now derives `code_lo` /
+`code_hi` from `_finite_code_bounds`, and `quantize` clamps to them. The main
+path passes `FitLimits.for_module(self.layer).max_abs_value` to every weight
+fit, including static groups, the CPU refit, and the eager and fused block
+loops. The fused kernel receives the same `[groups, rows]` bounds as GPTQ. The
+fallback threads the limit through `_affine_quantize` and `mse_optimal_quant`;
+row/column smoothing divides it by the factor restored after the fit.
+
+```mermaid
+flowchart TD
+    Q["QQQ weight fit"] --> L{"FitLimits.for_module<br/>weight dtype"}
+    L -- "FP32" --> N["value_limit = None"]
+    L -- "FP16 / BF16" --> F["value_limit = finfo(dtype).max<br/>/ restored smoothing factor"]
+    N --> P["Quantizer.find_params"]
+    F --> P
+    P --> B["_finite_code_bounds:<br/>code_lo / code_hi"]
+    B --> E{"Eager or fused block?"}
+    E -- eager --> C["quantize(..., code_lo, code_hi)"]
+    E -- fused --> K["block_update(..., code_lo, code_hi)"]
+    C --> O["Narrow to the weight dtype"]
+    K --> O
+    O --> V{"Finite?"}
+    V -- yes --> W["Packer recovers the same codes"]
+    V -- no --> X["Unchanged grid endpoint exceeded the dtype"]
+    style W fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+    style X fill:#fee,stroke:#c33
+```
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| QQQ INT4 symmetric, `amax = 61440`, FP16 | Negative endpoint code `0`, replay `-inf` | Code `1`, replay `-57344` |
+| QQQ INT4 symmetric, `amax = 65504`, FP16 | Code `0`, replay `-inf` | Code `1`, replay `-61152` |
+| QQQ fallback strategies | Natural `[0, maxq]` clamp | Same strategies, bounded codes |
+| QQQ fused block update | `[0, maxq]` clamp | Bounded per `(group, row)` |
+| QQQ unbounded caller (FP32, activation fit) | Natural grid | Bitwise unchanged |
+
+The MLX QQQ implementation uses its own kernel grid and is not exercised by
+this change; it remains a separate path.
 
 ## Asymmetric SmoothMSE zero points
 

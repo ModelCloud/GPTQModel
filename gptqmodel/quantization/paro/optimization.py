@@ -38,6 +38,7 @@ from ...utils.paro import (
 from ...utils.rocm import IS_ROCM, rocm_amp_disabled
 from ...utils.torch import dynamo_is_compiling
 from ..config import PARO_OPT_SCALE_CLAMP_MAX_DEFAULT, PARO_OPT_SCALE_CLAMP_MIN_DEFAULT
+from ..quantizer import FitLimits, _finite_code_bounds
 
 
 _PARO_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
@@ -221,11 +222,78 @@ def _checkpointed_forward(function, *args: torch.Tensor, enabled: bool = False) 
 
 def _clamp_ste(
     x: torch.Tensor,
-    min_value: float | int | None = None,
-    max_value: float | int | None = None,
+    min_value: float | int | torch.Tensor | None = None,
+    max_value: float | int | torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Clamp with a straight-through estimator to stabilize learned qparams."""
     return _ClampSTE.apply(x, min_value, max_value)
+
+
+def _scale_clamp_bounds(
+    dtype: torch.dtype,
+    min_value: float = 1e-5,
+    max_value: float = 1e5,
+) -> tuple[float, float]:
+    """Return scale clamp bounds that are representable in ``dtype``.
+
+    ``Tensor.clamp`` converts a Python bound to the tensor dtype before it
+    clamps. FP16's largest finite value is 65504, so a ``1e5`` upper bound
+    raises ``RuntimeError`` instead of clamping. The reconstruction range is
+    bounded separately through the integer codes, so this cap only has to be
+    representable in the scale dtype.
+    """
+    if dtype.is_floating_point:
+        max_value = min(float(max_value), float(torch.finfo(dtype).max))
+    return float(min_value), max_value
+
+
+def _clamp_scale(
+    scale: torch.Tensor,
+    min_value: float = 1e-5,
+    max_value: float = 1e5,
+) -> torch.Tensor:
+    """Clamp a learned scale without narrowing the bound to an overflow."""
+    lo, hi = _scale_clamp_bounds(scale.dtype, min_value, max_value)
+    return scale.clamp(min=lo, max=hi)
+
+
+def _clamp_scale_ste(
+    scale: torch.Tensor,
+    min_value: float = 1e-5,
+    max_value: float = 1e5,
+) -> torch.Tensor:
+    """Straight-through form of :func:`_clamp_scale`."""
+    lo, hi = _scale_clamp_bounds(scale.dtype, min_value, max_value)
+    return _clamp_ste(scale, min_value=lo, max_value=hi)
+
+
+def _finite_code_bounds_for_weight(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    zero: torch.Tensor,
+    qmin: int,
+    qmax: int,
+    *,
+    sym: bool,
+) -> tuple[torch.Tensor | int, torch.Tensor | int]:
+    """Bound integer codes so the reconstruction stays finite in ``weight.dtype``.
+
+    A symmetric grid reconstructs ``qmin * scale`` at its negative endpoint,
+    which is wider than the fitted ``amax`` and can exceed the source dtype's
+    finite maximum. Bounding the selected codes (rather than clamping the
+    narrowed tensor) keeps the replay weight and the codes the packers recover
+    from it on the same grid.
+    """
+    limit = FitLimits.for_dtype(weight.dtype).max_abs_value
+    if limit is None:
+        return qmin, qmax
+    grid_max = -qmin if sym else qmax
+    lo, hi = _finite_code_bounds(scale.detach(), zero.detach(), grid_max, sym, limit)
+    if lo is None or hi is None:
+        return qmin, qmax
+    lo = torch.maximum(lo, torch.full_like(lo, qmin))
+    hi = torch.minimum(hi, torch.full_like(hi, qmax))
+    return lo, hi
 
 
 class _AffineQuantDequantSTE(torch.autograd.Function):
@@ -270,10 +338,13 @@ class _AffineQuantDequantSTE(torch.autograd.Function):
         group_size: int,
     ) -> torch.Tensor:
         view = weight.reshape(-1, group_size)
-        bounded_scale = scale.clamp(min=1e-5, max=1e5)
+        bounded_scale = _clamp_scale(scale, 1e-5, 1e5)
         round_zero_point = (-zero_point_float).round().clamp(qmin, qmax)
+        code_lo, code_hi = _finite_code_bounds_for_weight(
+            weight, bounded_scale, round_zero_point, qmin, qmax, sym=False
+        )
         scaled = view / bounded_scale
-        quant = (scaled.round() + round_zero_point).clamp(qmin, qmax)
+        quant = (scaled.round() + round_zero_point).clamp(code_lo, code_hi)
         centered = quant - round_zero_point
         ctx.save_for_backward(scaled, bounded_scale, centered)
         ctx.group_size = group_size
@@ -1022,7 +1093,7 @@ def _calc_affine_qparams(
         high / (qmax - zero_point).clamp(min=1),
         zeros,
     )
-    scale = torch.maximum(negative_scale, positive_scale).clamp(min=1e-5, max=1e5)
+    scale = _clamp_scale(torch.maximum(negative_scale, positive_scale), 1e-5, 1e5)
     zero_point_float = -zero_point
     return scale, zero_point_float
 
@@ -1078,7 +1149,7 @@ class GroupLinearQuantizer(nn.Module):
         """Convert learned qparams into the runtime scale/zero-point tensors."""
         # Export the effective scale used by pseudo quantization, including
         # learned parameters that an optimizer moved outside the bounds.
-        bounded_scale = self.scale.detach().clamp(min=1e-5, max=1e5)
+        bounded_scale = _clamp_scale(self.scale.detach(), 1e-5, 1e5)
         scales = _reshape_group_params(weight, self.group_size, bounded_scale)
         if self.sym:
             zeros = torch.full_like(scales, 2 ** (self.bits - 1))
@@ -1117,12 +1188,18 @@ def pseudo_quantize_dequant(
             )
             if fused is not None:
                 return fused
-            scale = _clamp_ste(scale, min_value=1e-5, max_value=1e5)
-            quant = _clamp_ste(_round_ste(weight_view / scale), qmin, qmax)
+            scale = _clamp_scale_ste(scale, 1e-5, 1e5)
+            code_lo, code_hi = _finite_code_bounds_for_weight(
+                weight, scale, torch.zeros_like(scale), qmin, qmax, sym=True
+            )
+            quant = _clamp_ste(_round_ste(weight_view / scale), code_lo, code_hi)
             dequant = quant * scale
         else:
-            scale = scale.clamp(min=1e-5, max=1e5)
-            quant = torch.clamp(torch.round(weight_view / scale), qmin, qmax)
+            scale = _clamp_scale(scale, 1e-5, 1e5)
+            code_lo, code_hi = _finite_code_bounds_for_weight(
+                weight, scale, torch.zeros_like(scale), qmin, qmax, sym=True
+            )
+            quant = torch.clamp(torch.round(weight_view / scale), code_lo, code_hi)
             dequant = quant * scale
     else:
         qmin = 0
@@ -1139,15 +1216,21 @@ def pseudo_quantize_dequant(
             )
             if fused is not None:
                 return fused
-            scale = _clamp_ste(scale, min_value=1e-5, max_value=1e5)
+            scale = _clamp_scale_ste(scale, 1e-5, 1e5)
             round_zero_point = _clamp_ste(-_round_ste(zero_point_float), qmin, qmax)
+            code_lo, code_hi = _finite_code_bounds_for_weight(
+                weight, scale, round_zero_point, qmin, qmax, sym=False
+            )
             quant = _round_ste(weight_view / scale) + round_zero_point
-            quant = _clamp_ste(quant, qmin, qmax)
+            quant = _clamp_ste(quant, code_lo, code_hi)
         else:
-            scale = scale.clamp(min=1e-5, max=1e5)
+            scale = _clamp_scale(scale, 1e-5, 1e5)
             round_zero_point = torch.clamp(-torch.round(zero_point_float), qmin, qmax)
+            code_lo, code_hi = _finite_code_bounds_for_weight(
+                weight, scale, round_zero_point, qmin, qmax, sym=False
+            )
             quant = torch.round(weight_view / scale) + round_zero_point
-            quant = torch.clamp(quant, qmin, qmax)
+            quant = torch.clamp(quant, code_lo, code_hi)
         dequant = (quant - round_zero_point) * scale
 
     return dequant.reshape_as(weight).to(dtype)

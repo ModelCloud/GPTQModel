@@ -98,6 +98,7 @@ compatible deployment engine.
 | **[G²PTQ](docs/g2ptq.md)** | GPTQ-family solver with block-refresh first-order gradient compensation and a per-row trust region. Produces ordinary GPTQ checkpoints. |
 | **[JointQ](docs/jointq.md)** | Joint scale-and-integer refinement of a GPTQ solution. Keeps the GPTQ checkpoint layout and kernels; opt-in through `GPTQConfig(jointq=...)`. |
 | **[AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ)** | Activation-aware weight quantization, including dense and MoE workflows. |
+| **[MoEQuant](docs/moequant.md)** | Expert-Balanced Self-Sampling (EBSS) and Affinity-Guided Quantization (AGQ) for GPTQ/AWQ MoE calibration. It is not a checkpoint format. |
 | **[RTN](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md#rtn-w4a16-without-calibration)** | Round-to-nearest weight quantization when a calibration-free baseline is useful. |
 | **[Paro](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant)** | Low-bit weight quantization with learned rotations for accuracy recovery. [Affine fitting and optimization controls](docs/paro-optimization.md). [Fused rotation backward](docs/paro.md#fused-rotation-backward). |
 | **[MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md)** | Calibrated MXFP4 weights and activations, with native W4A4 inference and a W4A16 option. |
@@ -524,6 +525,7 @@ details are available in the [citation reference](https://github.com/ModelCloud/
 | [G²PTQ](docs/g2ptq.md) | Ruikang Liu et al. | [Paper](https://arxiv.org/abs/2609.31009) |
 | [GAR](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#group-aware-reordering-gar) | T. Gafni, A. Karnieli, and Y. Hanani, Intel | [Paper](https://arxiv.org/abs/2505.14638) |
 | [FOEM](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#foem-and-gptaq-correction) | Xingyu Zheng et al. | [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123) |
+| [MoEQuant](docs/moequant.md) | Zhixuan Chen, Xing Hu, Dawei Yang, Zukang Xu, Xu Chen, Zhihang Yuan, Sifan Zhou, Jiangyong Yu | [Paper](https://arxiv.org/abs/2505.03804) · [PMLR](https://proceedings.mlr.press/v267/chen25aa.html) · [Code](https://github.com/chenzx921020/MoEQuant) |
 | [Norm Tweaking](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#post-quantization-norm-tuning) | Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu | [Paper](https://arxiv.org/abs/2309.02784) |
 | [Fast Hadamard Transform](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#hadamard-dimensions-and-implementation-selection) | Tri Dao, Dao-AILab | [Code](https://github.com/Dao-AILab/fast-hadamard-transform) |
 | [Marlin](https://github.com/ModelCloud/GPTQModel/wiki/Kernel-Backends-Reference#marlin-and-caller-owned-scratch) | Elias Frantar et al. | [Paper](https://arxiv.org/abs/2408.11743) |
