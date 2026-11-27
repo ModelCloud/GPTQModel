@@ -967,6 +967,132 @@ def test_inkling2_loop_looped_capture_populates_lm_head_banks():
         )
 
 
+def test_inkling2_loop_looped_lm_head_banks_use_batch_identity():
+    """#6130: the final bank follows the batch, not the replay-call order.
+
+    ``ForwardExecutor.run_parallel`` splits the batches into contiguous
+    per-device segments and submits them interleaved (0, 8, 1, 9, ... on two
+    GPUs). The lm_head stage still reads ``banks[batch_index]`` in batch order,
+    so a bank keyed by a global replay counter pairs a batch with another
+    batch's residual bank: ``final_input`` cats different sequence lengths and
+    raises, or silently calibrates the head on the wrong activations. Replay
+    twice per batch to also pin one bank entry per batch.
+    """
+
+    configuration, modeling = _inkling2_modules()
+    definition = MODEL_MAP["inkling2_loop"]
+    config = _tiny_config(
+        configuration,
+        num_hidden_layers=15,
+        loop_config={"core_start": 6, "core_end": 12, "num_passes": 3, "gate_rank": 4},
+    )
+    torch.manual_seed(0)
+    model = modeling.Inkling2LoopForConditionalGeneration(config).float().eval()
+    assert _convert_model_with_defuser(definition, model, cleanup_original=False)
+    layers, layer_names = get_layers_with_prefixes(model, definition.extract_layers_node())
+    language_model = model.model.language_model
+    final_layer = layers[-1]
+
+    final_args = []
+    final_outputs = []
+
+    def capture_final_input(module, args):
+        final_args.append(
+            {
+                "bank": args[0].detach().clone(),
+                "hidden": args[1].detach().clone(),
+            }
+        )
+
+    def capture_output(module, args, output):
+        final_outputs.append(output.detach().clone())
+
+    handles = [language_model.final_input.register_forward_pre_hook(capture_final_input)]
+    handles.append(final_layer.register_forward_hook(capture_output))
+    # Eight batches of different lengths: pairing batch 1 with batch 4's bank
+    # makes ``final_input`` fail instead of silently producing a head input.
+    lengths = (12, 9, 14, 7, 11, 8, 13, 10)
+    examples = [
+        {
+            "input_ids": torch.randint(0, 64, (1, length)),
+            "attention_mask": torch.ones(1, length, dtype=torch.long),
+        }
+        for length in lengths
+    ]
+    try:
+        with torch.no_grad():
+            for example in examples:
+                model(**example, use_cache=False)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert len(final_args) == len(examples)
+    assert len(final_outputs) == len(examples)
+
+    previous = definition.require_load_processor
+    definition.require_load_processor = False
+    try:
+        wrapper = definition(model=model, quantized=False, quantize_config=None)
+    finally:
+        definition.require_load_processor = previous
+    wrapper.quantize_config = SimpleNamespace(
+        device=torch.device("cpu"),
+        activation_mode=None,
+        activation_recipe=None,
+        offload_to_disk=False,
+        compute_device_filter=None,
+    )
+
+    wrapper.build_quantization_input_cache(
+        layers=layers,
+        calibration_data=examples,
+        use_cache=False,
+        layer_names=layer_names,
+    )
+    bucket = wrapper._looped_per_layer[id(final_layer)]
+    assert len(bucket["layer_inputs"]) == len(examples)
+
+    # Two contiguous segments on two devices, submitted interleaved exactly
+    # like ``ForwardExecutor.run_parallel``. Two rounds stand for the per-subset
+    # replays of the last decoder layer.
+    replay_order = [0, 4, 1, 5, 2, 6, 3, 7]
+    assert replay_order != sorted(replay_order)
+    for _ in range(2):
+        for batch_index in replay_order:
+            additional_inputs = dict(bucket["layer_input_kwargs"][batch_index])
+            additional_inputs["attention_mask"] = bucket["attention_masks"][batch_index]
+            additional_inputs["position_ids"] = bucket["position_ids"][batch_index]
+            additional_inputs["use_cache"] = False
+            wrapper.prepare_layer_replay_kwargs(
+                layer=final_layer,
+                layer_input=list(bucket["layer_inputs"][batch_index]),
+                additional_inputs=additional_inputs,
+                target_device=torch.device("cpu"),
+            )
+
+    replayed = wrapper.lm_head_pre_quantize_generate_hook(
+        [[output] for output in final_outputs]
+    )
+    for batch_index, batch_final in enumerate(final_args):
+        expected = language_model.norm(
+            language_model.final_input(batch_final["bank"], batch_final["hidden"])[0]
+        )
+        torch.testing.assert_close(
+            replayed[batch_index][0],
+            expected,
+            atol=1e-6,
+            rtol=0,
+            msg=f"lm_head calibration batch {batch_index}",
+        )
+
+    banks = wrapper._inkling2_loop_final_block_banks
+    assert sorted(banks) == list(range(len(examples)))
+    assert len(banks) == len(examples), "one final bank per calibration batch"
+    for batch_index, batch_final in enumerate(final_args):
+        torch.testing.assert_close(banks[batch_index], batch_final["bank"])
+
+
 @pytest.fixture(scope="module")
 def inkling2_awq_case():
     """A float32 tiny model plus each layer's replay inputs from one forward."""

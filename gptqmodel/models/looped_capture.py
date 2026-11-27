@@ -116,6 +116,10 @@ class LoopedLayerCaptureMixin:
             for layer in layers
         }
         handles = []
+        # Capture order is the cache order the replay stage uses. A definition
+        # may need it to key per-batch replay state that must not follow the
+        # (possibly interleaved) replay submission order.
+        self._looped_capture_batch_index = None
 
         def make_hook(layer):
             def hook(module, args, kwargs):
@@ -170,9 +174,13 @@ class LoopedLayerCaptureMixin:
                 layer.register_forward_pre_hook(make_hook(layer), with_kwargs=True)
             )
         try:
-            for example in calibration_data:
+            for batch_index, example in enumerate(calibration_data):
                 example = self.move_input_capture_example(example, device)
-                self.model(**example, use_cache=False)
+                self._looped_capture_batch_index = batch_index
+                try:
+                    self.model(**example, use_cache=False)
+                finally:
+                    self._looped_capture_batch_index = None
         finally:
             for handle in handles:
                 handle.remove()
