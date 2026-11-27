@@ -23,7 +23,8 @@ to extend, see the audits from [Nov 17](references/2026-11-17-regressions.md),
 [Nov 18](references/2026-11-18-regressions.md), [Nov 19](references/2026-11-19-regressions.md),
 [Nov 20](references/2026-11-20-regressions.md), [Nov 21](references/2026-11-21-regressions.md),
 [Nov 23](references/2026-11-23-regressions.md), [Nov 24](references/2026-11-24-regressions.md),
-[Nov 25](references/2026-11-25-regressions.md) and [Nov 26](references/2026-11-26-regressions.md).
+[Nov 25](references/2026-11-25-regressions.md), [Nov 26](references/2026-11-26-regressions.md)
+and [Nov 27](references/2026-11-27-regressions.md).
 
 ## 1. Write the invariant before the patch
 
@@ -166,6 +167,12 @@ the retry device: weights, Hessians, permutations, group quantizers, and scales.
 Test a non-memory exception separately: it must propagate, not trigger an OOM
 fallback. Bound retries, require monotonic progress (for example shrinking the
 effective batch), and reset retry state between top-level calls.
+
+If a solver can delegate to its parent when calibration statistics are absent,
+install the variant's statistics and inject the fault inside its own block
+update. Pair a configured recovery with the same fault and recovery disabled.
+Exercise missing statistics separately through the public entry point. A G2PTQ
+fixture that always delegates can pass without ever running grouped compensation.
 
 After cancellation/error, assert hook removal, weight/device restoration,
 released temporary references, completed/failed futures, and the absence of
@@ -332,6 +339,13 @@ processor actually packs it; a close replay tensor is not evidence.
   requires rejection, test the first invalid stored field and the last valid
   payload. For a scale that rounds to zero, include a genuinely zero row
   alongside a tiny nonzero row and inspect both scales and codes.
+- **Refinement after fitting.** Give a hard candidate a better wide objective
+  than a finite initializer but a reconstruction that overflows on replay.
+  Prove both properties in the fixture. Check the returned replay tensor and
+  recompute the reported objective from the actual packed codes and stored
+  scales. Include an initializer that would change if regenerated from its
+  own code, and a legal move that must improve the export. See the
+  [GSQ and AWQ fixtures](references/2026-11-27-regressions.md).
 - **Grid refresh order.** When a refit reads weights with deferred updates,
   split a quantization group across two processing blocks. Compare grid parameters
   and discrete codes with a one-column-at-a-time solve. When convergence and
