@@ -273,10 +273,11 @@ if TRITON_AVAILABLE:
             buffered_update = update.to(tl.bfloat16)
 
         # The buffer-dtype cast can turn a finite FP32 value into an inf, so
-        # check the casted record as well as the FP32 output.
-        bad_o = (output != output) | (tl.abs(output) == float("inf"))
-        bad_u = (buffered_update != buffered_update) | (tl.abs(buffered_update) == float("inf"))
-        bad_k = (buffered_key != buffered_key) | (tl.abs(buffered_key) == float("inf"))
+        # check the casted record as well as the FP32 output. NaN and infinity
+        # both fail the ordered comparison, which avoids the ``x != x`` idiom.
+        bad_o = ~(tl.abs(output) < float("inf"))
+        bad_u = ~(tl.abs(buffered_update) < float("inf"))
+        bad_k = ~(tl.abs(buffered_key) < float("inf"))
         bad_count = tl.sum(bad_o.to(tl.int32)) + tl.sum(bad_u.to(tl.int32)) + tl.sum(bad_k.to(tl.int32))
         tl.store(bad_ptr + pid, bad_count > 0)
 
