@@ -16,10 +16,12 @@ from gptqmodel.nn_modules.qlinear.cptc import CPTCLinear
 from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.quantization.cptc import (
     CPTCSpec,
+    _resolve_storage_device,
     decode_e2m5,
     decode_weight,
     gaussian_table,
     pack_states,
+    quantize_weight,
     snap_e2m5,
     state_indices,
     unpack_states,
@@ -89,6 +91,13 @@ def cptc_gpu():
     ops = cptc.native_ops(device)
     assert ops is not None, cptc._EXTENSION.last_error_message()
     return device, ops
+
+
+@pytest.fixture(scope="module")
+def cptc_two_accelerators():
+    if torch.cuda.device_count() < 2:
+        pytest.skip("CPTC cross-device storage needs two accelerator devices")
+    return torch.device("cuda", 0), torch.device("cuda", 1)
 
 
 def test_e2m5_bytes_and_rounding_boundaries():
@@ -270,6 +279,123 @@ def test_native_linear_matches_fp64_and_keeps_packed_state(cptc_gpu, dtype, rows
     assert not any(isinstance(value, torch.Tensor) for value in vars(layer).values())
 
 
+def test_cptc_storage_device_resolution_is_explicit():
+    cpu = torch.device("cpu")
+    cuda0 = torch.device("cuda:0")
+    cuda1 = torch.device("cuda:1")
+    assert _resolve_storage_device(cpu, cuda0, None) == cpu
+    assert _resolve_storage_device(cuda1, cuda1, None) == cuda1
+    assert _resolve_storage_device(cuda1, cuda0, cuda0) == cuda0
+    with pytest.raises(ValueError, match="storage_device"):
+        _resolve_storage_device(cuda1, cuda0, None)
+
+
+def test_quantize_weight_rejects_meta_storage_device():
+    spec = CPTCSpec(bits=4, trellis_depth=4)
+    weight = torch.ones((1, 128))
+    with pytest.raises(ValueError, match=r"storage_device.*meta"):
+        quantize_weight(weight, spec, device=weight.device, storage_device="meta")
+
+    payload = quantize_weight(weight, spec, device=weight.device, storage_device="cpu")
+    assert all(tensor.device == weight.device for tensor in payload)
+    packed, table, coeffs, scales = payload
+    decoded = _decode_oracle(packed, table, coeffs, scales, spec, weight.shape[1])
+    torch.testing.assert_close(decoded, weight, rtol=0.1, atol=0)
+
+
+def test_quantize_weight_payload_survives_custom_table_reuse():
+    spec = CPTCSpec(bits=4, trellis_depth=4)
+    table = gaussian_table(spec, "cpu")
+    weight = torch.ones(1, 128)
+    payload = quantize_weight(weight, spec, device=weight.device, storage_device="cpu", table=table)
+    expected = _decode_oracle(*payload, spec, weight.shape[1])
+    torch.testing.assert_close(expected, weight, rtol=0.1, atol=0)
+
+    table.zero_()
+    actual = _decode_oracle(*payload, spec, weight.shape[1])
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_quantize_weight_requires_storage_device_between_accelerators(cptc_two_accelerators):
+    source, compute = cptc_two_accelerators
+    spec = CPTCSpec(bits=4, trellis_depth=8, block_size=128)
+    weight = torch.randn((8, 128), generator=torch.Generator().manual_seed(17)).to(source)
+    with pytest.raises(ValueError, match="storage_device"):
+        quantize_weight(weight, spec, device=compute)
+
+
+@pytest.mark.parametrize("storage", ("compute", "weight", "cpu"))
+def test_quantize_weight_storage_device_owns_returned_payload(cptc_two_accelerators, storage):
+    source, compute = cptc_two_accelerators
+    spec = CPTCSpec(bits=4, trellis_depth=8, block_size=128)
+    weight = torch.randn((8, 128), generator=torch.Generator().manual_seed(29)).to(source)
+    target = {"compute": compute, "weight": source, "cpu": torch.device("cpu")}[storage]
+
+    actual = quantize_weight(weight, spec, device=compute, storage_device=target)
+    assert all(tensor.device == target for tensor in actual)
+
+    reference = quantize_weight(weight.to(compute), spec, device=compute)
+    for actual_tensor, expected_tensor in zip(actual, reference):
+        assert torch.equal(actual_tensor.to(compute), expected_tensor)
+
+
+def test_quantize_weight_keeps_cpu_storage_for_gpu_compute(cptc_gpu):
+    device, _ = cptc_gpu
+    spec = CPTCSpec(bits=4, trellis_depth=8, block_size=128)
+    weight = torch.randn((8, 128), generator=torch.Generator().manual_seed(31))
+
+    actual = quantize_weight(weight, spec, device=device)
+    assert all(tensor.device.type == "cpu" for tensor in actual)
+
+    reference = quantize_weight(weight, spec, device=device, storage_device=device)
+    for actual_tensor, expected_tensor in zip(actual, reference):
+        assert torch.equal(actual_tensor, expected_tensor.cpu())
+
+
+def test_cptc_linear_pack_reuses_encoded_storage_under_inference_mode(monkeypatch):
+    source = torch.nn.Linear(145, 3, bias=False)
+    layer = CPTCLinear(4, 145, 3, trellis_depth=4)
+    payload = None
+
+    def record_payload(*args, **kwargs):
+        nonlocal payload
+        payload = quantize_weight(*args, **kwargs)
+        return payload
+
+    monkeypatch.setattr("gptqmodel.nn_modules.qlinear.cptc.quantize_weight", record_payload)
+    with torch.inference_mode():
+        layer.pack_original(source)
+
+    for name, encoded in zip(layer.checkpoint_required_buffers(), payload, strict=True):
+        stored = layer.state_dict()[name]
+        assert not stored.is_inference()
+        assert stored.data_ptr() == encoded.data_ptr(), name
+
+    layer.post_init()
+    inputs = torch.randn((2, 145), generator=torch.Generator().manual_seed(431))
+    decoded = _decode_oracle(*payload, layer.spec, source.in_features)
+    expected = (inputs.double() @ decoded.double().T).float()
+    torch.testing.assert_close(layer(inputs), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_cptc_linear_pack_uses_its_storage_target(cptc_two_accelerators):
+    source_device, compute_device = cptc_two_accelerators
+    source = torch.nn.Linear(128, 8, bias=False, dtype=torch.float32, device=source_device)
+    layer = CPTCLinear(4, 128, 8, trellis_depth=8).to(source_device)
+    layer.pack_original(source, device=compute_device)
+
+    assert all(
+        getattr(layer, name).device == source_device
+        for name in layer.CHECKPOINT_REQUIRED_BUFFERS
+    )
+    layer.post_init()
+    inputs = torch.randn((2, 128), generator=torch.Generator().manual_seed(37)).to(source_device)
+    with torch.inference_mode():
+        output = layer(inputs)
+    assert output.device == source_device
+    assert torch.isfinite(output).all()
+
+
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16, torch.float32))
 def test_cpu_linear_fp32_bias_and_empty_input(dtype):
     layer = CPTCLinear(4, 128, 4, True)
@@ -351,6 +477,7 @@ def test_gptqmodel_cptc_save_reload_and_resave(tmp_path, pack_on_gpu, yaqa, requ
     PreTrainedTokenizerFast(tokenizer_object=tokenizer, unk_token="[UNK]").save_pretrained(dense)
     pack_device = request.getfixturevalue("cptc_gpu")[0] if pack_on_gpu else torch.device("cpu")
     qcfg = CPTCConfig(bits=4, trellis_depth=8, yaqa=yaqa, offload_to_disk=False, device=pack_device,
+                      compute_device_filter=lambda devices: [d for d in devices if d == pack_device],
                       dynamic={"+:.*q_proj$": {"bits": 3}})
     model = GPTQModel.load(str(dense), quantize_config=qcfg, dtype=torch.float32)
     encoder_calls = []

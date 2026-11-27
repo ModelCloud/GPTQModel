@@ -145,7 +145,12 @@ class CPTCLinear(WeightOnlyQuantLinear):
                 weight, self.spec, sketch, device=device, seed=self.yaqa_seed, name=self.name or "",
             )
         else:
-            packed, table, coeffs, scale = quantize_weight(weight, self.spec, device=device)
+            # Allocate regular checkpoint tensors so registration can reuse their storage
+            # when the caller is in inference mode.
+            with torch.inference_mode(False):
+                packed, table, coeffs, scale = quantize_weight(
+                    weight, self.spec, device=device, storage_device=target
+                )
             signs = ()
         # Direct-pack may be called inside the looper's inference_mode scope.
         # Keep checkpoint buffers usable by ordinary state_dict and move APIs.
