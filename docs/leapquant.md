@@ -53,7 +53,7 @@ model.enable_state_quant(None)  # use the unquantized path for new caches
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `bits` | `8` | Symmetric code width: `4`, `6`, or `8`. 8 is the production point. |
+| `bits` | `8` | Symmetric code width: `4`, `6`, or `8`. 4/6-bit codes are bit-packed; 8-bit is the production accuracy point. |
 | `window` | `16` | Tokens between state quantizations. `1` is per-token quantization. |
 | `rank` | `4` | Compensator Tokens. `0` disables them; `6` is recommended for 4/6-bit. |
 | `smooth` | `True` | Key-row residual smoothing. |
@@ -124,9 +124,9 @@ flowchart TD
 | --- | --- | --- |
 | Generation cache | The generation framework creates the default dense cache for Qwen3.5, Qwen3.5-MoE, Qwen3-Next and GLM-5.3. | The decoder's LeapQuant policy selects a packed recurrent cache before the first forward. |
 | Decode state | `KimiDeltaAttention`, `Qwen3_5GatedDeltaNet`, `Qwen3_5MoeGatedDeltaNet`, `Qwen3NextGatedDeltaNet`, and `Glm5NextTextLinearAttention` read and rewrite a dense recurrent tensor through the cache layer. | The cache layer owns a `LeapQuantState`; decode replays the packed checkpoint and buffered records, then re-quantizes at the window boundary. |
-| Cache ownership | A Transformers `LinearAttentionLayer` or `KimiDeltaCacheLayer` stores the dense recurrent tensor. | `LeapQuantLinearAttentionLayer` or `KimiDeltaCacheLayer(state_quant=...)` stores int8 codes, scales, Compensator factors, and the window buffer; the dense slot stays empty. |
+| Cache ownership | A Transformers `LinearAttentionLayer` or `KimiDeltaCacheLayer` stores the dense recurrent tensor. | `LeapQuantLinearAttentionLayer` or `KimiDeltaCacheLayer(state_quant=...)` stores packed codes, scales, Compensator factors, and the window buffer; the dense slot stays empty. |
 | Prefill | The port kernel writes the final dense state. | The same dense kernel runs, then `LeapQuantState.quantize_` checkpoints the final state and clears the window. |
-| Invalid cache inputs | Ports process input masks and cache operations for their dense recurrence. | The packed path rejects padding, packed sequence boundaries, crop, and live batch expansion before updating the cache. |
+| Invalid cache inputs | Ports process input masks and cache operations for their dense recurrence. | The packed path rejects padding, packed sequence boundaries, crop, live batch expansion, and a changed state shape before updating the cache. |
 | Default | Dense FP32 recurrent state. | Unchanged: `state_quant=None` returns the original cache and kernel path. |
 
 Prefill uses the port's existing FP32 delta-rule kernel: the packed checkpoint
@@ -145,23 +145,66 @@ the original state. The model ports use their own prefill kernels.
 
 The persistent representation is:
 
-```
-int8 codes [B, H, K, V]
-float32 key scale [B, H, K]
-float32 value scale [B, H, V]
-float16 compensator factors [B, H, K, R] and [B, H, V, R]
-window keys/updates [B, H, L, K/V] in the configured buffer dtype
-window decay records [B, H, L, K] for KDA or [B, H, L, 1] for GDN, FP32
+| Component | Stored layout |
+| --- | --- |
+| 8-bit codes | `int8 [B, H, K, V]` |
+| 4-bit codes | `uint8 [B, H, K, ceil(V/2)]`, two signed nibbles per byte |
+| 6-bit codes | `uint8 [B, H, K, 3*ceil(V/4)]`, four signed 6-bit codes per three bytes |
+| key scale | `float32 [B, H, K]` |
+| value scale | `float32 [B, H, V]` |
+| compensator factors | `float16 [B, H, K, R]` and `float16 [B, H, V, R]` |
+| window keys/updates | `[B, H, L, K/V]` in the configured buffer dtype |
+| window decay records | `[B, H, L, K]` for KDA or `[B, H, L, 1]` for GDN, FP32 |
+
+The packed widths use the same symmetric integer grid as 8-bit:
+`code = round(residual / scale)`, clamped to `[-qmax, qmax]` with
+`qmax = 2^(bits-1) - 1`. The negative endpoint `-2^(bits-1)` is unused, so
+every stored code fits the symmetric range and the packer never needs an
+out-of-range sentinel.
+
+For 4-bit rows, the first code occupies the low nibble and the second the high
+nibble. For 6-bit rows, four codes form one 24-bit little-endian group: code 0
+is bits 0-5, code 1 is bits 6-11, code 2 is bits 12-17, and code 3 is bits
+18-23. Codes use two's-complement representation, so unpacking sign-extends
+each field. A row whose `V` is not a whole number of groups is padded with
+zero codes; the padding is not part of the logical state and is discarded when
+the row is unpacked.
+
+For `K=V=128`, `L=16`, `R=4`, the checkpoint is about 0.69 bytes per state
+element at 4-bit, 0.94 at 6-bit, and 1.19 at 8-bit before the window buffer.
+The buffer adds about 8 KiB per head for GDN and about 16 KiB per head for
+KDA. The buffer is part of `storage_bytes()` and is never omitted from memory
+accounting.
+
+```mermaid
+flowchart LR
+    A["logical signed codes<br/>[B, H, K, V]"] --> B{"bits"}
+    B -->|8| C["int8 codes<br/>[B, H, K, V]"]
+    B -->|4| D["uint8 nibble pairs<br/>[B, H, K, ceil(V/2)]"]
+    B -->|6| E["uint8 6-bit groups<br/>[B, H, K, 3*ceil(V/4)]"]
+    C --> F["dequantize"]
+    D --> G["unpack to transient int8"]
+    E --> G
+    G --> F
 ```
 
-For `K=V=128`, `L=16`, `R=4`, the 8-bit checkpoint is about 1.19 bytes per
-state element before the window buffer; the buffer adds about 8 KiB per head
-for GDN and about 16 KiB per head for KDA. The buffer is part of
-`storage_bytes()` and is never omitted from memory accounting.
+| Area | Before | After |
+| --- | --- | --- |
+| 4-bit code storage | `int8 [B, H, K, V]`, 1 B/elem | `uint8` nibble pairs, 0.5 B/elem |
+| 6-bit code storage | `int8 [B, H, K, V]`, 1 B/elem | `uint8` 4-in-3 groups, 0.75 B/elem |
+| 8-bit code storage | `int8 [B, H, K, V]` | unchanged |
+| `checkpoint_bytes()` | identical for 4/6/8-bit | decreases with `bits` |
+| `packed_state()` | format version 1, int8 codes | format version 2, `code_container` plus packed codes |
+| Dequantize | reads int8 codes directly | unpacks to a transient int8 tensor, then dequantizes |
 
-In this release the 4-bit and 6-bit modes use the same int8 code container as
-8-bit. Their accuracy is available, but their packed-storage benefit is not;
-packed 4/6-bit containers are a follow-up. 8-bit is the recommended mode.
+`packed_state()` now reports format version 2 and the `code_container` field.
+Version 1 snapshots stored one int8 element per code and are rejected on
+restore.
+
+Unpacking is transient: the logical `int8` tensor is consumed by the current
+dequantization and is never retained as a second persistent copy. 8-bit remains
+the recommended accuracy point, and 4/6-bit now reduce checkpoint storage as
+well as code width.
 
 ## Constraints
 
@@ -171,7 +214,10 @@ The implementation fails closed instead of silently degrading:
   before masking or changing the cache, including during single-token decode.
 - The packed path rejects `cu_seqlens` and other packed sequence boundaries.
 - Use the default dynamic cache for generation with LeapQuant. A cache can
-  reorder live sequences at the same batch size and rejects live expansion.
+  reorder live sequences at the same batch size. A live cache rejects
+  expansion: `batch_repeat_interleave` raises, and a forward whose batch size
+  or state geometry differs from the existing packed state raises instead of
+  rebuilding it. Device moves keep the packed state.
 - The packed cache supports ordinary generation and cached continuation.
   Operations that require recurrent-state rollback raise.
 - Training and autograd are not supported.
@@ -188,9 +234,10 @@ python -m pytest tests/test_leapquant_state.py tests/test_leapquant_models.py -q
 
 `test_leapquant_state.py` compares the quantizer against a hand-written FP32
 delta-rule recurrence, covers 4/6/8-bit, window boundaries, Compensator rank,
-smoothing, storage, reorder, and non-finite rejection. `test_leapquant_models.py`
+smoothing, packed-container bit layout, every representable code, partial rows,
+storage accounting, reorder, and non-finite rejection. `test_leapquant_models.py`
 checks Kimi K3, Qwen3.5, Qwen3.5-MoE, Qwen3-Next, and GLM-5.3 prefill/decode
-parity, packed-state ownership, cache-layer selection, padded-mask and
+parity, packed-code cache ownership, cache-layer selection, padded-mask and
 `cu_seqlens` rejection, and the public toggle. The regressions also cover
 `generate()`, cache continuation after offload and reorder, and retries after an
 invalid packed restore or a quantization failure.
@@ -201,6 +248,9 @@ throughput-optimized kernel. Measure it with:
 ```bash
 python scripts/benchmark_leapquant_state.py --device cuda
 ```
+
+Pass `--bits 4` or `--bits 6` to measure the packed decode path; the script
+also prints the checkpoint bytes for the selected width.
 
 On one accelerator, with `K=V=128`, 8 heads, `window=16`, `rank=4`, 8-bit, and
 model-shaped inputs:

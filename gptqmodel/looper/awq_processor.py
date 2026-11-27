@@ -66,6 +66,7 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from ..quantization.fallback_smooth import affine_range_with_zero, symmetric_range_from_bounds
+from ..quantization.quantizer import narrowing_loses_codes
 from ..utils.attn_mask import (
     align_single_head_capture,
     exclude_attention_sinks,
@@ -5595,6 +5596,7 @@ class AWQProcessor(LoopProcessor):
 
         org_w_shape = w.shape
         input_dtype = w.dtype
+        pack_weight = None
         sym = self.qcfg.sym if sym is None else bool(sym)
         bits = int(self.qcfg.runtime_bits if bits is None else bits)
         configured_group_size = (
@@ -5644,6 +5646,14 @@ class AWQProcessor(LoopProcessor):
                 codes = torch.clamp(torch.round(w / scales) + zeros, 0, max_int)
                 if repair:
                     codes = _awq_bound_affine_codes(codes, zeros, scales, max_int)
+                if narrowing_loses_codes(input_dtype, bits, sym):
+                    # The packers recover codes from the narrowed reconstruction
+                    # with `round(Q / scale) + zero`. BF16 cannot round-trip
+                    # every 8-bit asymmetric code, so keep the exact FP32
+                    # reconstruction for packing.
+                    pack_weight = (
+                        (codes.float() - zeros.float()) * scales.float()
+                    ).reshape(org_w_shape)
                 w = (codes - zeros) * scales
                 zeros = zeros.view(org_w_shape[0], -1)
         elif not sym:
@@ -5656,6 +5666,12 @@ class AWQProcessor(LoopProcessor):
             codes = torch.clamp(torch.round(w / scales) + zeros, 0, max_int)
             if repair:
                 codes = _awq_bound_affine_codes(codes, zeros, scales, max_int)
+            if narrowing_loses_codes(input_dtype, bits, sym):
+                # See the strategy branch above: the packer must not recover
+                # codes from a BF16-rounded 8-bit asymmetric reconstruction.
+                pack_weight = (
+                    (codes.float() - zeros.float()) * scales.float()
+                ).reshape(org_w_shape)
             w = (codes - zeros) * scales
             zeros = zeros.view(org_w_shape[0], -1)
         else:
@@ -5699,6 +5715,7 @@ class AWQProcessor(LoopProcessor):
 
         w = w.reshape(org_w_shape).to(dtype=input_dtype)
 
+        self.pack_weight = pack_weight
         return w, scales, zeros
 
     @torch.inference_mode()
@@ -6767,6 +6784,11 @@ class AWQProcessor(LoopProcessor):
                 sym=module_sym,
                 strategy=fallback_strategy,
             )
+            # Exact FP32 reconstruction for packers that recover integer codes
+            # from the weight. BF16 cannot round-trip every 8-bit asymmetric
+            # code, so the narrowed replay copy is not a valid packing source.
+            pack_weight = getattr(self, "pack_weight", None)
+            self.pack_weight = None
 
             from ..quantization.gsq_scalar import gsq_enabled_for, refine_affine_scalar
 
@@ -6787,6 +6809,10 @@ class AWQProcessor(LoopProcessor):
                                  scales.dtype in (torch.float16, torch.bfloat16) else torch.float16),
                 )
                 wq, scales, zeros = fitted.weight, fitted.scales, fitted.zeros
+                if not fitted.skipped:
+                    # GSQ may move codes, so the pre-refinement reconstruction
+                    # no longer describes the packed grid.
+                    pack_weight = None
                 named_module.state["gsq_diagnostics"] = {
                     "objective": "weight_mse", "before": fitted.before,
                     "after": fitted.after, "learn_scales": gsq.learn_scales,
@@ -6795,6 +6821,8 @@ class AWQProcessor(LoopProcessor):
 
             if pad_cols:
                 wq = wq[:, :original_cols]
+                if pack_weight is not None:
+                    pack_weight = pack_weight[:, :original_cols]
                 if module_group_size > 0:
                     valid_groups = max(
                         1, math.ceil(original_cols / module_group_size)
@@ -6812,6 +6840,8 @@ class AWQProcessor(LoopProcessor):
                 # weight swap below and for the AWQ packers, which transpose
                 # it back into the Linear layout.
                 wq = wq.t().contiguous()
+                if pack_weight is not None:
+                    pack_weight = pack_weight.t().contiguous()
 
             named_module.stream_state_payload_to_cpu(
                 {
@@ -6819,6 +6849,9 @@ class AWQProcessor(LoopProcessor):
                     "q_zeros": zeros,
                 },
             )
+            if pack_weight is not None:
+                named_module.stream_state_payload_to_cpu({"pack_wq": pack_weight})
+                del pack_weight
             del scales, zeros
 
             if self.calculate_w_wq_diff:
@@ -7109,8 +7142,13 @@ class AWQProcessor(LoopProcessor):
             # need to clone to due to steamed pinned memory and access on diff thread
             q_zeros = module.state.pop("q_zeros").clone()
             q_scales = module.state.pop("q_scales").clone()
+            # Exact FP32 reconstruction staged when the narrowed replay copy
+            # cannot round-trip the packed codes.
+            pack_wq = module.state.pop("pack_wq", None)
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
+        if pack_wq is not None:
+            assert pack_wq.device == CPU
         resolved_cfg = get_resolved_module_config(module)
         layers = {module.full_name: self.gptq_model.model.get_submodule(module.full_name)}
         packed_source = layers[module.full_name]
@@ -7177,6 +7215,17 @@ class AWQProcessor(LoopProcessor):
                 module_name=module_label,
         ):
             with parent_module_lock(parent_key):
+                if pack_wq is not None:
+                    if pack_wq.shape != packed_source.weight.shape:
+                        raise RuntimeError(
+                            f"AWQProcessor: module `{module.full_name}` staged a "
+                            f"pack weight of shape {tuple(pack_wq.shape)} for a "
+                            f"weight of shape {tuple(packed_source.weight.shape)}."
+                        )
+                    # Pack from the exact reconstruction, not the narrowed
+                    # replay copy, so the stored codes match the quantizer's.
+                    packed_source.weight.data = pack_wq
+                    del pack_wq
                 packer_label = pack_module(
                     name=module.full_name,
                     qModules=qModules,

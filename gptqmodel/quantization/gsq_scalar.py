@@ -26,6 +26,7 @@ from ..utils.gemv import awq_gemv_codes
 from ..utils.logger import setup_logger
 from ..utils.packing_math import awq_packed_codes, awq_storage_dtype
 from .config import normalize_gsq_config
+from .quantizer import _finite_code_bounds
 
 
 log = setup_logger()
@@ -284,6 +285,8 @@ def hard_code_sweep(
     bits: int,
     offsets: torch.Tensor,
     block: int = _HARD_SWEEP_BLOCK,
+    code_lo: torch.Tensor | None = None,
+    code_hi: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """One Gauss-Seidel sweep over exported integer codes, accepted per row.
 
@@ -292,6 +295,8 @@ def hard_code_sweep(
     ``column_scale`` holds the stored scale of every ``[out, in]`` column, so a
     code step of ``d`` moves the reconstruction by ``column_scale * d``;
     ``metric`` is the factor ``row_loss`` projects through.
+    ``code_lo``/``code_hi`` optionally bound the codes whose reconstruction
+    the destination dtype can hold; without them the grid's own range is used.
 
     Blocks advance one after another inside the sweep, so the residual
     projection carries the off-diagonal Gram coupling that earlier blocks
@@ -313,9 +318,11 @@ def hard_code_sweep(
         stop = min(codes.shape[1], start + block)
         width = stop - start
         gradient = projected @ metric[start:stop].T
+        lo_block = 0 if code_lo is None else code_lo[:, start:stop].unsqueeze(-1)
+        hi_block = limit if code_hi is None else code_hi[:, start:stop].unsqueeze(-1)
         shifted = current[:, start:stop].unsqueeze(-1) + offsets.view(1, 1, -1)
-        valid = (shifted >= 0) & (shifted <= limit)
-        shifted = shifted.clamp(0, limit)
+        valid = (shifted >= lo_block) & (shifted <= hi_block)
+        shifted = shifted.clamp(lo_block, hi_block)
         delta = column_scale[:, start:stop].unsqueeze(-1) * (
             shifted - current[:, start:stop].unsqueeze(-1)
         )
@@ -340,6 +347,9 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
     baseline = weight.detach().clone()
     base_scales = scales.detach().float().clone()
     zero = zeros.detach().float().clone()
+    # A finite code grid can still reconstruct outside the replay dtype's
+    # range; the selected codes must stay inside it (#6000).
+    value_limit = torch.finfo(weight.dtype).max
     teacher_projected = teacher @ factor
     teacher_energy = teacher_projected.square().sum()
     if not bool(torch.isfinite(teacher_energy)):
@@ -410,6 +420,10 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
     floor = 1.0 - _HARD_ACCEPT_MARGIN
     for _ in range(rounds):
         # Candidate 1: move codes on the current scale table.
+        stored_scales = current_scales.to(scale_dtype).float()
+        code_lo, code_hi = _finite_code_bounds(
+            stored_scales, zero, 2**bits - 1, False, value_limit,
+        )
         searched = hard_code_sweep(
             current_codes,
             current_scales[:, group],
@@ -423,6 +437,8 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
             row_loss=row_loss,
             bits=bits,
             offsets=offsets,
+            code_lo=code_lo[:, group],
+            code_hi=code_hi[:, group],
         )
         code_rows = score_rows(searched, current_scales)
         accepts = code_rows < best_rows * floor
@@ -444,8 +460,15 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
             current_codes, zero, group, teacher, factor, decode,
             scale_dtype, current_scales,
         )
+        scale_lo, scale_hi = _finite_code_bounds(
+            scaled.to(scale_dtype).float(), zero, 2**bits - 1, False, value_limit,
+        )
+        fits = (
+            (current_codes >= scale_lo[:, group])
+            & (current_codes <= scale_hi[:, group])
+        ).all(dim=1)
         scale_rows = score_rows(current_codes, scaled)
-        accepts = scale_rows < best_rows * floor
+        accepts = (scale_rows < best_rows * floor) & fits
         if not bool(accepts.any()):
             break
         best_scales = torch.where(accepts.unsqueeze(-1), scaled, best_scales)
@@ -470,6 +493,13 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
     # Score the checkpoint that is actually written: the search runs in FP32,
     # so casting to the model dtype can round a code across a half step.
     exported_weight = best_weight.detach().to(weight.dtype)
+    finite_rows = torch.isfinite(exported_weight).all(dim=1)
+    if not bool(finite_rows.all()):
+        # The initializer itself can sit on a code whose reconstruction leaves
+        # the replay dtype's range. Keep that finite initializer for those rows
+        # instead of returning -inf from the narrowed decode.
+        exported_weight = torch.where(finite_rows.unsqueeze(-1), exported_weight, baseline)
+        best_scales = torch.where(finite_rows.unsqueeze(-1), best_scales, base_scales)
     after = float(loss(exported(exported_weight, best_scales)))
     if not torch.isfinite(torch.tensor(after)):
         raise ValueError("non-finite GSQ hard objective")
@@ -755,15 +785,40 @@ def refine_affine_scalar(
                 raise ValueError("non-finite scalar GSQ gradient")
             optimizer.step()
             with torch.no_grad():
-                selected = logits.masked_fill(~valid, -torch.inf).argmax(-1, keepdim=True)
-                hard_codes = codes.gather(-1, selected).squeeze(-1)
                 hard_scales = (base_scales * scale_delta.exp()).to(scale_dtype).float()
                 if packing in ("awq_gemv", "awq_gemv_fast"):
                     # Score the source scales we return: BF16 can round an
                     # FP16 candidate again before the packer stores it.
                     hard_scales = hard_scales.to(scales.dtype)
+                # The replay weight is narrowed to weight.dtype below. A code
+                # whose reconstruction leaves that dtype's finite range would
+                # store -inf and recover as code 0, so keep the hard selection
+                # on the representable grid before scoring it.
+                code_lo, code_hi = _finite_code_bounds(
+                    hard_scales.to(scale_dtype).float(), zero, 2**bits - 1, False,
+                    torch.finfo(weight.dtype).max,
+                )
+                code_lo = code_lo[:, groups].unsqueeze(-1)
+                code_hi = code_hi[:, groups].unsqueeze(-1)
+                step_valid = valid & (codes >= code_lo) & (codes <= code_hi)
+                selected = logits.masked_fill(~step_valid, -torch.inf).argmax(-1, keepdim=True)
+                hard_codes = codes.gather(-1, selected).squeeze(-1)
+                hard_codes = hard_codes.clamp(code_lo.squeeze(-1), code_hi.squeeze(-1))
                 candidate = decode(hard_codes, hard_scales).to(weight.dtype)
+                if not bool(torch.isfinite(candidate).all()):
+                    # The replay dtype cannot hold this reconstruction; keep
+                    # the current best instead of scoring a different export.
+                    history.append(best)
+                    continue
                 candidate_codes = recover_codes(candidate, hard_scales)
+                if bool(
+                    ((candidate_codes < code_lo.squeeze(-1))
+                     | (candidate_codes > code_hi.squeeze(-1))).any()
+                ):
+                    # The packer would recover a code outside the representable
+                    # grid from this weight; reject the candidate.
+                    history.append(best)
+                    continue
                 score = float(loss(decode(candidate_codes, hard_scales)))
                 if not torch.isfinite(torch.tensor(score)):
                     raise ValueError("non-finite scalar GSQ hard objective")

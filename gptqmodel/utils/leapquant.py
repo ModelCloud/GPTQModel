@@ -26,7 +26,7 @@ from transformers.generation.configuration_utils import GenerationMode
 _EPS = 1e-12
 _SUPPORTED_BITS = (4, 6, 8)
 _SUPPORTED_BUFFER_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
-_FORMAT_VERSION = 1
+_FORMAT_VERSION = 2
 _STATE_TENSORS = (
     "codes",
     "key_scale",
@@ -37,6 +37,79 @@ _STATE_TENSORS = (
     "buffer_updates",
     "buffer_alpha",
 )
+_CODE_CONTAINERS = {4: "packed4", 6: "packed6", 8: "int8"}
+
+
+def _packed_code_width(bits: int, value_dim: int) -> int:
+    """Return the stored code width for one ``[B, H, K, V]`` state row."""
+
+    if bits == 8:
+        return value_dim
+    if bits == 4:
+        return (value_dim + 1) // 2
+    return ((value_dim + 3) // 4) * 3
+
+
+def _code_dtype(bits: int) -> torch.dtype:
+    return torch.int8 if bits == 8 else torch.uint8
+
+
+def _pack_codes(codes: torch.Tensor, bits: int) -> torch.Tensor:
+    """Pack signed codes into the persistent byte container.
+
+    4-bit rows store two two's-complement nibbles per byte, low nibble first.
+    6-bit rows store four two's-complement codes in three bytes as one
+    little-endian 24-bit group. Partial groups are padded with zero codes.
+    """
+
+    if bits == 8:
+        return codes.to(torch.int8)
+    if codes.shape[-1] == 0:
+        return torch.empty(
+            (*codes.shape[:-1], _packed_code_width(bits, 0)), dtype=torch.uint8, device=codes.device,
+        )
+    if bits == 4:
+        pad = (-codes.shape[-1]) % 2
+        if pad:
+            codes = F.pad(codes, (0, pad))
+        unsigned = (codes.to(torch.int16) & 0xF).reshape(*codes.shape[:-1], -1, 2)
+        packed = unsigned[..., 0] | (unsigned[..., 1] << 4)
+        return packed.to(torch.uint8)
+    if bits == 6:
+        pad = (-codes.shape[-1]) % 4
+        if pad:
+            codes = F.pad(codes, (0, pad))
+        unsigned = (codes.to(torch.int16) & 0x3F).reshape(*codes.shape[:-1], -1, 4)
+        first, second, third, fourth = unsigned.unbind(dim=-1)
+        byte0 = first | ((second & 0x3) << 6)
+        byte1 = (second >> 2) | ((third & 0xF) << 4)
+        byte2 = (third >> 4) | (fourth << 2)
+        packed = torch.stack((byte0, byte1, byte2), dim=-1).reshape(*codes.shape[:-1], -1)
+        return packed.to(torch.uint8)
+    raise ValueError(f"unsupported LeapQuant code width: {bits}")
+
+
+def _unpack_codes(packed: torch.Tensor, bits: int, value_dim: int) -> torch.Tensor:
+    """Return the logical signed codes from the persistent byte container."""
+
+    if bits == 8:
+        return packed
+    if bits == 4:
+        unsigned = packed.to(torch.int16)
+        values = torch.stack((unsigned & 0xF, (unsigned >> 4) & 0xF), dim=-1)
+        values = values.reshape(*packed.shape[:-1], -1)[..., :value_dim]
+        return ((values ^ 0x8) - 0x8).to(torch.int8)
+    if bits == 6:
+        unsigned = packed.to(torch.int16).reshape(*packed.shape[:-1], -1, 3)
+        byte0, byte1, byte2 = unsigned.unbind(dim=-1)
+        first = byte0 & 0x3F
+        second = ((byte0 >> 6) & 0x3) | ((byte1 & 0xF) << 2)
+        third = ((byte1 >> 4) & 0xF) | ((byte2 & 0x3) << 4)
+        fourth = (byte2 >> 2) & 0x3F
+        values = torch.stack((first, second, third, fourth), dim=-1)
+        values = values.reshape(*packed.shape[:-1], -1)[..., :value_dim]
+        return ((values ^ 0x20) - 0x20).to(torch.int8)
+    raise ValueError(f"unsupported LeapQuant code width: {bits}")
 
 
 @dataclass(frozen=True)
@@ -255,6 +328,10 @@ class LeapQuantState:
         return self.factors_key.shape[-1]
 
     @property
+    def code_container(self) -> str:
+        return _CODE_CONTAINERS[self.config.bits]
+
+    @property
     def window_count(self) -> int:
         return self._window_count
 
@@ -272,7 +349,11 @@ class LeapQuantState:
         b, h, k, v = self.num_sequences, self.num_heads, self.key_dim, self.value_dim
         r = self.config.rank
         cfg = self.config
-        self.codes = torch.zeros((b, h, k, v), dtype=torch.int8, device=self.device)
+        self.codes = torch.zeros(
+            (b, h, k, _packed_code_width(cfg.bits, v)),
+            dtype=_code_dtype(cfg.bits),
+            device=self.device,
+        )
         self.key_scale = torch.ones((b, h, k), dtype=torch.float32, device=self.device)
         self.value_scale = torch.ones((b, h, v), dtype=torch.float32, device=self.device)
         self.factors_key = torch.zeros((b, h, k, r), dtype=torch.float16, device=self.device)
@@ -433,12 +514,17 @@ class LeapQuantState:
         _check_finite("key scale", key_scale)
         _check_finite("value scale", value_scale)
 
-        self.codes.copy_(codes.to(torch.int8))
+        self.codes.copy_(_pack_codes(codes.to(torch.int8), self.config.bits))
         self.key_scale.copy_(key_scale)
         self.value_scale.copy_(value_scale)
         self.factors_key.copy_(factors_key)
         self.factors_value.copy_(factors_value)
         self._clear_window()
+
+    def _codes_i8(self) -> torch.Tensor:
+        """Return the logical signed codes; packed widths unpack transiently."""
+
+        return _unpack_codes(self.codes, self.config.bits, self.value_dim)
 
     @torch.no_grad()
     def dequantize(self) -> torch.Tensor:
@@ -447,7 +533,7 @@ class LeapQuantState:
         with _fp32_context(self.codes.device):
             approx = self.factors_key.float() @ self.factors_value.float().transpose(-1, -2)
         residual = (
-            self.codes.float()
+            self._codes_i8().float()
             / self.config.qmax
             * self.value_scale[..., None, :]
             * self.key_scale[..., :, None]
@@ -650,6 +736,7 @@ class LeapQuantState:
         return {
             "format_version": _FORMAT_VERSION,
             "bits": self.config.bits,
+            "code_container": self.code_container,
             "window": self.config.window,
             "rank": self.rank,
             "smooth": self.config.smooth,
@@ -671,6 +758,7 @@ class LeapQuantState:
             raise ValueError("unsupported LeapQuant packed-state format version")
         expected = {
             "bits": self.config.bits,
+            "code_container": self.code_container,
             "window": self.config.window,
             "rank": self.rank,
             "smooth": self.config.smooth,
@@ -701,8 +789,10 @@ class LeapQuantState:
                 _check_finite(name, value)
             if name in ("key_scale", "value_scale") and not (value > 0).all():
                 raise ValueError(f"LeapQuant packed-state {name} must be positive")
-            if name == "codes" and not ((value >= -self.config.qmax) & (value <= self.config.qmax)).all():
-                raise ValueError("LeapQuant packed-state codes are outside the configured bit range")
+            if name == "codes":
+                logical = _unpack_codes(value, self.config.bits, self.value_dim)
+                if not ((logical >= -self.config.qmax) & (logical <= self.config.qmax)).all():
+                    raise ValueError("LeapQuant packed-state codes are outside the configured bit range")
             tensors[name] = value
         self.__dict__.update(tensors)
         self.window_count = count
@@ -779,7 +869,7 @@ class LeapQuantLinearAttentionLayer(LinearAttentionLayer):
     ) -> LeapQuantState:
         shape = (int(num_sequences), int(num_heads), int(key_dim), int(value_dim), int(gate_dim))
         device = torch.device(device)
-        if self._leapquant_shape != shape or self._leapquant is None or self._leapquant.device != device:
+        if self._leapquant is None:
             if self.state_quant is None:
                 raise RuntimeError("LeapQuant cache layer has no state_quant config")
             self._leapquant = LeapQuantState(
@@ -792,6 +882,14 @@ class LeapQuantLinearAttentionLayer(LinearAttentionLayer):
                 device=device,
             )
             self._leapquant_shape = shape
+        elif self._leapquant_shape != shape:
+            raise ValueError(
+                f"LeapQuant cache state was created with shape {self._leapquant_shape} "
+                f"and cannot be reused with {shape}; a live cache cannot change its batch "
+                "size or state geometry"
+            )
+        elif self._leapquant.device != device:
+            self._leapquant.to(device)
         return self._leapquant
 
     def update_recurrent_state(self, recurrent_states: torch.Tensor, state_idx: int = 0, **kwargs) -> None:

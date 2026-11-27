@@ -335,6 +335,45 @@ def test_unsupported_cache_operation_preserves_attention_prefix(operation):
     torch.testing.assert_close(cache.layers[0].keys, before, rtol=0, atol=0)
 
 
+def test_live_packed_state_rejects_shape_change():
+    layer = LeapQuantLinearAttentionLayer(
+        number_of_states=1,
+        state_quant=LeapQuantConfig(bits=8, window=4, rank=2),
+    )
+    state = layer.leapquant_state(1, 2, 8, 8, gate_dim=1, device="cpu")
+    torch.manual_seed(29)
+    state.quantize_(torch.randn(1, 2, 8, 8))
+    before = state.materialize().clone()
+
+    for shape in ((2, 2, 8, 8, 1), (1, 3, 8, 8, 1), (1, 2, 8, 4, 1)):
+        with pytest.raises(ValueError, match="cannot be reused"):
+            layer.leapquant_state(*shape[:4], gate_dim=shape[4], device="cpu")
+        assert layer._leapquant is state
+        torch.testing.assert_close(state.materialize(), before, rtol=0, atol=0)
+
+    assert layer.leapquant_state(1, 2, 8, 8, gate_dim=1, device="cpu") is state
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="accelerator required for cache device move")
+def test_packed_state_follows_device_change():
+    layer = LeapQuantLinearAttentionLayer(
+        number_of_states=1,
+        state_quant=LeapQuantConfig(bits=8, window=4, rank=2),
+    )
+    state = layer.leapquant_state(1, 2, 8, 8, gate_dim=1, device="cuda")
+    torch.manual_seed(37)
+    state.quantize_(torch.randn(1, 2, 8, 8, device="cuda"))
+    expected = state.materialize().cpu().clone()
+
+    assert layer.leapquant_state(1, 2, 8, 8, gate_dim=1, device="cpu") is state
+    assert state.device.type == "cpu"
+    torch.testing.assert_close(state.materialize(), expected, rtol=1e-5, atol=1e-6)
+
+    assert layer.leapquant_state(1, 2, 8, 8, gate_dim=1, device="cuda") is state
+    assert state.device.type == "cuda"
+    torch.testing.assert_close(state.materialize().cpu(), expected, rtol=1e-5, atol=1e-6)
+
+
 def test_generate_validates_new_cache_policy_and_honors_caller_cache():
     model = Qwen3_5ForCausalLM(_qwen_config()).eval()
     model.model._gptqmodel_state_quant = LeapQuantConfig(rank=2)
@@ -423,6 +462,32 @@ def test_qwen_quantized_cache_matches_fp32(device):
     assert layer.recurrent_states[0] is None
     assert quantized.past_key_values.get_seq_length() == ids.shape[1]
     assert (baseline_logits - quantized_logits).abs().max().item() < 1e-3
+
+
+@pytest.mark.parametrize("device", _devices())
+@pytest.mark.parametrize("bits", [4, 6])
+def test_qwen_packed_code_container_decodes_from_cache(device, bits):
+    torch.manual_seed(123)
+    model = Qwen3_5ForCausalLM(_qwen_config()).to(device).eval()
+    ids = torch.tensor([[1, 5, 7, 9, 11, 13]], device=device)
+    with eager_torch_ssm_kernels(), torch.no_grad():
+        baseline = model(ids[:, :5], use_cache=True)
+        baseline_logits = model(ids[:, 5:], past_key_values=baseline.past_key_values).logits
+
+    model.model._gptqmodel_state_quant = LeapQuantConfig(bits=bits, window=4, rank=2)
+    with eager_torch_ssm_kernels(), torch.no_grad():
+        quantized = model(ids[:, :5], use_cache=True)
+        quantized_logits = model(ids[:, 5:], past_key_values=quantized.past_key_values).logits
+
+    layer = quantized.past_key_values.layers[0]
+    assert layer._leapquant is not None
+    assert layer._leapquant.codes.dtype == torch.uint8
+    assert layer._leapquant.code_container == f"packed{bits}"
+    expected_width = 4 if bits == 4 else 6
+    assert layer._leapquant.codes.shape[-1] == expected_width
+    assert layer._leapquant.checkpoint_bytes() < 384
+    assert layer._leapquant.window_count == 1
+    assert (baseline_logits - quantized_logits).abs().max().item() < 1e-5
 
 
 @pytest.mark.parametrize("device", _devices())
