@@ -1940,6 +1940,8 @@ class LazyTurtle:
             # succeeds. Resolve the raw source weight explicitly so the auto
             # decoder sees the packed representation.
             if "weight" not in tensors:
+                self._load_fused_mx_weight_tensors(path, tensors)
+            if "weight" not in tensors:
                 source_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(
                     path,
                     "weight",
@@ -2019,6 +2021,39 @@ class LazyTurtle:
                                 f"Fused quantization source shape mismatch: {source_name} -> {path}"
                             )
                         tensors["weight"] = weight.clone()
+
+            # A defused expert bias lives on the fused checkpoint projection
+            # (``gate_up_proj_bias`` / ``down_proj_bias``) rather than under the
+            # per-expert module prefix, so resolve it like the fused weight.
+            if (
+                "bias" not in tensors
+                and getattr(target_submodule, "bias", None) is not None
+            ):
+                source_name, expert_index, split_index, split_dim = (
+                    self._resolve_checkpoint_tensor_source(path, "bias")
+                )
+                if source_name is not None:
+                    with safe_open(
+                        self._checkpoint_shard_path(
+                            self._weight_map[source_name], module_path=path
+                        ),
+                        framework="pt",
+                        device="cpu",
+                    ) as handler:
+                        raw_bias = handler.get_tensor(source_name)
+                    bias = self._transform_checkpoint_tensor(
+                        raw_bias,
+                        expert_index=expert_index,
+                        split_index=split_index,
+                        split_dim=split_dim,
+                        expected_shape=tuple(target_submodule.bias.shape),
+                    )
+                    if bias is None:
+                        raise RuntimeError(
+                            f"Fused quantization source shape mismatch: "
+                            f"{source_name} -> {path}.bias"
+                        )
+                    tensors["bias"] = bias
 
             # Normalize the direct ``.scale`` spelling used by native
             # DeepSeek-V4 checkpoints to the names consumed by GPTQModel's
@@ -3632,6 +3667,105 @@ class LazyTurtle:
                         if fused_candidate in self._weight_map:
                             return fused_candidate, expert_index, split_index, split_dim
         return None, None, None, None
+
+    @staticmethod
+    def _slice_fused_mx_checkpoint_tensor(
+        tensor: torch.Tensor,
+        *,
+        expert_index: Optional[int],
+        split_index: Optional[int],
+        split_dim: Optional[int],
+    ) -> Optional[torch.Tensor]:
+        """Select one expert/split from a fused MXFP4 blocks or scales tensor."""
+
+        if expert_index is not None:
+            if tensor.shape[0] <= expert_index:
+                return None
+            tensor = tensor[expert_index]
+            if split_dim is not None and split_dim > 0:
+                split_dim -= 1
+        if split_index is not None and split_dim is not None:
+            if tensor.shape[split_dim] % 2:
+                return None
+            tensor = tensor.chunk(2, dim=split_dim)[split_index]
+        return tensor.contiguous()
+
+    def _load_fused_mx_weight_tensors(
+        self,
+        module_path: str,
+        tensors: Dict[str, torch.Tensor],
+    ) -> bool:
+        """Fill ``tensors`` from a defused expert's fused MXFP4 blocks/scales.
+
+        HF GPT-OSS checkpoints store each fused expert projection as
+        ``<leaf>_blocks`` (E2M1 nibbles grouped in 16-byte/32-value blocks) and
+        ``<leaf>_scales`` (E8M0), not as a dense ``<leaf>`` tensor. A defused
+        per-expert linear has no checkpoint prefix of its own, so the generic
+        materializer cannot find its weight and the module stays on meta.
+        Resolve the fused source, select the expert (and gate/up half), and
+        present the packed bytes and scales in the layout the generic FP4
+        decoder consumes.
+        """
+
+        combined_name = self._join_tensor_name(module_path, "weight")
+        for fused_name, expert_index, split_index, split_dim in self._fused_checkpoint_requests(
+            combined_name
+        ):
+            candidates = [fused_name]
+            for alias in self._all_runtime_to_checkpoint_candidates(fused_name):
+                if alias not in candidates:
+                    candidates.append(alias)
+            for candidate in tuple(candidates):
+                for alias in self._module_tree_name_aliases(candidate):
+                    if alias not in candidates:
+                        candidates.append(alias)
+            for candidate in candidates:
+                blocks_name = f"{candidate}_blocks"
+                scales_name = f"{candidate}_scales"
+                if (
+                    blocks_name not in self._weight_map
+                    or scales_name not in self._weight_map
+                ):
+                    continue
+                raw_tensors: Dict[str, torch.Tensor] = {}
+                names_by_shard: Dict[str, list[str]] = {}
+                for name in (blocks_name, scales_name):
+                    names_by_shard.setdefault(self._weight_map[name], []).append(
+                        name
+                    )
+                for shard, names in names_by_shard.items():
+                    with safe_open(
+                        self._checkpoint_shard_path(shard, module_path=module_path),
+                        framework="pt",
+                        device="cpu",
+                    ) as handler:
+                        for name in names:
+                            raw_tensors[name] = handler.get_tensor(name)
+                raw_blocks = raw_tensors[blocks_name]
+                raw_scales = raw_tensors[scales_name]
+                blocks = self._slice_fused_mx_checkpoint_tensor(
+                    raw_blocks,
+                    expert_index=expert_index,
+                    split_index=split_index,
+                    split_dim=split_dim,
+                )
+                scales = self._slice_fused_mx_checkpoint_tensor(
+                    raw_scales,
+                    expert_index=expert_index,
+                    split_index=split_index,
+                    split_dim=split_dim,
+                )
+                if blocks is None or scales is None or blocks.ndim < 2:
+                    raise RuntimeError(
+                        f"Fused MXFP4 quantization source shape mismatch: "
+                        f"{blocks_name} -> {module_path}"
+                    )
+                # MX blocks carry 16 bytes (32 values) per block column; the
+                # generic FP4 decoder consumes the packed 2-D bytes.
+                tensors["weight"] = blocks.reshape(blocks.shape[0], -1)
+                tensors["weight_scale"] = scales
+                return True
+        return False
 
     @staticmethod
     def _transform_checkpoint_tensor(

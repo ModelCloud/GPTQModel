@@ -2646,6 +2646,14 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
                     # AUTO_NF12 source afterwards, so the model tree keeps the
                     # dense module the next processor will quantize.
                     subset[name].state["auto_dtype_cast_forward_disabled"] = True
+                if forward_policy is not None and not getattr(
+                    forward_policy, "required", True
+                ):
+                    # A planning processor never executes a forward, so
+                    # nothing would restore a packed AUTO_NF12 source before
+                    # the next processor's `preprocess`, which requires the
+                    # dense linear. Keep the module in the tree.
+                    continue
                 source_module = subset[name].module
                 # EoRA runs after quantization: its forward must consume the
                 # quantized module in the model tree, not a freshly packed

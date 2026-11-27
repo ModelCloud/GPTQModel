@@ -6373,8 +6373,15 @@ class BaseQModel(nn.Module):
 
         quant_config = getattr(getattr(self.model, "config", None), "quantization_config", None)
         if not isinstance(quant_config, dict):
-            return str(getattr(quant_config, "format", "") or getattr(quant_config, "quant_algo", "")).lower()
-        labels = [str(quant_config.get(key) or "").lower() for key in ("format", "quant_algo", "variant")]
+            return str(
+                getattr(quant_config, "format", "")
+                or getattr(quant_config, "quant_algo", "")
+                or getattr(quant_config, "quant_method", "")
+            ).lower()
+        labels = [
+            str(quant_config.get(key) or "").lower()
+            for key in ("format", "quant_algo", "variant", "quant_method")
+        ]
         groups = quant_config.get("config_groups")
         if isinstance(groups, dict):
             labels.extend(

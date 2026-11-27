@@ -9,22 +9,32 @@ from types import SimpleNamespace
 import pytest
 import torch
 from safetensors.torch import save_file
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
 from torch import nn
+from transformers import PreTrainedTokenizerFast
 
 import gptqmodel.models.base as base_module
 import gptqmodel.models.loader as loader_module
 import gptqmodel.quantization.dtype as dtype_module
+import gptqmodel.quantization.nf12 as nf12_quantization
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.nn_modules.hooked_linear import HookedLinear
 from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.quantization import AutoModuleDecoderConfig, QuantizeConfig
 from gptqmodel.quantization.dtype import (
     dequantize_f4_e2m1,
     dequantize_fp8,
+    device_supports_native_fp8,
 )
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.utils import auto_dtype_cast
 from gptqmodel.utils.device_telemetry import (
     clear_device_telemetry_records,
     device_telemetry_scope,
@@ -51,6 +61,249 @@ def _write_index(path: Path, shard_name: str, keys: list[str]) -> None:
         json.dumps({"weight_map": weight_map}),
         encoding="utf-8",
     )
+
+
+def _write_minimal_tokenizer(path: Path, vocab_size: int) -> None:
+    backend = Tokenizer(
+        WordLevel({f"w{i}": i for i in range(vocab_size)}, unk_token="w0")
+    )
+    backend.pre_tokenizer = Whitespace()
+    PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        unk_token="w0",
+        pad_token="w0",
+        bos_token="w1",
+        eos_token="w2",
+    ).save_pretrained(str(path))
+
+
+def _build_qwen3_fp8_source(path: Path) -> None:
+    """Save the Qwen/Qwen3-0.6B-FP8 checkpoint layout for two layers.
+
+    Key names, dtypes and projection shapes follow the official hub
+    ``config.json`` and safetensors header. Only the layer count and the
+    vocabulary are truncated so the fixture stays small; values are synthetic.
+    """
+
+    vocab = 256
+    config = {
+        "architectures": ["Qwen3ForCausalLM"],
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "head_dim": 128,
+        "hidden_act": "silu",
+        "hidden_size": 1024,
+        "initializer_range": 0.02,
+        "intermediate_size": 3072,
+        "max_position_embeddings": 40960,
+        "max_window_layers": 28,
+        "model_type": "qwen3",
+        "num_attention_heads": 16,
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 8,
+        "pad_token_id": 0,
+        "rms_norm_eps": 1e-06,
+        "rope_scaling": None,
+        "rope_theta": 1000000,
+        "sliding_window": None,
+        "tie_word_embeddings": True,
+        "torch_dtype": "bfloat16",
+        "transformers_version": "4.51.0",
+        "use_cache": True,
+        "use_sliding_window": False,
+        "vocab_size": vocab,
+        "quantization_config": {
+            "activation_scheme": "dynamic",
+            "fmt": "e4m3",
+            "quant_method": "fp8",
+            "weight_block_size": [128, 128],
+        },
+    }
+    (path / "config.json").write_text(json.dumps(config, indent=1), encoding="utf-8")
+    _write_minimal_tokenizer(path, vocab)
+
+    hidden, intermediate, heads, kv_heads, head_dim = 1024, 3072, 16, 8, 128
+    generator = torch.Generator().manual_seed(6139)
+
+    def fp8_weight(shape: tuple[int, ...]) -> torch.Tensor:
+        return (torch.randn(shape, generator=generator) * 0.02).to(
+            torch.float8_e4m3fn
+        )
+
+    def bf16(shape: tuple[int, ...]) -> torch.Tensor:
+        return torch.randn(shape, generator=generator, dtype=torch.bfloat16) * 0.02
+
+    state = {
+        "model.embed_tokens.weight": bf16((vocab, hidden)),
+        "lm_head.weight": bf16((vocab, hidden)),
+        "model.norm.weight": torch.ones(hidden, dtype=torch.bfloat16),
+    }
+    for layer in range(2):
+        prefix = f"model.layers.{layer}."
+        state[prefix + "input_layernorm.weight"] = torch.ones(
+            hidden, dtype=torch.bfloat16
+        )
+        state[prefix + "post_attention_layernorm.weight"] = torch.ones(
+            hidden, dtype=torch.bfloat16
+        )
+        state[prefix + "self_attn.q_norm.weight"] = torch.ones(
+            head_dim, dtype=torch.bfloat16
+        )
+        state[prefix + "self_attn.k_norm.weight"] = torch.ones(
+            head_dim, dtype=torch.bfloat16
+        )
+        projections = (
+            ("q_proj", heads * head_dim, hidden),
+            ("k_proj", kv_heads * head_dim, hidden),
+            ("v_proj", kv_heads * head_dim, hidden),
+            ("o_proj", hidden, heads * head_dim),
+        )
+        for name, out_features, in_features in projections:
+            state[prefix + f"self_attn.{name}.weight"] = fp8_weight(
+                (out_features, in_features)
+            )
+            state[prefix + f"self_attn.{name}.weight_scale_inv"] = torch.ones(
+                (out_features // 128, in_features // 128), dtype=torch.bfloat16
+            )
+        mlp = (
+            ("gate_proj", intermediate, hidden),
+            ("up_proj", intermediate, hidden),
+            ("down_proj", hidden, intermediate),
+        )
+        for name, out_features, in_features in mlp:
+            state[prefix + f"mlp.{name}.weight"] = fp8_weight(
+                (out_features, in_features)
+            )
+            state[prefix + f"mlp.{name}.weight_scale_inv"] = torch.ones(
+                (out_features // 128, in_features // 128), dtype=torch.bfloat16
+            )
+
+    save_file(state, str(path / "model.safetensors"))
+    _write_index(path, "model.safetensors", list(state))
+
+
+def _build_gpt_oss_mxfp4_source(path: Path) -> None:
+    """Save the openai/gpt-oss-20b MXFP4 checkpoint layout for two layers.
+
+    Key names, dtypes and projection shapes follow the official hub
+    ``config.json`` and safetensors header. Only the layer count, expert count
+    and vocabulary are truncated; values are synthetic.
+    """
+
+    vocab, experts = 256, 4
+    config = {
+        "architectures": ["GptOssForCausalLM"],
+        "attention_bias": True,
+        "attention_dropout": 0.0,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "experts_per_token": 4,
+        "head_dim": 64,
+        "hidden_act": "silu",
+        "hidden_size": 2880,
+        "initial_context_length": 4096,
+        "initializer_range": 0.02,
+        "intermediate_size": 2880,
+        "layer_types": ["sliding_attention", "full_attention"],
+        "max_position_embeddings": 131072,
+        "model_type": "gpt_oss",
+        "num_attention_heads": 64,
+        "num_experts_per_tok": 4,
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 8,
+        "num_local_experts": experts,
+        "output_router_logits": False,
+        "pad_token_id": 0,
+        "quantization_config": {
+            "modules_to_not_convert": [
+                "model.layers.*.self_attn",
+                "model.layers.*.mlp.router",
+                "model.embed_tokens",
+                "lm_head",
+            ],
+            "quant_method": "mxfp4",
+        },
+        "rms_norm_eps": 1e-05,
+        "rope_scaling": {
+            "beta_fast": 32.0,
+            "beta_slow": 1.0,
+            "factor": 32.0,
+            "original_max_position_embeddings": 4096,
+            "rope_type": "yarn",
+            "truncate": False,
+        },
+        "rope_theta": 150000,
+        "router_aux_loss_coef": 0.9,
+        "sliding_window": 128,
+        "swiglu_limit": 7.0,
+        "tie_word_embeddings": False,
+        "transformers_version": "4.55.0.dev0",
+        "use_cache": True,
+        "vocab_size": vocab,
+    }
+    (path / "config.json").write_text(json.dumps(config, indent=1), encoding="utf-8")
+    _write_minimal_tokenizer(path, vocab)
+
+    hidden, intermediate, heads, kv_heads, head_dim = 2880, 2880, 64, 8, 64
+    generator = torch.Generator().manual_seed(6139)
+
+    def bf16(shape: tuple[int, ...]) -> torch.Tensor:
+        return torch.randn(shape, generator=generator, dtype=torch.bfloat16) * 0.02
+
+    def blocks(shape: tuple[int, ...]) -> torch.Tensor:
+        return torch.full(shape, 0x21, dtype=torch.uint8)
+
+    def scales(shape: tuple[int, ...]) -> torch.Tensor:
+        # E8M0 exponent 128 is the value 2.0 for every block.
+        return torch.full(shape, 128, dtype=torch.uint8)
+
+    state = {
+        "model.embed_tokens.weight": bf16((vocab, hidden)),
+        "lm_head.weight": bf16((vocab, hidden)),
+        "model.norm.weight": torch.ones(hidden, dtype=torch.bfloat16),
+    }
+    for layer in range(2):
+        prefix = f"model.layers.{layer}."
+        state[prefix + "input_layernorm.weight"] = torch.ones(
+            hidden, dtype=torch.bfloat16
+        )
+        state[prefix + "post_attention_layernorm.weight"] = torch.ones(
+            hidden, dtype=torch.bfloat16
+        )
+        state[prefix + "self_attn.sinks"] = bf16((heads,))
+        attention = (
+            ("q_proj", heads * head_dim, hidden),
+            ("k_proj", kv_heads * head_dim, hidden),
+            ("v_proj", kv_heads * head_dim, hidden),
+            ("o_proj", hidden, heads * head_dim),
+        )
+        for name, out_features, in_features in attention:
+            state[prefix + f"self_attn.{name}.weight"] = bf16(
+                (out_features, in_features)
+            )
+            state[prefix + f"self_attn.{name}.bias"] = bf16((out_features,))
+        state[prefix + "mlp.router.weight"] = bf16((experts, hidden))
+        state[prefix + "mlp.router.bias"] = bf16((experts,))
+        gate_up = 2 * intermediate
+        state[prefix + "mlp.experts.gate_up_proj_blocks"] = blocks(
+            (experts, gate_up, hidden // 32, 16)
+        )
+        state[prefix + "mlp.experts.gate_up_proj_scales"] = scales(
+            (experts, gate_up, hidden // 32)
+        )
+        state[prefix + "mlp.experts.gate_up_proj_bias"] = bf16((experts, gate_up))
+        state[prefix + "mlp.experts.down_proj_blocks"] = blocks(
+            (experts, hidden, intermediate // 32, 16)
+        )
+        state[prefix + "mlp.experts.down_proj_scales"] = scales(
+            (experts, hidden, intermediate // 32)
+        )
+        state[prefix + "mlp.experts.down_proj_bias"] = bf16((experts, hidden))
+
+    save_file(state, str(path / "model.safetensors"))
+    _write_index(path, "model.safetensors", list(state))
 
 
 def test_native_floatx_source_configuration_injects_decoder_and_preserves_lazy_weights(monkeypatch):
@@ -1103,3 +1356,256 @@ def test_awq_resolve_quant_source_module_prefers_dense_source():
     resolved = AWQProcessor.resolve_quant_source_module(named)
 
     assert resolved is quant_source
+
+
+@pytest.mark.parametrize(
+    ("forward_required", "expect_packed"),
+    [(False, False), (True, True)],
+    ids=["planning_processor", "quantizing_processor"],
+)
+def test_auto_nf12_forward_pack_respects_processor_forward_policy(
+    monkeypatch, forward_required, expect_packed
+):
+    """A no-forward planning processor must not hand NF12 wrappers to the quantizer."""
+
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(
+        nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None)
+    )
+
+    linear = HookedLinear.from_linear(
+        nn.Linear(64, 16, bias=False, dtype=torch.bfloat16)
+    )
+    with torch.no_grad():
+        linear.weight.copy_(torch.randn_like(linear.weight) * 0.02)
+    named = NamedModule(linear, name="proj", full_name="model.proj", layer_index=0)
+
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = nn.Module()
+    harness.model.add_module("model", nn.Module())
+    harness.model.model.add_module("proj", linear)
+    harness.quantize_config = QuantizeConfig(
+        bits=4, group_size=32, offload_to_disk=False
+    )
+    harness.lm_head = None
+    harness.auto_dtype_cast_events = []
+
+    class _Processor:
+        forward = SimpleNamespace(
+            required=forward_required, allow_auto_dtype_cast=True
+        )
+        tasks = {}
+
+        def preprocess(self, module):
+            module.state["planned"] = True
+
+        def is_skipped(self, module):
+            return False
+
+    looper = ModuleLooper.__new__(ModuleLooper)
+    looper.gptq_model = harness
+    looper.input_embeddings_name = None
+    looper.output_embeddings_name = None
+    looper.layer_module_coverage = SimpleNamespace(
+        record_hit=lambda *_args: None,
+        record_miss=lambda *_args: None,
+        record_undeclared=lambda *_args: None,
+    )
+
+    subset = ModuleLooper.create_named_modules(
+        looper,
+        module=harness.model,
+        full={"proj": named},
+        is_lm_head_module=False,
+        layer_index=0,
+        layers_prefix="model",
+        names=["proj"],
+        processor=_Processor(),
+        fallback=False,
+    )
+
+    assert named.state["planned"] is True
+    assert subset["proj"] is named
+    packed = isinstance(named.module, auto_dtype_cast.AutoNF12HookedLinear)
+    assert packed is expect_packed
+    assert bool(harness.auto_dtype_cast_events) is expect_packed
+
+
+def test_mxfp4_fused_expert_checkpoint_tensors_resolve_blocks_scales_and_bias(tmp_path):
+    """Defused GPT-OSS MXFP4 experts read their fused blocks/scales/bias (issue #6139)."""
+
+    experts, hidden, intermediate = 2, 64, 32
+    gate_up_blocks = torch.full(
+        (experts, 2 * intermediate, hidden // 32, 16), 0x21, dtype=torch.uint8
+    )
+    gate_up_scales = torch.full(
+        (experts, 2 * intermediate, hidden // 32), 128, dtype=torch.uint8
+    )
+    gate_up_bias = torch.arange(
+        experts * 2 * intermediate, dtype=torch.bfloat16
+    ).reshape(experts, 2 * intermediate)
+    down_blocks = torch.full(
+        (experts, hidden, intermediate // 32, 16), 0x21, dtype=torch.uint8
+    )
+    down_scales = torch.full(
+        (experts, hidden, intermediate // 32), 128, dtype=torch.uint8
+    )
+    down_bias = torch.arange(
+        experts * hidden, dtype=torch.bfloat16
+    ).reshape(experts, hidden)
+    state = {
+        "model.layers.0.mlp.experts.gate_up_proj_blocks": gate_up_blocks,
+        "model.layers.0.mlp.experts.gate_up_proj_scales": gate_up_scales,
+        "model.layers.0.mlp.experts.gate_up_proj_bias": gate_up_bias,
+        "model.layers.0.mlp.experts.down_proj_blocks": down_blocks,
+        "model.layers.0.mlp.experts.down_proj_scales": down_scales,
+        "model.layers.0.mlp.experts.down_proj_bias": down_bias,
+    }
+    save_file(state, str(tmp_path / "model.safetensors"))
+    _write_index(tmp_path, "model.safetensors", list(state))
+
+    model = nn.Module()
+    model.model = nn.Module()
+    layer = nn.Module()
+    layer.mlp = nn.Module()
+    layer.mlp.experts = nn.Module()
+    for index in range(experts):
+        container = nn.Module()
+        container.gate_proj = nn.Linear(hidden, intermediate, bias=True)
+        container.up_proj = nn.Linear(hidden, intermediate, bias=True)
+        container.down_proj = nn.Linear(intermediate, hidden, bias=True)
+        layer.mlp.experts.add_module(str(index), container)
+    model.model.layers = nn.ModuleList([layer])
+    for name, parameter in list(model.named_parameters()):
+        parent_path, leaf = name.rsplit(".", 1)
+        setattr(
+            model.get_submodule(parent_path),
+            leaf,
+            nn.Parameter(
+                torch.empty_like(parameter, device="meta"), requires_grad=False
+            ),
+        )
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(tmp_path),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    expert = 1
+    projections = (
+        ("gate_proj", gate_up_blocks, gate_up_scales, gate_up_bias, 0),
+        ("up_proj", gate_up_blocks, gate_up_scales, gate_up_bias, 1),
+        ("down_proj", down_blocks, down_scales, down_bias, None),
+    )
+    resolved = {}
+    for name, blocks, scales, bias, split in projections:
+        module_path = f"model.layers.0.mlp.experts.{expert}.{name}"
+        tensors = turtle.checkpoint_tensors_for_submodule(
+            target_model=model,
+            target_submodule=model.get_submodule(module_path),
+            recurse=False,
+            module_path=module_path,
+        )
+        expected_blocks, expected_scales, expected_bias = (
+            blocks[expert],
+            scales[expert],
+            bias[expert],
+        )
+        if split is not None:
+            expected_blocks = expected_blocks.chunk(2, dim=0)[split]
+            expected_scales = expected_scales.chunk(2, dim=0)[split]
+            expected_bias = expected_bias.chunk(2, dim=0)[split]
+        assert torch.equal(
+            tensors["weight"],
+            expected_blocks.reshape(expected_blocks.shape[0], -1),
+        )
+        assert torch.equal(tensors["weight_scale"], expected_scales)
+        assert torch.equal(tensors["bias"], expected_bias)
+        resolved[name] = tensors
+
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = model
+    harness.model.config = SimpleNamespace(
+        quantization_config={"quant_method": "mxfp4"}
+    )
+    gate_path = f"model.layers.0.mlp.experts.{expert}.gate_proj"
+    decoded = harness._build_decoder_quant_source_module(
+        model.get_submodule(gate_path),
+        checkpoint_tensors=resolved["gate_proj"],
+        target_dtype=torch.bfloat16,
+    )
+    # Every packed byte 0x21 decodes to (0.5, 1.0) and E8M0 128 is 2.0.
+    expected_dense = torch.tensor(
+        [[1.0, 2.0] * (hidden // 2)] * intermediate, dtype=torch.bfloat16
+    )
+    torch.testing.assert_close(decoded.weight, expected_dense)
+    torch.testing.assert_close(decoded.bias, gate_up_bias[expert, :intermediate])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("layout", ["qwen3_fp8", "gpt_oss_mxfp4"])
+def test_floatx_source_quantizes_with_default_auto_nf12(tmp_path, monkeypatch, layout):
+    """AUTO_NF12 must not replace the dense linear a floatx quantizer consumes."""
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    if not auto_dtype_cast.nf12_supported_device(device):
+        pytest.skip("requires a device with AUTO_NF12 support")
+    if layout == "qwen3_fp8" and device_supports_native_fp8(
+        device, require_validation=True
+    ):
+        pytest.skip("native FP8 is validated; this fixture covers the decode path")
+
+    model_dir = tmp_path / layout
+    model_dir.mkdir()
+    if layout == "qwen3_fp8":
+        _build_qwen3_fp8_source(model_dir)
+    else:
+        _build_gpt_oss_mxfp4_source(model_dir)
+
+    preprocessed = []
+    original_preprocess = GPTQProcessor.preprocess
+
+    def spy(self, module, *args, **kwargs):
+        if module.full_name == "model.layers.0.self_attn.q_proj":
+            preprocessed.append(type(module.module))
+        return original_preprocess(self, module, *args, **kwargs)
+
+    monkeypatch.setattr(GPTQProcessor, "preprocess", spy)
+
+    model = GPTQModel.load(
+        str(model_dir),
+        quantize_config=QuantizeConfig(bits=4, group_size=32),
+        device=str(device),
+    )
+    rows = [
+        list(range(2 + index * 16, 18 + index * 16)) for index in range(4)
+    ]
+    model.quantize(
+        CalibrationConfig(dataset=rows, batch_size=2), backend=BACKEND.TORCH
+    )
+
+    # The NF12 wrapper is a calibration stand-in: the GPTQ processor must
+    # receive the dense linear source that it owns.
+    assert preprocessed
+    assert issubclass(preprocessed[0], nn.Linear)
+    assert not any(
+        issubclass(module_type, auto_dtype_cast.AutoNF12HookedLinear)
+        for module_type in preprocessed
+    )
+    # NF12 is still used for the Hessian forward of the dense source.
+    assert any(
+        event["module"] == "model.layers.0.self_attn.q_proj"
+        for event in model.auto_dtype_cast_events
+    )
+
+    logged = {str(row["module"]) for row in model.quant_log}
+    assert "self_attn.q_proj" in logged
+    if layout == "gpt_oss_mxfp4":
+        # The fused MXFP4 experts must decode from _blocks/_scales, not stay
+        # on meta, so they reach the quantizer like any dense projection.
+        assert "mlp.experts.0.gate_proj" in logged
+        assert "mlp.experts.0.down_proj" in logged
