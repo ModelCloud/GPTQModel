@@ -96,6 +96,17 @@ def _get_module_by_relative_path(parent: nn.Module, relative_path: str) -> Optio
     return current
 
 
+def _is_nonempty_expert_container(module: Optional[nn.Module]) -> bool:
+    """Whether ``module`` can be enumerated as a non-empty expert container."""
+
+    if module is None or not hasattr(module, "__iter__"):
+        return False
+    try:
+        return len(module) > 0
+    except TypeError:
+        return next(iter(module), None) is not None
+
+
 class MoELifecycleHooks:
     """
     Base class for model-specific MoE lifecycle hooks.
@@ -523,17 +534,31 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         # only part of expert projections might be loaded,
         # so we need to check all subset keys instead of just the first expert
         has_expert_projs = False
-        if experts_module is not None and hasattr(experts_module, '__iter__') and len(
-                experts_module) > 0 and experts_attr_name and moe_block_prefix:
-            # Check all subset keys for any expert projections
+        subset_has_expert_projs = False
+        if experts_attr_name and moe_block_prefix:
             expert_prefix = f"{moe_block_prefix}.{experts_attr_name}."
             for key in subset.keys():
                 if key.startswith(expert_prefix):
                     # Extract the expert index and projection name from the key
                     parts = key[len(expert_prefix):].split('.')
                     if len(parts) >= 2 and parts[1] in proj_names:
-                        has_expert_projs = True
+                        subset_has_expert_projs = True
                         break
+        if subset_has_expert_projs:
+            has_expert_projs = _is_nonempty_expert_container(experts_module)
+            if not has_expert_projs:
+                container = (
+                    type(experts_module).__name__
+                    if experts_module is not None
+                    else "None"
+                )
+                log.warn(
+                    "ExpertsRoutingBypass was requested but the routed-expert "
+                    f"container `{container}` at `{moe_block_prefix}.{experts_attr_name}` "
+                    "is not iterable (or is empty). Every expert will not see the "
+                    "full calibration batch; falling back to native routing. Make "
+                    "the container iterable/len-able, or use ExpertsRoutingOverride."
+                )
 
         def run_shared_experts():
             nonlocal expert_count, stop_forward_raised
@@ -549,7 +574,11 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
 
         def run_routed_experts():
             nonlocal expert_count, stop_forward_raised
-            if not has_expert_projs or experts_module is None or not hasattr(experts_module, '__iter__') or not experts_attr_name:
+            if (
+                not has_expert_projs
+                or not experts_attr_name
+                or not _is_nonempty_expert_container(experts_module)
+            ):
                 return
 
             if hidden_states.dim() == 3:

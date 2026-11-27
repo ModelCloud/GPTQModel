@@ -175,6 +175,193 @@ def test_packed_experts_defuse_into_linear_leaves_without_decoding():
     )
 
 
+def _fill_mxfp8(container: E.Inkling2LoopPackedExperts) -> None:
+    with torch.no_grad():
+        for name in ("gate_up_weight", "down_weight"):
+            getattr(container, name).fill_(1.0)
+        for name in ("gate_up_scales", "down_scales"):
+            getattr(container, name).fill_(127)
+
+
+def test_packed_experts_are_iterable_and_apply_the_softcapped_gate():
+    """#6108: the defused packed container must behave like the dense one."""
+
+    config = _text_config(experts_formats=["mxfp8"], intermediate_size=32)
+    container = E.build_experts(config, 0)
+    assert isinstance(container, E.Inkling2LoopPackedExperts)
+    _fill_mxfp8(container)
+
+    assert len(container) == 0
+    assert list(container) == []
+    container.defuse()
+
+    expected_experts = [getattr(container, str(index)) for index in range(config.n_routed_experts)]
+    assert len(container) == config.n_routed_experts
+    assert list(container) == expected_experts
+
+    gate_up = torch.randn(5, 2 * config.moe_intermediate_size)
+    routing_weight = torch.rand(5, 1)
+    actual = container._apply_gate(gate_up, routing_weight)
+    gate, up = gate_up.chunk(2, dim=-1)
+    expected = (
+        4 * torch.tanh(gate / 4) * torch.sigmoid(gate) * 25 * torch.tanh(up / 25)
+    ) * routing_weight
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+
+    dense = E.Inkling2LoopExperts(config)
+    torch.testing.assert_close(
+        actual, dense._apply_gate(gate_up, routing_weight), atol=1e-6, rtol=1e-6
+    )
+    plain_swiglu = nn.functional.silu(gate) * up * routing_weight
+    assert not torch.allclose(actual, plain_swiglu), (
+        "the packed gate must use the model's softcapped SwiGLU, not plain SwiGLU"
+    )
+
+
+def test_packed_experts_bypass_runs_every_expert_with_softcapped_activation():
+    """#6108: ExpertsRoutingBypass must reach every packed expert projection."""
+
+    from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
+
+    config = _text_config(experts_formats=["mxfp8"], intermediate_size=32)
+    container = E.build_experts(config, 0)
+    _fill_mxfp8(container)
+    container.defuse()
+
+    block = nn.Module()
+    block.experts = container
+    hooks = GateUpDownMoELifecycleHooks()
+    # The lifecycle hooks normally resolve this from the model's module plan.
+    # A one-container fixture binds the same container name directly.
+    hooks.expert_block_names = ("experts",)
+
+    subset = {}
+    for index in range(config.n_routed_experts):
+        expert = getattr(container, str(index))
+        for projection in ("gate_proj", "up_proj", "down_proj"):
+            subset[f"mlp.experts.{index}.{projection}"] = getattr(expert, projection)
+    names = list(subset)
+    hidden = torch.randn(2, 5, config.hidden_size)
+
+    gate_calls = {}
+    gate_outputs = {}
+    up_outputs = {}
+    down_inputs = {}
+    handles = []
+
+    def record_gate(index):
+        def hook(module, args, output):
+            gate_calls[index] = gate_calls.get(index, 0) + 1
+            gate_outputs[index] = output.detach().clone()
+
+        return hook
+
+    def record_up(index):
+        def hook(module, args, output):
+            up_outputs[index] = output.detach().clone()
+
+        return hook
+
+    def record_down(index):
+        def hook(module, args):
+            down_inputs[index] = args[0].detach().clone()
+
+        return hook
+
+    for index in range(config.n_routed_experts):
+        expert = getattr(container, str(index))
+        handles.append(expert.gate_proj.register_forward_hook(record_gate(index)))
+        handles.append(expert.up_proj.register_forward_hook(record_up(index)))
+        handles.append(expert.down_proj.register_forward_pre_hook(record_down(index)))
+
+    class _Processor:
+        def record_moe_root_input_feature(self, *args, **kwargs):
+            return None
+
+    class _Looper:
+        def _set_processor_hooks_paused(self, *args, **kwargs):
+            return None
+
+    original_calls = []
+
+    def original_forward(hidden_states, **kwargs):
+        original_calls.append(hidden_states.shape)
+        return torch.zeros_like(hidden_states)
+
+    try:
+        with torch.inference_mode():
+            output = hooks.forward_to_all_experts(
+                moe_block=block,
+                hidden_states=hidden,
+                processor=_Processor(),
+                subset=subset,
+                ordered_module_names=names,
+                original_forward=original_forward,
+                model_class=None,
+                module_looper=_Looper(),
+                moe_block_prefix="mlp",
+            )
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert output.shape == hidden.shape
+    assert original_calls == [hidden.shape]
+    assert gate_calls == dict.fromkeys(range(config.n_routed_experts), 1), (
+        "the bypass lifecycle must run every packed expert on the block input"
+    )
+    for index in range(config.n_routed_experts):
+        gate, up = gate_outputs[index], up_outputs[index]
+        expected = 4 * torch.tanh(gate / 4) * torch.sigmoid(gate) * 25 * torch.tanh(up / 25)
+        torch.testing.assert_close(down_inputs[index], expected, atol=1e-6, rtol=1e-6)
+
+
+def test_moe_bypass_warns_when_the_experts_container_cannot_be_iterated(monkeypatch):
+    """#6108: a dropped bypass request must not be silent."""
+
+    from gptqmodel.models import moe_lifecycle
+
+    hooks = moe_lifecycle.GateUpDownMoELifecycleHooks()
+    hooks.expert_block_names = ("experts",)
+    block = nn.Module()
+    block.experts = nn.Module()
+    subset = {
+        f"mlp.experts.0.{projection}": nn.Identity()
+        for projection in ("gate_proj", "up_proj", "down_proj")
+    }
+
+    warnings = []
+
+    class _Log:
+        def warn(self, message):
+            warnings.append(message)
+
+    monkeypatch.setattr(moe_lifecycle, "log", _Log())
+    original_calls = []
+
+    def original_forward(hidden_states, **kwargs):
+        original_calls.append(hidden_states.shape)
+        return hidden_states
+
+    output = hooks.forward_to_all_experts(
+        moe_block=block,
+        hidden_states=torch.randn(1, 4, 8),
+        processor=object(),
+        subset=subset,
+        ordered_module_names=list(subset),
+        original_forward=original_forward,
+        model_class=None,
+        module_looper=object(),
+        moe_block_prefix="mlp",
+    )
+
+    assert output.shape == (1, 4, 8)
+    assert original_calls == [(1, 4, 8)]
+    assert warnings, "dropping ExpertsRoutingBypass must be reported"
+    assert "not iterable" in warnings[0]
+    assert "ExpertsRoutingBypass" in warnings[0]
+
+
 def test_packed_expert_linear_forwards_on_kernel_and_defers_dense_weight(monkeypatch):
     leaf = E.Inkling2LoopPackedExpertLinear(
         in_features=32,

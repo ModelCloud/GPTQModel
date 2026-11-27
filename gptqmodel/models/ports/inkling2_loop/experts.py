@@ -590,6 +590,31 @@ class Inkling2LoopPackedExperts(nn.Module):
             final_hidden_states.index_add_(0, tokens, current.to(final_hidden_states.dtype))
         return final_hidden_states.to(hidden_states.dtype)
 
+    def __iter__(self):
+        """Yield the per-expert containers in checkpoint order.
+
+        ``defuse`` registers one child per expert, matching the layout
+        Defuser leaves on the dense container. ``ExpertsRoutingBypass`` and
+        the quantization subset planner both enumerate experts through this
+        interface, so a packed checkpoint must expose it too.
+        """
+
+        for expert_idx in range(self.num_experts):
+            expert = self._modules.get(str(expert_idx))
+            if expert is not None:
+                yield expert
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+    def _apply_gate(
+        self, gate_up: torch.Tensor, routing_weight: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Apply the model's softcapped SwiGLU to concatenated gate/up rows."""
+
+        gate, up = gate_up.chunk(2, dim=-1)
+        return self.act_fn(gate, up, routing_weight)
+
     @torch.no_grad()
     def dequantize(self) -> "Inkling2LoopExperts":
         """Materialize a dense container (used for export and as a numerical oracle)."""
