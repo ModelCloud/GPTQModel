@@ -657,6 +657,29 @@ def test_chatglm_config_aliases_and_unsupported_native_modes():
         _config(multi_query_group_num=3)
 
 
+def test_glm4v_released_vision_config_is_rejected_before_text_only_drop(tmp_path):
+    from gptqmodel.models.ports.chatglm.configuration_chatglm import ChatGLMConfig
+    from gptqmodel.models.ports.chatglm.modeling_chatglm import ChatGLMForConditionalGeneration
+
+    released = json.loads(
+        (Path(__file__).resolve().parent / "fixtures/ports/chatglm/glm4v_released.json").read_text()
+    )
+    (tmp_path / "config.json").write_text(json.dumps(released["config"]))
+    with pytest.raises(ValueError, match="GLM-4V"):
+        load_model_config(tmp_path)
+    # The pinned released index has 770 transformer.vision.* tensors. The
+    # text-only port owns none of them, so accepting this config would drop
+    # them from the quantized checkpoint.
+    assert released["tensor_count"] == 1054
+    assert released["vision_tensor_count"] == 770
+    assert len(released["keys_sha256"]) == 64
+    text_config = {key: value for key, value in released["config"].items() if key != "vision_config"}
+    config = ChatGLMConfig(**text_config)
+    with torch.device("meta"):
+        model = ChatGLMForConditionalGeneration(config)
+    assert not [name for name in model.state_dict() if name.startswith("transformer.vision.")]
+
+
 @pytest.mark.parametrize("rope_ratio", [None, 500])
 def test_chatglm_checkpointed_training_disables_cache_and_backpropagates(rope_ratio):
     model = _model(rope_ratio=rope_ratio).train()
