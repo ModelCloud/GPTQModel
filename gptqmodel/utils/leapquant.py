@@ -120,6 +120,7 @@ class LeapQuantConfig:
     window: int = 16
     rank: int = 4
     smooth: bool = True
+    use_triton: bool = True
     buffer_dtype: torch.dtype = torch.bfloat16
     lowrank_iters: int = 2
     lowrank_oversample: int = 4
@@ -134,6 +135,8 @@ class LeapQuantConfig:
             raise ValueError(f"LeapQuantConfig.rank must be a non-negative integer, got {self.rank!r}")
         if not isinstance(self.smooth, bool):
             raise TypeError(f"LeapQuantConfig.smooth must be bool, got {type(self.smooth).__name__}")
+        if not isinstance(self.use_triton, bool):
+            raise TypeError(f"LeapQuantConfig.use_triton must be bool, got {type(self.use_triton).__name__}")
         if self.buffer_dtype not in _SUPPORTED_BUFFER_DTYPES:
             raise ValueError(
                 "LeapQuantConfig.buffer_dtype must be float16, bfloat16, or float32, "
@@ -321,6 +324,11 @@ class LeapQuantState:
         self.gate_dim = gate_dim
         self.config = config
         self.device = torch.device(device) if device is not None else torch.device("cpu")
+        self._omega: Optional[torch.Tensor] = None
+        self._omega_key: Optional[tuple[int, int, torch.device]] = None
+        self._scratch: dict[str, torch.Tensor] = {}
+        self._step_backend: Optional[str] = None
+        self._fit_backend: Optional[str] = None
         self.reset()
 
     @property
@@ -451,6 +459,32 @@ class LeapQuantState:
         return beta
 
     @torch.no_grad()
+    def _orthonormalize(self, matrix: torch.Tensor) -> torch.Tensor:
+        """Orthonormalize the sketch through the native kernel when available."""
+
+        if self.config.use_triton and self.device.type == "cuda":
+            from . import leapquant_triton
+
+            basis = leapquant_triton.orthonormalize(matrix)
+            if basis is not None:
+                self._fit_backend = "triton"
+                return basis
+        self._fit_backend = "torch"
+        return _orthonormal_columns(matrix)
+
+    def _sketch(self, value_dim: int, columns: int) -> torch.Tensor:
+        """Return the fixed seeded sketch, created once per state and device."""
+
+        key = (value_dim, columns, self.device)
+        if self._omega is None or self._omega_key != key:
+            generator = torch.Generator(device="cpu").manual_seed(self.config.seed)
+            self._omega = torch.randn(
+                (value_dim, columns), generator=generator, device="cpu", dtype=torch.float32,
+            ).to(self.device)
+            self._omega_key = key
+        return self._omega
+
+    @torch.no_grad()
     def _fit_compensator(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Fit the rank-R additive term; exact SVD at full rank, randomized otherwise."""
 
@@ -461,25 +495,17 @@ class LeapQuantState:
                 torch.zeros((b, h, k, 0), dtype=torch.float32, device=state.device),
                 torch.zeros((b, h, v, 0), dtype=torch.float32, device=state.device),
             )
-        if not torch.any(state):
-            return (
-                torch.zeros((b, h, k, r), dtype=torch.float32, device=state.device),
-                torch.zeros((b, h, v, r), dtype=torch.float32, device=state.device),
-            )
         if r >= min(k, v):
             u, s, vh = torch.linalg.svd(state, full_matrices=False)
             root = s.clamp_min(0.0).sqrt()
             return u[..., :r] * root[..., None, :], vh[..., :r, :].transpose(-1, -2) * root[..., None, :]
 
         columns = min(r + self.config.lowrank_oversample, min(k, v))
-        generator = torch.Generator(device="cpu").manual_seed(self.config.seed)
-        omega = torch.randn(
-            (v, columns), generator=generator, device=generator.device, dtype=torch.float32,
-        ).to(state.device)
-        q = _orthonormal_columns(state @ omega)
+        omega = self._sketch(v, columns)
+        q = self._orthonormalize(state @ omega)
         for _ in range(self.config.lowrank_iters):
-            z = _orthonormal_columns(state.transpose(-1, -2) @ q)
-            q = _orthonormal_columns(state @ z)
+            z = self._orthonormalize(state.transpose(-1, -2) @ q)
+            q = self._orthonormalize(state @ z)
         reduced = q.transpose(-1, -2) @ state
         u, singular = _thin_singular_pairs(reduced)
         root = singular[..., :r].clamp_min(0.0).sqrt()
@@ -511,8 +537,12 @@ class LeapQuantState:
         scaled = residual / key_scale[..., :, None]
         value_scale = scaled.abs().amax(dim=-2).clamp_min(_EPS)
         codes = torch.round(scaled / value_scale[..., None, :] * qmax).clamp(-qmax, qmax)
-        _check_finite("key scale", key_scale)
-        _check_finite("value scale", value_scale)
+        self._require_finite(
+            ("key scale", key_scale),
+            ("value scale", value_scale),
+            ("factors key", factors_key),
+            ("factors value", factors_value),
+        )
 
         self.codes.copy_(_pack_codes(codes.to(torch.int8), self.config.bits))
         self.key_scale.copy_(key_scale)
@@ -600,13 +630,53 @@ class LeapQuantState:
         if self.window_count >= self.config.window:
             raise RuntimeError("LeapQuant window is full; quantize before the next step")
 
+        index = self.window_count
+        if self.config.use_triton and self.rank > 0 and self.device.type == "cuda":
+            from . import leapquant_triton
+
+            fused = leapquant_triton.launch_step(
+                codes=self.codes,
+                key_scale=self.key_scale,
+                value_scale=self.value_scale,
+                factors_key=self.factors_key,
+                factors_value=self.factors_value,
+                buffer_keys=self.buffer_keys,
+                buffer_updates=self.buffer_updates,
+                buffer_alpha=self.buffer_alpha,
+                query=query,
+                key=key,
+                value=value,
+                alpha=alpha,
+                beta=beta,
+                window_count=index,
+                window=self.config.window,
+                rank=self.rank,
+                gate_dim=self.gate_dim,
+                bits=self.config.bits,
+                buffer_dtype=self.config.buffer_dtype,
+                device=self.device,
+                scratch=self._scratch,
+            )
+            if fused is not None:
+                output, _update, next_state, bad, staged_key, staged_update = fused
+                if bool(bad.any()):
+                    raise ValueError("LeapQuant input contains non-finite values")
+                if next_state is not None:
+                    self.quantize_(next_state)
+                else:
+                    self.buffer_keys[:, :, index].copy_(staged_key)
+                    self.buffer_updates[:, :, index].copy_(staged_update)
+                    self.buffer_alpha[:, :, index].copy_(alpha)
+                    self.window_count = index + 1
+                self._step_backend = "triton"
+                return output
+
         decayed = self._replay_window() * self._decay_row_scale(alpha)
         prediction = (decayed * key[..., :, None]).sum(dim=-2)
         update = beta[..., None] * (value - prediction)
         next_state = decayed + key[..., :, None] * update[..., None, :]
         output = (next_state * query[..., :, None]).sum(dim=-2)
 
-        index = self.window_count
         buffered_key = key.to(self.config.buffer_dtype)
         buffered_update = update.to(self.config.buffer_dtype)
         # A non-finite input reaches ``output`` through the recurrence above, so
@@ -625,6 +695,7 @@ class LeapQuantState:
             self.buffer_updates[:, :, index].copy_(buffered_update)
             self.buffer_alpha[:, :, index].copy_(alpha)
             self.window_count = index + 1
+        self._step_backend = "torch"
         return output
 
     @torch.no_grad()
@@ -784,7 +855,7 @@ class LeapQuantState:
             previous = getattr(self, name)
             if value.shape != previous.shape or value.dtype != previous.dtype or value.layout != previous.layout:
                 raise ValueError(f"LeapQuant packed-state {name} has an incompatible shape, dtype, or layout")
-            value = value.to(device=self.device, copy=True)
+            value = value.to(device=self.device, copy=True).contiguous()
             if value.is_floating_point():
                 _check_finite(name, value)
             if name in ("key_scale", "value_scale") and not (value > 0).all():
@@ -823,6 +894,9 @@ class LeapQuantState:
         tensors = {name: getattr(self, name).to(device) for name in _STATE_TENSORS}
         self.__dict__.update(tensors)
         self.device = device
+        self._omega = None
+        self._omega_key = None
+        self._scratch = {}
         return self
 
     def _check_reorder_shape(self, beam_idx: torch.Tensor) -> None:

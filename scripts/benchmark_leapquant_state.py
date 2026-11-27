@@ -8,6 +8,7 @@ real layer produces. The dense reference applies the same delta-rule
 recurrence one token at a time without any state quantization.
 
     python scripts/benchmark_leapquant_state.py --device cuda --tokens 64
+    python scripts/benchmark_leapquant_state.py --device cuda --backend torch
 """
 
 import argparse
@@ -51,6 +52,12 @@ def main():
     parser.add_argument("--window", type=int, default=16)
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--bits", type=int, choices=(4, 6, 8), default=8)
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "torch"),
+        default="auto",
+        help="auto uses the fused Triton kernels when available; torch forces the portable path",
+    )
     parser.add_argument("--tokens", type=int, default=64)
     parser.add_argument("--repeats", type=int, default=10)
     args = parser.parse_args()
@@ -83,7 +90,12 @@ def main():
     def build():
         state = LeapQuantState(
             batch, heads, key_dim, value_dim,
-            LeapQuantConfig(bits=args.bits, window=window, rank=args.rank),
+            LeapQuantConfig(
+                bits=args.bits,
+                window=window,
+                rank=args.rank,
+                use_triton=args.backend != "torch",
+            ),
             gate_dim=1, device=device,
         )
         state.quantize_(torch.randn(batch, heads, key_dim, value_dim, device=device) * 0.05)
@@ -112,6 +124,7 @@ def main():
     print(f"compensator_fit_us   {fit_us:9.1f}")
     print(f"decode_overhead_x    {decode_us / dense_us:9.2f}")
     print(f"checkpoint_bytes     {state.checkpoint_bytes():9d}")
+    print(f"backend              {args.backend:>9}")
 
 
 if __name__ == "__main__":

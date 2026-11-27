@@ -57,6 +57,7 @@ model.enable_state_quant(None)  # use the unquantized path for new caches
 | `window` | `16` | Tokens between state quantizations. `1` is per-token quantization. |
 | `rank` | `4` | Compensator Tokens. `0` disables them; `6` is recommended for 4/6-bit. |
 | `smooth` | `True` | Key-row residual smoothing. |
+| `use_triton` | `True` | Use the fused Triton decode and sketch kernels on accelerators. Set `False` to force the portable Torch path. |
 | `buffer_dtype` | `bfloat16` | In-window key/update buffer dtype (`float16`, `bfloat16`, or `float32`). |
 | `lowrank_iters` | `2` | Power iterations for the randomized Compensator fit. |
 | `lowrank_oversample` | `4` | Oversampling columns for that fit. |
@@ -235,18 +236,61 @@ python -m pytest tests/test_leapquant_state.py tests/test_leapquant_models.py -q
 `test_leapquant_state.py` compares the quantizer against a hand-written FP32
 delta-rule recurrence, covers 4/6/8-bit, window boundaries, Compensator rank,
 smoothing, packed-container bit layout, every representable code, partial rows,
-storage accounting, reorder, and non-finite rejection. `test_leapquant_models.py`
+storage accounting, reorder, and non-finite rejection. It also selects the
+fused and Torch paths explicitly, compares their outputs and reconstruction
+error, and covers the `use_triton` switch. `test_leapquant_models.py`
 checks Kimi K3, Qwen3.5, Qwen3.5-MoE, Qwen3-Next, and GLM-5.3 prefill/decode
 parity, packed-code cache ownership, cache-layer selection, padded-mask and
 `cu_seqlens` rejection, and the public toggle. The regressions also cover
 `generate()`, cache continuation after offload and reorder, and retries after an
 invalid packed restore or a quantization failure.
 
-The portable Torch path is a correctness and memory baseline, not a
-throughput-optimized kernel. Measure it with:
+The portable Torch path remains the correctness reference and the fallback.
+On accelerators, `use_triton=True` selects two fused Triton kernels:
+
+- `leapquant_triton._leapquant_step_kernel` dequantizes one `[K, V]` state
+  slice, replays the buffered records in registers, computes the prediction,
+  update and readout, and stages the rounded record. It reads the packed code
+  container directly and never materializes the full state.
+- `leapquant_triton._mgs_kernel` orthonormalizes the narrow randomized-fit
+  sketch with modified Gram-Schmidt, replacing the Cholesky and triangular
+  solve pair that dominated the fit's host time.
+
+Both kernels compute in FP32. The decode kernel stages the buffer record but
+the caller commits it only after the kernel's finiteness flag passes, so a
+rejected token leaves the packed state unchanged. The fused decode path is
+used when `rank > 0`, `K <= 256`, and `rank <= 16`; the fused sketch path also
+requires at most 16 sketch columns. CPU, explicit `use_triton=False`, and other
+shapes keep the Torch path.
+
+```mermaid
+flowchart TD
+    A[Decode token] --> B{use_triton and accelerator}
+    B -->|no| C[Torch replay]
+    B -->|yes| D[Triton step kernel]
+    D --> E{finiteness flag}
+    E -->|bad| F["raise; packed state unchanged"]
+    E -->|ok| G{window boundary}
+    G -->|no| H["commit staged key/update/decay"]
+    G -->|yes| I[fit compensator]
+    I --> J[Triton MGS sketch]
+    J --> K[Torch eigendecomposition and residual quantization]
+    K --> L[packed checkpoint]
+```
+
+| Area | Before | After |
+| --- | --- | --- |
+| Decode | Replays the buffered window into a transient dense state every token, about 40 eager kernels. | One fused kernel per token; the state slice stays in registers. |
+| Fit sketch | Cholesky factorization plus triangular solve, five times per fit. | Triton modified Gram-Schmidt, five times per fit. |
+| Fail closed | One host synchronization per token. | One finiteness-flag read per token; the staged record is committed only after it passes. |
+| Fallback | Torch only. | Torch on CPU, `use_triton=False`, or an unsupported shape. |
+| Numerics | FP32 replay. | FP32 kernel accumulation; the output dtype is unchanged. |
+
+Measure both paths with:
 
 ```bash
 python scripts/benchmark_leapquant_state.py --device cuda
+python scripts/benchmark_leapquant_state.py --device cuda --backend torch
 ```
 
 Pass `--bits 4` or `--bits 6` to measure the packed decode path; the script
@@ -255,22 +299,23 @@ also prints the checkpoint bytes for the selected width.
 On one accelerator, with `K=V=128`, 8 heads, `window=16`, `rank=4`, 8-bit, and
 model-shaped inputs:
 
-| Step | Time |
-| --- | ---: |
-| Dense FP32 delta-rule step | 64-70 µs |
-| LeapQuant decode step | 724 µs |
-| Compensator fit (once per window) | 1175 µs |
+| Step | Torch path | Fused path |
+| --- | ---: | ---: |
+| Dense FP32 delta-rule step | 55.9 µs | 55.3 µs |
+| LeapQuant decode step | 588.3 µs | 130.8 µs |
+| Compensator fit (once per window) | 979.0 µs | 489.6 µs |
+| Decode / dense | 10.5x | 2.4x |
 
-Decode is about 10x the dense step, and the fit dominates the per-token cost
-through its one-per-window amortization. Two costs remain structural:
+The same kernels were validated on a second accelerator family:
 
-- The step is dispatch-bound. Roughly 40 small eager kernels per token, plus
-  one host synchronization for the finiteness check, cost more than the
-  arithmetic.
-- The fit is limited by the accelerator linear-algebra drivers. The current
-  form uses a Cholesky-factor orthonormalization and a Gram-matrix
-  eigendecomposition because a batched QR plus a wide SVD of the sketch cost
-  several times more on the same hardware.
+| Step | Torch path | Fused path |
+| --- | ---: | ---: |
+| Dense FP32 delta-rule step | 58.1 µs | 67.5 µs |
+| LeapQuant decode step | 978.7 µs | 265.1 µs |
+| Compensator fit (once per window) | 2480.8 µs | 1307.9 µs |
+| Decode / dense | 16.9x | 3.9x |
 
-The paper's speedups come from specialized kernels. A native kernel is a
-separate follow-up and is not claimed here.
+The per-token kernel and record commit are about 1.5x the dense step on the
+first accelerator; the once-per-window fit accounts for most of the remaining
+average. The fit still uses the accelerator eigendecomposition for the small
+Gram matrix, while the sketch orthonormalization is fused.
