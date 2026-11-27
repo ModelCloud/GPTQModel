@@ -73,6 +73,41 @@ def _tiny_tokenizer():
     return PreTrainedTokenizerFast(tokenizer_object=backend, bos_token="a", eos_token="b")
 
 
+def _llama3_template_tokenizer():
+    """A small Llama-3-shaped tokenizer.
+
+    Transformers 5 reports ``add_bos_token=False`` for Llama-3 tokenizers even
+    though the backend ``TemplateProcessing`` post-processor prepends
+    ``<|begin_of_text|>``. The BPE vocabulary stays tiny, but the post-processor
+    and special-token layout match the real tokenizer.
+    """
+
+    from tokenizers import Tokenizer, models, processors
+    from transformers import PreTrainedTokenizerFast
+
+    vocab = {chr(ord("a") + index): index for index in range(VOCAB - 1)}
+    vocab["ab"] = VOCAB - 1
+    bos_id = VOCAB
+    vocab["<|begin_of_text|>"] = bos_id
+    vocab["<|eot_id|>"] = VOCAB + 1
+    backend = Tokenizer(models.BPE(vocab=vocab, merges=[("a", "b")]))
+    backend.post_processor = processors.Sequence(
+        [
+            processors.ByteLevel(add_prefix_space=True),
+            processors.TemplateProcessing(
+                single="<|begin_of_text|> $A",
+                pair="<|begin_of_text|> $A <|begin_of_text|> $B",
+                special_tokens=[("<|begin_of_text|>", bos_id)],
+            ),
+        ]
+    )
+    return PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        bos_token="<|begin_of_text|>",
+        eos_token="<|eot_id|>",
+    )
+
+
 def _packed(shape, qtype):
     from gptqmodel.nn_modules.qlinear.gguf import _quantize_gguf_tensor_numpy
 
@@ -738,17 +773,37 @@ def test_refuses_mixture_of_experts(tmp_path):
         _run_package(root, out_dir)
 
 
-def test_refuses_a_plain_gguf_quant_method(tmp_path):
+def test_refuses_a_non_gguf_quant_method(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    _build_checkpoint(root)
+    config = json.loads((root / "config.json").read_text(encoding="utf-8"))
+    config["quantization_config"]["quant_method"] = "gptq"
+    config["quantization_config"]["method"] = "gptq"
+    (root / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    with pytest.raises(CheckpointFormatError, match="GPT-QModel GGUF"):
+        _run_package(root, out_dir)
+
+
+@pytest.mark.parametrize("keep_canonical_method", [True, False])
+def test_packages_a_legacy_gguf_quant_method(tmp_path, keep_canonical_method):
+    """v7.10 and earlier wrote ``quant_method: "gguf"`` for the same layout."""
+
     root = tmp_path / "ckpt"
     root.mkdir()
     _build_checkpoint(root)
     config = json.loads((root / "config.json").read_text(encoding="utf-8"))
     config["quantization_config"]["quant_method"] = "gguf"
+    if not keep_canonical_method:
+        config["quantization_config"].pop("method", None)
     (root / "config.json").write_text(json.dumps(config), encoding="utf-8")
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-    with pytest.raises(CheckpointFormatError, match="quant_method"):
-        _run_package(root, out_dir)
+
+    out = _run_package(root, tmp_path)
+
+    reader = gguf.GGUFReader(str(out))
+    assert reader.get_field("general.architecture").contents() == "qwen3"
 
 
 def test_refuses_untied_checkpoint_without_lm_head(tmp_path):
@@ -896,6 +951,71 @@ def test_tokenizer_metadata_covers_added_tokens():
     assert meta.tokens[VOCAB:] == ("<|endoftext|>", "</think>", f"[PAD{VOCAB + 2}]")
     assert meta.token_types[VOCAB:] == (TOKEN_TYPE_CONTROL, TOKEN_TYPE_USER_DEFINED, TOKEN_TYPE_UNUSED)
     assert meta.special_ids["eos"] == 1
+
+
+def test_tokenizer_metadata_uses_the_observed_special_token_flags():
+    """A Llama-3 post-processor prepends BOS while ``add_bos_token`` is false."""
+
+    tokenizer = _llama3_template_tokenizer()
+    assert tokenizer.add_bos_token is False
+    assert tokenizer("a").input_ids[0] == tokenizer.bos_token_id
+
+    meta = build_tokenizer_metadata(
+        tokenizer,
+        vocab_size=len(tokenizer),
+        tokenizer_pre="llama-bpe",
+    )
+
+    assert meta.add_special["bos"] is True
+    assert meta.add_special.get("eos") is False
+
+
+def test_tokenizer_metadata_omits_undeterminable_special_token_flags():
+    from tokenizers import Tokenizer, models
+    from transformers import PreTrainedTokenizerFast
+
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(models.BPE(vocab={"a": 0}, merges=[]))
+    )
+    meta = build_tokenizer_metadata(tokenizer, vocab_size=1, tokenizer_pre="llama-bpe")
+
+    assert meta.add_special == {}
+
+
+def test_packaged_llama3_tokenizer_keeps_the_bos_post_processor(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    tokenizer = _llama3_template_tokenizer()
+    _build_checkpoint(root, model_type="llama", vocab_size=len(tokenizer))
+
+    out = _run_package(root, tmp_path, tokenizer=tokenizer)
+
+    reader = gguf.GGUFReader(str(out))
+    add_bos = reader.get_field("tokenizer.ggml.add_bos_token")
+    assert add_bos is not None
+    assert add_bos.contents() is True
+    add_eos = reader.get_field("tokenizer.ggml.add_eos_token")
+    assert add_eos is None or add_eos.contents() is False
+
+
+def test_llamacpp_adds_bos_for_a_llama3_post_processor(tmp_path):
+    llama_cpp = pytest.importorskip("llama_cpp")
+
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    tokenizer = _llama3_template_tokenizer()
+    _build_checkpoint(root, model_type="llama", vocab_size=len(tokenizer))
+    out = _run_package(root, tmp_path, tokenizer=tokenizer)
+
+    model = llama_cpp.Llama(
+        model_path=str(out), n_ctx=32, vocab_only=True, verbose=False
+    )
+    try:
+        vocab = llama_cpp.llama_model_get_vocab(model.model)
+        assert llama_cpp.llama_vocab_get_add_bos(vocab) is True
+        assert model.tokenize(b"a")[0] == tokenizer.bos_token_id
+    finally:
+        model.close()
 
 
 @pytest.mark.parametrize("model_type", ["qwen2", "qwen3", "llama"])

@@ -33,7 +33,7 @@ _SPECIAL_ID_FIELDS = (
     ("unk", "unk_token_id"),
     ("pad", "pad_token_id"),
 )
-_ADD_SPECIAL_FIELDS = (("bos", "add_bos_token"), ("eos", "add_eos_token"))
+_SPECIAL_PROBE_TEXT = "a"
 
 
 @dataclass(frozen=True)
@@ -111,6 +111,118 @@ def _normalize_added_token(tokenizer: Any, token: str) -> str:
     return decoded if isinstance(decoded, str) and decoded else token
 
 
+def _probe_token_ids(tokenizer: Any, *, add_special_tokens: bool) -> list[int] | None:
+    try:
+        encoded = tokenizer(_SPECIAL_PROBE_TEXT, add_special_tokens=add_special_tokens)
+        ids = encoded["input_ids"]
+    except Exception:
+        return None
+    if not isinstance(ids, list) or not all(isinstance(index, int) for index in ids):
+        return None
+    return ids
+
+
+def _observed_add_special(
+    tokenizer: Any,
+    special_ids: Mapping[str, int],
+) -> dict[str, bool]:
+    """Read the flags from what the tokenizer actually does to a plain string.
+
+    Transformers 5 reports ``add_bos_token=False`` for Llama-3 even though the
+    backend ``TemplateProcessing`` post-processor prepends
+    ``<|begin_of_text|>``. Comparing a probe with and without special tokens
+    follows the tokenizer instead of that attribute.
+    """
+
+    with_special = _probe_token_ids(tokenizer, add_special_tokens=True)
+    without_special = _probe_token_ids(tokenizer, add_special_tokens=False)
+    if with_special is None or without_special is None or not with_special:
+        return {}
+
+    flags: dict[str, bool] = {}
+    bos_id = special_ids.get("bos")
+    if bos_id is not None:
+        flags["bos"] = (
+            with_special[0] == bos_id
+            and with_special.count(bos_id) > without_special.count(bos_id)
+        )
+    eos_id = special_ids.get("eos")
+    if eos_id is not None:
+        flags["eos"] = (
+            with_special[-1] == eos_id
+            and with_special.count(eos_id) > without_special.count(eos_id)
+        )
+    return flags
+
+
+def _iter_post_processors(node: Any):
+    if not isinstance(node, dict):
+        return
+    yield node
+    children = node.get("processors")
+    if isinstance(children, list):
+        for child in children:
+            yield from _iter_post_processors(child)
+
+
+def _template_special_token_id(entry: Any, processor: Mapping[str, Any]) -> int | None:
+    if not isinstance(entry, dict):
+        return None
+    special = entry.get("SpecialToken")
+    if not isinstance(special, dict):
+        return None
+    content = special.get("id")
+    if not isinstance(content, str):
+        return None
+    special_tokens = processor.get("special_tokens")
+    if not isinstance(special_tokens, dict):
+        return None
+    token_info = special_tokens.get(content)
+    if not isinstance(token_info, dict):
+        return None
+    ids = token_info.get("ids")
+    if isinstance(ids, list) and len(ids) == 1 and isinstance(ids[0], int):
+        return ids[0]
+    return None
+
+
+def _post_processor_add_special(
+    tokenizer: Any,
+    special_ids: Mapping[str, int],
+) -> dict[str, bool]:
+    """Fallback for a tokenizer whose ``__call__`` cannot be probed."""
+
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is None:
+        return {}
+    try:
+        post_processor = json.loads(backend.to_str()).get("post_processor")
+    except Exception:
+        return {}
+
+    flags: dict[str, bool] = {}
+    for processor in _iter_post_processors(post_processor):
+        kind = processor.get("type")
+        if kind == "RobertaProcessing":
+            if "bos" in special_ids:
+                flags["bos"] = True
+            if "eos" in special_ids:
+                flags["eos"] = True
+            continue
+        if kind != "TemplateProcessing":
+            continue
+        single = processor.get("single")
+        if not isinstance(single, list) or not single:
+            continue
+        bos_id = special_ids.get("bos")
+        if bos_id is not None:
+            flags["bos"] = _template_special_token_id(single[0], processor) == bos_id
+        eos_id = special_ids.get("eos")
+        if eos_id is not None:
+            flags["eos"] = _template_special_token_id(single[-1], processor) == eos_id
+    return flags
+
+
 def build_tokenizer_metadata(
     tokenizer: Any,
     *,
@@ -166,11 +278,9 @@ def build_tokenizer_metadata(
         if isinstance(value, int) and 0 <= value < vocab_size:
             special_ids[name] = value
 
-    add_special: dict[str, bool] = {}
-    for name, attr in _ADD_SPECIAL_FIELDS:
-        value = getattr(tokenizer, attr, None)
-        if isinstance(value, bool):
-            add_special[name] = value
+    add_special = _observed_add_special(tokenizer, special_ids)
+    for name, value in _post_processor_add_special(tokenizer, special_ids).items():
+        add_special.setdefault(name, value)
 
     template = chat_template if chat_template else getattr(tokenizer, "chat_template", None)
     if template is not None and not isinstance(template, str):
