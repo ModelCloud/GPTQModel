@@ -485,3 +485,116 @@ def test_randomized_compensator_respects_explicit_generator_device():
         state.step(key, key, value, gate, gate)
     expected = key.unsqueeze(-1) * value.unsqueeze(-2)
     torch.testing.assert_close(state.materialize(), expected, rtol=2e-3, atol=2e-3)
+
+
+def _triton_ready(device):
+    if not str(device).startswith("cuda") or not torch.cuda.is_available():
+        return False
+    try:
+        from gptqmodel.utils import leapquant_triton
+    except Exception:
+        return False
+    return leapquant_triton.TRITON_AVAILABLE
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+def test_fused_step_backend_selection():
+    if not _triton_ready("cuda"):
+        pytest.skip("Triton is unavailable")
+    query, key, value, alpha, beta = _fixture("cuda", tokens=2)
+    state = LeapQuantState(2, 2, 8, 8, LeapQuantConfig(bits=8, window=4, rank=2), gate_dim=1, device="cuda")
+    state.step(query[:, 0], key[:, 0], value[:, 0], alpha[:, 0], beta[:, 0])
+    assert state._step_backend == "triton"
+
+    reference = LeapQuantState(
+        2, 2, 8, 8, LeapQuantConfig(bits=8, window=4, rank=2, use_triton=False), gate_dim=1, device="cuda",
+    )
+    reference.step(query[:, 0], key[:, 0], value[:, 0], alpha[:, 0], beta[:, 0])
+    assert reference._step_backend == "torch"
+
+    exact = LeapQuantState(2, 2, 8, 8, LeapQuantConfig(bits=8, window=4, rank=0), gate_dim=1, device="cuda")
+    exact.step(query[:, 0], key[:, 0], value[:, 0], alpha[:, 0], beta[:, 0])
+    assert exact._step_backend == "torch"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+@pytest.mark.parametrize("bits", [4, 6, 8])
+@pytest.mark.parametrize("gate_dim", [1, 8])
+def test_fused_step_matches_torch_path(bits, gate_dim):
+    if not _triton_ready("cuda"):
+        pytest.skip("Triton is unavailable")
+    query, key, value, alpha, beta = _fixture("cuda", tokens=8)
+    if gate_dim == 8:
+        alpha = alpha[..., None].expand(-1, -1, -1, 8)
+    native = LeapQuantState(
+        2, 2, 8, 8,
+        LeapQuantConfig(bits=bits, window=4, rank=2, buffer_dtype=torch.float32),
+        gate_dim=gate_dim,
+        device="cuda",
+    )
+    reference = LeapQuantState(
+        2, 2, 8, 8,
+        LeapQuantConfig(bits=bits, window=4, rank=2, buffer_dtype=torch.float32, use_triton=False),
+        gate_dim=gate_dim,
+        device="cuda",
+    )
+    reference.load_packed_state(native.packed_state())
+
+    native_outputs = []
+    reference_outputs = []
+    for index in range(8):
+        native_outputs.append(native.step(query[:, index], key[:, index], value[:, index], alpha[:, index], beta[:, index]))
+        reference_outputs.append(
+            reference.step(query[:, index], key[:, index], value[:, index], alpha[:, index], beta[:, index])
+        )
+    assert native._step_backend == "triton"
+    assert reference._step_backend == "torch"
+    limit = {4: 8e-2, 6: 2e-2, 8: 5e-3}[bits]
+    assert _relative(torch.stack(native_outputs), torch.stack(reference_outputs)) < limit
+    assert _relative(native.materialize(), reference.materialize()) < limit * 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+def test_fused_fit_backend_selection():
+    if not _triton_ready("cuda"):
+        pytest.skip("Triton is unavailable")
+    generator = torch.Generator(device="cpu").manual_seed(19)
+    dense = torch.randn(2, 2, 8, 8, generator=generator).to("cuda") * 0.05
+    native = LeapQuantState(2, 2, 8, 8, LeapQuantConfig(bits=8, window=4, rank=2), gate_dim=1, device="cuda")
+    native.quantize_(dense)
+    assert native._fit_backend == "triton"
+
+    reference = LeapQuantState(
+        2, 2, 8,
+        8,
+        LeapQuantConfig(bits=8, window=4, rank=2, use_triton=False),
+        gate_dim=1,
+        device="cuda",
+    )
+    reference.quantize_(dense)
+    assert reference._fit_backend == "torch"
+
+    native_error = (native.dequantize() - dense).norm() / dense.norm()
+    reference_error = (reference.dequantize() - dense).norm() / dense.norm()
+    assert abs(native_error - reference_error).item() < 1e-3
+
+
+def test_use_triton_must_be_bool():
+    with pytest.raises(TypeError):
+        LeapQuantConfig(use_triton=1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+def test_fused_step_falls_back_for_unsupported_shape():
+    state = LeapQuantState(
+        1, 1, 512, 8,
+        LeapQuantConfig(bits=8, window=2, rank=2),
+        gate_dim=1,
+        device="cuda",
+    )
+    query = torch.randn(1, 1, 512, device="cuda")
+    key = torch.randn(1, 1, 512, device="cuda")
+    value = torch.randn(1, 1, 8, device="cuda")
+    gate = torch.ones(1, 1, device="cuda")
+    state.step(query, key, value, gate, gate)
+    assert state._step_backend == "torch"
