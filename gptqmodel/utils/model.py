@@ -2153,9 +2153,50 @@ def simple_dispatch_model(model, device_map):
 
 
 # public/stable api exposed to transformer/optimum
+def _attach_checkpoint_serialization_save_guard(model) -> None:
+    """Run this model instance's ``save_pretrained`` as a checkpoint write.
+
+    The HF bridge loads GPT-QModel checkpoints through Transformers, whose
+    ``PreTrainedModel.save_pretrained`` collects ``state_dict()`` itself.
+    Marlin and ExLlamaV2 replace their packed tensors with a private runtime
+    layout that has no inverse, so that writer would publish words no loader
+    can read. The kernels refuse from ``_save_to_state_dict`` only inside
+    ``checkpoint_serialization()`` (PEFT's read-only ``state_dict()`` must keep
+    working), so the bridge marks this instance's writer instead of patching
+    ``PreTrainedModel``.
+
+    The same scope drops the ``qzeros_format`` runtime marker (#4155), so a
+    checkpoint-layout kernel writes an ordinary GPTQ payload.
+    """
+
+    from functools import wraps
+
+    original = getattr(model, "save_pretrained", None)
+    if not callable(original):
+        return
+    if getattr(original, "_gptqmodel_checkpoint_serialization_guard", False):
+        return
+
+    from .checkpoint_state import checkpoint_serialization
+
+    @wraps(original)
+    def save_pretrained_with_checkpoint_serialization(*args, **kwargs):
+        with checkpoint_serialization():
+            return original(*args, **kwargs)
+
+    save_pretrained_with_checkpoint_serialization._gptqmodel_checkpoint_serialization_guard = True
+    model.save_pretrained = save_pretrained_with_checkpoint_serialization
+
+
 def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None):
-    return gptqmodel_post_init(model, use_act_order, quantize_config, max_input_length)
+    model = gptqmodel_post_init(model, use_act_order, quantize_config, max_input_length)
+    # Transformers' quantizers call this bridge after the packed weights are
+    # loaded. Attach the guard here so only bridge-loaded instances are marked:
+    # GPT-QModel's own loader keeps ``model.save_pretrained`` untouched for
+    # ``torch.save(model)`` and its writer owns the export path.
+    _attach_checkpoint_serialization_save_guard(model)
+    return model
 
 
 def _cpu_offload_writable_storage(weights_map):
