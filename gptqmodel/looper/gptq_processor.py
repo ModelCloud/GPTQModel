@@ -53,6 +53,10 @@ from ..quantization.activation_floatx import (
     nvfp4_global_scale,
     nvfp4_uses_headroom,
 )
+from ..quantization.admmq import (
+    admmq_diagnostics_alert,
+    summarize_admmq_diagnostics,
+)
 from ..quantization.config import (
     METHOD,
     CalibrationConfig,
@@ -245,6 +249,7 @@ class GPTQProcessor(LoopProcessor):
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
+        self.admmq_diagnostics: Dict[str, dict] = {}
         # Preserve per-sample keep-mask semantics when batch quantization uses
         # padded calibration rows. GPTQ then consumes the original [B, S, H]
         # activations and applies the current batch mask itself.
@@ -1051,6 +1056,14 @@ class GPTQProcessor(LoopProcessor):
         jointq_diagnostics = getattr(g, "jointq_diagnostics", None)
         if jointq_diagnostics:
             module.state["jointq_diagnostics"] = jointq_diagnostics
+        admmq_diagnostics = getattr(g, "admmq_diagnostics", None)
+        if admmq_diagnostics is not None:
+            entry = dict(admmq_diagnostics)
+            entry["module"] = module.full_name
+            entry["layer_index"] = module.layer_index
+            module.state["admmq_diagnostics"] = entry
+            with self.lock:
+                self.admmq_diagnostics[module.full_name] = entry
 
         workspace_summary = getattr(g, "_borrow_workspace_last_summary", None)
         workspace_totals = getattr(g, "_borrow_workspace_totals", None)
@@ -1350,6 +1363,8 @@ class GPTQProcessor(LoopProcessor):
         # print("finalize")
         # print_module_tree(model.model)
 
+        self._publish_admmq_diagnostics(model)
+
         # set quantized state
         model.quantized = True
         # GPTAQ and FOEM are GPTQ options, so their artifacts are plain
@@ -1360,6 +1375,34 @@ class GPTQProcessor(LoopProcessor):
             model.quantize_config.method = METHOD.GPTQ
 
         super().finalize(model=model, **kwargs)
+
+    def _publish_admmq_diagnostics(self, model: BaseQModel) -> None:
+        """Publish per-module ADMM-Q telemetry on the model.
+
+        The solver keeps diagnostics on each task, which disappears when the
+        layer is packed. Aggregating here preserves the run's early-stop,
+        max-iteration, RTN-fallback and refinement history for the caller. The
+        payload is runtime-only: it is never written to the checkpoint config.
+        One warning is logged only when a layer was skipped, fell back to RTN,
+        or produced a non-finite condition number; clean runs stay silent so
+        the normal quantization log is unchanged.
+        """
+
+        with self.lock:
+            entries = dict(self.admmq_diagnostics)
+        if not entries:
+            return
+
+        summary = summarize_admmq_diagnostics(entries)
+        model.admmq_diagnostics = {"layers": entries, "summary": summary}
+
+        alert = admmq_diagnostics_alert(summary)
+        if alert is not None:
+            log.warn(
+                "ADMM-Q diagnostics: %s; per-module records are on "
+                "model.admmq_diagnostics",
+                alert,
+            )
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         """Ensures GPTQ received calibration data before the quantization loop starts."""

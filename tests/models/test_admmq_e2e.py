@@ -18,6 +18,7 @@ from gptqmodel.quantization.config import METHOD, ADMMQConfig
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.bfloat16
+FALLBACK_MODULE = "model.layers.0.self_attn.q_proj"
 
 
 def _tokenizer():
@@ -54,8 +55,19 @@ def _packed_state(module):
     }
 
 
-@pytest.mark.parametrize("desc_act", [False, True])
-def test_tiny_llama_admmq_roundtrip(tmp_path, desc_act):
+@pytest.mark.parametrize(
+    ("desc_act", "dynamic"),
+    [
+        (False, None),
+        (True, None),
+        pytest.param(
+            False,
+            {FALLBACK_MODULE: {"fallback": {"strategy": "mean", "threshold": 1000}}},
+            id="mean-fallback",
+        ),
+    ],
+)
+def test_tiny_llama_admmq_roundtrip(tmp_path, desc_act, dynamic, capfd):
     torch.manual_seed(41)
     source = tmp_path / "source"
     saved = tmp_path / "quantized"
@@ -81,6 +93,7 @@ def test_tiny_llama_admmq_roundtrip(tmp_path, desc_act):
         group_size=32,
         sym=True,
         desc_act=desc_act,
+        dynamic=dynamic,
         max_iter=24,
         update_iter=3,
         switch_iter=6,
@@ -108,6 +121,44 @@ def test_tiny_llama_admmq_roundtrip(tmp_path, desc_act):
     assert len(selected) == 14
     expected = {name: _packed_state(module) for name, module in selected}
 
+    diagnostics = getattr(model, "admmq_diagnostics", None)
+    assert diagnostics is not None, "quantize() did not publish ADMM-Q diagnostics"
+    summary = diagnostics["summary"]
+    assert summary["layers"] == len(diagnostics["layers"]) == len(selected)
+    assert diagnostics["layers"].keys() == {name for name, _ in selected}
+    assert summary["solved"] + summary["skipped"] == summary["layers"]
+    if dynamic:
+        fallback = diagnostics["layers"][FALLBACK_MODULE]
+        assert summary["skipped"] == 1
+        assert fallback["status"] == "skipped"
+        assert fallback["fallback_to_rtn"] is False
+        assert fallback["fallback_strategy"] == "mean"
+        assert fallback["fallback_reason"] == "insufficient_calibration"
+        assert FALLBACK_MODULE not in summary["rtn_fallback_layers"]
+    for name, entry in diagnostics["layers"].items():
+        assert entry["module"] == name
+        assert entry["status"] in {"solved", "skipped"}
+        assert entry["converged"] in {True, False}
+        assert entry["stop_reason"] in {"early_stop", "max_iter", "skipped", "fallback"}
+        assert entry["max_iter"] == 24
+        assert "condition_number" in entry
+        assert "refresh_attempts" in entry
+        assert "pairswap_flips" in entry
+        assert "fallback_to_rtn" in entry
+    # Diagnostics are runtime-only: the checkpoint config keeps its usual
+    # lightweight meta and never grows with the module count.
+    meta = getattr(model.quantize_config, "meta", None) or {}
+    assert "admmq_diagnostics" not in meta
+
+    captured = capfd.readouterr()
+    alert_count = (captured.out + captured.err).count("ADMM-Q diagnostics:")
+    degraded = bool(
+        summary["skipped"]
+        or len(summary["rtn_fallback_layers"])
+        or summary["condition_number_nonfinite"]
+    )
+    assert alert_count == int(degraded)
+
     model.save(str(saved))
     loaded = GPTQModel.load(
         str(saved), backend=BACKEND.GPTQ_TORCH, device=DEVICE, dtype=DTYPE
@@ -119,6 +170,7 @@ def test_tiny_llama_admmq_roundtrip(tmp_path, desc_act):
     assert loaded.quantize_config.switch_iter == 6
     assert loaded.quantize_config.pairswap_pairs == 8
     assert loaded.quantize_config.desc_act is desc_act
+    assert loaded.admmq_diagnostics is None
 
     restored = _packed_modules(loaded)
     assert [name for name, _ in restored] == [name for name, _ in selected]

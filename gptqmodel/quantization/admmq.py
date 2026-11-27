@@ -26,16 +26,17 @@ from __future__ import annotations
 
 import copy
 import math
+import statistics
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
 
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
-from .config import ADMMQConfig, BaseQuantizeConfig
+from .config import ADMMQConfig, BaseQuantizeConfig, FallbackStrategy
 from .gptq import GPTQ
 from .quantizer import _neutralize_dead_columns, quantize
 
@@ -52,9 +53,12 @@ class _AdmmNumericalFailure(Exception):
     a layer where the ADMM iterate simply did not beat its RTN baseline.
     """
 
-    def __init__(self, reason: str, detail: str = "", *, iterations: Optional[int] = None):
+    def __init__(
+        self, reason: str, detail: str = "", *, iterations: Optional[int] = None, diagnostics: Optional[dict] = None
+    ):
         self.reason = reason
         self.iterations = iterations
+        self.diagnostics = diagnostics
         super().__init__(f"{reason}: {detail}" if detail else reason)
 
 
@@ -190,6 +194,138 @@ def pairswap_delta(
     return tuple(deltas)
 
 
+def _diagnostics_stats(values: Sequence[Any]) -> Dict[str, Optional[float]]:
+    """Return min/median/max over the finite numeric values only."""
+
+    finite = [
+        float(value)
+        for value in values
+        if isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    ]
+    if not finite:
+        return {"min": None, "median": None, "max": None}
+    return {
+        "min": min(finite),
+        "median": float(statistics.median(finite)),
+        "max": max(finite),
+    }
+
+
+def summarize_admmq_diagnostics(
+    layers: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Aggregate per-module ADMM-Q diagnostics into one run summary.
+
+    The summary names the modules that early-stopped, exhausted ``max_iter``,
+    fell back to RTN, or accepted a grid refresh. Condition numbers and
+    iteration counts are reported as finite min/median/max distributions; an
+    infinite condition number is counted separately instead of poisoning the
+    statistics.
+    """
+
+    names = sorted(layers)
+    solved = [
+        name for name in names
+        if layers[name].get("status", "solved") == "solved"
+    ]
+    # Classify by ``stop_reason`` rather than ``converged``: a numerical
+    # failure records a fallback without a normal stop reason and must not be
+    # counted as an exhausted iteration budget.
+    early_stop = [
+        name for name in solved
+        if layers[name].get("stop_reason") == "early_stop"
+    ]
+    max_iter = [
+        name for name in solved
+        if layers[name].get("stop_reason") == "max_iter"
+    ]
+    rtn_fallback = [name for name in names if bool(layers[name].get("fallback_to_rtn"))]
+
+    fallback_reasons: Dict[str, int] = {}
+    for name in rtn_fallback:
+        reason = layers[name].get("fallback_reason") or "unspecified"
+        fallback_reasons[reason] = fallback_reasons.get(reason, 0) + 1
+
+    refresh_attempted = [
+        name for name in names
+        if int(layers[name].get("refresh_attempts", 0) or 0) > 0
+    ]
+    refresh_accepted = [
+        name for name in refresh_attempted
+        if bool(layers[name].get("refresh_accepted"))
+    ]
+    pairswap_layers = [
+        name for name in names
+        if bool(layers[name].get("pairswap_ran"))
+    ]
+    pairswap_with_flips = [
+        name for name in names
+        if int(layers[name].get("pairswap_flips", 0) or 0) > 0
+    ]
+
+    condition_numbers = [layers[name].get("condition_number") for name in solved]
+    iterations = [layers[name].get("iterations") for name in solved]
+    nonfinite_condition_numbers = sum(
+        1
+        for value in condition_numbers
+        if isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and not math.isfinite(float(value))
+    )
+
+    return {
+        "layers": len(names),
+        "solved": len(solved),
+        "skipped": len(names) - len(solved),
+        "early_stop_layers": early_stop,
+        "max_iter_layers": max_iter,
+        "rtn_fallback_layers": rtn_fallback,
+        "rtn_fallback_reasons": dict(sorted(fallback_reasons.items())),
+        "refresh_attempted": len(refresh_attempted),
+        "refresh_accepted": len(refresh_accepted),
+        "refresh_accepted_layers": refresh_accepted,
+        "pairswap_layers": len(pairswap_layers),
+        "pairswap_flips": sum(
+            int(layers[name].get("pairswap_flips", 0) or 0) for name in names
+        ),
+        "pairswap_layers_with_flips": pairswap_with_flips,
+        "condition_number": _diagnostics_stats(condition_numbers),
+        "condition_number_nonfinite": nonfinite_condition_numbers,
+        "iterations": _diagnostics_stats(iterations),
+    }
+
+
+def admmq_diagnostics_alert(summary: Mapping[str, Any]) -> Optional[str]:
+    """Return a one-line alert when a layer's solve degraded, else ``None``.
+
+    ADMM-Q normally spends the whole iteration budget, so ``max_iter`` alone is
+    not worth a log line. Only skipped modules, RTN fallbacks and non-finite
+    condition numbers signal a result the caller should inspect; a clean run
+    logs nothing and leaves the full record on ``model.admmq_diagnostics``.
+    """
+
+    skipped = int(summary.get("skipped") or 0)
+    fallback = len(summary.get("rtn_fallback_layers") or ())
+    nonfinite = int(summary.get("condition_number_nonfinite") or 0)
+    if not (skipped or fallback or nonfinite):
+        return None
+
+    reasons = summary.get("rtn_fallback_reasons") or {}
+    parts = [
+        f"skipped={skipped}",
+        f"rtn_fallback={fallback}",
+        f"condition_number_nonfinite={nonfinite}",
+    ]
+    if reasons:
+        parts.append(
+            "reasons="
+            + ",".join(f"{name}:{count}" for name, count in sorted(reasons.items()))
+        )
+    return " ".join(parts)
+
+
 @dataclass
 class _Grid:
     """One fitted quantization grid (per output channel) for a column range."""
@@ -289,9 +425,6 @@ class ADMMQ(GPTQ):
 
         cfg = self.qcfg
         rounds = int(cfg.pairswap_rounds)
-        if cfg.pairswap_mode == "off" or rounds <= 0 or self.columns < 2:
-            return quantized, 0
-
         device = quantized.device
         scale = torch.cat([grid.scale for grid in grids], dim=1)
         zero = torch.cat([grid.zero for grid in grids], dim=1)
@@ -416,12 +549,13 @@ class ADMMQ(GPTQ):
         return float(eigenvalues[-1].item()) / smallest
 
     def _should_pairswap(self, condition_number: float) -> bool:
-        mode = self.qcfg.pairswap_mode
+        cfg = self.qcfg
+        mode = cfg.pairswap_mode
+        if mode == "off" or int(cfg.pairswap_rounds) <= 0 or self.columns < 2:
+            return False
         if mode == "always":
             return True
-        if mode == "off":
-            return False
-        return condition_number > float(self.qcfg.pairswap_condition_threshold)
+        return condition_number > float(cfg.pairswap_condition_threshold)
 
     def _admm_weight_solve(self, weight: torch.Tensor, hessian: torch.Tensor) -> Tuple[torch.Tensor, List[_Grid]]:
         """Run Algorithm 1 on one already-prepared ``[out, in]`` weight matrix."""
@@ -486,8 +620,10 @@ class ADMMQ(GPTQ):
         iterations = 0
         error_history: List[float] = []
         rho = rho_initial
+        stop_reason = "max_iter"
+        max_iter = int(cfg.max_iter)
 
-        for step in range(int(cfg.max_iter)):
+        for step in range(max_iter):
             rho = admm_rho_at(step, rho_initial, rho_update, int(cfg.update_iter))
             right_hand_side = hessian_weight + rho * discrete - dual
             continuous = torch.empty_like(weight_scaled)
@@ -505,6 +641,18 @@ class ADMMQ(GPTQ):
                         "non_finite_iterate",
                         f"iteration {step + 1}",
                         iterations=step + 1,
+                        diagnostics={
+                            "condition_number": condition_number,
+                            "ill_conditioned": condition_number > ILL_CONDITIONED_THRESHOLD,
+                            "rho_initial": rho_initial,
+                            "rho_update": rho_update,
+                            "rho_final": rho,
+                            "refresh_attempts": int(refresh_attempted),
+                            "refresh_attempted": refresh_attempted,
+                            "refresh_accepted": refresh_accepted,
+                            "refresh_improvement": refresh_improvement,
+                            "initial_objective": float(initial_objective.item()),
+                        },
                     )
                 continuous[start:end] = block
             del right_hand_side
@@ -561,14 +709,16 @@ class ADMMQ(GPTQ):
             # next solve, including any accepted grid refresh.
             d_rel = float(((discrete - previous).square().sum() / denominator).item())
             previous = discrete
-            if step + 1 >= int(cfg.switch_iter) and d_rel < float(cfg.early_stop_tol):
+            if int(cfg.switch_iter) <= iterations < max_iter and d_rel < float(cfg.early_stop_tol):
+                stop_reason = "early_stop"
                 break
 
         quantized = discrete * column_sigma
         # Land exactly on the final grid so packing recovers integer codes.
         quantized = self._project(quantized, grids)
 
-        if self._should_pairswap(condition_number):
+        pairswap_ran = self._should_pairswap(condition_number)
+        if pairswap_ran:
             quantized, flips = self._pairswap(weight, quantized, hessian, grids)
         else:
             flips = 0
@@ -593,17 +743,24 @@ class ADMMQ(GPTQ):
             fallback_to_rtn = True
 
         self.admmq_diagnostics = {
+            "status": "solved",
+            "converged": stop_reason == "early_stop",
+            "stop_reason": stop_reason,
             "iterations": iterations,
+            "max_iter": max_iter,
             "condition_number": condition_number,
             "ill_conditioned": condition_number > ILL_CONDITIONED_THRESHOLD,
             "rho_initial": rho_initial,
             "rho_update": rho_update,
             "rho_final": rho,
             "refresh_attempts": 1 if refresh_attempted else 0,
+            "refresh_attempted": refresh_attempted,
             "refresh_accepted": refresh_accepted,
             "refresh_improvement": refresh_improvement,
+            "pairswap_ran": pairswap_ran,
             "pairswap_flips": flips,
             "fallback_to_rtn": fallback_to_rtn,
+            "fallback_strategy": FallbackStrategy.RTN.value if fallback_to_rtn else None,
             "fallback_reason": fallback_reason,
             "initial_objective": float(initial_objective.item()),
             "final_objective": float(final_objective.item()),
@@ -624,6 +781,47 @@ class ADMMQ(GPTQ):
             return source_device
         return torch.device("cpu")
 
+    def _set_skipped_diagnostics(self, reason: str) -> None:
+        """Record a module that did not run the ADMM solve."""
+
+        self.admmq_diagnostics = {
+            "status": "skipped",
+            "reason": reason,
+            "converged": False,
+            "stop_reason": "skipped",
+            "iterations": 0,
+            "max_iter": int(self.qcfg.max_iter),
+            "condition_number": None,
+            "rho_final": None,
+            "refresh_attempts": 0,
+            "refresh_attempted": False,
+            "refresh_accepted": False,
+            "refresh_improvement": 0.0,
+            "pairswap_ran": False,
+            "pairswap_flips": 0,
+            "fallback_to_rtn": False,
+            "fallback_strategy": None,
+            "fallback_reason": reason if reason == "insufficient_calibration" else None,
+            "initial_objective": None,
+            "final_objective": None,
+        }
+
+    def _fallback_quantize(
+        self,
+        strategy: FallbackStrategy,
+        blocksize: int,
+        target_device: Optional[torch.device] = None,
+        hessian_diag: Optional[torch.Tensor] = None,
+    ):
+        result = super()._fallback_quantize(
+            strategy, blocksize, target_device=target_device, hessian_diag=hessian_diag
+        )
+        diagnostics = self.admmq_diagnostics
+        if diagnostics is not None:
+            diagnostics["fallback_to_rtn"] = strategy is FallbackStrategy.RTN
+            diagnostics["fallback_strategy"] = strategy.value
+        return result
+
     # ------------------------------------------------------------------
     # GPTQ entry point
     # ------------------------------------------------------------------
@@ -633,6 +831,7 @@ class ADMMQ(GPTQ):
         if isinstance(self.module, nn.Embedding):
             # The embedding Hessian is a token-frequency diagonal; the ADMM
             # split has nothing to gain over the exact per-group RTN projection.
+            self._set_skipped_diagnostics("embedding")
             return self._quantize_embedding(blocksize=blocksize)
 
         from ..utils.fallback import should_use_fallback
@@ -640,8 +839,8 @@ class ADMMQ(GPTQ):
         if self.nsamples == 0 or should_use_fallback(
             self.fallback, float(self.nsamples), self.expected_nsamples
         ):
-            # The configured data-independent fallback is the GPTQ family's RTN
-            # path, with its documented output contract.
+            # GPTQ selects the fallback strategy from the calibration coverage.
+            self._set_skipped_diagnostics("insufficient_calibration")
             return super()._quantize_impl(blocksize=blocksize)
 
         start = time.time()
@@ -661,6 +860,8 @@ class ADMMQ(GPTQ):
 
         def solve():
             nonlocal inverse_permutation, original_diagonal
+            # Each attempt owns its diagnostics, including the CPU retry.
+            self.admmq_diagnostics = None
             hessian = self.H
             if hessian.device.type == "cuda":
                 # Only the diagonal is changed by dead-column handling and
@@ -698,7 +899,6 @@ class ADMMQ(GPTQ):
             if original_diagonal is not None:
                 self.H.diagonal().copy_(original_diagonal)
 
-        self.admmq_diagnostics = None
         try:
             if solve_device != source_device:
                 log.warn(
@@ -728,23 +928,31 @@ class ADMMQ(GPTQ):
                 )
                 if self.admmq_diagnostics is None:
                     self.admmq_diagnostics = {
+                        "status": "solved",
+                        "converged": False,
+                        "stop_reason": "fallback",
                         "iterations": (
                             exc.iterations if isinstance(exc, _AdmmNumericalFailure) else None
                         ),
+                        "max_iter": int(self.qcfg.max_iter),
                         "condition_number": None,
                         "rho_final": None,
-                        "refresh_attempts": None,
-                        "refresh_accepted": None,
+                        "refresh_attempts": 0,
+                        "refresh_attempted": False,
+                        "refresh_accepted": False,
                         "refresh_improvement": None,
+                        "pairswap_ran": False,
                         "pairswap_flips": 0,
-                        "fallback_to_rtn": True,
                         "fallback_reason": reason,
                         "initial_objective": None,
                         "final_objective": None,
                     }
+                    if isinstance(exc, _AdmmNumericalFailure) and exc.diagnostics is not None:
+                        self.admmq_diagnostics.update(exc.diagnostics)
                 else:
-                    self.admmq_diagnostics["fallback_to_rtn"] = True
                     self.admmq_diagnostics["fallback_reason"] = reason
+                    self.admmq_diagnostics["converged"] = False
+                    self.admmq_diagnostics["stop_reason"] = "fallback"
                 result = self._rtn_fallback_after_hessian_failure(blocksize)
                 if not bool(torch.isfinite(result[0]).all()):
                     raise ValueError(

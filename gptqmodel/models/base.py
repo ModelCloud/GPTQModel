@@ -1659,6 +1659,9 @@ class BaseQModel(nn.Module):
             else model_local_path
         )
         self.quantize_config = quantize_config
+        # Runtime-only ADMM-Q telemetry published by the processor after a run;
+        # it is not part of the checkpoint config and starts empty.
+        self.admmq_diagnostics = None
         self.quantization_run_plan: Optional[QuantizationRunPlan] = None
         self.quant_region_timer = QuantizationRegionTimer(logger=log)
         self._runtime_generate = None

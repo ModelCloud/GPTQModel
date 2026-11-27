@@ -82,16 +82,18 @@ its own Hessian for damping and activation ordering.
      paper's adaptive schedule before the first iteration: `rho = 0.05` above
      a preconditioned condition number of `5e4` (`0.01` above `3e5`) and
      `rho_update = 1.05`.
-   - Stop after `switch_iter` iterations once the relative change of `D` falls
-     below `early_stop_tol`. Measure the change after any accepted grid refresh.
+   - Stop early from `switch_iter` onward if the relative change of `D` falls
+     below `early_stop_tol` before the iteration cap. Measure the change after
+     any accepted grid refresh.
 5. When `D` stagnates over `stagnation_window` iterations, refit the grids on
    the current continuous iterate and accept the refresh only when it lowers the
    projection objective by `refresh_accept_rel`. The dual absorbs the accepted
    change, and at most one refresh is attempted per layer.
-6. Project the final iterate onto the fitted grid and run PairSwap. For each
-   sampled pair, score the four sign combinations of a one-cell move. Apply
-   the best improving pair using its updated integer codes and update the
-   gradient with the resulting rank-2 correction.
+6. Project the final iterate onto the fitted grid. PairSwap is eligible with
+   at least one configured round and two columns. For each sampled pair, score
+   the four sign combinations of a one-cell move. Apply the best improving pair
+   using its updated integer codes and update the gradient with the resulting
+   rank-2 correction.
 7. Keep the RTN projection if the result is non-finite or has a higher
    reconstruction objective than the RTN initialization.
 8. If the float64 eigendecomposition raises `LinAlgError`, returns a
@@ -299,6 +301,59 @@ rejects enabled `mock_quantization`, `g2ptq`, `gsq`, `gsq_training`,
 `static_groups`, and `act_group_aware`. ADMM-Q damps the Hessian once with
 `damp_percent` and requires `damp_auto_increment=0`. The same restrictions
 apply to per-module `dynamic` rules.
+
+## Diagnostics
+
+Each solver records one `admmq_diagnostics` mapping on the `ADMMQ` task. The
+mapping records how the solve ended, which fallback the layer used, and what
+the grid refresh and PairSwap passes did.
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `"solved"` for an attempted ADMM solve and `"skipped"` for embeddings or a calibration fallback. |
+| `converged` | `True` when the relative iterate change triggered an early stop before `max_iter`. |
+| `stop_reason` | `"early_stop"`, `"max_iter"`, `"skipped"`, or `"fallback"` when a numerical failure interrupted the solve or invalidated its loss. |
+| `iterations` / `max_iter` | Iterations actually run and the configured cap. |
+| `condition_number` | Preconditioned Hessian condition number; may be infinite. |
+| `refresh_attempts`, `refresh_accepted`, `refresh_improvement` | The single guarded grid refresh. |
+| `pairswap_ran`, `pairswap_flips` | Whether PairSwap searched and how many improving row-pair moves survived the solver's objective check. |
+| `fallback_strategy`, `fallback_to_rtn` | The selected fallback strategy, if any, and whether it was RTN. |
+| `fallback_reason` | The trigger for fallback, such as a numerical failure, an objective worse than RTN, or insufficient calibration. |
+| `initial_objective`, `final_objective` | Reconstruction objective before and after the solve. |
+
+`GPTQProcessor` aggregates the per-module records and publishes them on the
+model after `quantize()`:
+
+```python
+model.quantize_config.method is METHOD.ADMMQ
+diagnostics = model.admmq_diagnostics
+summary = diagnostics["summary"]
+
+print(summary["early_stop_layers"])   # modules that converged early
+print(summary["max_iter_layers"])     # modules that hit max_iter
+print(summary["rtn_fallback_layers"]) # modules that kept the RTN projection
+print(summary["condition_number"])    # finite min/median/max
+```
+
+`summary` also reports `refresh_attempted`, `refresh_accepted`,
+`pairswap_layers`, `pairswap_flips` and the finite min/median/max
+`iterations`. Non-finite condition numbers are counted under
+`summary["condition_number_nonfinite"]` instead of poisoning the statistics.
+If an iteration fails, the summary includes the condition number measured before
+the failure and any grid refresh already performed.
+The full per-module records stay in `model.admmq_diagnostics["layers"]` for the
+live session.
+
+The payload is runtime-only: it is not written to `quantize_config.meta`, so
+the checkpoint config stays lightweight and does not grow with the module
+count. A reloaded checkpoint starts with `model.admmq_diagnostics = None`.
+For a resumed quantization, the mapping covers modules processed during the
+current invocation. A fully restored run has no new diagnostics.
+
+Logging stays quiet. `GPTQProcessor` emits one aggregate warning only when at
+least one module was skipped, fell back to RTN, or produced a non-finite
+condition number. Clean runs add no ADMM-Q lines, so the normal quantization
+progress log is unchanged.
 
 ## Measured quality
 
