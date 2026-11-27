@@ -42,6 +42,22 @@ from .quantizer import _neutralize_dead_columns, quantize
 
 log = setup_logger()
 
+
+class _AdmmNumericalFailure(Exception):
+    """Internal signal that one ADMM layer solve cannot produce a finite result.
+
+    The caller keeps the GPTQ family's RTN quantization for that layer instead
+    of aborting the whole model. ``reason`` is recorded in
+    ``ADMMQ.admmq_diagnostics`` so a fallback layer stays distinguishable from
+    a layer where the ADMM iterate simply did not beat its RTN baseline.
+    """
+
+    def __init__(self, reason: str, detail: str = "", *, iterations: Optional[int] = None):
+        self.reason = reason
+        self.iterations = iterations
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+
+
 #: Penalty growth is capped so a very long run cannot overflow the schedule.
 RHO_CAP = 1e6
 
@@ -388,8 +404,13 @@ class ADMMQ(GPTQ):
         # One factorization for the whole solve.  Float64 keeps the
         # preconditioned spectrum accurate; the iteration runs in the weight
         # dtype, like the reference schedule.
-        eigenvalues64, eigenvectors64 = torch.linalg.eigh(hessian_scaled.to(torch.float64))
+        try:
+            eigenvalues64, eigenvectors64 = torch.linalg.eigh(hessian_scaled.to(torch.float64))
+        except torch._C._LinAlgError as exc:
+            raise _AdmmNumericalFailure("eigh_failure", str(exc), iterations=0) from exc
         del hessian_scaled
+        if not bool(torch.isfinite(eigenvalues64).all()):
+            raise _AdmmNumericalFailure("non_finite_eigenvalues", iterations=0)
         eigenvalues = eigenvalues64.clamp_min(0).to(dtype)
         eigenvectors = eigenvectors64.to(dtype)
         del eigenvalues64, eigenvectors64
@@ -406,6 +427,11 @@ class ADMMQ(GPTQ):
         denominator = discrete.square().sum().clamp_min(torch.finfo(dtype).tiny)
 
         chunk_rows = max(1, int(_WORK_CHUNK_BYTES // max(1, columns * weight.element_size())))
+        # A non-finite iterate cannot recover, but scanning every iteration
+        # would add a full-tensor reduction to the healthy path. Check on a
+        # bounded cadence; the final objective check is the backstop for a
+        # NaN introduced between checks.
+        check_every = max(1, min(int(cfg.update_iter), 8))
         refresh_attempted = False
         refresh_accepted = False
         refresh_improvement = 0.0
@@ -417,11 +443,22 @@ class ADMMQ(GPTQ):
             rho = admm_rho_at(step, float(cfg.rho), float(cfg.rho_update), int(cfg.update_iter))
             right_hand_side = hessian_weight + rho * discrete - dual
             continuous = torch.empty_like(weight_scaled)
+            check_iterate = step == 0 or (step + 1) % check_every == 0
             for start in range(0, rows, chunk_rows):
                 end = min(start + chunk_rows, rows)
                 block = right_hand_side[start:end] @ eigenvectors
                 block = block / (eigenvalues + rho)
-                continuous[start:end] = block @ eigenvectors.t()
+                block = block @ eigenvectors.t()
+                # A NaN/Inf iterate makes every later projection and the final
+                # objective meaningless. Stop here and use the RTN fallback
+                # instead of running the remaining iterations.
+                if check_iterate and not bool(torch.isfinite(block).all()):
+                    raise _AdmmNumericalFailure(
+                        "non_finite_iterate",
+                        f"iteration {step + 1}",
+                        iterations=step + 1,
+                    )
+                continuous[start:end] = block
             del right_hand_side
 
             # The projection target is W + V / rho, not the continuous iterate.
@@ -490,13 +527,16 @@ class ADMMQ(GPTQ):
 
         final_objective = self._objective(weight, quantized, hessian)
         fallback_to_rtn = False
+        fallback_reason: Optional[str] = None
         if not bool(torch.isfinite(final_objective)) or final_objective > initial_objective:
+            finite_final = bool(torch.isfinite(final_objective))
+            fallback_reason = "non_finite_objective" if not finite_final else "worse_than_rtn"
             log.warn(
                 "ADMM-Q: module `%s` did not improve on its RTN initialization "
                 "(initial=%s final=%s); keeping the RTN projection.",
                 self.name,
                 float(initial_objective.item()),
-                float(final_objective.item()) if bool(torch.isfinite(final_objective)) else "nan",
+                float(final_objective.item()) if finite_final else "nan",
             )
             quantized = rtn
             grids = rtn_grids
@@ -513,6 +553,7 @@ class ADMMQ(GPTQ):
             "refresh_improvement": refresh_improvement,
             "pairswap_flips": flips,
             "fallback_to_rtn": fallback_to_rtn,
+            "fallback_reason": fallback_reason,
             "initial_objective": float(initial_objective.item()),
             "final_objective": float(final_objective.item()),
         }
@@ -574,9 +615,15 @@ class ADMMQ(GPTQ):
             quantized, grids = self._admm_weight_solve(weight, hessian)
             loss = self._objective(weight, quantized, hessian) / max(1, self.nsamples)
             if not bool(torch.isfinite(loss)):
-                raise ValueError(
-                    f"ADMM-Q: module `{self.name}` produced a non-finite reconstruction loss; "
-                    "increase calibration data or raise `damp_percent`."
+                iterations = (
+                    None
+                    if self.admmq_diagnostics is None
+                    else self.admmq_diagnostics.get("iterations")
+                )
+                raise _AdmmNumericalFailure(
+                    "non_finite_loss",
+                    f"module `{self.name}` produced a non-finite reconstruction loss",
+                    iterations=iterations,
                 )
             return quantized, grids, float(loss.item())
 
@@ -587,9 +634,47 @@ class ADMMQ(GPTQ):
 
         self.admmq_diagnostics = None
         try:
-            (quantized, grids, avg_loss), _ = self._run_with_accelerator_oom_cpu_fallback(
-                solve, source_device=source_device, stage="ADMM-Q solve", prepare_cpu=prepare_cpu
-            )
+            try:
+                (quantized, grids, avg_loss), _ = self._run_with_accelerator_oom_cpu_fallback(
+                    solve, source_device=source_device, stage="ADMM-Q solve", prepare_cpu=prepare_cpu
+                )
+            except (_AdmmNumericalFailure, torch._C._LinAlgError) as exc:
+                # A failed factorization, a non-finite iterate or a non-finite
+                # reconstruction loss is a property of this layer's Hessian or
+                # weights. Keep the GPTQ family's RTN quantization for the
+                # layer instead of aborting the whole model.
+                reason = exc.reason if isinstance(exc, _AdmmNumericalFailure) else "eigh_failure"
+                log.warn(
+                    "ADMM-Q: module `%s` -> %s; using the GPTQ RTN fallback instead of aborting.",
+                    self.name,
+                    exc,
+                )
+                if self.admmq_diagnostics is None:
+                    self.admmq_diagnostics = {
+                        "iterations": (
+                            exc.iterations if isinstance(exc, _AdmmNumericalFailure) else None
+                        ),
+                        "condition_number": None,
+                        "rho_final": None,
+                        "refresh_attempts": None,
+                        "refresh_accepted": None,
+                        "refresh_improvement": None,
+                        "pairswap_flips": 0,
+                        "fallback_to_rtn": True,
+                        "fallback_reason": reason,
+                        "initial_objective": None,
+                        "final_objective": None,
+                    }
+                else:
+                    self.admmq_diagnostics["fallback_to_rtn"] = True
+                    self.admmq_diagnostics["fallback_reason"] = reason
+                result = self._rtn_fallback_after_hessian_failure(blocksize)
+                if not bool(torch.isfinite(result[0]).all()):
+                    raise ValueError(
+                        f"ADMM-Q: module `{self.name}` -> the RTN fallback also produced "
+                        "non-finite weights; the captured Hessian or source weights are not finite."
+                    ) from exc
+                return result
         finally:
             self.H = None
 
