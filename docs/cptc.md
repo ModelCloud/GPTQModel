@@ -138,6 +138,8 @@ encoder; `storage_device` selects the returned packed blocks, table,
 coefficients and scales. The default is `weight.device`, which keeps the model
 path's CPU checkpoint storage while the encoder runs on an accelerator.
 An explicit `meta` storage target raises `ValueError` before encoding.
+When a caller supplies a codebook, the payload keeps its own copy so the
+caller can refit the table without changing previously encoded weights.
 
 Before this contract, `quantize_weight` allocated `coeffs`, `packed` and
 `scales` on `weight.device` and returned `table` there, even when `device`

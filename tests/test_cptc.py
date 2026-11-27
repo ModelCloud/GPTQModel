@@ -303,6 +303,19 @@ def test_quantize_weight_rejects_meta_storage_device():
     torch.testing.assert_close(decoded, weight, rtol=0.1, atol=0)
 
 
+def test_quantize_weight_payload_survives_custom_table_reuse():
+    spec = CPTCSpec(bits=4, trellis_depth=4)
+    table = gaussian_table(spec, "cpu")
+    weight = torch.ones(1, 128)
+    payload = quantize_weight(weight, spec, device=weight.device, storage_device="cpu", table=table)
+    expected = _decode_oracle(*payload, spec, weight.shape[1])
+    torch.testing.assert_close(expected, weight, rtol=0.1, atol=0)
+
+    table.zero_()
+    actual = _decode_oracle(*payload, spec, weight.shape[1])
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_quantize_weight_requires_storage_device_between_accelerators(cptc_two_accelerators):
     source, compute = cptc_two_accelerators
     spec = CPTCSpec(bits=4, trellis_depth=8, block_size=128)
@@ -464,6 +477,7 @@ def test_gptqmodel_cptc_save_reload_and_resave(tmp_path, pack_on_gpu, yaqa, requ
     PreTrainedTokenizerFast(tokenizer_object=tokenizer, unk_token="[UNK]").save_pretrained(dense)
     pack_device = request.getfixturevalue("cptc_gpu")[0] if pack_on_gpu else torch.device("cpu")
     qcfg = CPTCConfig(bits=4, trellis_depth=8, yaqa=yaqa, offload_to_disk=False, device=pack_device,
+                      compute_device_filter=lambda devices: [d for d in devices if d == pack_device],
                       dynamic={"+:.*q_proj$": {"bits": 3}})
     model = GPTQModel.load(str(dense), quantize_config=qcfg, dtype=torch.float32)
     encoder_calls = []

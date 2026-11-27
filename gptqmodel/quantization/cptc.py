@@ -361,7 +361,9 @@ def quantize_weight(
     out_features, in_features = weight.shape
     blocks_per_row = spec.blocks(in_features)
     coeffs = torch.tensor(spec.coefficients(), dtype=torch.int32, device=storage_device)
-    table = gaussian_table(spec, device) if table is None else table.to(device)
+    # The checkpoint must keep the codebook used for this search even if the
+    # caller later refits its table in place.
+    table = gaussian_table(spec, device) if table is None else table.to(device, copy=True)
     if table.dtype != torch.uint8 or table.shape != (spec.table_size,) or bool(((table & 127) == 127).any()):
         raise ValueError("CPTC requires a finite E2M5 table with 2**table_q entries")
     decoded = _lookup(_indices(spec, device), decode_e2m5(table))
