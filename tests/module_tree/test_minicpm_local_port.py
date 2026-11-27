@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exact real MiniCPM checkpoint inventories and live dense/MoE owners."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,12 +16,36 @@ from gptqmodel.models.definitions.minicpm import MiniCPMGPTQ
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.minicpm import MiniCPMConfig, MiniCPMForCausalLM
+from gptqmodel.utils.hf import load_model_config
 from tests.port_assets import read_port_json
 from tests.test_minicpm_local_port import _config, _model
 
 
 FIXTURE = Path(__file__).parents[2] / "gptqmodel/models/ports/minicpm/checkpoint_inventories.json"
 INVENTORIES = read_port_json(FIXTURE)
+RELEASED_CONFIGS = Path(__file__).parents[1] / "fixtures/ports/minicpm/released_configs"
+
+
+@pytest.mark.parametrize("checkpoint", sorted(path.name for path in RELEASED_CONFIGS.iterdir()))
+def test_released_minicpm4_longrope_configs_load(checkpoint):
+    path = RELEASED_CONFIGS / checkpoint
+    released = json.loads((path / "config.json").read_text())
+    # This is the same first call GPTQModel.load()/from_quantized() make.
+    config = load_model_config(path)
+    assert isinstance(config, MiniCPMConfig)
+    rope = released["rope_scaling"]
+    assert config.rope_parameters["rope_type"] == "longrope"
+    assert config.rope_parameters["short_factor"] == rope["short_factor"]
+    assert config.rope_parameters["long_factor"] == rope["long_factor"]
+    assert config.rope_parameters["original_max_position_embeddings"] == rope["original_max_position_embeddings"]
+    # Released 4/4.1 configs keep the pretraining context, so the source
+    # attention scale is one; the GPTQ config also serializes head_dim.
+    assert config.rope_parameters["attention_factor"] == 1.0
+    derived = released["hidden_size"] // released["num_attention_heads"]
+    assert config.head_dim == released.get("head_dim", derived)
+    with torch.device("meta"):
+        model = MiniCPMForCausalLM(config)
+    assert model.model.layers[0].self_attn.head_dim == config.head_dim
 
 
 @pytest.mark.parametrize("checkpoint", sorted(INVENTORIES))

@@ -3,6 +3,7 @@
 """Real original MiniCPM execution, independent source equations and public lifecycle."""
 
 import json
+import math
 import shutil
 
 import pytest
@@ -98,15 +99,24 @@ def _oracle(weights, c, ids, positions, padding=None, past=None, sdpa=False):
         params = c.rope_parameters
         kind = params["rope_type"]
         pos = positions.float()
+        scale = 1.0
         if kind == "linear":
             pos = pos / params["factor"]
         elif kind == "dynamic" and total > c.max_position_embeddings:
             base = base * (params["factor"] * total / c.max_position_embeddings - params["factor"] + 1) ** (dim / (dim - 2))
+        elif kind == "longrope":
+            original = params["original_max_position_embeddings"]
+            factors = params["long_factor"] if total > original else params["short_factor"]
+            ratio = c.max_position_embeddings / original
+            if ratio > 1:
+                scale = math.sqrt(1 + math.log(ratio) / math.log(original))
         freq = base ** (-torch.arange(0, dim, 2).float() / dim)
+        if kind == "longrope":
+            freq = freq / torch.tensor(factors, dtype=freq.dtype)
         angles = pos[..., None] * freq
-        trig_dtype = torch.float32 if c._attn_implementation == "eager" else x.dtype
-        cos = angles.cos()[:, None].to(trig_dtype)
-        sin = angles.sin()[:, None].to(trig_dtype)
+        trig_dtype = torch.float32 if kind == "longrope" or c._attn_implementation == "eager" else x.dtype
+        cos = angles.cos()[:, None].to(trig_dtype) * scale
+        sin = angles.sin()[:, None].to(trig_dtype) * scale
         left, right = x.float().chunk(2, dim=-1)
         return torch.cat((left * cos - right * sin, right * cos + left * sin), dim=-1).to(x.dtype)
 
@@ -399,6 +409,57 @@ def test_dynamic_ntk_crossing_context_matches_rotated_key_source_and_resets(dtyp
             torch.testing.assert_close(output.logits, expected, atol=tolerance, rtol=tolerance)
         expected, _ = _oracle(model.state_dict(), model.config, ids[:, :3], torch.arange(3)[None])
         torch.testing.assert_close(model(ids[:, :3]).logits, expected, atol=tolerance, rtol=tolerance)
+
+
+@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_minicpm4_longrope_short_long_factors_and_crossing_cache(implementation, dtype):
+    model = _model(
+        attn_implementation=implementation,
+        max_position_embeddings=16,
+        rope_scaling={
+            "rope_type": "longrope",
+            "short_factor": [1.0, 1.25, 1.5, 2.0],
+            "long_factor": [2.0, 2.5, 3.0, 4.0],
+            "original_max_position_embeddings": 8,
+            "factor": 1.0,
+        },
+    ).to(dtype)
+    ids = torch.tensor([[2, 4, 7, 5, 6, 8, 4, 7, 5, 6]])
+    tolerance = 5e-7 if dtype == torch.float32 else 0.003
+    with torch.no_grad():
+        for length in (6, 10):
+            expected, _ = _oracle(
+                model.state_dict(), model.config, ids[:, :length], torch.arange(length)[None],
+                sdpa=implementation == "sdpa",
+            )
+            torch.testing.assert_close(model(ids[:, :length]).logits, expected, atol=tolerance, rtol=tolerance)
+        # The first six tokens cache short-factor keys; the continuation uses
+        # long factors, matching the source cache semantics at the threshold.
+        expected, past = _oracle(
+            model.state_dict(), model.config, ids[:, :6], torch.arange(6)[None],
+            sdpa=implementation == "sdpa",
+        )
+        first = model(ids[:, :6], use_cache=True)
+        torch.testing.assert_close(first.logits, expected, atol=tolerance, rtol=tolerance)
+        expected, _ = _oracle(
+            model.state_dict(), model.config, ids[:, 6:], torch.arange(6, 10)[None], past=past,
+            sdpa=implementation == "sdpa",
+        )
+        rest = model(ids[:, 6:], past_key_values=first.past_key_values, use_cache=True)
+        torch.testing.assert_close(rest.logits, expected, atol=tolerance, rtol=tolerance)
+
+
+def test_minicpm_stored_head_dim_reaches_attention_projections():
+    config = _config(head_dim=8)
+    assert config.head_dim == 8
+    with torch.device("meta"):
+        model = MiniCPMForCausalLM(config)
+    attention = model.model.layers[0].self_attn
+    assert attention.q_proj.out_features == config.num_attention_heads * config.head_dim
+    assert attention.k_proj.out_features == config.num_key_value_heads * config.head_dim
+    with pytest.raises(ValueError, match="head_dim"):
+        _config(head_dim=4)
 
 
 @pytest.mark.parametrize("tp", [1, 2, 4])

@@ -20,7 +20,7 @@ class MiniCPMConfig(PreTrainedConfig):
         eos_token_id=2, pretraining_tp=1, tie_word_embeddings=True,
         rope_theta=10000.0, rope_scaling=None, rope_parameters=None, attention_bias=False,
         attention_dropout=0.0, scale_emb=1, dim_model_base=1, scale_depth=1,
-        num_experts=0, num_experts_per_tok=0, **kwargs,
+        num_experts=0, num_experts_per_tok=0, head_dim=None, **kwargs,
     ):
         super().__init__(pad_token_id=pad_token_id, bos_token_id=bos_token_id,
                          eos_token_id=eos_token_id, tie_word_embeddings=tie_word_embeddings, **kwargs)
@@ -38,7 +38,8 @@ class MiniCPMConfig(PreTrainedConfig):
         self.pretraining_tp = pretraining_tp
         self.rope_theta = rope_theta
         self.rope_parameters = dict(rope_parameters or rope_scaling or {})
-        self.rope_parameters.setdefault("rope_type", self.rope_parameters.get("type", "default"))
+        self.rope_parameters.setdefault("rope_type", self.rope_parameters.pop("type", "default"))
+        self.rope_parameters.pop("type", None)
         self.rope_parameters.setdefault("rope_theta", rope_theta)
         self.rope_theta = self.rope_parameters["rope_theta"]
         self.attention_bias = attention_bias
@@ -53,8 +54,25 @@ class MiniCPMConfig(PreTrainedConfig):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        if hidden_size % num_attention_heads or (hidden_size // num_attention_heads) % 2:
-            raise ValueError("MiniCPM needs an even head dimension dividing hidden_size")
+        if hidden_size % num_attention_heads:
+            raise ValueError("hidden_size must be divisible by num_attention_heads")
+        derived_head_dim = hidden_size // num_attention_heads
+        if head_dim is None:
+            head_dim = derived_head_dim
+        elif (
+            not isinstance(head_dim, int)
+            or isinstance(head_dim, bool)
+            or head_dim != derived_head_dim
+        ):
+            # Q/K/V projections and the output reshape use one head width; a
+            # different serialized value would silently change the layout.
+            raise ValueError(
+                "MiniCPM head_dim must equal hidden_size // num_attention_heads "
+                f"({derived_head_dim})"
+            )
+        if head_dim % 2:
+            raise ValueError("MiniCPM needs an even head dimension")
+        self.head_dim = head_dim
         if num_attention_heads % self.num_key_value_heads:
             raise ValueError("num_key_value_heads must divide num_attention_heads")
         for value in (hidden_size, intermediate_size, self.num_key_value_heads * self.head_dim, vocab_size):
@@ -70,16 +88,49 @@ class MiniCPMConfig(PreTrainedConfig):
                 raise ValueError(f"{name} must be finite and positive")
         if not 0 <= attention_dropout < 1:
             raise ValueError("attention_dropout must be in [0, 1)")
-        if self.rope_parameters["rope_type"] != "default":
-            kind = self.rope_parameters["rope_type"]
+        kind = self.rope_parameters["rope_type"]
+        if kind == "longrope":
+            # MiniCPM4/4.1 `MiniCPMLongRoPE`: short factors inside the
+            # pretraining window, long factors beyond it, and cos/sin scaled
+            # by the source's context-extension factor.
+            original = self.rope_parameters.get("original_max_position_embeddings")
+            if not isinstance(original, int) or isinstance(original, bool) or original <= 1:
+                raise ValueError("longrope requires original_max_position_embeddings > 1")
+            for name in ("short_factor", "long_factor"):
+                factors = self.rope_parameters.get(name)
+                if (
+                    not isinstance(factors, (list, tuple))
+                    or len(factors) != self.head_dim // 2
+                    or not all(
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and math.isfinite(value)
+                        and value > 0
+                        for value in factors
+                    )
+                ):
+                    raise ValueError(
+                        f"longrope {name} must contain {self.head_dim // 2} finite positive values"
+                    )
+            ratio = self.max_position_embeddings / original
+            attention_factor = self.rope_parameters.get("attention_factor")
+            if attention_factor is None:
+                attention_factor = (
+                    1.0 if ratio <= 1 else math.sqrt(1 + math.log(ratio) / math.log(original))
+                )
+            if (
+                not isinstance(attention_factor, (int, float))
+                or isinstance(attention_factor, bool)
+                or not math.isfinite(attention_factor)
+                or attention_factor <= 0
+            ):
+                raise ValueError("longrope attention_factor must be finite and positive")
+            self.rope_parameters["attention_factor"] = float(attention_factor)
+        elif kind != "default":
             if kind not in ("linear", "dynamic"):
-                raise ValueError("MiniCPM supports only linear or dynamic rope_scaling")
+                raise ValueError("MiniCPM supports only linear, dynamic or longrope rope_scaling")
             factor = self.rope_parameters.get("factor")
             if not isinstance(factor, (int, float)) or not math.isfinite(factor) or factor <= 1:
                 raise ValueError("rope_scaling.factor must be finite and greater than one")
             if kind == "dynamic" and self.head_dim <= 2:
                 raise ValueError("dynamic RoPE requires head_dim > 2")
-
-    @property
-    def head_dim(self):
-        return self.hidden_size // self.num_attention_heads
