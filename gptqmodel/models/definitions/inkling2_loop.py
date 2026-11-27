@@ -32,6 +32,11 @@ from ._vlm_calibration import prepare_vlm_calibration_dataset
 # unchanged, which is what keeps one holder per calibration batch.
 _BLOCK_STATES_CARRY_KEY = "_inkling2_loop_block_states_carry"
 
+# The looped capture records the calibration batch position with the final
+# decoder layer's invocation. ``lm_head_pre_quantize_generate_hook`` consumes
+# the banks in batch order, while replay may submit batches interleaved.
+_CAPTURE_BATCH_INDEX_KEY = "_inkling2_loop_capture_batch_index"
+
 
 def declare_expert_storage(model) -> None:
     """Make ``experts_formats`` describe the storage the model now holds.
@@ -196,7 +201,6 @@ class Inkling2LoopQModel(LoopedLayerCaptureMixin, BaseQModel):
         # The head stage is the last consumer of the per-batch banks; do not
         # retain calibration activations after the run.
         self._inkling2_loop_final_block_banks = {}
-        self._inkling2_loop_final_block_bank_index = 0
 
     @classmethod
     def after_defuser_conversion(cls, model):
@@ -310,7 +314,6 @@ class Inkling2LoopQModel(LoopedLayerCaptureMixin, BaseQModel):
         # drop the previous run's final banks.
         self._inkling2_loop_capture_index = 0
         self._inkling2_loop_final_block_banks = {}
-        self._inkling2_loop_final_block_bank_index = 0
         core_model = self.model.model
         language_model = core_model.language_model
         self.shell_module_materialize(language_model.embed_tokens, self.quantize_config.device)
@@ -467,17 +470,27 @@ class Inkling2LoopQModel(LoopedLayerCaptureMixin, BaseQModel):
         rebuilding a single pass-1 chain.
         """
 
-        del module, kwargs
+        del kwargs
         captured: Dict[str, Any] = {}
         if len(args) > 1 and torch.is_tensor(args[1]):
             captured["block_states"] = args[1].detach()
         if len(args) > 2 and torch.is_tensor(args[2]):
             captured["messages"] = args[2].detach()
+        layer_idx = getattr(module, "layer_idx", None)
+        batch_index = getattr(self, "_looped_capture_batch_index", None)
+        if (
+            batch_index is not None
+            and layer_idx == len(self.model.model.language_model.layers) - 1
+        ):
+            # Keep the batch's capture position with its own invocation so the
+            # final bank does not follow the replay submission order.
+            captured[_CAPTURE_BATCH_INDEX_KEY] = batch_index
         return captured
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         captured_block_states = additional_inputs.pop("block_states", None)
         captured_messages = additional_inputs.pop("messages", None)
+        captured_batch_index = additional_inputs.pop(_CAPTURE_BATCH_INDEX_KEY, None)
         additional_inputs = super().prepare_layer_replay_kwargs(
             layer,
             layer_input,
@@ -497,7 +510,6 @@ class Inkling2LoopQModel(LoopedLayerCaptureMixin, BaseQModel):
                 # A new replay pass starts here; do not keep banks from the
                 # previous processor or quantization run.
                 self._inkling2_loop_final_block_banks = {}
-                self._inkling2_loop_final_block_bank_index = 0
             additional_inputs["block_states"] = move_to(
                 captured_block_states, device=target_device
             )
@@ -522,11 +534,15 @@ class Inkling2LoopQModel(LoopedLayerCaptureMixin, BaseQModel):
                 if banks is None:
                     banks = {}
                     self._inkling2_loop_final_block_banks = banks
-                index = getattr(
-                    self, "_inkling2_loop_final_block_bank_index", 0
-                )
-                banks[index] = bank
-                self._inkling2_loop_final_block_bank_index = index + 1
+                if captured_batch_index is None:
+                    raise RuntimeError(
+                        "Inkling2Loop replay is missing the captured batch index "
+                        "for the final decoder layer; the lm_head attention-"
+                        "residual bank cannot be keyed by batch."
+                    )
+                # One entry per batch: replaying a subset again overwrites the
+                # same batch's bank instead of growing the dict.
+                banks[captured_batch_index] = bank
             return additional_inputs
 
         carry = additional_inputs.pop(_BLOCK_STATES_CARRY_KEY, None)
@@ -560,7 +576,6 @@ class Inkling2LoopQModel(LoopedLayerCaptureMixin, BaseQModel):
             # A new replay pass starts here; do not keep banks from the previous
             # processor or quantization run.
             self._inkling2_loop_final_block_banks = {}
-            self._inkling2_loop_final_block_bank_index = 0
         block_states = carry.states
         if carry.layer is not layer:
             if getattr(layer, "is_block_boundary", False):
