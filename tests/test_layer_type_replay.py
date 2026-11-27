@@ -196,7 +196,13 @@ def _native_forward(model, input_ids, attention_mask):
 
 
 def _capture_and_replay(
-    model, qmodel_cls, input_ids, attention_mask, *, drop_captured_mask: bool = False
+    model,
+    qmodel_cls,
+    input_ids,
+    attention_mask,
+    *,
+    drop_captured_mask: bool = False,
+    capture_example=None,
 ):
     """Run the capture hook once, then replay every layer through the default hooks.
 
@@ -242,7 +248,9 @@ def _capture_and_replay(
 
     handle = layers[0].register_forward_pre_hook(capture_first, with_kwargs=True)
     qmodel.begin_input_capture_example(
-        {"input_ids": input_ids, "attention_mask": attention_mask},
+        capture_example
+        if capture_example is not None
+        else {"input_ids": input_ids, "attention_mask": attention_mask},
         torch.device("cpu"),
     )
     try:
@@ -351,6 +359,187 @@ def test_replay_kwargs_match_native_layer_type(builder, qmodel_cls, padded):
     last_native = native_outputs[-1]
     last_native = last_native[0] if isinstance(last_native, tuple) else last_native
     torch.testing.assert_close(replayed_hidden, last_native, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("padded", [False, True], ids=["dense", "padded"])
+def test_batch_feature_capture_source_rebuilds_every_layer_type_mask(padded):
+    """Processor batches are ``BatchFeature`` (a ``UserDict``), not plain dicts.
+
+    Issue #6138: the per-layer-type replay rebuild returned early for every
+    ``BatchFeature`` source, so a mixed ``layer_types`` model replayed layer 0's
+    mask into the other type. Qwen3.5-MoE crashes in its first
+    ``full_attention`` layer; Gemma 3 VL silently loses its sliding window.
+    """
+
+    from transformers import BatchFeature
+
+    model, qmodel_cls = _gemma3_text()
+    input_ids = torch.arange(3, 3 + SEQ).unsqueeze(0)
+    attention_mask = torch.ones(1, SEQ, dtype=torch.long)
+    if padded:
+        attention_mask[0, :2] = 0
+    example = BatchFeature(
+        {"input_ids": input_ids, "attention_mask": attention_mask}
+    )
+    assert not isinstance(example, dict)
+
+    native, native_outputs = _native_forward(model, input_ids, attention_mask)
+    replayed, replayed_hidden = _capture_and_replay(
+        model,
+        qmodel_cls,
+        input_ids,
+        attention_mask,
+        capture_example=example,
+    )
+
+    layer_types = list(model.config.layer_types)
+    assert len(set(layer_types)) == 2, "test model must mix two attention types"
+    for index, layer in enumerate(model.model.layers):
+        _assert_masks_equal(
+            index,
+            _layer_type(layer, model.config),
+            native[index]["attention_mask"],
+            replayed[index].get("attention_mask"),
+        )
+
+    last_native = native_outputs[-1]
+    last_native = last_native[0] if isinstance(last_native, tuple) else last_native
+    torch.testing.assert_close(replayed_hidden, last_native, rtol=0, atol=0)
+
+
+def test_qwen3_5_moe_quantize_batch_size_two_rebuilds_full_attention_mask(
+    tmp_path, monkeypatch
+):
+    """End-to-end #6138: a padded processor batch must not crash SDPA.
+
+    The tiny Qwen3.5-MoE checkpoint mixes ``linear_attention`` and
+    ``full_attention``. Without the per-layer-type rebuild, layer 0's raw 2-D
+    ``int64`` padding mask is replayed into the first full-attention layer and
+    ``scaled_dot_product_attention`` rejects it. The processor is a stub so the
+    test owns the padded ``BatchFeature`` and needs no Hub download.
+    """
+
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import BatchFeature, PreTrainedTokenizerFast
+
+    from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.models.local import LocalModelLoader
+    from gptqmodel.models.ports.native.auto import NativeForImageTextToText
+    from gptqmodel.models.ports.native.qwen3_5_moe.configuration_qwen3_5_moe import (
+        Qwen3_5MoeConfig,
+    )
+    from gptqmodel.quantization.config import CalibrationConfig, QuantizeConfig
+
+    config = Qwen3_5MoeConfig(
+        text_config={
+            "vocab_size": 128,
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 8,
+            "num_experts": 4,
+            "num_experts_per_tok": 2,
+            "moe_intermediate_size": 16,
+            "shared_expert_intermediate_size": 16,
+            "layer_types": ["linear_attention", "full_attention"],
+            "max_position_embeddings": 128,
+            "partial_rotary_factor": 1.0,
+            "rope_parameters": {
+                "rope_type": "default",
+                "rope_theta": 10000.0,
+                "partial_rotary_factor": 1.0,
+                "mrope_interleaved": True,
+                "mrope_section": [1, 1, 2],
+            },
+            "linear_conv_kernel_dim": 4,
+            "linear_key_head_dim": 8,
+            "linear_value_head_dim": 8,
+            "linear_num_key_heads": 2,
+            "linear_num_value_heads": 4,
+            "pad_token_id": 0,
+            "eos_token_id": None,
+            "bos_token_id": 1,
+            "tie_word_embeddings": False,
+            "attn_output_gate": True,
+        },
+        vision_config={
+            "depth": 1,
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_heads": 2,
+            "out_hidden_size": 16,
+            "patch_size": 16,
+            "temporal_patch_size": 2,
+            "spatial_merge_size": 2,
+            "num_position_embeddings": 64,
+        },
+        image_token_id=60,
+        video_token_id=61,
+        vision_start_token_id=58,
+        vision_end_token_id=59,
+        tie_word_embeddings=False,
+    )
+    config._attn_implementation = "eager"
+    torch.manual_seed(0)
+    NativeForImageTextToText._from_config(config).eval().save_pretrained(tmp_path)
+
+    # The loader requires tokenizer files even though this test's processor is
+    # a stub; a WordLevel tokenizer keeps the checkpoint self-contained.
+    backend = Tokenizer(WordLevel({f"token_{i}": i for i in range(128)}, unk_token="token_0"))
+    backend.pre_tokenizer = Whitespace()
+    PreTrainedTokenizerFast(
+        tokenizer_object=backend, unk_token="token_0", pad_token="token_0"
+    ).save_pretrained(tmp_path)
+
+    class _PaddingProcessor:
+        def apply_chat_template(self, batch, tokenize=False, add_generation_prompt=True):
+            return [f"sample {index}" for index, _ in enumerate(batch)]
+
+        def __call__(self, *, text, images, videos, padding, return_tensors):
+            assert padding is True and return_tensors == "pt"
+            lengths = [4 + 3 * index for index in range(len(text))]
+            width = max(lengths)
+            input_ids = torch.zeros((len(text), width), dtype=torch.long)
+            attention_mask = torch.zeros_like(input_ids)
+            for row, length in enumerate(lengths):
+                input_ids[row, :length] = torch.arange(1, length + 1)
+                attention_mask[row, :length] = 1
+            return BatchFeature(
+                {"input_ids": input_ids, "attention_mask": attention_mask}
+            )
+
+    monkeypatch.setattr(
+        LocalModelLoader, "load_processor", lambda *args, **kwargs: _PaddingProcessor()
+    )
+    model = GPTQModel.load(
+        str(tmp_path),
+        QuantizeConfig(device="cpu", bits=4, group_size=32, fallback=None),
+        backend=BACKEND.TORCH,
+        dtype=torch.float32,
+    )
+    conversations = [
+        [{"role": "user", "content": "GPTQModel quantizes large language models."}],
+        [{"role": "user", "content": "Short one."}],
+        [{"role": "user", "content": "The quick brown fox jumps over the lazy dog today."}],
+        [{"role": "user", "content": "Tiny text here."}],
+    ]
+
+    prepared = model.prepare_dataset(conversations, batch_size=2)
+    assert all(isinstance(batch, BatchFeature) for batch in prepared)
+    assert [batch["input_ids"].shape[0] for batch in prepared] == [2, 2]
+    assert model.model.config.text_config.layer_types == [
+        "linear_attention",
+        "full_attention",
+    ]
+
+    model.quantize(
+        CalibrationConfig(dataset=conversations, batch_size=2, min_length=1),
+        backend=BACKEND.TORCH,
+    )
 
 
 @pytest.mark.parametrize("padded", [False, True], ids=["dense", "padded"])
