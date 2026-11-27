@@ -290,6 +290,19 @@ def test_cptc_storage_device_resolution_is_explicit():
         _resolve_storage_device(cuda1, cuda0, None)
 
 
+def test_quantize_weight_rejects_meta_storage_device():
+    spec = CPTCSpec(bits=4, trellis_depth=4)
+    weight = torch.ones((1, 128))
+    with pytest.raises(ValueError, match=r"storage_device.*meta"):
+        quantize_weight(weight, spec, device=weight.device, storage_device="meta")
+
+    payload = quantize_weight(weight, spec, device=weight.device, storage_device="cpu")
+    assert all(tensor.device == weight.device for tensor in payload)
+    packed, table, coeffs, scales = payload
+    decoded = _decode_oracle(packed, table, coeffs, scales, spec, weight.shape[1])
+    torch.testing.assert_close(decoded, weight, rtol=0.1, atol=0)
+
+
 def test_quantize_weight_requires_storage_device_between_accelerators(cptc_two_accelerators):
     source, compute = cptc_two_accelerators
     spec = CPTCSpec(bits=4, trellis_depth=8, block_size=128)
@@ -326,9 +339,35 @@ def test_quantize_weight_keeps_cpu_storage_for_gpu_compute(cptc_gpu):
         assert torch.equal(actual_tensor, expected_tensor.cpu())
 
 
+def test_cptc_linear_pack_reuses_encoded_storage_under_inference_mode(monkeypatch):
+    source = torch.nn.Linear(145, 3, bias=False)
+    layer = CPTCLinear(4, 145, 3, trellis_depth=4)
+    payload = None
+
+    def record_payload(*args, **kwargs):
+        nonlocal payload
+        payload = quantize_weight(*args, **kwargs)
+        return payload
+
+    monkeypatch.setattr("gptqmodel.nn_modules.qlinear.cptc.quantize_weight", record_payload)
+    with torch.inference_mode():
+        layer.pack_original(source)
+
+    for name, encoded in zip(layer.checkpoint_required_buffers(), payload, strict=True):
+        stored = layer.state_dict()[name]
+        assert not stored.is_inference()
+        assert stored.data_ptr() == encoded.data_ptr(), name
+
+    layer.post_init()
+    inputs = torch.randn((2, 145), generator=torch.Generator().manual_seed(431))
+    decoded = _decode_oracle(*payload, layer.spec, source.in_features)
+    expected = (inputs.double() @ decoded.double().T).float()
+    torch.testing.assert_close(layer(inputs), expected, rtol=1e-6, atol=1e-6)
+
+
 def test_cptc_linear_pack_uses_its_storage_target(cptc_two_accelerators):
     source_device, compute_device = cptc_two_accelerators
-    source = torch.nn.Linear(128, 8, bias=False, dtype=torch.float32)
+    source = torch.nn.Linear(128, 8, bias=False, dtype=torch.float32, device=source_device)
     layer = CPTCLinear(4, 128, 8, trellis_depth=8).to(source_device)
     layer.pack_original(source, device=compute_device)
 

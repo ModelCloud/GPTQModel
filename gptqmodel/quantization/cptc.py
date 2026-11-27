@@ -312,10 +312,11 @@ def _encode_scaled_blocks(blocks, scales, decoded, spec, native):
 def _resolve_storage_device(weight_device, device, storage_device):
     """Resolve where the encoded CPTC payload is stored."""
     if storage_device is not None:
-        target = torch.device(storage_device)
-        if target.type == "cuda" and target.index is None:
-            target = torch.device("cuda", torch.cuda.current_device())
-        return target
+        if storage_device.type == "meta":
+            raise ValueError("CPTC `storage_device` requires materialized storage, got meta")
+        if storage_device.type == "cuda" and storage_device.index is None:
+            return torch.device("cuda", torch.cuda.current_device())
+        return storage_device
     if weight_device.type == "cuda" and device.type == "cuda" and weight_device != device:
         raise ValueError(
             "CPTC requires an explicit `storage_device` when `weight` and `device` "
@@ -341,7 +342,8 @@ def quantize_weight(
     coefficients and scales live on ``storage_device``, which defaults to
     ``weight.device`` so a CPU-resident checkpoint can be encoded on an
     accelerator. When ``weight`` and ``device`` are different accelerator
-    devices, ``storage_device`` must be explicit.
+    devices, ``storage_device`` must be explicit. The payload requires
+    materialized storage, so a meta target raises ``ValueError``.
     """
     from ..utils.cptc import native_ops
     from ..utils.torch import as_torch_device
