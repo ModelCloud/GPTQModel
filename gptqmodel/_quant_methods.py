@@ -13,6 +13,10 @@ quantization package.
 # `quant_method: "gguf"` (plus `method: "gguf"`) keep loading in GPT-QModel.
 GGUF_EXPORT_QUANT_METHOD = "gptqmodel_gguf"
 
+#: Checkpoints written by GPT-QModel v7.10 and earlier store this
+#: ``quant_method`` for the same packed GGUF layout.
+LEGACY_GGUF_QUANT_METHOD = "gguf"
+
 #: Methods that reuse another method's checkpoint layout publish that layout's
 #: ``quant_method`` name instead of their own. ADMM-Q writes ordinary
 #: GPTQ-packed tensors, so plain transformers, vLLM and SGLang read the

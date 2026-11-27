@@ -328,15 +328,16 @@ def _load_generation_config(model_dir: str, model_config: Mapping[str, Any]) -> 
 
 
 def _quantize_config(payload: Mapping[str, Any]) -> Any:
-    from .._quant_methods import GGUF_EXPORT_QUANT_METHOD
+    from .._quant_methods import GGUF_EXPORT_QUANT_METHOD, LEGACY_GGUF_QUANT_METHOD
     from ..quantization.config import GGUFConfig, QuantizeConfig
 
     method = payload.get("quant_method")
-    if method != GGUF_EXPORT_QUANT_METHOD:
+    if method not in (GGUF_EXPORT_QUANT_METHOD, LEGACY_GGUF_QUANT_METHOD):
         raise CheckpointFormatError(
-            f"package(): expected `quant_method: {GGUF_EXPORT_QUANT_METHOD!r}`, got {method!r}. A plain "
-            "`gguf` checkpoint is already a llama.cpp file, and another quantization method is not packed "
-            "by this writer."
+            "package(): expected a GPT-QModel GGUF checkpoint "
+            f"(`quant_method: {GGUF_EXPORT_QUANT_METHOD!r}` or legacy "
+            f"`quant_method: {LEGACY_GGUF_QUANT_METHOD!r}`), got {method!r}. This writer only packs "
+            "GPT-QModel GGUF checkpoints; other quantization methods are not supported."
         )
     config = QuantizeConfig.from_quant_config(dict(payload))
     if not isinstance(config, GGUFConfig):

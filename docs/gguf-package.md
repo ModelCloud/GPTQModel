@@ -130,8 +130,25 @@ does:
 | `tokenizer.ggml.pre` | architecture registry (`qwen2`, `llama-bpe`, `default`), overridable with `tokenizer_pre=` |
 | `tokenizer.ggml.tokens` / `token_type` | one entry per embedding row; added tokens keep their id and become CONTROL or USER_DEFINED; unused rows become `[PAD<i>]`/UNUSED |
 | `tokenizer.ggml.merges` | the tokenizer's merge table, spaces encoded as llama.cpp expects |
-| `tokenizer.ggml.{bos,eos,unk,pad}_token_id`, `add_bos_token`/`add_eos_token` | the tokenizer's special-token ids and flags |
+| `tokenizer.ggml.{bos,eos,unk,pad}_token_id`, `add_bos_token`/`add_eos_token` | the tokenizer's special-token ids; add flags follow the tokenizer's actual post-processing and are omitted when it cannot be determined |
 | `tokenizer.chat_template` | `tokenizer.chat_template` verbatim, overridable with `chat_template=` |
+
+`add_bos_token`/`add_eos_token` are not copied from the Hugging Face
+attributes alone. Transformers 5 reports `add_bos_token=False` for Llama-3
+tokenizers even though their `TemplateProcessing` post-processor prepends
+`<|begin_of_text|>`. The exporter probes `tokenizer("a")` with and without
+special tokens, falls back to the backend post-processor, and omits a flag it
+cannot determine so llama.cpp uses its per-tokenizer default.
+
+```mermaid
+flowchart TD
+    A["build_tokenizer_metadata"] --> B{"probe tokenizer('a') with and without specials"}
+    B -- "special token appears only with specials" --> C["write add_bos/add_eos true"]
+    B -- "no added special token" --> D["write add_bos/add_eos false"]
+    B -- "probe unavailable" --> E["read backend post_processor"]
+    E -- "TemplateProcessing or RobertaProcessing" --> F["write flag from the template"]
+    E -- "unknown" --> G["omit key and use llama.cpp default"]
+```
 
 Generation defaults come from `generation_config.json` when the checkpoint has
 one, mapped onto llama.cpp's sampling keys:
@@ -167,7 +184,7 @@ generated key.
 
 | Situation | Result |
 | --- | --- |
-| `quant_method` is not `gptqmodel_gguf` | `CheckpointFormatError` |
+| `quant_method` is neither `gptqmodel_gguf` nor the legacy `gguf` | `CheckpointFormatError` |
 | no `config.json`, or no safetensors weights | `CheckpointFormatError` |
 | a quantized module also stores `weight`/`scales`/`qzeros` | `CheckpointFormatError` |
 | an untied checkpoint has no `lm_head` | `CheckpointFormatError` |
@@ -197,9 +214,11 @@ generated key.
 | `test_llama_permutes_qk_rows_and_keeps_every_row` | Llama's q/k reorder is a row permutation, not a rewrite |
 | `test_llama3_rope_freqs_matches_the_piecewise_spec` | the generated rope table follows the documented scaling rule |
 | `test_refuses_a_shape_the_arch_layout_does_not_allow` / `test_refuses_an_unmapped_tensor` / `test_refuses_mixture_of_experts` | unsafe layouts fail before a file is created |
+| `test_refuses_a_non_gguf_quant_method` / `test_packages_a_legacy_gguf_quant_method` | a non-GGUF method is refused, while v7.10's legacy `quant_method: "gguf"` packages the same layout |
 | `test_failed_write_publishes_nothing` / `test_writer_failure_leaves_existing_output_and_cleans_temp_file` | failure removes the temporary file and preserves existing output |
 | `test_output_created_during_verification_is_preserved` | publication preserves a file created during verification |
 | `test_llamacpp_loads_the_packaged_file` | llama.cpp loads, tokenizes and evaluates local Qwen2, Qwen3 and Llama fixtures when `llama-cpp-python` is installed |
+| `test_packaged_llama3_tokenizer_keeps_the_bos_post_processor` / `test_llamacpp_adds_bos_for_a_llama3_post_processor` | a Llama-3 `TemplateProcessing` BOS is stored as `add_bos_token=true` and llama.cpp prepends it |
 | `test_chat_template_is_packaged` / `test_chat_template_override_wins` | the template is stored verbatim and a caller override wins |
 | `test_sampling_defaults_are_packaged` / `test_greedy_generation_maps_to_zero_temperature` | `generation_config.json` maps onto llama.cpp's sampling keys, without a sampler sequence |
 | `test_caller_metadata_wins_over_generation_config` | an explicit sampling value overrides a derived one |
