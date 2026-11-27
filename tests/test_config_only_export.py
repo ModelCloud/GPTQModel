@@ -217,3 +217,150 @@ def test_config_only_save_preserves_source_fields_on_in_place_export(tmp_path):
     saved_config = json.loads((tmp_path / "config.json").read_text())
     assert saved_config["architectures"] == ["LiveModel"]
     assert saved_config["num_hash_layers"] == 3
+
+
+PORTED_REMOTE_CODE_CASES = {
+    "minicpmv": {
+        "architectures": ["MiniCPMV"],
+        "auto_map": {
+            "AutoConfig": "configuration_minicpm.MiniCPMVConfig",
+            "AutoModel": "modeling_minicpmv.MiniCPMV",
+            "AutoModelForCausalLM": "modeling_minicpmv.MiniCPMV",
+        },
+        "runtime_class": "MiniCPMV",
+    },
+    "minicpmo": {
+        "architectures": ["MiniCPMO"],
+        "auto_map": {
+            "AutoConfig": "configuration_minicpm.MiniCPMOConfig",
+            "AutoModel": "modeling_minicpmo.MiniCPMO",
+            "AutoModelForCausalLM": "modeling_minicpmo.MiniCPMO",
+        },
+        # The port dispatches version 2.6 to this package-internal subclass.
+        "runtime_class": "MiniCPMO26",
+    },
+    "internvl_chat": {
+        "architectures": ["InternVLChatModel"],
+        "auto_map": {
+            "AutoConfig": "configuration_internvl_chat.InternVLChatConfig",
+            "AutoModel": "modeling_internvl_chat.InternVLChatModel",
+            "AutoModelForCausalLM": "modeling_internvl_chat.InternVLChatModel",
+        },
+        "runtime_class": "InternVLChatModel",
+    },
+    "ovis2_5": {
+        "architectures": ["Ovis2_5"],
+        "auto_map": {
+            "AutoConfig": "configuration_ovis2_5.Ovis2_5_Config",
+            "AutoModelForCausalLM": "modeling_ovis2_5.Ovis2_5",
+        },
+        "runtime_class": "Ovis2_5",
+    },
+    "deepseek_vl_v2": {
+        "architectures": None,
+        "auto_map": {
+            "AutoConfig": "configuration_deepseek_vl_v2.DeepseekVLV2Config",
+            "AutoModelForCausalLM": "modeling_deepseek_vl_v2.DeepseekVLV2ForCausalLM",
+        },
+        "runtime_class": "DeepseekVLV2ForCausalLM",
+    },
+}
+
+
+def _remote_config_module(config_class, model_type):
+    return (
+        "from transformers import PretrainedConfig\n\n"
+        f"class {config_class}(PretrainedConfig):\n"
+        f"    model_type = {model_type!r}\n"
+    )
+
+
+def _write_remote_code_source(source, model_type, architectures, auto_map):
+    """Write the released metadata plus every checkpoint `.py` module as data."""
+
+    source.mkdir()
+    (source / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": model_type,
+                "architectures": architectures,
+                "auto_map": auto_map,
+            }
+        )
+    )
+    config_module, _, config_class = auto_map["AutoConfig"].rpartition(".")
+    for reference in auto_map.values():
+        module_name = reference.rpartition(".")[0]
+        path = source / f"{module_name}.py"
+        if not path.exists():
+            if module_name == config_module:
+                path.write_text(_remote_config_module(config_class, model_type))
+            else:
+                # Modeling code is copied as data and never imported by the writer.
+                path.write_text("# released checkpoint modeling code\n")
+
+
+def test_ported_config_only_save_keeps_remote_code_metadata(tmp_path):
+    """Only a natively registered model type may drop `auto_map` (issue #6134).
+
+    MiniCPM-V/o, InternVL-Chat, Ovis2.5 and DeepSeek-VL2 are package-owned ports
+    of released remote-code checkpoints. Their export must keep the source
+    `auto_map` and checkpoint `.py` files so `AutoConfig` can still resolve the
+    config class. MiniCPM-o's runtime class is the internal `MiniCPMO26`
+    subclass; the saved architecture must stay the released `MiniCPMO`.
+    """
+
+    from transformers import AutoConfig
+
+    for model_type, case in PORTED_REMOTE_CODE_CASES.items():
+        source = tmp_path / f"{model_type}-source"
+        out = tmp_path / f"{model_type}-out"
+        _write_remote_code_source(
+            source,
+            model_type,
+            case["architectures"],
+            case["auto_map"],
+        )
+
+        class Config:
+            def __init__(self):
+                self.architectures = case["architectures"]
+                self.dtype = None
+
+            def save_pretrained(self, save_dir):
+                (Path(save_dir) / "config.json").write_text(
+                    json.dumps(
+                        {
+                            "model_type": model_type,
+                            "architectures": self.architectures,
+                            "dtype": self.dtype,
+                        }
+                    )
+                )
+
+        class Model:
+            config = Config()
+            dtype = None
+
+        Model.__name__ = case["runtime_class"]
+        # Ported runtime classes live in the package-owned ports tree; the
+        # writer uses that to recognize a package-internal subclass name.
+        Model.__module__ = "gptqmodel.models.ports.test_port"
+        _save_model_configs_without_weights(Model(), str(out), str(source))
+
+        saved = json.loads((out / "config.json").read_text())
+        assert saved["auto_map"] == case["auto_map"], model_type
+        if case["architectures"] is not None:
+            assert saved["architectures"] == case["architectures"], model_type
+        for reference in case["auto_map"].values():
+            module_name = reference.rpartition(".")[0]
+            assert (out / f"{module_name}.py").is_file(), (model_type, module_name)
+
+        config_class = case["auto_map"]["AutoConfig"].rpartition(".")[2]
+        loaded = AutoConfig.from_pretrained(str(out), trust_remote_code=True)
+        assert type(loaded).__name__ == config_class, model_type
+        assert loaded.model_type == model_type
+
+    assert json.loads((tmp_path / "minicpmo-out" / "config.json").read_text())[
+        "architectures"
+    ] == ["MiniCPMO"]

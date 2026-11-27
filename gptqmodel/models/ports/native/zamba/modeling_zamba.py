@@ -798,6 +798,9 @@ class ZambaPreTrainedModel(NativePreTrainedModel):
     config: ZambaConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
+    # ``ZambaMambaMixer`` builds ``A_log`` from an explicit fp32 ``A`` and
+    # reads it back as fp32; keep it fp32 under every half dtype (issue #6136).
+    _keep_in_fp32_modules_strict = ["A_log"]
     _no_split_modules = ["ZambaHybridLayer", "ZambaMambaDecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_flash_attn = True

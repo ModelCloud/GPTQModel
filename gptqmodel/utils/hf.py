@@ -37,6 +37,7 @@ __all__ = [
     "get_hf_config_dtype",
     "normalize_torch_dtype_kwarg",
     "has_native_transformers_causallm_support",
+    "is_transformers_native_config_type",
     "get_config_selection_kwargs",
     "get_hf_gguf_load_kwargs",
     "normalize_checkpoint_subfolder",
@@ -749,6 +750,24 @@ def has_native_transformers_causallm_support(model_id_or_path: Optional[str]) ->
 
     native_supported, _, _ = _detect_native_transformers_causallm_support(str(model_id_or_path))
     return native_supported
+
+
+def is_transformers_native_config_type(model_type: Optional[str]) -> bool:
+    """Whether installed Transformers resolves ``model_type`` itself.
+
+    A package-owned port may serve a model type that Transformers does not
+    register (MiniCPM-V, InternVL-Chat, ...). Such an export must keep its
+    released ``auto_map`` and checkpoint Python files so ``AutoConfig`` can
+    still resolve it (issue #6134). Only a natively registered type can drop
+    them and load from the installed Transformers code.
+    """
+
+    if not model_type:
+        return False
+
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+    return str(model_type) in CONFIG_MAPPING
 
 def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
     from tokenicer import Tokenicer
