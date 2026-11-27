@@ -22,6 +22,21 @@ class Phi4MMConfig(Phi4MultimodalConfig):
         audio_config=None,
         **kwargs,
     ):
+        # Released phi4mm configs serialize the Transformers-4
+        # ``_attn_implementation: flash_attention_2`` preference. This port
+        # dispatches eager/SDPA only, so treat the checkpoint hint as a
+        # preference unless the caller explicitly requested Flash Attention.
+        requested_attention = kwargs.pop("attn_implementation", None)
+        serialized_attention = kwargs.pop("_attn_implementation", None)
+        attention = requested_attention if requested_attention is not None else serialized_attention
+        if (
+            requested_attention is None
+            and isinstance(attention, str)
+            and attention.startswith("flash_attention")
+        ):
+            attention = "sdpa"
+        if attention is not None:
+            kwargs["attn_implementation"] = attention
         # Released phi4mm config.json files spell RoPE as ``rope_scaling``; convert it once at parse time.
         legacy_rope = kwargs.pop("rope_scaling", None)
         rope = kwargs.get("rope_parameters") or legacy_rope or {}

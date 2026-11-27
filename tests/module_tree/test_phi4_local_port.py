@@ -106,13 +106,25 @@ RELEASED_HEADER_SHA256 = "a614e91b7668889a00fc95ba7969b5dfc28fd8d87ee855ec8543e6
 def test_complete_pinned_released_tensor_header_inventory():
     released = json.loads((Path(__file__).parents[1] / "fixtures/ports/phi4/released_config.json").read_text())
     config = Phi4MMConfig(**released["config"])
-    config._attn_implementation = "eager"
+    # The released config serializes `_attn_implementation: flash_attention_2`;
+    # the port falls back to SDPA instead of rejecting its own checkpoint.
+    assert config._attn_implementation == "sdpa"
     with torch.device("meta"):
         model = Phi4MMForCausalLM(config)
     inventory = sorted((key, list(value.shape)) for key, value in model.state_dict().items() if key != "lm_head.weight")
     assert len(inventory) == 2047
     assert hashlib.sha256(json.dumps(inventory).encode()).hexdigest() == RELEASED_HEADER_SHA256
     assert model.lm_head.weight is model.model.embed_tokens.weight
+
+
+def test_explicit_attention_implementation_still_wins_over_the_released_hint():
+    released = json.loads((Path(__file__).parents[1] / "fixtures/ports/phi4/released_config.json").read_text())
+    eager = Phi4MMConfig(**released["config"], attn_implementation="eager")
+    assert eager._attn_implementation == "eager"
+    requested = Phi4MMConfig(**released["config"], attn_implementation="flash_attention_2")
+    assert requested._attn_implementation == "flash_attention_2"
+    with pytest.raises(ValueError, match="does not support Flash Attention"):
+        Phi4MMForCausalLM(requested)
 
 
 def test_device_map_no_split_covers_wrapped_legacy_layers():
