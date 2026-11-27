@@ -30,10 +30,12 @@ objectives of Algorithm 2 are then built from the same differentiable replay:
     the supervised objective of Eq. 10, whose weight gradient is the exact
     first-order term of Eq. 6/15.
 
-Blocks below the output head use the block-wise MSE pair; the output head uses
-the KL / NLL pair. Both statistics are installed on the ``G2PTQ`` task, which
-falls back to plain GPTQ when they are absent (a module the refresh never
-reached, or a run where the refresh was skipped).
+Intermediate blocks use the block-wise MSE pair. The final Transformer block
+uses the KL / NLL pair through the model's final norm and output head, and a
+quantized output head uses the same pair directly. Both statistics are
+installed on the ``G2PTQ`` task, which falls back to plain GPTQ when they are
+absent (a module the refresh never reached, or a run where the refresh was
+skipped).
 """
 
 from __future__ import annotations
@@ -68,6 +70,12 @@ _REPLAY_KWARG_BLOCKLIST = frozenset({"past_key_values", "past_key_value"})
 #: Replay keys the executor always supplies from the cache, not from the
 #: captured per-batch kwargs.
 _REPLAY_MANAGED_KWARGS = frozenset({"attention_mask", "position_ids", "use_cache"})
+
+#: Largest number of logits elements the final-block KL/NLL pair materializes
+#: at once. The pair runs on the default path, so a calibration batch times a
+#: large vocabulary must not hold several float32 ``[tokens, vocab]`` tensors.
+#: Rows are independent, so the row chunking is exact.
+_LAST_BLOCK_LOGIT_CHUNK_ELEMENTS = 1 << 25
 
 
 def _first_tensor(value: Any) -> Optional[torch.Tensor]:
@@ -122,6 +130,76 @@ def _module_device(module: torch.nn.Module) -> torch.device:
     for buffer in module.buffers():
         return buffer.device
     return torch.device("cpu")
+
+
+class _LastBlockHead:
+    """The final norm and linear output head that turn a block output into logits."""
+
+    def __init__(self, norm: Optional[torch.nn.Module], head: torch.nn.Module):
+        weight = getattr(head, "weight", None)
+        if not torch.is_tensor(weight) or weight.ndim != 2:
+            raise TypeError(
+                f"G2PTQ cannot use `{type(head).__name__}` as a logits head."
+            )
+        if not weight.is_floating_point() or weight.device.type == "meta":
+            raise TypeError(
+                f"G2PTQ cannot use a {weight.dtype} `{type(head).__name__}` "
+                "weight on "
+                f"{weight.device} as a logits head."
+            )
+
+        from transformers.pytorch_utils import Conv1D
+
+        if isinstance(head, Conv1D):
+            # Conv1D stores ``[in, out]`` and computes ``x @ weight + bias``.
+            self._weight = weight.t()
+        elif isinstance(head, (torch.nn.Linear, torch.nn.Embedding)):
+            self._weight = weight
+        else:
+            raise TypeError(
+                f"G2PTQ cannot use `{type(head).__name__}` as a logits head."
+            )
+
+        bias = getattr(head, "bias", None)
+        if bias is not None and (
+            not torch.is_tensor(bias) or bias.device != weight.device
+        ):
+            raise TypeError("G2PTQ: the logits head bias is not on the weight device.")
+
+        self.norm = norm
+        self.head = head
+        self.device = weight.device
+        self.vocab = int(self._weight.shape[0])
+        self._bias = bias
+        self._dtype = weight.dtype
+        self._release = None
+
+    def close(self) -> None:
+        """Release any live modules staged for this objective."""
+
+        release = self._release
+        self._release = None
+        if release is not None:
+            release()
+
+    def logits(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Project ``hidden`` to logits without building an autograd graph."""
+
+        if hidden.device != self.device:
+            hidden = hidden.to(self.device)
+        if hidden.dtype != self._dtype:
+            hidden = hidden.to(self._dtype)
+        with torch.no_grad():
+            return F.linear(hidden, self._weight, self._bias)
+
+    def input_grad(self, grad_logits: torch.Tensor) -> torch.Tensor:
+        """Return ``d loss / d hidden`` for an upstream logits gradient."""
+
+        weight = self._weight
+        with torch.no_grad():
+            return torch.matmul(grad_logits.to(weight.dtype), weight).to(
+                dtype=torch.float32
+            )
 
 
 def _accepts_keyword(module: torch.nn.Module, keyword: str) -> bool:
@@ -224,6 +302,9 @@ class G2PTQProcessor(GPTQProcessor):
         self._g2ptq_suppress_capture = False
         self._g2ptq_is_lm_head = False
         self._g2ptq_unavailable: set = set()
+        # layer_index -> (layer_index, _LastBlockHead); rebuilt after resume.
+        self._g2ptq_last_block_head: Optional[Tuple[int, _LastBlockHead]] = None
+        self._g2ptq_last_block_warned: set = set()
         self._g2ptq_embedding_notice = False
         # Clean calibration stream, advanced by the pristine replay of each
         # layer. ``None`` means "the live stream is still clean" (layer 0).
@@ -385,10 +466,19 @@ class G2PTQProcessor(GPTQProcessor):
             except Exception as exc:  # noqa: BLE001 - the refresh must never abort a run
                 self._report_unavailable(layer_index, exc)
 
+        release_head = None
         if subset_total is not None and subset_index + 1 >= subset_total:
             with self._g2ptq_lock:
                 self._g2ptq_layer_state.pop(layer_index, None)
                 self._g2ptq_pristine.pop(layer_index, None)
+                if (
+                    self._g2ptq_last_block_head is not None
+                    and self._g2ptq_last_block_head[0] == layer_index
+                ):
+                    release_head = self._g2ptq_last_block_head[1]
+                    self._g2ptq_last_block_head = None
+        if release_head is not None:
+            release_head.close()
 
     # ------------------------------------------------------------------
     # refresh
@@ -409,13 +499,42 @@ class G2PTQProcessor(GPTQProcessor):
         # Modules with different seeds need different Fisher draws, so the
         # replay groups by both objective and seed. The default run-level seed
         # keeps the common case at one replay per subset.
+        layer = state.get("layer")
+        last_block = self._is_last_transformer_block(layer_index) and not getattr(
+            layer, "is_mtp", False
+        )
+        device = None
+        if last_block:
+            target = layer if layer is not None else block
+            if target is not None:
+                device = _module_device(target)
+
         tasks_by_objective: Dict[Tuple[bool, int], Dict[str, G2PTQ]] = {}
         for name in names:
             task = self.tasks.get(name)
             if isinstance(task, G2PTQ):
                 config = task.qcfg.g2ptq
-                use_kl = self._uses_kl_objective([name], config=config)
+                use_kl = self._uses_kl_objective(
+                    [name],
+                    config=config,
+                    layer_index=layer_index if last_block else None,
+                )
                 tasks_by_objective.setdefault((use_kl, config.seed), {})[name] = task
+
+        head_path = None
+        if last_block and any(use_kl for use_kl, _ in tasks_by_objective):
+            if device is not None:
+                head_path = self._last_block_head_path(layer_index, device)
+            else:
+                self._report_last_block_unavailable(layer_index, None)
+            if head_path is None:
+                # The final block has no supported logits path. Keep the
+                # paper's block-wise MSE fallback rather than treating hidden
+                # states as logits.
+                for (use_kl, seed), tasks in list(tasks_by_objective.items()):
+                    if use_kl:
+                        tasks_by_objective.setdefault((False, seed), {}).update(tasks)
+                        del tasks_by_objective[(use_kl, seed)]
 
         for (use_kl, seed), tasks in tasks_by_objective.items():
             try:
@@ -426,6 +545,7 @@ class G2PTQProcessor(GPTQProcessor):
                     use_kl=use_kl,
                     seed=seed,
                     layer_index=layer_index,
+                    head_path=head_path if use_kl else None,
                 )
             except Exception as exc:  # noqa: BLE001 - replay can fail on unsupported blocks
                 self._report_unavailable(layer_index, exc)
@@ -459,22 +579,177 @@ class G2PTQProcessor(GPTQProcessor):
             exc,
         )
 
-    def _uses_kl_objective(
-        self, names: Iterable[str], *, config: Optional[G2PTQConfig] = None,
-    ) -> bool:
-        """Whether this subset is the output head, which Algorithm 2 trains with KL.
+    def _report_last_block_unavailable(
+        self, layer_index: int, exc: Optional[BaseException]
+    ) -> None:
+        """Warn once when the final block cannot reach the model's logits."""
 
-        The paper applies the KL/NLL pair to the last Transformer block by
-        composing the final norm and the language head. This port applies it
-        where the logits are actually produced -- the output head itself --
-        which reaches the same predictive-distribution objective without
-        assuming an architecture-specific norm attribute.
+        with self._g2ptq_lock:
+            if layer_index in self._g2ptq_last_block_warned:
+                return
+            self._g2ptq_last_block_warned.add(layer_index)
+        if exc is None:
+            log.warn(
+                "G2PTQ: the final block %s has no supported final-norm + head "
+                "path; using block-wise MSE for it.",
+                layer_index,
+            )
+            return
+        log.warn(
+            "G2PTQ: the final block %s cannot compose its final norm and head "
+            "(%s: %s); using block-wise MSE for it.",
+            layer_index,
+            type(exc).__name__,
+            exc,
+        )
+
+    def _is_last_transformer_block(self, layer_index: Optional[int]) -> bool:
+        """Whether ``layer_index`` is the final quantized Transformer block."""
+
+        layer_count = getattr(self, "layer_count", None)
+        return (
+            not self._g2ptq_is_lm_head
+            and isinstance(layer_index, int)
+            and isinstance(layer_count, int)
+            and layer_index == layer_count - 1
+        )
+
+    def _last_block_head_path(
+        self, layer_index: int, device: torch.device
+    ) -> Optional[_LastBlockHead]:
+        """Build (or reuse) the final norm + head path for the last block."""
+
+        with self._g2ptq_lock:
+            cached = self._g2ptq_last_block_head
+            if cached is not None and cached[0] == layer_index:
+                return cached[1]
+            self._g2ptq_last_block_head = None
+
+        resolver = getattr(self.gptq_model, "last_block_objective_modules", None)
+        if not callable(resolver):
+            return None
+        try:
+            modules = resolver()
+        except Exception as exc:  # noqa: BLE001 - an unsupported model falls back to MSE
+            self._report_last_block_unavailable(layer_index, exc)
+            return None
+        if modules is None:
+            self._report_last_block_unavailable(layer_index, None)
+            return None
+
+        norm, norm_name, head, head_name = modules
+        pre_quantize = getattr(self.gptq_model, "pre_quantize", None)
+        post_quantize = getattr(self.gptq_model, "post_quantize", None)
+        staged: List[Tuple[torch.nn.Module, torch.device]] = []
+        try:
+            # Lazy checkpoints keep the head and final norm on META until their
+            # own stage. Materialize them for this objective, then hand them
+            # back through the normal post-quantize offload path.
+            if norm is not None and callable(pre_quantize):
+                original = _module_device(norm)
+                norm = pre_quantize(norm, module_path=norm_name)
+                staged.append((norm, original))
+            if callable(pre_quantize):
+                original = _module_device(head)
+                head = pre_quantize(head, module_path=head_name)
+                staged.append((head, original))
+                head = self._materialize_tied_head(head, head_name, staged)
+            if norm is not None:
+                norm_copy = self._differentiable_block(
+                    norm, layer=None, device=device
+                )
+            else:
+                norm_copy = None
+            path = _LastBlockHead(norm_copy, head)
+        except Exception as exc:  # noqa: BLE001 - fall back instead of aborting the run
+            self._release_staged(staged, post_quantize)
+            self._report_last_block_unavailable(layer_index, exc)
+            return None
+
+        def release() -> None:
+            self._release_staged(staged, post_quantize)
+
+        path._release = release
+        with self._g2ptq_lock:
+            self._g2ptq_last_block_head = (layer_index, path)
+        return path
+
+    @staticmethod
+    def _release_staged(
+        staged: List[Tuple[torch.nn.Module, torch.device]],
+        post_quantize,
+    ) -> None:
+        """Return staged modules to their pre-refresh placement."""
+
+        for module, original in reversed(staged):
+            if original.type == "meta":
+                if not callable(post_quantize):
+                    continue
+                try:
+                    post_quantize(module)
+                except Exception:  # noqa: BLE001 - best-effort release
+                    pass
+                continue
+            try:
+                module.to(device=original)
+            except Exception:  # noqa: BLE001 - best-effort release
+                pass
+
+    def _materialize_tied_head(
+        self,
+        head: torch.nn.Module,
+        head_name: str,
+        staged: List[Tuple[torch.nn.Module, torch.device]],
+    ) -> torch.nn.Module:
+        """Expose a tied head's storage by materializing its input embedding.
+
+        A tied ``lm_head`` has no checkpoint tensor of its own, so the lazy
+        loader leaves it on META until the shared input embedding is
+        materialized. Only that case needs the extra staging: an untied head
+        owns its checkpoint tensor and materializes directly.
+        """
+
+        weight = getattr(head, "weight", None)
+        if torch.is_tensor(weight) and weight.device.type != "meta":
+            return head
+        pre_quantize = getattr(self.gptq_model, "pre_quantize", None)
+        get_embeddings = getattr(self.gptq_model, "get_input_embeddings", None)
+        get_name = getattr(self.gptq_model, "get_input_embeddings_name", None)
+        if not callable(pre_quantize) or not callable(get_embeddings):
+            return head
+        embed = get_embeddings()
+        if (
+            embed is None
+            or embed is head
+            or getattr(embed, "weight", None) is not weight
+        ):
+            return head
+        original = _module_device(embed)
+        embed_name = get_name() if callable(get_name) else None
+        embed = pre_quantize(embed, module_path=embed_name)
+        staged.append((embed, original))
+        return pre_quantize(head, module_path=head_name)
+
+    def _uses_kl_objective(
+        self,
+        names: Iterable[str],
+        *,
+        config: Optional[G2PTQConfig] = None,
+        layer_index: Optional[int] = None,
+    ) -> bool:
+        """Whether this subset uses Algorithm 2's KL/NLL pair.
+
+        The paper applies the pair to the last Transformer block by composing
+        the final norm and the language head. A quantized output head uses the
+        pair directly because its output is already logits.
         """
 
         config = config if config is not None else self.qcfg.g2ptq
         if config is None or not config.kl_last_block:
             return False
         if self._g2ptq_is_lm_head:
+            return True
+        if layer_index is not None and self._is_last_transformer_block(layer_index):
             return True
         lm_head = getattr(self.gptq_model, "lm_head", None)
         if not isinstance(lm_head, str) or not lm_head:
@@ -493,6 +768,7 @@ class G2PTQProcessor(GPTQProcessor):
         use_kl: bool,
         seed: int = 0,
         layer_index: int = 0,
+        head_path: Optional[_LastBlockHead] = None,
     ) -> Dict[str, Dict[str, torch.Tensor]]:
         """Run the differentiable block replay and fold it into statistics."""
 
@@ -600,9 +876,17 @@ class G2PTQProcessor(GPTQProcessor):
                         target = target.flatten(0, -2)[keep_rows]
                     if produced.numel() == 0:
                         continue
-                    loss_g, loss_h = self._block_objectives(
-                        produced, target, use_kl=use_kl, generator=generator,
-                    )
+                    if use_kl and head_path is not None:
+                        loss_g, loss_h = self._last_block_objectives(
+                            produced,
+                            target,
+                            head_path=head_path,
+                            generator=generator,
+                        )
+                    else:
+                        loss_g, loss_h = self._block_objectives(
+                            produced, target, use_kl=use_kl, generator=generator,
+                        )
 
                     weight_grads = torch.autograd.grad(
                         loss_g,
@@ -933,6 +1217,67 @@ class G2PTQProcessor(GPTQProcessor):
             weighted = activations * weights.unsqueeze(1)
             hessian[group] += weighted.transpose(0, 1) @ activations
         return hessian
+
+    @staticmethod
+    def _last_block_objectives(
+        quantized: torch.Tensor,
+        target: torch.Tensor,
+        *,
+        head_path: _LastBlockHead,
+        generator: Optional[torch.Generator] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return gradient surrogates for the composed last-block KL/NLL pair.
+
+        Algorithm 2 lines 12-13 score the final block through the model's
+        predictive distribution. The head is applied without autograd so the
+        large vocabulary projection is never saved for backward; the returned
+        scalars are linearized at the current logits, so their derivative with
+        respect to the block output equals the derivative of the KL/NLL pair.
+        """
+
+        quantized = quantized.reshape(-1, quantized.shape[-1])
+        target = target.reshape(-1, target.shape[-1])
+        if head_path.norm is not None:
+            hidden = head_path.norm(quantized)
+            with torch.no_grad():
+                reference_hidden = head_path.norm(target)
+        else:
+            hidden = quantized
+            reference_hidden = target
+
+        rows = max(
+            1, _LAST_BLOCK_LOGIT_CHUNK_ELEMENTS // max(int(head_path.vocab), 1)
+        )
+        loss_g = torch.zeros((), device=hidden.device, dtype=torch.float32)
+        loss_h = torch.zeros((), device=hidden.device, dtype=torch.float32)
+        for start in range(0, hidden.shape[0], rows):
+            hidden_chunk = hidden[start:start + rows]
+            reference_chunk = reference_hidden[start:start + rows]
+            logits = head_path.logits(hidden_chunk.detach()).float()
+            reference_logits = head_path.logits(reference_chunk).float()
+            log_prob = F.log_softmax(logits, dim=-1)
+            reference_prob = F.softmax(reference_logits, dim=-1)
+
+            sample_generator = generator
+            if generator is not None and generator.device != reference_prob.device:
+                sample_generator = torch.Generator(
+                    device=reference_prob.device
+                ).manual_seed(generator.initial_seed())
+            labels = torch.multinomial(
+                reference_prob, num_samples=1, generator=sample_generator
+            ).squeeze(1)
+
+            quant_prob = log_prob.exp()
+            grad_g = quant_prob - reference_prob
+            grad_h = quant_prob.clone()
+            grad_h[torch.arange(labels.numel(), device=grad_h.device), labels] -= 1.0
+            del quant_prob
+
+            grad_hidden_g = head_path.input_grad(grad_g).to(hidden.device)
+            grad_hidden_h = head_path.input_grad(grad_h).to(hidden.device)
+            loss_g = loss_g + (grad_hidden_g.detach() * hidden_chunk).sum()
+            loss_h = loss_h + (grad_hidden_h.detach() * hidden_chunk).sum()
+        return loss_g, loss_h
 
     @staticmethod
     def _block_objectives(

@@ -30,7 +30,7 @@ model.quantize(calibration)
 
 | Aspect | Plain GPTQ | G²PTQ |
 | --- | --- | --- |
-| Objective | per-linear layer-wise MSE | block-wise MSE, KL on the output head |
+| Objective | per-linear layer-wise MSE | block-wise MSE; KL on the final block and a quantized output head |
 | Hessian | `X^T X` from module inputs | grouped Fisher from output-activation gradients, Eq. 8/9 |
 | First-order term | omitted | exact weight gradient of the block objective, Eq. 6/15 |
 | Step size | fixed by the GPTQ update | per-row trust-region factor `beta` in `[0, 1]`, Eq. 13/14/56 |
@@ -138,9 +138,12 @@ another stage path reaches it.
 `_collect_block_statistics` runs one differentiable replay per captured batch:
 
 1. Build `ell_G` and `ell_H` from the block output (Algorithm 2, lines 9-13):
-   block-wise MSE for body blocks, and KL / cross-entropy on the output head
-   when `kl_last_block` is set. Both terms sum the per-token objectives in
-   FP32 for FP16 and BF16 models, using the active replay keep mask.
+   block-wise MSE for intermediate blocks, and KL / cross-entropy for the
+   final Transformer block when `kl_last_block` is set. The final block
+   reaches logits through the model's declared final norm and output head; a
+   quantized output head uses the same pair directly. Both terms sum the
+   per-token objectives in FP32 for FP16 and BF16 models, using the active
+   replay keep mask.
 2. Backpropagate `ell_G` for each projection's weight gradient `G` (line 16).
 3. Backpropagate `ell_H` and cache each projection's output-activation
    gradient; Eq. 8 squares it per token and channel, Eq. 9 averages channels
@@ -148,6 +151,16 @@ another stage path reaches it.
    over every invocation of the projection.
 4. Install both on the task; `G2PTQ.quantize` then solves Eq. 6/15 with the
    trust region of Eq. 13.
+
+```mermaid
+flowchart TD
+    A["_refresh_block"] --> B{"final Transformer block?"}
+    B -->|"no"| C["block-wise MSE pair"]
+    B -->|"yes"| D{"declared final norm + plain head?"}
+    D -->|"yes"| E["compose norm + head, KL / NLL pair"]
+    D -->|"no"| F["warn once, block-wise MSE pair"]
+    G["quantized output head"] --> H["KL / NLL pair on head logits"]
+```
 
 The replay runs outside `torch.inference_mode()`, because the quantization
 stage itself runs inside it and every tensor allocated there is an inference
@@ -182,6 +195,12 @@ use the same draws without depending on the ambient process RNG state.
 - **KV-cache reuse.** A block whose forward consumes a previous layer's KV
   cache cannot be replayed in isolation; the refresh refuses it and the block
   falls back.
+- **Final-block logits path.** The final block uses KL only when its output
+  feeds the model's declared final norm and a plain linear (or `Conv1D` /
+  tied-embedding) head. A definition that preprocesses head inputs in
+  `lm_head_pre_quantize_generate_hook` (an extra projection, a stream
+  collapse, or a conditional norm) cannot reuse that path; the block logs one
+  warning and uses block-wise MSE instead.
 - **Embedding endpoints.** A token-id embedding table has no float activation
   block to differentiate, so `quantize()`/`requantize()` with
   `embed_quant_mode=INPUT` or `BOTH` quantizes it with plain GPTQ. A linear
@@ -225,10 +244,11 @@ stateDiagram-v2
 
 ## Measured effect
 
-The measurements below are from the initial implementation. WikiText-2 perplexity at 4 bits, `group_size=128`, fp16 weights and
-activations, produced by `scripts/benchmark_g2ptq_ppl.py`. `alpha` is the
-trust-region budget (`alpha_mse`); the output head keeps the default
-`alpha_kl`.
+The measurements below are from the initial implementation, which applied
+the KL pair to the output head only. WikiText-2 perplexity at 4 bits,
+`group_size=128`, fp16 weights and activations, produced by
+`scripts/benchmark_g2ptq_ppl.py`. `alpha` is the trust-region budget
+(`alpha_mse`); the output head keeps the default `alpha_kl`.
 
 Qwen2.5-0.5B-Instruct, 24 x 2048 calibration tokens and 16 x 2048 evaluation
 tokens:
@@ -239,6 +259,15 @@ tokens:
 | GPTQ | 15.265 | - |
 | G²PTQ `alpha=0.05` | 15.015 | -1.6% |
 | G²PTQ `alpha=0.2` | 14.819 | -2.9% |
+
+Re-measured after the final-block KL change on the same Qwen2.5-0.5B setup:
+14.870 at `alpha=0.05` and 14.732 at `alpha=0.2`. Repeated runs of the
+unmodified objective on the same revision scored 14.911 / 14.919 and
+14.788 / 14.739, so the spread is the solver's run-to-run variation at this
+scale: the change restores the paper's objective without a measurable
+perplexity gain here. It costs one extra vocabulary projection per
+final-block subset, measured at about 7-12 s more quantization time and
+0.3 GiB more peak device memory.
 
 SmolLM2-135M, 16 x 1024 calibration tokens and 16 x 1024 evaluation tokens:
 
@@ -252,10 +281,11 @@ SmolLM2-135M, 16 x 1024 calibration tokens and 16 x 1024 evaluation tokens:
 | G²PTQ `alpha=2.0` | 18.652 | -7.9% |
 
 The refresh costs one extra differentiable block replay per subset. On the 0.5B
-run it raised quantization time from 39 s to about 99 s and peak device memory
-from 0.57 GiB to 2.3-2.8 GiB. A larger budget is not monotonically better: the
-SmolLM2 row at `alpha=2.0` is where the trust region starts trading accuracy
-for step size.
+run the initial implementation raised quantization time from 39 s to about 99 s
+and peak device memory from 0.57 GiB to 2.3-2.8 GiB; the final-block KL path
+adds one vocabulary projection per subset, measured at about 7-12 s and
+0.3 GiB. A larger budget is not monotonically better: the SmolLM2 row at
+`alpha=2.0` is where the trust region starts trading accuracy for step size.
 
 ## Configuration
 
@@ -264,7 +294,7 @@ for step size.
 | `alpha_mse` | `0.01` | Trust-region budget for block-wise MSE blocks |
 | `alpha_kl` | `0.05` | Trust-region budget for the output-head KL block |
 | `num_groups` | `4` | Output-channel groups that share one Hessian |
-| `kl_last_block` | `True` | Use the KL objective on the output head |
+| `kl_last_block` | `True` | Use the KL objective on the final Transformer block (through the final norm and head) and on a quantized output head |
 | `seed` | `0` | Seed for the Fisher noise and KL label sampling; the draws also depend on the layer index |
 
 Once enabled for the run, a module's `dynamic.g2ptq` rule can select its own
