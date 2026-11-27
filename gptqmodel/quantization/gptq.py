@@ -1448,10 +1448,18 @@ class GPTQ:
         pad = inp.new_zeros((self._tp_pad_cols, inp.shape[1]))
         return torch.cat((inp, pad), dim=0)
 
-    def add_batch(self, inp: torch.Tensor, out: Optional[torch.Tensor], batch_index: Optional[int] = None):
+    def add_batch(
+        self,
+        inp: torch.Tensor,
+        out: Optional[torch.Tensor],
+        batch_index: Optional[int] = None,
+        row_weights: Optional[torch.Tensor] = None,
+    ):
         if not self._hessian_capture_enabled:
             return
         if isinstance(self.module, nn.Embedding):
+            if row_weights is not None:
+                raise ValueError("MoEQuant AGQ: embedding capture does not accept affinity weights.")
             del out
             token_count, counts, device = self.process_batch(inp, batch_index=batch_index)
             if token_count == 0 or counts is None:
@@ -1479,7 +1487,7 @@ class GPTQ:
 
         with self._inplace_accumulation(dev) as target:
             batch_token_size, xtx, device = self.process_batch(
-                inp, batch_index=batch_index, out=target,
+                inp, batch_index=batch_index, out=target, row_weights=row_weights,
             )
             if batch_token_size == 0 or xtx is None:
                 return
@@ -1960,6 +1968,7 @@ class GPTQ:
         self,
         matrix: torch.Tensor,
         out: Optional[torch.Tensor] = None,
+        row_weights: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Return this batch's ``X^T X``, accumulating into ``out`` when given.
 
@@ -1980,6 +1989,25 @@ class GPTQ:
                 return out
             return torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
+        row_scale = None
+        if row_weights is not None:
+            if (
+                not torch.is_tensor(row_weights)
+                or row_weights.ndim != 1
+                or row_weights.numel() != rows
+            ):
+                raise ValueError(
+                    "MoEQuant AGQ: row_weights must be a 1-D tensor with one entry per "
+                    f"calibration row; got {type(row_weights).__name__} for {rows} rows."
+                )
+            if not torch.isfinite(row_weights).all():
+                raise ValueError("MoEQuant AGQ: row_weights must be finite.")
+            if bool((row_weights < 0).any()):
+                raise ValueError("MoEQuant AGQ: row_weights must be non-negative.")
+            row_scale = torch.sqrt(
+                row_weights.to(device=matrix.device, dtype=torch.float32)
+            )
+
         stage_dtype = self.preferred_staging_dtype(matrix.dtype, matrix.device)
         chunk_size = self.resolve_hessian_chunk_size(rows, stage_dtype)
         self._borrow_workspace_stage_dtype = stage_dtype
@@ -1991,11 +2019,14 @@ class GPTQ:
             if threshold is not None
             else None
         )
+        scale = cap_scale
+        if row_scale is not None:
+            scale = row_scale if scale is None else scale * row_scale
 
         if chunk_size is None:
             needs_copy = matrix.dtype != torch.float32
             mat32 = matrix.to(dtype=torch.float32)
-            if cap_scale is not None:
+            if scale is not None:
                 # Fold the cap into the fp32 GEMM input instead of switching
                 # to the chunk-workspace lease: an all-ones scale is a
                 # bitwise no-op, and a capped batch keeps the single-GEMM
@@ -2004,9 +2035,9 @@ class GPTQ:
                 # when it is already fp32 (and activations may be shared by
                 # several projections), so this must be out of place.
                 if needs_copy:
-                    mat32.mul_(cap_scale.unsqueeze(1))
+                    mat32.mul_(scale.unsqueeze(1))
                 else:
-                    mat32 = mat32 * cap_scale.unsqueeze(1)
+                    mat32 = mat32 * scale.unsqueeze(1)
             # Determinism across processes comes from this fp32 X^T X GEMM
             # running on rocBLAS (see ``utils/rocm.py``). The quantization run
             # already holds the override for Hessian methods; this per-call
@@ -2034,10 +2065,10 @@ class GPTQ:
             source = matrix[start:start + rows_this]
             with self.borrow_materialized_chunk_fp32(source, rows_this) as materialized:
                 materialized32 = materialized
-                if cap_scale is not None:
+                if scale is not None:
                     # ``materialized`` is a private workspace copy, so the
                     # in-place clamp never touches the caller's activations.
-                    materialized32.mul_(cap_scale[start:start + rows_this].unsqueeze(1))
+                    materialized32.mul_(scale[start:start + rows_this].unsqueeze(1))
                 with quant_blas_backend(matrix.device):
                     # Local accumulator: accumulate the chunk in place so the
                     # chunk's product never materializes (#5731).
@@ -2050,6 +2081,7 @@ class GPTQ:
         inp: torch.Tensor,
         batch_index: Optional[int] = None,
         out: Optional[torch.Tensor] = None,
+        row_weights: Optional[torch.Tensor] = None,
     ) -> Tuple[int, Optional[torch.Tensor], torch.device]:
         """Return ``(token_count, xtx_or_counts, partial_key_device)`` for one batch.
 
@@ -2118,8 +2150,30 @@ class GPTQ:
             del reshaped_inp
             return 0, None, canonical_device
 
+        if row_weights is not None:
+            if (
+                not torch.is_tensor(row_weights)
+                or row_weights.ndim != 1
+                or row_weights.numel() != batch_token_size
+            ):
+                raise ValueError(
+                    "MoEQuant AGQ: row_weights must be a 1-D tensor with one entry per "
+                    f"calibration row; got {type(row_weights).__name__} for "
+                    f"{batch_token_size} rows."
+                )
+            if not torch.isfinite(row_weights).all():
+                raise ValueError("MoEQuant AGQ: row_weights must be finite.")
+            if bool((row_weights < 0).any()):
+                raise ValueError("MoEQuant AGQ: row_weights must be non-negative.")
+            if float(row_weights.sum().item()) <= 0.0:
+                del reshaped_inp
+                return 0, None, canonical_device
+            row_weights = row_weights.to(device=reshaped_inp.device, dtype=torch.float32)
+
         try:
-            xtx = self.compute_hessian_xtx(reshaped_inp, out=out).to(dtype=torch.float32)
+            xtx = self.compute_hessian_xtx(
+                reshaped_inp, out=out, row_weights=row_weights
+            ).to(dtype=torch.float32)
         except RuntimeError as exc:
             if (
                 torch.device(inp_device).type == "cuda"
@@ -2131,12 +2185,19 @@ class GPTQ:
                 )
                 reshaped_inp_cpu = reshaped_inp.to(device=torch.device("cpu"))
                 del reshaped_inp
+                row_weights_cpu = (
+                    row_weights.to(device=torch.device("cpu"))
+                    if row_weights is not None
+                    else None
+                )
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 canonical_device = torch.device("cpu")
                 # ``out`` lives on the device that just failed; the retry has to
                 # allocate its own product and be merged like a first batch.
-                xtx = self.compute_hessian_xtx(reshaped_inp_cpu).to(dtype=torch.float32)
+                xtx = self.compute_hessian_xtx(
+                    reshaped_inp_cpu, row_weights=row_weights_cpu
+                ).to(dtype=torch.float32)
                 xtx = xtx.detach()
                 del reshaped_inp_cpu
             else:

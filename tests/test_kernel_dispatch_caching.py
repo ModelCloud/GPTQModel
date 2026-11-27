@@ -243,6 +243,75 @@ def test_exllamav2_fast_path_detects_in_place_write(monkeypatch):
     assert made[1].eq(0).all()
 
 
+def test_exllamav2_fast_path_detects_data_swap(monkeypatch):
+    """A ``.data =`` swap keeps the version but changes the storage fields."""
+
+    monkeypatch.setattr(exllamav2, "exllamav2_free_q_matrix", lambda *_args: None)
+    layer, made = _exllamav2_layer()
+    ensure = lambda: exllamav2.ExllamaV2Linear._ensure_q_handle(layer)  # noqa: E731
+
+    ensure()
+    layer.qweight.data = torch.ones_like(layer.qweight)
+    ensure()
+
+    assert len(made) == 2
+
+
+def test_exllamav2_fast_path_detects_same_storage_shape_swap(monkeypatch):
+    """A same-storage view keeps the pointer but changes the bound shape."""
+
+    monkeypatch.setattr(exllamav2, "exllamav2_free_q_matrix", lambda *_args: None)
+    layer, made = _exllamav2_layer()
+    ensure = lambda: exllamav2.ExllamaV2Linear._ensure_q_handle(layer)  # noqa: E731
+
+    ensure()
+    layer.qweight.data = layer.qweight.data.view(-1)
+    ensure()
+
+    assert len(made) == 2
+
+
+def test_exllamav2_fast_path_skips_signature_rebuild(monkeypatch):
+    """Steady-state forwards must not rebuild the per-tensor signature."""
+
+    calls = []
+    real_signature = exllamav2._q_fast_signature
+
+    def counting_signature(tensor):
+        calls.append(tensor)
+        return real_signature(tensor)
+
+    monkeypatch.setattr(exllamav2, "_q_fast_signature", counting_signature)
+    layer, made = _exllamav2_layer()
+    ensure = lambda: exllamav2.ExllamaV2Linear._ensure_q_handle(layer)  # noqa: E731
+
+    ensure()
+    first_calls = len(calls)
+    assert first_calls > 0
+
+    ensure()
+    ensure()
+
+    assert len(calls) == first_calls
+    assert len(made) == 1
+
+
+def test_exllamav2_fast_path_handles_inference_tensors(monkeypatch):
+    """Inference tensors have no version counter; the snapshot stores ``None``."""
+
+    monkeypatch.setattr(exllamav2, "exllamav2_free_q_matrix", lambda *_args: None)
+    with torch.inference_mode():
+        layer, made = _exllamav2_layer()
+    ensure = lambda: exllamav2.ExllamaV2Linear._ensure_q_handle(layer)  # noqa: E731
+
+    ensure()
+    ensure()
+    ensure()
+
+    assert len(made) == 1
+    assert layer._q_fast[1][0][0] is None
+
+
 def test_exllamav2_concurrent_first_forward_builds_one_handle(monkeypatch):
     """Issue #4184: serialize the cold native q-matrix rebuild.
 
@@ -351,6 +420,59 @@ def test_bitsandbytes_quant_state_signature_uses_tensor_identity_fields(monkeypa
     state.weight = torch.zeros(4, 8)
     refresh()
     assert len(built) == 2
+
+
+def test_bitsandbytes_quant_state_signature_reads_registered_buffers(monkeypatch):
+    """The per-forward guard reads the live buffers without module attributes."""
+
+    built = []
+
+    class _QuantState:
+        @classmethod
+        def from_dict(cls, payload, device):
+            built.append(device)
+            return object()
+
+    fake_bnb = types.SimpleNamespace(
+        __version__="0.49.0",
+        functional=types.SimpleNamespace(QuantState=_QuantState),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "bitsandbytes", fake_bnb)
+    monkeypatch.setattr(bnb_module, "import_bitsandbytes", lambda: fake_bnb)
+    bnb_module._clear_availability_state()
+
+    try:
+        layer = bnb_module.BitsAndBytesLinear(
+            bits=4,
+            group_size=64,
+            sym=True,
+            desc_act=False,
+            in_features=64,
+            out_features=64,
+            register_buffers=False,
+        )
+        layer.register_buffer("weight", torch.zeros(16, 64, dtype=torch.uint8))
+        layer.register_buffer("weight_absmax", torch.zeros(1))
+        layer.register_buffer("weight_quant_map", torch.zeros(16))
+        layer.register_buffer("weight_quant_state", torch.zeros(3))
+        layer._quant_state_payload = lambda: {}
+
+        refresh = lambda: bnb_module.BitsAndBytesLinear._refresh_quant_state(layer)  # noqa: E731
+        refresh()
+        assert layer._quant_state_signature == (
+            (torch.Size([16, 64]), torch.device("cpu"), torch.uint8),
+            (torch.Size([1]), torch.device("cpu"), torch.float32),
+            (torch.Size([16]), torch.device("cpu"), torch.float32),
+            (torch.Size([3]), torch.device("cpu"), torch.float32),
+        )
+
+        # ``_pack_cpu``/``_ensure_unpacked`` replace the buffer directly; the
+        # signature must notice the new shape and rebuild the QuantState.
+        layer._buffers["weight"] = torch.zeros(16, 128, dtype=torch.uint8)
+        refresh()
+        assert len(built) == 2
+    finally:
+        bnb_module._clear_availability_state()
 
 
 # ---------------------------------------------------------------------------

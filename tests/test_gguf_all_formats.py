@@ -35,6 +35,7 @@ from gptqmodel.nn_modules.qlinear.gguf import (
     _dequantize_gguf_tensor_numpy,
     _pack_gguf_tensor_numpy,
     _quantize_gguf_tensor_numpy,
+    _repair_simple_scale_underflow,
 )
 from gptqmodel.nn_modules.qlinear.gguf_cpp import (
     GGUFCppKernel,
@@ -500,6 +501,8 @@ def test_simple_formats_guard_reads_torch_packed_bytes(qtype, divisor):
 # Simple blocks that store a bare FP16 scale, plus the byte offset of that
 # field. Q4_1/Q5_1 also carry an FP16 offset; TQ1_0/TQ2_0 keep the scale last.
 _SIMPLE_UNDERFLOW_D_OFFSETS = {
+    "Q1_0": 0,
+    "Q1_0_g128": 0,
     "Q2_0": 0,
     "Q4_0": 0,
     "Q4_1": 0,
@@ -511,7 +514,17 @@ _SIMPLE_UNDERFLOW_D_OFFSETS = {
     "TQ1_0": 52,
     "TQ2_0": 64,
 }
-_SIMPLE_UNDERFLOW_QTYPES = ["Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1", "IQ4_NL"]
+_SIMPLE_UNDERFLOW_QTYPES = [
+    "Q1_0",
+    "Q1_0_g128",
+    "Q4_0",
+    "Q4_1",
+    "Q5_0",
+    "Q5_1",
+    "Q8_0",
+    "Q8_1",
+    "IQ4_NL",
+]
 _SIMPLE_UNDERFLOW_AMPLITUDES = (1e-6, 1e-7, 1e-8, float(np.finfo(np.float16).tiny))
 
 
@@ -664,6 +677,67 @@ def test_simple_underflow_repairs_every_packer(qtype):
         assert np.any(_dequantize_gguf_tensor_numpy(packed, qtype) != 0)
     finally:
         gguf_module._GGUF_AVAILABLE = original
+
+
+def _unclamped_sign_only_bytes(weight: np.ndarray, qtype: str) -> np.ndarray:
+    """Pack sign-only bytes the way a producer without the FP16 clamp does."""
+
+    info = _GGUF_TYPE_INFO[qtype]
+    block_size = info["block_size"]
+    blocks = np.ascontiguousarray(weight, dtype=np.float32).reshape(-1, block_size)
+    scales = np.mean(np.abs(blocks), axis=-1).astype(np.float16, copy=False)
+    sign_bits = np.packbits((blocks >= 0).astype(np.uint8), axis=-1, bitorder="little")
+    packed = np.empty((blocks.shape[0], info["type_size"]), dtype=np.uint8)
+    packed[:, :2] = scales.view(np.uint8).reshape(-1, 2)
+    packed[:, 2:] = sign_bits
+    return packed
+
+
+@pytest.mark.parametrize("qtype", ["Q1_0", "Q1_0_g128"])
+@pytest.mark.parametrize("amplitude", (1.28e-7, 1e-7))
+def test_sign_only_sparse_block_never_decodes_to_zero(qtype, amplitude):
+    """A sparse block whose mean magnitude underflows must keep its signs."""
+
+    _skip_without_quantizer(qtype)
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+    weight = np.zeros((1, block_size), dtype=np.float32)
+    weight[0, 0] = np.float32(amplitude)
+    weight[0, 1] = np.float32(-amplitude)
+    # Trigger proof: the mean-magnitude scale is below the smallest FP16
+    # subnormal, so an unclamped cast publishes d = 0.
+    assert float(np.mean(np.abs(weight))) < float(np.float16(2.0**-24))
+
+    packed = _quantize_gguf_tensor_numpy(weight, qtype)
+    stored = _packed_simple_scale(packed, qtype)
+    assert stored[0] == np.float16(2.0**-24)
+    decoded = _dequantize_gguf_tensor_numpy(packed, qtype)
+    assert np.any(decoded != 0)
+    assert np.isfinite(decoded).all()
+    assert decoded[0, 0] > 0
+    assert decoded[0, 1] < 0
+    peak = float(np.abs(decoded).max())
+    assert 0.25 * amplitude <= peak <= 4.0 * amplitude
+
+
+@pytest.mark.parametrize("qtype", ["Q1_0", "Q1_0_g128"])
+def test_sign_only_repair_rebuilds_an_unclamped_packers_bytes(qtype):
+    """The shared exit repairs bytes from a packer that casts without clamping."""
+
+    _skip_without_quantizer(qtype)
+    block_size = _GGUF_TYPE_INFO[qtype]["block_size"]
+    weight = np.zeros((1, block_size), dtype=np.float32)
+    weight[0, 0] = np.float32(1.28e-7)
+    weight[0, 1] = np.float32(-1.28e-7)
+
+    unclamped = _unclamped_sign_only_bytes(weight, qtype)
+    assert _packed_simple_scale(unclamped, qtype)[0] == 0
+
+    repaired = _repair_simple_scale_underflow(weight, unclamped, qtype)
+    assert _packed_simple_scale(repaired, qtype)[0] != 0
+    decoded = _dequantize_gguf_tensor_numpy(repaired, qtype)
+    assert np.any(decoded != 0)
+    assert decoded[0, 0] > 0
+    assert decoded[0, 1] < 0
 
 
 @pytest.mark.parametrize("alias,divisor", [("q4_0", 8.0), ("q8_0", 127.0)])
@@ -1039,6 +1113,43 @@ def test_simple_underflow_export_forward_stays_nonzero(alias):
         register_buffers=False,
     )
     module.pack_original(lin, None, None)
+
+    x = torch.ones(1, in_features, dtype=torch.float32)
+    with torch.no_grad():
+        out = module(x)
+    assert torch.isfinite(out).all()
+    assert torch.any(out != 0)
+
+
+@pytest.mark.parametrize("alias", ["q1_0", "q1_0_g128"])
+def test_sign_only_underflow_export_forward_stays_nonzero(alias):
+    """A sparse underflowed block must survive export into the checkpoint buffer."""
+
+    qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
+    in_features = _GGUF_TYPE_INFO[qtype]["block_size"]
+    lin = torch.nn.Linear(in_features, 2, bias=False)
+    with torch.no_grad():
+        lin.weight.zero_()
+        lin.weight[0, 0] = 1.28e-7
+        lin.weight[1, 1] = -1.28e-7
+
+    module = GGUFTorchLinear(
+        bits=alias,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=2,
+        bias=False,
+        register_buffers=False,
+    )
+    module.pack_original(lin, None, None)
+
+    stored = _packed_simple_scale(module.qweight.numpy(), qtype)
+    assert stored[0] != 0
+    decoded = _dequantize_gguf_tensor_numpy(module.qweight.numpy(), qtype)
+    assert np.any(decoded != 0)
 
     x = torch.ones(1, in_features, dtype=torch.float32)
     with torch.no_grad():

@@ -15,7 +15,11 @@ from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import GSQConfig, QuantizeConfig
 from gptqmodel.quantization.config import FORMAT
 from gptqmodel.quantization.gptq import GPTQ
-from gptqmodel.quantization.gsq_scalar import gsq_enabled_for, refine_gptq_scalar
+from gptqmodel.quantization.gsq_scalar import (
+    gsq_enabled_for,
+    refine_affine_scalar,
+    refine_gptq_scalar,
+)
 
 
 def test_gsq_config_round_trip_and_scope():
@@ -311,3 +315,71 @@ def test_gsq_hard_search_score_matches_the_packed_export():
     decoded = result.scales.float()[:, result.g_idx] * (codes - result.zeros.float()[:, result.g_idx])
     measured = _hessian_metric(decoded, layer.weight, hessian)
     assert measured == pytest.approx(result.after, rel=2e-4, abs=2e-6)
+
+
+def _unrepresentable_endpoint_fixture(columns=16):
+    """A finite FP16 grid whose negative endpoint reconstructs ``-65536``."""
+    scale = torch.tensor([[8192.0]], dtype=torch.float16)
+    zero = torch.tensor([[8.0]], dtype=torch.float16)
+    groups = torch.zeros(columns, dtype=torch.int32)
+    weight = torch.full((1, columns), -57344.0, dtype=torch.float16)
+    target = torch.full((1, columns), -62000.0, dtype=torch.float32)
+    config = GSQConfig(
+        enabled=True, steps=60, candidates=16, seed=7, learning_rate=0.1,
+        temperature_start=1.0, temperature_end=0.05, learn_scales=False,
+    )
+    return scale, zero, groups, weight, target, config
+
+
+def test_gsq_scalar_never_accepts_a_reconstruction_outside_the_replay_dtype():
+    """A code that narrows to ``-inf`` must not win on its FP32 score.
+
+    ``scale=8192, zero=8`` makes code 0 reconstruct ``-65536``: finite in
+    FP32 but ``-inf`` in FP16, where the packer recovers code 0 from it. The
+    target is closer to that endpoint than to the baseline code 1, so an
+    unguarded search accepts the narrowed ``-inf`` candidate. Both scalar
+    refiners must keep the finite initializer.
+    """
+
+    scale, zero, groups, weight, target, config = _unrepresentable_endpoint_fixture()
+    baseline = weight.float()
+    endpoint = scale.float() * (0.0 - zero.float())
+    baseline_error = (baseline - target).square().sum()
+    endpoint_error = (endpoint - target).square().sum()
+    # Trigger: the unrepresentable endpoint is finite in FP32, becomes -inf in
+    # the replay dtype, and scores better than the baseline.
+    assert torch.isfinite(endpoint).all()
+    assert not torch.isfinite(endpoint.to(weight.dtype)).all()
+    assert endpoint_error < baseline_error
+
+    affine = refine_affine_scalar(
+        weight, scale, zero, groups, target=target, bits=4, config=config,
+        hessian=torch.ones(weight.shape[1]), packing="gptq", scale_dtype=torch.float16,
+    )
+    assert torch.isfinite(affine.weight).all()
+    assert torch.equal(affine.weight, weight)
+    assert affine.after <= affine.before
+
+    gptq = refine_gptq_scalar(
+        weight, scale, zero, groups, target=target, bits=4, config=config,
+        hessian=torch.eye(weight.shape[1]), scale_dtype=torch.float16,
+    )
+    assert torch.isfinite(gptq.weight).all()
+    assert torch.equal(gptq.weight, weight)
+    assert gptq.after <= gptq.before
+
+
+def test_gsq_scalar_keeps_a_finite_initializer_at_the_grid_endpoint():
+    """A finite initializer whose own recovered code overflows stays finite."""
+
+    scale, zero, groups, _, target, config = _unrepresentable_endpoint_fixture()
+    weight = torch.full((1, 16), -65504.0, dtype=torch.float16)
+    # The grid recovers code 0 from this finite weight; its FP32 decode is
+    # -65536 and narrows to -inf. The initializer itself must be returned.
+    result = refine_gptq_scalar(
+        weight, scale, zero, groups, target=target, bits=4, config=config,
+        hessian=torch.eye(weight.shape[1]), scale_dtype=torch.float16,
+    )
+    assert torch.isfinite(result.weight).all()
+    assert torch.equal(result.weight, weight)
+    assert result.after <= result.before

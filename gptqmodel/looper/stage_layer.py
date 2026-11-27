@@ -237,6 +237,18 @@ def _processor_needs_pristine_group_clone(processor) -> bool:
     return callable(uses_grouped_optimization) and bool(uses_grouped_optimization())
 
 
+def _is_token_embedding_module(monitor: torch.nn.Module) -> bool:
+    """Whether an endpoint gathers rows by token id instead of projecting floats.
+
+    ``AUTO_NF12`` and other packed embedding storage wrap the table instead of
+    subclassing ``nn.Embedding``, so check the table metadata as well.
+    """
+
+    if isinstance(monitor, torch.nn.Embedding):
+        return True
+    return getattr(monitor, "num_embeddings", None) is not None
+
+
 def _collect_layer_forward_progress(
     looper: "ModuleLooper",
     *,
@@ -478,6 +490,8 @@ def _capture_pristine_group_context(
     attention_masks: List[torch.Tensor],
     cur_layer_device: torch.device,
     is_lm_head_module: bool,
+    is_embeddings_module: bool = False,
+    is_input_embeddings_module: bool = False,
     shared_kv_cache_dict: Dict[Tuple[int, int], Any],
     layer_index: int,
     layer_descriptor: str,
@@ -486,9 +500,29 @@ def _capture_pristine_group_context(
     region_timer,
     starts_branch: bool = False,
 ) -> None:
-    """Capture clean grouped targets while the main layer cache keeps the noisy stream."""
+    """Capture clean grouped targets while the main layer cache keeps the noisy stream.
+
+    Embedding endpoints are replayed with their own forward contract: the input
+    embedding consumes token ids, and every endpoint (input, output, lm_head)
+    rejects decoder-only kwargs such as ``position_ids``. The main subset replay
+    already passes ``is_lm_head_module=True`` for those stages; the pristine
+    replay has to follow the same convention or an ``AutoNF12Embedding`` raises
+    ``TypeError`` before it can produce the clean target.
+    """
     uses_grouped_optimization = getattr(processor, "uses_grouped_optimization", None)
     if not callable(uses_grouped_optimization) or not uses_grouped_optimization():
+        return
+    # A token-id embedding has no float activation block to differentiate, so
+    # a grouped clean-target replay cannot produce statistics for it. The
+    # input endpoint also starts the clean stream: its pristine output is
+    # already the captured first-decoder-layer input. Leave both to the normal
+    # (GPTQ) quantization path instead of forwarding decoder kwargs to a
+    # module whose ``forward`` only accepts ids.
+    if is_input_embeddings_module or (
+        is_embeddings_module
+        and not is_lm_head_module
+        and _is_token_embedding_module(module)
+    ):
         return
     clean_layer_inputs = layer_inputs
     resolve_clean_inputs = getattr(processor, "clean_group_layer_inputs", None)
@@ -497,7 +531,10 @@ def _capture_pristine_group_context(
             layer_index=layer_index,
             layer_inputs=layer_inputs,
         )
-    if is_lm_head_module and clean_layer_inputs is not layer_inputs:
+    if (
+        (is_lm_head_module or is_embeddings_module)
+        and clean_layer_inputs is not layer_inputs
+    ):
         clean_layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(
             [list(batch) for batch in clean_layer_inputs]
         )
@@ -518,7 +555,9 @@ def _capture_pristine_group_context(
         position_ids=position_ids,
         attention_masks=attention_masks,
         cur_layer_device=cur_layer_device,
-        is_lm_head_module=is_lm_head_module,
+        # Every embedding endpoint uses its own forward contract; only decoder
+        # blocks accept the cached position ids and attention kwargs.
+        is_lm_head_module=is_lm_head_module or is_embeddings_module,
         shared_kv_cache_dict=shared_kv_cache_dict,
         layer_index=layer_index,
         layer_descriptor=layer_descriptor,
@@ -1138,6 +1177,8 @@ def run_layer_stage(
                 attention_masks=attention_masks,
                 cur_layer_device=cur_layer_device,
                 is_lm_head_module=is_lm_head_module,
+                is_embeddings_module=is_embeddings_module,
+                is_input_embeddings_module=is_input_embeddings_module,
                 shared_kv_cache_dict=shared_kv_cache_dict,
                 layer_index=layer_index,
                 layer_descriptor=layer_descriptor,

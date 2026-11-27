@@ -2623,6 +2623,12 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
 
             if plan is not None and plan.is_expert(name):
                 subset[name].state["is_routed_expert"] = True
+                expert_index = plan.expert_index(name)
+                expert_container = plan.expert_container(name)
+                if expert_index is not None:
+                    subset[name].state["moe_expert_index"] = expert_index
+                if expert_container is not None:
+                    subset[name].state["moe_container"] = expert_container
 
             if isinstance(processor, GPTQProcessor):
                 processor.preprocess(subset[name], fallback=fallback, region_timer=region_timer)

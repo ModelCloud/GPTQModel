@@ -51,13 +51,67 @@ def _q_fast_signature(tensor):
 
     if tensor is None:
         return None
-    try:
-        # Inference tensors have no version counter; PyTorch raises instead of
-        # returning one. Only their storage identity is stable.
-        version = tensor._version
-    except RuntimeError:
-        version = None
+    # Inference tensors have no version counter; PyTorch raises instead of
+    # returning one. Resolve that once here, where the snapshot is built, and
+    # store ``None`` so the per-forward check never enters an exception
+    # handler. Their storage identity is still covered by the other fields.
+    version = None if tensor.is_inference() else tensor._version
     return (version, tensor.data_ptr(), tensor.dtype, tensor.shape)
+
+
+def _q_live_tensors(layer):
+    """Read the packed module tensors without ``nn.Module.__getattr__``.
+
+    Registered buffers live in ``_buffers``; going through the module
+    attribute path costs a dictionary-chain lookup for each tensor on every
+    forward. Test doubles that are not modules keep the attribute fallback.
+    """
+
+    buffers = getattr(layer, "_buffers", None)
+    if buffers is not None:
+        qweight = buffers.get("qweight")
+        qzeros = buffers.get("qzeros")
+        scales = buffers.get("scales")
+        g_idx = buffers.get("g_idx")
+        if qweight is not None and qzeros is not None and scales is not None and g_idx is not None:
+            return (qweight, qzeros, scales, g_idx)
+    return (layer.qweight, layer.qzeros, layer.scales, layer.g_idx)
+
+
+def _q_fast_matches(tensors, signatures, live):
+    """Whether a cached native q-matrix still matches the packed tensors.
+
+    The first four snapshot entries are the module's packed buffers; later
+    entries are derived by ``make_q_matrix`` and only change with the handle.
+    Object identity catches replacement, ``_version`` catches in-place
+    writes, and the storage fields catch ``.data =`` swaps. Inference tensors
+    carry a ``None`` version because PyTorch does not track one.
+    """
+
+    if len(tensors) < len(live):
+        return False
+    if (
+        tensors[0] is not live[0]
+        or tensors[1] is not live[1]
+        or tensors[2] is not live[2]
+        or tensors[3] is not live[3]
+    ):
+        return False
+    for tensor, signature in zip(tensors, signatures):
+        if tensor is None or signature is None:
+            if tensor is not signature:
+                return False
+            continue
+        version = signature[0]
+        if version is not None and tensor._version != version:
+            return False
+        if (
+            tensor.data_ptr() != signature[1]
+            or tensor.dtype is not signature[2]
+            or tensor.shape != signature[3]
+        ):
+            return False
+    return True
 
 
 class ExllamaV2Linear(GPTQQuantLinear):
@@ -158,6 +212,9 @@ class ExllamaV2Linear(GPTQQuantLinear):
         self._q_handle_key = None
         # (tensors, signatures) snapshot for the per-forward handle fast path.
         self._q_fast = None
+        # Set here so the steady-state forward does not pay a failed
+        # ``getattr`` lookup; fusion code promotes it when it installs a view.
+        self._fusion_native_view = False
         self._native_shuffled = False
 
     @classmethod
@@ -274,10 +331,7 @@ class ExllamaV2Linear(GPTQQuantLinear):
         fast = getattr(self, "_q_fast", None)
         if fast is not None and self.q_handle is not None:
             tensors, signatures = fast
-            live = (self.qweight, self.qzeros, self.scales, self.g_idx)
-            if len(tensors) >= len(live) and all(t is l for t, l in zip(tensors, live)) and all(
-                _q_fast_signature(t) == s for t, s in zip(tensors, signatures)
-            ):
+            if _q_fast_matches(tensors, signatures, _q_live_tensors(self)):
                 return self.q_handle
         # A post-load first forward can run from several free-threaded workers.
         # Serialize only this cold rebuild; steady-state forwards stay
@@ -288,10 +342,7 @@ class ExllamaV2Linear(GPTQQuantLinear):
             fast = getattr(self, "_q_fast", None)
             if fast is not None and self.q_handle is not None:
                 tensors, signatures = fast
-                live = (self.qweight, self.qzeros, self.scales, self.g_idx)
-                if len(tensors) >= len(live) and all(t is l for t, l in zip(tensors, live)) and all(
-                    _q_fast_signature(t) == s for t, s in zip(tensors, signatures)
-                ):
+                if _q_fast_matches(tensors, signatures, _q_live_tensors(self)):
                     return self.q_handle
             if self.scales.dtype != torch.float16:
                 self.scales = self.scales.to(dtype=torch.float16)

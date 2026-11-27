@@ -34,7 +34,7 @@ from typing import Callable, Optional
 import torch
 import torch.nn as nn
 
-from ..utils.fallback import should_use_fallback
+from ..utils.fallback import resolve_threshold, should_use_fallback
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
 from ..utils.torch import torch_sync
@@ -285,6 +285,17 @@ class G2PTQ(GPTQ):
         self.activation_square = None
         self._g2ptq_trust_alpha = None
 
+    def add_batch(
+        self,
+        inp: torch.Tensor,
+        out: Optional[torch.Tensor],
+        batch_index: Optional[int] = None,
+        row_weights: Optional[torch.Tensor] = None,
+    ):
+        if row_weights is not None:
+            raise ValueError("MoEQuant AGQ cannot be combined with G2PTQ.")
+        super().add_batch(inp, out, batch_index=batch_index)
+
     # ------------------------------------------------------------------
     # quantization
     # ------------------------------------------------------------------
@@ -352,6 +363,9 @@ class G2PTQ(GPTQ):
         config = self._g2ptq_config()
         start = time.time()
         result_device = torch.device(self.module.weight.data.device)
+        fallback_configured = (
+            resolve_threshold(self.fallback, self.expected_nsamples)[0] is not None
+        )
 
         hessians = self.group_hessians
         gradient = self.weight_gradient
@@ -382,18 +396,28 @@ class G2PTQ(GPTQ):
 
         if self.module_copy is None:
             W = self.clone_module(device=compute_device)
+            weight_from_module = True
         else:
             W = safe_move_to(self.module_copy, compute_device)
             self.module_copy = None
+            weight_from_module = False
 
         # Capture is deferred into device-local GPTQ partials. Its diagonal
         # distinguishes dead inputs from live columns with zero Fisher weight.
+        # The full matrix is never a grouped-solve input, so keep only the
+        # diagonal and release the capture before the solve instead of
+        # materializing another columns x columns copy.
         input_energy = self._captured_hessian_diagonal(compute_device)
         if input_energy is None:
             input_energy = activation_square
             if input_energy is None:
                 input_energy = hessians.diagonal(dim1=-2, dim2=-1).mean(dim=0)
             input_energy = safe_move_to(input_energy, compute_device)
+        retry_hessian_diag = (
+            input_energy.detach().clone()
+            if fallback_configured and not self.qcfg.mock_quantization
+            else None
+        )
         self.release_hessian_state()
 
         # Symmetrize before writes, since the grouped input may be a shared
@@ -528,7 +552,14 @@ class G2PTQ(GPTQ):
         # ``hessians`` is a closure variable of ``_invert_groups``; clear the
         # cell instead of deleting it so a stale reference cannot survive.
         hessians = None
-        loss_terms = torch.empty_like(weight_groups)
+        loss_terms = None
+        block_input_host = None
+        if not weight_from_module and weight_groups.device.type == "cuda":
+            # ``module_copy`` is consumed above, so a retry cannot rebuild the
+            # pre-pass weight from the module. Keep the host snapshot for the
+            # uncommon explicit-copy path only; module-sourced weights are
+            # rebuilt from the untouched module weight.
+            block_input_host = weight_groups.detach().to(device="cpu")
 
         def _quantize_column(column: int) -> torch.Tensor:
             nonlocal now_idx
@@ -555,21 +586,71 @@ class G2PTQ(GPTQ):
             w = weight_groups[:, :, column].reshape(-1, 1)
             return self.quantizer.quantize(w).flatten().view(num_groups, rows_per_group)
 
-        q, _error = g2ptq_compensate(
-            weight_groups,
-            factor,
-            gradient,
-            beta,
-            _quantize_column,
-            blocksize=blocksize,
-            loss_terms=loss_terms,
-            dynamic_group_size=-1 if static_groups else self.qcfg.group_size,
-        )
+        def _restore_pre_pass_weights(cpu_device):
+            nonlocal weight_groups
+            if weight_from_module:
+                restored = self.clone_module(device=cpu_device)
+                restored.masked_fill_(dead.to(device=cpu_device).unsqueeze(0), 0)
+                if self.qcfg.group_size == -1:
+                    self._fit_weight_params(restored)
+                if perm is not None:
+                    restored = restored[:, perm.to(device=cpu_device)]
+                elif final_perm is not None:
+                    restored = restored[:, final_perm.to(device=cpu_device)]
+                weight_groups = restored.reshape(
+                    num_groups, rows_per_group, self.columns
+                )
+            else:
+                weight_groups = block_input_host.to(device=cpu_device)
+
+        def _prepare_cpu_for_block_retry(cpu_device):
+            nonlocal factor, gradient, beta, scale, zero, now_idx, loss_terms
+            _restore_pre_pass_weights(cpu_device)
+            factor = factor.to(device=cpu_device)
+            gradient = gradient.to(device=cpu_device)
+            beta = beta.to(device=cpu_device)
+            if static_groups:
+                scale, zero = _move_static_groups(groups, cpu_device)
+            else:
+                scale = []
+                zero = []
+            now_idx = 1
+            if not weight_from_module and self.qcfg.group_size == -1:
+                # The host snapshot carries the pre-pass weight, but the
+                # failed attempt's quantizer parameters still live on the
+                # accelerator.
+                self._fit_weight_params(
+                    weight_groups.reshape(-1, self.columns)
+                )
+            loss_terms = None
+
+        def _block_pass():
+            nonlocal loss_terms
+            if loss_terms is None:
+                loss_terms = torch.empty_like(weight_groups)
+            return g2ptq_compensate(
+                weight_groups,
+                factor,
+                gradient,
+                beta,
+                _quantize_column,
+                blocksize=blocksize,
+                loss_terms=loss_terms,
+                dynamic_group_size=-1 if static_groups else self.qcfg.group_size,
+            )
+
+        q, _error = self._run_with_accelerator_oom_cpu_fallback(
+            _block_pass,
+            source_device=weight_groups.device,
+            stage="G2PTQ block update",
+            prepare_cpu=_prepare_cpu_for_block_retry,
+        )[0]
+        block_input_host = None
 
         # ``gradient`` and ``weight_groups`` are closure variables of
         # ``_invert_groups``/``_quantize_column``. Clearing the cells releases
         # the tensors at the same point as ``del`` would.
-        del factor, beta, _error
+        factor = beta = _error = None
         gradient = None
         weight_groups = None
 
@@ -577,8 +658,20 @@ class G2PTQ(GPTQ):
         avg_loss = (loss_terms.sum() / (2.0 * self.nsamples)).item()
         del loss_terms
         if math.isnan(avg_loss):
+            if fallback_configured and retry_hessian_diag is not None:
+                log.info(
+                    "Quantization: Failed due to `NaN` loss for `%s`, "
+                    "use mock quantization retry for `%s`",
+                    self.name,
+                    self.name,
+                )
+                del q
+                self.H = torch.diag(retry_hessian_diag)
+                self.qcfg.mock_quantization = True
+                return self.quantize(blocksize=blocksize)
             raise ValueError(
-                f"Quantization: Failed due to `NaN` loss for `{self.name}`"
+                f"Quantization: Failed due to `NaN` loss for `{self.name}`, "
+                "please try increasing calibration data samples or enable fallback=True"
             )
 
         Q = q.reshape(self.rows, self.columns)

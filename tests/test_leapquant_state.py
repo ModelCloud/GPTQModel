@@ -8,6 +8,8 @@ import torch
 from gptqmodel.utils.leapquant import (
     LeapQuantConfig,
     LeapQuantState,
+    _pack_codes,
+    _unpack_codes,
     mask_is_unpadded,
 )
 
@@ -186,6 +188,133 @@ def test_packed_state_roundtrip_and_storage_accounting():
     assert state.buffer_bytes() > 0
 
 
+@pytest.mark.parametrize(
+    ("bits", "codes", "expected"),
+    [
+        (4, [1, -1, 7, -7], [0xF1, 0x97]),
+        (6, [1, -1, 31, -31], [0xC1, 0xFF, 0x85]),
+    ],
+)
+def test_packed_code_container_bit_layout(bits, codes, expected):
+    logical = torch.tensor(codes, dtype=torch.int8).reshape(1, 1, 1, -1)
+    packed = _pack_codes(logical, bits)
+    assert packed.dtype == torch.uint8
+    assert packed.flatten().tolist() == expected
+    assert torch.equal(_unpack_codes(packed, bits, len(codes)), logical)
+
+
+@pytest.mark.parametrize("bits", [4, 6])
+def test_packed_code_container_roundtrips_every_representable_code(bits):
+    qmax = 2 ** (bits - 1) - 1
+    logical = torch.arange(-qmax, qmax + 1, dtype=torch.int8).reshape(1, 1, 1, -1)
+    packed = _pack_codes(logical, bits)
+    unpacked = _unpack_codes(packed, bits, logical.shape[-1])
+    assert torch.equal(unpacked, logical)
+    assert torch.equal(_pack_codes(unpacked, bits), packed)
+
+
+@pytest.mark.parametrize("bits", [4, 6])
+@pytest.mark.parametrize("value_dim", [1, 2, 3, 4, 5, 6, 7, 8, 9])
+def test_packed_code_container_pads_partial_rows(bits, value_dim):
+    qmax = 2 ** (bits - 1) - 1
+    generator = torch.Generator(device="cpu").manual_seed(31)
+    logical = torch.randint(
+        -qmax, qmax + 1, (2, 3, 4, value_dim), generator=generator, dtype=torch.int8,
+    )
+    packed = _pack_codes(logical, bits)
+    expected_width = (value_dim + 1) // 2 if bits == 4 else ((value_dim + 3) // 4) * 3
+    assert packed.shape == (2, 3, 4, expected_width)
+    assert packed.dtype == torch.uint8
+    assert torch.equal(_unpack_codes(packed, bits, value_dim), logical)
+
+
+@pytest.mark.parametrize("bits", [4, 6])
+@pytest.mark.parametrize("device", _devices())
+def test_packed_codes_match_quantization_oracle(device, bits):
+    generator = torch.Generator(device="cpu").manual_seed(43)
+    dense = torch.randn(2, 2, 4, 8, generator=generator).to(device) * 0.05
+    config = LeapQuantConfig(bits=bits, window=4, rank=0, smooth=False)
+    state = LeapQuantState(2, 2, 4, 8, config, gate_dim=1, device=device)
+    state.quantize_(dense)
+
+    qmax = config.qmax
+    value_scale = dense.abs().amax(dim=-2).clamp_min(1e-12)
+    expected_codes = torch.round(dense / value_scale[..., None, :] * qmax).clamp(-qmax, qmax).to(torch.int8)
+    expected_state = expected_codes.float() / qmax * value_scale[..., None, :]
+
+    assert state.codes.dtype == torch.uint8
+    assert torch.equal(state._codes_i8(), expected_codes)
+    torch.testing.assert_close(state.dequantize(), expected_state, rtol=0, atol=0)
+    assert torch.equal(_pack_codes(expected_codes, bits), state.codes)
+
+
+def test_packed_checkpoint_storage_scales_with_bits():
+    expected_bytes = {4: 11264, 6: 15360, 8: 19456}
+    states = {
+        bits: LeapQuantState(
+            1, 1, 128, 128,
+            LeapQuantConfig(bits=bits, window=16, rank=4),
+            gate_dim=1,
+            device="cpu",
+        )
+        for bits in (4, 6, 8)
+    }
+    for bits, state in states.items():
+        assert state.checkpoint_bytes() == expected_bytes[bits]
+        assert state.codes.numel() * state.codes.element_size() == expected_bytes[bits] - 3072
+    assert states[4].checkpoint_bytes() < states[6].checkpoint_bytes() < states[8].checkpoint_bytes()
+
+
+@pytest.mark.parametrize("bits", [4, 6])
+def test_packed_state_roundtrip_preserves_packed_container(bits):
+    query, key, value, alpha, _beta = _fixture("cpu", tokens=3)
+    config = LeapQuantConfig(bits=bits, window=4, rank=2)
+    state = LeapQuantState(2, 2, 8, 8, config, gate_dim=1, device="cpu")
+    for index in range(3):
+        state.step(query[:, index], key[:, index], value[:, index], alpha[:, index], torch.full((2, 2), 0.5))
+
+    packed = state.packed_state()
+    assert packed["format_version"] == 2
+    assert packed["code_container"] == f"packed{bits}"
+    restored = LeapQuantState(2, 2, 8, 8, config, gate_dim=1, device="cpu")
+    restored.load_packed_state(packed)
+
+    assert restored.codes.dtype == torch.uint8
+    assert torch.equal(restored.codes, state.codes)
+    assert torch.equal(restored.buffer_keys, state.buffer_keys)
+    assert restored.window_count == state.window_count
+    assert torch.equal(restored.materialize(), state.materialize())
+
+
+@pytest.mark.parametrize("bits", [4, 6])
+def test_packed_codes_reorder_is_atomic(bits):
+    query, key, value, alpha, _beta = _fixture("cpu", tokens=2)
+    state = LeapQuantState(
+        2, 2, 8, 8, LeapQuantConfig(bits=bits, window=4, rank=2), gate_dim=1, device="cpu",
+    )
+    for index in range(2):
+        state.step(query[:, index], key[:, index], value[:, index], alpha[:, index], torch.full((2, 2), 0.5))
+    before = state.packed_state()
+    index = torch.tensor([1, 0])
+    state.reorder_(index)
+    for name in ("codes", "key_scale", "value_scale", "factors_key", "factors_value", "buffer_keys"):
+        assert torch.equal(getattr(state, name), before[name].index_select(0, index))
+
+
+@pytest.mark.parametrize("bits", [4, 6])
+def test_packed_restore_rejects_out_of_range_packed_codes(bits):
+    config = LeapQuantConfig(bits=bits, window=4, rank=0, smooth=False)
+    state = LeapQuantState(1, 1, 1, 4, config, gate_dim=1, device="cpu")
+    state.quantize_(torch.ones(1, 1, 1, 4))
+    before = state.materialize()
+    packed = state.packed_state()
+    # Encode the unused negative endpoint (outside the symmetric range).
+    packed["codes"][0, 0, 0, 0] = 0x08 if bits == 4 else 0x20
+    with pytest.raises(ValueError, match="bit range"):
+        state.load_packed_state(packed)
+    torch.testing.assert_close(state.materialize(), before, rtol=0, atol=0)
+
+
 def test_reorder_is_atomic():
     query, key, value, alpha, _beta = _fixture("cpu", tokens=2)
     state = LeapQuantState(2, 2, 8, 8, LeapQuantConfig(bits=8, window=4, rank=2), gate_dim=1, device="cpu")
@@ -267,7 +396,9 @@ def test_compensator_stays_fp32_under_autocast(device):
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("invalid_field", ["buffer_dtype", "buffer_alpha", "window_count", "codes", "key_scale"])
+@pytest.mark.parametrize(
+    "invalid_field", ["buffer_dtype", "code_container", "buffer_alpha", "window_count", "codes", "key_scale"],
+)
 def test_packed_restore_validates_before_replacing_live_state(invalid_field):
     config = LeapQuantConfig(window=3, rank=0, smooth=False, buffer_dtype=torch.float32)
     state = LeapQuantState(1, 1, 1, 1, config)
@@ -279,6 +410,7 @@ def test_packed_restore_validates_before_replacing_live_state(invalid_field):
     valid = packed[invalid_field]
     packed[invalid_field] = {
         "buffer_dtype": str(torch.float16),
+        "code_container": "packed4",
         "buffer_alpha": torch.empty(1),
         "window_count": config.window,
         "codes": packed["codes"].float(),

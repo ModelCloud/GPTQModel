@@ -3,13 +3,17 @@
 
 import pytest
 import torch
+from torch import nn
 
+from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
 from gptqmodel.quantization.config import (
     Fallback,
     FallbackStrategy,
     MSEConfig,
     QQQConfig,
     QuantizeConfig,
+    SmoothMSE,
+    SmoothRowCol,
 )
 from gptqmodel.quantization.qqq import QQQ, Quantizer, quantize
 
@@ -424,3 +428,286 @@ def test_qqq_fallback_affine_grid_keeps_finite_scale_at_bf16_extreme_endpoints(
     assert torch.isfinite(dequant).all()
     assert dequant[0, 0] > 0
     assert dequant[0, 2] < 0
+
+
+# A symmetric INT4 group fits ``scale = 2 * amax / 15`` and stores zero point
+# eight, so code zero reconstructs ``-16 * amax / 15``. At ``amax = 61440``
+# that is ``-65536``: the FP16 replay weight becomes ``-inf`` even though every
+# source value is finite. The grid is valid; the selected codes must stay
+# inside the destination dtype's finite range (#6000, #6011, #6023).
+_FP16_MAX = float(torch.finfo(torch.float16).max)
+_FP16_OVERFLOW_AMAX = 61440.0
+
+
+def _extreme_fp16_layer(device, *, in_features=128, out_features=4):
+    layer = nn.Linear(in_features, out_features, bias=False, dtype=torch.float16, device=device)
+    with torch.no_grad():
+        layer.weight.zero_()
+        layer.weight[:, 0] = -_FP16_OVERFLOW_AMAX
+        layer.weight[:, 1] = _FP16_OVERFLOW_AMAX
+        layer.weight[0, 0] = -_FP16_MAX
+        layer.weight[0, 1] = _FP16_MAX
+    return layer
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="CUDA unavailable",
+    )),
+])
+@pytest.mark.parametrize("mse", [False, True])
+@pytest.mark.parametrize("sym", [True, False])
+def test_qqq_find_params_bounds_codes_to_finite_fp16_range(device, mse, sym):
+    weights = torch.zeros(2, 128, dtype=torch.float32, device=device)
+    weights[0, 0] = -_FP16_OVERFLOW_AMAX
+    weights[0, 2] = _FP16_OVERFLOW_AMAX
+    weights[1] = torch.linspace(-1.0, 1.0, 128, device=device)
+
+    quantizer = Quantizer()
+    quantizer.configure(
+        bits=4, perchannel=True, sym=sym, groupsize=128, mse=mse
+    )
+    quantizer.find_params(weights, weight=True, value_limit=_FP16_MAX)
+
+    assert quantizer.code_lo is not None
+    assert quantizer.code_hi is not None
+    assert (quantizer.code_lo >= 0).all()
+    assert (quantizer.code_hi <= 15).all()
+
+    dequant = quantizer.quantize(weights)
+    assert torch.isfinite(dequant.to(torch.float16)).all()
+    assert dequant.min() >= -_FP16_MAX
+
+    if not mse:
+        # 61440 / 8192 = 7.5 rounds ties-to-even to code zero, whose
+        # reconstruction is -65536. The finite grid excludes it.
+        assert quantizer.code_lo.flatten()[0] == 1
+        assert quantizer.code_hi.flatten()[0] == 15
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="CUDA unavailable",
+    )),
+])
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        FallbackStrategy.MIDPOINT,
+        FallbackStrategy.MEAN,
+        FallbackStrategy.MEDIAN,
+        FallbackStrategy.STDCLIP,
+        FallbackStrategy.RTN,
+    ],
+    ids=lambda strategy: strategy.value,
+)
+@pytest.mark.parametrize("sym", [True, False])
+def test_qqq_fallback_bounds_codes_to_finite_fp16_range(device, strategy, sym):
+    layer = _extreme_fp16_layer(device)
+    qcfg = QQQConfig(
+        bits=4,
+        group_size=128,
+        sym=sym,
+        fallback=Fallback(strategy=strategy, threshold=False),
+        offload_to_disk=False,
+    )
+    task = QQQ(layer, qcfg)
+    task.quantizer.configure(4, perchannel=True, sym=sym, groupsize=128)
+
+    dequant, scale, zero, *_ = task._fallback_quantize(strategy)
+
+    assert torch.isfinite(dequant).all()
+    assert torch.isfinite(scale).all()
+    assert torch.isfinite(zero).all()
+    assert dequant.min() >= -_FP16_MAX
+    assert dequant.max() <= _FP16_MAX
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="CUDA unavailable",
+    )),
+])
+def test_qqq_fallback_smooth_paths_bound_codes_to_finite_fp16_range(device):
+    """Smoothing restores a per-row factor after the fit; the bound follows it."""
+
+    for smooth, strategy in (
+        (SmoothMSE(steps=8), FallbackStrategy.RTN),
+        (SmoothRowCol(axis="row"), FallbackStrategy.MIDPOINT),
+    ):
+        layer = _extreme_fp16_layer(device)
+        qcfg = QQQConfig(
+            bits=4,
+            group_size=128,
+            sym=True,
+            fallback=Fallback(strategy=strategy, threshold=False, smooth=smooth),
+            offload_to_disk=False,
+        )
+        task = QQQ(layer, qcfg)
+        task.quantizer.configure(4, perchannel=True, sym=True, groupsize=128)
+
+        dequant, scale, zero, *_ = task._fallback_quantize(strategy)
+
+        assert torch.isfinite(dequant).all(), type(smooth).__name__
+        assert torch.isfinite(scale).all(), type(smooth).__name__
+        assert torch.isfinite(zero).all(), type(smooth).__name__
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="CUDA unavailable",
+    )),
+])
+@pytest.mark.parametrize("static_groups", [False, True])
+@pytest.mark.parametrize("mse", [False, True])
+def test_qqq_main_path_narrows_finite_endpoint_and_packs_checkpoint(
+    device, static_groups, mse
+):
+    """The full QQQ fit, narrowing, and packer round-trip stay finite."""
+
+    torch.manual_seed(6000)
+    layer = nn.Linear(256, 64, bias=False, dtype=torch.float16, device=device)
+    with torch.no_grad():
+        layer.weight.normal_(0, 1)
+        layer.weight[0, 0] = -_FP16_OVERFLOW_AMAX
+        layer.weight[0, 2] = _FP16_OVERFLOW_AMAX
+        layer.weight[1, 0] = -_FP16_MAX
+        layer.weight[1, 1] = _FP16_MAX
+
+    qcfg = QQQConfig(
+        bits=4,
+        group_size=128,
+        sym=True,
+        static_groups=static_groups,
+        desc_act=False,
+        offload_to_disk=False,
+    )
+    task = QQQ(layer, qcfg)
+    task.quantizer.configure(
+        4, perchannel=True, sym=True, groupsize=128, mse=mse
+    )
+    task.add_batch(torch.eye(256, dtype=torch.float16, device=device).unsqueeze(0), None)
+
+    (
+        weight,
+        scales,
+        _zeros,
+        _g_idx,
+        _duration,
+        _loss,
+        _damp,
+        scale_extra,
+        _samples,
+    ) = task.quantize(blocksize=128)
+
+    assert weight.dtype == torch.float16
+    assert torch.isfinite(weight).all()
+    assert torch.isfinite(scales).all()
+    assert torch.isfinite(scale_extra).all()
+
+    # Pack the narrowed weight exactly as the looper does before saving.
+    pack_layer = nn.Linear(256, 64, bias=False, dtype=torch.float16)
+    with torch.no_grad():
+        pack_layer.weight.copy_(weight.cpu())
+    module = QQQTorchLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=256,
+        out_features=64,
+        bias=False,
+    )
+    module.pack(pack_layer, scales.cpu(), s_extra=scale_extra.cpu())
+
+    assert torch.isfinite(module.s_group).all()
+    assert torch.isfinite(module.s_channel).all()
+    # A non-finite channel scale divides the group scales to zero and the
+    # forward then computes ``0 * inf`` (#6076).
+    assert (module.s_group != 0).all()
+
+    # The packer must recover exactly the codes the fitted grid selected.
+    codes = module._unpack_weight_codes().to(torch.int32)
+    raw_scale = scales.cpu().t().to(torch.float32)
+    group_index = torch.arange(256) // 128
+    expected = (
+        torch.round(weight.cpu().t().float() / raw_scale[group_index].float()) + 8
+    ).clamp(0, 15).to(torch.int32)
+    assert torch.equal(codes, expected)
+
+    # The consumer end of the chain: an input whose dense reference is finite
+    # must not produce NaN from ``0 * inf`` in the packed forward.
+    module = module.to(device)
+    probe = torch.nn.functional.one_hot(torch.tensor([0, 1]), 256).to(
+        dtype=torch.float16, device=device
+    )
+    output = module(probe)
+    assert output.dtype == torch.float16
+    assert torch.isfinite(output).all()
+    assert not torch.isnan(output).any()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("magnitude", [_FP16_OVERFLOW_AMAX, _FP16_MAX])
+def test_qqq_fused_block_update_uses_the_same_finite_codes_as_eager(
+    monkeypatch, magnitude
+):
+    """The fused kernel must select the same codes the eager loop selects."""
+
+    from gptqmodel.quantization import gptq_cuda
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel, reset_kernel_config
+
+    if not gptq_cuda.block_update_available():
+        pytest.skip(gptq_cuda._EXTENSION.last_error_message())
+
+    device = torch.device("cuda:0")
+
+    def run(fused):
+        configure_kernel(KernelConfig(gptq_fused_block_update=fused))
+        launches = []
+        original = gptq_cuda.gptq_block_update
+
+        def counted(*args, **kwargs):
+            launches.append(1)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(gptq_cuda, "gptq_block_update", counted)
+
+        torch.manual_seed(6076)
+        layer = nn.Linear(256, 64, bias=False, dtype=torch.float16, device=device)
+        with torch.no_grad():
+            layer.weight.normal_(0, 1)
+            layer.weight[0, 0] = -magnitude
+            layer.weight[0, 2] = magnitude
+            layer.weight[1, 0] = -_FP16_MAX
+            layer.weight[1, 1] = _FP16_MAX
+        qcfg = QQQConfig(
+            bits=4,
+            group_size=128,
+            sym=True,
+            desc_act=False,
+            offload_to_disk=False,
+        )
+        task = QQQ(layer, qcfg)
+        task.quantizer.configure(4, perchannel=True, sym=True, groupsize=128)
+        task.add_batch(torch.eye(256, dtype=torch.float16, device=device).unsqueeze(0), None)
+        weight, scales, zeros, *_ = task.quantize(blocksize=128)
+        torch.cuda.synchronize(device)
+        return weight.cpu(), scales.cpu(), zeros.cpu(), len(launches)
+
+    try:
+        eager = run(False)
+        fused = run(True)
+    finally:
+        reset_kernel_config()
+
+    # The trigger must actually run: two 128-column blocks.
+    assert eager[3] == 0
+    assert fused[3] == 2
+    assert torch.isfinite(fused[0]).all()
+    for eager_value, fused_value in zip(eager[:3], fused[:3]):
+        assert torch.equal(eager_value, fused_value)

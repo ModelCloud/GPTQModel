@@ -217,6 +217,23 @@ def _accepts_keyword(module: torch.nn.Module, keyword: str) -> bool:
     )
 
 
+def _is_embedding_lookup(module: Optional[torch.nn.Module]) -> bool:
+    """Whether ``module`` gathers rows by token id instead of projecting floats.
+
+    G2PTQ's block objective differentiates a float activation. A token-id
+    lookup has no such activation, and its integer indices cannot be used as
+    Hessian columns, so the refresh has to leave those endpoints to GPTQ.
+    ``AUTO_NF12`` storage keeps the table metadata, so check it as well as the
+    plain ``nn.Embedding`` type.
+    """
+
+    if module is None:
+        return False
+    if isinstance(module, torch.nn.Embedding):
+        return True
+    return getattr(module, "num_embeddings", None) is not None
+
+
 def _relative_path(root: torch.nn.Module, target: torch.nn.Module) -> Optional[str]:
     """Return ``target``'s dotted path under ``root``, or ``None``."""
 
@@ -288,6 +305,7 @@ class G2PTQProcessor(GPTQProcessor):
         # layer_index -> (layer_index, _LastBlockHead); rebuilt after resume.
         self._g2ptq_last_block_head: Optional[Tuple[int, _LastBlockHead]] = None
         self._g2ptq_last_block_warned: set = set()
+        self._g2ptq_embedding_notice = False
         # Clean calibration stream, advanced by the pristine replay of each
         # layer. ``None`` means "the live stream is still clean" (layer 0).
         self._g2ptq_clean_inputs: Optional[List[List[torch.Tensor]]] = None
@@ -408,6 +426,22 @@ class G2PTQProcessor(GPTQProcessor):
         attention_masks: Optional[List[torch.Tensor]] = None,
     ) -> None:
         """Remembers the clean reference, then refreshes statistics per subset."""
+
+        if _is_embedding_lookup(layer_module):
+            # Token-id lookups have no float activation to differentiate. Keep
+            # the clean stream moving, but do not install statistics: the
+            # ``G2PTQ`` task falls back to plain GPTQ for these endpoints.
+            with self._g2ptq_lock:
+                self._g2ptq_subset_names = []
+                self._g2ptq_layer_state.pop(layer_index, None)
+                announce = not self._g2ptq_embedding_notice
+                self._g2ptq_embedding_notice = True
+            if announce:
+                log.info(
+                    "G2PTQ: embedding endpoints consume token ids, so they are "
+                    "quantized with GPTQ instead of the gradient refresh."
+                )
+            return
 
         if subset_index is None:
             with self._g2ptq_lock:
@@ -1139,6 +1173,10 @@ class G2PTQProcessor(GPTQProcessor):
         """
 
         if not torch.is_tensor(activation) or not torch.is_tensor(output_grad):
+            return None
+        if not activation.is_floating_point():
+            # Token ids (or any other integer index) are not activations; a
+            # Hessian over them would be meaningless.
             return None
         if activation.ndim < 2 or output_grad.ndim < 2:
             return None
