@@ -94,7 +94,7 @@ compatible deployment engine.
 | Method | What it provides |
 | --- | --- |
 | **[GPTQ](https://github.com/ModelCloud/GPTQModel/wiki/GPTQ)** | Calibration-driven, low-bit weight quantization with mixed precision and broad checkpoint/runtime support. |
-| **[ADMM-Q](docs/admmq.md)** | Hessian-based weight quantization that replaces GPTQ's one-pass column sweep with an ADMM solve over the whole layer, then refines it with PairSwap. Exports standard GPTQ checkpoints. |
+| **[ADMM-Q](docs/admmq.md)** | Hessian-based weight quantization that replaces GPTQ's one-pass column sweep with an ADMM solve over the whole layer, then refines it with PairSwap. Exports standard GPTQ checkpoints. Supports 3–8 bits; 2-bit is not supported. |
 | **[G²PTQ](docs/g2ptq.md)** | GPTQ-family solver with block-refresh first-order gradient compensation and a per-row trust region. Produces ordinary GPTQ checkpoints. |
 | **[JointQ](docs/jointq.md)** | Joint scale-and-integer refinement of a GPTQ solution. Keeps the GPTQ checkpoint layout and kernels; opt-in through `GPTQConfig(jointq=...)`. |
 | **[AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ)** | Activation-aware weight quantization, including dense and MoE workflows. |
