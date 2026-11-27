@@ -1398,7 +1398,7 @@ class GPTQProcessor(LoopProcessor):
 
         alert = admmq_diagnostics_alert(summary)
         if alert is not None:
-            log.warning(
+            log.warn(
                 "ADMM-Q diagnostics: %s; per-module records are on "
                 "model.admmq_diagnostics",
                 alert,

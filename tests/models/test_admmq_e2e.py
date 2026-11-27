@@ -18,6 +18,7 @@ from gptqmodel.quantization.config import METHOD, ADMMQConfig
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.bfloat16
+FALLBACK_MODULE = "model.layers.0.self_attn.q_proj"
 
 
 def _tokenizer():
@@ -54,8 +55,19 @@ def _packed_state(module):
     }
 
 
-@pytest.mark.parametrize("desc_act", [False, True])
-def test_tiny_llama_admmq_roundtrip(tmp_path, desc_act, caplog):
+@pytest.mark.parametrize(
+    ("desc_act", "dynamic"),
+    [
+        (False, None),
+        (True, None),
+        pytest.param(
+            False,
+            {FALLBACK_MODULE: {"fallback": {"strategy": "mean", "threshold": 1000}}},
+            id="mean-fallback",
+        ),
+    ],
+)
+def test_tiny_llama_admmq_roundtrip(tmp_path, desc_act, dynamic, capfd):
     torch.manual_seed(41)
     source = tmp_path / "source"
     saved = tmp_path / "quantized"
@@ -81,6 +93,7 @@ def test_tiny_llama_admmq_roundtrip(tmp_path, desc_act, caplog):
         group_size=32,
         sym=True,
         desc_act=desc_act,
+        dynamic=dynamic,
         max_iter=24,
         update_iter=3,
         switch_iter=6,
@@ -112,7 +125,16 @@ def test_tiny_llama_admmq_roundtrip(tmp_path, desc_act, caplog):
     assert diagnostics is not None, "quantize() did not publish ADMM-Q diagnostics"
     summary = diagnostics["summary"]
     assert summary["layers"] == len(diagnostics["layers"]) == len(selected)
+    assert diagnostics["layers"].keys() == {name for name, _ in selected}
     assert summary["solved"] + summary["skipped"] == summary["layers"]
+    if dynamic:
+        fallback = diagnostics["layers"][FALLBACK_MODULE]
+        assert summary["skipped"] == 1
+        assert fallback["status"] == "skipped"
+        assert fallback["fallback_to_rtn"] is False
+        assert fallback["fallback_strategy"] == "mean"
+        assert fallback["fallback_reason"] == "insufficient_calibration"
+        assert FALLBACK_MODULE not in summary["rtn_fallback_layers"]
     for name, entry in diagnostics["layers"].items():
         assert entry["module"] == name
         assert entry["status"] in {"solved", "skipped"}
@@ -128,20 +150,14 @@ def test_tiny_llama_admmq_roundtrip(tmp_path, desc_act, caplog):
     meta = getattr(model.quantize_config, "meta", None) or {}
     assert "admmq_diagnostics" not in meta
 
-    alerts = [
-        record
-        for record in caplog.records
-        if record.levelname == "WARNING" and "ADMM-Q diagnostics" in record.getMessage()
-    ]
-    degraded = (
+    captured = capfd.readouterr()
+    alert_count = (captured.out + captured.err).count("ADMM-Q diagnostics:")
+    degraded = bool(
         summary["skipped"]
         or len(summary["rtn_fallback_layers"])
         or summary["condition_number_nonfinite"]
     )
-    if degraded:
-        assert len(alerts) == 1, "degraded runs must emit one aggregate warning"
-    else:
-        assert not alerts, "clean runs must not add ADMM-Q diagnostics noise"
+    assert alert_count == int(degraded)
 
     model.save(str(saved))
     loaded = GPTQModel.load(

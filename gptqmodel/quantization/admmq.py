@@ -36,7 +36,7 @@ import torch.nn as nn
 
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
-from .config import ADMMQConfig, BaseQuantizeConfig
+from .config import ADMMQConfig, BaseQuantizeConfig, FallbackStrategy
 from .gptq import GPTQ
 from .quantizer import _neutralize_dead_columns, quantize
 
@@ -227,7 +227,6 @@ def summarize_admmq_diagnostics(
         name for name in names
         if layers[name].get("status", "solved") == "solved"
     ]
-    skipped = [name for name in names if name not in solved]
     # Classify by ``stop_reason`` rather than ``converged``: a numerical
     # failure records a fallback without a normal stop reason and must not be
     # counted as an exhausted iteration budget.
@@ -276,7 +275,7 @@ def summarize_admmq_diagnostics(
     return {
         "layers": len(names),
         "solved": len(solved),
-        "skipped": len(skipped),
+        "skipped": len(names) - len(solved),
         "early_stop_layers": early_stop,
         "max_iter_layers": max_iter,
         "rtn_fallback_layers": rtn_fallback,
@@ -423,9 +422,6 @@ class ADMMQ(GPTQ):
 
         cfg = self.qcfg
         rounds = int(cfg.pairswap_rounds)
-        if cfg.pairswap_mode == "off" or rounds <= 0 or self.columns < 2:
-            return quantized, 0
-
         device = quantized.device
         scale = torch.cat([grid.scale for grid in grids], dim=1)
         zero = torch.cat([grid.zero for grid in grids], dim=1)
@@ -550,12 +546,13 @@ class ADMMQ(GPTQ):
         return float(eigenvalues[-1].item()) / smallest
 
     def _should_pairswap(self, condition_number: float) -> bool:
-        mode = self.qcfg.pairswap_mode
+        cfg = self.qcfg
+        mode = cfg.pairswap_mode
+        if mode == "off" or int(cfg.pairswap_rounds) <= 0 or self.columns < 2:
+            return False
         if mode == "always":
             return True
-        if mode == "off":
-            return False
-        return condition_number > float(self.qcfg.pairswap_condition_threshold)
+        return condition_number > float(cfg.pairswap_condition_threshold)
 
     def _admm_weight_solve(self, weight: torch.Tensor, hessian: torch.Tensor) -> Tuple[torch.Tensor, List[_Grid]]:
         """Run Algorithm 1 on one already-prepared ``[out, in]`` weight matrix."""
@@ -621,8 +618,9 @@ class ADMMQ(GPTQ):
         error_history: List[float] = []
         rho = rho_initial
         stop_reason = "max_iter"
+        max_iter = int(cfg.max_iter)
 
-        for step in range(int(cfg.max_iter)):
+        for step in range(max_iter):
             rho = admm_rho_at(step, rho_initial, rho_update, int(cfg.update_iter))
             right_hand_side = hessian_weight + rho * discrete - dual
             continuous = torch.empty_like(weight_scaled)
@@ -696,7 +694,7 @@ class ADMMQ(GPTQ):
             # next solve, including any accepted grid refresh.
             d_rel = float(((discrete - previous).square().sum() / denominator).item())
             previous = discrete
-            if step + 1 >= int(cfg.switch_iter) and d_rel < float(cfg.early_stop_tol):
+            if int(cfg.switch_iter) <= iterations < max_iter and d_rel < float(cfg.early_stop_tol):
                 stop_reason = "early_stop"
                 break
 
@@ -734,7 +732,7 @@ class ADMMQ(GPTQ):
             "converged": stop_reason == "early_stop",
             "stop_reason": stop_reason,
             "iterations": iterations,
-            "max_iter": int(cfg.max_iter),
+            "max_iter": max_iter,
             "condition_number": condition_number,
             "ill_conditioned": condition_number > ILL_CONDITIONED_THRESHOLD,
             "rho_initial": rho_initial,
@@ -747,6 +745,7 @@ class ADMMQ(GPTQ):
             "pairswap_ran": pairswap_ran,
             "pairswap_flips": flips,
             "fallback_to_rtn": fallback_to_rtn,
+            "fallback_strategy": FallbackStrategy.RTN.value if fallback_to_rtn else None,
             "fallback_reason": fallback_reason,
             "initial_objective": float(initial_objective.item()),
             "final_objective": float(final_objective.item()),
@@ -768,14 +767,8 @@ class ADMMQ(GPTQ):
         return torch.device("cpu")
 
     def _set_skipped_diagnostics(self, reason: str) -> None:
-        """Record a module that did not run the ADMM solve.
+        """Record a module that did not run the ADMM solve."""
 
-        Embedding rows and calibration-starved modules still use the GPTQ
-        family's RTN projection. Recording them keeps the run summary honest
-        about which modules were actually solved by ADMM.
-        """
-
-        fallback_to_rtn = reason == "insufficient_calibration"
         self.admmq_diagnostics = {
             "status": "skipped",
             "reason": reason,
@@ -791,11 +784,28 @@ class ADMMQ(GPTQ):
             "refresh_improvement": 0.0,
             "pairswap_ran": False,
             "pairswap_flips": 0,
-            "fallback_to_rtn": fallback_to_rtn,
-            "fallback_reason": reason if fallback_to_rtn else None,
+            "fallback_to_rtn": False,
+            "fallback_strategy": None,
+            "fallback_reason": reason if reason == "insufficient_calibration" else None,
             "initial_objective": None,
             "final_objective": None,
         }
+
+    def _fallback_quantize(
+        self,
+        strategy: FallbackStrategy,
+        blocksize: int,
+        target_device: Optional[torch.device] = None,
+        hessian_diag: Optional[torch.Tensor] = None,
+    ):
+        result = super()._fallback_quantize(
+            strategy, blocksize, target_device=target_device, hessian_diag=hessian_diag
+        )
+        diagnostics = self.admmq_diagnostics
+        if diagnostics is not None:
+            diagnostics["fallback_to_rtn"] = strategy is FallbackStrategy.RTN
+            diagnostics["fallback_strategy"] = strategy.value
+        return result
 
     # ------------------------------------------------------------------
     # GPTQ entry point
@@ -814,8 +824,7 @@ class ADMMQ(GPTQ):
         if self.nsamples == 0 or should_use_fallback(
             self.fallback, float(self.nsamples), self.expected_nsamples
         ):
-            # The configured data-independent fallback is the GPTQ family's RTN
-            # path, with its documented output contract.
+            # GPTQ selects the fallback strategy from the calibration coverage.
             self._set_skipped_diagnostics("insufficient_calibration")
             return super()._quantize_impl(blocksize=blocksize)
 
@@ -836,6 +845,8 @@ class ADMMQ(GPTQ):
 
         def solve():
             nonlocal inverse_permutation, original_diagonal
+            # Each attempt owns its diagnostics, including the CPU retry.
+            self.admmq_diagnostics = None
             hessian = self.H
             if hessian.device.type == "cuda":
                 # Only the diagonal is changed by dead-column handling and
@@ -873,7 +884,6 @@ class ADMMQ(GPTQ):
             if original_diagonal is not None:
                 self.H.diagonal().copy_(original_diagonal)
 
-        self.admmq_diagnostics = None
         try:
             if solve_device != source_device:
                 log.warn(
@@ -917,13 +927,11 @@ class ADMMQ(GPTQ):
                         "refresh_improvement": None,
                         "pairswap_ran": False,
                         "pairswap_flips": 0,
-                        "fallback_to_rtn": True,
                         "fallback_reason": reason,
                         "initial_objective": None,
                         "final_objective": None,
                     }
                 else:
-                    self.admmq_diagnostics["fallback_to_rtn"] = True
                     self.admmq_diagnostics["fallback_reason"] = reason
                     self.admmq_diagnostics["converged"] = False
                     self.admmq_diagnostics["stop_reason"] = "fallback"
