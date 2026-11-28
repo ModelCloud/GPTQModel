@@ -41,7 +41,7 @@ def nf12_loader(monkeypatch, tmp_path):
     monkeypatch.setattr(_library, "_loaded", threading.Event())
     monkeypatch.setattr(_library, "_register_fakes", lambda: None)
     monkeypatch.setattr(nf12, "__path__", [str(tmp_path / "package")])
-    monkeypatch.setattr(_jit, "_directory", None)
+    _jit.reset_runtime_cache()
     monkeypatch.setattr(_jit, "_source_root", lambda: tmp_path)
     monkeypatch.setattr(_jit, "_cache_key", lambda *_: "fixture")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -107,10 +107,23 @@ def test_nf12_source_compile_failure_is_not_a_missing_tool_skip(monkeypatch, nf1
         raise jit.subprocess.CalledProcessError(1, command)
 
     monkeypatch.setattr(jit.subprocess, "run", broken_compile)
+
+    def build_commands():
+        # ``cmake --version`` is the toolchain probe, not a build attempt.
+        return [command for command in attempts if len(command) > 1 and command[1] != "--version"]
+
     for _ in range(2):
         with pytest.raises(RuntimeError, match="JIT compilation failed"):
             accelerator_gates.nf12_skip_reason()
-    assert len(attempts) == 2
+    # A build that raised is remembered for the process: retrying it per module
+    # was 672 doomed cmake configures in one 0.5B quantization run.
+    assert len(build_commands()) == 1
+
+    # A repaired toolchain is reachable through the explicit reset.
+    jit.reset_runtime_cache()
+    with pytest.raises(RuntimeError, match="JIT compilation failed"):
+        accelerator_gates.nf12_skip_reason()
+    assert len(build_commands()) == 2
 
 
 def test_hip_build_is_rejected_before_any_capability_probe(monkeypatch):
@@ -307,6 +320,8 @@ def test_nf12_nvcc_honors_cudacxx(monkeypatch, tmp_path, override):
 
     from gptqmodel_nf12 import _jit
 
+    # Tool probing is memoized per process; this test changes the environment.
+    _jit.reset_runtime_cache()
     monkeypatch.setenv("CUDACXX", override)
     monkeypatch.setattr(cpp_extension, "CUDA_HOME", "/unused/cuda")
     monkeypatch.setattr(shutil, "which", lambda name: name if name in ("cmake", "ninja", override) else None)
@@ -322,8 +337,9 @@ def test_nf12_nvcc_honors_cudacxx(monkeypatch, tmp_path, override):
     monkeypatch.setattr(_jit.subprocess, "run", run)
     _jit._build(tmp_path, tmp_path, [89])
 
-    assert f"-DCMAKE_CUDA_COMPILER={override}" in commands[0]
-    assert len(commands) == 2
+    build = [command for command in commands if len(command) > 1 and command[1] != "--version"]
+    assert f"-DCMAKE_CUDA_COMPILER={override}" in build[0]
+    assert len(build) == 2
 
 
 def _fake_mlx(*, kernel):
