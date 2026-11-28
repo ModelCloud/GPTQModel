@@ -525,7 +525,7 @@ def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) 
     """
     backend = normalize_backend(backend, quant_method=quant_method)
     matches = []
-    for cls in iter_quant_linear_kernels():
+    for cls in get_kernel_inventory():
         if backend not in get_kernel_backends(cls):
             continue
         if quant_method not in cls.SUPPORTS_METHODS:
@@ -740,6 +740,30 @@ def _registry_kernel_classes() -> List[Type[BaseQuantLinear]]:
 
 _REGISTRY_BUILD_LOCK = threading.Lock()
 _REGISTRY_BUILD_OWNER = None
+_EXTERNAL_REGISTERED_KERNELS: List[Type[BaseQuantLinear]] = []
+
+
+def get_kernel_inventory() -> List[Type[BaseQuantLinear]]:
+    """Return the inventory of kernel classes eligible for selection and lookup.
+
+    This includes all built-in kernels shipped in the ``qlinear`` package
+    (discovered lazily) along with any out-of-package kernels explicitly
+    registered via :func:`register_kernel`.
+    """
+    shipped = _registry_kernel_classes()
+    if _REGISTRY_BUILD_OWNER == threading.get_ident():
+        inventory = list(shipped)
+        for ext in _EXTERNAL_REGISTERED_KERNELS:
+            if ext not in inventory:
+                inventory.append(ext)
+        return inventory
+
+    with _REGISTRY_BUILD_LOCK:
+        inventory = list(shipped)
+        for ext in _EXTERNAL_REGISTERED_KERNELS:
+            if ext not in inventory:
+                inventory.append(ext)
+    return inventory
 
 
 _BUILT_MODULES = None
@@ -762,7 +786,7 @@ def _build_kernel_support_maps_cached():
     # kernel modules, so snapshotting the import state before this walk would
     # miss a module that recovers on this pass and make the next lookup rebuild
     # the maps even though the returned map already contains its kernel.
-    classes = _registry_kernel_classes()
+    classes = get_kernel_inventory()
     # Snapshot the modules this build saw. A module that failed to import is not
     # in ``_QLINEAR_IMPORTED``; if it recovers later, the wrapper notices the
     # difference and rebuilds instead of serving a map that omits it forever.
@@ -892,21 +916,86 @@ def _clear_kernel_registry_caches() -> None:
     with _REGISTRY_BUILD_LOCK:
         _REGISTRY_BUILD_OWNER = threading.get_ident()
         try:
-            namespace = sys.modules[__name__].__dict__
-            if _build_kernel_support_maps_cached.cache_info().currsize:
-                auto_map, supports_map = _build_kernel_support_maps_cached()
-                for name, cached in (
-                    ("AUTO_BACKEND_KERNEL_MAPPING", auto_map),
-                    ("BACKEND_TO_METHOD_FORMAT_MAPPING", supports_map),
-                ):
-                    if namespace.get(name, _MISSING) is cached:
-                        namespace.pop(name, None)
-
-            _build_kernel_support_maps_cached.cache_clear()
-            _BUILT_MODULES = None
+            _invalidate_derived_maps_unlocked()
+            _EXTERNAL_REGISTERED_KERNELS.clear()
             _reset_kernel_module_imports()
         finally:
             _REGISTRY_BUILD_OWNER = None
+
+
+def _invalidate_derived_maps_unlocked() -> None:
+    """Clear cached auto/supports maps and drop cached module-level dict entries."""
+    namespace = sys.modules[__name__].__dict__
+    if _build_kernel_support_maps_cached.cache_info().currsize:
+        auto_map, supports_map = _build_kernel_support_maps_cached()
+        for name, cached in (
+            ("AUTO_BACKEND_KERNEL_MAPPING", auto_map),
+            ("BACKEND_TO_METHOD_FORMAT_MAPPING", supports_map),
+        ):
+            if namespace.get(name, _MISSING) is cached:
+                namespace.pop(name, None)
+
+    _build_kernel_support_maps_cached.cache_clear()
+    global _BUILT_MODULES
+    _BUILT_MODULES = None
+
+
+def register_kernel(cls: Type[BaseQuantLinear]) -> None:
+    """Explicitly register an out-of-package kernel class.
+
+    Downstream libraries, plugins, or custom backends must register their
+    :class:`BaseQuantLinear` subclass here so it participates in explicit
+    backend lookup (:func:`get_kernel_for_backend`), automatic selection
+    maps, and portable fallback.
+
+    Migration note:
+        Subclasses defined outside the ``gptqmodel.nn_modules.qlinear`` package
+        are no longer implicitly selected merely by subclassing
+        :class:`BaseQuantLinear` or importing their module. Call
+        ``register_kernel(MyQuantLinear)`` to opt into selection.
+
+    Raises:
+        TypeError: If ``cls`` is not a subclass of :class:`BaseQuantLinear`.
+        ValueError: If ``cls`` declares a (backend, method, format) triple that
+            conflicts with an existing registered kernel.
+    """
+    if not isinstance(cls, type) or not issubclass(cls, BaseQuantLinear):
+        raise TypeError(f"Kernel must be a subclass of BaseQuantLinear, got {cls}")
+
+    with _REGISTRY_BUILD_LOCK:
+        _REGISTRY_BUILD_OWNER = threading.get_ident()
+        try:
+            current_inventory = list(_registry_kernel_classes())
+            for ext in _EXTERNAL_REGISTERED_KERNELS:
+                if ext not in current_inventory:
+                    current_inventory.append(ext)
+
+            if cls in current_inventory:
+                return
+
+            cls_backends = get_kernel_backends(cls)
+            cls_methods = infer_quant_methods(cls)
+            cls_formats = getattr(cls, "SUPPORTS_FORMATS", {}) or {}
+
+            for backend in cls_backends:
+                for method in cls_methods:
+                    for fmt in cls_formats:
+                        for existing_cls in current_inventory:
+                            if (
+                                backend in get_kernel_backends(existing_cls)
+                                and method in infer_quant_methods(existing_cls)
+                                and fmt in (getattr(existing_cls, "SUPPORTS_FORMATS", {}) or {})
+                            ):
+                                raise ValueError(
+                                    f"Conflicting kernel registration for backend `{backend}` for `{method}` with format `{fmt}`: "
+                                    f"`{cls.__name__}` conflicts with existing owner `{existing_cls.__name__}`."
+                                )
+
+            _EXTERNAL_REGISTERED_KERNELS.append(cls)
+            _invalidate_derived_maps_unlocked()
+        finally:
+            _REGISTRY_BUILD_OWNER = None
+
 
 
 build_kernel_support_maps.cache_clear = _clear_kernel_registry_caches
@@ -1481,7 +1570,7 @@ def _portable_fallback(quant_method: METHOD, fmt: FORMAT, families):
     reader never serves a ROCm placement.
     """
 
-    for cls in iter_quant_linear_kernels():
+    for cls in get_kernel_inventory():
         # ``PORTABLE_CPU_FALLBACK`` is the pre-#5109 spelling, kept because the
         # GEMV reader still only serves CPU targets.
         if not (getattr(cls, "PORTABLE_FALLBACK", False)
