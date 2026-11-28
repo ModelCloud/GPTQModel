@@ -2686,15 +2686,17 @@ class AWQProcessor(LoopProcessor):
 
         return AWQProcessor._token_row_budget_for_counts(row_counts)
 
-    #: One in this many single-row quotas keeps the batch's first position.
+    #: One in this many quotas keeps the batch's first position.
     #:
-    #: Both extremes are bad. Keeping every single-row quota at row 0 collapsed
-    #: the sample onto the BOS/attention-sink activation, identical for every
-    #: document (#5265: Llama-3.2-1B PPL 21.8 -> 91.7). Keeping none removes
-    #: the sink rows entirely, and the scale search then never sees the
-    #: outlier channels those positions carry (#5310: Qwen2.5-0.5B PPL 28.0,
-    #: worse than RTN's 24.8). A 1/8 share is close to the sink share of the
-    #: ``batch_size=4`` sample that #4176 accepted.
+    #: Both extremes are bad. Keeping every quota at row 0 collapsed the sample
+    #: onto the BOS/attention-sink activation, identical for every document
+    #: (#5265: Llama-3.2-1B PPL 21.8 -> 91.7). Keeping none removes the sink
+    #: rows entirely, and the scale search then never sees the outlier channels
+    #: those positions carry (#5310: Qwen2.5-0.5B PPL 28.0, worse than RTN's
+    #: 24.8). A 1/8 share is close to the sink share of the ``batch_size=4``
+    #: sample that #4176 accepted. Multi-row quotas follow the same share
+    #: (#6155: keeping row 0 in every multi-row batch made 28% of a default
+    #: short-document sample the sink row, and AWQ ended up worse than RTN).
     SINGLE_ROW_SINK_PERIOD = 8
 
     @staticmethod
@@ -2736,8 +2738,10 @@ class AWQProcessor(LoopProcessor):
         ``_pack_token_rows``: they contribute no rows, so counting them would
         steal budget (or select a zero-row batch) and break equivalence.
 
-        A batch that contributes a single row keeps the centre of the batch,
-        not row 0, which is the BOS/attention-sink position (#5265).
+        A batch that contributes one row keeps the centre of the batch, not
+        row 0, which is the BOS/attention-sink position (#5265). A batch that
+        contributes more rows keeps bin centres, plus row 0 for one quota in
+        ``SINGLE_ROW_SINK_PERIOD`` (#6155).
         """
         quotas = [0] * len(lengths)
         local_indices: Dict[int, torch.Tensor] = {}
@@ -2810,11 +2814,15 @@ class AWQProcessor(LoopProcessor):
                     length, single_row_ordinal
                 )
             else:
-                local_indices[batch_index] = (
-                    torch.arange(quota, dtype=torch.int64)
-                    * (length - 1)
-                    // (quota - 1)
-                )
+                # Bin centres, plus row 0 for one quota in
+                # ``SINGLE_ROW_SINK_PERIOD``: the same sink-share policy as
+                # ``_single_token_row``, sharing its ordinal counter so the
+                # choice stays deterministic across the calibration set.
+                single_row_ordinal += 1
+                rows = AWQProcessor._stratified_token_row(quota, length)
+                if single_row_ordinal % AWQProcessor.SINGLE_ROW_SINK_PERIOD == 1:
+                    rows[0] = 0
+                local_indices[batch_index] = rows
 
         return quotas, local_indices
 

@@ -337,7 +337,8 @@ def test_awq_token_rows_out_of_order_sampled_rows_keep_provenance_aligned():
         + 1000.0
     )
 
-    # Batch 1 arrives before batch 0; each batch keeps an evenly sampled 3 rows.
+    # Batch 1 arrives before batch 0; each batch keeps a sampled 3 rows, the
+    # first quota keeping row 0 and the next keeping bin centres (#6155).
     processor._set_current_batch_index(1)
     processor._record_input_feature(module_name, batch1)
     processor._set_current_batch_index(0)
@@ -348,11 +349,11 @@ def test_awq_token_rows_out_of_order_sampled_rows_keep_provenance_aligned():
     replayed = features[module_name]
 
     # Batch 0 keeps rows [0, 1, 3]; batch 1 keeps rows [0, 2, 5].
-    expected_rows = [0, 8, 24, 1000, 1016, 1040]
+    expected_rows = [0, 16, 24, 1008, 1024, 1040]
     assert [int(value) for value in replayed[0, :, 0].tolist()] == expected_rows
 
     position_ids = processor._awq_feature_kwargs[module_name]["position_ids"]
-    assert position_ids.tolist() == [[0, 1, 3, 0, 2, 5]]
+    assert position_ids.tolist() == [[0, 2, 3, 1, 3, 5]]
 
 
 def test_awq_token_row_quotas_skip_empty_batches():
@@ -365,7 +366,7 @@ def test_awq_token_row_quotas_skip_empty_batches():
 
     quotas, local = AWQProcessor._compute_token_row_quotas([0, 7, 3], 4)
     assert quotas == [0, 2, 2]
-    assert local[1].tolist() == [0, 6]
+    assert local[1].tolist() == [0, 5]
     assert local[2].tolist() == [0, 2]
 
 
