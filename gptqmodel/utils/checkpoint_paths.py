@@ -75,17 +75,69 @@ def resolve_checkpoint_path(
     return path
 
 
-def _hf_blob_root(source_root: str) -> Optional[str]:
-    """Return the sibling ``blobs`` directory of an HF ``snapshots`` root."""
-
+def _hf_repo_root(source_root: str) -> Optional[str]:
+    """Return the ``models--X--Y`` / ``datasets--X--Y`` dir of an HF snapshot."""
     current = os.path.abspath(source_root)
     while True:
         parent = os.path.dirname(current)
         if parent == current:
             return None
         if os.path.basename(current) == "snapshots":
-            return os.path.join(parent, "blobs")
+            return parent
         current = parent
+
+
+def _hf_blob_root(source_root: str) -> Optional[str]:
+    """Return the sibling ``blobs`` directory of an HF ``snapshots`` root."""
+
+    repo = _hf_repo_root(source_root)
+    return None if repo is None else os.path.join(repo, "blobs")
+
+
+def _hf_shared_blob_root(source_root: str) -> Optional[str]:
+    """Return the cache-wide shared blob store of an HF snapshot root.
+
+    Recent ``huggingface_hub`` releases store Xet-backed files once per cache:
+    ``<cache>/models--X--Y/blobs/<etag>`` is itself a symlink to
+    ``<cache>/blobs/<2-hex>/<xet-hash>``. That store lives one directory above
+    the per-repo ``blobs`` directory, so the per-repo allowance misses it
+    (#6150).
+    """
+
+    repo = _hf_repo_root(source_root)
+    return None if repo is None else os.path.join(os.path.dirname(repo), "blobs")
+
+
+def _one_symlink_hop(path: str) -> Optional[str]:
+    """Return the normalized target of one symlink hop, or ``None``."""
+
+    if not os.path.islink(path):
+        return None
+    target = os.readlink(path)
+    if not os.path.isabs(target):
+        target = os.path.join(os.path.dirname(path), target)
+    return os.path.normpath(target)
+
+
+def _is_hf_shared_blob_chain(source_root: str, source_path: str) -> bool:
+    """Accept exactly ``snapshot -> repo/blobs/<etag> -> cache/blobs/...``.
+
+    The shared blob store is allowed only through the two-hop chain that
+    ``huggingface_hub`` builds. A direct link from the snapshot into the shared
+    store, a third hop, or a link that leaves the store is rejected.
+    """
+
+    blob_root = _hf_blob_root(source_root)
+    shared_root = _hf_shared_blob_root(source_root)
+    if blob_root is None or shared_root is None:
+        return False
+    first = _one_symlink_hop(source_path)
+    if first is None or not _is_under(os.path.abspath(blob_root), first):
+        return False
+    second = _one_symlink_hop(first)
+    if second is None or os.path.islink(second):
+        return False
+    return _is_under(os.path.abspath(shared_root), second)
 
 
 def _assert_real_target_allowed(source_root: str, source_path: str, *, kind: str) -> None:
@@ -94,6 +146,8 @@ def _assert_real_target_allowed(source_root: str, source_path: str, *, kind: str
         return
     blob_root = _hf_blob_root(source_root)
     if blob_root is not None and _is_under(os.path.realpath(blob_root), real_target):
+        return
+    if _is_hf_shared_blob_chain(source_root, source_path):
         return
     raise CheckpointPathError(
         f"Unsafe {kind}: {source_path!r} resolves outside the checkpoint tree: {real_target!r}"
