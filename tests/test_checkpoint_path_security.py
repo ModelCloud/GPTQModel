@@ -17,6 +17,7 @@ from gptqmodel.models.writer import _save_module_replacement_safetensors
 from gptqmodel.utils.checkpoint_paths import (
     CheckpointPathError,
     assert_auxiliary_copy_allowed,
+    assert_source_read_allowed,
     resolve_checkpoint_path,
     validate_relative_checkpoint_path,
 )
@@ -158,6 +159,111 @@ def test_source_identity_accepts_hf_snapshot_symlinks(tmp_path):
     for name, text in contents.items():
         blob = blobs / name
         blob.write_text(text, encoding="utf-8")
+        os.symlink(os.path.join("..", "..", "blobs", name), snapshot / name)
+    (snapshot / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": 0},
+                "weight_map": {"model.layers.0.weight": "model-00001-of-00001.safetensors"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    identity = _source_identity(types.SimpleNamespace(model_local_path=str(snapshot)))
+
+    assert identity == {
+        name: hashlib.sha256(text.encode("utf-8")).hexdigest()
+        for name, text in contents.items()
+    }
+
+
+def _shared_blob_snapshot(tmp_path, *, escape=False):
+    """Build the two-hop HF cache layout from #6150.
+
+    ``snapshots/<rev>/tokenizer.json -> repo/blobs/<etag>`` and
+    ``repo/blobs/<etag> -> <cache>/blobs/<2-hex>/<hash>``.
+    """
+
+    cache = tmp_path / "hub"
+    repo = cache / "models--Qwen--Qwen3-0.6B"
+    snapshot = repo / "snapshots" / "rev"
+    snapshot.mkdir(parents=True)
+    (repo / "blobs").mkdir(parents=True)
+
+    if escape:
+        blob = tmp_path / "outside" / "secret"
+        blob.parent.mkdir(parents=True)
+        blob.write_text("weights", encoding="utf-8")
+        second_hop = str(blob)
+    else:
+        blob = cache / "blobs" / "bb" / ("b" * 64)
+        blob.parent.mkdir(parents=True)
+        blob.write_text("weights", encoding="utf-8")
+        second_hop = os.path.join("..", "..", "blobs", "bb", "b" * 64)
+
+    os.symlink(second_hop, repo / "blobs" / "etag")
+    os.symlink(os.path.join("..", "..", "blobs", "etag"), snapshot / "tokenizer.json")
+    return snapshot, snapshot / "tokenizer.json"
+
+
+def test_hf_shared_blob_two_hop_chain_allowed(tmp_path):
+    """A cache-wide shared blob link is accepted through its two-hop chain."""
+
+    snapshot, path = _shared_blob_snapshot(tmp_path)
+
+    assert_source_read_allowed(str(snapshot), str(path))
+    assert_auxiliary_copy_allowed(str(snapshot), str(path))
+
+
+def test_hf_shared_blob_chain_escape_rejected(tmp_path):
+    """The second hop may not leave the shared blob store."""
+
+    snapshot, path = _shared_blob_snapshot(tmp_path, escape=True)
+
+    with pytest.raises(CheckpointPathError):
+        assert_source_read_allowed(str(snapshot), str(path))
+    with pytest.raises(CheckpointPathError):
+        assert_auxiliary_copy_allowed(str(snapshot), str(path))
+
+
+def test_hf_shared_blob_direct_link_rejected(tmp_path):
+    """Skipping the per-repo blob hop is not a Hugging Face cache layout."""
+
+    cache = tmp_path / "hub"
+    snapshot = cache / "models--Qwen--Qwen3-0.6B" / "snapshots" / "rev"
+    snapshot.mkdir(parents=True)
+    blob = cache / "blobs" / "bb" / ("b" * 64)
+    blob.parent.mkdir(parents=True)
+    blob.write_text("weights", encoding="utf-8")
+    os.symlink(
+        os.path.join("..", "..", "..", "blobs", "bb", "b" * 64),
+        snapshot / "tokenizer.json",
+    )
+
+    with pytest.raises(CheckpointPathError):
+        assert_source_read_allowed(str(snapshot), str(snapshot / "tokenizer.json"))
+
+
+def test_source_identity_accepts_hf_shared_blob_symlinks(tmp_path):
+    """The checkpointed-quantization hashing path accepts the shared store."""
+
+    cache = tmp_path / "hub"
+    repo = cache / "models--Qwen--Qwen2.5-0.5B-Instruct"
+    snapshot = repo / "snapshots" / "rev"
+    (repo / "blobs").mkdir(parents=True)
+    snapshot.mkdir(parents=True)
+    shared = cache / "blobs" / "bb"
+    shared.mkdir(parents=True)
+
+    contents = {
+        "config.json": "{}",
+        "model-00001-of-00001.safetensors": "weights",
+    }
+    for name, text in contents.items():
+        blob = shared / (name + "-hash")
+        blob.write_text(text, encoding="utf-8")
+        os.symlink(os.path.join("..", "..", "blobs", "bb", name + "-hash"), repo / "blobs" / name)
         os.symlink(os.path.join("..", "..", "blobs", name), snapshot / name)
     (snapshot / "model.safetensors.index.json").write_text(
         json.dumps(
