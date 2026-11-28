@@ -23,8 +23,9 @@ to extend, see the audits from [Nov 17](references/2026-11-17-regressions.md),
 [Nov 18](references/2026-11-18-regressions.md), [Nov 19](references/2026-11-19-regressions.md),
 [Nov 20](references/2026-11-20-regressions.md), [Nov 21](references/2026-11-21-regressions.md),
 [Nov 23](references/2026-11-23-regressions.md), [Nov 24](references/2026-11-24-regressions.md),
-[Nov 25](references/2026-11-25-regressions.md), [Nov 26](references/2026-11-26-regressions.md)
-and [Nov 27](references/2026-11-27-regressions.md).
+[Nov 25](references/2026-11-25-regressions.md), [Nov 26](references/2026-11-26-regressions.md),
+[Nov 27](references/2026-11-27-regressions.md) and
+[Nov 28](references/2026-11-28-regressions.md).
 
 ## 1. Write the invariant before the patch
 
@@ -141,6 +142,19 @@ the existing buffers reject an in-place copy.
   the public exporter identifies it and preserves the destination. A header
   check against the writer's own tensor plan can pass with a wrong plan.
 
+Exercise each supported writer entry point after runtime initialization,
+including a bridge-loaded instance's `save_pretrained`. For reversible layouts,
+reload and compare packed tensors and outputs. For irreversible runtime layouts,
+assert the documented save rejection. Keep a read-only `state_dict()` control
+and verify runtime-only markers stay out of published checkpoint payloads.
+
+Build port-load fixtures from released configs, shrinking only model geometry.
+Preserve serialized attention hints, rope options, explicit head dimensions,
+tokenizer declarations and architecture-owned FP32 parameters. Pair inherited
+hints with explicit caller overrides and supported text variants with rejected
+vision variants. Check config-only and quantized re-save metadata against the
+files actually published, then exercise the supported reload entry point.
+
 Follow [checkpoint serialization](../gptqmodel-checkpoint-serialization/SKILL.md),
 [model plans](../gptqmodel-model-plan-tests/SKILL.md), and
 [lazy loading](../gptqmodel-lazy-load-smoke-testing/SKILL.md) as applicable.
@@ -167,6 +181,14 @@ the retry device: weights, Hessians, permutations, group quantizers, and scales.
 Test a non-memory exception separately: it must propagate, not trigger an OOM
 fallback. Bound retries, require monotonic progress (for example shrinking the
 effective batch), and reset retry state between top-level calls.
+
+For numerical solver fallback, inject factorization failure, nonfinite spectrum,
+iterate and final loss separately. Compare the returned weight/grid metadata
+with an independent fresh fallback and assert the recorded reason and completed
+iteration count. Exercise a fallback that also fails and an unrelated error.
+For adaptive schedules, assert the fixture's condition number crosses each
+threshold and the chosen schedule reaches a later iteration. Check diagnostics
+through the public quantization result as well as on the solver object.
 
 If a solver can delegate to its parent when calibration statistics are absent,
 install the variant's statistics and inject the fault inside its own block
@@ -217,6 +239,11 @@ Use bounded joins and an outer subprocess timeout so a regression cannot hang
 the suite. Always clean up workers and process-global settings on test failure.
 Test overlapping global guards leaving in a different order from entry.
 
+For background prewarm, test interpreter shutdown in a subprocess with an
+in-flight worker. Check both successful load-then-exit and caught-error exit
+status, plus bounded cleanup of a wedged worker. A direct call to the join
+helper only establishes part of the shutdown lifecycle.
+
 CPU doubles establish ownership logic, not native stream or GIL=0 safety.
 Follow the [GIL=0 skill](../gptqmodel-pytorch-gil0/SKILL.md) and ledger for actual
 threaded qualification, and the numerical skill for persistent packed storage.
@@ -256,6 +283,20 @@ kernel without silently overriding an explicit backend. Inspect the **packed
 buffer's actual device** and run a first forward against a reference; a
 plausible device map or correct logits alone can hide a copy on every call.
 
+For packer selection, vary supported global widths through the public quantize
+entry point and check the actual packed class. Pair shape-free backend selection
+with concrete per-layer validation. For replacement placement, give a packed
+module a CPU metadata buffer and accelerator payload, then inspect the payload
+after rehoming. Exercise resident dispatch hooks that own execution placement.
+
+When multiple processors share a source module, drive their real sequence.
+A planning processor that performs no forward must leave the source dense.
+Check the temporary capture representation during the statistics forward and
+the restored dense source at quantizer preprocessing, followed by final packing.
+Use a fused expert fixture with distinct gate/up rows, scales and bias to check
+the checkpoint-to-defused-source handoff. See the
+[Nov 28 fixtures](references/2026-11-28-regressions.md).
+
 ### Calibration representations and repeated replay
 
 Represent the same explicit token rows as each affected supported input form:
@@ -272,6 +313,19 @@ additive mask is not an all-padding boolean mask. Test BOS-present and BOS-less
 tokenizers, not the assumption that position zero is always a special token.
 Run consecutive batches/layers/parallel branches with distinct context and
 assert no stale mask or KV state leaks between them.
+
+Keep actual processor containers through capture and replay. Use `BatchFeature`
+with mixed sliding/full attention layers, padding and unequal conversations at
+batch size two. Compare every replay mask and layer output with a native forward.
+
+For recurrent decoders, capture a native full forward with multiple core visits
+and post-loop layers. Compare every invocation's hidden input, positional state,
+mask and output. Assert later-visit inputs differ from the first visit. Include
+the architecture's complete head-input transform. Replay distinguishable batches
+in scheduler order (for example `0, 4, 1, 5, 2, 6, 3, 7`) and repeat subset replay.
+Require each batch's native head input and one final-state entry per batch.
+Use both unequal lengths and equal-shaped distinct values. Verify a new run
+releases old state. See the [invocation fixtures and ownership proposal](references/2026-11-28-regressions.md).
 
 When splitting a float mask into rows, put a `1.0` in one row and only zeros
 in another: the second row is padding in that 0/1 column. As a control, an
