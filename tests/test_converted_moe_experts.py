@@ -12,18 +12,22 @@
   implementation in Transformers' experts registry.
 """
 
+import gc
 import hashlib
 import os
 import subprocess
 import sys
 import textwrap
+import weakref
 from pathlib import Path
+from types import MethodType
 
 import pytest
 import torch
 from eager_ssm_kernels import eager_torch_ssm_kernels
 
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.utils.looper_helpers import clone_module_for_devices, release_module_replicas
 from tests.test_defuser_vendored_classes import _build, _Definition
 
 
@@ -196,3 +200,44 @@ def test_tiny_moe_awq_expert_scales_match_routed_loop_reference(family, tmp_path
     model.save(quantized)
 
     assert _expert_quant_digest(quantized) in _MAIN_AWQ_EXPERT_DIGESTS[family]
+
+
+def test_converted_experts_replica_is_freed_without_a_gc_pass():
+    """A discarded replica must not need a cyclic GC pass to be released (#6158).
+
+    ``_bind_converted_experts_forwards`` stores a bound method in
+    ``vars(experts)["forward"]``, so the converted module references itself.
+    Data-parallel forward replicas inherit that cycle, and dropping a replica
+    only removed the dict entry: on the second GPU every finished layer's
+    replica (and its weights) stayed alive until a GC pass, which grew cuda:1 by
+    several GiB per layer until a MoE quantization ran out of memory.
+    """
+
+    model = _build("qwen3_moe", "gptqmodel.models.ports.native")
+    assert _convert_model_with_defuser(_Definition, model, cleanup_original=True)
+    experts = next(
+        module
+        for name, module in model.named_modules()
+        if name.endswith(".experts")
+        and "0" in module._modules
+        and isinstance(vars(module).get("forward"), MethodType)
+    )
+
+    source_device = next(iter(experts.parameters())).device
+    replicas = clone_module_for_devices(experts, [source_device, torch.device("cpu:0")])
+    replica = next(module for module in replicas.values() if module is not experts)
+    assert isinstance(vars(replica).get("forward"), MethodType)
+
+    gc.collect()
+    gc.disable()
+    try:
+        ref = weakref.ref(replica)
+        release_module_replicas(experts, replicas)
+        del replica
+        assert ref() is None, "a discarded replica is only freed by a cyclic GC pass"
+    finally:
+        gc.enable()
+
+    # The live converted module keeps its bound forward; only copies are stripped.
+    assert isinstance(vars(experts).get("forward"), MethodType)
+    assert vars(experts)["forward"].__self__ is experts

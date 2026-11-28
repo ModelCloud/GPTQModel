@@ -64,6 +64,32 @@ def _rebind_copied_instance_methods(
                     MethodType(value.__func__, replica_module),
                 )
 
+
+def release_module_replicas(source: torch.nn.Module, replicas: Dict[torch.device, torch.nn.Module]) -> None:
+    """Drop ``replicas`` and break the instance-method cycles they hold.
+
+    ``clone_module_for_devices`` hands back ``source`` itself for the device it
+    already occupies, and a copy for every other device. A copy carries the
+    self-bound instance methods ``_rebind_copied_instance_methods`` rebuilt for
+    it, and a method stored in ``vars(module)`` that is bound to ``module`` is a
+    reference cycle: the replica and every device tensor it owns survive
+    refcount release until a cyclic GC pass. Multi-GPU quantization of a MoE
+    therefore accumulated dead layer replicas on the second device until it ran
+    out of memory (#6158).
+
+    ``source`` keeps its methods: it is the live model, not a discarded copy.
+    """
+
+    for replica in replicas.values():
+        if replica is source:
+            continue
+        for sub in replica.modules():
+            for attribute, value in tuple(vars(sub).items()):
+                if isinstance(value, MethodType) and value.__self__ is sub:
+                    delattr(sub, attribute)
+    replicas.clear()
+
+
 def torch_replicate(
     module: torch.nn.Module,
     devices: Sequence[torch.device | str | int],
@@ -116,6 +142,7 @@ __all__ = [
     "move_module_to_device",
     "move_nested_to_device",
     "clone_module_for_devices",
+    "release_module_replicas",
     "find_last_quantized_layer_index",
     "plan_layer_count",
     "forward_batch_worker",

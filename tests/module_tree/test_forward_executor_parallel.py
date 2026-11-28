@@ -9,7 +9,10 @@ previous batch's input kwargs, mask, and position ids. Both the serial and the
 data-parallel executors must keep positional slots.
 """
 
-from types import SimpleNamespace
+import copy
+import gc
+import weakref
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -70,11 +73,13 @@ class _StubLooper:
         del processor, mask, padding_mask
 
 
-def _run_parallel(worker, *, num_batches: int = 2, need_outputs: bool = True):
+def _run_parallel(worker, *, num_batches: int = 2, need_outputs: bool = True, clone_fn=None, module=None):
     devices = [torch.device("cpu"), torch.device("meta")]
+    if clone_fn is None:
+        clone_fn = lambda module, devs, **kwargs: dict.fromkeys(devs, module)  # noqa: E731
     executor = ForwardExecutor(_StubLooper(num_batches))
     return executor.run_parallel(
-        module=torch.nn.Identity(),
+        module=torch.nn.Identity() if module is None else module,
         processor=SimpleNamespace(num_batches=num_batches),
         layer_inputs=[[torch.zeros(1, 4)] for _ in range(num_batches)],
         layer_input_kwargs=[{} for _ in range(num_batches)],
@@ -87,7 +92,7 @@ def _run_parallel(worker, *, num_batches: int = 2, need_outputs: bool = True):
         need_outputs=need_outputs,
         reuse_kv=False,
         devices=devices,
-        clone_module_for_devices_fn=lambda module, devs, **kwargs: dict.fromkeys(devs, module),
+        clone_module_for_devices_fn=clone_fn,
         forward_batch_worker_fn=worker,
         device_thread_pool=_ImmediatePool(),
     )
@@ -195,6 +200,57 @@ def test_parallel_forward_keeps_batch_order_for_real_outputs():
     for batch_index, batch_output in enumerate(outputs):
         assert len(batch_output) == 1
         torch.testing.assert_close(batch_output[0], torch.full((1, 4), float(batch_index)))
+
+
+def _self_bound_forward(self, hidden, **kwargs):
+    del self, kwargs
+    return hidden
+
+
+class _SelfBoundForwardModule(torch.nn.Module):
+    """Carry a self-bound ``forward``, like a Defuser-converted experts block."""
+
+    def __init__(self):
+        super().__init__()
+        self.proj = torch.nn.Linear(4, 4)
+        self.forward = MethodType(_self_bound_forward, self)
+
+
+def test_parallel_forward_releases_self_bound_replicas_without_a_gc_pass():
+    """A discarded replica must not survive on its own self-bound methods (#6158).
+
+    ``clone_module_for_devices`` rebinds each copied instance method to its
+    replica, so ``vars(replica)["forward"]`` points back at the replica. Dropping
+    the dict entry then left the whole replica - and every CUDA tensor it owned -
+    alive until a cyclic GC pass, which accumulated dead MoE layer replicas on
+    the second GPU until quantization ran out of memory.
+    """
+
+    source = _SelfBoundForwardModule()
+    refs = []
+
+    def clone(module, devices, **kwargs):
+        del kwargs
+        replica = copy.deepcopy(module)
+        refs.append(weakref.ref(replica))
+        return {dev: (module if dev == devices[0] else replica) for dev in devices}
+
+    def worker(module, processor, batch_index, layer_input, *args, **kwargs):
+        del module, processor, args, kwargs
+        return batch_index, layer_input[0], None
+
+    gc.collect()
+    gc.disable()
+    try:
+        _run_parallel(worker, clone_fn=clone, module=source)
+        assert len(refs) == 1
+        assert refs[0]() is None, "the discarded replica is only freed by a cyclic GC pass"
+    finally:
+        gc.enable()
+
+    # The live module keeps its bound forward; only discarded copies are stripped.
+    assert isinstance(vars(source).get("forward"), MethodType)
+    assert vars(source)["forward"].__self__ is source
 
 
 class _DeferredFuture:
