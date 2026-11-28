@@ -21,6 +21,7 @@ from ..utils.looper_helpers import (
     forward_batch_worker,
     move_nested_to_device,
     rehome_module_to_device,
+    release_module_replicas,
     select_forward_devices,
 )
 from ..utils.model import move_to, nested_move_to
@@ -943,9 +944,12 @@ class ForwardExecutor:
                 except Exception:
                     pass
             moe_contexts.clear()
-
-        for dev in list(module_replicas.keys()):
-            del module_replicas[dev]
+            # Break each discarded replica's self-bound instance methods before
+            # dropping it: the cycle otherwise keeps the replica and its device
+            # tensors alive until a GC pass, which accumulated dead MoE layer
+            # replicas on the second GPU (#6158). Released in the ``finally``
+            # so a failed forward does not leak them either.
+            release_module_replicas(module, module_replicas)
 
         if not need_outputs:
             return []
