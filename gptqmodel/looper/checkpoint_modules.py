@@ -45,6 +45,19 @@ def _deserialize_pack_dtype(value, default):
     return dtype
 
 
+def _deserialize_float_dtype(value, *, kind):
+    if not isinstance(value, str):
+        raise CheckpointError(f"invalid packed {kind} dtype")
+    dtype = {
+        "torch.float16": torch.float16,
+        "torch.bfloat16": torch.bfloat16,
+        "torch.float32": torch.float32,
+    }.get(value)
+    if dtype is None:
+        raise CheckpointError(f"invalid packed {kind} dtype")
+    return dtype
+
+
 def _kernel_path(kernel):
     return f"{kernel.__module__}.{kernel.__qualname__}"
 
@@ -100,6 +113,13 @@ def packed_module_config(module, config, *, module_name=None):
     # rebuild matches the bundle instead of tripping the schema comparison.
     if isinstance(bias, torch.Tensor):
         module_config["bias_dtype"] = str(bias.dtype)
+    # AWQ keeps the source scale width (fp16/bf16) through ``pack()``, while
+    # the restore template allocates ``scales`` at fp16. Record any other width
+    # so the rebuild matches the bundle instead of tripping the schema
+    # comparison (#6153). FP16 needs no entry: it is the template default.
+    scales = getattr(module, "scales", None)
+    if isinstance(scales, torch.Tensor) and scales.dtype != torch.float16:
+        module_config["scales_dtype"] = str(scales.dtype)
     if constructor.kind is not None:
         module_config["kind"] = constructor.kind
     if constructor.options:
@@ -161,6 +181,7 @@ def restore_packed_module(module_config, *, name, config, kernel, lm_head_name):
         dtype_name = module_config.pop("compute_dtype", None)
         escape_rows = module_config.pop("escape_rows", None)
         checkpoint_bias_dtype = module_config.pop("bias_dtype", None)
+        checkpoint_scales_dtype = module_config.pop("scales_dtype", None)
         quant_state_shape = module_config.pop("quant_state_shape", None)
         if kind == "paro":
             kernel = ParoLinear
@@ -198,30 +219,27 @@ def restore_packed_module(module_config, *, name, config, kernel, lm_head_name):
         if has_compute_dtype and dtype_name is None:
             kwargs["dtype"] = None
         elif dtype_name is not None:
-            dtype = {
-                "torch.float16": torch.float16,
-                "torch.bfloat16": torch.bfloat16,
-                "torch.float32": torch.float32,
-            }.get(dtype_name)
-            if dtype is None:
-                raise CheckpointError("invalid packed compute dtype")
-            kwargs["dtype"] = dtype
+            kwargs["dtype"] = _deserialize_float_dtype(dtype_name, kind="compute")
         module = kernel(**module_config, **kwargs)
         if checkpoint_bias_dtype is not None:
             # The kernel allocates its bias placeholder at its default width.
             # Restore the bundle's width so the tensor schema matches.
             bias = getattr(module, "bias", None)
             if isinstance(bias, torch.Tensor):
-                bias_dtype = {
-                    "torch.float16": torch.float16,
-                    "torch.bfloat16": torch.bfloat16,
-                    "torch.float32": torch.float32,
-                }.get(checkpoint_bias_dtype)
-                if bias_dtype is None:
-                    raise CheckpointError("invalid packed bias dtype")
+                bias_dtype = _deserialize_float_dtype(checkpoint_bias_dtype, kind="bias")
                 if bias.dtype != bias_dtype:
                     module.bias = bias.to(bias_dtype)
                     module.bias_dtype = bias_dtype
+        if checkpoint_scales_dtype is not None:
+            # The kernel allocates ``scales`` at fp16; restore the width the
+            # bundle stores so the tensor schema matches (#6153).
+            scales = getattr(module, "scales", None)
+            if isinstance(scales, torch.Tensor):
+                scales_dtype = _deserialize_float_dtype(checkpoint_scales_dtype, kind="scale")
+                if scales.dtype != scales_dtype:
+                    module.scales = torch.empty(
+                        scales.shape, dtype=scales_dtype, device=scales.device
+                    )
         if quant_state_shape is not None:
             if (
                 len(quant_state_shape) != 1
