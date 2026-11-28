@@ -37,7 +37,15 @@ from .metrics import (
 from .report import MeasurementReport
 
 
-__all__ = ["MeasurementError", "TokenWindow", "build_token_rows", "measure_models"]
+__all__ = [
+    "MeasurementError",
+    "ReferenceCapture",
+    "TokenWindow",
+    "build_token_rows",
+    "capture_reference",
+    "measure_against",
+    "measure_models",
+]
 
 log = setup_logger()
 
@@ -348,35 +356,30 @@ def _capture(
     return captures
 
 
-def measure_models(
-    candidate: torch.nn.Module,
-    reference: torch.nn.Module,
-    token_rows: Sequence[Union[TokenWindow, torch.Tensor]],
-    config: MeasureConfig,
-    *,
-    pad_token_id: Optional[int] = None,
-) -> MeasurementReport:
-    """Run every configured metric over the same token rows for both models.
+@dataclass
+class ReferenceCapture:
+    """Reference-side artifacts, kept so several candidates share one pass.
 
-    ``token_rows`` accepts :class:`TokenWindow` objects from
-    :func:`build_token_rows` (which carry a scoring mask) or plain ``[1, tokens]``
-    tensors (every transition in the row is scored). The mask is what makes PPL
-    weight each transition in the stream exactly once across overlapping windows.
+    Capturing is worthwhile when more than one candidate is measured against
+    the same reference: the fp16 forward runs once, and the artifacts outlive
+    the reference model instead of keeping a second copy resident. A capture
+    only contains the signals its metrics asked for, so ``measure_against``
+    rejects a request outside ``needs`` rather than measuring against an empty
+    sample.
     """
 
-    if reference is None:
-        raise ValueError("measure() needs a reference model or checkpoint path")
-    if not token_rows:
-        raise ValueError("measurement needs at least one token row")
+    batches: List[_Batch]
+    nll_sum: float
+    tokens: int
+    positions: int
+    logits: List[torch.Tensor]
+    positions_wanted: int
+    needs: frozenset = frozenset()
 
-    reference_device = config.device or _model_device(reference)
-    candidate_device = config.device or _model_device(candidate)
-    batches = _batch_rows(list(token_rows), config.batch, pad_token_id or 0)[
-        : max(1, config.max_batches)
-    ]
 
-    # `fuse` plans the passes; the captures those passes must produce are the
-    # union of what the members read.
+def _plan(config: MeasureConfig) -> tuple:
+    """The captures the metrics need and the sample width they ask for."""
+
     fuse(config.metrics)
     needs = frozenset().union(*[member.capture_needs for member in config.metrics])
     # An explicit KLDConfig.positions wins; the default only applies when no
@@ -385,21 +388,76 @@ def measure_models(
     positions_wanted = max(asked) if asked else _DEFAULT_POSITIONS
     if CAPTURE_SAMPLED_LOGITS not in needs:
         positions_wanted = 0
+    return needs, positions_wanted
 
-    # One forward per batched pass for each model; fused metrics share it.
-    reference_captures = _capture(
+
+def capture_reference(
+    reference: torch.nn.Module,
+    token_rows: Sequence[Union[TokenWindow, torch.Tensor]],
+    config: MeasureConfig,
+    *,
+    pad_token_id: Optional[int] = None,
+) -> ReferenceCapture:
+    """Read the reference side once, before the model is modified."""
+
+    if reference is None:
+        raise ValueError("measurement needs a reference model or checkpoint path")
+    if not token_rows:
+        raise ValueError("measurement needs at least one token row")
+
+    needs, positions_wanted = _plan(config)
+    batches = _batch_rows(list(token_rows), config.batch, pad_token_id or 0)[
+        : max(1, config.max_batches)
+    ]
+    captures = _capture(
         reference,
         batches,
-        device=reference_device,
+        device=config.device or _model_device(reference),
         needs_nll=CAPTURE_NLL in needs,
         positions=positions_wanted,
     )
+    return ReferenceCapture(
+        batches=batches,
+        nll_sum=captures.nll_sum,
+        tokens=captures.tokens,
+        positions=captures.positions,
+        logits=captures.logits,
+        positions_wanted=positions_wanted,
+        needs=needs,
+    )
+
+
+def measure_against(
+    candidate: torch.nn.Module,
+    capture: ReferenceCapture,
+    config: MeasureConfig,
+) -> MeasurementReport:
+    """Measure ``candidate`` against artifacts captured earlier."""
+
+    needs, _positions_wanted = _plan(config)
+    missing = []
+    if CAPTURE_NLL in needs and CAPTURE_NLL not in capture.needs:
+        missing.append("PPL (the reference capture has no NLL totals)")
+    if CAPTURE_SAMPLED_LOGITS in needs and CAPTURE_SAMPLED_LOGITS not in capture.needs:
+        missing.append("KLD/TOP_K/RMSE (the reference capture has no sampled logits)")
+    if missing:
+        raise ValueError(
+            "reference capture does not cover the requested metric(s): "
+            + "; ".join(missing)
+            + ". Capture the reference again with those metrics enabled."
+        )
     candidate_captures = _capture(
         candidate,
-        batches,
-        device=candidate_device,
+        capture.batches,
+        device=config.device or _model_device(candidate),
         needs_nll=CAPTURE_NLL in needs,
-        positions=positions_wanted,
+        positions=capture.positions_wanted,
+    )
+    reference_captures = _Captures(
+        nll_sum=capture.nll_sum,
+        tokens=capture.tokens,
+        positions=capture.positions,
+        logits=capture.logits,
     )
 
     values: Dict[str, Any] = {}
@@ -420,12 +478,32 @@ def measure_models(
         values=values,
         grades=grades,
         reference=reference_values,
-        batches=len(batches),
+        batches=len(capture.batches),
         positions=candidate_captures.positions,
     )
     if config.strict and report.overall is MetricGrades.FAIL:
         raise MeasurementError(report)
     return report
+
+
+def measure_models(
+    candidate: torch.nn.Module,
+    reference: torch.nn.Module,
+    token_rows: Sequence[Union[TokenWindow, torch.Tensor]],
+    config: MeasureConfig,
+    *,
+    pad_token_id: Optional[int] = None,
+) -> MeasurementReport:
+    """Run every configured metric over the same token rows for both models.
+
+    ``token_rows`` accepts :class:`TokenWindow` objects from
+    :func:`build_token_rows` (which carry a scoring mask) or plain ``[1, tokens]``
+    tensors (every transition in the row is scored). The mask is what makes PPL
+    weight each transition in the stream exactly once across overlapping windows.
+    """
+
+    capture = capture_reference(reference, token_rows, config, pad_token_id=pad_token_id)
+    return measure_against(candidate, capture, config)
 
 
 def _evaluate(

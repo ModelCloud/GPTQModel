@@ -26,7 +26,15 @@ from .metrics import (
     topk_overlap,
 )
 from .report import MeasurementReport
-from .runner import MeasurementError, TokenWindow, build_token_rows, measure_models
+from .runner import (
+    MeasurementError,
+    ReferenceCapture,
+    TokenWindow,
+    build_token_rows,
+    capture_reference,
+    measure_against,
+    measure_models,
+)
 
 
 __all__ = [
@@ -35,6 +43,7 @@ __all__ = [
     "MeasureConfig",
     "MeasurementError",
     "MeasurementReport",
+    "ReferenceCapture",
     "Metric",
     "MetricGrades",
     "PPLConfig",
@@ -42,10 +51,12 @@ __all__ = [
     "TOPKConfig",
     "TokenWindow",
     "build_token_rows",
+    "capture_reference",
     "fuse",
     "kl_divergence",
     "logit_rmse",
     "mean_negative_log_likelihood",
+    "measure_against",
     "measure_models",
     "topk_overlap",
 ]
