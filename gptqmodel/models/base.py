@@ -96,7 +96,11 @@ from ..utils.backend import (
     backend_for_activation,
     normalize_backend,
 )
-from ..utils.backend_config import Backend, resolve_quantize_backend
+from ..utils.backend_config import (
+    Backend,
+    inherited_quantize_backend,
+    resolve_quantize_backend,
+)
 from ..utils.calibration import (
     AUTO_BATCH_SIZE,
     _chat_calibration_row_tokens,
@@ -119,7 +123,7 @@ from ..utils.hf import (
     resolve_checkpoint_subfolder,
     resolve_trust_remote_code,
 )
-from ..utils.importer import select_quant_linear
+from ..utils.importer import _supports_pack_api, select_quant_linear
 from ..utils.kv_cache import KVCacheEstimate, estimate_kv_cache
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
@@ -1128,6 +1132,53 @@ def select_in_session_quant_linear(qcfg, device):
         pack=True,
         pack_dtype=qcfg.pack_dtype,
     )
+
+
+def _backend_can_pack(backend, qcfg, format_code, quant_method) -> bool:
+    """Whether ``backend`` names a kernel with a pack API for this config.
+
+    Selection without ``pack=True`` returns the backend's kernel whatever its
+    capabilities; ``_supports_pack_api`` then answers the packing question
+    without the "cannot pack quantized weights" error the validated call
+    raises (#6154).
+    """
+
+    kernel = select_quant_linear(
+        bits=qcfg.runtime_bits,
+        dynamic=qcfg.dynamic,
+        group_size=qcfg.group_size,
+        desc_act=qcfg.desc_act,
+        sym=qcfg.sym,
+        backend=backend,
+        format=format_code,
+        quant_method=quant_method,
+        device=normalize_device(qcfg.device),
+        pack=False,
+        pack_dtype=qcfg.pack_dtype,
+    )
+    return _supports_pack_api(kernel)
+
+
+def resolve_pack_backend(retained_backend, backend, qcfg, format_code, quant_method):
+    """The backend ``quantize()`` packs with, given what the load retained.
+
+    An inference-only kernel (Marlin, ExLlamaV2, ...) selected for the dense
+    load has no pack API. Inheriting it as the packing backend made the
+    documented ``load(..., backend=MarlinConfig(...))`` + ``quantize()`` flow
+    fail before calibration (#6154). Pack with the method default instead,
+    exactly as an un-retained AUTO request does; an explicit
+    ``quantize(backend=...)`` is not inherited, so it still raises at the pack
+    validation.
+    """
+
+    if retained_backend is None or _backend_can_pack(backend, qcfg, format_code, quant_method):
+        return backend
+    log.warning(
+        "Quantize: the retained load backend `%s` cannot pack quantized weights; "
+        "packing with the method default backend instead.",
+        backend,
+    )
+    return BACKEND.AUTO
 
 
 def _switch_quant_linear_class(module: BaseQuantLinear, target_cls) -> None:
@@ -3044,6 +3095,7 @@ class BaseQModel(nn.Module):
 
         # A typed choice on the dense-model load survives into quantize(),
         # while an explicit quantize backend may replace that choice.
+        retained_backend = inherited_quantize_backend(self.quantize_config, backend)
         backend, _ = resolve_quantize_backend(backend, self.quantize_config, inherit=True)
 
         dynamic_cache_stats_before = (
@@ -3135,6 +3187,10 @@ class BaseQModel(nn.Module):
         if self.support_batch_quantize is False:
             batch_size = 1
             log.warn("Batch quantization is not supported for this model. Setting batch_size to 1.")
+
+        backend = resolve_pack_backend(
+            retained_backend, backend, self.quantize_config, format_code, export_quant_method
+        )
 
         requested_backend = backend
         requested_backend = normalize_backend(requested_backend, quant_method=export_quant_method)

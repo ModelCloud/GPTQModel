@@ -275,6 +275,23 @@ def resolve_backend_config(
     return resolved, runtime.to_kernel_config()
 
 
+def inherited_quantize_backend(qcfg, backend):
+    """The dense-load selection ``quantize(backend=AUTO)`` would inherit.
+
+    ``None`` means "nothing to inherit": either the caller named a backend for
+    this call, or the load recorded no selection. One owner for the rule keeps
+    ``resolve_quantize_backend`` and its callers from disagreeing about which
+    requests are inherited.
+    """
+
+    if isinstance(backend, BackendConfig) or normalize_backend(backend) != BACKEND.AUTO:
+        return None
+    inherited = getattr(qcfg, "_backend_config", None)
+    if inherited is None:
+        inherited = getattr(qcfg, "_load_backend", None)
+    return inherited
+
+
 def resolve_quantize_backend(backend, qcfg, kernel=None, runtime=None, *, inherit=False):
     """Resolve a quantization config's backend and policy at an API boundary.
 
@@ -292,13 +309,11 @@ def resolve_quantize_backend(backend, qcfg, kernel=None, runtime=None, *, inheri
     """
     if qcfg is None:
         return resolve_backend_config(backend, kernel, runtime)
-    if inherit and not isinstance(backend, BackendConfig) and normalize_backend(backend) == BACKEND.AUTO:
+    if inherit:
         # Typed choices carry their options in `_backend_config`; an explicit
         # enum/string load choice is recorded in `_load_backend`. Both must
         # survive into quantize(backend=AUTO).
-        inherited = getattr(qcfg, "_backend_config", None)
-        if inherited is None:
-            inherited = getattr(qcfg, "_load_backend", None)
+        inherited = inherited_quantize_backend(qcfg, backend)
         backend = inherited or backend
     if kernel is not None:
         kernel = _coerce_kernel_config(kernel)
