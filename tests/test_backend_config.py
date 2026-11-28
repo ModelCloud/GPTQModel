@@ -11,9 +11,15 @@ import torch
 import gptqmodel.backend as configs
 from gptqmodel import GPTQModel, MarlinConfig
 from gptqmodel.backend import BACKEND, BackendConfig, RuntimeConfig, TorchConfig
-from gptqmodel.quantization import QuantizeConfig
+from gptqmodel.models.base import resolve_pack_backend
+from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.utils.backend import normalize_backend
-from gptqmodel.utils.backend_config import resolve_backend_config, resolve_quantize_backend
+from gptqmodel.utils.backend_config import (
+    inherited_quantize_backend,
+    resolve_backend_config,
+    resolve_quantize_backend,
+)
+from gptqmodel.utils.importer import select_quant_linear
 from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config, resolve_kernel_config
 
 
@@ -129,6 +135,70 @@ def test_quantization_retains_and_can_replace_a_typed_load_choice():
     assert policy.marlin_fp32 is True
     selected, _ = resolve_quantize_backend(BACKEND.MARLIN, qcfg, inherit=True)
     assert selected is BACKEND.MARLIN
+
+
+def _gptq_config():
+    return QuantizeConfig(bits=4, group_size=128, device="cuda:0")
+
+
+def test_an_inherited_inference_only_backend_is_not_the_pack_backend():
+    """A Marlin load selection cannot pack, so quantize() must not inherit it.
+
+    Before #6154 the documented ``load(..., backend=MarlinConfig(...))`` +
+    ``quantize()`` flow died in the pack validation, before calibration.
+    """
+
+    qcfg = _gptq_config()
+    resolve_quantize_backend(MarlinConfig(fp32=False), qcfg)
+    retained = inherited_quantize_backend(qcfg, BACKEND.AUTO)
+    selected, _ = resolve_quantize_backend(BACKEND.AUTO, qcfg, inherit=True)
+
+    assert retained is not None
+    assert selected is BACKEND.MARLIN
+    # The exact error the documented flow raised.
+    with pytest.raises(ValueError, match="cannot pack quantized weights"):
+        select_quant_linear(
+            bits=qcfg.runtime_bits,
+            group_size=qcfg.group_size,
+            desc_act=qcfg.desc_act,
+            sym=qcfg.sym,
+            backend=selected,
+            format=FORMAT.GPTQ,
+            quant_method=METHOD.GPTQ,
+            device="cuda:0",
+            pack=True,
+            pack_dtype=qcfg.pack_dtype,
+        )
+    assert (
+        resolve_pack_backend(retained, selected, qcfg, FORMAT.GPTQ, METHOD.GPTQ)
+        is BACKEND.AUTO
+    )
+
+
+def test_an_explicit_quantize_backend_is_not_inherited():
+    """``quantize(backend=...)`` stays the caller's choice, so it still raises."""
+
+    qcfg = _gptq_config()
+    resolve_quantize_backend(MarlinConfig(fp32=False), qcfg)
+
+    assert inherited_quantize_backend(qcfg, BACKEND.MARLIN) is None
+    assert (
+        resolve_pack_backend(None, BACKEND.MARLIN, qcfg, FORMAT.GPTQ, METHOD.GPTQ)
+        is BACKEND.MARLIN
+    )
+
+
+def test_a_packable_retained_backend_is_kept():
+    qcfg = _gptq_config()
+    resolve_quantize_backend(BACKEND.TRITON, qcfg)
+    retained = inherited_quantize_backend(qcfg, BACKEND.AUTO)
+    selected, _ = resolve_quantize_backend(BACKEND.AUTO, qcfg, inherit=True)
+
+    assert selected is BACKEND.TRITON
+    assert (
+        resolve_pack_backend(retained, selected, qcfg, FORMAT.GPTQ, METHOD.GPTQ)
+        is BACKEND.TRITON
+    )
 
 
 def test_quantization_rejects_a_caller_legacy_policy_even_after_a_typed_load():
