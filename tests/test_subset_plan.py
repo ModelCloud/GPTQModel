@@ -588,6 +588,7 @@ def test_build_layer_subset_plans_merges_groups_for_single_pass_processors():
         processor,
         fallback,
         layer_module=None,
+        inline_processors=(),
     ):
         requested_name_groups.append(list(names))
         return {name: _make_named_module(name, layer_index=layer_index) for name in names}
